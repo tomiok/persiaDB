@@ -36,7 +36,7 @@ Deps: none.
   - [ ] 0.1.2.2 `rustfmt.toml`, `clippy.toml`, workspace lint levels
   - [ ] 0.1.2.3 `.editorconfig`, `.gitignore`, `.gitattributes` (binary fixtures)
 - 0.1.3 Repo hygiene
-  - [ ] 0.1.3.1 `LICENSE` (decide: Apache-2.0 vs MIT/Apache dual) + `NOTICE`
+  - [x] 0.1.3.1 `LICENSE` (Apache-2.0) + `NOTICE`
   - [ ] 0.1.3.2 `README.md` stub (what it is, status, quickstart placeholder)
   - [ ] 0.1.3.3 `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`
   - [ ] 0.1.3.4 `CHANGELOG.md` (Keep a Changelog format)
