@@ -16,8 +16,8 @@ def ignored(path: str) -> bool:
 
 
 def attr(path: str, name: str) -> str:
-    # Output: "<path>: <attr>: <value>"
-    return git("check-attr", name, "--", path).stdout.rsplit(": ", 1)[-1].strip()
+    # -z output: "<path>\0<attr>\0<value>\0", robust to ": " in paths.
+    return git("check-attr", "-z", name, "--", path).stdout.split("\0")[2]
 
 
 class RepoFilesTest(unittest.TestCase):
@@ -25,6 +25,7 @@ class RepoFilesTest(unittest.TestCase):
         for path in [
             "tests/fixtures/v1/basic.persia",
             "tests/fixtures/v1/basic.persia.blobs",
+            "crates/persia-engine/tests/fixtures/seg.persia",
             "crates/persia-format/proptest-regressions/frame.txt",
             "crates/persia-format/src/snapshots/header.snap",
             "fuzz/corpus/frame_scanner/seed1",
@@ -47,7 +48,15 @@ class RepoFilesTest(unittest.TestCase):
 
     def test_fixtures_are_binary(self):
         # `binary` = -text -diff -merge: no EOL conversion can corrupt golden bytes.
-        for path in ["tests/fixtures/v1/basic.persia", "tests/fixtures/v1/frame.txt", "fuzz/corpus/x/seed", "a.bin"]:
+        for path in [
+            "tests/fixtures/v1/basic.persia",
+            "tests/fixtures/v1/frame.txt",
+            "crates/persia-format/tests/fixtures/v1/frame.dat",
+            "sdk/go/testdata/a.golden",
+            "fuzz/corpus/x/seed",
+            "a.bin",
+            "seed.zst",
+        ]:
             self.assertEqual(attr(path, "text"), "unset", path)
             self.assertEqual(attr(path, "diff"), "unset", path)
 

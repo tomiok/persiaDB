@@ -18,7 +18,12 @@ trim_trailing_whitespace = false
 [*.go]
 indent_style = tab
 
-[{*.bin,*.persia,*.persia.blobs,tests/fixtures/**,fuzz/corpus/**}]
+[*.snap]
+# Accepted insta snapshots are byte-exact; an editor save must not change them.
+trim_trailing_whitespace = false
+insert_final_newline = unset
+
+[{*.bin,*.zst,*.fst,*.persia,*.persia.blobs,**/tests/fixtures/**,**/fuzz/corpus/**,**/testdata/**}]
 charset = unset
 end_of_line = unset
 insert_final_newline = unset

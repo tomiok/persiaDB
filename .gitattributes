@@ -2,11 +2,17 @@
 * text=auto eol=lf
 
 # Golden fixtures and fuzz seeds are raw bytes: no EOL conversion, no textual diff/merge.
-/tests/fixtures/** binary
-/fuzz/corpus/** binary
+# Unanchored: crate-local fixtures (crates/*/tests/fixtures) and Go testdata are covered too.
+**/tests/fixtures/** binary
+**/fuzz/corpus/** binary
+**/testdata/** binary
 *.persia binary
 *.persia.blobs binary
 *.bin binary
+# Common binary types, so protection never depends on content detection.
+*.zst binary
+*.fst binary
+*.png binary
 
 # Generated files: collapsed in GitHub diffs.
 /PROGRESS.md linguist-generated=true
