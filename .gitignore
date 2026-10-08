@@ -1,2 +1,29 @@
-/target
+# Build output (criterion reports live here too)
+/target/
+
+# Fuzzing (cargo-fuzz); seed corpora under fuzz/corpus are committed, found crashes are not
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/coverage/
+
+# Snapshot-test leftovers (insta); accepted *.snap files are committed
+*.snap.new
+*.pending-snap
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+
+# Scratch databases in the repo root. Golden fixtures (tests/fixtures/) are NOT ignored.
+/*.persia
+/*.persia.blobs
+
+# Python tooling (scripts/)
 __pycache__/
+
+# Local, per-developer settings
+/.claude/settings.local.json
+.idea/
+*.swp
+.DS_Store

@@ -34,7 +34,7 @@ Deps: none.
 - 0.1.2 Toolchain and formatting
   - [x] 0.1.2.1 `rust-toolchain.toml` (pinned stable) + MSRV policy
   - [x] 0.1.2.2 `rustfmt.toml`, `clippy.toml`, workspace lint levels
-  - [ ] 0.1.2.3 `.editorconfig`, `.gitignore`, `.gitattributes` (binary fixtures)
+  - [~] 0.1.2.3 `.editorconfig`, `.gitignore`, `.gitattributes` (binary fixtures)
 - 0.1.3 Repo hygiene
   - [x] 0.1.3.1 `LICENSE` (Apache-2.0) + `NOTICE`
   - [ ] 0.1.3.2 `README.md` stub (what it is, status, quickstart placeholder)

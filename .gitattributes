@@ -1,0 +1,13 @@
+# Normalize text to LF everywhere; on-disk formats are byte-exact, so binaries must never be touched.
+* text=auto eol=lf
+
+# Golden fixtures and fuzz seeds are raw bytes: no EOL conversion, no textual diff/merge.
+/tests/fixtures/** binary
+/fuzz/corpus/** binary
+*.persia binary
+*.persia.blobs binary
+*.bin binary
+
+# Generated files: collapsed in GitHub diffs.
+/PROGRESS.md linguist-generated=true
+/docs/progress-history.csv linguist-generated=true
