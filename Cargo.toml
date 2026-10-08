@@ -3,10 +3,11 @@ resolver = "3"
 members = ["crates/*"]
 
 # Inherited by every crate via `field.workspace = true`.
-# `rust-version` (MSRV) lands with ROADMAP 0.1.2.1.
+# `rust-version` is the MSRV and must equal the channel in rust-toolchain.toml.
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.99.0"
 license = "Apache-2.0"
 publish = false
 

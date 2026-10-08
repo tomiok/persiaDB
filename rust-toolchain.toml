@@ -1,0 +1,7 @@
+# Pinned toolchain for reproducible builds, lints and benchmarks.
+# MSRV policy (CLAUDE.md "Toolchain"): until v1.0, MSRV == this version, so it is always the
+# tested one. Bumping it updates `rust-version` in Cargo.toml in the same PR.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

@@ -70,6 +70,13 @@ python3 -m unittest discover -s scripts      # tests for repo scripts
 
 Always run fmt, clippy and tests before declaring a task done.
 
+## Toolchain
+
+- Pinned in `rust-toolchain.toml`; rustup picks it up automatically.
+- MSRV policy: until v1.0, MSRV equals the pinned toolchain (`rust-version` in `Cargo.toml`), so the MSRV is always
+  the tested version. Bump both together in one `chore(toolchain)` PR (`scripts/test_toolchain.py` enforces this).
+  After v1.0, revisit with an ADR (e.g. support the last N stable releases, with a CI job on the MSRV).
+
 ## Coding rules
 
 **Safety & errors**
