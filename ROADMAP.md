@@ -30,7 +30,7 @@ Deps: none.
 - 0.1.1 Create cargo workspace with empty crates: `persia-format`, `persia-storage`, `persia-analysis`, `persia-engine`, `persia-blob`, `persia`, `persia-proto`, `persia-server`, `persia-cli`, `persia-testutil` (dev-only)
   - [x] 0.1.1.1 Workspace `Cargo.toml` with shared `[workspace.package]`, `[workspace.dependencies]`, lints table
   - [x] 0.1.1.2 Per-crate `Cargo.toml` + `lib.rs`/`main.rs` stubs with `#![forbid(unsafe_code)]` (except format)
-  - [ ] 0.1.1.3 Enforce dependency direction with a `cargo-deny`/script check (no upward deps)
+  - [~] 0.1.1.3 Enforce dependency direction with a `cargo-deny`/script check (no upward deps)
 - 0.1.2 Toolchain and formatting
   - [ ] 0.1.2.1 `rust-toolchain.toml` (pinned stable) + MSRV policy
   - [ ] 0.1.2.2 `rustfmt.toml`, `clippy.toml`, workspace lint levels

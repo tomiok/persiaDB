@@ -64,6 +64,8 @@ cargo bench -p persia-engine
 just integration                             # docker-compose: MinIO, fake-gcs, azurite
 python3 scripts/progress.py --record         # regenerate PROGRESS.md + append today's snapshot
 python3 scripts/progress.py --check          # CI: fail if PROGRESS.md is stale
+python3 scripts/check_deps.py                # internal crate dependency direction
+python3 -m unittest discover -s scripts      # tests for repo scripts
 ```
 
 Always run fmt, clippy and tests before declaring a task done.
@@ -88,7 +90,7 @@ Always run fmt, clippy and tests before declaring a task done.
 **Architecture**
 - `persia-engine` is **synchronous** and storage-agnostic; it talks to I/O only through the `Storage` trait.
   `async` lives in `persia-storage` cloud backends and `persia-server`.
-- Dependencies point downward. No cycles, no upward edges:
+- Dependencies point downward. No cycles, no upward edges (enforced by `scripts/check_deps.py`; its `ALLOWED` table is the source of truth):
   - `persia-format` ← `persia-storage` ← `persia-engine` ← `persia` ← `persia-server` ← SDKs (`persia-proto` sits beside `persia-server`).
   - `persia-analysis` has no internal dependencies; it is used by `persia-engine`.
   - `persia-blob` depends on `persia-format` + `persia-storage`; it is used by `persia` (not by the engine).
