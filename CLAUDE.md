@@ -59,7 +59,7 @@ cargo test --workspace                       # unit + property tests (must be fa
 cargo test --workspace --features slow       # extended property tests
 cargo nextest run --workspace                # preferred runner if installed
 cargo deny check                             # licenses + advisories
-cargo fuzz run <target> -- -max_total_time=60
+cargo +nightly-YYYY-MM-DD fuzz run <target> -- -max_total_time=60   # dated nightly, see "Toolchain"
 cargo bench -p persia-engine
 just integration                             # docker-compose: MinIO, fake-gcs, azurite
 python3 scripts/progress.py --record         # regenerate PROGRESS.md + append today's snapshot
@@ -75,7 +75,11 @@ Always run fmt, clippy and tests before declaring a task done.
 - Pinned in `rust-toolchain.toml`; rustup picks it up automatically.
 - MSRV policy: until v1.0, MSRV equals the pinned toolchain (`rust-version` in `Cargo.toml`), so the MSRV is always
   the tested version. Bump both together in one `chore(toolchain)` PR (`scripts/test_toolchain.py` enforces this).
-  After v1.0, revisit with an ADR (e.g. support the last N stable releases, with a CI job on the MSRV).
+  Write an ADR before the first crates.io publish (i.e. before any `publish = false` is flipped), e.g. support the last
+  N stable releases with a CI job on the MSRV.
+- Bump cadence: within ~6 weeks of each stable release, as a standalone PR that also fixes any new clippy lints.
+- Nightly-only tools (cargo-fuzz, Miri) use a **dated** nightly pinned in their own `rust-toolchain.toml` (e.g. `fuzz/`)
+  or passed explicitly (`cargo +nightly-YYYY-MM-DD ...`), so they stay reproducible too.
 
 ## Coding rules
 

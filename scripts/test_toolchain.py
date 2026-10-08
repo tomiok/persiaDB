@@ -1,20 +1,31 @@
-"""The MSRV (`rust-version`) must equal the pinned toolchain. Run: python3 -m unittest discover -s scripts"""
+"""The pinned toolchain is exact and equals the MSRV. Run: python3 -m unittest discover -s scripts"""
 
+import re
 import tomllib
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+TOOLCHAIN = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]
+WORKSPACE = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]
 
 
 class ToolchainTest(unittest.TestCase):
-    def test_msrv_equals_pinned_toolchain(self):
-        channel = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
-        msrv = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["rust-version"]
-        self.assertEqual(msrv, channel, "update rust-version and rust-toolchain.toml together")
+    def test_channel_is_an_exact_release(self):
+        # "1.99" would float across patch releases and break reproducibility.
+        self.assertRegex(TOOLCHAIN["channel"], r"^\d+\.\d+\.\d+$")
 
-    def test_every_crate_inherits_msrv(self):
-        for manifest in sorted((ROOT / "crates").glob("*/Cargo.toml")):
+    def test_dod_gate_components_installed(self):
+        self.assertLessEqual({"rustfmt", "clippy"}, set(TOOLCHAIN.get("components", [])))
+
+    def test_msrv_equals_pinned_toolchain(self):
+        msrv = WORKSPACE["package"]["rust-version"]
+        self.assertEqual(msrv, TOOLCHAIN["channel"], "update rust-version and rust-toolchain.toml together")
+
+    def test_every_member_inherits_msrv(self):
+        manifests = sorted(m for pattern in WORKSPACE["members"] for m in ROOT.glob(f"{pattern}/Cargo.toml"))
+        self.assertTrue(manifests)
+        for manifest in manifests:
             package = tomllib.loads(manifest.read_text())["package"]
             self.assertEqual(package.get("rust-version"), {"workspace": True}, manifest)
 
