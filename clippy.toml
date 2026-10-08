@@ -3,3 +3,6 @@ allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
 allow-indexing-slicing-in-tests = true
+
+# Pre-1.0: let lints suggest better public signatures even if that changes the API.
+avoid-breaking-exported-api = false

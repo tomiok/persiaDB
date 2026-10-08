@@ -33,7 +33,7 @@ Deps: none.
   - [x] 0.1.1.3 Enforce dependency direction with a `cargo-deny`/script check (no upward deps)
 - 0.1.2 Toolchain and formatting
   - [x] 0.1.2.1 `rust-toolchain.toml` (pinned stable) + MSRV policy
-  - [ ] 0.1.2.2 `rustfmt.toml`, `clippy.toml`, workspace lint levels
+  - [~] 0.1.2.2 `rustfmt.toml`, `clippy.toml`, workspace lint levels
   - [ ] 0.1.2.3 `.editorconfig`, `.gitignore`, `.gitattributes` (binary fixtures)
 - 0.1.3 Repo hygiene
   - [x] 0.1.3.1 `LICENSE` (Apache-2.0) + `NOTICE`

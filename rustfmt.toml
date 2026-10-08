@@ -1,0 +1,2 @@
+# rustfmt defaults (CLAUDE.md "Style"). Only stable options: the toolchain is pinned stable.
+style_edition = "2024"

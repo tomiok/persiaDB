@@ -66,6 +66,8 @@ unsafe_code = "deny"
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "deny"
 rust_2018_idioms = { level = "warn", priority = -1 }
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
 
 [workspace.lints.clippy]
 # Data from disk, network or users must never panic (CLAUDE.md "Safety & errors").
@@ -75,3 +77,11 @@ expect_used = "deny"
 panic = "deny"
 indexing_slicing = "deny"
 undocumented_unsafe_blocks = "deny"
+# No placeholders or debug leftovers in committed code (open a ROADMAP leaf instead).
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+# Pedantic where practical (CLAUDE.md "Style"). The cast_* lints matter most here:
+# offsets and lengths must use checked conversions (`try_from`), not `as`.
+pedantic = { level = "warn", priority = -1 }
+must_use_candidate = "allow"  # noise on every getter; add #[must_use] where it prevents real bugs
