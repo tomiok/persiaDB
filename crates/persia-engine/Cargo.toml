@@ -1,0 +1,13 @@
+[package]
+name = "persia-engine"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+persia-format.workspace = true
+persia-storage.workspace = true
+persia-analysis.workspace = true
+
+[lints]
+workspace = true

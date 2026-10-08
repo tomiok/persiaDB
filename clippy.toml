@@ -1,0 +1,5 @@
+# Tests may panic on purpose; production code may not (see [workspace.lints.clippy]).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true

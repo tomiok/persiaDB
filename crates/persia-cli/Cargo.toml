@@ -1,0 +1,15 @@
+[package]
+name = "persia-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "persia"
+path = "src/main.rs"
+
+[dependencies]
+persia.workspace = true
+
+[lints]
+workspace = true

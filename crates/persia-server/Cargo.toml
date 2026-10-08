@@ -1,0 +1,12 @@
+[package]
+name = "persia-server"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+persia.workspace = true
+persia-proto.workspace = true
+
+[lints]
+workspace = true

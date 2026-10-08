@@ -1,0 +1,12 @@
+[package]
+name = "persia-blob"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+persia-format.workspace = true
+persia-storage.workspace = true
+
+[lints]
+workspace = true
