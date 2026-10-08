@@ -44,10 +44,16 @@ def violations(metadata: dict) -> list[str]:
     ]
     for pkg in sorted(metadata["packages"], key=lambda p: p["name"]):
         name = pkg["name"]
-        allowed = ALLOWED.get(name, frozenset())
+        if name not in ALLOWED:
+            continue  # already reported above
+        allowed = ALLOWED[name]
         for dep in pkg["dependencies"]:
+            # `name` is the real package name even when the dependency is renamed.
             target, kind = dep["name"], dep["kind"] or "normal"
             if target not in members:
+                # Internal crates outside the workspace (e.g. a future sdk/rust) must be added deliberately.
+                if target.startswith("persia"):
+                    errors.append(f"{name} -> {target} ({kind}): internal crate outside the workspace")
                 continue  # external crates are cargo-deny's job
             if kind == "dev":
                 ok = target in allowed or (target == TESTUTIL and name != TESTUTIL)
@@ -59,12 +65,17 @@ def violations(metadata: dict) -> list[str]:
 
 
 def main() -> int:
-    raw = subprocess.run(
-        ["cargo", "metadata", "--format-version", "1", "--no-deps"],
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    try:
+        raw = subprocess.run(
+            ["cargo", "metadata", "--format-version", "1", "--no-deps"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError) as e:
+        print(f"cargo metadata failed: {e}", file=sys.stderr)
+        print(getattr(e, "stderr", "") or "", file=sys.stderr)
+        return 1
     errors = violations(json.loads(raw))
     if errors:
         print("Dependency direction violations (see CLAUDE.md \"Architecture\"):", file=sys.stderr)

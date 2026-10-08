@@ -58,6 +58,33 @@ class CheckDepsTest(unittest.TestCase):
             ["persia-new: workspace member is not listed in scripts/check_deps.py ALLOWED"],
         )
 
+    def test_unlisted_member_reported_once(self):
+        md = metadata(extra_members=["persia-new"])
+        md["packages"][-1]["dependencies"].append({"name": "persia-server", "kind": None})
+        self.assertEqual(len(violations(md)), 1)
+
+    def test_renamed_dependency_checked_by_package_name(self):
+        md = metadata()
+        fmt = next(p for p in md["packages"] if p["name"] == "persia-format")
+        fmt["dependencies"].append({"name": "persia-engine", "rename": "eng", "kind": None})
+        self.assertEqual(violations(md), ["persia-format -> persia-engine (normal): not allowed"])
+
+    def test_target_specific_dependency_checked(self):
+        md = metadata()
+        fmt = next(p for p in md["packages"] if p["name"] == "persia-format")
+        fmt["dependencies"].append({"name": "persia-engine", "kind": None, "target": "cfg(unix)"})
+        self.assertTrue(violations(md))
+
+    def test_self_dev_dependency_rejected(self):
+        self.assertTrue(violations(metadata([("persia-engine", "persia-engine", "dev")])))
+        self.assertTrue(violations(metadata([(TESTUTIL, TESTUTIL, "dev")])))
+
+    def test_internal_crate_outside_workspace_rejected(self):
+        self.assertEqual(
+            violations(metadata([("persia-server", "persia-client", None)])),
+            ["persia-server -> persia-client (normal): internal crate outside the workspace"],
+        )
+
     def test_external_dependencies_ignored(self):
         self.assertEqual(violations(metadata([("persia-format", "zstd", None)])), [])
 
