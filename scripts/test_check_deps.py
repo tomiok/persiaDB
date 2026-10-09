@@ -2,7 +2,15 @@
 
 import unittest
 
-from check_deps import ALLOWED, TESTUTIL, violations, workspace_dependencies
+from check_deps import (
+    ALLOWED,
+    BINARY_ONLY,
+    DEV_ONLY,
+    TESTUTIL,
+    not_inherited,
+    violations,
+    workspace_dependencies,
+)
 
 
 def metadata(edges=(), extra_members=()):
@@ -98,6 +106,61 @@ class CheckDepsTest(unittest.TestCase):
 
     def test_real_workspace_table_is_readable(self):
         self.assertIn("zstd", workspace_dependencies())
+
+    def test_tiers_are_subsets_of_the_allowed_list(self):
+        self.assertLessEqual(BINARY_ONLY | DEV_ONLY, workspace_dependencies())
+
+    def test_build_dependency_outside_table_rejected(self):
+        md = metadata([("persia-format", "left-pad", "build")])
+        self.assertTrue(violations(md, frozenset({"zstd"})))
+
+    def test_binary_only_crate_rejected_in_library(self):
+        md = metadata([("persia-engine", "anyhow", None)])
+        self.assertEqual(
+            violations(md, frozenset({"anyhow"})),
+            ["persia-engine -> anyhow (normal): binary-only crate used by a library"],
+        )
+
+    def test_binary_only_crate_allowed_in_binary_and_tests(self):
+        md = metadata([("persia-cli", "clap", None), ("persia-engine", "anyhow", "dev")])
+        self.assertEqual(violations(md, frozenset({"clap", "anyhow"})), [])
+
+    def test_dev_only_crate_rejected_as_normal_dependency(self):
+        for kind in (None, "build"):
+            md = metadata([("persia-format", "proptest", kind)])
+            self.assertTrue(violations(md, frozenset({"proptest"})), kind)
+        md = metadata([("persia-server", "proptest", None)])
+        self.assertTrue(violations(md, frozenset({"proptest"})))
+
+    def test_dev_only_crate_allowed_as_dev_dependency(self):
+        md = metadata([("persia-format", "proptest", "dev")])
+        self.assertEqual(violations(md, frozenset({"proptest"})), [])
+
+
+class NotInheritedTest(unittest.TestCase):
+    def test_workspace_inherited_dependencies_pass(self):
+        manifest = {
+            "dependencies": {"zstd": {"workspace": True}, "serde": {"workspace": True, "features": ["rc"]}},
+            "target": {"cfg(unix)": {"dependencies": {"memmap2": {"workspace": True}}}},
+        }
+        self.assertEqual(not_inherited("persia-format", manifest), [])
+
+    def test_direct_versions_rejected_everywhere(self):
+        manifest = {
+            "dependencies": {"zstd": "0.13"},
+            "dev-dependencies": {"proptest": {"version": "1"}},
+            "build-dependencies": {"cc": {"git": "https://example.com/cc"}},
+            "target": {"cfg(unix)": {"dependencies": {"libc": "0.2"}}},
+        }
+        self.assertEqual(
+            not_inherited("persia-format", manifest),
+            [
+                "persia-format -> zstd ([dependencies]): must be `zstd.workspace = true`",
+                "persia-format -> proptest ([dev-dependencies]): must be `proptest.workspace = true`",
+                "persia-format -> cc ([build-dependencies]): must be `cc.workspace = true`",
+                "persia-format -> libc ([target.'cfg(unix)'.dependencies]): must be `libc.workspace = true`",
+            ],
+        )
 
 
 if __name__ == "__main__":

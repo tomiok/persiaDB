@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
-"""Enforce the internal crate dependency direction (CLAUDE.md "Architecture").
+"""Enforce the dependency rules in CLAUDE.md ("Architecture" and "Dependencies").
 
-Internal crates: every workspace member must appear in ALLOWED, and may only depend on the crates
-listed for it. External crates: every direct dependency must be declared in the root
-[workspace.dependencies] (the allowed list from CLAUDE.md "Dependencies"). Internal rules:
-  - normal and build dependencies: only the crates in ALLOWED[crate];
-  - dev-dependencies: the same, plus `persia-testutil`;
-  - `persia-testutil` is never a normal or build dependency.
-Adding a crate or an edge means editing ALLOWED on purpose, in the PR that needs it.
+Internal crates: every workspace member must appear in ALLOWED and may only depend on the crates
+listed for it. Normal and build dependencies use ALLOWED[crate]; dev-dependencies may also use
+`persia-testutil`, which is never a normal or build dependency.
+
+External crates: every direct dependency must be declared in the root [workspace.dependencies]
+(the allowed list) and be inherited with `.workspace = true`, so versions and features live in one
+place. Tiers on top of that:
+  - BINARY_ONLY crates: only in BINARIES, or as dev-dependencies (tests may use anyhow);
+  - DEV_ONLY crates: only as dev-dependencies.
+Licenses, advisories and banned crates in the full graph are cargo-deny's job (deny.toml).
+Adding a crate or an edge means editing these tables on purpose, in the PR that needs it.
 
 Usage: python3 scripts/check_deps.py   (exit 1 and list violations on failure)
 Standard library only.
@@ -40,10 +44,26 @@ ALLOWED: dict[str, frozenset[str]] = {
     TESTUTIL: frozenset(),
 }
 
+BINARIES = frozenset({"persia-server", "persia-cli"})
+BINARY_ONLY = frozenset({"clap", "anyhow", "rustls", "tracing-subscriber"})
+DEV_ONLY = frozenset({"proptest", "criterion", "insta", "tempfile", "testcontainers", "hdrhistogram"})
+
+DEP_TABLES = ("dependencies", "dev-dependencies", "build-dependencies")
+
 
 def workspace_dependencies() -> frozenset[str]:
     manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
     return frozenset(manifest["workspace"]["dependencies"])
+
+
+def external_violation(crate: str, target: str, kind: str, external_allowed: frozenset[str]) -> str | None:
+    if target not in external_allowed:
+        return "not in [workspace.dependencies] (allowed list)"
+    if target in DEV_ONLY and kind != "dev":
+        return "dev-only crate used outside [dev-dependencies]"
+    if target in BINARY_ONLY and kind != "dev" and crate not in BINARIES:
+        return "binary-only crate used by a library"
+    return None
 
 
 def violations(metadata: dict, external_allowed: frozenset[str] = frozenset()) -> list[str]:
@@ -61,12 +81,14 @@ def violations(metadata: dict, external_allowed: frozenset[str] = frozenset()) -
             # `name` is the real package name even when the dependency is renamed.
             target, kind = dep["name"], dep["kind"] or "normal"
             if target not in members:
-                # Internal crates outside the workspace (e.g. a future sdk/rust) must be added deliberately.
                 if target.startswith("persia"):
-                    errors.append(f"{name} -> {target} ({kind}): internal crate outside the workspace")
-                elif target not in external_allowed:
-                    errors.append(f"{name} -> {target} ({kind}): not in [workspace.dependencies] (allowed list)")
-                continue  # licenses, advisories and bans of the full graph are cargo-deny's job
+                    # Internal crates outside the workspace (e.g. a future sdk/rust) must be added deliberately.
+                    problem = "internal crate outside the workspace"
+                else:
+                    problem = external_violation(name, target, kind, external_allowed)
+                if problem:
+                    errors.append(f"{name} -> {target} ({kind}): {problem}")
+                continue
             if kind == "dev":
                 ok = target in allowed or (target == TESTUTIL and name != TESTUTIL)
             else:
@@ -74,6 +96,24 @@ def violations(metadata: dict, external_allowed: frozenset[str] = frozenset()) -
             if not ok:
                 errors.append(f"{name} -> {target} ({kind}): not allowed")
     return errors
+
+
+def dependency_tables(manifest: dict) -> list[tuple[str, dict]]:
+    """All dependency tables of a member manifest, including target-specific ones."""
+    tables = [(t, manifest.get(t, {})) for t in DEP_TABLES]
+    for cfg, section in manifest.get("target", {}).items():
+        tables += [(f"target.'{cfg}'.{t}", section.get(t, {})) for t in DEP_TABLES]
+    return tables
+
+
+def not_inherited(crate: str, manifest: dict) -> list[str]:
+    """Dependencies that do not use `.workspace = true` (versions/features must live in the root)."""
+    return [
+        f"{crate} -> {dep} ([{table}]): must be `{dep}.workspace = true`"
+        for table, deps in dependency_tables(manifest)
+        for dep, spec in sorted(deps.items())
+        if not (isinstance(spec, dict) and spec.get("workspace") is True)
+    ]
 
 
 def main() -> int:
@@ -88,12 +128,15 @@ def main() -> int:
         print(f"cargo metadata failed: {e}", file=sys.stderr)
         print(getattr(e, "stderr", "") or "", file=sys.stderr)
         return 1
-    errors = violations(json.loads(raw), workspace_dependencies())
+    metadata = json.loads(raw)
+    errors = violations(metadata, workspace_dependencies())
+    for pkg in metadata["packages"]:
+        errors += not_inherited(pkg["name"], tomllib.loads(Path(pkg["manifest_path"]).read_text()))
     if errors:
-        print("Dependency direction violations (see CLAUDE.md \"Architecture\"):", file=sys.stderr)
+        print("Dependency rule violations (see CLAUDE.md \"Architecture\" and \"Dependencies\"):", file=sys.stderr)
         print("\n".join(f"  {e}" for e in errors), file=sys.stderr)
         return 1
-    print(f"dependency direction OK ({len(ALLOWED)} crates)")
+    print(f"dependency rules OK ({len(ALLOWED)} crates)")
     return 0
 
 

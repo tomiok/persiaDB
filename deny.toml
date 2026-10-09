@@ -35,23 +35,59 @@ unused-allowed-license = "allow"
 ignore = true
 
 [bans]
+# Warn, not deny: tonic/object_store/testcontainers pull duplicate versions we cannot control.
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
-# Pillar 2 "Own engine": no search, storage or KV engines, not even transitively.
+# Pillar 2 "Own engine": no search, SQL or KV engines, not even transitively.
+# Backstop only: a name list is never complete. The real gate is scripts/check_deps.py, which
+# rejects any direct dependency not on the allowed list.
 deny = [
     { name = "tantivy", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-common", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-fst", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-bitpacker", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-columnar", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-sstable", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-stacker", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-query-grammar", reason = "own engine (CLAUDE.md)" },
+    { name = "tantivy-tokenizer-api", reason = "own engine (CLAUDE.md)" },
+    { name = "milli", reason = "own engine (CLAUDE.md)" },
+    { name = "meilisearch-sdk", reason = "own engine (CLAUDE.md)" },
+    { name = "surrealdb", reason = "own engine (CLAUDE.md)" },
     { name = "rusqlite", reason = "own engine (CLAUDE.md)" },
     { name = "libsqlite3-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "sqlite", reason = "own engine (CLAUDE.md)" },
+    { name = "sqlite3-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "libsql", reason = "own engine (CLAUDE.md)" },
+    { name = "limbo", reason = "own engine (CLAUDE.md)" },
+    { name = "turso_core", reason = "own engine (CLAUDE.md)" },
+    { name = "duckdb", reason = "own engine (CLAUDE.md)" },
+    { name = "libduckdb-sys", reason = "own engine (CLAUDE.md)" },
     { name = "rocksdb", reason = "own engine (CLAUDE.md)" },
     { name = "librocksdb-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "rust-rocksdb", reason = "own engine (CLAUDE.md)" },
+    { name = "ckb-rocksdb", reason = "own engine (CLAUDE.md)" },
+    { name = "speedb", reason = "own engine (CLAUDE.md)" },
+    { name = "leveldb", reason = "own engine (CLAUDE.md)" },
+    { name = "rusty-leveldb", reason = "own engine (CLAUDE.md)" },
     { name = "sled", reason = "own engine (CLAUDE.md)" },
     { name = "redb", reason = "own engine (CLAUDE.md)" },
-    { name = "heed", reason = "own engine (CLAUDE.md)" },
-    { name = "lmdb-rkv", reason = "own engine (CLAUDE.md)" },
     { name = "fjall", reason = "own engine (CLAUDE.md)" },
-    { name = "milli", reason = "own engine (CLAUDE.md)" },
-    { name = "lucene", reason = "own engine (CLAUDE.md)" },
+    { name = "lsm-tree", reason = "own engine (CLAUDE.md)" },
+    { name = "heed", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-zero", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-rkv", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-rkv-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-master-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "rkv", reason = "own engine (CLAUDE.md)" },
+    { name = "sanakirja", reason = "own engine (CLAUDE.md)" },
+    { name = "jammdb", reason = "own engine (CLAUDE.md)" },
+    { name = "persy", reason = "own engine (CLAUDE.md)" },
+    { name = "native_db", reason = "own engine (CLAUDE.md)" },
+    { name = "agatedb", reason = "own engine (CLAUDE.md)" },
 ]
 
 [sources]
