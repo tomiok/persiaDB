@@ -9,6 +9,9 @@ publish.workspace = true
 [dependencies]
 thiserror.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
 slow = []

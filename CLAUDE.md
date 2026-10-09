@@ -118,7 +118,7 @@ Always run fmt, clippy and tests before declaring a task done.
   `unicode-segmentation` (UAX#29), `unicode-normalization` (NFKC) — Unicode data tables are not worth hand-maintaining.
 - Binaries (`persia-server`, `persia-cli`) may additionally use: `clap`, `anyhow`, `rustls`, `tracing-subscriber`,
   `opentelemetry*`, a Prometheus exporter.
-- Dev/bench only: `proptest`, `criterion`, `insta`, `tempfile`, `testcontainers`, `hdrhistogram`.
+- Dev/bench only: `proptest`, `criterion`, `insta`, `tempfile`, `testcontainers`, `hdrhistogram`; `libfuzzer-sys` in `fuzz/` only.
 - The allowed list lives in root `[workspace.dependencies]`; `scripts/check_deps.py` rejects any direct dependency not
   declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
 - Anything else: justify in the PR. Banned: `tantivy`, `rusqlite`, `rocksdb`, `sled`, any search/KV engine.

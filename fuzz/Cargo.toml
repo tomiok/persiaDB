@@ -1,0 +1,25 @@
+# Fuzz targets (cargo-fuzz). A separate workspace: libFuzzer needs the dated nightly from
+# .github/nightly-toolchain and sanitizer flags (CLAUDE.md "Toolchain"). Run: just fuzz <target> [seconds]
+[package]
+name = "persia-fuzz"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+persia-format = { path = "../crates/persia-format" }
+
+[workspace]
+
+# Every untrusted-bytes parser gets a target (CLAUDE.md "Testing rules", SPEC §16.1).
+[[bin]]
+name = "reader"
+path = "fuzz_targets/reader.rs"
+test = false
+doc = false
+bench = false
