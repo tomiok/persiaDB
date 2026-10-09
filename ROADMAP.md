@@ -44,16 +44,11 @@ Deps: none.
 ## 0.2 Continuous integration
 - [x] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS; plus `cargo deny check` and `scripts/check_deps.py`
 - [x] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
-- 0.2.3 Scheduled workflows
-  - [x] 0.2.3.1 Nightly extended property tests (`--features slow`)
-  - [ ] 0.2.3.2 Nightly fuzz run (time-boxed per target, corpus cached as artifact)
-  - [ ] 0.2.3.3 Weekly benchmark run storing results (regression tracking)
-- [ ] 0.2.4 Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet
+- [x] 0.2.3 Nightly extended property tests (`--features slow`) (fuzz/bench/coverage jobs moved to 1.11)
 - [x] 0.2.5 Miri job for `persia-format` pure-logic modules
 
 ## 0.3 Developer tooling
 - [x] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`
-- [ ] 0.3.2 Dev container / `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12)
 - [x] 0.3.3 Install Claude Code assets: `CLAUDE.md`, `.claude/agents/*`, `.claude/skills/*` committed and documented
 - [x] 0.3.4 GitHub issue/PR templates, labels, milestone setup script
 - 0.3.5 Progress tracking
@@ -143,6 +138,11 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 ## 1.10 Shared value types
 - [ ] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002
 
+## 1.11 CI for fuzz targets, benchmarks and coverage (moved from M0: they need M1's first targets)
+- [ ] 1.11.1 `fuzz/` crate on the dated nightly + nightly fuzz job (time-boxed per target, corpus cached as artifact)
+- [ ] 1.11.2 Weekly benchmark run storing results (regression tracking)
+- [ ] 1.11.3 Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet
+
 ---
 
 # M2 — Storage abstraction & local backends (`persia-storage`)
@@ -181,6 +181,9 @@ Deps: M1.
 - [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
 - [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
+
+## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
+- [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
 
 ---
 

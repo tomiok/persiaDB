@@ -13,11 +13,11 @@ Arrows point from a dependency to the milestone that needs it (implied edges omi
 
 ```mermaid
 flowchart LR
-  M0["🔨 in progress<br/><b>M0</b> Project bootstrap<br/>23/27 · 85%"]:::doing
-  M1["⏳ blocked<br/><b>M1</b> Format primitives<br/>0/44 · 0%"]:::blocked
-  M2["⏳ blocked<br/><b>M2</b> Storage abstraction & local backends<br/>0/22 · 0%"]:::blocked
+  M0["✅ done<br/><b>M0</b> Project bootstrap<br/>23/23 · 100%"]:::done
+  M1["▶️ ready<br/><b>M1</b> Format primitives<br/>0/47 · 0%"]:::ready
+  M2["⏳ blocked<br/><b>M2</b> Storage abstraction & local backends<br/>0/23 · 0%"]:::blocked
   M3["⏳ blocked<br/><b>M3</b> Schema, documents, collections<br/>0/14 · 0%"]:::blocked
-  M4["⏳ blocked<br/><b>M4</b> Text analysis<br/>0/22 · 0%"]:::blocked
+  M4["▶️ ready<br/><b>M4</b> Text analysis<br/>0/22 · 0%"]:::ready
   M5["⏳ blocked<br/><b>M5</b> Segment writer & reader<br/>0/34 · 0%"]:::blocked
   M6["⏳ blocked<br/><b>M6</b> Write path, durability, merging<br/>0/29 · 0%"]:::blocked
   M7["⏳ blocked<br/><b>M7</b> Query engine & ranking<br/>0/29 · 0%"]:::blocked
@@ -58,11 +58,11 @@ flowchart LR
 
 | Milestone | State | Progress | Done | Doing | Leaves | Deps |
 |---|---|---|--:|--:|--:|---|
-| **M0** Project bootstrap | 🔨 in progress | `█████████████████░░░` 85% | 23 | 0 | 27 | — |
-| **M1** Format primitives | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 44 | M0 |
-| **M2** Storage abstraction & local backends | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 22 | M1 |
+| **M0** Project bootstrap | ✅ done | `████████████████████` 100% | 23 | 0 | 23 | — |
+| **M1** Format primitives | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 47 | M0 |
+| **M2** Storage abstraction & local backends | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 23 | M1 |
 | **M3** Schema, documents, collections | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 14 | M1 |
-| **M4** Text analysis | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 22 | M0 |
+| **M4** Text analysis | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 22 | M0 |
 | **M5** Segment writer & reader | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 34 | M1, M3, M4 |
 | **M6** Write path, durability, merging | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M2, M5 |
 | **M7** Query engine & ranking | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M5 |
@@ -81,10 +81,22 @@ _Nothing in progress._
 
 ## Ready next (first 15 todo leaves whose milestone deps are done)
 
-- `0.2.3.2` Nightly fuzz run (time-boxed per target, corpus cached as artifact) (M0)
-- `0.2.3.3` Weekly benchmark run storing results (regression tracking) (M0)
-- `0.2.4` Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet (M0)
-- `0.3.2` Dev container / `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12) (M0)
+- `1.1.1.1` `Reader` over `&[u8]` returning `Err(Corrupt)` on short reads, never panics (M1)
+- `1.1.1.2` `Writer` over `Vec<u8>` with alignment helpers (`pad_to(8)`) (M1)
+- `1.1.1.3` [T] property: write/read round-trip for all primitive widths; fuzz `Reader` (M1)
+- `1.1.2.1` Encode/decode with overlong-encoding rejection (M1)
+- `1.1.2.2` [T] property round-trip; golden vectors; fuzz decode (M1)
+- `1.1.3` Zigzag encoding for signed integers (M1)
+- `1.1.4` Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes) (M1)
+- `1.1.5` `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops (M1)
+- `1.2.1.1` Delta encode/decode with strictly-increasing validation (M1)
+- `1.2.1.2` [T] property round-trip for random sorted sets incl. empty, single, max values (M1)
+- `1.2.2.1` Scalar pack/unpack for all widths (M1)
+- `1.2.2.2` Compute minimal bit-width for a block (M1)
+- `1.2.2.3` Packed-size formula + bounds checks on decode input (M1)
+- `1.2.2.4` [T] exhaustive width test; property round-trip; fuzz (M1)
+- `1.2.2.5` Benchmark scalar throughput (baseline for SIMD later) (M1)
+- … and 54 more
 
 ## Burn-up
 
