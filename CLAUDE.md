@@ -112,7 +112,7 @@ Always run fmt, clippy and tests before declaring a task done.
 - Public APIs are small, documented (`#![deny(missing_docs)]` on public crates), and have doctests.
 
 **Dependencies**
-- Allowed building blocks (libraries): `fst`, `roaring`, `zstd`, `crc32c`, `xxhash-rust`, `memmap2`, `ciborium`,
+- Allowed building blocks (libraries): `fst`, `roaring`, `zstd`, `crc32c`, `xxhash-rust`, `memmap2`, `ciborium`, `sha2` (blob ids, ADR-0002),
   `serde`, `serde_json`, `thiserror`, `tracing`, `bytes`, `arc-swap`, `rayon`, `object_store`, `tokio`, `tonic`, `prost`, `axum`,
   `unicode-segmentation` (UAX#29), `unicode-normalization` (NFKC) — Unicode data tables are not worth hand-maintaining.
 - Binaries (`persia-server`, `persia-cli`) may additionally use: `clap`, `anyhow`, `rustls`, `tracing-subscriber`,

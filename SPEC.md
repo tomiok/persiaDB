@@ -358,8 +358,9 @@ truncating at the first invalid frame) → ready. Recovery MUST be idempotent.
 
 ### 9.1 Model
 Documents may reference one blob (v1): `blob_ref = { blob_id, size, mime, chunk_size, user_meta? }`.
-The index NEVER contains blob bytes — only the reference. `blob_id` is a content hash; the algorithm is fixed by ADR-0002
-(SPEC §18.1; proposed default **SHA-256**, alternative xxh3-128). `BlobRef`/`BlobId` are value types in `persia-format` so
+The index NEVER contains blob bytes — only the reference. `blob_id` is the **SHA-256** of the blob's bytes (32 bytes;
+hex-encoded, lowercase, wherever it appears as text) (ADR-0002). Persia always computes it from the bytes it receives;
+a caller-supplied id is only an expectation, and a mismatch is an error. `BlobRef`/`BlobId` are value types in `persia-format` so
 that documents and segments can carry them without depending on `persia-blob`.
 
 ### 9.2 Properties
@@ -571,7 +572,7 @@ Comparison against other engines is reported with methodology, never cherry-pick
 
 ## 18. Open questions (track as ADRs)
 
-1. Blob hash: xxh3-128 (fast, non-crypto) vs SHA-256 (collision-resistant, enables untrusted dedup). Default proposal: SHA-256.
+1. ~~Blob hash~~: resolved by ADR-0002, SHA-256 (§9.1).
 2. Single blob per document vs many (`blobs: []`) in v1.
 3. Tombstone sidecar format vs copy-on-write segment footers. Current proposal: full-set sidecars (SPEC §8.3).
 4. Positions: always-on vs opt-in (current: opt-in).
