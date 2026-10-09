@@ -1,6 +1,5 @@
 # Persia DB
 
-[![CI](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
 **An embedded, single-file, cloud-native search database, written in Rust. Think "SQLite for search".**
@@ -19,19 +18,23 @@ The same on-disk format can be served from object storage (S3 / GCS / Azure) and
 - **Never zero results:** when a query matches nothing, Persia relaxes it step by step (synonyms, dropped terms,
   prefix, typo tolerance) and tells you exactly what it changed.
 - **Cloud-native:** immutable segments, object-storage friendly, stateless query nodes.
-- **Correctness first:** checksummed everything, crash-safe commits, fuzzed parsers.
+- **Correctness first:** designed for checksummed data, crash-safe commits and fuzzed parsers.
 
 ## Quickstart
 
-_Coming with the first release (`v0.1`, ROADMAP M10)._ The planned API looks like this:
+_Coming with the first release (`v0.1`, ROADMAP M10)._ A sketch of the intended shape; method names are
+illustrative and not final:
 
 ```rust,ignore
 let db = persia::Db::open("app.persia")?;
-let products = db.collection("products")?;
-products.put(json!({ "id": "1", "title": "Red running shoes", "price": 79.0 }))?;
+// Collections declare their schema up front (SPEC §6.2).
+let products = db.create_collection(schema)?;
+products.put(doc)?;
 products.commit()?;
 
-let hits = products.search("red runing shoes")?; // typo tolerated, and reported
+// No exact match for the typo? The query is relaxed (here: fuzzy, SPEC §7.6),
+// and the response says what changed: "runing" -> "running".
+let results = products.search("runing")?;
 ```
 
 ## Documentation

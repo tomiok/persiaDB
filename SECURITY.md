@@ -28,7 +28,9 @@ Reporters are credited in the advisory unless they ask not to be.
 
 - Panics, undefined behavior, or unbounded memory/CPU use when opening or reading a crafted database,
   segment, WAL, blob pack, or network request (SPEC §17).
-- Acknowledged writes lost, or committed data corrupted, after a crash (SPEC §4.5, §8).
+- Writes acknowledged under `Fsync` durability (the default at commit, SPEC §8.2) lost, or committed data
+  corrupted, after a crash (SPEC §4.5, §8.6). Loss of un-synced writes under `Buffered`/`Async` is by design.
+- Path traversal through collection or blob names (SPEC §17).
 - Authentication or authorization bypass in `persia-server`.
 - Secrets leaking into logs or debug output.
 
@@ -36,3 +38,4 @@ Reporters are credited in the advisory unless they ask not to be.
 
 - Attacks that need write access to the database files themselves, other than crafted-input parsing bugs.
 - Denial of service through query volume alone (use rate limiting in front of the server).
+- Encryption at rest: not provided by the format in v1 (SPEC §1.2); use storage-level encryption.
