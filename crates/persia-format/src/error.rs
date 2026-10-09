@@ -30,7 +30,8 @@ pub enum Error {
 /// Variants carry only fixed-size data, so the type stays `Copy`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum Corruption {
-    /// The input ended before a value was complete.
+    /// The input ended before a value was complete. For variable-length values (varints) `needed` is a
+    /// lower bound: at least one byte more than was available.
     #[error("unexpected end of input: needed {needed} bytes, {available} available")]
     UnexpectedEof {
         /// Bytes the value needed.

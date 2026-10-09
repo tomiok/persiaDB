@@ -1,4 +1,4 @@
-//! Unsigned LEB128 varints (`u32`, `u64`), accepting only the canonical encoding.
+//! Unsigned LEB128 varints (`u32`, `u64`), accepting only the canonical encoding (SPEC §4.1 "Varints").
 //!
 //! Each byte carries 7 value bits, least significant group first; the high bit means "more bytes follow".
 //! Decoding is strict so that every value has exactly one valid encoding (stable checksums, golden files):
@@ -17,6 +17,7 @@ use crate::writer::Writer;
 pub fn encoded_len(value: u64) -> usize {
     let bits = value.bit_width();
     // ceil(bits / 7), at least 1; at most 10 for 64 bits.
+    // Cannot fail: the result is at most 10.
     usize::try_from(bits.div_ceil(7).max(1)).unwrap_or(10)
 }
 
@@ -87,6 +88,7 @@ impl Reader<'_> {
                 if byte == 0 && len > 1 {
                     return Err(corrupt(Corruption::OverlongVarint));
                 }
+                // `len` <= 10, so the conversion cannot fail.
                 self.skip(usize::try_from(len).unwrap_or(usize::MAX))?;
                 return Ok(value);
             }
@@ -115,7 +117,7 @@ mod tests {
         Error::Corrupt { offset, reason }
     }
 
-    /// Golden vectors: the canonical bytes for boundary values (pinned format, SPEC §4.1 little-endian groups).
+    /// Golden vectors: the canonical bytes for boundary values (SPEC §4.1 "Varints").
     const GOLDEN: &[(u64, &[u8])] = &[
         (0, &[0x00]),
         (1, &[0x01]),

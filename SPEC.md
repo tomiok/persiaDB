@@ -83,6 +83,9 @@ A local database is two files:
 - Checksum: **CRC32C** for headers/frames; **xxh3-64** for internal content hashes where noted.
   Blob ids are **SHA-256** (SPEC §9.1, ADR-0002).
 - Compression: **zstd** (level configurable); every compressed unit declares its codec.
+- Varints: unsigned LEB128, least significant 7-bit group first, high bit = "more bytes follow". Only the shortest
+  encoding is valid; an overlong encoding, or a value wider than its declared type (`u32`: at most 5 bytes, the 5th
+  holding 4 bits; `u64`: at most 10 bytes, the 10th exactly `0x01`), is corruption.
 
 ### 4.2 Header (first 8192 bytes)
 ```

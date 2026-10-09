@@ -30,34 +30,37 @@ fn encode(value: u64) -> Vec<u8> {
     w.into_inner()
 }
 
-/// Naive reference: accumulate groups in a u128 with no limits, then classify.
+/// Naive reference, written from SPEC §4.1 rather than from the implementation: scan up to 11 bytes for the
+/// terminating byte, accumulate in a u128, and only then classify (too many bytes or too wide => overflow,
+/// zero final group after the first byte => overlong).
 fn reference(bytes: &[u8], bits: u32) -> Result<(u64, usize), Corruption> {
-    let mut value: u128 = 0;
-    for (i, &b) in bytes.iter().enumerate() {
-        if i >= 10 {
-            break;
-        }
-        value |= u128::from(b & 0x7f) << (7 * i);
-        if b & 0x80 == 0 {
-            let len = i + 1;
-            let max_len = bits.div_ceil(7) as usize;
-            if len > max_len || value >> bits != 0 {
-                return Err(Corruption::VarintOverflow { bits });
-            }
-            if b == 0 && len > 1 {
-                return Err(Corruption::OverlongVarint);
-            }
-            return Ok((value as u64, len));
-        }
-        if i + 1 == bits.div_ceil(7) as usize {
+    let max_len = bits.div_ceil(7) as usize;
+    let scanned = &bytes[..bytes.len().min(11)];
+    let Some(end) = scanned.iter().position(|b| b & 0x80 == 0) else {
+        // No terminator: either input ran out first, or the varint is longer than any valid one.
+        if bytes.len() >= max_len {
             return Err(Corruption::VarintOverflow { bits });
         }
+        let available = bytes.len() as u64;
+        return Err(Corruption::UnexpectedEof {
+            needed: available + 1,
+            available,
+        });
+    };
+    let len = end + 1;
+    let value = scanned[..len]
+        .iter()
+        .enumerate()
+        .fold(0_u128, |acc, (i, b)| {
+            acc | (u128::from(b & 0x7f) << (7 * i))
+        });
+    if len > max_len || value >> bits != 0 {
+        Err(Corruption::VarintOverflow { bits })
+    } else if len > 1 && scanned[end] == 0 {
+        Err(Corruption::OverlongVarint)
+    } else {
+        Ok((value as u64, len))
     }
-    let available = bytes.len() as u64;
-    Err(Corruption::UnexpectedEof {
-        needed: available + 1,
-        available,
-    })
 }
 
 proptest! {
