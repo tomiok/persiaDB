@@ -262,4 +262,246 @@ mod tests {
             "corrupt data at offset 100: unexpected end of input: needed 4 bytes, 1 available"
         );
     }
+
+    /// Runs `read` on a fresh reader over `len` zero bytes at `base`, returning the result and final position.
+    fn try_width<T>(
+        len: usize,
+        base: u64,
+        read: fn(&mut Reader<'_>) -> Result<T>,
+    ) -> (Result<T>, usize) {
+        let buf = vec![0xa5; len];
+        let mut r = Reader::with_base_offset(&buf, base);
+        let got = read(&mut r);
+        (got, r.position())
+    }
+
+    #[test]
+    fn every_width_succeeds_at_exact_size_and_fails_one_byte_short() {
+        // (width, read) table: a one-byte-short buffer must fail with the exact EOF fields,
+        // an exact-size buffer must succeed and consume everything.
+        type Probe = fn(&mut Reader<'_>) -> Result<()>;
+        let table: [(usize, Probe); 9] = [
+            (1, |r| r.read_u8().map(drop)),
+            (2, |r| r.read_u16().map(drop)),
+            (4, |r| r.read_u32().map(drop)),
+            (8, |r| r.read_u64().map(drop)),
+            (16, |r| r.read_u128().map(drop)),
+            (4, |r| r.read_i32().map(drop)),
+            (8, |r| r.read_i64().map(drop)),
+            (3, |r| r.read_array::<3>().map(drop)),
+            (32, |r| r.read_array::<32>().map(drop)),
+        ];
+        for (width, read) in table {
+            let (ok, pos) = try_width(width, 7, read);
+            assert_eq!(ok, Ok(()), "width {width} exact");
+            assert_eq!(pos, width, "width {width} must consume exactly its size");
+
+            let short = width - 1;
+            let (err, pos) = try_width(short, 7, read);
+            assert_eq!(
+                err,
+                Err(eof_at(7, width as u64, short as u64)),
+                "width {width} short"
+            );
+            assert_eq!(pos, 0, "width {width}: failed read must not advance");
+        }
+    }
+
+    #[test]
+    fn extreme_values_decode_little_endian_for_every_width() {
+        // Asymmetric patterns catch byte-order swaps that symmetric values (0, MAX) would hide.
+        let mut bytes = Vec::new();
+        bytes.extend(u16::MAX.to_le_bytes());
+        bytes.extend(0x8001_u16.to_le_bytes());
+        bytes.extend(i32::MIN.to_le_bytes());
+        bytes.extend(i32::MAX.to_le_bytes());
+        bytes.extend((-1_i64).to_le_bytes());
+        bytes.extend(i64::MAX.to_le_bytes());
+        bytes.extend(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff_u128.to_le_bytes());
+        bytes.extend(1_u64.to_le_bytes());
+        let mut r = Reader::new(&bytes);
+        assert_eq!(r.read_u16(), Ok(u16::MAX));
+        assert_eq!(r.read_u16(), Ok(0x8001));
+        assert_eq!(r.read_i32(), Ok(i32::MIN));
+        assert_eq!(r.read_i32(), Ok(i32::MAX));
+        assert_eq!(r.read_i64(), Ok(-1));
+        assert_eq!(r.read_i64(), Ok(i64::MAX));
+        assert_eq!(r.read_u128(), Ok(0x0011_2233_4455_6677_8899_aabb_ccdd_eeff));
+        assert_eq!(r.read_u64(), Ok(1));
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn explicit_byte_order_for_each_width() {
+        let seq: Vec<u8> = (1..=16).collect();
+        assert_eq!(Reader::new(&seq).read_u16(), Ok(0x0201));
+        assert_eq!(Reader::new(&seq).read_u64(), Ok(0x0807_0605_0403_0201));
+        assert_eq!(
+            Reader::new(&seq).read_u128(),
+            Ok(0x100f_0e0d_0c0b_0a09_0807_0605_0403_0201)
+        );
+        assert_eq!(Reader::new(&[0xfe, 0xff, 0xff, 0xff]).read_i32(), Ok(-2));
+        assert_eq!(
+            Reader::new(&[0, 0, 0, 0, 0, 0, 0, 0x80]).read_i64(),
+            Ok(i64::MIN)
+        );
+        assert_eq!(Reader::new(&seq).read_array::<3>(), Ok([1, 2, 3]));
+    }
+
+    #[test]
+    fn interleaved_reads_hit_eof_exactly_at_boundary() {
+        // 1 + 2 + 4 + 8 = 15 bytes: the last read ends exactly at the end of the buffer.
+        let buf: Vec<u8> = (0..15).collect();
+        let mut r = Reader::with_base_offset(&buf, 100);
+        assert_eq!(r.read_u8(), Ok(0));
+        assert_eq!(r.read_u16(), Ok(0x0201));
+        assert_eq!(r.read_bytes(4), Ok(&buf[3..7]));
+        assert_eq!(
+            r.read_u64(),
+            Ok(u64::from_le_bytes(buf[7..15].try_into().unwrap()))
+        );
+        assert_eq!(r.position(), 15);
+        assert_eq!(r.remaining(), 0);
+        assert!(r.is_empty());
+        // Every further non-empty read fails at the absolute end, with nothing available.
+        assert_eq!(r.read_u8(), Err(eof_at(115, 1, 0)));
+        assert_eq!(r.read_bytes(1), Err(eof_at(115, 1, 0)));
+        assert_eq!(r.read_array::<2>(), Err(eof_at(115, 2, 0)));
+        assert_eq!(r.skip(usize::MAX), Err(eof_at(115, u64::MAX, 0)));
+        // Zero-length reads at the end still succeed and do not move.
+        assert_eq!(r.read_bytes(0), Ok(&[][..]));
+        assert_eq!(r.read_array::<0>(), Ok([]));
+        assert_eq!(r.position(), 15);
+        assert_eq!(r.offset(), 115);
+    }
+
+    #[test]
+    fn read_bytes_succeeds_at_remaining_and_fails_one_past() {
+        let buf = [1, 2, 3, 4, 5, 6];
+        let mut r = Reader::new(&buf);
+        r.skip(2).unwrap();
+        assert_eq!(r.read_bytes(5), Err(eof_at(2, 5, 4)));
+        assert_eq!(r.skip(5), Err(eof_at(2, 5, 4)));
+        assert_eq!(r.position(), 2);
+        assert_eq!(r.read_bytes(4), Ok(&buf[2..]));
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn rest_after_full_consume_is_empty_and_points_at_end() {
+        let buf = [1, 2, 3];
+        let mut r = Reader::new(&buf);
+        assert_eq!(r.rest(), &buf);
+        assert!(core::ptr::eq(r.rest().as_ptr(), buf.as_ptr()));
+        r.skip(3).unwrap();
+        assert_eq!(r.rest(), &[] as &[u8]);
+        assert!(core::ptr::eq(r.rest().as_ptr(), buf.as_ptr_range().end));
+        assert_eq!(r.read_bytes(0).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn rest_does_not_advance_and_tracks_position() {
+        let buf = [1, 2, 3, 4];
+        let mut r = Reader::new(&buf);
+        r.skip(1).unwrap();
+        assert_eq!(r.rest(), &buf[1..]);
+        assert_eq!(r.rest(), &buf[1..]);
+        assert_eq!(r.position(), 1);
+        assert_eq!(r.remaining(), r.rest().len());
+    }
+
+    #[test]
+    fn read_bytes_returns_slices_into_the_input_for_whole_buffer_and_tail() {
+        let buf = [1, 2, 3, 4, 5];
+        // The borrows outlive the reader (lifetime is tied to the input, not to the cursor).
+        let (head, tail) = {
+            let mut r = Reader::new(&buf);
+            (r.read_bytes(2).unwrap(), r.read_bytes(3).unwrap())
+        };
+        assert!(core::ptr::eq(head.as_ptr(), buf.as_ptr()));
+        assert!(core::ptr::eq(tail.as_ptr(), buf[2..].as_ptr()));
+        assert_eq!((head, tail), (&buf[..2], &buf[2..]));
+    }
+
+    #[test]
+    fn offset_is_base_plus_position_and_position_ignores_base() {
+        let buf = [0; 10];
+        let mut r = Reader::with_base_offset(&buf, 4096);
+        assert_eq!((r.position(), r.offset()), (0, 4096));
+        r.read_u32().unwrap();
+        assert_eq!((r.position(), r.offset()), (4, 4100));
+        r.skip(6).unwrap();
+        assert_eq!((r.position(), r.offset()), (10, 4106));
+
+        let plain = Reader::new(&buf);
+        assert_eq!(plain.offset(), 0);
+        assert_eq!(plain.offset(), plain.position() as u64);
+    }
+
+    #[test]
+    fn every_failure_kind_reports_base_relative_offset() {
+        let buf = [0; 5];
+        let mut r = Reader::with_base_offset(&buf, 1_000_000);
+        r.skip(3).unwrap();
+        let want = |needed| Err(eof_at(1_000_003, needed, 2));
+        assert_eq!(r.read_u32().map(drop), want(4));
+        assert_eq!(r.read_i64().map(drop), want(8));
+        assert_eq!(r.read_u128().map(drop), want(16));
+        assert_eq!(r.read_array::<3>().map(drop), want(3));
+        assert_eq!(r.read_bytes(3).map(drop), want(3));
+        assert_eq!(r.skip(3), want(3));
+        assert_eq!(r.position(), 3);
+    }
+
+    #[test]
+    fn base_offset_at_max_saturates_from_the_start() {
+        let mut r = Reader::with_base_offset(&[7], u64::MAX);
+        assert_eq!(r.offset(), u64::MAX);
+        assert_eq!(r.read_u16(), Err(eof_at(u64::MAX, 2, 1)));
+        assert_eq!(r.read_u8(), Ok(7));
+        assert_eq!(r.offset(), u64::MAX);
+        assert_eq!(r.position(), 1);
+    }
+
+    #[test]
+    fn position_never_exceeds_len_across_mixed_success_and_failure() {
+        let buf: Vec<u8> = (0..13).collect();
+        let mut r = Reader::new(&buf);
+        let lens = [0, 3, usize::MAX, 4, 8, 5, 1, 1, 2, usize::MAX / 2, 0, 1];
+        let mut expected = 0usize;
+        for len in lens {
+            let before = r.position();
+            let ok = r.skip(len).is_ok();
+            if ok {
+                expected += len;
+            }
+            assert_eq!(ok, len <= buf.len() - before, "skip({len}) at {before}");
+            assert_eq!(r.position(), expected);
+            assert!(r.position() <= buf.len());
+            assert_eq!(r.remaining(), buf.len() - r.position());
+            assert_eq!(r.is_empty(), r.position() == buf.len());
+        }
+        assert_eq!(r.position(), buf.len());
+    }
+
+    #[test]
+    fn clone_is_an_independent_cursor() {
+        let buf = [1, 2, 3, 4];
+        let mut a = Reader::with_base_offset(&buf, 10);
+        a.skip(1).unwrap();
+        let mut b = a.clone();
+        assert_eq!(b.read_u16(), Ok(0x0302));
+        assert_eq!(a.position(), 1);
+        assert_eq!(a.offset(), 11);
+        assert_eq!(b.offset(), 13);
+        assert_eq!(a.read_u8(), Ok(2));
+    }
+
+    #[test]
+    fn corrupt_and_eof_errors_compare_by_all_fields() {
+        // Guards the `PartialEq` that every other test relies on: differing fields must not compare equal.
+        assert_ne!(eof_at(1, 2, 3), eof_at(0, 2, 3));
+        assert_ne!(eof_at(1, 2, 3), eof_at(1, 4, 3));
+        assert_ne!(eof_at(1, 2, 3), eof_at(1, 2, 0));
+    }
 }
