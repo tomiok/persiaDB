@@ -108,16 +108,28 @@ impl<'a> Reader<'a> {
     /// Skips the zero padding up to the next multiple of `align`, computed on the absolute [`Reader::offset`]
     /// (the counterpart of [`crate::Writer::pad_to`]).
     ///
+    /// The base offset must be trustworthy: decoders that take offsets from disk must check
+    /// `offset + len <= object length` before building a reader with [`Reader::with_base_offset`]. (Only a base
+    /// near `u64::MAX`, which no real file reaches, makes the saturated offset accept one byte per call.)
+    ///
     /// # Errors
-    /// [`Error::Corrupt`] if the input ends inside the padding, or with [`Corruption::NonZeroPadding`] at the
+    /// [`Error::Corrupt`] if the input ends inside the padding, or with [`Corruption::NonZeroReserved`] at the
     /// first non-zero byte. Either way the position is unchanged.
     pub fn skip_padding(&mut self, align: NonZeroUsize) -> Result<()> {
-        let len = padding_for(self.offset(), align);
-        let padding = self.rest().get(..len).ok_or_else(|| self.eof(len))?;
-        if let Some((i, &value)) = padding.iter().enumerate().find(|&(_, &b)| b != 0) {
+        self.expect_zeros(padding_for(self.offset(), align))
+    }
+
+    /// Consumes `len` bytes that the format requires to be zero (padding, reserved fields, SPEC §4.3/§4.4).
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] if fewer than `len` bytes remain, or with [`Corruption::NonZeroReserved`] at the first
+    /// non-zero byte. Either way the position is unchanged.
+    pub fn expect_zeros(&mut self, len: usize) -> Result<()> {
+        let zeros = self.rest().get(..len).ok_or_else(|| self.eof(len))?;
+        if let Some((i, &value)) = zeros.iter().enumerate().find(|&(_, &b)| b != 0) {
             return Err(Error::Corrupt {
                 offset: self.offset().saturating_add(to_u64(i)),
-                reason: Corruption::NonZeroPadding { value },
+                reason: Corruption::NonZeroReserved { value },
             });
         }
         self.skip(len)
@@ -332,7 +344,7 @@ mod tests {
             r.skip_padding(crate::ALIGNMENT),
             Err(Error::Corrupt {
                 offset: 103,
-                reason: Corruption::NonZeroPadding { value: 5 },
+                reason: Corruption::NonZeroReserved { value: 5 },
             })
         );
         assert_eq!(r.position(), 1);
@@ -347,14 +359,30 @@ mod tests {
     }
 
     #[test]
+    fn expect_zeros_checks_fixed_reserved_ranges() {
+        let mut r = Reader::with_base_offset(&[0, 0, 0, 0, 0, 7], 48);
+        assert_eq!(r.expect_zeros(4), Ok(()));
+        assert_eq!(r.expect_zeros(0), Ok(()));
+        assert_eq!(
+            r.expect_zeros(2),
+            Err(Error::Corrupt {
+                offset: 53,
+                reason: Corruption::NonZeroReserved { value: 7 }
+            })
+        );
+        assert_eq!(r.expect_zeros(3), Err(eof_at(52, 3, 2)));
+        assert_eq!(r.position(), 4);
+    }
+
+    #[test]
     fn non_zero_padding_message() {
         let err = Error::Corrupt {
             offset: 9,
-            reason: Corruption::NonZeroPadding { value: 0xab },
+            reason: Corruption::NonZeroReserved { value: 0xab },
         };
         assert_eq!(
             err.to_string(),
-            "corrupt data at offset 9: non-zero padding byte 0xab"
+            "corrupt data at offset 9: non-zero byte 0xab where zeros are required"
         );
     }
 
@@ -643,7 +671,7 @@ mod tests {
                         r.skip_padding(crate::ALIGNMENT),
                         Err(Error::Corrupt {
                             offset: base + bad as u64,
-                            reason: Corruption::NonZeroPadding { value },
+                            reason: Corruption::NonZeroReserved { value },
                         }),
                         "base={base} bad={bad} value={value:#x}"
                     );
@@ -668,7 +696,7 @@ mod tests {
             r.skip_padding(crate::ALIGNMENT),
             Err(Error::Corrupt {
                 offset: 204,
-                reason: Corruption::NonZeroPadding { value: 2 },
+                reason: Corruption::NonZeroReserved { value: 2 },
             })
         );
         assert_eq!(r.position(), 1);

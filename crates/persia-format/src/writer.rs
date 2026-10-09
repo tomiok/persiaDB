@@ -88,10 +88,17 @@ impl Writer {
         self.buf.extend_from_slice(bytes);
     }
 
+    /// Appends `len` zero bytes (reserved fields, SPEC §4.3/§4.4); the counterpart of [`crate::Reader::expect_zeros`].
+    pub fn write_zeros(&mut self, len: usize) {
+        self.buf.resize(self.buf.len().saturating_add(len), 0);
+    }
+
     /// Appends zero bytes until the absolute offset is a multiple of `align` (no-op if already aligned).
+    ///
+    /// Only with a base near `u64::MAX` (unreachable for real files) does the saturated offset stop advancing,
+    /// so each call would add another byte.
     pub fn pad_to(&mut self, align: NonZeroUsize) {
-        let pad = padding_for(self.offset(), align);
-        self.buf.resize(self.buf.len().saturating_add(pad), 0);
+        self.write_zeros(padding_for(self.offset(), align));
     }
 
     write_le! {
@@ -171,6 +178,20 @@ mod tests {
         w.write_u8(1);
         w.pad_to(NonZeroUsize::MIN);
         assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn write_zeros_round_trips_through_expect_zeros() {
+        let mut w = Writer::new();
+        w.write_u8(1);
+        w.write_zeros(4);
+        w.write_zeros(0);
+        w.write_u8(2);
+        assert_eq!(w.as_slice(), &[1, 0, 0, 0, 0, 2]);
+        let mut r = Reader::new(w.as_slice());
+        assert_eq!(r.read_u8(), Ok(1));
+        assert_eq!(r.expect_zeros(4), Ok(()));
+        assert_eq!(r.read_u8(), Ok(2));
     }
 
     #[test]
@@ -261,10 +282,12 @@ mod tests {
     fn pad_to_and_skip_padding_agree_for_any_base_and_prefix() {
         // Invariants 2 and 3: for every base residue (including near u64::MAX), prefix length and alignment,
         // the writer pads with zeros to an absolute boundary and the reader skips exactly those bytes.
-        let bases = (0..=17_u64).chain([4093, 1 << 40, u64::MAX - 40]);
+        // Under Miri (which checks for UB, irrelevant to this logic) a smaller grid keeps the CI job fast.
+        let (max_residue, max_prefix) = if cfg!(miri) { (8, 9) } else { (17, 17) };
+        let bases = (0..=max_residue).chain([4093, 1 << 40, u64::MAX - 40]);
         for base in bases {
             for align in [1, 2, 3, 4, 8, 16] {
-                for prefix in 0..=17 {
+                for prefix in 0..=max_prefix {
                     let ctx = format!("base={base} align={align} prefix={prefix}");
                     let mut w = Writer::with_base_offset(base);
                     w.write_bytes(&vec![0xff; prefix]);
@@ -323,7 +346,7 @@ mod tests {
                 r.skip_padding(ALIGNMENT),
                 Err(Error::Corrupt {
                     offset: base + i as u64,
-                    reason: Corruption::NonZeroPadding { value: 0x40 },
+                    reason: Corruption::NonZeroReserved { value: 0x40 },
                 }),
                 "padding byte {i}"
             );

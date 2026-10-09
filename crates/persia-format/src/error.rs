@@ -38,9 +38,10 @@ pub enum Corruption {
         /// Bytes that were left.
         available: u64,
     },
-    /// Alignment padding (SPEC §4.1) contained a non-zero byte; `Error::Corrupt::offset` points at it.
-    #[error("non-zero padding byte {value:#04x}")]
-    NonZeroPadding {
+    /// Bytes the format requires to be zero (alignment padding, reserved fields; SPEC §4.1, §4.3, §4.4) were not;
+    /// `Error::Corrupt::offset` points at the first offending byte.
+    #[error("non-zero byte {value:#04x} where zeros are required")]
+    NonZeroReserved {
         /// The offending byte.
         value: u8,
     },
