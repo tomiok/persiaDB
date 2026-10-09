@@ -55,7 +55,7 @@ Deps: none.
 - [x] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`
 - [ ] 0.3.2 Dev container / `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12)
 - [x] 0.3.3 Install Claude Code assets: `CLAUDE.md`, `.claude/agents/*`, `.claude/skills/*` committed and documented
-- [ ] 0.3.4 GitHub issue/PR templates, labels, milestone setup script
+- [x] 0.3.4 GitHub issue/PR templates, labels, milestone setup script
 - 0.3.5 Progress tracking
   - [x] 0.3.5.1 `scripts/progress.py`: ROADMAP checkboxes → `PROGRESS.md` (milestone graph, burn-up, ready-next list)
   - [~] 0.3.5.2 CI job: `python3 scripts/progress.py --check` fails on stale `PROGRESS.md`
