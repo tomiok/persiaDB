@@ -139,14 +139,20 @@ proptest! {
         let cut = cut.index(bytes.len() + 1);
         let end = base + cut as u64;
         let mut r = Reader::with_base_offset(&bytes[..cut], base);
+        let mut hit_eof = false;
         for (v, &(start, stop)) in values.iter().zip(&spans) {
             if stop <= end {
                 prop_assert_eq!(decode(&mut r, v), Ok(v.clone()));
             } else {
                 prop_assert_eq!(decode(&mut r, v), Err(eof(start, stop - start, end - start)));
                 prop_assert_eq!(r.offset(), start);
+                hit_eof = true;
                 break;
             }
+        }
+        if !hit_eof {
+            // Everything fit: the cut was at (or past the last non-empty item before) the end.
+            prop_assert!(r.is_empty());
         }
     }
 }

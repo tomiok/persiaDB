@@ -46,10 +46,12 @@ check: lint test repo-checks deny
 progress:
     python3 scripts/progress.py --record
 
-# Fuzz one target for N seconds (dated nightly; targets arrive with ROADMAP 0.2.3.2)
+# Fuzz one target for N seconds (dated nightly). New inputs go to the git-ignored fuzz/corpus-local/;
+# committed seeds in fuzz/corpus/ are only read (minimize with `cargo fuzz cmin` before adding any)
 fuzz target seconds="60":
     @test -d fuzz || { echo "no fuzz/ crate yet (ROADMAP 0.2.3.2)"; exit 1; }
-    cd fuzz && cargo +{{ nightly }} fuzz run {{ target }} -- -max_total_time={{ seconds }}
+    mkdir -p fuzz/corpus-local/{{ target }}
+    cd fuzz && cargo +{{ nightly }} fuzz run {{ target }} corpus-local/{{ target }} corpus/{{ target }} -- -max_total_time={{ seconds }}
 
 # Criterion benchmarks (optionally one package)
 bench package="persia-engine":

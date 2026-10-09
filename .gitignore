@@ -5,6 +5,7 @@
 /fuzz/target/
 /fuzz/artifacts/
 /fuzz/coverage/
+/fuzz/corpus-local/
 
 # Snapshot-test leftovers (insta); accepted *.snap files are committed
 *.snap.new

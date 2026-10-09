@@ -16,15 +16,23 @@ fuzz_target!(|data: &[u8]| {
 
     for &op in ops {
         let before = r.position();
-        let n = usize::from(op >> 3); // 0..32; huge lengths are covered below
+        // op = [n:4][huge:1][kind:3]. `huge` turns n into a corrupt-length-field-sized value.
+        let small = usize::from(op >> 4);
+        let n = if op & 8 == 0 { small } else { usize::MAX - small };
         let ok = match op & 7 {
             0 => r.read_bytes(n).is_ok(),
             1 => r.read_u64().is_ok(),
             2 => r.read_u128().is_ok(),
-            3 => r.skip(if op & 8 == 0 { n } else { usize::MAX - n }).is_ok(),
+            3 => r.skip(n).is_ok(),
             4 => r.expect_zeros(n).is_ok(),
-            5 => r.skip_padding(NonZeroUsize::new(n + 1).unwrap()).is_ok(),
-            6 => r.sub_reader(n).map(|mut s| while s.read_u8().is_ok() {}).is_ok(),
+            5 => r.skip_padding(NonZeroUsize::new(small + 1).unwrap()).is_ok(),
+            6 => r
+                .sub_reader(n)
+                .map(|mut s| {
+                    while s.read_u8().is_ok() {}
+                    assert!(s.offset() <= base.saturating_add(buf.len() as u64));
+                })
+                .is_ok(),
             _ => r.read_array::<3>().is_ok(),
         };
         assert!(r.position() <= buf.len());

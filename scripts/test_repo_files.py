@@ -38,6 +38,7 @@ class RepoFilesTest(unittest.TestCase):
         for path in [
             "target/debug/persia",
             "fuzz/artifacts/frame_scanner/crash-1",
+            "fuzz/corpus-local/reader/abc",
             "app.persia",
             "app.persia.blobs",
             "scripts/__pycache__/x.pyc",
