@@ -22,6 +22,11 @@ class ToolchainTest(unittest.TestCase):
         msrv = WORKSPACE["package"]["rust-version"]
         self.assertEqual(msrv, TOOLCHAIN["channel"], "update rust-version and rust-toolchain.toml together")
 
+    def test_nightly_is_dated(self):
+        # Nightly-only tools (Miri, cargo-fuzz) must be reproducible too (CLAUDE.md "Toolchain").
+        nightly = (ROOT / ".github" / "nightly-toolchain").read_text().strip()
+        self.assertRegex(nightly, r"^nightly-\d{4}-\d{2}-\d{2}$")
+
     def test_every_member_inherits_msrv(self):
         manifests = sorted(m for pattern in WORKSPACE["members"] for m in ROOT.glob(f"{pattern}/Cargo.toml"))
         self.assertTrue(manifests)

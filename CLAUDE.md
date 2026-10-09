@@ -61,8 +61,9 @@ cargo test --workspace                       # unit + property tests (must be fa
 cargo test --workspace --features slow       # extended property tests (each crate has `slow = []`; gate with #[cfg(feature = "slow")])
 cargo nextest run --workspace                # preferred runner if installed
 cargo deny check                             # licenses + advisories
-cargo +nightly-YYYY-MM-DD fuzz run <target> -- -max_total_time=60   # dated nightly, see "Toolchain"
+just fuzz <target> [seconds]                 # dated nightly from .github/nightly-toolchain
 cargo bench -p persia-engine
+just miri                                    # Miri on persia-format (dated nightly)
 just integration                             # docker-compose: MinIO, fake-gcs, azurite
 python3 scripts/progress.py --record         # regenerate PROGRESS.md + append today's snapshot
 python3 scripts/progress.py --check          # CI: fail if PROGRESS.md is stale
@@ -80,8 +81,8 @@ Always run fmt, clippy and tests before declaring a task done.
   Write an ADR before the first crates.io publish (i.e. before any `publish = false` is flipped), e.g. support the last
   N stable releases with a CI job on the MSRV.
 - Bump cadence: within ~6 weeks of each stable release, as a standalone PR that also fixes any new clippy lints.
-- Nightly-only tools (cargo-fuzz, Miri) use a **dated** nightly pinned in their own `rust-toolchain.toml` (e.g. `fuzz/`)
-  or passed explicitly (`cargo +nightly-YYYY-MM-DD ...`), so they stay reproducible too.
+- Nightly-only tools (cargo-fuzz, Miri) use the **dated** nightly in `.github/nightly-toolchain` (CI and `just`
+  read it from there), so they stay reproducible too. Bump it deliberately, like the stable pin.
 
 ## Coding rules
 

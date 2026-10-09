@@ -49,7 +49,7 @@ Deps: none.
   - [ ] 0.2.3.2 Nightly fuzz run (time-boxed per target, corpus cached as artifact)
   - [ ] 0.2.3.3 Weekly benchmark run storing results (regression tracking)
 - [ ] 0.2.4 Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet
-- [ ] 0.2.5 Miri job for `persia-format` pure-logic modules
+- [~] 0.2.5 Miri job for `persia-format` pure-logic modules
 
 ## 0.3 Developer tooling
 - [x] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`

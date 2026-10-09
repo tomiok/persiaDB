@@ -73,6 +73,23 @@ jobs:
       - name: PROGRESS.md is up to date
         run: python3 scripts/progress.py --check
 
+  miri:
+    # ROADMAP 0.2.5: UB detection for persia-format, the only crate allowed to contain `unsafe`.
+    # The dated nightly lives in .github/nightly-toolchain (CLAUDE.md "Toolchain").
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install dated nightly with Miri
+        run: |
+          nightly="$(cat .github/nightly-toolchain)"
+          echo "NIGHTLY=$nightly" >> "$GITHUB_ENV"
+          rustup toolchain install "$nightly" --profile minimal --component miri,rust-src
+      - run: cargo "+$NIGHTLY" miri setup
+      - run: cargo "+$NIGHTLY" miri test -p persia-format
+
   deny:
     runs-on: ubuntu-latest
     timeout-minutes: 15
