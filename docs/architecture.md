@@ -24,8 +24,8 @@ SPEC disagree, the SPEC wins and this page is a bug.
 
 ## Crate dependency graph
 
-Arrows point from a crate to what it depends on. This is enforced by `scripts/check_deps.py` (its `ALLOWED`
-table is the source of truth); `persia-testutil` is a dev-dependency only and is omitted.
+Arrows point from a crate to what it depends on. This is enforced by `cargo xtask check-deps` (`ALLOWED` in `xtask/src/check_deps.rs`
+is the source of truth); `persia-testutil` is a dev-dependency only and is omitted.
 
 ```mermaid
 flowchart TD

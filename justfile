@@ -27,7 +27,7 @@ test-slow:
 
 # Dependency direction/allowlist, script tests, PROGRESS.md freshness
 repo-checks:
-    python3 scripts/check_deps.py
+    cargo xtask check-deps
     python3 -m unittest discover -s scripts
     python3 scripts/progress.py --check
 

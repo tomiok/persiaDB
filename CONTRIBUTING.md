@@ -24,7 +24,7 @@ cargo test --workspace
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
-python3 scripts/check_deps.py
+cargo xtask check-deps
 python3 -m unittest discover -s scripts
 python3 scripts/progress.py --check
 ```

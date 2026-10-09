@@ -1,5 +1,5 @@
 # cargo-deny configuration (CLAUDE.md "Dependencies"). Run: cargo deny check
-# Which external crates are allowed at all is enforced by scripts/check_deps.py
+# Which external crates are allowed at all is enforced by `cargo xtask check-deps`
 # (direct deps must come from [workspace.dependencies]); this file covers the whole graph.
 
 [graph]
@@ -40,7 +40,7 @@ multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
 # Pillar 2 "Own engine": no search, SQL or KV engines, not even transitively.
-# Backstop only: a name list is never complete. The real gate is scripts/check_deps.py, which
+# Backstop only: a name list is never complete. The real gate is `cargo xtask check-deps`, which
 # rejects any direct dependency not on the allowed list.
 deny = [
     { name = "tantivy", reason = "own engine (CLAUDE.md)" },

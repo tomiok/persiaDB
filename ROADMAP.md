@@ -61,6 +61,11 @@ Deps: none.
 - [x] 0.4.3 ADR-0002: blob hash choice (SPEC §18.1)
 - [x] 0.4.4 `docs/architecture.md` (diagram from SPEC §3, glossary)
 
+## 0.5 Repo tooling in Rust (replaces the Python scripts)
+- [x] 0.5.1 `xtask` crate + `cargo xtask check-deps` (port of `scripts/check_deps.py`, with its tests)
+- [ ] 0.5.2 `cargo xtask progress` (port of `scripts/progress.py`; byte-identical `PROGRESS.md`)
+- [ ] 0.5.3 `cargo xtask github-setup`; repo-file and toolchain checks as Rust tests; delete Python, update CI/justfile/docs
+
 ---
 
 # M1 — Format primitives (`persia-format`)

@@ -1,0 +1,3 @@
+# `cargo xtask <command>`: repo tooling written in Rust (xtask/), no Python or other runtimes needed.
+[alias]
+xtask = "run --quiet --package xtask --"
