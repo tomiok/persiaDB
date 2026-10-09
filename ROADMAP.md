@@ -517,7 +517,8 @@ Deps: M10.
 ## 11.1 Protocol
 - [ ] 11.1.1 `persia.proto` v1 per SPEC §12.2 (collections, put stream, delete, get, search, blob stream, commit, stats)
 - [ ] 11.1.2 Buf/lint config; breaking-change detection in CI
-- [ ] 11.1.3 Rust codegen crate `persia-proto`
+- [ ] 11.1.3 Rust codegen crate `persia-proto` (generated code committed; no `build.rs`, ADR-0003)
+- [ ] 11.1.4 `cargo xtask proto`: regenerate `persia-proto` code; CI job fails if regeneration changes anything
 
 ## 11.2 gRPC service
 - [ ] 11.2.1 Service skeleton (tonic) wired to embedded API

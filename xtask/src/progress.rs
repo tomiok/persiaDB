@@ -154,21 +154,26 @@ pub(crate) fn parse_deps(raw: &str) -> Vec<String> {
     while let Some((_, after_m)) = s.split_once('M') {
         let (digits, tail) = split_digits(after_m);
         s = tail;
-        let Ok(from) = digits.parse::<u32>() else {
+        if digits.is_empty() {
             continue;
-        };
-        // Optional range: `\s*[–-]\s*M\d+`
+        }
+        // Optional range: `\s*[–-]\s*M\d+`. Tokens keep their text as written ("M01" stays "M01"), so
+        // malformed keys surface as unknown dependencies instead of being normalized or dropped.
         let range_end = tail
             .trim_start()
             .strip_prefix(['–', '-'])
             .and_then(|r| r.trim_start().strip_prefix('M'))
             .map(split_digits)
-            .and_then(|(to, after)| to.parse::<u32>().ok().map(|to| (to, after)));
-        if let Some((to, after)) = range_end {
-            deps.extend((from..=to).map(|i| format!("M{i}")));
-            s = after;
-        } else {
-            deps.push(format!("M{from}"));
+            .filter(|(to, _)| !to.is_empty());
+        match range_end {
+            Some((to, after)) => {
+                s = after;
+                match (digits.parse::<u32>(), to.parse::<u32>()) {
+                    (Ok(a), Ok(b)) => deps.extend((a..=b).map(|i| format!("M{i}"))),
+                    _ => deps.extend([format!("M{digits}"), format!("M{to}")]),
+                }
+            }
+            None => deps.push(format!("M{digits}")),
         }
     }
     deps
@@ -257,10 +262,47 @@ pub(crate) fn parse_roadmap(text: &str) -> Result<Vec<Milestone>> {
                 .map(|d| format!("{}: unknown dependency {d}", ms.key)),
         );
     }
+    if let Some(cycle) = dependency_cycle(&milestones) {
+        errors.push(format!("dependency cycle: {}", cycle.join(" -> ")));
+    }
     if !errors.is_empty() {
         bail!("ROADMAP.md is malformed:\n{}", errors.join("\n"));
     }
     Ok(milestones)
+}
+
+/// The first dependency cycle found (e.g. `["M0", "M1", "M0"]`), if any.
+fn dependency_cycle(milestones: &[Milestone]) -> Option<Vec<String>> {
+    fn visit<'a>(
+        key: &'a str,
+        by_key: &BTreeMap<&str, &'a Milestone>,
+        path: &mut Vec<&'a str>,
+        finished: &mut BTreeSet<&'a str>,
+    ) -> Option<Vec<String>> {
+        if let Some(start) = path.iter().position(|k| *k == key) {
+            let mut cycle: Vec<String> = path.iter().skip(start).map(|k| (*k).to_owned()).collect();
+            cycle.push(key.to_owned());
+            return Some(cycle);
+        }
+        if finished.contains(key) {
+            return None;
+        }
+        path.push(key);
+        let found = by_key.get(key).and_then(|ms| {
+            ms.deps
+                .iter()
+                .find_map(|d| visit(d, by_key, path, finished))
+        });
+        path.pop();
+        finished.insert(key);
+        found
+    }
+    let by_key: BTreeMap<&str, &Milestone> =
+        milestones.iter().map(|ms| (ms.key.as_str(), ms)).collect();
+    let mut finished = BTreeSet::new();
+    milestones
+        .iter()
+        .find_map(|ms| visit(&ms.key, &by_key, &mut Vec::new(), &mut finished))
 }
 
 fn milestone_state(ms: &Milestone, by_key: &BTreeMap<&str, &Milestone>, depth: usize) -> State {
@@ -337,8 +379,8 @@ fn bar(done: usize, doing: usize, total: usize, width: usize) -> String {
     if total == 0 {
         return "░".repeat(width);
     }
-    let full = div_round_half_even(width * done, total);
-    let half = (width - full).min(div_round_half_even(width * doing, total));
+    let full = div_round_half_even(width.saturating_mul(done), total).min(width);
+    let half = (width - full).min(div_round_half_even(width.saturating_mul(doing), total));
     format!(
         "{}{}{}",
         "█".repeat(full),
@@ -351,7 +393,7 @@ fn pct(part: usize, total: usize) -> String {
     if total == 0 {
         "—".to_owned()
     } else {
-        format!("{}%", div_round_half_even(100 * part, total))
+        format!("{}%", div_round_half_even(part.saturating_mul(100), total))
     }
 }
 
@@ -365,6 +407,7 @@ pub(crate) struct Snapshot {
 }
 
 const HISTORY_HEADER: &str = "date,done,in_progress,total";
+const MAX_COUNT: usize = 1_000_000;
 
 fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
     let mut lines = text.lines();
@@ -378,13 +421,23 @@ fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
         .map(|l| {
             let f: Vec<&str> = l.split(',').collect();
             let [date, done, in_progress, total] = f.as_slice() else {
-                bail!("bad history row: {l}")
+                bail!("docs/progress-history.csv: bad row {l:?}")
+            };
+            let count = |field: &str| -> Result<usize> {
+                let n: usize = field.parse().with_context(|| {
+                    format!("docs/progress-history.csv: bad count {field:?} in row {l:?}")
+                })?;
+                // Leaf counts are small; this keeps percentage math far from overflow.
+                if n > MAX_COUNT {
+                    bail!("docs/progress-history.csv: implausible count {n} in row {l:?}");
+                }
+                Ok(n)
             };
             Ok(Snapshot {
                 date: (*date).to_owned(),
-                done: done.parse()?,
-                in_progress: in_progress.parse()?,
-                total: total.parse()?,
+                done: count(done)?,
+                in_progress: count(in_progress)?,
+                total: count(total)?,
             })
         })
         .collect()
@@ -759,6 +812,11 @@ Deps: M0–M1
             ["M11", "M13"]
         );
         assert_eq!(parse_deps("M2 - M4"), ["M2", "M3", "M4"]);
+        // Written text is kept: malformed keys become unknown dependencies, never silently normalized or dropped.
+        assert_eq!(parse_deps("M01"), ["M01"]);
+        assert_eq!(parse_deps("M99999999999"), ["M99999999999"]);
+        assert_eq!(parse_deps("M1–M99999999999"), ["M1", "M99999999999"]);
+        assert_eq!(parse_deps("Max, M"), Vec::<String>::new());
     }
 
     #[test]
@@ -775,6 +833,28 @@ Deps: M0–M1
         ] {
             assert!(err.contains(expected), "missing {expected:?} in:\n{err}");
         }
+    }
+
+    #[test]
+    fn dependency_cycles_are_errors() {
+        let cyclic = "# M0 — A\nDeps: M1\n# M1 — B\nDeps: M0\n# M2 — C\nDeps: M2\n";
+        let err = parse_roadmap(cyclic).unwrap_err().to_string();
+        assert!(err.contains("dependency cycle: M0 -> M1 -> M0"), "{err}");
+        assert!(parse_roadmap("# M0 — A\nDeps: none\n# M1 — B\nDeps: M0\n").is_ok());
+    }
+
+    #[test]
+    fn bad_history_is_an_error_with_context_not_a_panic() {
+        let huge = "date,done,in_progress,total\n2026-01-01,200000000000000000,0,1\n";
+        assert!(
+            parse_history(huge)
+                .unwrap_err()
+                .to_string()
+                .contains("implausible count")
+        );
+        let junk = "date,done,in_progress,total\n2026-01-01,x,0,1\n";
+        assert!(format!("{:#}", parse_history(junk).unwrap_err()).contains("progress-history.csv"));
+        assert_eq!(pct(usize::MAX, 1), format!("{}%", usize::MAX));
     }
 
     #[test]

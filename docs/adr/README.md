@@ -23,5 +23,6 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 
 | ADR | Title | Status |
 |---|---|---|
-| [0001](./0001-own-engine-and-allowed-dependencies.md) | Own search engine, and a closed list of allowed dependencies | accepted |
+| [0001](./0001-own-engine-and-allowed-dependencies.md) | Own search engine, and a closed list of allowed dependencies | accepted (amended by 0003) |
 | [0002](./0002-blob-hash-sha256.md) | Blobs are identified by SHA-256 | accepted |
+| [0003](./0003-rust-tooling-and-no-build-scripts.md) | Repo tooling in Rust (`xtask`), and no build scripts | accepted |

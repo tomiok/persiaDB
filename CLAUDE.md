@@ -118,11 +118,12 @@ Always run fmt, clippy and tests before declaring a task done.
 - Binaries (`persia-server`, `persia-cli`) may additionally use: `clap`, `anyhow`, `rustls`, `tracing-subscriber`,
   `opentelemetry*`, a Prometheus exporter.
 - Dev/bench only: `proptest`, `criterion`, `insta`, `tempfile`, `testcontainers`, `hdrhistogram`; `libfuzzer-sys` in `fuzz/` only.
+- Repo tooling only (`xtask`, which counts as a binary): `toml` (ADR-0003).
 - The allowed list lives in root `[workspace.dependencies]`; `cargo xtask check-deps` rejects any direct dependency not
   declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
 - Anything else: justify in the PR. Banned: `tantivy`, `rusqlite`, `rocksdb`, `sled`, any search/KV engine.
 - Prefer writing the 100-line primitive (varint, bitpacking, delta coding) over adding a crate.
-- **No `build.rs`.** Generated code (e.g. gRPC stubs for `persia-proto`) is produced by a script, committed, and
+- **No `build.rs`** (ADR-0003). Generated code (e.g. gRPC stubs for `persia-proto`) is produced by `cargo xtask`, committed, and
   CI fails if regenerating it changes anything. Users must never need `protoc` or other tools to build.
   Data tables use `const fn` or `include_bytes!`. Enforced by `cargo xtask check-deps`.
 

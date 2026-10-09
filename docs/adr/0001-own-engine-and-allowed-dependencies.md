@@ -1,6 +1,6 @@
 # ADR-0001: Own search engine, and a closed list of allowed dependencies
 
-- Status: accepted
+- Status: accepted (enforcement details amended by ADR-0003)
 - Date: 2026-10-09
 - Related: CLAUDE.md "Product pillars" (2) and "Dependencies"; SPEC §1, §5, §17; ROADMAP 0.4.2
 
