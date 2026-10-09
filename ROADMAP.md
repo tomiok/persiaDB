@@ -42,7 +42,7 @@ Deps: none.
   - [x] 0.1.3.4 `CHANGELOG.md` (Keep a Changelog format)
 
 ## 0.2 Continuous integration
-- [ ] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS
+- [~] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS; plus `cargo deny check` and `scripts/check_deps.py`
 - [~] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
 - 0.2.3 Scheduled workflows
   - [ ] 0.2.3.1 Nightly extended property tests (`--features slow`)
@@ -58,7 +58,7 @@ Deps: none.
 - [ ] 0.3.4 GitHub issue/PR templates, labels, milestone setup script
 - 0.3.5 Progress tracking
   - [x] 0.3.5.1 `scripts/progress.py`: ROADMAP checkboxes → `PROGRESS.md` (milestone graph, burn-up, ready-next list)
-  - [ ] 0.3.5.2 CI job: `python3 scripts/progress.py --check` fails on stale `PROGRESS.md`
+  - [~] 0.3.5.2 CI job: `python3 scripts/progress.py --check` fails on stale `PROGRESS.md`
 
 ## 0.4 Documentation scaffolding
 - [~] 0.4.1 `docs/adr/0000-template.md` + ADR process

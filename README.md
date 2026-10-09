@@ -1,5 +1,6 @@
 # Persia DB
 
+[![CI](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 
 **An embedded, single-file, cloud-native search database, written in Rust. Think "SQLite for search".**
