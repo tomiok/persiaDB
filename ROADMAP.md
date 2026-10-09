@@ -42,14 +42,14 @@ Deps: none.
   - [x] 0.1.3.4 `CHANGELOG.md` (Keep a Changelog format)
 
 ## 0.2 Continuous integration
-- [~] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS; plus `cargo deny check` and `scripts/check_deps.py`
-- [~] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
+- [x] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS; plus `cargo deny check` and `scripts/check_deps.py`
+- [x] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
 - 0.2.3 Scheduled workflows
-  - [~] 0.2.3.1 Nightly extended property tests (`--features slow`)
+  - [x] 0.2.3.1 Nightly extended property tests (`--features slow`)
   - [ ] 0.2.3.2 Nightly fuzz run (time-boxed per target, corpus cached as artifact)
   - [ ] 0.2.3.3 Weekly benchmark run storing results (regression tracking)
 - [ ] 0.2.4 Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet
-- [~] 0.2.5 Miri job for `persia-format` pure-logic modules
+- [x] 0.2.5 Miri job for `persia-format` pure-logic modules
 
 ## 0.3 Developer tooling
 - [x] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`
@@ -58,7 +58,7 @@ Deps: none.
 - [x] 0.3.4 GitHub issue/PR templates, labels, milestone setup script
 - 0.3.5 Progress tracking
   - [x] 0.3.5.1 `scripts/progress.py`: ROADMAP checkboxes → `PROGRESS.md` (milestone graph, burn-up, ready-next list)
-  - [~] 0.3.5.2 CI job: `python3 scripts/progress.py --check` fails on stale `PROGRESS.md`
+  - [x] 0.3.5.2 CI job: `python3 scripts/progress.py --check` fails on stale `PROGRESS.md`
 
 ## 0.4 Documentation scaffolding
 - [x] 0.4.1 `docs/adr/0000-template.md` + ADR process
