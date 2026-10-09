@@ -38,7 +38,7 @@ Deps: none.
 - 0.1.3 Repo hygiene
   - [x] 0.1.3.1 `LICENSE` (Apache-2.0) + `NOTICE`
   - [x] 0.1.3.2 `README.md` stub (what it is, status, quickstart placeholder)
-  - [ ] 0.1.3.3 `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`
+  - [x] 0.1.3.3 `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`
   - [ ] 0.1.3.4 `CHANGELOG.md` (Keep a Changelog format)
 
 ## 0.2 Continuous integration
