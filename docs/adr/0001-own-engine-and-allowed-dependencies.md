@@ -33,7 +33,8 @@ Unicode tables, the async/gRPC/HTTP stack and object-store clients.
      dependency not inherited with `.workspace = true`;
    - `deny.toml` bans known engines in the full graph and checks licenses, advisories and sources.
 4. Adding a crate requires a PR that justifies it and updates the table, CLAUDE.md, the tiers in
-   `scripts/check_deps.py` and this ADR's list (or a new ADR for anything significant).
+   `scripts/check_deps.py` (or a new ADR for anything significant). The list in item 2 is a snapshot taken when
+   this ADR was accepted; the living list is `[workspace.dependencies]` plus CLAUDE.md.
 
 ## Consequences
 

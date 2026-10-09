@@ -441,6 +441,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 Deps: M1, M2.
 
 ## 9.1 Core model (SPEC §9)
+- [ ] 9.1.0 ADR: blob upload staging and expected-id API (SPEC §18.8); update SPEC §9.3/§9.4/§9.6
 - [ ] 9.1.1 Content hasher per ADR-0002 producing `BlobId` (type from 1.10.1), chunking parameters
 - [ ] 9.1.2 Streaming chunker (`Read` → chunks with CRC and running content hash)
 - [ ] 9.1.3 Blob manifest (chunk list) encode/decode

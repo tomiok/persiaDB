@@ -48,6 +48,6 @@ fuzz target seconds="60":
 bench package="persia-engine":
     cargo bench -p {{ package }}
 
-# Cloud-emulator integration tests: MinIO, fake-gcs-server, Azurite. The body lands with ROADMAP 0.3.2.
+# Cloud-emulator integration tests: MinIO, fake-gcs-server, Azurite (ROADMAP 12.2.4)
 integration:
-    @test -f docker-compose.test.yml || { echo "no docker-compose.test.yml yet (ROADMAP 0.3.2)"; exit 1; }
+    @echo "not implemented yet: emulator integration tests land with M12 (ROADMAP 12.2.4)"; exit 1

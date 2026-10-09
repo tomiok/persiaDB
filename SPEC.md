@@ -80,7 +80,8 @@ A local database is two files:
 
 ### 4.1 Conventions
 - All integers little-endian. All structures 8-byte aligned. Offsets are absolute `u64`.
-- Checksum: **CRC32C** for headers/frames; **xxh3-64** for content hashes where noted.
+- Checksum: **CRC32C** for headers/frames; **xxh3-64** for internal content hashes where noted.
+  Blob ids are **SHA-256** (SPEC §9.1, ADR-0002).
 - Compression: **zstd** (level configurable); every compressed unit declares its codec.
 
 ### 4.2 Header (first 8192 bytes)
@@ -360,7 +361,8 @@ truncating at the first invalid frame) → ready. Recovery MUST be idempotent.
 Documents may reference one blob (v1): `blob_ref = { blob_id, size, mime, chunk_size, user_meta? }`.
 The index NEVER contains blob bytes — only the reference. `blob_id` is the **SHA-256** of the blob's bytes (32 bytes;
 hex-encoded, lowercase, wherever it appears as text) (ADR-0002). Persia always computes it from the bytes it receives;
-a caller-supplied id is only an expectation, and a mismatch is an error. `BlobRef`/`BlobId` are value types in `persia-format` so
+if a caller supplies an expected id, a mismatch is an error. Chunks must not become addressable under a
+`blob_id` before it is verified (upload staging: SPEC §18.8). `BlobRef`/`BlobId` are value types in `persia-format` so
 that documents and segments can carry them without depending on `persia-blob`.
 
 ### 9.2 Properties
@@ -374,7 +376,7 @@ Pack file: header + append-only `BlobChunk` frames `{blob_id, chunk_idx, len, cr
 (`blob_id → [chunk offsets]`) + superblock like SPEC §4.3. GC rewrites live blobs into a new pack (like container compaction).
 
 ### 9.4 Remote layout
-`blobs/<hex[0..2]>/<blob_id>/<chunk_idx>` objects (or one object per blob below a size threshold, configurable).
+`blobs/<hex[0..2]>/<hex(blob_id)>/<chunk_idx>` objects (64-character lowercase hex) (or one object per blob below a size threshold, configurable).
 
 ### 9.5 Write ordering and GC
 1. Write blob chunks (and blob index). Durable.
@@ -579,3 +581,8 @@ Comparison against other engines is reported with methodology, never cherry-pick
 5. Resharding strategy (split-by-hash-range using immutable segments + filtering merge).
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.
 7. Language analyzers scope for v1 (en, es, pt first).
+8. Blob upload staging: the id is known only after hashing the last byte, but §9.3/§9.4 key chunks by `blob_id`.
+   Proposal to evaluate: stage chunks under an upload id, then bind them to the verified `blob_id` with the
+   `BlobIndex` frame (local) or a per-blob index object written with `put_if_absent` (remote); dedup check after
+   hashing; resumable uploads re-hash stored chunks or persist hasher state. Also: how an expected id is passed
+   (API/gRPC). Must be decided (ADR) before ROADMAP 9.2.

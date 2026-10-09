@@ -44,12 +44,12 @@ flowchart TD
 
 | Crate | Owns | SPEC | Sync/async |
 |---|---|---|---|
-| `persia-format` | Byte-level encodings, frames, header/superblock, block codecs, `BlobRef`/`BlobId`. No I/O policy. The only crate that may contain `unsafe` (mmap) | §4, §5 | sync |
+| `persia-format` | Byte-level encodings, frames, header/superblock, block codecs, `BlobRef`/`BlobId`. No I/O policy. Holds the `unsafe` mmap module; other `unsafe` needs an ADR (CLAUDE.md) | §4, §5 | sync |
 | `persia-storage` | `Storage` trait; memory, local container and cloud backends; `FaultyStorage` for crash tests | §4, §10 | async only in cloud backends |
 | `persia-analysis` | Tokenizers, normalizers, stemmers, analyzer registry | §6.3 | sync |
 | `persia-engine` | Memtable, WAL, segments, commit, merge, query, BM25F, relaxation | §5–§8 | **sync**, I/O only via `Storage` |
 | `persia-blob` | Content-addressed chunked blobs, dedup, GC | §9 | sync core |
-| `persia` | Public embedded API (`Db`, `Collection`); orders blob writes before document commits | §8, §9.5 | sync (+ optional `tokio` wrapper) |
+| `persia` | Public embedded API (`Db`, `Collection`); orders blob writes before document commits | §8, §9.5 | sync (an optional `tokio` wrapper is ROADMAP 10.1.6) |
 | `persia-proto` | `persia.proto` and generated code | §12 | n/a |
 | `persia-server` | gRPC + HTTP server, roles (writer/reader/router) | §11, §12 | async |
 | `persia-cli` | `persia` binary: inspect, dump, verify, compact, bench | — | sync |
