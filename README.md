@@ -46,6 +46,7 @@ let results = products.search("runing")?;
 | [`ROADMAP.md`](./ROADMAP.md) | All planned work; every leaf is one issue |
 | [`PROGRESS.md`](./PROGRESS.md) | Generated status graph of the roadmap |
 | [`CLAUDE.md`](./CLAUDE.md) | Engineering rules for contributors (human or AI) |
+| [`docs/architecture.md`](./docs/architecture.md) | Map of the code: layers, crates, write and query paths |
 | [`docs/adr/`](./docs/adr/) | Architecture decision records |
 
 ## License
