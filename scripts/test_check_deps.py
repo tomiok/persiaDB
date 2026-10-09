@@ -2,7 +2,7 @@
 
 import unittest
 
-from check_deps import ALLOWED, TESTUTIL, violations
+from check_deps import ALLOWED, TESTUTIL, violations, workspace_dependencies
 
 
 def metadata(edges=(), extra_members=()):
@@ -85,8 +85,19 @@ class CheckDepsTest(unittest.TestCase):
             ["persia-server -> persia-client (normal): internal crate outside the workspace"],
         )
 
-    def test_external_dependencies_ignored(self):
-        self.assertEqual(violations(metadata([("persia-format", "zstd", None)])), [])
+    def test_allowed_external_dependency_passes(self):
+        md = metadata([("persia-format", "zstd", None)])
+        self.assertEqual(violations(md, frozenset({"zstd"})), [])
+
+    def test_external_dependency_not_in_workspace_table_rejected(self):
+        md = metadata([("persia-format", "left-pad", "dev")])
+        self.assertEqual(
+            violations(md, frozenset({"zstd"})),
+            ["persia-format -> left-pad (dev): not in [workspace.dependencies] (allowed list)"],
+        )
+
+    def test_real_workspace_table_is_readable(self):
+        self.assertIn("zstd", workspace_dependencies())
 
 
 if __name__ == "__main__":

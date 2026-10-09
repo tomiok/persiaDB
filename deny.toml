@@ -1,0 +1,60 @@
+# cargo-deny configuration (CLAUDE.md "Dependencies"). Run: cargo deny check
+# Which external crates are allowed at all is enforced by scripts/check_deps.py
+# (direct deps must come from [workspace.dependencies]); this file covers the whole graph.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+# Every ignored advisory needs a reason and an issue link.
+ignore = []
+
+[licenses]
+version = 2
+# Permissive licenses compatible with distributing Persia DB under Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "BSL-1.0",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.93
+# The allow list anticipates the allowed crates (CLAUDE.md); not all are used yet.
+unused-allowed-license = "allow"
+
+[licenses.private]
+# Our own crates are `publish = false` until release; they are Apache-2.0 regardless.
+ignore = true
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Pillar 2 "Own engine": no search, storage or KV engines, not even transitively.
+deny = [
+    { name = "tantivy", reason = "own engine (CLAUDE.md)" },
+    { name = "rusqlite", reason = "own engine (CLAUDE.md)" },
+    { name = "libsqlite3-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "rocksdb", reason = "own engine (CLAUDE.md)" },
+    { name = "librocksdb-sys", reason = "own engine (CLAUDE.md)" },
+    { name = "sled", reason = "own engine (CLAUDE.md)" },
+    { name = "redb", reason = "own engine (CLAUDE.md)" },
+    { name = "heed", reason = "own engine (CLAUDE.md)" },
+    { name = "lmdb-rkv", reason = "own engine (CLAUDE.md)" },
+    { name = "fjall", reason = "own engine (CLAUDE.md)" },
+    { name = "milli", reason = "own engine (CLAUDE.md)" },
+    { name = "lucene", reason = "own engine (CLAUDE.md)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

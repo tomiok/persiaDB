@@ -1,0 +1,24 @@
+# Scheduled supply-chain audit (ROADMAP 0.2.2). New RustSec advisories appear without any change on
+# our side, so this runs daily; PRs get the full `cargo deny check` in ci.yml.
+# Actions are pinned to commit SHAs (SPEC §17 supply chain); the tag is in the trailing comment.
+name: audit
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check advisories

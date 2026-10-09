@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Enforce the internal crate dependency direction (CLAUDE.md "Architecture").
 
-Every workspace member must appear in ALLOWED, and may only depend on the crates listed
-for it. Rules:
+Internal crates: every workspace member must appear in ALLOWED, and may only depend on the crates
+listed for it. External crates: every direct dependency must be declared in the root
+[workspace.dependencies] (the allowed list from CLAUDE.md "Dependencies"). Internal rules:
   - normal and build dependencies: only the crates in ALLOWED[crate];
   - dev-dependencies: the same, plus `persia-testutil`;
   - `persia-testutil` is never a normal or build dependency.
@@ -17,6 +18,10 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import tomllib
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 
 TESTUTIL = "persia-testutil"
 
@@ -36,7 +41,12 @@ ALLOWED: dict[str, frozenset[str]] = {
 }
 
 
-def violations(metadata: dict) -> list[str]:
+def workspace_dependencies() -> frozenset[str]:
+    manifest = tomllib.loads((ROOT / "Cargo.toml").read_text())
+    return frozenset(manifest["workspace"]["dependencies"])
+
+
+def violations(metadata: dict, external_allowed: frozenset[str] = frozenset()) -> list[str]:
     members = {p["name"] for p in metadata["packages"]}
     errors = [
         f"{name}: workspace member is not listed in scripts/check_deps.py ALLOWED"
@@ -54,7 +64,9 @@ def violations(metadata: dict) -> list[str]:
                 # Internal crates outside the workspace (e.g. a future sdk/rust) must be added deliberately.
                 if target.startswith("persia"):
                     errors.append(f"{name} -> {target} ({kind}): internal crate outside the workspace")
-                continue  # external crates are cargo-deny's job
+                elif target not in external_allowed:
+                    errors.append(f"{name} -> {target} ({kind}): not in [workspace.dependencies] (allowed list)")
+                continue  # licenses, advisories and bans of the full graph are cargo-deny's job
             if kind == "dev":
                 ok = target in allowed or (target == TESTUTIL and name != TESTUTIL)
             else:
@@ -76,7 +88,7 @@ def main() -> int:
         print(f"cargo metadata failed: {e}", file=sys.stderr)
         print(getattr(e, "stderr", "") or "", file=sys.stderr)
         return 1
-    errors = violations(json.loads(raw))
+    errors = violations(json.loads(raw), workspace_dependencies())
     if errors:
         print("Dependency direction violations (see CLAUDE.md \"Architecture\"):", file=sys.stderr)
         print("\n".join(f"  {e}" for e in errors), file=sys.stderr)

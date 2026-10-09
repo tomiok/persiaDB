@@ -43,7 +43,7 @@ Deps: none.
 
 ## 0.2 Continuous integration
 - [ ] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS
-- [ ] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
+- [x] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
 - 0.2.3 Scheduled workflows
   - [ ] 0.2.3.1 Nightly extended property tests (`--features slow`)
   - [ ] 0.2.3.2 Nightly fuzz run (time-boxed per target, corpus cached as artifact)
