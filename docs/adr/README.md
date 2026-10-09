@@ -23,3 +23,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 
 | ADR | Title | Status |
 |---|---|---|
+| [0001](./0001-own-engine-and-allowed-dependencies.md) | Own search engine, and a closed list of allowed dependencies | accepted |

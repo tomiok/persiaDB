@@ -119,7 +119,7 @@ Always run fmt, clippy and tests before declaring a task done.
   `opentelemetry*`, a Prometheus exporter.
 - Dev/bench only: `proptest`, `criterion`, `insta`, `tempfile`, `testcontainers`, `hdrhistogram`.
 - The allowed list lives in root `[workspace.dependencies]`; `scripts/check_deps.py` rejects any direct dependency not
-  declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. ADR-0001 records it.
+  declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
 - Anything else: justify in the PR. Banned: `tantivy`, `rusqlite`, `rocksdb`, `sled`, any search/KV engine.
 - Prefer writing the 100-line primitive (varint, bitpacking, delta coding) over adding a crate.
 

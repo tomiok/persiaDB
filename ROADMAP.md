@@ -62,7 +62,7 @@ Deps: none.
 
 ## 0.4 Documentation scaffolding
 - [x] 0.4.1 `docs/adr/0000-template.md` + ADR process
-- [ ] 0.4.2 ADR-0001: record "own engine, no Tantivy" decision and allowed dependency list
+- [x] 0.4.2 ADR-0001: record "own engine, no Tantivy" decision and allowed dependency list
 - [ ] 0.4.3 ADR-0002: blob hash choice (SPEC §18.1)
 - [ ] 0.4.4 `docs/architecture.md` (diagram from SPEC §3, glossary)
 
