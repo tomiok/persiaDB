@@ -40,6 +40,9 @@ macro_rules! read_le {
 
 impl<'a> Reader<'a> {
     /// A reader at the start of `buf`; error offsets are relative to `buf`.
+    ///
+    /// For a structure nested inside other data, use [`Reader::sub_reader`] or
+    /// [`Reader::with_base_offset`] instead, so errors keep pointing at the real byte.
     pub fn new(buf: &'a [u8]) -> Self {
         Self::with_base_offset(buf, 0)
     }
@@ -50,12 +53,14 @@ impl<'a> Reader<'a> {
         Self { buf, pos: 0, base }
     }
 
-    /// Bytes consumed so far, relative to the start of the slice.
+    /// Bytes consumed so far, relative to the start of the slice. For error reports and on-disk
+    /// offsets use [`Reader::offset`] instead.
     pub fn position(&self) -> usize {
         self.pos
     }
 
-    /// Absolute offset of the next byte (`base + position`).
+    /// Absolute offset of the next byte (`base + position`): what error reports and on-disk offsets use
+    /// (SPEC §4.1). Saturates at `u64::MAX`, which no real file reaches.
     pub fn offset(&self) -> u64 {
         self.base.saturating_add(to_u64(self.pos))
     }
@@ -81,8 +86,20 @@ impl<'a> Reader<'a> {
     /// [`Error::Corrupt`] if fewer than `len` bytes remain (including absurd lengths from corrupt length fields).
     pub fn read_bytes(&mut self, len: usize) -> Result<&'a [u8]> {
         let bytes = self.rest().get(..len).ok_or_else(|| self.eof(len))?;
-        self.pos += len; // cannot overflow: pos + len <= buf.len()
+        // Never saturates: `get` succeeded, so pos + len <= buf.len().
+        self.pos = self.pos.saturating_add(len);
         Ok(bytes)
+    }
+
+    /// Consumes the next `len` bytes and returns a reader over just them (a length-prefixed sub-structure),
+    /// whose error offsets stay absolute.
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] if fewer than `len` bytes remain.
+    pub fn sub_reader(&mut self, len: usize) -> Result<Reader<'a>> {
+        let base = self.offset();
+        self.read_bytes(len)
+            .map(|bytes| Reader::with_base_offset(bytes, base))
     }
 
     /// Advances past the next `len` bytes.
@@ -102,7 +119,8 @@ impl<'a> Reader<'a> {
             .rest()
             .split_first_chunk::<N>()
             .ok_or_else(|| self.eof(N))?;
-        self.pos += N; // cannot overflow: pos + N <= buf.len()
+        // Never saturates: the chunk exists, so pos + N <= buf.len().
+        self.pos = self.pos.saturating_add(N);
         Ok(*head)
     }
 
@@ -249,6 +267,30 @@ mod tests {
         r.skip(2).unwrap();
         assert_eq!(r.offset(), u64::MAX);
         assert_eq!(r.read_u8(), Err(eof_at(u64::MAX, 1, 0)));
+    }
+
+    #[test]
+    fn sub_reader_errors_keep_absolute_offsets() {
+        let mut outer = Reader::with_base_offset(&[1, 2, 3, 4, 5, 6], 1000);
+        outer.skip(1).unwrap();
+        let mut inner = outer.sub_reader(4).unwrap();
+        assert_eq!(outer.offset(), 1005);
+        assert_eq!(inner.read_u16(), Ok(0x0302));
+        // EOF inside the sub-structure: outer base + outer position + inner position.
+        assert_eq!(inner.read_u32(), Err(eof_at(1003, 4, 2)));
+        assert_eq!(inner.read_u16(), Ok(0x0504));
+        assert!(inner.is_empty());
+        assert_eq!(outer.read_u8(), Ok(6));
+    }
+
+    #[test]
+    fn sub_reader_past_end_fails_without_advancing() {
+        let mut outer = Reader::with_base_offset(&[0; 3], 10);
+        assert_eq!(
+            outer.sub_reader(4).map(|r| r.remaining()),
+            Err(eof_at(10, 4, 3))
+        );
+        assert_eq!(outer.position(), 0);
     }
 
     #[test]
