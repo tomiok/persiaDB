@@ -45,6 +45,15 @@ pub enum Corruption {
         /// The offending byte.
         value: u8,
     },
+    /// A varint used more bytes than its value needs; only the canonical (shortest) encoding is valid.
+    #[error("overlong varint (non-canonical encoding)")]
+    OverlongVarint,
+    /// A varint encodes a value wider than its type, or has more bytes than the type can need.
+    #[error("varint does not fit in {bits} bits")]
+    VarintOverflow {
+        /// Width of the target type (32 or 64).
+        bits: u32,
+    },
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.

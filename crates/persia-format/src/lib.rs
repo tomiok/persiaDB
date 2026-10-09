@@ -5,6 +5,7 @@
 pub mod align;
 pub mod error;
 pub mod reader;
+pub mod varint;
 pub mod writer;
 
 pub use align::ALIGNMENT;
