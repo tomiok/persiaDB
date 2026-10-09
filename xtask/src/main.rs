@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod check_deps;
+mod progress;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,7 +14,8 @@ use anyhow::{Context, Result};
 const USAGE: &str = "usage: cargo xtask <command>
 
 commands:
-  check-deps   enforce crate dependency rules (CLAUDE.md \"Architecture\", \"Dependencies\")";
+  check-deps   enforce crate dependency rules (CLAUDE.md \"Architecture\", \"Dependencies\")
+  progress     regenerate PROGRESS.md from ROADMAP.md [--record [--date YYYY-MM-DD] | --check]";
 
 fn main() -> ExitCode {
     match run() {
@@ -29,11 +31,15 @@ fn main() -> ExitCode {
 /// Returns whether the command passed.
 fn run() -> Result<bool> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some("check-deps") = args.first().map(String::as_str) {
-        return check_deps::run(&repo_root()?);
+    let rest = args.get(1..).unwrap_or_default();
+    match args.first().map(String::as_str) {
+        Some("check-deps") => check_deps::run(&repo_root()?),
+        Some("progress") => progress::run(&repo_root()?, rest),
+        _ => {
+            eprintln!("{USAGE}");
+            Ok(false)
+        }
     }
-    eprintln!("{USAGE}");
-    Ok(false)
 }
 
 /// The repository root: the parent of this crate's directory.

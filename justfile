@@ -29,7 +29,7 @@ test-slow:
 repo-checks:
     cargo xtask check-deps
     python3 -m unittest discover -s scripts
-    python3 scripts/progress.py --check
+    cargo xtask progress --check
 
 # Undefined-behavior check of persia-format under Miri (needs the dated nightly with miri)
 miri:
@@ -45,7 +45,7 @@ check: lint test repo-checks deny
 
 # Regenerate PROGRESS.md and record today's snapshot (after ticking a ROADMAP leaf)
 progress:
-    python3 scripts/progress.py --record
+    cargo xtask progress --record
 
 # Fuzz one target for N seconds (dated nightly). New inputs go to the git-ignored fuzz/corpus-local/;
 # committed seeds in fuzz/corpus/ are only read (minimize with `cargo fuzz cmin` before adding any)

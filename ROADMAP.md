@@ -7,7 +7,7 @@ How to read this file:
 - `(SPEC §x)` points to the section that defines the behavior. `[T]` marks the test expectation for that leaf.
 - Dependencies are listed per milestone. Do not start a milestone before its dependencies are done unless noted.
 - **Status** is tracked on leaves only: `[ ]` todo · `[~]` in progress · `[x]` done (DoD met). Parent status is derived.
-  After changing a status run `python3 scripts/progress.py --record`; it regenerates [`PROGRESS.md`](./PROGRESS.md).
+  After changing a status run `cargo xtask progress --record`; it regenerates [`PROGRESS.md`](./PROGRESS.md).
   New work discovered along the way is added here as new leaves (next free id), never tracked only in TODOs.
 - Labels to create: `milestone:M0`…`milestone:M15`, `area:format|storage|engine|analysis|blob|server|sdk|ci|docs`, `type:feat|test|bench|fuzz|docs|chore`.
 
@@ -63,7 +63,7 @@ Deps: none.
 
 ## 0.5 Repo tooling in Rust (replaces the Python scripts)
 - [x] 0.5.1 `xtask` crate + `cargo xtask check-deps` (port of `scripts/check_deps.py`, with its tests)
-- [ ] 0.5.2 `cargo xtask progress` (port of `scripts/progress.py`; byte-identical `PROGRESS.md`)
+- [x] 0.5.2 `cargo xtask progress` (port of `scripts/progress.py`; byte-identical `PROGRESS.md`)
 - [ ] 0.5.3 `cargo xtask github-setup`; repo-file and toolchain checks as Rust tests; delete Python, update CI/justfile/docs
 
 ---

@@ -71,7 +71,7 @@ jobs:
       - name: Script tests
         run: python3 -m unittest discover -s scripts -v
       - name: PROGRESS.md is up to date
-        run: python3 scripts/progress.py --check
+        run: cargo xtask progress --check
 
   miri:
     # ROADMAP 0.2.5: UB detection for persia-format, the only crate allowed to contain `unsafe`.

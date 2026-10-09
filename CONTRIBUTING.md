@@ -26,14 +26,14 @@ cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo xtask check-deps
 python3 -m unittest discover -s scripts
-python3 scripts/progress.py --check
+cargo xtask progress --check
 ```
 
 - Tests ship with the change, at the right layers (unit, property, golden, fuzz; see `CLAUDE.md`).
   A bug fix starts with a failing test.
 - On-disk format changes need a SPEC update, a version or flag bump, an ADR in `docs/adr/`, and a golden test.
 - Tick the ROADMAP leaf (`[x]`) only when the Definition of Done in `CLAUDE.md` is met, then run
-  `python3 scripts/progress.py --record`.
+  `cargo xtask progress --record`.
 - Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/): `feat(engine): ...`,
   `fix(format): ...`, `docs: ...`.
 - New dependencies must be on the allowed list in `CLAUDE.md`, or be justified in the PR.

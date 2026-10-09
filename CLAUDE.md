@@ -44,7 +44,7 @@ tests/
 benches/            # criterion + end-to-end benchmark harness
 fuzz/               # cargo-fuzz targets
 docs/adr/           # architecture decision records
-scripts/            # repo tooling (progress.py)
+xtask/              # repo tooling in Rust: `cargo xtask check-deps | progress | ...`
 .claude/agents/     # subagents: test-writer, code-reviewer, integration-tester
 .claude/skills/     # skills: implement-issue
 PROGRESS.md         # GENERATED status graph — never edit by hand
@@ -65,8 +65,8 @@ just fuzz <target> [seconds]                 # dated nightly from .github/nightl
 cargo bench -p persia-engine
 just miri                                    # Miri on persia-format (dated nightly)
 just integration                             # docker-compose: MinIO, fake-gcs, azurite
-python3 scripts/progress.py --record         # regenerate PROGRESS.md + append today's snapshot
-python3 scripts/progress.py --check          # CI: fail if PROGRESS.md is stale
+cargo xtask progress --record                # regenerate PROGRESS.md + append today's snapshot
+cargo xtask progress --check                 # CI: fail if PROGRESS.md is stale
 cargo xtask check-deps                       # crate dependency rules (direction, allowed list, no build.rs)
 python3 -m unittest discover -s scripts      # tests for repo scripts
 ```
@@ -152,7 +152,7 @@ Always run fmt, clippy and tests before declaring a task done.
 4. One issue = one PR = one focused change. Conventional commits (`feat(engine): ...`, `fix(format): ...`).
 5. Update `SPEC.md` / ADRs in the same PR when a decision changes.
 6. Progress: mark the leaf `[~]` in `ROADMAP.md` when starting, `[x]` when the DoD is met, then run
-   `python3 scripts/progress.py --record` and commit `ROADMAP.md`, `PROGRESS.md` and `docs/progress-history.csv` with the change.
+   `cargo xtask progress --record` and commit `ROADMAP.md`, `PROGRESS.md` and `docs/progress-history.csv` with the change.
    Never tick a leaf whose DoD is not met; add newly discovered work as new ROADMAP leaves instead of hiding it.
 
 ## Definition of Done (every issue)
@@ -164,7 +164,7 @@ Always run fmt, clippy and tests before declaring a task done.
 - [ ] Public API documented; CHANGELOG entry if user-visible
 - [ ] Benchmarks added/updated if on a hot path (query, indexing, block decode)
 - [ ] Reviewed by `code-reviewer` with no unresolved blockers
-- [ ] ROADMAP leaf ticked and `PROGRESS.md` regenerated (`scripts/progress.py --check` passes)
+- [ ] ROADMAP leaf ticked and `PROGRESS.md` regenerated (`cargo xtask progress --check` passes)
 
 ## Things Claude must never do
 

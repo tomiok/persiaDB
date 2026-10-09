@@ -45,7 +45,7 @@ Re-run step 4 after changes. Re-run `code-reviewer` if you made significant edit
 
 ## 6. Finish
 - Tick the Definition of Done list from `CLAUDE.md`.
-- Mark the leaf `[x]` in `ROADMAP.md`, run `python3 scripts/progress.py --record`, and include `ROADMAP.md`,
+- Mark the leaf `[x]` in `ROADMAP.md`, run `cargo xtask progress --record`, and include `ROADMAP.md`,
   `PROGRESS.md` and `docs/progress-history.csv` in the PR. Add any follow-up work as new ROADMAP leaves.
 - Report the progress delta to the user (milestone %, what is now ready next).
 - Update `SPEC.md`, ADRs, `CHANGELOG.md`, docs/examples if behavior is user-visible.

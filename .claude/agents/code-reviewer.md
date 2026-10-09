@@ -15,7 +15,7 @@ files; you report findings. Your review must be independent: do not assume the a
    Identify the ROADMAP item / issue and read the SPEC sections it cites (`SPEC.md`) plus `CLAUDE.md`.
 2. Read the **full changed files** (not just hunks) and the tests added. Read callers/callees when behavior crosses modules.
 3. Run (read-only, report output): `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets --all-features -- -D warnings`,
-   `cargo test --workspace`, `python3 scripts/progress.py --check`. Note failures; do not fix.
+   `cargo test --workspace`, `cargo xtask progress --check`. Note failures; do not fix.
 4. Review against the checklist below. Be concrete: file:line, what is wrong, why it matters, suggested fix.
 5. Produce the report in the format at the bottom.
 
