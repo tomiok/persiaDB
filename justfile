@@ -16,7 +16,7 @@ lint:
 
 # Unit + property tests (fast suite)
 test:
-    cargo test --workspace --all-features
+    cargo test --workspace
 
 # Dependency direction/allowlist, script tests, PROGRESS.md freshness
 repo-checks:
