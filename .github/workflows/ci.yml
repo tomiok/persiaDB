@@ -88,7 +88,10 @@ jobs:
           echo "NIGHTLY=$nightly" >> "$GITHUB_ENV"
           rustup toolchain install "$nightly" --profile minimal --component miri,rust-src
       - run: cargo "+$NIGHTLY" miri setup
-      - run: cargo "+$NIGHTLY" miri test -p persia-format
+      # Unit tests + doctests only: property tests need the filesystem (proptest's failure persistence),
+      # which Miri isolates, and they test pure logic that native runs already cover.
+      - run: cargo "+$NIGHTLY" miri test -p persia-format --lib
+      - run: cargo "+$NIGHTLY" miri test -p persia-format --doc
 
   deny:
     runs-on: ubuntu-latest

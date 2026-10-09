@@ -33,7 +33,8 @@ repo-checks:
 
 # Undefined-behavior check of persia-format under Miri (needs the dated nightly with miri)
 miri:
-    cargo +{{ nightly }} miri test -p persia-format
+    cargo +{{ nightly }} miri test -p persia-format --lib
+    cargo +{{ nightly }} miri test -p persia-format --doc
 
 # Licenses, advisories, banned engines
 deny:
