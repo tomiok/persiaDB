@@ -38,6 +38,22 @@ python3 scripts/progress.py --check
   `fix(format): ...`, `docs: ...`.
 - New dependencies must be on the allowed list in `CLAUDE.md`, or be justified in the PR.
 
+## Working with Claude Code
+
+The repo ships its own [Claude Code](https://claude.com/claude-code) setup, so AI-assisted work follows the
+same rules as everyone else:
+
+| Asset | What it does |
+|---|---|
+| [`CLAUDE.md`](./CLAUDE.md) | Project rules loaded into every session (pillars, coding and testing rules, Definition of Done) |
+| [`.claude/skills/implement-issue`](./.claude/skills/implement-issue/SKILL.md) | `/implement-issue <leaf>`: plan from SPEC → implement → test → review → tick ROADMAP |
+| [`.claude/agents/test-writer.md`](./.claude/agents/test-writer.md) | Adds unit, property, golden, fuzz, differential and crash tests |
+| [`.claude/agents/code-reviewer.md`](./.claude/agents/code-reviewer.md) | Read-only review of a diff against SPEC and CLAUDE.md |
+| [`.claude/agents/integration-tester.md`](./.claude/agents/integration-tester.md) | System tests: crash loops, cloud emulators, load, relevance |
+
+Personal settings go in `.claude/settings.local.json` (git-ignored). Claude-authored commits carry a
+`Co-Authored-By` trailer and get the same human review as any other PR.
+
 ## Conduct and security
 
 By participating you agree to the [Code of Conduct](./CODE_OF_CONDUCT.md).
