@@ -1,5 +1,8 @@
 //! Bounds-checked little-endian cursor over a byte slice (SPEC §4.1).
 
+use core::num::NonZeroUsize;
+
+use crate::align::padding_for;
 use crate::error::{Corruption, Error, Result, to_u64};
 
 /// A cursor that decodes little-endian values from a byte slice.
@@ -100,6 +103,24 @@ impl<'a> Reader<'a> {
         let base = self.offset();
         self.read_bytes(len)
             .map(|bytes| Reader::with_base_offset(bytes, base))
+    }
+
+    /// Skips the zero padding up to the next multiple of `align`, computed on the absolute [`Reader::offset`]
+    /// (the counterpart of [`crate::Writer::pad_to`]).
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] if the input ends inside the padding, or with [`Corruption::NonZeroPadding`] at the
+    /// first non-zero byte. Either way the position is unchanged.
+    pub fn skip_padding(&mut self, align: NonZeroUsize) -> Result<()> {
+        let len = padding_for(self.offset(), align);
+        let padding = self.rest().get(..len).ok_or_else(|| self.eof(len))?;
+        if let Some((i, &value)) = padding.iter().enumerate().find(|&(_, &b)| b != 0) {
+            return Err(Error::Corrupt {
+                offset: self.offset().saturating_add(to_u64(i)),
+                reason: Corruption::NonZeroPadding { value },
+            });
+        }
+        self.skip(len)
     }
 
     /// Advances past the next `len` bytes.
@@ -291,6 +312,50 @@ mod tests {
             Err(eof_at(10, 4, 3))
         );
         assert_eq!(outer.position(), 0);
+    }
+
+    #[test]
+    fn skip_padding_consumes_zeros_to_the_absolute_boundary() {
+        let mut r = Reader::with_base_offset(&[7, 0, 0, 0, 0, 9], 4093);
+        assert_eq!(r.read_u8(), Ok(7)); // offset 4094
+        r.skip_padding(crate::ALIGNMENT).unwrap(); // 2 bytes reach 4096
+        assert_eq!(r.offset(), 4096);
+        r.skip_padding(crate::ALIGNMENT).unwrap(); // already aligned: no-op
+        assert_eq!(r.position(), 3);
+    }
+
+    #[test]
+    fn skip_padding_rejects_non_zero_bytes_at_their_offset() {
+        let mut r = Reader::with_base_offset(&[1, 0, 0, 5, 0, 0, 0, 0], 100);
+        r.skip(1).unwrap(); // offset 101: 3 padding bytes to 104
+        assert_eq!(
+            r.skip_padding(crate::ALIGNMENT),
+            Err(Error::Corrupt {
+                offset: 103,
+                reason: Corruption::NonZeroPadding { value: 5 },
+            })
+        );
+        assert_eq!(r.position(), 1);
+    }
+
+    #[test]
+    fn skip_padding_past_end_is_eof_without_advancing() {
+        let mut r = Reader::new(&[1, 0, 0]);
+        r.skip(1).unwrap();
+        assert_eq!(r.skip_padding(crate::ALIGNMENT), Err(eof_at(1, 7, 2)));
+        assert_eq!(r.position(), 1);
+    }
+
+    #[test]
+    fn non_zero_padding_message() {
+        let err = Error::Corrupt {
+            offset: 9,
+            reason: Corruption::NonZeroPadding { value: 0xab },
+        };
+        assert_eq!(
+            err.to_string(),
+            "corrupt data at offset 9: non-zero padding byte 0xab"
+        );
     }
 
     #[test]

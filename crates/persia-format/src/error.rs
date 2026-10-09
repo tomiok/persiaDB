@@ -38,6 +38,12 @@ pub enum Corruption {
         /// Bytes that were left.
         available: u64,
     },
+    /// Alignment padding (SPEC §4.1) contained a non-zero byte; `Error::Corrupt::offset` points at it.
+    #[error("non-zero padding byte {value:#04x}")]
+    NonZeroPadding {
+        /// The offending byte.
+        value: u8,
+    },
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.

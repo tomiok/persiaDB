@@ -69,7 +69,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 ## 1.1 Integer & byte encodings
 - 1.1.1 Little-endian read/write helpers with bounds-checked cursor (`Reader`, `Writer`)
   - [x] 1.1.1.1 `Reader` over `&[u8]` returning `Err(Corrupt)` on short reads, never panics
-  - [ ] 1.1.1.2 `Writer` over `Vec<u8>` with alignment helpers (`pad_to(8)`), plus the matching `Reader::skip_padding(8)` (absolute-offset alignment; non-zero padding is `Corrupt`)
+  - [~] 1.1.1.2 `Writer` over `Vec<u8>` with alignment helpers (`pad_to(8)`), plus the matching `Reader::skip_padding(8)` (absolute-offset alignment; non-zero padding is `Corrupt`)
   - [ ] 1.1.1.3 [T] property: write/read round-trip for all primitive widths; fuzz `Reader`
 - 1.1.2 Varint (LEB128 u32/u64) encode/decode
   - [ ] 1.1.2.1 Encode/decode with overlong-encoding rejection
