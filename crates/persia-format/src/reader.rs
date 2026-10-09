@@ -611,4 +611,101 @@ mod tests {
         assert_ne!(eof_at(1, 2, 3), eof_at(1, 4, 3));
         assert_ne!(eof_at(1, 2, 3), eof_at(1, 2, 0));
     }
+    #[test]
+    fn skip_padding_aligns_on_offset_not_position() {
+        // Position 0 is "aligned" within the slice, but offset 5 is not: 3 zero bytes reach offset 8.
+        let mut r = Reader::with_base_offset(&[0, 0, 0, 0xaa], 5);
+        r.skip_padding(crate::ALIGNMENT).unwrap();
+        assert_eq!((r.position(), r.offset()), (3, 8));
+        assert_eq!(r.read_u8(), Ok(0xaa));
+
+        // Conversely, an offset already on a boundary skips nothing even though position is not.
+        let mut r = Reader::with_base_offset(&[9, 0xbb], 15);
+        r.skip(1).unwrap(); // offset 16
+        r.skip_padding(crate::ALIGNMENT).unwrap();
+        assert_eq!(r.position(), 1);
+        assert_eq!(r.read_u8(), Ok(0xbb));
+    }
+
+    #[test]
+    fn skip_padding_detects_a_non_zero_byte_at_every_padding_position() {
+        // For several unaligned bases and every byte inside the padding, a single bad byte must be reported
+        // at its exact absolute offset and value, the cursor must not move, and repairing the byte must succeed.
+        for base in [1_u64, 3, 5, 4093, (1 << 40) + 6] {
+            let pad = padding_for(base, crate::ALIGNMENT);
+            for bad in 0..pad {
+                for value in [0x01_u8, 0x80, 0xff] {
+                    let mut buf = vec![0_u8; pad + 1];
+                    buf[bad] = value;
+                    buf[pad] = 0x77; // first byte after the padding: never inspected
+                    let mut r = Reader::with_base_offset(&buf, base);
+                    assert_eq!(
+                        r.skip_padding(crate::ALIGNMENT),
+                        Err(Error::Corrupt {
+                            offset: base + bad as u64,
+                            reason: Corruption::NonZeroPadding { value },
+                        }),
+                        "base={base} bad={bad} value={value:#x}"
+                    );
+                    assert_eq!(r.position(), 0, "failed skip_padding must not advance");
+                    assert_eq!(r.offset(), base);
+
+                    buf[bad] = 0;
+                    let mut r = Reader::with_base_offset(&buf, base);
+                    r.skip_padding(crate::ALIGNMENT).unwrap();
+                    assert_eq!(r.offset() % 8, 0);
+                    assert_eq!(r.read_u8(), Ok(0x77));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn skip_padding_reports_the_first_of_several_bad_bytes() {
+        let mut r = Reader::with_base_offset(&[0xee, 0, 0, 0x02, 0, 0x03, 0], 201);
+        r.skip(1).unwrap(); // offset 202: 6 padding bytes to 208
+        assert_eq!(
+            r.skip_padding(crate::ALIGNMENT),
+            Err(Error::Corrupt {
+                offset: 204,
+                reason: Corruption::NonZeroPadding { value: 2 },
+            })
+        );
+        assert_eq!(r.position(), 1);
+    }
+
+    #[test]
+    fn skip_padding_ignores_bytes_beyond_the_boundary() {
+        // Only the padding itself is checked: non-zero data right after it is fine.
+        let mut r = Reader::with_base_offset(&[0, 0xff, 0xff], 7);
+        r.skip_padding(crate::ALIGNMENT).unwrap();
+        assert_eq!(r.position(), 1);
+        assert_eq!(r.rest(), &[0xff, 0xff]);
+    }
+
+    #[test]
+    fn skip_padding_with_align_one_never_checks_anything() {
+        let mut r = Reader::with_base_offset(&[0xff], 3);
+        r.skip_padding(NonZeroUsize::MIN).unwrap();
+        assert_eq!(r.position(), 0);
+        let mut r = Reader::new(&[]);
+        r.skip_padding(crate::ALIGNMENT).unwrap(); // offset 0 is aligned: empty input is fine
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn truncated_padding_is_eof_even_if_present_bytes_are_bad() {
+        // Input ends inside the padding: the report is the truncation (needed/available at the cursor).
+        let mut r = Reader::with_base_offset(&[0, 0x09], 1001); // 7 padding bytes needed to reach 1008
+        assert_eq!(r.skip_padding(crate::ALIGNMENT), Err(eof_at(1001, 7, 2)));
+        assert_eq!(r.position(), 0);
+    }
+
+    #[test]
+    fn skip_padding_with_non_power_of_two_alignment() {
+        let mut r = Reader::with_base_offset(&[0, 0, 0x5a], 10); // 2 zero bytes reach 12, a multiple of 3
+        r.skip_padding(NonZeroUsize::new(3).unwrap()).unwrap();
+        assert_eq!(r.offset(), 12);
+        assert_eq!(r.read_u8(), Ok(0x5a));
+    }
 }

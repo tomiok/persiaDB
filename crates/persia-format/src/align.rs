@@ -54,4 +54,52 @@ mod tests {
             );
         }
     }
+    /// Checks invariant 5 for one pair: `pad` is in `0..align` and `offset + pad` is a multiple of `align`.
+    /// The sum is computed in `u128`, so it cannot overflow even at `u64::MAX`.
+    fn assert_pads_to_boundary(offset: u64, align: usize) {
+        let pad = padding_for(offset, nz(align));
+        assert!(pad < align, "pad {pad} >= align {align} (offset={offset})");
+        let end = u128::from(offset) + pad as u128;
+        assert_eq!(
+            end % align as u128,
+            0,
+            "offset={offset} align={align} pad={pad} does not reach a boundary"
+        );
+    }
+
+    #[test]
+    fn padding_is_below_align_and_reaches_a_multiple() {
+        // Exhaustive over small offsets/alignments plus the top of the u64 range (SPEC §4.1).
+        let aligns = (1..=17).chain([32, 64, 4096, 1 << 20]);
+        for align in aligns {
+            for offset in (0..=70).chain(u64::MAX - 70..=u64::MAX) {
+                assert_pads_to_boundary(offset, align);
+            }
+        }
+    }
+
+    #[test]
+    fn padding_at_extreme_alignments_does_not_overflow() {
+        let huge = [usize::MAX, usize::MAX - 1, 1 << (usize::BITS - 1)];
+        for align in huge {
+            for offset in [0, 1, 2, 7, u64::MAX - 1, u64::MAX] {
+                assert_pads_to_boundary(offset, align);
+            }
+        }
+    }
+
+    #[test]
+    fn padding_is_zero_exactly_on_boundaries() {
+        for align in [1_usize, 2, 8, 4096] {
+            for k in 0..8_u64 {
+                let boundary = k * align as u64;
+                assert_eq!(padding_for(boundary, nz(align)), 0, "boundary {boundary}");
+                if align > 1 {
+                    // One past a boundary needs the full align - 1 bytes; one before needs exactly one.
+                    assert_eq!(padding_for(boundary + 1, nz(align)), align - 1);
+                    assert_eq!(padding_for(boundary + align as u64 - 1, nz(align)), 1);
+                }
+            }
+        }
+    }
 }
