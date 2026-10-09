@@ -11,5 +11,9 @@ persia-format.workspace = true
 persia-storage.workspace = true
 persia-analysis.workspace = true
 
+[features]
+# Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
+slow = []
+
 [lints]
 workspace = true

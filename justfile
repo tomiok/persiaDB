@@ -18,6 +18,10 @@ lint:
 test:
     cargo test --workspace
 
+# Extended property tests (what nightly CI runs)
+test-slow:
+    PROPTEST_CASES=10000 cargo test --workspace --features slow --release
+
 # Dependency direction/allowlist, script tests, PROGRESS.md freshness
 repo-checks:
     python3 scripts/check_deps.py

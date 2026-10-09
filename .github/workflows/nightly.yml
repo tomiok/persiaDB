@@ -1,0 +1,35 @@
+# Nightly extended checks (ROADMAP 0.2.3). Slow suites are excluded from PR CI to keep it under 2 minutes.
+# Actions are pinned to commit SHAs (SPEC §17).
+name: nightly
+
+on:
+  schedule:
+    - cron: "41 2 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  slow-tests:
+    # ROADMAP 0.2.3.1. proptest prints the failing seed; failures persist under proptest-regressions/.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    env:
+      PROPTEST_CASES: "10000"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo test --workspace --features slow --release

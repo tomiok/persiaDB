@@ -10,5 +10,9 @@ publish.workspace = true
 persia-engine.workspace = true
 persia-blob.workspace = true
 
+[features]
+# Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
+slow = []
+
 [lints]
 workspace = true

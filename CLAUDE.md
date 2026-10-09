@@ -58,7 +58,7 @@ PROGRESS.md         # GENERATED status graph — never edit by hand
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace                       # unit + property tests (must be fast, < 2 min)
-cargo test --workspace --features slow       # extended property tests
+cargo test --workspace --features slow       # extended property tests (each crate has `slow = []`; gate with #[cfg(feature = "slow")])
 cargo nextest run --workspace                # preferred runner if installed
 cargo deny check                             # licenses + advisories
 cargo +nightly-YYYY-MM-DD fuzz run <target> -- -max_total_time=60   # dated nightly, see "Toolchain"

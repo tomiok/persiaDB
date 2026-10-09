@@ -8,5 +8,9 @@ publish.workspace = true
 
 [dependencies]
 
+[features]
+# Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
+slow = []
+
 [lints]
 workspace = true

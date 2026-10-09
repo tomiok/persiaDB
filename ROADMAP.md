@@ -45,7 +45,7 @@ Deps: none.
 - [~] 0.2.1 PR workflow: fmt, clippy `-D warnings`, `cargo test --workspace`, on Linux + macOS; plus `cargo deny check` and `scripts/check_deps.py`
 - [~] 0.2.2 Supply chain: `cargo deny` (licenses, advisories, bans incl. tantivy/rocksdb/sled), `cargo audit` scheduled
 - 0.2.3 Scheduled workflows
-  - [ ] 0.2.3.1 Nightly extended property tests (`--features slow`)
+  - [~] 0.2.3.1 Nightly extended property tests (`--features slow`)
   - [ ] 0.2.3.2 Nightly fuzz run (time-boxed per target, corpus cached as artifact)
   - [ ] 0.2.3.3 Weekly benchmark run storing results (regression tracking)
 - [ ] 0.2.4 Coverage report (`cargo llvm-cov`) uploaded as artifact, no gating yet

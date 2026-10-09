@@ -13,5 +13,9 @@ path = "src/main.rs"
 [dependencies]
 persia.workspace = true
 
+[features]
+# Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
+slow = []
+
 [lints]
 workspace = true
