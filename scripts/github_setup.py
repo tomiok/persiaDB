@@ -14,7 +14,7 @@ Standard library only.
 from __future__ import annotations
 
 import argparse
-import json
+import shlex
 import subprocess
 import sys
 
@@ -82,7 +82,7 @@ def main() -> int:
     commands = label_commands(args.repo, labels) + new_milestones
     for cmd in commands:
         if not args.apply:
-            print(" ".join(json.dumps(c) if " " in c else c for c in cmd))
+            print(shlex.join(cmd))
             continue
         result = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if result.returncode != 0:
