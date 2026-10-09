@@ -98,6 +98,16 @@ def violations(metadata: dict, external_allowed: frozenset[str] = frozenset()) -
     return errors
 
 
+def build_scripts(metadata: dict) -> list[str]:
+    """Build scripts are not allowed (CLAUDE.md "Dependencies"): generated code is committed and checked in CI."""
+    return [
+        f"{pkg['name']}: has a build script ({target['src_path']}); commit generated code instead"
+        for pkg in sorted(metadata["packages"], key=lambda p: p["name"])
+        for target in pkg.get("targets", [])
+        if "custom-build" in target.get("kind", [])
+    ]
+
+
 def dependency_tables(manifest: dict) -> list[tuple[str, dict]]:
     """All dependency tables of a member manifest, including target-specific ones."""
     tables = [(t, manifest.get(t, {})) for t in DEP_TABLES]
@@ -129,7 +139,7 @@ def main() -> int:
         print(getattr(e, "stderr", "") or "", file=sys.stderr)
         return 1
     metadata = json.loads(raw)
-    errors = violations(metadata, workspace_dependencies())
+    errors = violations(metadata, workspace_dependencies()) + build_scripts(metadata)
     for pkg in metadata["packages"]:
         errors += not_inherited(pkg["name"], tomllib.loads(Path(pkg["manifest_path"]).read_text()))
     if errors:

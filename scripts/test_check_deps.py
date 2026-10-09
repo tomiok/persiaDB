@@ -7,6 +7,7 @@ from check_deps import (
     BINARY_ONLY,
     DEV_ONLY,
     TESTUTIL,
+    build_scripts,
     not_inherited,
     violations,
     workspace_dependencies,
@@ -135,6 +136,19 @@ class CheckDepsTest(unittest.TestCase):
     def test_dev_only_crate_allowed_as_dev_dependency(self):
         md = metadata([("persia-format", "proptest", "dev")])
         self.assertEqual(violations(md, frozenset({"proptest"})), [])
+
+
+class BuildScriptTest(unittest.TestCase):
+    def test_build_script_rejected(self):
+        md = {"packages": [
+            {"name": "persia-proto", "targets": [{"kind": ["lib"], "src_path": "/r/src/lib.rs"},
+                                                 {"kind": ["custom-build"], "src_path": "/r/build.rs"}]},
+            {"name": "persia-format", "targets": [{"kind": ["lib"], "src_path": "/f/src/lib.rs"}]},
+        ]}
+        self.assertEqual(
+            build_scripts(md),
+            ["persia-proto: has a build script (/r/build.rs); commit generated code instead"],
+        )
 
 
 class NotInheritedTest(unittest.TestCase):

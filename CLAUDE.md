@@ -123,6 +123,9 @@ Always run fmt, clippy and tests before declaring a task done.
   declared there, and `deny.toml` bans engines and checks licenses/advisories for the whole graph. See ADR-0001.
 - Anything else: justify in the PR. Banned: `tantivy`, `rusqlite`, `rocksdb`, `sled`, any search/KV engine.
 - Prefer writing the 100-line primitive (varint, bitpacking, delta coding) over adding a crate.
+- **No `build.rs`.** Generated code (e.g. gRPC stubs for `persia-proto`) is produced by a script, committed, and
+  CI fails if regenerating it changes anything. Users must never need `protoc` or other tools to build.
+  Data tables use `const fn` or `include_bytes!`. Enforced by `scripts/check_deps.py`.
 
 **Style**
 - `rustfmt` defaults, clippy pedantic where practical. Small functions, small modules, no `mod.rs` sprawl.
