@@ -68,7 +68,6 @@ just integration                             # docker-compose: MinIO, fake-gcs, 
 cargo xtask progress --record                # regenerate PROGRESS.md + append today's snapshot
 cargo xtask progress --check                 # CI: fail if PROGRESS.md is stale
 cargo xtask check-deps                       # crate dependency rules (direction, allowed list, no build.rs)
-python3 -m unittest discover -s scripts      # tests for repo scripts
 ```
 
 Always run fmt, clippy and tests before declaring a task done.
@@ -77,7 +76,7 @@ Always run fmt, clippy and tests before declaring a task done.
 
 - Pinned in `rust-toolchain.toml`; rustup picks it up automatically.
 - MSRV policy: until v1.0, MSRV equals the pinned toolchain (`rust-version` in `Cargo.toml`), so the MSRV is always
-  the tested version. Bump both together in one `chore(toolchain)` PR (`scripts/test_toolchain.py` enforces this).
+  the tested version. Bump both together in one `chore(toolchain)` PR (tests in `xtask/src/repo_checks.rs` enforce this).
   Write an ADR before the first crates.io publish (i.e. before any `publish = false` is flipped), e.g. support the last
   N stable releases with a CI job on the MSRV.
 - Bump cadence: within ~6 weeks of each stable release, as a standalone PR that also fixes any new clippy lints.

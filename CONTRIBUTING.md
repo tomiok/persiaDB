@@ -25,7 +25,6 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --workspace
 cargo xtask check-deps
-python3 -m unittest discover -s scripts
 cargo xtask progress --check
 ```
 

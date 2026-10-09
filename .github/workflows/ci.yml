@@ -68,8 +68,6 @@ jobs:
         run: rustup toolchain install
       - name: Dependency direction and allowed list
         run: cargo xtask check-deps
-      - name: Script tests
-        run: python3 -m unittest discover -s scripts -v
       - name: PROGRESS.md is up to date
         run: cargo xtask progress --check
 

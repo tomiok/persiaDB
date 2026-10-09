@@ -20,8 +20,6 @@ lcov.info
 /*.persia
 /*.persia.blobs
 
-# Python tooling (scripts/)
-__pycache__/
 
 # Local, per-developer settings
 /.claude/settings.local.json

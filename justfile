@@ -28,7 +28,6 @@ test-slow:
 # Dependency direction/allowlist, script tests, PROGRESS.md freshness
 repo-checks:
     cargo xtask check-deps
-    python3 -m unittest discover -s scripts
     cargo xtask progress --check
 
 # Undefined-behavior check of persia-format under Miri (needs the dated nightly with miri)
