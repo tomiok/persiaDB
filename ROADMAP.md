@@ -52,7 +52,7 @@ Deps: none.
 - [ ] 0.2.5 Miri job for `persia-format` pure-logic modules
 
 ## 0.3 Developer tooling
-- [ ] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`
+- [x] 0.3.1 `justfile` with `fmt`, `lint`, `test`, `fuzz`, `bench`, `integration`
 - [ ] 0.3.2 Dev container / `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12)
 - [~] 0.3.3 Install Claude Code assets: `CLAUDE.md`, `.claude/agents/*`, `.claude/skills/*` committed and documented
 - [ ] 0.3.4 GitHub issue/PR templates, labels, milestone setup script

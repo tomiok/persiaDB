@@ -52,6 +52,8 @@ PROGRESS.md         # GENERATED status graph — never edit by hand
 
 ## Commands
 
+`just check` runs everything CI runs; `just` lists all recipes. The underlying commands:
+
 ```bash
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
