@@ -7,6 +7,7 @@ pub mod error;
 pub mod reader;
 pub mod varint;
 pub mod writer;
+pub mod zigzag;
 
 pub use align::ALIGNMENT;
 pub use error::{Corruption, Error, Result};
