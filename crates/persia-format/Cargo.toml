@@ -8,6 +8,7 @@ publish.workspace = true
 
 [dependencies]
 crc32c.workspace = true
+xxhash-rust.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
