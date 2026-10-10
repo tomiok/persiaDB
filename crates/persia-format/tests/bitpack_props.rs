@@ -9,7 +9,7 @@
 )]
 
 use persia_format::bitpack::{BLOCK_LEN, BitWidth};
-use persia_format::{Reader, Writer};
+use persia_format::{Corruption, EncodeError, Error, Reader, Writer};
 use proptest::prelude::*;
 
 /// Where bit `b` of value `i` lives, straight from the SPEC: lane `i % 4`, slot `i / 4`; within the lane's
@@ -111,6 +111,101 @@ fn every_single_bit_lands_where_the_spec_says() {
                     .collect();
                 assert_eq!(set, [word * 32 + bit], "w={w} i={i} b={b}");
             }
+        }
+    }
+}
+
+proptest! {
+    /// A width narrower than the minimal one is rejected at the first value that does not fit, and the
+    /// writer keeps exactly what it held before.
+    #[test]
+    fn too_narrow_width_fails_at_first_wide_value_and_writes_nothing(
+        (_, values) in block_at_width(),
+        narrower in any::<prop::sample::Index>(),
+        prefix in proptest::collection::vec(any::<u8>(), 0..8),
+    ) {
+        let minimal = BitWidth::of(&values).get();
+        prop_assume!(minimal > 0);
+        let w = narrower.index(usize::from(minimal)) as u8;
+        let mask = (1_u64 << w) - 1;
+        let index = values.iter().position(|&v| u64::from(v) > mask).unwrap();
+        let mut writer = Writer::new();
+        writer.write_bytes(&prefix);
+        prop_assert_eq!(
+            writer.write_packed_block(&values, BitWidth::new(w).unwrap()),
+            Err(EncodeError::ValueTooWide { index, width: w })
+        );
+        prop_assert_eq!(writer.as_slice(), prefix.as_slice());
+    }
+}
+
+/// Every possible width byte: 0..=32 is accepted and consumed, anything else is `InvalidBitWidth` at the
+/// byte's absolute offset with the reader unmoved (SPEC §5.2.1).
+#[test]
+fn read_bit_width_accepts_exactly_0_to_32() {
+    for raw in 0..=u8::MAX {
+        let bytes = [0xee, raw, 0x55];
+        let mut r = Reader::with_base_offset(&bytes, 1000);
+        r.skip(1).unwrap();
+        match r.read_bit_width() {
+            Ok(width) => {
+                assert!(raw <= 32);
+                assert_eq!(width.get(), raw);
+                assert_eq!(r.rest(), [0x55]);
+            }
+            Err(e) => {
+                assert!(raw > 32);
+                assert_eq!(
+                    e,
+                    Error::Corrupt {
+                        offset: 1001,
+                        reason: Corruption::InvalidBitWidth {
+                            width: raw,
+                            max: 32
+                        },
+                    }
+                );
+                assert_eq!(r.position(), 1);
+            }
+        }
+    }
+    let mut r = Reader::with_base_offset(&[], 9);
+    assert_eq!(
+        r.read_bit_width(),
+        Err(Error::Corrupt {
+            offset: 9,
+            reason: Corruption::UnexpectedEof {
+                needed: 1,
+                available: 0
+            },
+        })
+    );
+}
+
+/// Every width, every short length: `UnexpectedEof` at the block's absolute offset with exact sizes, and
+/// neither the reader nor the output buffer changes.
+#[test]
+fn short_packed_blocks_fail_atomically_at_every_width_and_length() {
+    let bytes = [0xa5_u8; 1 + 512];
+    for w in 1..=32_u8 {
+        let width = BitWidth::new(w).unwrap();
+        for len in 0..width.packed_len() {
+            let mut r = Reader::with_base_offset(&bytes[..=len], 70);
+            r.skip(1).unwrap();
+            let mut out = [7; BLOCK_LEN];
+            assert_eq!(
+                r.read_packed_block(width, &mut out),
+                Err(Error::Corrupt {
+                    offset: 71,
+                    reason: Corruption::UnexpectedEof {
+                        needed: width.packed_len() as u64,
+                        available: len as u64,
+                    },
+                }),
+                "w {w} len {len}"
+            );
+            assert_eq!(r.position(), 1);
+            assert_eq!(out, [7; BLOCK_LEN]);
         }
     }
 }

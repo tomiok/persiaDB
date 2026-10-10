@@ -82,14 +82,47 @@ proptest! {
         }
     }
 
+    // A local filter, not prop_assume!: about half of `sorted_set()` is shorter than 2, which exhausted the
+    // global reject budget at PROPTEST_CASES=5000.
     #[test]
-    fn non_increasing_input_is_rejected_at_its_index(values in sorted_set(), at in any::<prop::sample::Index>()) {
-        prop_assume!(values.len() >= 2);
+    fn non_increasing_input_is_rejected_at_its_index(values in sorted_set().prop_filter("two or more values", |v| v.len() >= 2), at in any::<prop::sample::Index>()) {
         let i = at.index(values.len() - 1) + 1;
         let mut bad = values.clone();
         bad[i] = bad[i - 1]; // a duplicate
         let mut buf = bad.clone();
         prop_assert_eq!(encode_in_place(&mut buf, None), Err(EncodeError::NotStrictlyIncreasing { index: i }));
         prop_assert_eq!(buf, bad);
+    }
+}
+
+proptest! {
+    /// SPEC §5.2.1: the encoder rejects the first value not above its predecessor (or `prev`), and a
+    /// rejected buffer is left exactly as it was; accepted input round-trips.
+    #[test]
+    fn encode_rejects_at_the_first_violation_and_leaves_input_untouched(
+        values in prop_oneof![
+            proptest::collection::vec(prop_oneof![any::<u32>(), 0_u32..20, Just(u32::MAX)], 0..40),
+            sorted_set(),
+        ],
+        prev in proptest::option::of(prop_oneof![any::<u32>(), 0_u32..20, Just(u32::MAX)]),
+    ) {
+        let mut last = prev;
+        let first_bad = values.iter().position(|&v| {
+            let bad = last.is_some_and(|l| v <= l);
+            last = Some(v);
+            bad
+        });
+        let mut buf = values.clone();
+        match (encode_in_place(&mut buf, prev), first_bad) {
+            (Ok(()), None) => {
+                decode_in_place(&mut buf, prev).unwrap();
+                prop_assert_eq!(buf, values);
+            }
+            (Err(e), Some(index)) => {
+                prop_assert_eq!(e, EncodeError::NotStrictlyIncreasing { index });
+                prop_assert_eq!(buf, values);
+            }
+            (result, expected) => prop_assert!(false, "got {result:?}, first violation at {expected:?}"),
+        }
     }
 }
