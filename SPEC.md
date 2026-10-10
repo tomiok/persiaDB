@@ -175,6 +175,51 @@ All large sections are split into **fixed-size logical blocks (default 16 KiB un
 with `{crc32c, codec, uncompressed_len}` header. Blocks are independently decodable ⇒ range requests
 and per-block caching work on object storage.
 
+### 5.2.1 Integer codecs
+Building blocks of the Postings, Freqs, Skip and Columns sections (SPEC §5.3), ADR-0004. They live inside
+blocks, so they are byte-aligned (the 8-byte alignment of SPEC §4.1 applies to frames and sections). Every
+width, count and length below is validated before use; anything out of range is corruption.
+
+**Delta coding (sorted `u32`).** A strictly increasing sequence `v0 < v1 < ...` is stored as gaps
+`g_i = v_i - v_(i-1) - 1`, where `v_(-1)` is the previous block's last value, or `-1` for the first block of
+a list (so the first gap is `v0` itself, and consecutive ids cost 0 bits). A decoded value above `u32::MAX`
+is corruption.
+
+**Bit-packed block (128 × `u32`, width `w` in `0..=32`).** Exactly `16·w` bytes, read as `4·w` little-endian
+`u32` words; word `k` is lane `k mod 4`, row `k div 4`. Value `i` belongs to lane `i mod 4`, slot `i div 4`.
+Each lane is a little-endian bit stream made of its `w` words (row 0 first, least significant bit first), and
+slot `j` holds bits `[j·w, (j+1)·w)`. (This is the SIMD-BP128 "vertical" layout: one row is one 128-bit SIMD
+word, so a vectorised decoder reads the same bytes as the scalar one.) Writers use the minimal width, the
+bit length of the largest value; a width above 32 is corruption.
+
+**Postings blocks.** A posting list of `n` docids is `n div 128` full blocks, then a tail block if
+`n mod 128 > 0`. Docids are delta coded across the whole list.
+```
+full block                                  tail block
+0  4  last_docid u32 (absolute)             0  1  count  u8 (1..=127)
+4  4  max_tf     u32                        1  .. max_tf varint u32
+8  1  width      u8  (0..=32)               .. .. count gaps, varint u32 each
+9  16·width  bit-packed gaps
+```
+`last_docid` lets a reader skip a full block without unpacking it. It must equal the block's last decoded
+docid, or the block is corrupt. Term frequencies are not part of these blocks: they live in the Freqs section.
+
+**Frame-of-reference (FOR) block (numeric columns).** `count` values stored as offsets from their minimum,
+horizontally bit-packed so any value can be read in O(1):
+```
+0   8  min    u64  (order-preserving key, below)
+8   4  count  u32
+12  1  width  u8   (0..=64)
+13  ceil(count·width / 8) bytes
+```
+Value `i` is `min + (bits [i·w, (i+1)·w) of a little-endian, least-significant-bit-first bit stream)`. The unused
+high bits of the last byte are zero. A value above `u64::MAX` is corruption. Writers use the minimal width.
+
+**Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
+the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;
+otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
+bit pattern round-trips exactly.
+
 ### 5.3 Sections (per segment)
 | Section | Per | Content | Encoding |
 |---|---|---|---|

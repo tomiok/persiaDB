@@ -85,8 +85,8 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 
 ## 1.2 Integer compression
 - 1.2.1 Delta coding for sorted `u32` sequences
-  - [ ] 1.2.1.1 Delta encode/decode with strictly-increasing validation
-  - [ ] 1.2.1.2 [T] property round-trip for random sorted sets incl. empty, single, max values
+  - [~] 1.2.1.1 Delta encode/decode with strictly-increasing validation
+  - [~] 1.2.1.2 [T] property round-trip for random sorted sets incl. empty, single, max values
 - 1.2.2 Bit-packing of 128-value blocks (width 0..=32)
   - [ ] 1.2.2.1 Scalar pack/unpack for all widths
   - [ ] 1.2.2.2 Compute minimal bit-width for a block
