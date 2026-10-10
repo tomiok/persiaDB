@@ -20,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(r.position(), start);
                 break;
             };
-            assert!(prev.is_none_or(|p| u64::from(header.last_docid) >= u64::from(p) + 128), "skip went backwards");
+            assert!(u64::from(header.last_docid) >= prev.map_or(127, |p| u64::from(p) + 128), "skip went backwards");
             prev = Some(header.last_docid);
             continue;
         }

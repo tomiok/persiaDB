@@ -48,19 +48,19 @@ fn postings(c: &mut Criterion) {
 
 fn for_blocks(c: &mut Criterion) {
     let mut group = c.benchmark_group("for_block");
-    group.throughput(Throughput::Elements(for_codec::BLOCK_LEN as u64));
+    group.throughput(Throughput::Elements(for_codec::VALUES_PER_BLOCK as u64));
     for width in [7_u32, 20, 64] {
         let mut next = lcg(u64::from(width));
         let mask = u64::MAX >> (64 - width);
-        let keys: Vec<u64> = (0..for_codec::BLOCK_LEN)
+        let keys: Vec<u64> = (0..for_codec::VALUES_PER_BLOCK)
             .map(|_| 1_000 + (next() & mask))
             .collect();
         let mut w = Writer::new();
         w.write_for_block(&keys).unwrap();
         let bytes = w.into_inner();
         let mut pick = lcg(99);
-        let indices: Vec<usize> = (0..for_codec::BLOCK_LEN)
-            .map(|_| (pick() % for_codec::BLOCK_LEN as u64) as usize)
+        let indices: Vec<usize> = (0..for_codec::VALUES_PER_BLOCK)
+            .map(|_| (pick() % for_codec::VALUES_PER_BLOCK as u64) as usize)
             .collect();
 
         group.bench_with_input(BenchmarkId::new("iter", width), &bytes, |b, bytes| {

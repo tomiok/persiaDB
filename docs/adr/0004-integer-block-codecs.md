@@ -67,7 +67,7 @@ has been released yet, so there is nothing to bump from. After this, changing th
 - **Horizontal layout for postings.** It is simpler to describe, but SIMD would later need a format change or a
   repacking step.
 - **`max_tf` (and `min_norm`) inside the postings block.** This duplicates the Skip section. `max_tf` alone is
-  not a sound block-max bound for BM25F.
+  too loose a block-max bound for BM25F (it must assume the segment-wide shortest field).
 - **Unbounded FOR `count`.** This leaves docid→block lookup undefined and moves the count bound onto every
   caller.
 - **PFOR / exceptions (Lucene `PForUtil`).** These compress better when a block has a few outliers, but they

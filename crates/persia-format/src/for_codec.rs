@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! 0   8  min    u64  (order-preserving key)
-//! 8   4  count  u32
+//! 8   4  count  u32  (1..=1024)
 //! 12  1  width  u8   (0..=64)
 //! 13  ceil(count·width / 8) bytes: value i - min at bits [i·w, (i+1)·w), little-endian, LSB first
 //! ```
@@ -13,15 +13,15 @@
 //! The layout is horizontal so any value can be read in O(1) by docid. The block is validated once when it is
 //! read ([`Reader::read_for_block`]); after that, every access is infallible.
 //!
-//! A column is cut into blocks of exactly [`BLOCK_LEN`] values (the last may be shorter), so the block holding
-//! docid `d` is block `d / BLOCK_LEN`. Readers reject a `count` outside `1..=BLOCK_LEN`.
+//! A column is cut into blocks of exactly [`VALUES_PER_BLOCK`] values (the last may be shorter), so the block holding
+//! docid `d` is block `d / VALUES_PER_BLOCK`. Readers reject a `count` outside `1..=VALUES_PER_BLOCK`.
 
 use crate::error::{Corruption, EncodeError, Error, Result};
 use crate::reader::Reader;
 use crate::writer::Writer;
 
 /// Values per FOR block; only the last block of a column may hold fewer (SPEC §5.2.1).
-pub const BLOCK_LEN: usize = 1024;
+pub const VALUES_PER_BLOCK: usize = 1024;
 
 /// The widest width: values spanning the whole `u64` range.
 pub const MAX_WIDTH: u8 = 64;
@@ -59,15 +59,15 @@ impl Writer {
     /// Appends `keys` as a FOR block, using their minimum and the minimal width (SPEC §5.2.1).
     ///
     /// # Errors
-    /// [`EncodeError::InvalidLen`] unless there are 1..=[`BLOCK_LEN`] keys; nothing is written then.
+    /// [`EncodeError::InvalidLen`] unless there are 1..=[`VALUES_PER_BLOCK`] keys; nothing is written then.
     pub fn write_for_block(&mut self, keys: &[u64]) -> Result<(), EncodeError> {
         let count = u32::try_from(keys.len())
             .ok()
-            .filter(|_| (1..=BLOCK_LEN).contains(&keys.len()))
+            .filter(|_| (1..=VALUES_PER_BLOCK).contains(&keys.len()))
             .ok_or(EncodeError::InvalidLen {
                 len: keys.len(),
                 min: 1,
-                max: BLOCK_LEN,
+                max: VALUES_PER_BLOCK,
             })?;
         let min = keys.iter().copied().min().unwrap_or(0);
         let max = keys.iter().copied().max().unwrap_or(0);
@@ -107,7 +107,7 @@ impl<'a> Reader<'a> {
     /// Reads and validates a FOR block.
     ///
     /// # Errors
-    /// [`Error::Corrupt`] on short input, a count outside 1..=[`BLOCK_LEN`] ([`Corruption::InvalidCount`], at
+    /// [`Error::Corrupt`] on short input, a count outside 1..=[`VALUES_PER_BLOCK`] ([`Corruption::InvalidCount`], at
     /// the count field), a width above 64 ([`Corruption::InvalidBitWidth`], at the width
     /// byte), non-zero unused bits in the last byte ([`Corruption::NonZeroReserved`], at that byte), or a value
     /// past `u64::MAX` ([`Corruption::ValueOverflow`], at the block start). The position is then unchanged.
@@ -117,7 +117,7 @@ impl<'a> Reader<'a> {
         let min = r.read_u64()?;
         let count_at = r.offset();
         let count = r.read_u32()?;
-        let max_count = u32::try_from(BLOCK_LEN).unwrap_or(u32::MAX);
+        let max_count = u32::try_from(VALUES_PER_BLOCK).unwrap_or(u32::MAX);
         if !(1..=max_count).contains(&count) {
             return Err(Error::Corrupt {
                 offset: count_at,
@@ -142,7 +142,7 @@ impl<'a> Reader<'a> {
         let width = u32::from(raw_width);
         // count <= 1024 and width <= 64: the product is below 2^17.
         let bits = u64::from(count).wrapping_mul(u64::from(width));
-        // A length that does not fit in memory cannot be present: let read_bytes report it as short input.
+        // At most 8 KiB (bits < 2^17), so the conversion cannot fail.
         let len = usize::try_from(bits.div_ceil(8)).unwrap_or(usize::MAX);
         let packed_at = r.offset();
         let packed = r.read_bytes(len)?;
@@ -181,7 +181,7 @@ impl ForBlock<'_> {
         usize::try_from(self.count).unwrap_or(usize::MAX)
     }
 
-    /// True when the block holds no values.
+    /// Always false for a block that was read successfully (`count` is at least 1); kept next to `len`.
     pub fn is_empty(&self) -> bool {
         self.count == 0
     }
@@ -283,19 +283,19 @@ mod tests {
 
     #[test]
     fn golden_constant_block_and_count_limits() {
-        let constant = encode(&[7; BLOCK_LEN]);
+        let constant = encode(&[7; VALUES_PER_BLOCK]);
         let mut expected = vec![7, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0]; // min 7, count 1024, width 0
         assert_eq!(constant, expected, "width 0: no packed bytes");
-        assert_eq!(decode(&constant), Ok(vec![7; BLOCK_LEN]));
+        assert_eq!(decode(&constant), Ok(vec![7; VALUES_PER_BLOCK]));
 
         let mut w = Writer::new();
-        for keys in [&[][..], &[0; BLOCK_LEN + 1][..]] {
+        for keys in [&[][..], &[0; VALUES_PER_BLOCK + 1][..]] {
             assert_eq!(
                 w.write_for_block(keys),
                 Err(EncodeError::InvalidLen {
                     len: keys.len(),
                     min: 1,
-                    max: BLOCK_LEN
+                    max: VALUES_PER_BLOCK
                 })
             );
         }

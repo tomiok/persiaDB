@@ -219,7 +219,8 @@ stores its values as offsets from their minimum, horizontally bit-packed so any 
 13  ceil(count·width / 8) bytes
 ```
 Value `i` is `min + (bits [i·w, (i+1)·w) of a little-endian, least-significant-bit-first bit stream)`. The unused
-high bits of the last byte are zero. A count outside `1..=1024` or a value above `u64::MAX` is corruption.
+high bits of the last byte are zero. A count outside `1..=1024` or a value above `u64::MAX` is corruption. The column reader checks that every block
+but the last has `count = 1024` and that the counts sum to the segment's `doc_count`; a mismatch is corruption.
 Writers use the true minimum and the minimal width.
 
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is

@@ -24,7 +24,7 @@
 mod common;
 
 use common::{apply, corrupt, eof, mutation, placement};
-use persia_format::for_codec::{BLOCK_LEN, MAX_WIDTH};
+use persia_format::for_codec::{MAX_WIDTH, VALUES_PER_BLOCK};
 use persia_format::{Corruption, EncodeError, Error, Reader, Writer};
 use proptest::prelude::*;
 
@@ -150,7 +150,7 @@ fn encode(keys: &[u64]) -> Vec<u8> {
 fn keys_at_width() -> impl Strategy<Value = (u8, Vec<u64>)> {
     (
         0..=MAX_WIDTH,
-        prop_oneof![9 => 2_usize..40, 1 => Just(BLOCK_LEN)],
+        prop_oneof![9 => 2_usize..40, 1 => Just(VALUES_PER_BLOCK)],
     )
         .prop_flat_map(|(w, n)| {
             let mask = if w == 0 {
@@ -421,7 +421,7 @@ fn encoder_accepts_exactly_1_to_1024_keys() {
         let mut w = Writer::new();
         w.write_bytes(&prefix);
         let result = w.write_for_block(&keys);
-        if (1..=BLOCK_LEN).contains(&len) {
+        if (1..=VALUES_PER_BLOCK).contains(&len) {
             assert_eq!(result, Ok(()));
             let decoded = library_for(w.as_slice(), 0, prefix.len()).unwrap();
             assert_eq!(decoded.values, keys);

@@ -79,25 +79,25 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - 1.1.2 Varint (LEB128 u32/u64) encode/decode
   - [x] 1.1.2.1 Encode/decode with overlong-encoding rejection
   - [x] 1.1.2.2 [T] property round-trip; golden vectors; fuzz decode
-- [~] 1.1.3 Zigzag encoding for signed integers
-- [~] 1.1.4 Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes)
-- [~] 1.1.5 `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops
+- [x] 1.1.3 Zigzag encoding for signed integers
+- [x] 1.1.4 Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes)
+- [x] 1.1.5 `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops
 
 ## 1.2 Integer compression
 - 1.2.1 Delta coding for sorted `u32` sequences
-  - [~] 1.2.1.1 Delta encode/decode with strictly-increasing validation
-  - [~] 1.2.1.2 [T] property round-trip for random sorted sets incl. empty, single, max values
+  - [x] 1.2.1.1 Delta encode/decode with strictly-increasing validation
+  - [x] 1.2.1.2 [T] property round-trip for random sorted sets incl. empty, single, max values
 - 1.2.2 Bit-packing of 128-value blocks (width 0..=32)
-  - [~] 1.2.2.1 Scalar pack/unpack for all widths
-  - [~] 1.2.2.2 Compute minimal bit-width for a block
-  - [~] 1.2.2.3 Packed-size formula + bounds checks on decode input
-  - [~] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
-  - [~] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
+  - [x] 1.2.2.1 Scalar pack/unpack for all widths
+  - [x] 1.2.2.2 Compute minimal bit-width for a block
+  - [x] 1.2.2.3 Packed-size formula + bounds checks on decode input
+  - [x] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
+  - [x] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
 - 1.2.3 Postings block codec: delta + bit-pack 128 docids, varint tail block
-  - [~] 1.2.3.1 Encode block with `last_docid` + width header (block-max `max_tf`/`min_norm` live in the Skip section only, ADR-0004)
-  - [~] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
-  - [~] 1.2.3.3 `advance_to(target)` within a block (galloping/binary search)
-- [~] 1.2.4 Frame-of-reference codec for numeric columns (i64/f64 via order-preserving bits)
+  - [x] 1.2.3.1 Encode block with `last_docid` + width header (block-max `max_tf`/`min_norm` live in the Skip section only, ADR-0004)
+  - [x] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
+  - [x] 1.2.3.3 `advance_to(target)` within a block (galloping/binary search)
+- [x] 1.2.4 Frame-of-reference codec for numeric columns (i64/f64 via order-preserving bits)
 
 ## 1.3 Checksums & hashing
 - [ ] 1.3.1 CRC32C wrapper (`crc32c` crate) with streaming API
