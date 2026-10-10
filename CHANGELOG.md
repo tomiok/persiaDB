@@ -16,6 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Integer codecs for segment sections (SPEC §4.1, §5.2.1; ADR-0004): zigzag signed varints, delta coding of
   sorted docids, 128-value bit-packed blocks (SIMD-BP128 layout), postings full and tail blocks, and
   frame-of-reference blocks with order-preserving keys for numeric columns.
+- Checksum and hash primitives (SPEC §4.1): CRC32C (one-shot and streaming), xxh3-64/128 (seed 0), and
+  `Checksummed<T>` for fixed-size structures whose CRC32C field covers the rest of the region (SPEC §4.2, §4.3).
 
 <!--
 Sections per release, in this order, only when non-empty:

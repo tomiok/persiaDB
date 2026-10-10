@@ -136,6 +136,15 @@ pub enum EncodeError {
         /// Largest valid count.
         max: usize,
     },
+    /// A [`crate::checksummed::ChecksummedLayout`] wrote a region of the wrong size: a bug in that
+    /// implementation, not in the caller's values.
+    #[error("layout wrote {actual} bytes, its LEN is {expected}")]
+    LayoutLen {
+        /// The layout's `LEN`.
+        expected: usize,
+        /// Bytes `encode_fields` actually wrote.
+        actual: usize,
+    },
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.

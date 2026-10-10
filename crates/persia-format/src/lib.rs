@@ -10,6 +10,7 @@
 pub mod align;
 pub mod bitpack;
 pub mod checksum;
+pub mod checksummed;
 pub mod delta;
 pub mod error;
 pub mod for_codec;

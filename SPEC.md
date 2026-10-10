@@ -80,7 +80,8 @@ A local database is two files:
 
 ### 4.1 Conventions
 - All integers little-endian. All structures 8-byte aligned. Offsets are absolute `u64`.
-- Checksum: **CRC32C** for headers/frames; **xxh3-64** for internal content hashes where noted.
+- Checksum: **CRC32C** for headers/frames; **xxh3-64** (or xxh3-128) for internal content hashes and routing where
+  noted, always with the default secret and seed 0: persisted hashes depend on it, so changing it is a format change.
   Blob ids are **SHA-256** (SPEC §9.1, ADR-0002).
 - Compression: **zstd** (level configurable); every compressed unit declares its codec.
 - Varints: unsigned LEB128, least significant 7-bit group first, high bit = "more bytes follow". Only the shortest

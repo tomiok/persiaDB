@@ -51,3 +51,10 @@ path = "fuzz_targets/for_block.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "checksummed"
+path = "fuzz_targets/checksummed.rs"
+test = false
+doc = false
+bench = false
