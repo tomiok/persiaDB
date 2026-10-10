@@ -144,7 +144,8 @@ fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, Enc
 ///
 /// # Errors
 /// [`Error::Corrupt`] at `offset`, with:
-/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`;
+/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`, or when a zstd payload that passes
+///   every other check needs an output buffer that cannot be allocated;
 /// - [`Corruption::UncompressedLenMismatch`] when the payload expands (or, for zstd, declares it expands) to a
 ///   different length;
 /// - [`Corruption::InvalidCompressedData`] when a zstd payload is not exactly one well-formed zstd frame with
@@ -178,12 +179,17 @@ pub fn decompress_block(
             out.extend_from_slice(src);
             Ok(())
         }
-        Codec::Zstd => decompress_zstd(src, len, out).map_err(corrupt),
+        Codec::Zstd => decompress_zstd(src, len, max_len, out).map_err(corrupt),
     }
 }
 
 /// Checks the frame structure first, so a hostile payload is rejected before `len` bytes are allocated for it.
-fn decompress_zstd(src: &[u8], len: usize, out: &mut Vec<u8>) -> Result<(), Corruption> {
+fn decompress_zstd(
+    src: &[u8],
+    len: usize,
+    max_len: usize,
+    out: &mut Vec<u8>,
+) -> Result<(), Corruption> {
     // Exactly one frame: the magic rules out skippable and legacy frames, the size rules out trailing bytes.
     if !src.starts_with(&ZSTD_MAGIC) || zstd_safe::find_frame_compressed_size(src) != Ok(src.len())
     {
@@ -199,6 +205,13 @@ fn decompress_zstd(src: &[u8], len: usize, out: &mut Vec<u8>) -> Result<(), Corr
         }
         Ok(None) | Err(_) => return Err(Corruption::InvalidCompressedData),
     }
+    // A length within the caller's limit can still be unallocatable (above `isize::MAX`, or out of memory):
+    // that is an error too, never a capacity-overflow panic or an abort.
+    out.try_reserve_exact(len)
+        .map_err(|_| Corruption::UncompressedTooLarge {
+            len: to_u64(len),
+            max: to_u64(max_len),
+        })?;
     let start = out.len();
     let end = start
         .checked_add(len)
