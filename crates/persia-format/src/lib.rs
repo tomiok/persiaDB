@@ -4,6 +4,7 @@
 
 pub mod align;
 pub mod error;
+pub mod offset;
 pub mod reader;
 pub mod varint;
 pub mod writer;
@@ -11,5 +12,6 @@ pub mod zigzag;
 
 pub use align::ALIGNMENT;
 pub use error::{Corruption, Error, Result};
+pub use offset::{Len, Offset};
 pub use reader::Reader;
 pub use writer::Writer;

@@ -80,7 +80,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [x] 1.1.2.1 Encode/decode with overlong-encoding rejection
   - [x] 1.1.2.2 [T] property round-trip; golden vectors; fuzz decode
 - [~] 1.1.3 Zigzag encoding for signed integers
-- [ ] 1.1.4 Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes)
+- [~] 1.1.4 Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes)
 - [ ] 1.1.5 `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops
 
 ## 1.2 Integer compression
