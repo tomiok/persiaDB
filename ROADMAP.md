@@ -105,9 +105,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.3.3 `Checksummed<T>` helper for header structures; [T] bit-flip detection test (flip every bit in a sample, assert detected)
 
 ## 1.4 Compression
-- [ ] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`
-- [ ] 1.4.2 Decompression-bomb guard: caller supplies max uncompressed size, reject mismatches
-- [ ] 1.4.3 [T] fuzz decompress with random/mutated inputs
+- [~] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`
+- [~] 1.4.2 Decompression-bomb guard: caller supplies max uncompressed size, reject mismatches
+- [~] 1.4.3 [T] fuzz decompress with random/mutated inputs
 
 ## 1.5 Block framing (SPEC §5.2)
 - [ ] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len}` encode/decode

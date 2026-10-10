@@ -27,3 +27,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0002](./0002-blob-hash-sha256.md) | Blobs are identified by SHA-256 | accepted |
 | [0003](./0003-rust-tooling-and-no-build-scripts.md) | Repo tooling in Rust (`xtask`), and no build scripts | accepted |
 | [0004](./0004-integer-block-codecs.md) | Integer block codecs (delta, bit-packing, postings blocks, FOR) | accepted |
+| [0005](./0005-block-compression-codecs.md) | Block compression codecs and the decompression-bomb guard | accepted |

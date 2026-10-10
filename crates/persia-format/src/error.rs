@@ -105,6 +105,32 @@ pub enum Corruption {
         /// The checksum of the bytes actually read.
         computed: u32,
     },
+    /// A `codec` byte with no assigned codec (SPEC §5.2).
+    #[error("unknown codec {codec}")]
+    UnknownCodec {
+        /// The byte read.
+        codec: u8,
+    },
+    /// A unit declares more uncompressed bytes than the reader allows (decompression-bomb guard, SPEC §5.2).
+    #[error("uncompressed length {len} exceeds the limit of {max}")]
+    UncompressedTooLarge {
+        /// The declared uncompressed length.
+        len: u64,
+        /// The caller's limit.
+        max: u64,
+    },
+    /// A payload expands, or declares that it expands, to a length other than the one in its header (SPEC §5.2).
+    #[error("payload expands to {actual} bytes, header says {expected}")]
+    UncompressedLenMismatch {
+        /// The uncompressed length from the header.
+        expected: u64,
+        /// The length the payload has or declares.
+        actual: u64,
+    },
+    /// A compressed payload is malformed: for zstd, not exactly one valid frame with a declared content size
+    /// (SPEC §5.2).
+    #[error("malformed compressed payload")]
+    InvalidCompressedData,
 }
 
 /// Errors produced while encoding: the caller passed values the format cannot represent.
@@ -145,6 +171,19 @@ pub enum EncodeError {
         /// Bytes `encode_fields` actually wrote.
         actual: usize,
     },
+    /// A compression level the codec does not accept.
+    #[error("compression level {level} outside {min}..={max}")]
+    InvalidCompressionLevel {
+        /// The requested level.
+        level: i32,
+        /// Lowest valid level.
+        min: i32,
+        /// Highest valid level.
+        max: i32,
+    },
+    /// The compressor failed internally (out of memory); the input itself is always compressible.
+    #[error("compression failed")]
+    CompressionFailed,
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.
