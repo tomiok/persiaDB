@@ -61,6 +61,7 @@ fn zstd_with(src: &[u8], params: &[CParameter]) -> Vec<u8> {
 /// Decodes into a vector that already holds `PREFIX`, checking the shared error contract: on error the offset
 /// is the caller's, the reason is a codec error and `out` still holds exactly `PREFIX`; on success exactly
 /// `len` bytes were appended. Returns the decoded bytes or the reason.
+#[allow(clippy::panic)] // test helper: any other error is a test failure
 fn decode(
     codec: Codec,
     src: &[u8],
@@ -89,11 +90,13 @@ fn decode(
             assert_eq!(out, PREFIX, "a failed decode must leave `out` unchanged");
             Err(reason)
         }
+        Err(other) => panic!("decompression returns only Error::Corrupt: {other:?}"),
     }
 }
 
 /// Like [`decode`], but also asserts that `out` never grew: the payload is rejected from its header alone,
 /// before `len` bytes are allocated (ADR-0005, decision 2).
+#[allow(clippy::panic)] // test helper: any other error is a test failure
 fn reject_early(src: &[u8], len: u64, max: usize) -> Corruption {
     for offset in OFFSETS {
         let mut out = Vec::with_capacity(PREFIX.len());
@@ -102,11 +105,15 @@ fn reject_early(src: &[u8], len: u64, max: usize) -> Corruption {
         let err = decompress_block(Codec::Zstd, src, len, max, offset, &mut out).unwrap_err();
         assert_eq!(out, PREFIX);
         assert_eq!(out.capacity(), cap, "rejected before allocating: {src:x?}");
-        let Error::Corrupt { offset: at, .. } = err;
+        let Error::Corrupt { offset: at, .. } = err else {
+            panic!("{err:?}")
+        };
         assert_eq!(at, offset);
     }
-    let Error::Corrupt { reason, .. } =
-        decompress_block(Codec::Zstd, src, len, max, 0, &mut Vec::new()).unwrap_err();
+    let err = decompress_block(Codec::Zstd, src, len, max, 0, &mut Vec::new()).unwrap_err();
+    let Error::Corrupt { reason, .. } = err else {
+        panic!("{err:?}")
+    };
     reason
 }
 

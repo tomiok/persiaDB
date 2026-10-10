@@ -126,6 +126,7 @@ proptest! {
                 );
                 prop_assert_eq!(out, [1, 2, 3]);
             }
+            Err(other) => prop_assert!(false, "decompression returns only Error::Corrupt: {other:?}"),
         }
     }
 }

@@ -20,6 +20,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Checksummed<T>` for fixed-size structures whose CRC32C field covers the rest of the region (SPEC §4.2, §4.3).
 - Block codecs (SPEC §5.2; ADR-0005): codec byte `0 = None`, `1 = Zstd` (one zstd frame with declared content
   size), with a decompression-bomb guard on every decode.
+- Block framing of segment sections (SPEC §5.2; ADR-0006): 16-byte block header (CRC32C, codec, lengths), fixed-size
+  blocks over a byte stream, and a CRC-protected block table that records the block size (the bomb limit) and
+  each block's end; corrupt blocks are reported with their index. The section table has no `codec` field.
 
 <!--
 Sections per release, in this order, only when non-empty:

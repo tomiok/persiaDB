@@ -23,6 +23,26 @@ pub enum Error {
         /// What was wrong.
         reason: Corruption,
     },
+    /// Block `index` of a block-framed section is corrupt (SPEC §5.2). Errors in the block table itself are
+    /// [`Error::Corrupt`].
+    #[error("corrupt block {index} at offset {offset}: {reason}")]
+    CorruptBlock {
+        /// Index of the block within its section.
+        index: u32,
+        /// Absolute byte offset where decoding failed.
+        offset: u64,
+        /// What was wrong.
+        reason: Corruption,
+    },
+    /// The caller asked for `index` (a block, or a stream position) but only `len` exist. A caller error, not
+    /// corruption.
+    #[error("index {index} out of bounds (length {len})")]
+    OutOfBounds {
+        /// The requested index or end position.
+        index: u64,
+        /// How many exist.
+        len: u64,
+    },
 }
 
 /// The specific way input was corrupt.
@@ -131,6 +151,41 @@ pub enum Corruption {
     /// (SPEC §5.2).
     #[error("malformed compressed payload")]
     InvalidCompressedData,
+    /// A block table's `block_size` is outside `1..=max` (SPEC §5.2).
+    #[error("block size {size} outside 1..={max}")]
+    InvalidBlockSize {
+        /// The size read.
+        size: u32,
+        /// The largest valid size.
+        max: u32,
+    },
+    /// A block table's `block_count` disagrees with `ceil(total_len / block_size)` (SPEC §5.2).
+    #[error("block count {count}, but the stream length implies {expected}")]
+    BlockCountMismatch {
+        /// `block_count` from the table.
+        count: u32,
+        /// The count implied by `total_len` and `block_size`.
+        expected: u64,
+    },
+    /// A block table's `block_end` is outside `min..=max`: blocks must be at least a header long and end
+    /// where the table starts (SPEC §5.2).
+    #[error("block end {end} outside {min}..={max}")]
+    InvalidBlockEnd {
+        /// The `block_end` read.
+        end: u64,
+        /// Smallest valid end.
+        min: u64,
+        /// Largest valid end.
+        max: u64,
+    },
+    /// A block header's `stored_len` or `uncompressed_len` disagrees with the block table (SPEC §5.2).
+    #[error("block header says {header} bytes, the block table implies {table}")]
+    BlockLenMismatch {
+        /// The length from the block header.
+        header: u64,
+        /// The length the block table implies.
+        table: u64,
+    },
 }
 
 /// Errors produced while encoding: the caller passed values the format cannot represent.
@@ -184,6 +239,17 @@ pub enum EncodeError {
     /// The compressor failed internally (out of memory); the input itself is always compressible.
     #[error("compression failed")]
     CompressionFailed,
+    /// A block size outside `1..=max` (SPEC §5.2).
+    #[error("block size {size} outside 1..={max}")]
+    InvalidBlockSize {
+        /// The requested size.
+        size: u32,
+        /// The largest valid size.
+        max: u32,
+    },
+    /// A block-framed section would need more than `u32::MAX` blocks (SPEC §5.2).
+    #[error("too many blocks")]
+    TooManyBlocks,
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.

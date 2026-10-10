@@ -106,11 +106,18 @@ pub fn compress_block(
     }
 }
 
-fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, EncodeError> {
+/// Rejects a zstd level outside what zstd accepts.
+pub(crate) fn check_zstd_level(level: i32) -> Result<(), EncodeError> {
     let (min, max) = (zstd_safe::min_c_level(), zstd_safe::max_c_level());
-    if !(min..=max).contains(&level) {
-        return Err(EncodeError::InvalidCompressionLevel { level, min, max });
+    if (min..=max).contains(&level) {
+        Ok(())
+    } else {
+        Err(EncodeError::InvalidCompressionLevel { level, min, max })
     }
+}
+
+fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, EncodeError> {
+    check_zstd_level(level)?;
     out.try_reserve(zstd_safe::compress_bound(src.len()))
         .map_err(|_| EncodeError::CompressionFailed)?;
     // zstd writes into `out`'s spare capacity after `start` and sets its length only on success, so `out` is

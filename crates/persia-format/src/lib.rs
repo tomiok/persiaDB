@@ -9,6 +9,7 @@
 
 pub mod align;
 pub mod bitpack;
+pub mod block;
 pub mod checksum;
 pub mod checksummed;
 pub mod compress;
