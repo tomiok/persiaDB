@@ -12,6 +12,7 @@ pub mod bitpack;
 pub mod delta;
 pub mod error;
 pub mod offset;
+pub mod postings;
 pub mod reader;
 pub mod varint;
 pub mod writer;

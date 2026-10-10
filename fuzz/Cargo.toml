@@ -37,3 +37,10 @@ path = "fuzz_targets/bitpack.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "postings"
+path = "fuzz_targets/postings.rs"
+test = false
+doc = false
+bench = false

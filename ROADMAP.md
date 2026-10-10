@@ -94,9 +94,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [~] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
   - [~] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
 - 1.2.3 Postings block codec: delta + bit-pack 128 docids, varint tail block
-  - [ ] 1.2.3.1 Encode block with `last_docid`, `max_tf`, width metadata header
-  - [ ] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
-  - [ ] 1.2.3.3 `advance_to(target)` within a block (galloping/binary search)
+  - [~] 1.2.3.1 Encode block with `last_docid`, `max_tf`, width metadata header
+  - [~] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
+  - [~] 1.2.3.3 `advance_to(target)` within a block (galloping/binary search)
 - [ ] 1.2.4 Frame-of-reference codec for numeric columns (i64/f64 via order-preserving bits)
 
 ## 1.3 Checksums & hashing
