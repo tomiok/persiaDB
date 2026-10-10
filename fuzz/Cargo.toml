@@ -67,3 +67,10 @@ path = "fuzz_targets/decompress.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "block"
+path = "fuzz_targets/block.rs"
+test = false
+doc = false
+bench = false

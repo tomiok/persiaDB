@@ -1,10 +1,17 @@
 //! Block decode throughput on the query hot path (ROADMAP 1.2.3, 1.2.4): a full postings block (unpack +
-//! delta + header checks) and FOR column blocks by random access and by iteration.
+//! delta + header checks), FOR column blocks by random access and by iteration, and one 16 KiB block of a
+//! block-framed section (ROADMAP 1.5.4).
 //! Run: `cargo bench -p persia-format --bench blocks`.
 
-#![allow(missing_docs, clippy::unwrap_used, clippy::cast_possible_truncation)]
+#![allow(
+    missing_docs,
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation,
+    clippy::indexing_slicing
+)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use persia_format::block::{self, BlockReader, BlockWriter, Compression};
 use persia_format::{Reader, Writer, bitpack, for_codec};
 use std::hint::black_box;
 
@@ -81,5 +88,53 @@ fn for_blocks(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, postings, for_blocks);
+/// Text-like data from the LCG over a small vocabulary: compresses roughly like documents do.
+fn text(len: usize) -> Vec<u8> {
+    const WORDS: [&[u8]; 8] = [
+        b"persia ",
+        b"search ",
+        b"segment ",
+        b"query ",
+        b"the ",
+        b"of ",
+        b"block ",
+        b"zstd ",
+    ];
+    let mut next = lcg(42);
+    let mut out = Vec::with_capacity(len + 8);
+    while out.len() < len {
+        out.extend_from_slice(WORDS[(next() % 8) as usize]);
+    }
+    out.truncate(len);
+    out
+}
+
+/// One block of a block-framed section (ROADMAP 1.5.4, SPEC §5.2): CRC over header + payload, header checks
+/// against the table, then the codec. A 16 KiB block is the SPEC default and a doc-store/column read unit.
+fn framed_blocks(c: &mut Criterion) {
+    let size = block::DEFAULT_BLOCK_SIZE;
+    let data = text(4 * size as usize);
+    let mut group = c.benchmark_group("block_framed");
+    group.throughput(Throughput::Bytes(u64::from(size)));
+    for (name, compression) in [
+        ("none", Compression::None),
+        ("zstd", Compression::default()),
+    ] {
+        let mut w = BlockWriter::new(size, compression).unwrap();
+        w.write(&data).unwrap();
+        let section = w.finish().unwrap();
+        let reader = BlockReader::open(&section, 0).unwrap();
+        let mut out = Vec::with_capacity(size as usize);
+        group.bench_function(BenchmarkId::new("read_block", name), |b| {
+            b.iter(|| {
+                out.clear();
+                reader.read_block(black_box(1), &mut out).unwrap();
+                black_box(&out);
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, postings, for_blocks, framed_blocks);
 criterion_main!(benches);
