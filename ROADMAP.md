@@ -111,11 +111,11 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [ ] 1.4.4 Resource/I-O error class in `persia-format` so allocation failures (zstd context, output buffer) are not reported as `Corrupt`
 
 ## 1.5 Block framing (SPEC §5.2)
-- [ ] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len}` encode/decode
-- [ ] 1.5.2 `BlockWriter`: split a byte stream into fixed-size blocks, emit block table
-- [ ] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
-- [ ] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
-- [ ] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
+- [~] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len}` encode/decode
+- [~] 1.5.2 `BlockWriter`: split a byte stream into fixed-size blocks, emit block table
+- [~] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
+- [~] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
+- [~] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
 
 ## 1.6 Container header & superblock (SPEC §4.2–4.3)
 - 1.6.1 `Header` struct: magic, versions, flags, uuid, page size; encode/decode

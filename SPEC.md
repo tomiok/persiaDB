@@ -167,7 +167,7 @@ Sections are block-oriented (SPEC §5.2). The footer (last 4096 bytes max, locat
 - segment_id (u128), collection schema hash, format version, doc count
   (no deleted count: deletions live outside the segment, SPEC §8.3)
 - per-field statistics: `sum_field_len`, `docs_with_field`
-- section table: `{section_kind, field_id, offset, len, codec}`
+- section table: `{section_kind, field_id, offset, len}` (no codec: each block names its own, SPEC §5.2)
 - min/max `doc_id_ext` (for routing/pruning), creation time, merge generation
 - footer CRC32C
 
@@ -187,10 +187,52 @@ Any other value is corruption. Readers apply a **decompression-bomb guard**: the
 `uncompressed_len` it accepts (for blocks, the section's block size), and a larger value is rejected before any
 allocation or decoding. A payload that expands, or declares that it expands, to another length is corruption.
 Writers choose the codec per block (e.g. `None` when zstd does not shrink it); the zstd level is not recorded.
-Still open, so not yet normative: where a reader finds a section's block size (the section table has no field
-for it yet), DocStore rows larger than one block, what the section table's own `codec` field means next to the
-per-block codecs (ROADMAP 1.5.5), and how frame payload compression (§4.4 flags bit0) gets an uncompressed
-length and a bomb limit (ROADMAP 1.7.4).
+Still open, so not yet normative: how frame payload compression (§4.4 flags bit0) gets an uncompressed length
+and a bomb limit (ROADMAP 1.7.4).
+
+**Block layout** (ADR-0006). A block is a 16-byte header followed by its payload; blocks are byte-aligned
+and not padded:
+```
+0   4  crc32c            u32  over bytes 4..(16 + stored_len): the rest of the header and the payload
+4   1  codec             u8   (table above)
+5   3  reserved          MUST be zero
+8   4  uncompressed_len  u32
+12  4  stored_len        u32  (payload length)
+16  ..  payload           stored_len bytes
+```
+The CRC is verified before any other field is interpreted.
+
+**Block-framed sections** (ADR-0006). A block-framed section stores a logical byte stream of `total_len`
+bytes cut into blocks of `block_size` uncompressed bytes: block `i` holds stream bytes
+`[i·block_size, min((i+1)·block_size, total_len))`, so every block but the last is full, the last holds
+`1..=block_size` bytes, and an empty stream has no blocks. Stream position `p` is in block `p div block_size`.
+The blocks are followed by the **block table**, which ends the section:
+```
+[ block 0 ][ block 1 ] ... [ block n-1 ][ block table ]
+
+block table (8·n + 24 bytes)
+0      8·n  block_end    u64 each: end of block i, relative to the section start
+                         (block 0 starts at 0, block i at block_end[i-1])
+8n     8    total_len    u64
+8n+8   4    block_size   u32  (1..=1 MiB, i.e. at most 1048576)
+8n+12  4    block_count  u32  (n)
+8n+16  4    reserved     u32  MUST be zero
+8n+20  4    crc32c       u32  over table bytes 0..8n+20
+```
+A reader reads `block_count` from the fixed 24-byte trailer, checks that the table fits in the section, then
+verifies the table CRC before using any other field. The following are corruption: a `block_size` outside
+`1..=1 MiB`; `block_count ≠ ceil(total_len / block_size)`; a block shorter than its 16-byte header; a
+`block_end` that does not increase; a last `block_end` (or `0` when `n = 0`) other than the table's start. When
+block `i` is decoded, its header must agree with the table: `stored_len = block_end[i] - start - 16`, and
+`uncompressed_len` equals the length the formula above gives for block `i`. A block's errors name its index.
+
+The table's `block_size` is the decompression-bomb limit for its blocks, so a reader needs nothing outside
+the section to decode it (no footer field). Any reader may use a smaller limit of its own.
+Records in a block-framed section are addressed by stream position, not by block, so a record may span blocks:
+a reader decodes every block that overlaps the record. In particular a DocStore row may be larger than one
+block (row offsets are defined with the DocStore writer, ROADMAP 5.2.6). Whether a section is block-framed is
+fixed by its `section_kind` (SPEC §5.3) and each block names its own codec, so the section table has no `codec`
+field.
 
 ### 5.2.1 Integer codecs
 Building blocks of the Postings, Freqs, Skip and Columns sections (SPEC §5.3), ADR-0004. They live inside
