@@ -78,7 +78,8 @@ impl Reader<'_> {
             if len == max_len {
                 // The last possible byte must end the varint and hold only the bits that are left
                 // (4 for u32, 1 for u64).
-                let bits_left = bits - shift;
+                // shift = 7 * (len - 1) < bits here, so this never saturates.
+                let bits_left = bits.saturating_sub(shift);
                 if byte & 0x80 != 0 || group >> bits_left != 0 {
                     return Err(corrupt(Corruption::VarintOverflow { bits }));
                 }
@@ -92,7 +93,8 @@ impl Reader<'_> {
                 self.skip(usize::try_from(len).unwrap_or(usize::MAX))?;
                 return Ok(value);
             }
-            shift += 7;
+            // At most 63: the loop runs at most 10 times for u64.
+            shift = shift.saturating_add(7);
         }
         // Every available byte had the continuation bit set (or there were none).
         let available = to_u64(self.remaining());

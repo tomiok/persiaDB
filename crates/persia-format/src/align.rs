@@ -13,8 +13,13 @@ pub const ALIGNMENT: NonZeroUsize = NonZeroUsize::MIN.saturating_add(7);
 /// `offset` in its file lines up there, not merely within the buffer.
 pub fn padding_for(offset: u64, align: NonZeroUsize) -> usize {
     let align = to_u64(align.get());
-    let rem = offset % align; // `align` is non-zero
-    let pad = if rem == 0 { 0 } else { align - rem }; // rem < align, so no underflow
+    // `align` is non-zero, so the remainder exists; and rem < align, so the subtraction cannot underflow.
+    let rem = offset.checked_rem(align).unwrap_or(0);
+    let pad = if rem == 0 {
+        0
+    } else {
+        align.saturating_sub(rem)
+    };
     // pad < align <= usize::MAX, so the conversion is lossless.
     usize::try_from(pad).unwrap_or(0)
 }

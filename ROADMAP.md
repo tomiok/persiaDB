@@ -81,7 +81,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [x] 1.1.2.2 [T] property round-trip; golden vectors; fuzz decode
 - [~] 1.1.3 Zigzag encoding for signed integers
 - [~] 1.1.4 Checked arithmetic helpers for offsets/lengths (`Offset`, `Len` newtypes)
-- [ ] 1.1.5 `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops
+- [~] 1.1.5 `#![deny(clippy::arithmetic_side_effects)]` in `persia-format` (and later in engine segment readers); fix all hits with checked ops
 
 ## 1.2 Integer compression
 - 1.2.1 Delta coding for sorted `u32` sequences
@@ -292,6 +292,7 @@ Deps: M1, M3, M4. The heart of the index format.
 - [ ] 5.3.6 Doc fetch by docid (DocStore block cache) and by external id (IdMap FST)
 - [ ] 5.3.7 Tombstone overlay view (roaring) applied on iteration
 - [ ] 5.3.8 Prefix/range term enumeration (FST range) and Levenshtein-automaton intersection hook (used in M8)
+- [ ] 5.3.9 `#![deny(clippy::arithmetic_side_effects)]` on the segment-reader modules of `persia-engine` (continues 1.1.5)
 
 ## 5.4 Verification & tooling
 - [ ] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data
