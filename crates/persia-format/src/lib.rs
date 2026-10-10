@@ -8,6 +8,7 @@
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
 pub mod align;
+pub mod bitpack;
 pub mod delta;
 pub mod error;
 pub mod offset;

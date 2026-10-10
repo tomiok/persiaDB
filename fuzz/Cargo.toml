@@ -30,3 +30,10 @@ path = "fuzz_targets/varint.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "bitpack"
+path = "fuzz_targets/bitpack.rs"
+test = false
+doc = false
+bench = false

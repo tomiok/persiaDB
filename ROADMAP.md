@@ -88,11 +88,11 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [~] 1.2.1.1 Delta encode/decode with strictly-increasing validation
   - [~] 1.2.1.2 [T] property round-trip for random sorted sets incl. empty, single, max values
 - 1.2.2 Bit-packing of 128-value blocks (width 0..=32)
-  - [ ] 1.2.2.1 Scalar pack/unpack for all widths
-  - [ ] 1.2.2.2 Compute minimal bit-width for a block
-  - [ ] 1.2.2.3 Packed-size formula + bounds checks on decode input
-  - [ ] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
-  - [ ] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
+  - [~] 1.2.2.1 Scalar pack/unpack for all widths
+  - [~] 1.2.2.2 Compute minimal bit-width for a block
+  - [~] 1.2.2.3 Packed-size formula + bounds checks on decode input
+  - [~] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
+  - [~] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
 - 1.2.3 Postings block codec: delta + bit-pack 128 docids, varint tail block
   - [ ] 1.2.3.1 Encode block with `last_docid`, `max_tf`, width metadata header
   - [ ] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
