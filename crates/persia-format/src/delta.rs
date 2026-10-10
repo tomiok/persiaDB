@@ -52,7 +52,7 @@ pub fn decode_in_place(gaps: &mut [u32], prev: Option<u32>) -> Result<(), Corrup
 
 /// The smallest value allowed after `prev`: `prev + 1`, or 0 at the start of a list. Kept in a `u64` because
 /// `u32::MAX + 1` is a valid "nothing can follow" bound.
-fn first_after(prev: Option<u32>) -> u64 {
+pub(crate) fn first_after(prev: Option<u32>) -> u64 {
     prev.map_or(0, |p| u64::from(p).wrapping_add(1))
 }
 

@@ -14,11 +14,6 @@ fuzz_target!(|data: &[u8]| {
             assert_eq!(r.position(), start, "a failed read must not move the cursor");
             break;
         };
-        // Width 0 lets 13 bytes claim 2^32 - 1 values (callers bound `count`): only spot-check those.
-        if block.width() == 0 {
-            assert!(block.get(block.len().saturating_sub(1)).is_none_or(|v| v == block.min()));
-            continue;
-        }
         let values: Vec<u64> = block.iter().collect();
         assert_eq!(values.len(), block.len());
         for (i, &v) in values.iter().enumerate() {

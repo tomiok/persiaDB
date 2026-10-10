@@ -1,4 +1,5 @@
 //! Scalar bit-packing throughput (ROADMAP 1.2.2.5): the baseline a SIMD decoder must beat (ADR-0004).
+//! Baseline numbers are recorded in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-format --bench bitpack`.
 
 #![allow(missing_docs, clippy::unwrap_used)]

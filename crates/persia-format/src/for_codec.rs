@@ -13,13 +13,15 @@
 //! The layout is horizontal so any value can be read in O(1) by docid. The block is validated once when it is
 //! read ([`Reader::read_for_block`]); after that, every access is infallible.
 //!
-//! `count` is not bounded by the input length: at width 0 (a constant column) a 13-byte block can claim
-//! `u32::MAX` values. Callers must check [`ForBlock::len`] against the number of values they expect (e.g.
-//! the segment's doc count) before iterating or allocating.
+//! A column is cut into blocks of exactly [`BLOCK_LEN`] values (the last may be shorter), so the block holding
+//! docid `d` is block `d / BLOCK_LEN`. Readers reject a `count` outside `1..=BLOCK_LEN`.
 
 use crate::error::{Corruption, EncodeError, Error, Result};
 use crate::reader::Reader;
 use crate::writer::Writer;
+
+/// Values per FOR block; only the last block of a column may hold fewer (SPEC §5.2.1).
+pub const BLOCK_LEN: usize = 1024;
 
 /// The widest width: values spanning the whole `u64` range.
 pub const MAX_WIDTH: u8 = 64;
@@ -57,13 +59,16 @@ impl Writer {
     /// Appends `keys` as a FOR block, using their minimum and the minimal width (SPEC §5.2.1).
     ///
     /// # Errors
-    /// [`EncodeError::InvalidLen`] if there are more than `u32::MAX` keys; nothing is written then.
+    /// [`EncodeError::InvalidLen`] unless there are 1..=[`BLOCK_LEN`] keys; nothing is written then.
     pub fn write_for_block(&mut self, keys: &[u64]) -> Result<(), EncodeError> {
-        let count = u32::try_from(keys.len()).map_err(|_| EncodeError::InvalidLen {
-            len: keys.len(),
-            min: 0,
-            max: usize::try_from(u32::MAX).unwrap_or(usize::MAX),
-        })?;
+        let count = u32::try_from(keys.len())
+            .ok()
+            .filter(|_| (1..=BLOCK_LEN).contains(&keys.len()))
+            .ok_or(EncodeError::InvalidLen {
+                len: keys.len(),
+                min: 1,
+                max: BLOCK_LEN,
+            })?;
         let min = keys.iter().copied().min().unwrap_or(0);
         let max = keys.iter().copied().max().unwrap_or(0);
         // max >= min, so this cannot wrap; bit_width() <= 64 fits a u8.
@@ -102,14 +107,27 @@ impl<'a> Reader<'a> {
     /// Reads and validates a FOR block.
     ///
     /// # Errors
-    /// [`Error::Corrupt`] on short input, a width above 64 ([`Corruption::InvalidBitWidth`], at the width
+    /// [`Error::Corrupt`] on short input, a count outside 1..=[`BLOCK_LEN`] ([`Corruption::InvalidCount`], at
+    /// the count field), a width above 64 ([`Corruption::InvalidBitWidth`], at the width
     /// byte), non-zero unused bits in the last byte ([`Corruption::NonZeroReserved`], at that byte), or a value
     /// past `u64::MAX` ([`Corruption::ValueOverflow`], at the block start). The position is then unchanged.
     pub fn read_for_block(&mut self) -> Result<ForBlock<'a>> {
         let start = self.offset();
         let mut r = self.clone();
         let min = r.read_u64()?;
+        let count_at = r.offset();
         let count = r.read_u32()?;
+        let max_count = u32::try_from(BLOCK_LEN).unwrap_or(u32::MAX);
+        if !(1..=max_count).contains(&count) {
+            return Err(Error::Corrupt {
+                offset: count_at,
+                reason: Corruption::InvalidCount {
+                    count,
+                    min: 1,
+                    max: max_count,
+                },
+            });
+        }
         let width_at = r.offset();
         let raw_width = r.read_u8()?;
         if raw_width > MAX_WIDTH {
@@ -122,7 +140,7 @@ impl<'a> Reader<'a> {
             });
         }
         let width = u32::from(raw_width);
-        // count < 2^32 and width <= 64: the product is below 2^38.
+        // count <= 1024 and width <= 64: the product is below 2^17.
         let bits = u64::from(count).wrapping_mul(u64::from(width));
         // A length that does not fit in memory cannot be present: let read_bytes report it as short input.
         let len = usize::try_from(bits.div_ceil(8)).unwrap_or(usize::MAX);
@@ -199,16 +217,22 @@ impl ForBlock<'_> {
 
     /// The `width` bits of value `index`; `index < len`, so they are inside `packed`.
     fn raw(&self, index: usize) -> u64 {
-        // index < 2^32 and width <= 64: below 2^38.
+        // index < 1024 and width <= 64: below 2^17.
         let bit = crate::error::to_u64(index).wrapping_mul(u64::from(self.width));
         let byte = usize::try_from(bit >> 3).unwrap_or(usize::MAX);
         let shift = bit & 7;
-        // The value spans at most 9 bytes (7 bits of shift + 64 bits); load up to 16 into a u128.
-        let mut window = [0_u8; 16];
+        // The value spans at most 9 bytes (7 bits of shift + 64 bits): load 16 into a u128 in one go, or copy
+        // what is left near the end of the block.
         let src = self.packed.get(byte..).unwrap_or_default();
-        for (dst, &b) in window.iter_mut().zip(src) {
-            *dst = b;
-        }
+        let window = if let Some(chunk) = src.first_chunk::<16>() {
+            *chunk
+        } else {
+            let mut window = [0_u8; 16];
+            for (dst, &b) in window.iter_mut().zip(src) {
+                *dst = b;
+            }
+            window
+        };
         let bits = u128::from_le_bytes(window) >> shift;
         // Truncation to the low 64 bits, then the width mask.
         #[allow(clippy::cast_possible_truncation)]
@@ -258,11 +282,41 @@ mod tests {
     }
 
     #[test]
-    fn golden_empty_and_constant_blocks() {
-        assert_eq!(encode(&[]), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let constant = encode(&[7; 1000]);
-        assert_eq!(constant.len(), 13, "width 0: no packed bytes");
-        assert_eq!(decode(&constant), Ok(vec![7; 1000]));
+    fn golden_constant_block_and_count_limits() {
+        let constant = encode(&[7; BLOCK_LEN]);
+        let mut expected = vec![7, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 0, 0]; // min 7, count 1024, width 0
+        assert_eq!(constant, expected, "width 0: no packed bytes");
+        assert_eq!(decode(&constant), Ok(vec![7; BLOCK_LEN]));
+
+        let mut w = Writer::new();
+        for keys in [&[][..], &[0; BLOCK_LEN + 1][..]] {
+            assert_eq!(
+                w.write_for_block(keys),
+                Err(EncodeError::InvalidLen {
+                    len: keys.len(),
+                    min: 1,
+                    max: BLOCK_LEN
+                })
+            );
+        }
+        assert!(w.is_empty());
+
+        for count in [0_u32, 1025, u32::MAX] {
+            expected[8..12].copy_from_slice(&count.to_le_bytes());
+            let mut r = Reader::with_base_offset(&expected, 40);
+            assert_eq!(
+                r.read_for_block().map(|b| b.len()),
+                Err(corrupt(
+                    48,
+                    Corruption::InvalidCount {
+                        count,
+                        min: 1,
+                        max: 1024
+                    }
+                ))
+            );
+            assert_eq!(r.position(), 0);
+        }
     }
 
     #[test]
@@ -339,9 +393,9 @@ mod tests {
             assert!(r.read_for_block().is_err(), "len {len}");
             assert_eq!(r.position(), 0);
         }
-        // A count that claims far more data than exists is short input, not an allocation.
+        // A count that claims more data than exists is short input.
         let mut huge = encode(&[1, 2]);
-        huge[8..12].copy_from_slice(&u32::MAX.to_le_bytes());
+        huge[8..12].copy_from_slice(&1024_u32.to_le_bytes());
         huge[12] = 64;
         assert!(matches!(
             decode(&huge),

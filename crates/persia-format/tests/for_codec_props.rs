@@ -17,7 +17,7 @@ use proptest::prelude::*;
 
 /// Key sets: clustered (small widths), full-range, near the top (overflow edge), constant.
 fn keys() -> impl Strategy<Value = Vec<u64>> {
-    let n = 0_usize..300;
+    let n = 1_usize..300;
     prop_oneof![
         (
             any::<u64>(),
@@ -105,11 +105,6 @@ proptest! {
     fn arbitrary_bytes_never_panic_and_accepted_blocks_are_sane(bytes in proptest::collection::vec(any::<u8>(), 0..64)) {
         let mut r = Reader::new(&bytes);
         if let Ok(block) = r.read_for_block() {
-            // Width 0 lets 13 bytes claim 2^32 - 1 values (callers bound `count`): only spot-check those.
-            if block.width() == 0 {
-                prop_assert!(block.get(block.len().saturating_sub(1)).is_none_or(|v| v == block.min()));
-                return Ok(());
-            }
             let values: Vec<u64> = block.iter().collect();
             prop_assert_eq!(values.len(), block.len());
             prop_assert!(values.iter().all(|&v| v >= block.min()));

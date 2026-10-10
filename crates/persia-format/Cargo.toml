@@ -23,3 +23,7 @@ workspace = true
 [[bench]]
 name = "bitpack"
 harness = false
+
+[[bench]]
+name = "blocks"
+harness = false

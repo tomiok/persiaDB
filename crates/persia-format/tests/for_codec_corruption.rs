@@ -4,13 +4,14 @@
 //! Invariants:
 //! 1. A reader built from the SPEC byte table agrees with `read_for_block` on valid, mutated and random input:
 //!    same values, same error kind and absolute offset (`Reader::with_base_offset`), same bytes consumed.
+//!    `InvalidCount` (outside 1..=1024) points at the count field and wins over a bad width,
 //!    `InvalidBitWidth` points at the width byte, `NonZeroReserved` at the last packed byte, `ValueOverflow`
 //!    at the block start.
 //! 2. Reads are atomic: on any error the reader has not moved.
 //! 3. Every single-bit flip in a valid block is detected or has exactly the predicted effect: a flip in a used
 //!    packed bit changes exactly one value by that bit, a flip in `min` shifts every value, and a flip in the
 //!    unused high bits of the last byte is always `NonZeroReserved`.
-//! 4. Width-0 blocks may claim up to `u32::MAX` values and stay O(1) to read and access.
+//! 4. Encoders accept exactly 1..=1024 keys and append nothing otherwise.
 
 // Test-only helpers index, cast and unwrap on purpose (see reader_writer_props.rs).
 #![allow(
@@ -23,18 +24,17 @@
 mod common;
 
 use common::{apply, corrupt, eof, mutation, placement};
-use persia_format::for_codec::MAX_WIDTH;
-use persia_format::{Corruption, Error, Reader, Writer};
+use persia_format::for_codec::{BLOCK_LEN, MAX_WIDTH};
+use persia_format::{Corruption, EncodeError, Error, Reader, Writer};
 use proptest::prelude::*;
 
-/// What a FOR block decodes to: header fields, values (materialised only when bounded by the input) and
-/// bytes consumed.
+/// What a FOR block decodes to: header fields, values and bytes consumed.
 #[derive(Debug, PartialEq)]
 struct Decoded {
     min: u64,
     count: u32,
     width: u8,
-    values: Option<Vec<u64>>,
+    values: Vec<u64>,
     used: usize,
 }
 
@@ -57,6 +57,16 @@ fn reference_for(bytes: &[u8], start: u64) -> Result<Decoded, Error> {
         return Err(eof(start + 8, 4, len - 8));
     }
     let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+    if !(1..=1024).contains(&count) {
+        return Err(corrupt(
+            start + 8,
+            Corruption::InvalidCount {
+                count,
+                min: 1,
+                max: 1024,
+            },
+        ));
+    }
     if len < 13 {
         return Err(eof(start + 12, 1, 0));
     }
@@ -82,18 +92,12 @@ fn reference_for(bytes: &[u8], start: u64) -> Result<Decoded, Error> {
             ));
         }
     }
-    // With width > 0 the count is bounded by the input; with width 0 every value is `min`.
-    let values = if width == 0 {
-        None
-    } else {
-        let values = (0..count as usize)
-            .map(|i| {
-                u64::try_from(u128::from(min) + u128::from(raw_at(packed, i, usize::from(width))))
-                    .map_err(|_| corrupt(start, Corruption::ValueOverflow { bits: 64 }))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Some(values)
-    };
+    let values = (0..count as usize)
+        .map(|i| {
+            u64::try_from(u128::from(min) + u128::from(raw_at(packed, i, usize::from(width))))
+                .map_err(|_| corrupt(start, Corruption::ValueOverflow { bits: 64 }))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(Decoded {
         min,
         count,
@@ -113,21 +117,13 @@ fn library_for(bytes: &[u8], base: u64, skip: usize) -> Result<Decoded, Error> {
             assert_eq!(block.is_empty(), len == 0);
             assert_eq!(block.get(len), None);
             assert_eq!(block.get(usize::MAX), None);
-            let values = if block.width() == 0 {
-                if let Some(last) = len.checked_sub(1) {
-                    assert_eq!(block.get(0), Some(block.min()));
-                    assert_eq!(block.get(last), Some(block.min()));
-                }
-                None
-            } else {
-                let values: Vec<u64> = block.iter().collect();
-                assert_eq!(values.len(), len);
-                for (i, &v) in values.iter().enumerate() {
-                    assert_eq!(block.get(i), Some(v), "get({i}) disagrees with iter");
-                    assert!(v >= block.min());
-                }
-                Some(values)
-            };
+            let values: Vec<u64> = block.iter().collect();
+            assert_eq!(values.len(), len);
+            for (i, &v) in values.iter().enumerate() {
+                assert_eq!(block.get(i), Some(v), "get({i}) disagrees with iter");
+                assert!(v >= block.min());
+            }
+
             Ok(Decoded {
                 min: block.min(),
                 count: u32::try_from(len).unwrap(),
@@ -152,29 +148,33 @@ fn encode(keys: &[u64]) -> Vec<u8> {
 /// Keys whose FOR block has exactly width `w` (for two or more keys): `min` and `min + 2^w - 1` both occur.
 /// The minimum is 0, arbitrary, or as high as the width allows (the overflow edge).
 fn keys_at_width() -> impl Strategy<Value = (u8, Vec<u64>)> {
-    (0..=MAX_WIDTH, 2_usize..40).prop_flat_map(|(w, n)| {
-        let mask = if w == 0 {
-            0
-        } else {
-            u64::MAX >> (64 - u32::from(w))
-        };
-        let min = prop_oneof![Just(0), 0..=u64::MAX - mask, Just(u64::MAX - mask)];
-        let raw = prop_oneof![0..=mask, Just(mask), Just(0)];
-        (
-            Just(w),
-            min,
-            proptest::collection::vec(raw, n),
-            any::<proptest::sample::Index>(),
-        )
-            .prop_map(move |(w, min, mut raws, at)| {
-                // Pin the extremes at random places so the width is exactly w.
-                let i = at.index(raws.len());
-                raws[i] = mask;
-                let j = (i + 1) % raws.len();
-                raws[j] = 0;
-                (w, raws.into_iter().map(|r| min + r).collect())
-            })
-    })
+    (
+        0..=MAX_WIDTH,
+        prop_oneof![9 => 2_usize..40, 1 => Just(BLOCK_LEN)],
+    )
+        .prop_flat_map(|(w, n)| {
+            let mask = if w == 0 {
+                0
+            } else {
+                u64::MAX >> (64 - u32::from(w))
+            };
+            let min = prop_oneof![Just(0), 0..=u64::MAX - mask, Just(u64::MAX - mask)];
+            let raw = prop_oneof![0..=mask, Just(mask), Just(0)];
+            (
+                Just(w),
+                min,
+                proptest::collection::vec(raw, n),
+                any::<proptest::sample::Index>(),
+            )
+                .prop_map(move |(w, min, mut raws, at)| {
+                    // Pin the extremes at random places so the width is exactly w.
+                    let i = at.index(raws.len());
+                    raws[i] = mask;
+                    let j = (i + 1) % raws.len();
+                    raws[j] = 0;
+                    (w, raws.into_iter().map(|r| min + r).collect())
+                })
+        })
 }
 
 proptest! {
@@ -185,12 +185,8 @@ proptest! {
         let decoded = library_for(&bytes, 0, 0).unwrap();
         prop_assert_eq!(decoded.used, bytes.len());
         prop_assert_eq!(decoded.min, *keys.iter().min().unwrap());
-        if w == 0 {
-            prop_assert!(keys.iter().all(|&k| k == decoded.min));
-            prop_assert_eq!(decoded.count as usize, keys.len());
-        } else {
-            prop_assert_eq!(decoded.values.unwrap(), keys);
-        }
+        prop_assert_eq!(decoded.count as usize, keys.len());
+        prop_assert_eq!(decoded.values, keys);
     }
 
     #[test]
@@ -210,7 +206,7 @@ proptest! {
     #[test]
     fn reader_matches_spec_reference_on_random_headers(
         min in prop_oneof![any::<u64>(), (0_u64..1 << 16).prop_map(|d| u64::MAX - d)],
-        count in prop_oneof![0_u32..64, any::<u32>()],
+        count in prop_oneof![0_u32..64, 1000_u32..=1030, any::<u32>()],
         width in prop_oneof![0_u8..=MAX_WIDTH, any::<u8>()],
         packed in proptest::collection::vec(any::<u8>(), 0..600),
         (base, prefix) in placement(),
@@ -268,8 +264,7 @@ fn every_bit_flip_is_detected_or_has_the_predicted_effect() {
                         .map(|&k| (k - min).checked_add(new_min))
                         .collect();
                     match (expected, &result) {
-                        (Some(_), Ok(d)) if w == 0 => assert_eq!(d.min, new_min),
-                        (Some(e), Ok(d)) => assert_eq!(d.values.as_ref(), Some(&e), "bit {bit}"),
+                        (Some(e), Ok(d)) => assert_eq!(d.values, e, "bit {bit}"),
                         (None, r) => assert_eq!(r, &overflow, "bit {bit}"),
                         (Some(_), Err(e)) => panic!("bit {bit}: unexpected {e}"),
                     }
@@ -287,7 +282,7 @@ fn every_bit_flip_is_detected_or_has_the_predicted_effect() {
                             Some(v) => {
                                 expected[i] = v;
                                 let d = result.unwrap();
-                                assert_eq!(d.values, Some(expected), "bit {bit}");
+                                assert_eq!(d.values, expected, "bit {bit}");
                             }
                             None => assert_eq!(result, overflow, "bit {bit}"),
                         }
@@ -332,7 +327,7 @@ fn overflow_is_detected_at_every_width() {
                 let result = library_for(&bytes, 300, 0);
                 assert_eq!(result, reference_for(&bytes, 300), "w {w} count {count}");
                 if ok {
-                    let values = result.unwrap().values.unwrap();
+                    let values = result.unwrap().values;
                     assert_eq!(values[count - 1], u64::MAX, "w {w} count {count}");
                     assert!(values[..count - 1].iter().all(|&v| v == min));
                 } else {
@@ -347,48 +342,101 @@ fn overflow_is_detected_at_every_width() {
     }
 }
 
-/// Invariant 4: a 13-byte width-0 block claiming `u32::MAX` values is valid and O(1) to access.
+/// SPEC §5.2.1: `count` must be 1..=1024. Outside that it is `InvalidCount` at the count field (the
+/// block start plus 8), checked before the width byte, so it wins over a bad or missing width. At both
+/// bounds the block is read normally.
 #[test]
-fn width_0_block_with_max_count_is_constant_time() {
-    let mut bytes = Vec::new();
-    bytes.extend(u64::MAX.to_le_bytes());
-    bytes.extend(u32::MAX.to_le_bytes());
-    bytes.push(0);
-    bytes.push(0xab); // the next structure: must not be consumed
-    let mut r = Reader::new(&bytes);
-    let block = r.read_for_block().unwrap();
-    assert_eq!(r.rest(), [0xab]);
-    assert_eq!(block.len(), u32::MAX as usize);
-    assert_eq!(block.width(), 0);
-    assert_eq!(block.get(0), Some(u64::MAX));
-    assert_eq!(block.get(u32::MAX as usize - 1), Some(u64::MAX));
-    assert_eq!(block.get(u32::MAX as usize), None);
-    assert_eq!(block.iter().take(3).collect::<Vec<_>>(), [u64::MAX; 3]);
+fn count_is_bounded_and_checked_before_the_width() {
+    let base = 1 << 40;
+    for count in [0_u32, 1, 2, 1023, 1024, 1025, 4096, u32::MAX] {
+        let in_range = (1..=1024).contains(&count);
+        for width in [None, Some(65_u8), Some(0)] {
+            let mut block = Vec::new();
+            block.extend(7_u64.to_le_bytes());
+            block.extend(count.to_le_bytes());
+            block.extend(width);
+            let result = library_for(&block, base, 0);
+            assert_eq!(
+                result,
+                reference_for(&block, base),
+                "count {count} width {width:?}"
+            );
+            let expected = match (in_range, width) {
+                (false, _) => Err(corrupt(
+                    base + 8,
+                    Corruption::InvalidCount {
+                        count,
+                        min: 1,
+                        max: 1024,
+                    },
+                )),
+                (true, None) => Err(eof(base + 12, 1, 0)),
+                (true, Some(65)) => Err(corrupt(
+                    base + 12,
+                    Corruption::InvalidBitWidth { width: 65, max: 64 },
+                )),
+                (true, Some(_)) => Ok(Decoded {
+                    min: 7,
+                    count,
+                    width: 0,
+                    values: vec![7; count as usize],
+                    used: 13,
+                }),
+            };
+            assert_eq!(result, expected, "count {count} width {width:?}");
+        }
+    }
 }
 
-/// Width 64 with a large count must not be mistaken for valid: the length it claims (2^35 bytes) is short
-/// input at the packed bytes, not an allocation or an overflow.
+/// The largest legal block at width 64 claims 8192 packed bytes: missing bytes are short input at the packed
+/// data with exact sizes, not an allocation or an overflow.
 #[test]
-fn huge_claimed_lengths_are_short_input() {
+fn largest_claimed_lengths_are_short_input() {
     for width in [1_u8, 33, 64] {
         let mut bytes = Vec::new();
         bytes.extend(0_u64.to_le_bytes());
-        bytes.extend(u32::MAX.to_le_bytes());
+        bytes.extend(1024_u32.to_le_bytes());
         bytes.push(width);
         bytes.extend([0; 7]);
-        let needed = (u64::from(u32::MAX) * u64::from(width)).div_ceil(8);
         assert_eq!(
-            Reader::with_base_offset(&bytes, 1 << 40)
-                .read_for_block()
-                .map(|b| b.len()),
+            library_for(&bytes, 1 << 40, 0),
             Err(corrupt(
                 (1 << 40) + 13,
                 Corruption::UnexpectedEof {
-                    needed,
+                    needed: 128 * u64::from(width),
                     available: 7
                 }
             ))
         );
+    }
+}
+
+/// Invariant 4: the encoder takes 1..=1024 keys; anything else is `InvalidLen` and a writer that already
+/// holds bytes keeps exactly those.
+#[test]
+fn encoder_accepts_exactly_1_to_1024_keys() {
+    let prefix = [0xaa, 0xbb, 0xcc];
+    for len in [0, 1, 1023, 1024, 1025, 5000] {
+        let keys: Vec<u64> = (0..len as u64).map(|i| i * 3).collect();
+        let mut w = Writer::new();
+        w.write_bytes(&prefix);
+        let result = w.write_for_block(&keys);
+        if (1..=BLOCK_LEN).contains(&len) {
+            assert_eq!(result, Ok(()));
+            let decoded = library_for(w.as_slice(), 0, prefix.len()).unwrap();
+            assert_eq!(decoded.values, keys);
+            assert_eq!(prefix.len() + decoded.used, w.as_slice().len());
+        } else {
+            assert_eq!(
+                result,
+                Err(EncodeError::InvalidLen {
+                    len,
+                    min: 1,
+                    max: 1024
+                })
+            );
+            assert_eq!(w.as_slice(), prefix);
+        }
     }
 }
 

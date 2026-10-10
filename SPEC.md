@@ -197,30 +197,36 @@ bit length of the largest value; a width above 32 is corruption.
 ```
 full block                                  tail block
 0  4  last_docid u32 (absolute)             0  1  count  u8 (1..=127)
-4  4  max_tf     u32                        1  .. max_tf varint u32
-8  1  width      u8  (0..=32)               .. .. count gaps, varint u32 each
-9  16·width  bit-packed gaps
+4  1  width      u8  (0..=32)               1  .. count gaps, varint u32 each
+5  16·width  bit-packed gaps
 ```
-`last_docid` lets a reader skip a full block without unpacking it. It must equal the block's last decoded
-docid, or the block is corrupt. Term frequencies are not part of these blocks: they live in the Freqs section.
+`last_docid` lets a reader skip a full block without unpacking it. It must be at least `prev + 128` (127 for
+a list's first block), checked when the header is read, whether the block is skipped or decoded. It must also
+equal the block's last decoded docid. A violation of either is corruption. So a list stays strictly increasing
+however skipping and decoding are mixed. A tail's `count` must equal the term's `df mod 128`. Docids must be
+below the segment's `doc_count` (SPEC §5.4). The section reader checks both; the block codec cannot.
+Block-max data (`max_tf`, `min_norm`) is not part of these blocks: it lives only in the Skip section. Term
+frequencies live in the Freqs section, whose layout (blocks aligned with these) is defined with its writer
+(ROADMAP 5.2.2).
 
-**Frame-of-reference (FOR) block (numeric columns).** `count` values stored as offsets from their minimum,
-horizontally bit-packed so any value can be read in O(1):
+**Frame-of-reference (FOR) block (numeric columns).** A column is cut into FOR blocks of exactly 1024
+values; only the last may be shorter. So docid `d` is value `d mod 1024` of block `d div 1024`. Each block
+stores its values as offsets from their minimum, horizontally bit-packed so any value can be read in O(1):
 ```
 0   8  min    u64  (order-preserving key, below)
-8   4  count  u32
+8   4  count  u32  (1..=1024)
 12  1  width  u8   (0..=64)
 13  ceil(count·width / 8) bytes
 ```
 Value `i` is `min + (bits [i·w, (i+1)·w) of a little-endian, least-significant-bit-first bit stream)`. The unused
-high bits of the last byte are zero. A value above `u64::MAX` is corruption. Writers use the minimal width.
-At width 0 the block has no packed bytes, so readers check `count` against the number of values the column
-expects (the doc count) rather than trusting it.
+high bits of the last byte are zero. A count outside `1..=1024` or a value above `u64::MAX` is corruption.
+Writers use the true minimum and the minimal width.
 
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
 the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;
 otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
-bit pattern round-trips exactly.
+bit pattern round-trips exactly. Whether writers canonicalize `-0.0` and NaN before keying is decided with
+the document model (ROADMAP 3.2.6).
 
 ### 5.3 Sections (per segment)
 | Section | Per | Content | Encoding |

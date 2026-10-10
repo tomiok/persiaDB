@@ -94,7 +94,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [~] 1.2.2.4 [T] exhaustive width test; property round-trip; fuzz
   - [~] 1.2.2.5 Benchmark scalar throughput (baseline for SIMD later)
 - 1.2.3 Postings block codec: delta + bit-pack 128 docids, varint tail block
-  - [~] 1.2.3.1 Encode block with `last_docid`, `max_tf`, width metadata header
+  - [~] 1.2.3.1 Encode block with `last_docid` + width header (block-max `max_tf`/`min_norm` live in the Skip section only, ADR-0004)
   - [~] 1.2.3.2 Decode block into caller-provided buffer (no allocation in hot path)
   - [~] 1.2.3.3 `advance_to(target)` within a block (galloping/binary search)
 - [~] 1.2.4 Frame-of-reference codec for numeric columns (i64/f64 via order-preserving bits)
@@ -206,6 +206,7 @@ Deps: M1. (Parallel with M2.)
 ## 3.2 Document model
 - [ ] 3.2.1 `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1)
 - [ ] 3.2.2 Validation against schema (types, multi-valued fields, limits: doc size, field count, id length)
+- [ ] 3.2.6 `f64` field values: decide and spec whether `-0.0`/NaN are canonicalized (or rejected) on write, so range filters on order-preserving keys (SPEC §5.2.1) never silently exclude values
 - [ ] 3.2.3 CBOR encode/decode for DocStore; deterministic field order
 - [ ] 3.2.4 JSON ↔ Document conversion (strict/non-strict mode, SPEC §6.4)
 - [ ] 3.2.5 [T] property: random schema + random valid docs round-trip; invalid docs rejected with precise errors

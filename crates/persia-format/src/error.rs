@@ -77,6 +77,15 @@ pub enum Corruption {
         /// The last docid actually decoded.
         decoded: u32,
     },
+    /// A full postings block's `last_docid` is too small to end 128 docids that follow the previous block
+    /// (SPEC §5.2.1).
+    #[error("block last docid {last_docid} is below the smallest possible {min}")]
+    LastDocidOutOfRange {
+        /// `last_docid` from the header.
+        last_docid: u32,
+        /// The smallest valid value (`prev + 128`, or 127 for a list's first block; may exceed `u32::MAX`).
+        min: u64,
+    },
     /// An element count outside its valid range (SPEC §5.2.1).
     #[error("count {count} outside {min}..={max}")]
     InvalidCount {

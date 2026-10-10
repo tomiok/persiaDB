@@ -1,11 +1,12 @@
 //! Corruption and error-reporting tests for postings blocks (ROADMAP 1.2.3, SPEC §5.2.1 "Postings blocks").
 //!
 //! Invariants:
-//! 1. A reader built from the SPEC alone (byte offsets, bit-level unpacking, delta formula) agrees with
-//!    `read_postings_block` / `read_postings_tail` on arbitrary and mutated input: same value, same error kind,
-//!    same absolute error offset (`Reader::with_base_offset`), same bytes consumed.
-//! 2. Reads are atomic: on any error the reader has not moved; a tail read never writes past `count`.
-//! 3. `skip_postings_block` and `read_postings_block` agree: same header, same position, same header errors.
+//! 1. Readers built from the SPEC alone (byte offsets, the `last_docid >= prev + 128` header rule, bit-level
+//!    unpacking, delta formula) agree with `read_postings_header`, `skip_postings_block`,
+//!    `read_postings_block` and `read_postings_tail` on arbitrary and mutated input: same value, same error
+//!    kind, same absolute error offset (`Reader::with_base_offset`), same bytes consumed.
+//! 2. Reads are atomic: on any error the reader has not moved; a tail read never writes past its count.
+//! 3. Skipping and decoding agree: same header, same position; a block that skip rejects is never decoded.
 //! 4. Every single-bit flip in a valid block is either rejected with `Error::Corrupt` or decodes to a valid
 //!    block (strictly increasing, after `prev`, header last docid == decoded last). For full blocks a flip in
 //!    `last_docid` or in the packed gaps is always detected (the header pins the sum of all gaps).
@@ -25,12 +26,15 @@ use std::collections::BTreeSet;
 use common::{Mutation, apply, corrupt, eof, mutation, placement};
 
 use persia_format::bitpack::{BLOCK_LEN, BitWidth};
-use persia_format::postings::{BlockHeader, MAX_TAIL_LEN, TailHeader};
+use persia_format::postings::{BlockHeader, MAX_TAIL_LEN};
 use persia_format::{Corruption, EncodeError, Error, Reader, Writer};
 use proptest::prelude::*;
 use proptest::sample::Index;
 
 const SENTINEL: u32 = 0xdead_beef;
+
+/// A decoded block: its docids and the bytes consumed.
+type Decoded = (Vec<u32>, usize);
 
 /// SPEC §5.2.1 delta rule with wide arithmetic: `v_i = v_(i-1) + g_i + 1`, `v_(-1) = prev` or -1.
 fn reference_undelta(gaps: &[u32], prev: Option<u32>, start: u64) -> Result<Vec<u32>, Error> {
@@ -60,62 +64,81 @@ fn reference_unpack(bytes: &[u8], w: usize) -> Vec<u32> {
         .collect()
 }
 
-/// A full block read from the SPEC's byte table; returns the header, the docids and the bytes consumed.
-/// `start` is the absolute offset of `bytes[0]`.
-fn reference_full(
-    bytes: &[u8],
-    start: u64,
-    prev: Option<u32>,
-) -> Result<(BlockHeader, Vec<u32>, usize), Error> {
+/// SPEC §5.2.1: 128 strictly increasing docids after `prev` end at `prev + 128` or later (127 for a list's
+/// first block).
+fn min_last_docid(prev: Option<u32>) -> u64 {
+    prev.map_or(127, |p| u64::from(p) + 128)
+}
+
+/// A full block's 5-byte header from the SPEC's byte table. `start` is the absolute offset of `bytes[0]`.
+/// The `last_docid` range is checked before the width byte is read.
+fn reference_header(bytes: &[u8], start: u64, prev: Option<u32>) -> Result<BlockHeader, Error> {
     let len = bytes.len();
     if len < 4 {
         return Err(eof(start, 4, len));
     }
     let last_docid = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
-    if len < 8 {
-        return Err(eof(start + 4, 4, len - 4));
+    let min = min_last_docid(prev);
+    if u64::from(last_docid) < min {
+        return Err(corrupt(
+            start,
+            Corruption::LastDocidOutOfRange { last_docid, min },
+        ));
     }
-    let max_tf = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-    if len < 9 {
-        return Err(eof(start + 8, 1, 0));
+    if len < 5 {
+        return Err(eof(start + 4, 1, 0));
     }
-    let w = bytes[8];
+    let w = bytes[4];
     if w > 32 {
         return Err(corrupt(
-            start + 8,
+            start + 4,
             Corruption::InvalidBitWidth { width: w, max: 32 },
         ));
     }
-    let packed_len = 16 * usize::from(w);
-    if len - 9 < packed_len {
-        return Err(eof(start + 9, packed_len, len - 9));
+    Ok(BlockHeader {
+        last_docid,
+        width: BitWidth::new(w).unwrap(),
+    })
+}
+
+/// Skipping a full block: the header, then `16·width` bytes that must be present.
+fn reference_skip(
+    bytes: &[u8],
+    start: u64,
+    prev: Option<u32>,
+) -> Result<(BlockHeader, usize), Error> {
+    let header = reference_header(bytes, start, prev)?;
+    let packed_len = header.width.packed_len();
+    if bytes.len() - 5 < packed_len {
+        return Err(eof(start + 5, packed_len, bytes.len() - 5));
     }
-    let gaps = reference_unpack(&bytes[9..9 + packed_len], usize::from(w));
+    Ok((header, 5 + packed_len))
+}
+
+/// Decoding a full block: as skipping, then the docids must not overflow and must end at `last_docid`.
+fn reference_full(
+    bytes: &[u8],
+    start: u64,
+    prev: Option<u32>,
+) -> Result<(BlockHeader, Decoded), Error> {
+    let (header, used) = reference_skip(bytes, start, prev)?;
+    let gaps = reference_unpack(&bytes[5..used], usize::from(header.width.get()));
     let docids = reference_undelta(&gaps, prev, start)?;
-    if docids[BLOCK_LEN - 1] != last_docid {
+    if docids[BLOCK_LEN - 1] != header.last_docid {
         return Err(corrupt(
             start,
             Corruption::LastDocidMismatch {
-                header: last_docid,
+                header: header.last_docid,
                 decoded: docids[BLOCK_LEN - 1],
             },
         ));
     }
-    let header = BlockHeader {
-        last_docid,
-        max_tf,
-        width: BitWidth::new(w).unwrap(),
-    };
-    Ok((header, docids, 9 + packed_len))
+    Ok((header, (docids, used)))
 }
 
-/// A tail block read from the SPEC's byte table. Varints are parsed by the crate's own (separately
-/// tested, see `varint_props.rs`) varint reader, so their errors are passed through as-is.
-fn reference_tail(
-    bytes: &[u8],
-    start: u64,
-    prev: Option<u32>,
-) -> Result<(TailHeader, Vec<u32>, usize), Error> {
+/// A tail block from the SPEC's byte table: `count` (1..=127), then `count` varint gaps. Varints are parsed by
+/// the crate's own (separately tested, see `varint_props.rs`) varint reader, so their errors pass through.
+fn reference_tail(bytes: &[u8], start: u64, prev: Option<u32>) -> Result<Decoded, Error> {
     let Some(&raw_count) = bytes.first() else {
         return Err(eof(start, 1, 0));
     };
@@ -131,83 +154,106 @@ fn reference_tail(
         ));
     }
     let mut r = Reader::with_base_offset(&bytes[1..], start + 1);
-    let max_tf = r.read_varint_u32()?;
     let gaps = (0..count)
         .map(|_| r.read_varint_u32())
         .collect::<Result<Vec<_>, _>>()?;
     let docids = reference_undelta(&gaps, prev, start)?;
-    Ok((TailHeader { count, max_tf }, docids, 1 + r.position()))
+    Ok((docids, 1 + r.position()))
 }
 
-/// Reads a full block with the crate at absolute offset `base + skip`, checking atomicity and that
-/// `skip_postings_block` agrees; returns what `reference_full` returns.
-fn library_full(
-    bytes: &[u8],
+/// Places `block` at absolute offset `base + prefix.len()` behind an already-consumed `prefix`, runs
+/// `read_postings_header`, `skip_postings_block` and `read_postings_block` on it, and checks each against
+/// its reference and for atomicity. Returns the decode result.
+fn check_full(
+    block: &[u8],
     base: u64,
-    skip: usize,
+    prefix: &[u8],
     prev: Option<u32>,
-) -> Result<(BlockHeader, Vec<u32>, usize), Error> {
-    let mut r = Reader::with_base_offset(bytes, base);
-    r.skip(skip).unwrap();
+) -> Result<(BlockHeader, Decoded), Error> {
+    let mut bytes = prefix.to_vec();
+    bytes.extend(block);
+    let skip = prefix.len();
+    let start = base + skip as u64;
+    let reader = || {
+        let mut r = Reader::with_base_offset(&bytes, base);
+        r.skip(skip).unwrap();
+        r
+    };
+
+    let mut h = reader();
+    let header = h.read_postings_header(prev);
+    assert_eq!(
+        header,
+        reference_header(block, start, prev),
+        "read_postings_header"
+    );
+    let expected_pos = if header.is_ok() { skip + 5 } else { skip };
+    assert_eq!(h.position(), expected_pos, "header read moved wrongly");
+
+    let mut s = reader();
+    let skipped = s.skip_postings_block(prev);
+    let expected_skip = reference_skip(block, start, prev);
+    assert_eq!(
+        skipped,
+        expected_skip.clone().map(|(h, _)| h),
+        "skip_postings_block"
+    );
+    let expected_pos = expected_skip.as_ref().map_or(skip, |(_, used)| skip + used);
+    assert_eq!(s.position(), expected_pos, "skip moved wrongly");
+
+    let mut r = reader();
     let mut out = [SENTINEL; BLOCK_LEN];
     let read = r.read_postings_block(prev, &mut out);
-
-    let mut s = Reader::with_base_offset(bytes, base);
-    s.skip(skip).unwrap();
-    let skipped = s.skip_postings_block();
-    match (&read, &skipped) {
-        (Ok(h), Ok(sh)) => {
-            assert_eq!(h, sh, "skip and read disagree on the header");
+    let actual = match read {
+        Ok(header) => {
+            // Decoding lands exactly where skipping does.
             assert_eq!(
                 r.position(),
                 s.position(),
                 "skip and read disagree on position"
             );
+            Ok((header, (out.to_vec(), r.position() - skip)))
         }
-        (Err(e), Err(se)) => {
-            assert_eq!(e, se, "a header error must be the same for skip and read");
-        }
-        (Err(_), Ok(_)) => {} // content errors (overflow, last-docid mismatch) are invisible to skip
-        (Ok(_), Err(se)) => assert!(
-            read.is_err(),
-            "read accepted a block that skip rejects: {se}"
-        ),
-    }
-    if skipped.is_err() {
-        assert_eq!(s.position(), skip, "failed skip moved the reader");
-    }
-
-    match read {
-        Ok(header) => Ok((header, out.to_vec(), r.position() - skip)),
         Err(e) => {
             assert_eq!(r.position(), skip, "failed read moved the reader");
             Err(e)
         }
+    };
+    assert_eq!(
+        actual,
+        reference_full(block, start, prev),
+        "read_postings_block"
+    );
+    if let Err(e) = &skipped {
+        // Anything skip rejects, decode rejects the same way.
+        assert_eq!(actual.as_ref().err(), Some(e));
     }
+    actual
 }
 
-fn library_tail(
-    bytes: &[u8],
-    base: u64,
-    skip: usize,
-    prev: Option<u32>,
-) -> Result<(TailHeader, Vec<u32>, usize), Error> {
-    let mut r = Reader::with_base_offset(bytes, base);
+/// Runs `read_postings_tail` on `block` placed as in [`check_full`] and checks it against its reference.
+fn check_tail(block: &[u8], base: u64, prefix: &[u8], prev: Option<u32>) -> Result<Decoded, Error> {
+    let mut bytes = prefix.to_vec();
+    bytes.extend(block);
+    let skip = prefix.len();
+    let mut r = Reader::with_base_offset(&bytes, base);
     r.skip(skip).unwrap();
     let mut out = [SENTINEL; BLOCK_LEN];
-    match r.read_postings_tail(prev, &mut out) {
-        Ok(tail) => {
+    let actual = match r.read_postings_tail(prev, &mut out) {
+        Ok(count) => {
             assert!(
-                out[tail.count..].iter().all(|&x| x == SENTINEL),
-                "tail read wrote past count"
+                out[count..].iter().all(|&x| x == SENTINEL),
+                "tail read wrote past its count"
             );
-            Ok((tail, out[..tail.count].to_vec(), r.position() - skip))
+            Ok((out[..count].to_vec(), r.position() - skip))
         }
         Err(e) => {
             assert_eq!(r.position(), skip, "failed read moved the reader");
             Err(e)
         }
-    }
+    };
+    assert_eq!(actual, reference_tail(block, base + skip as u64, prev));
+    actual
 }
 
 /// What every accepted block must satisfy, whatever its bytes.
@@ -223,15 +269,15 @@ fn assert_valid_docids(docids: &[u32], prev: Option<u32>) {
     );
 }
 
-fn encode_full(docids: &[u32; BLOCK_LEN], prev: Option<u32>, max_tf: u32) -> Vec<u8> {
+fn encode_full(docids: &[u32; BLOCK_LEN], prev: Option<u32>) -> Vec<u8> {
     let mut w = Writer::new();
-    w.write_postings_block(docids, prev, max_tf).unwrap();
+    w.write_postings_block(docids, prev).unwrap();
     w.into_inner()
 }
 
-fn encode_tail(docids: &[u32], prev: Option<u32>, max_tf: u32) -> Vec<u8> {
+fn encode_tail(docids: &[u32], prev: Option<u32>) -> Vec<u8> {
     let mut w = Writer::new();
-    w.write_postings_tail(docids, prev, max_tf).unwrap();
+    w.write_postings_tail(docids, prev).unwrap();
     w.into_inner()
 }
 
@@ -250,7 +296,7 @@ fn sorted_docids(n: usize) -> impl Strategy<Value = Vec<u32>> {
                 })
                 .collect()
         }),
-        // Dense run: all gaps 0 except possibly the first.
+        // Dense run: all gaps 0 except possibly the first; `last_docid` is at its minimum after `first - 1`.
         (0..=u32::MAX - n as u32).prop_map(move |s| (s..s + n as u32).collect()),
         // One small docid, then a run ending at u32::MAX: a gap near 2^32 (width 32).
         (0..u32::MAX - n as u32).prop_map(move |x| {
@@ -271,33 +317,25 @@ fn prev_before(first: u32) -> impl Strategy<Value = Option<u32>> {
 
 proptest! {
     #[test]
-    fn full_block_reader_matches_spec_reference(
+    fn full_block_readers_match_spec_reference(
         (docids, prev) in sorted_docids(BLOCK_LEN)
             .prop_flat_map(|d| { let first = d[0]; (Just(d), prev_before(first)) }),
-        max_tf in any::<u32>(),
         m in mutation(),
         (base, prefix) in placement(),
         read_prev in any::<bool>(),
     ) {
         let docids: [u32; BLOCK_LEN] = docids.try_into().unwrap();
-        let block = apply(encode_full(&docids, prev, max_tf), &m);
-        // Mostly decode with the right prev; sometimes with a wrong one, which must also be handled.
+        let block = apply(encode_full(&docids, prev), &m);
+        // Mostly decode with the right prev; sometimes with a later one, which can trip the header rule.
         let prev = if read_prev { prev } else { prev.map_or(Some(0), |p| p.checked_add(1)) };
-        let mut bytes = prefix.clone();
-        bytes.extend(&block);
-        let start = base + prefix.len() as u64;
-
-        let expected = reference_full(&block, start, prev);
-        let actual = library_full(&bytes, base, prefix.len(), prev);
-        prop_assert_eq!(&actual, &expected);
-        if let Ok((header, decoded, _)) = &actual {
+        let actual = check_full(&block, base, &prefix, prev);
+        if let Ok((header, (decoded, _))) = &actual {
             assert_valid_docids(decoded, prev);
             prop_assert_eq!(header.last_docid, decoded[BLOCK_LEN - 1]);
         }
         if matches!(m, Mutation::Keep) && read_prev {
-            let (header, decoded, used) = actual.unwrap();
+            let (_, (decoded, used)) = actual.unwrap();
             prop_assert_eq!(decoded.as_slice(), &docids[..]);
-            prop_assert_eq!(header.max_tf, max_tf);
             prop_assert_eq!(used, block.len());
         }
     }
@@ -307,26 +345,17 @@ proptest! {
         (docids, prev) in (1..=MAX_TAIL_LEN)
             .prop_flat_map(sorted_docids)
             .prop_flat_map(|d| { let first = d[0]; (Just(d), prev_before(first)) }),
-        max_tf in any::<u32>(),
         m in mutation(),
         (base, prefix) in placement(),
     ) {
-        let block = apply(encode_tail(&docids, prev, max_tf), &m);
-        let mut bytes = prefix.clone();
-        bytes.extend(&block);
-        let start = base + prefix.len() as u64;
-
-        let expected = reference_tail(&block, start, prev);
-        let actual = library_tail(&bytes, base, prefix.len(), prev);
-        prop_assert_eq!(&actual, &expected);
-        if let Ok((tail, decoded, _)) = &actual {
+        let block = apply(encode_tail(&docids, prev), &m);
+        let actual = check_tail(&block, base, &prefix, prev);
+        if let Ok((decoded, _)) = &actual {
             assert_valid_docids(decoded, prev);
-            prop_assert_eq!(tail.count, decoded.len());
         }
         if matches!(m, Mutation::Keep) {
-            let (tail, decoded, used) = actual.unwrap();
+            let (decoded, used) = actual.unwrap();
             prop_assert_eq!(&decoded, &docids);
-            prop_assert_eq!(tail.max_tf, max_tf);
             prop_assert_eq!(used, block.len());
         }
     }
@@ -348,13 +377,13 @@ proptest! {
 
         let bad_full: [u32; BLOCK_LEN] = bad.clone().try_into().unwrap();
         prop_assert_eq!(
-            w.write_postings_block(&bad_full, prev, 1),
+            w.write_postings_block(&bad_full, prev),
             Err(EncodeError::NotStrictlyIncreasing { index: i })
         );
         prop_assert_eq!(w.as_slice(), prefix.as_slice());
 
         let tail = &bad[..tail_len];
-        let result = w.write_postings_tail(tail, prev, 1);
+        let result = w.write_postings_tail(tail, prev);
         if !(1..=MAX_TAIL_LEN).contains(&tail_len) {
             prop_assert_eq!(result, Err(EncodeError::InvalidLen { len: tail_len, min: 1, max: 127 }));
         } else if i < tail_len {
@@ -367,10 +396,11 @@ proptest! {
     }
 }
 
-/// Valid full blocks covering widths 0, small, 25-ish and 32, with and without `prev`.
+/// Valid full blocks covering widths 0, small, 25-ish and 32, with and without `prev`, and `last_docid` at
+/// exactly its minimum.
 fn sample_full_blocks() -> Vec<([u32; BLOCK_LEN], Option<u32>)> {
     vec![
-        (core::array::from_fn(|i| i as u32), None), // width 0
+        (core::array::from_fn(|i| i as u32), None), // width 0, last 127 = minimum
         (
             core::array::from_fn(|i| 1000 + 7 * i as u32 + (i as u32 % 3)),
             Some(999),
@@ -384,48 +414,51 @@ fn sample_full_blocks() -> Vec<([u32; BLOCK_LEN], Option<u32>)> {
             core::array::from_fn(|i| u32::MAX - 127 + i as u32),
             Some(u32::MAX - 200),
         ), // ends at u32::MAX, width 7
+        (
+            core::array::from_fn(|i| u32::MAX - 127 + i as u32),
+            Some(u32::MAX - 128),
+        ), // width 0, last u32::MAX = minimum
     ]
 }
 
 /// Invariant 4, exhaustive over every bit of every sample full block.
 #[test]
 fn every_bit_flip_in_a_full_block_is_detected_or_harmless() {
+    let base = 4096;
     for (docids, prev) in sample_full_blocks() {
-        let bytes = encode_full(&docids, prev, 0x0102_0304);
-        let width = usize::from(bytes[8]);
-        assert_eq!(bytes.len(), 9 + 16 * width);
+        let bytes = encode_full(&docids, prev);
+        let width = usize::from(bytes[4]);
+        assert_eq!(bytes.len(), 5 + 16 * width);
+        let last = docids[BLOCK_LEN - 1];
         for bit in 0..bytes.len() * 8 {
             let mut flipped = bytes.clone();
             flipped[bit / 8] ^= 1 << (bit % 8);
-            let base = 4096;
-            let result = library_full(&flipped, base, 0, prev);
-            assert_eq!(
-                result,
-                reference_full(&flipped, base, prev),
-                "width {width} bit {bit}"
-            );
+            let result = check_full(&flipped, base, &[], prev);
             match bit / 8 {
-                // last_docid: the decoded content no longer matches the header.
-                0..4 => assert_eq!(
-                    result,
-                    Err(corrupt(
-                        base,
-                        Corruption::LastDocidMismatch {
-                            header: docids[BLOCK_LEN - 1] ^ (1 << bit),
-                            decoded: docids[BLOCK_LEN - 1],
+                // last_docid: below the header minimum, or no longer what the content decodes to.
+                0..4 => {
+                    let flipped_last = last ^ (1 << bit);
+                    let min = min_last_docid(prev);
+                    let reason = if u64::from(flipped_last) < min {
+                        Corruption::LastDocidOutOfRange {
+                            last_docid: flipped_last,
+                            min,
                         }
-                    )),
-                    "width {width} bit {bit}"
-                ),
-                // max_tf is not self-checking (the Frame checksum covers it, SPEC §4.4): decodes, docids intact.
-                4..8 => {
-                    let (header, decoded, _) = result.unwrap();
-                    assert_eq!(header.max_tf, 0x0102_0304 ^ (1 << (bit - 32)));
-                    assert_eq!(decoded, docids);
+                    } else {
+                        Corruption::LastDocidMismatch {
+                            header: flipped_last,
+                            decoded: last,
+                        }
+                    };
+                    assert_eq!(
+                        result,
+                        Err(corrupt(base, reason)),
+                        "width {width} bit {bit}"
+                    );
                 }
                 // Width: either rejected or a structurally valid block.
-                8 => {
-                    if let Ok((header, decoded, _)) = result {
+                4 => {
+                    if let Ok((header, (decoded, _))) = result {
                         assert_valid_docids(&decoded, prev);
                         assert_eq!(header.last_docid, decoded[BLOCK_LEN - 1]);
                     }
@@ -460,17 +493,11 @@ fn every_bit_flip_in_a_tail_block_is_detected_or_harmless() {
         ((0..127).map(|i| u32::MAX - 126 + i).collect(), Some(0)),
     ];
     for (docids, prev) in samples {
-        let bytes = encode_tail(&docids, prev, u32::MAX);
+        let bytes = encode_tail(&docids, prev);
         for bit in 0..bytes.len() * 8 {
             let mut flipped = bytes.clone();
             flipped[bit / 8] ^= 1 << (bit % 8);
-            let result = library_tail(&flipped, 77, 0, prev);
-            assert_eq!(
-                result,
-                reference_tail(&flipped, 77, prev),
-                "{docids:?} bit {bit}"
-            );
-            if let Ok((_, decoded, used)) = result {
+            if let Ok((decoded, used)) = check_tail(&flipped, 77, &[], prev) {
                 assert_valid_docids(&decoded, prev);
                 assert!(used <= flipped.len());
             }
@@ -478,40 +505,103 @@ fn every_bit_flip_in_a_tail_block_is_detected_or_harmless() {
     }
 }
 
-/// Invariant 1 at the edges: a full block of widths 32 and 0 at the top of the docid space round-trips.
+/// The header rule is checked first (SPEC §5.2.1): a `last_docid` below `prev + 128` (127 for a list's
+/// first block) is `LastDocidOutOfRange` at the block start even when the width byte is invalid or missing;
+/// at exactly the minimum, the width byte is what fails.
+#[test]
+fn last_docid_range_is_checked_before_the_width() {
+    let prevs = [
+        None,
+        Some(0),
+        Some(1000),
+        Some(u32::MAX - 128),
+        Some(u32::MAX - 127),
+        Some(u32::MAX),
+    ];
+    for prev in prevs {
+        let min = min_last_docid(prev);
+        let below = u32::try_from(min - 1).unwrap_or(u32::MAX);
+        let at_min = u32::try_from(min).ok();
+        for tail in [&[][..], &[33][..], &[0][..]] {
+            let mut block = below.to_le_bytes().to_vec();
+            block.extend(tail);
+            assert_eq!(
+                check_full(&block, 512, &[0xee], prev).map(|(h, _)| h),
+                Err(corrupt(
+                    513,
+                    Corruption::LastDocidOutOfRange {
+                        last_docid: below,
+                        min
+                    }
+                )),
+                "{prev:?} {tail:?}"
+            );
+            if let Some(last) = at_min {
+                let mut block = last.to_le_bytes().to_vec();
+                block.extend(tail);
+                let expected = match tail {
+                    [] => eof(517, 1, 0),
+                    [33] => corrupt(517, Corruption::InvalidBitWidth { width: 33, max: 32 }),
+                    // Width 0: the header and the skip succeed; decoding checks the content.
+                    _ => {
+                        let mut r = Reader::new(&block);
+                        assert_eq!(
+                            r.skip_postings_block(prev),
+                            Ok(BlockHeader {
+                                last_docid: last,
+                                width: BitWidth::new(0).unwrap()
+                            })
+                        );
+                        assert_eq!(r.position(), 5);
+                        continue;
+                    }
+                };
+                assert_eq!(
+                    check_full(&block, 512, &[0xee], prev).map(|(h, _)| h),
+                    Err(expected)
+                );
+            }
+        }
+    }
+}
+
+/// Invariant 1 at the edges: full blocks of widths 0 to 32 at the top of the docid space round-trip.
 #[test]
 fn full_blocks_round_trip_at_the_u32_edges() {
     for (docids, prev) in sample_full_blocks() {
-        let bytes = encode_full(&docids, prev, u32::MAX);
-        let (header, decoded, used) = library_full(&bytes, 0, 0, prev).unwrap();
+        let bytes = encode_full(&docids, prev);
+        let (header, (decoded, used)) = check_full(&bytes, 0, &[], prev).unwrap();
         assert_eq!(decoded, docids);
-        assert_eq!(header.max_tf, u32::MAX);
         assert_eq!(header.last_docid, docids[BLOCK_LEN - 1]);
         assert_eq!(used, bytes.len());
     }
     let widths: Vec<u8> = sample_full_blocks()
         .iter()
-        .map(|(d, p)| encode_full(d, *p, 0)[8])
+        .map(|(d, p)| encode_full(d, *p)[4])
         .collect();
-    assert_eq!(widths, [0, 3, 25, 32, 7]);
+    assert_eq!(widths, [0, 3, 25, 32, 7, 0]);
 }
 
-/// Golden tail at the u32 edges (SPEC §5.2.1, §4.1 varints): a single docid `u32::MAX` from the start of a
-/// list is gap `u32::MAX`, a 5-byte varint, as is `max_tf = u32::MAX`.
+/// Golden blocks at the u32 edges (SPEC §5.2.1, §4.1 varints).
 #[test]
-fn golden_tail_at_u32_max() {
+fn golden_blocks_at_u32_max() {
+    // A single docid u32::MAX from the start of a list is gap u32::MAX: a 5-byte varint.
     assert_eq!(
-        encode_tail(&[u32::MAX], None, u32::MAX),
-        [
-            1, 0xff, 0xff, 0xff, 0xff, 0x0f, 0xff, 0xff, 0xff, 0xff, 0x0f
-        ]
+        encode_tail(&[u32::MAX], None),
+        [1, 0xff, 0xff, 0xff, 0xff, 0x0f]
     );
     // After prev u32::MAX - 1 the gap is 0.
-    assert_eq!(encode_tail(&[u32::MAX], Some(u32::MAX - 1), 0), [1, 0, 0]);
+    assert_eq!(encode_tail(&[u32::MAX], Some(u32::MAX - 1)), [1, 0]);
+    // The last 128 docids after prev u32::MAX - 128: a 5-byte header, width 0, nothing packed.
+    let top: [u32; BLOCK_LEN] = core::array::from_fn(|i| u32::MAX - 127 + i as u32);
+    assert_eq!(
+        encode_full(&top, Some(u32::MAX - 128)),
+        [0xff, 0xff, 0xff, 0xff, 0]
+    );
     // Nothing can follow u32::MAX.
     let mut w = Writer::new();
     assert_eq!(
-        w.write_postings_tail(&[u32::MAX], Some(u32::MAX), 0),
+        w.write_postings_tail(&[u32::MAX], Some(u32::MAX)),
         Err(EncodeError::NotStrictlyIncreasing { index: 0 })
     );
     assert!(w.is_empty());
