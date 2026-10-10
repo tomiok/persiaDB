@@ -1,0 +1,33 @@
+---
+title: How it works
+description: Crate layers, the planned write path, and the planned query path.
+---
+
+import ArchitectureDiagram from '../../components/ArchitectureDiagram.astro';
+import WritePath from '../../components/WritePath.astro';
+import QueryPath from '../../components/QueryPath.astro';
+import WinButton from '../../components/WinButton.astro';
+
+Persia is a library you open on a file, plus a server that embeds the same engine.
+The engine is synchronous. It talks to disks and object storage only through a `Storage` trait
+that does not exist yet. Async belongs in the cloud backends and in the server.
+
+<ArchitectureDiagram />
+
+## A write
+
+<WritePath />
+
+## A query
+
+<QueryPath />
+
+The contributor map, with the crate dependency graph, is
+[docs/architecture.md](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md).
+Quotes from the code that exists today are on the [code](/guide/code/) page.
+
+<p class="win-actions">
+    <WinButton href="/guide/architecture/">Architecture guide</WinButton>
+    <WinButton href="/guide/code/">Read the code</WinButton>
+    <WinButton href="/guide/file-format/">File format</WinButton>
+</p>

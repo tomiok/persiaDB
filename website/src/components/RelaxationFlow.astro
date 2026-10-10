@@ -1,0 +1,54 @@
+---
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+---
+
+<figure class="diagram">
+    <div class="diagram-scroll">
+        <svg viewBox="0 0 520 420" role="img" aria-labelledby="relax-title relax-desc">
+            <title id="relax-title">Zero-results relaxation cascade</title>
+            <desc id="relax-desc">
+                Six levels, L0 exact through L5 fallback. The engine stops at the first level that returns enough hits.
+                Stricter levels rank above looser ones. Filters are not relaxed unless the caller opts in.
+            </desc>
+            <rect width="520" height="420" fill="#ffffff" />
+            <g font-family="Courier New, Courier, monospace" font-size="13" fill="#000000">
+                <rect x="16" y="16" width="150" height="70" fill="#c0c0c0" stroke="#000080" stroke-width="2" />
+                <text x="28" y="42">L0 exact</text>
+                <text x="28" y="64">every term required</text>
+
+                <rect x="184" y="16" width="150" height="70" fill="#ffffff" stroke="#000080" stroke-width="2" />
+                <text x="196" y="42">L1 synonyms</text>
+                <text x="196" y="64">expand groups</text>
+
+                <rect x="352" y="16" width="152" height="70" fill="#ffffff" stroke="#000080" stroke-width="2" />
+                <text x="364" y="42">L2 drop terms</text>
+                <text x="364" y="64">100, 75, 50, 1</text>
+
+                <rect x="16" y="120" width="150" height="70" fill="#ffffff" stroke="#000080" stroke-width="2" />
+                <text x="28" y="146">L3 prefix</text>
+                <text x="28" y="168">capped expansions</text>
+
+                <rect x="184" y="120" width="150" height="70" fill="#ffffff" stroke="#000080" stroke-width="2" />
+                <text x="196" y="146">L4 fuzzy</text>
+                <text x="196" y="168">edit distance 1 or 2</text>
+
+                <rect x="352" y="120" width="152" height="70" fill="#ffffcc" stroke="#800000" stroke-width="2" />
+                <text x="364" y="146">L5 fallback</text>
+                <text x="364" y="168">static rank, or none</text>
+
+                <text x="16" y="230">Stop at the first level with enough hits (default: one).</text>
+                <text x="16" y="254">A stricter level always ranks above a looser one.</text>
+                <text x="16" y="278">The response includes level, applied steps, and corrections.</text>
+                <text x="16" y="302">Filters stay as written, unless relax.filters is last_resort.</text>
+                <text x="16" y="326">A time budget (default 50 ms) returns the best so far.</text>
+                <text x="16" y="350">Turn the whole feature off per query with relax: false.</text>
+                <text x="16" y="386">Planned. SPEC section 7.6. Milestone M8. On by default in the design.</text>
+                <text x="16" y="410">L5 is drawn on a yellow field so the last resort is easy to find; the label says fallback.</text>
+            </g>
+        </svg>
+    </div>
+    <figcaption>
+        The cascade in SPEC §7.6. The full table, with the illustrative JSON shape, is in the
+        <a href={`${base}/guide/features/#zero-results-relaxation`}>features guide</a>.
+    </figcaption>
+</figure>

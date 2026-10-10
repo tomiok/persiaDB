@@ -1,0 +1,45 @@
+---
+title: Roadmap
+description: Milestone status for Persia DB as of 2026-10-10. Bootstrap is done. Format primitives are in progress.
+---
+
+import WinButton from '../../components/WinButton.astro';
+
+Work is a tree of milestones, `M0` through `M15`. Every leaf is one issue and one pull request.
+This table is the **2026-10-10** snapshot from
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **51 of 400 leaves, 13%**.
+That file is regenerated from checkboxes in
+[ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md) and is the live status.
+No leaf is marked in progress. M1 is the active milestone because half of its leaves are done.
+
+A milestone is **done** when every leaf is done, **in progress** when some are done,
+**ready** when its dependencies are done and its own leaves have not started, and **blocked**
+while a dependency is unfinished.
+
+| Milestone | Delivers | Depends on | Snapshot |
+|---|---|---|---|
+| **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | Done, 26/26 |
+| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 25/50 |
+| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/23 |
+| **M3** Schema | Collections, documents, manifests | M1 | Blocked, 0/15 |
+| **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Ready, 0/22 |
+| **M5** Segments | Segment writer and reader | M1, M3, M4 | Blocked, 0/35 |
+| **M6** Durability | WAL, commit, merge, recovery | M2, M5 | Blocked, 0/29 |
+| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Blocked, 0/29 |
+| **M8** Relaxation | The zero-results cascade | M7 | Blocked, 0/23 |
+| **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | Blocked, 0/19 |
+| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/17 |
+| **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/22 |
+| **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/28 |
+| **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
+| **M14** SDKs | Rust and Go clients | M11; M13 for shard routing | Blocked, 0/17 |
+| **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
+
+The next format work is a resource-error class for compression (1.4.4), then block framing (1.5),
+then the container header and superblock (1.6). Text analysis (M4) may proceed alongside that.
+What each milestone contains, in prose, is the [roadmap guide](/guide/roadmap/).
+
+<p class="win-actions">
+    <WinButton href="/guide/roadmap/">Milestone by milestone</WinButton>
+    <WinButton href="https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md">ROADMAP.md</WinButton>
+</p>

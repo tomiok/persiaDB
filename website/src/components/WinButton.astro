@@ -1,0 +1,11 @@
+---
+interface Props {
+    href: string;
+}
+
+const { href } = Astro.props;
+const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const url = href.startsWith('http') ? href : `${base}${href}`;
+---
+
+<a class="win-btn" href={url}><slot /></a>

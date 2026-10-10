@@ -1,0 +1,371 @@
+/*
+ * Windows 98 chrome for the Persia DB site.
+ * Gray #c0c0c0 desktop, navy #000080 title bar and headings, white content,
+ * classic blue links and purple visited links. Borders are beveled, not rounded.
+ * Body text stays at least 16px. Status is written in words, not color alone.
+ */
+
+:root,
+:root[data-theme='light'] {
+    --sl-font: Georgia, 'Times New Roman', Times, serif;
+    --sl-font-mono: 'Courier New', Courier, monospace;
+    --sl-color-bg: #c0c0c0;
+    --sl-color-bg-nav: #000080;
+    --sl-color-bg-sidebar: #c0c0c0;
+    --sl-color-black: #c0c0c0;
+    --sl-color-white: #000000;
+    --sl-color-text: #000000;
+    --sl-color-text-accent: #0000ee;
+    --sl-color-text-invert: #ffffff;
+    --sl-color-accent: #000080;
+    --sl-color-accent-high: #000080;
+    --sl-color-accent-low: #d4d0c8;
+    --sl-color-bg-accent: #000080;
+    --sl-color-hairline: #808080;
+    --sl-color-hairline-light: #ffffff;
+    --sl-color-hairline-shade: #404040;
+    --sl-color-gray-1: #000000;
+    --sl-color-gray-2: #000000;
+    --sl-color-gray-3: #404040;
+    --sl-color-gray-4: #808080;
+    --sl-color-gray-5: #c0c0c0;
+    --sl-color-gray-6: #d4d0c8;
+    --sl-color-gray-7: #c0c0c0;
+    --sl-color-bg-inline-code: #ffffff;
+    --sl-shadow-sm: none;
+    --sl-shadow-md: none;
+    --sl-shadow-lg: none;
+    --sl-text-2xs: 0.875rem;
+    --sl-text-xs: 0.875rem;
+    --sl-text-sm: 1rem;
+    --sl-text-base: 1.0625rem;
+    --sl-text-body: 1.0625rem;
+    --sl-text-body-sm: 1rem;
+    --sl-line-height: 1.6;
+    color-scheme: light;
+}
+
+/* Same palette on a navy desktop, so the theme toggle stays readable. */
+:root[data-theme='dark'] {
+    --sl-color-bg: #000080;
+    --sl-color-bg-nav: #000080;
+    --sl-color-bg-sidebar: #c0c0c0;
+    --sl-color-black: #c0c0c0;
+    --sl-color-white: #000000;
+    --sl-color-text: #000000;
+    --sl-color-text-accent: #0000ee;
+    --sl-color-text-invert: #ffffff;
+    --sl-color-accent: #000080;
+    --sl-color-accent-high: #ffffff;
+    --sl-color-accent-low: #d4d0c8;
+    --sl-color-gray-1: #000000;
+    --sl-color-gray-2: #000000;
+    --sl-color-gray-3: #404040;
+    --sl-color-gray-4: #808080;
+    --sl-color-gray-5: #c0c0c0;
+    --sl-color-gray-6: #d4d0c8;
+    --sl-color-bg-inline-code: #ffffff;
+    color-scheme: dark;
+}
+
+.page {
+    background: var(--sl-color-bg);
+    color: #000000;
+}
+
+header.header {
+    background: #000080;
+    color: #ffffff;
+    border-bottom: 2px solid #000000;
+}
+
+header.header .site-title,
+header.header .site-title span {
+    color: #ffffff;
+    font-family: 'Courier New', Courier, monospace;
+    font-weight: bold;
+    text-decoration: none;
+}
+
+header.header a.site-title:hover,
+header.header a.site-title:focus {
+    text-decoration: underline;
+}
+
+.site-title img {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    height: 32px;
+    width: 32px;
+    background: #ffffff;
+    border: 2px solid #ffffff;
+    border-color: #ffffff #404040 #404040 #ffffff;
+}
+
+header.header button,
+header.header select {
+    background: #c0c0c0;
+    color: #000000;
+    border: 2px solid #ffffff;
+    border-color: #ffffff #404040 #404040 #ffffff;
+    border-radius: 0;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.sidebar-pane {
+    background: #c0c0c0;
+    color: #000000;
+    border-right: 2px solid #808080;
+}
+
+.sidebar a {
+    color: #0000ee;
+    text-decoration: underline;
+    border-radius: 0;
+}
+
+.sidebar a:visited {
+    color: #800080;
+}
+
+.sidebar a[aria-current='page'] {
+    background: #000080;
+    color: #ffffff;
+    text-decoration: none;
+}
+
+.sidebar summary,
+.group-label {
+    color: #000080;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.content-panel {
+    background: #ffffff;
+    color: #000000;
+    margin: 0.75rem;
+    border: 2px solid #808080;
+    border-color: #ffffff #404040 #404040 #ffffff;
+}
+
+.sl-markdown-content,
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3,
+.sl-markdown-content h4 {
+    color: #000000;
+}
+
+.sl-markdown-content h1,
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+    font-family: Georgia, 'Times New Roman', Times, serif;
+}
+
+.sl-markdown-content h2,
+.sl-markdown-content h3 {
+    color: #000080;
+}
+
+.sl-markdown-content a {
+    color: #0000ee;
+    text-decoration: underline;
+}
+
+.sl-markdown-content a:visited {
+    color: #800080;
+}
+
+.sl-markdown-content a:hover,
+.sl-markdown-content a:focus-visible {
+    background: #ffffcc;
+}
+
+.sl-markdown-content {
+    overflow-x: auto;
+}
+
+.sl-markdown-content table {
+    width: 100%;
+    min-width: 36rem;
+    border-collapse: collapse;
+    background: #ffffff;
+    border: 2px solid #000000;
+}
+
+.sl-markdown-content th,
+.sl-markdown-content td {
+    border: 1px solid #808080;
+    padding: 0.4rem 0.55rem;
+    text-align: left;
+    vertical-align: top;
+}
+
+.sl-markdown-content th {
+    background: #000080;
+    color: #ffffff;
+    font-family: 'Courier New', Courier, monospace;
+    font-weight: bold;
+}
+
+.sl-markdown-content :not(pre) > code {
+    background: #ffffff;
+    color: #000000;
+    border: 1px solid #808080;
+    border-radius: 0;
+    font-family: 'Courier New', Courier, monospace;
+    padding: 0.05rem 0.25rem;
+}
+
+.sl-markdown-content pre {
+    border: 2px solid #808080;
+    border-radius: 0;
+}
+
+.starlight-aside {
+    border: 2px solid #808080;
+    border-radius: 0;
+    background: #ffffcc;
+    color: #000000;
+}
+
+.starlight-aside__title {
+    color: #000080;
+    font-family: 'Courier New', Courier, monospace;
+}
+
+.pagination-links a {
+    background: #c0c0c0;
+    color: #000000;
+    text-decoration: none;
+    border: 2px solid #ffffff;
+    border-color: #ffffff #404040 #404040 #ffffff;
+    border-radius: 0;
+}
+
+.pagination-links a:hover,
+.pagination-links a:focus-visible {
+    color: #0000ee;
+    text-decoration: underline;
+}
+
+:focus-visible {
+    outline: 2px solid #000080;
+    outline-offset: 2px;
+}
+
+header.header :focus-visible {
+    outline-color: #ffffff;
+}
+
+.pixel-logo {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    background: #ffffff;
+    border: 2px solid #ffffff;
+    border-color: #ffffff #404040 #404040 #ffffff;
+}
+
+.pixel-banner {
+    image-rendering: pixelated;
+    image-rendering: crisp-edges;
+    display: block;
+    margin: 0.25rem 0 0.75rem;
+    max-width: 100%;
+    height: auto;
+}
+
+.win-box {
+    background: #ffffff;
+    color: #000000;
+    border: 2px solid #808080;
+    border-color: #404040 #ffffff #ffffff #404040;
+    padding: 0.75rem 1rem 1rem;
+    margin: 1rem 0;
+}
+
+.win-box-title {
+    margin: 0 0 0.5rem;
+    color: #000080;
+    font-family: 'Courier New', Courier, monospace;
+    font-weight: bold;
+}
+
+.win-box-body > :first-child {
+    margin-top: 0;
+}
+
+.win-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.win-btn {
+    display: inline-block;
+    background: #c0c0c0;
+    color: #000000;
+    font-family: 'Courier New', Courier, monospace;
+    text-decoration: none;
+    border: 2px solid #ffffff;
+    border-color: #ffffff #404040 #404040 #ffffff;
+    padding: 0.35rem 0.75rem;
+    border-radius: 0;
+}
+
+.win-btn:hover,
+.win-btn:focus-visible {
+    color: #0000ee;
+    text-decoration: underline;
+}
+
+.win-btn:active {
+    border-color: #404040 #ffffff #ffffff #404040;
+}
+
+.win-btn:visited {
+    color: #000000;
+}
+
+.diagram {
+    margin: 1rem 0;
+}
+
+.diagram-scroll {
+    overflow-x: auto;
+    background: #ffffff;
+    border: 2px solid #808080;
+    border-color: #404040 #ffffff #ffffff #404040;
+    padding: 0.25rem;
+}
+
+.diagram-scroll svg {
+    display: block;
+    width: 100%;
+    min-width: 20rem;
+    height: auto;
+}
+
+.diagram figcaption {
+    margin-top: 0.5rem;
+    font-family: 'Courier New', Courier, monospace;
+    font-size: 0.95rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        scroll-behavior: auto !important;
+        transition: none !important;
+        animation: none !important;
+    }
+}
+
+@media print {
+    .page,
+    .content-panel,
+    header.header {
+        background: #ffffff;
+        color: #000000;
+    }
+}

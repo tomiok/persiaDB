@@ -1,0 +1,42 @@
+---
+title: About
+description: Who Persia DB is for, how to contribute, and the license.
+---
+
+import WinButton from '../../components/WinButton.astro';
+
+Persia DB is an open-source search database. The aim is a library you can embed the way you embed
+SQLite, with a file format that also works from object storage and from stateless query nodes.
+It is pre-alpha. The first release a caller can use is `v0.1` (roadmap M10). The format freezes
+at `v1.0` (M15).
+
+Copyright 2026 The Persia DB Authors. See
+[NOTICE](https://github.com/tomiok/persiaDB/blob/main/NOTICE).
+
+## Community
+
+Contributions are welcome, and the bar is correctness first.
+Pick one leaf from [ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md).
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) lists what is ready next.
+One leaf is one pull request. If the SPEC is unclear, open an issue before writing the code.
+
+By participating you agree to the
+[Code of Conduct](https://github.com/tomiok/persiaDB/blob/main/CODE_OF_CONDUCT.md).
+Report security issues privately, as described in
+[SECURITY.md](https://github.com/tomiok/persiaDB/blob/main/SECURITY.md).
+Only the latest commit on `main` receives fixes. A panic or unbounded memory use on a crafted
+database file is a security issue.
+
+The repository also documents how AI-assisted changes follow the same rules, in
+[CONTRIBUTING.md](https://github.com/tomiok/persiaDB/blob/main/CONTRIBUTING.md).
+
+<p class="win-actions">
+    <WinButton href="/guide/contributing/">Contributing guide</WinButton>
+    <WinButton href="https://github.com/tomiok/persiaDB">Repository</WinButton>
+    <WinButton href="/guide/license/">License</WinButton>
+</p>
+
+## License
+
+Persia DB is licensed under the [Apache License, Version 2.0](https://github.com/tomiok/persiaDB/blob/main/LICENSE).
+Contributions are licensed under the same terms, as stated in section 5 of the license.

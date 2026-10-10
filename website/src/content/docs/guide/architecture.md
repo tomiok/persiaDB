@@ -1,0 +1,58 @@
+---
+title: "Architecture"
+description: "How the crates are layered, and the path of a write and a query."
+---
+
+The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
+`persia-format` is the only crate with real code,
+and it currently covers encodings, checksums, and block codecs. Frames and the superblock are still
+ROADMAP 1.6–1.7. Every other crate is a workspace stub.
+[`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
+path) and stays the place for that detail.
+
+```
+ ┌───────────────── persia (embedded facade) ─────────────────┐
+ │  Db ── Collection ── put/get/delete/search/blob             │
+ ├──────────────┬──────────────┬───────────────┬──────────────┤
+ │ persia-engine│ persia-blob  │persia-analysis│              │
+ │ memtable/WAL │ chunks/dedup │ analyzers     │              │
+ │ segments     │              │               │              │
+ │ query+rank   │              │               │              │
+ ├──────────────┴──────────────┴───────────────┴──────────────┤
+ │ persia-storage:  Storage trait                              │
+ │   memory │ local file container │ s3 │ gcs │ azure          │
+ ├─────────────────────────────────────────────────────────────┤
+ │ persia-format: encodings, frames, superblock, checksums     │
+ └─────────────────────────────────────────────────────────────┘
+      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
+```
+
+Three rules shape the rest of the design:
+
+1. **Immutable segments and append-only metadata.** Crash recovery, caching, and replication all
+   read a snapshot instead of locking a mutable index.
+2. **The same logical objects everywhere.** A segment, manifest, WAL chunk, or blob is a named
+   object. Locally they are frames in one file; remotely they are one object each. The segment
+   bytes do not change between the two.
+3. **The engine is synchronous.** It talks to I/O only through the `Storage` trait. Async belongs
+   in the cloud backends and in the server.
+
+| Crate | Role | Status |
+|---|---|---|
+| `persia-format` | Encodings, checksums, block codecs. No I/O policy. | In progress (M1) |
+| `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Planned (M2, M12) |
+| `persia-analysis` | Tokenizers, normalizers, stemmers. | Planned (M4); ready to start |
+| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Planned (M3, M5–M8) |
+| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | Planned (M9) |
+| `persia` | The embedded API: `Db` and `Collection`. | Planned (M10) |
+| `persia-proto` | `persia.proto` and committed generated code. | Planned (M11) |
+| `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Planned (M11, M13) |
+| `persia-cli` | `persia inspect`, `dump`, `verify`, `compact`, `bench`. | Planned (M10) |
+
+Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
+the graph. The public facade orders blob writes before the document commit so the engine never has
+to know about blob bytes (SPEC §9.5).
+
+On a query, once the engine exists: analyze the text, search each segment and the memtable, merge
+the per-segment top-k, and if there are too few hits run the relaxation cascade. The response
+includes which level matched.
