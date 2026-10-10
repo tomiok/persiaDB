@@ -1,6 +1,6 @@
 //! Fuzz `Checksummed<T>` decoding (ROADMAP 1.3.3): arbitrary bytes never panic, a wrong CRC is reported
 //! exactly (offset, stored, computed) as the definition says, a failed decode moves nothing, and an accepted
-//! region re-encodes to the same bytes (the CRC is a function of the rest).
+//! region re-encodes to the same bytes (the CRC is a function of the rest). A mode byte can fix CRCs first.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -46,7 +46,24 @@ fn reference_mismatch(region: &[u8]) -> Option<(u32, u32)> {
     (stored != computed).then_some((stored, computed))
 }
 
-fuzz_target!(|data: &[u8]| {
+/// Overwrites the CRC field of `region` with the correct value, so arbitrary field bytes reach `decode_fields`.
+fn fix_crc(region: &mut [u8]) {
+    let crc_end = Mini::CRC_OFFSET + 4;
+    let mut crc = Crc32c::new();
+    crc.update(&region[..Mini::CRC_OFFSET]);
+    crc.update(&region[crc_end..]);
+    region[Mini::CRC_OFFSET..crc_end].copy_from_slice(&crc.finish().to_le_bytes());
+}
+
+fuzz_target!(|input: &[u8]| {
+    // The first byte picks the mode. Odd: fix every region's CRC first; random bytes almost never carry a
+    // valid CRC, so without this field decoding and the round trip would only see the seed corpus.
+    let Some((&mode, rest)) = input.split_first() else { return };
+    let mut data = rest.to_vec();
+    if mode & 1 == 1 {
+        data.chunks_exact_mut(Mini::LEN).for_each(fix_crc);
+    }
+    let data = &data[..];
     let mut r = Reader::new(data);
     while !r.is_empty() {
         let start = r.position();

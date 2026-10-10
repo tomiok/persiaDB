@@ -22,6 +22,8 @@ arbitrary code on every build.
 3. **No `build.rs` anywhere** (also enforced by `cargo xtask check-deps`). Generated code, such as the gRPC stubs in
    `persia-proto`, is produced by an xtask command, committed, and CI regenerates it and fails on any diff
    (ROADMAP 11.1.4). Data tables use `const fn` or `include_bytes!`.
+   The rule covers the workspace's own crates. Allowed third-party dependencies (ADR-0001) may have build
+   scripts (e.g. `crc32c` probes the compiler version) as long as building still needs only the pinned toolchain.
 
 ## Consequences
 

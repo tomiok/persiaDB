@@ -44,10 +44,8 @@ pub struct Xxh3 {
 
 impl core::fmt::Debug for Xxh3 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        // The internal buffer is noise; the running digest identifies the state.
-        f.debug_struct("Xxh3")
-            .field("digest64", &self.digest64())
-            .finish()
+        // The upstream state (buffer, accumulators) has no `Debug`, and digesting would be work in a `{:?}`.
+        f.debug_struct("Xxh3").finish_non_exhaustive()
     }
 }
 
@@ -79,26 +77,38 @@ impl Xxh3 {
 mod tests {
     use super::*;
 
-    /// `i * 131 mod 251` for `i < len`: deterministic bytes without long zero runs.
+    /// xxhsum's sanity-test buffer (`XSUM_fillTestBuffer`, `cli/xsum_sanity_check.c`): byte `i` is the top
+    /// byte of `PRIME32 * PRIME64^i` (wrapping).
     fn sample(len: usize) -> Vec<u8> {
+        let mut generator: u64 = 2_654_435_761;
         (0..len)
-            .map(|i| u8::try_from(i * 131 % 251).unwrap_or(0))
+            .map(|_| {
+                let [byte, ..] = generator.to_be_bytes();
+                generator = generator.wrapping_mul(11_400_714_785_074_694_797);
+                byte
+            })
             .collect()
     }
 
-    // One length per XXH3 code path: empty, 1..=3, 4..=8, 9..=16, 17..=128, 129..=240, one stripe block,
-    // and several 1024-byte blocks plus a partial one. Empty-input values are the published
-    // reference; the others were produced by `xxhash-rust` 0.8.19 and pin it against a silent change.
+    // Seed-0 vectors from xxHash's tests/sanity_test_vectors.h (Cyan4973/xxHash@680bf46), at the edges of
+    // every XXH3 code path: empty, 1..=3, 4..=8, 9..=16, 17..=128, 129..=240, and long inputs (one
+    // 1024-byte block; several blocks plus a partial stripe). XXH128 is stored there as {low64, high64}.
     #[rustfmt::skip]
     const GOLDEN: &[(usize, u64, u128)] = &[
-        (0,    0x2d06_8005_38d3_94c2, 0x99aa_06d3_0147_98d8_6001_c324_468d_497f),
-        (3,    0xc3ab_f7ae_2e25_0b5a, 0x1cef_1b44_9ba1_1392_c3ab_f7ae_2e25_0b5a),
-        (8,    0x2c21_27bb_b99b_325e, 0xc37b_9c60_9b81_2e65_b97c_a908_010c_ab60),
-        (16,   0xbea4_2f62_eac4_54d0, 0x7bf0_40f5_3be4_8d8c_0deb_840a_dcd7_a040),
-        (128,  0x3d41_caa0_b80a_4385, 0xace2_e3f9_8ca7_79b2_f5f6_48d0_2c5e_a199),
-        (240,  0x4da2_ab79_21d0_6c5e, 0x79ee_b64c_c139_b65a_64ac_bec0_6479_6cc2),
-        (1024, 0x89af_ebe6_14a9_26d7, 0xb42e_c12d_d784_ee70_89af_ebe6_14a9_26d7),
-        (4000, 0xa133_6be7_bfd9_28d4, 0x0630_f845_344e_8449_a133_6be7_bfd9_28d4),
+        (0,   0x2d06_8005_38d3_94c2, 0x99aa_06d3_0147_98d8_6001_c324_468d_497f),
+        (1,   0xc44b_dff4_074e_ecdb, 0xa6cd_5e93_9200_0f6a_c44b_dff4_074e_ecdb),
+        (3,   0x5424_7382_a8d6_b94d, 0x20ef_c49f_f024_22ea_5424_7382_a8d6_b94d),
+        (4,   0xe5dc_74bc_5184_8a51, 0x970d_585a_c632_bf8e_2e7d_8d68_76a3_9fe9),
+        (8,   0x24cc_c9ac_aa9f_65e4, 0x47a7_f080_d82b_b456_64c6_9cab_4bb2_1dc5),
+        (9,   0x14d5_001c_15dd_3f2b, 0x564e_f607_8950_d457_ed7c_cbc5_01eb_7501),
+        (16,  0x981b_17d3_6c74_98c9, 0xc68c_368e_cf8a_9c05_5629_8025_8a99_8629),
+        (17,  0x796f_5acd_3a60_f862, 0x955f_a786_43ed_3669_abbc_12d1_1973_d7db),
+        (128, 0xfcff_2412_6754_d861, 0x3999_2220_e045_260a_ebb1_5e34_a7fb_5ab1),
+        (129, 0x98f1_b0a6_79a2_ca29, 0x0381_5fc9_1f1b_30b6_86c9_e3bc_8f0a_3b5c),
+        (240, 0x81c3_c2b6_7f56_8ccf, 0xaa42_02da_a276_9dc8_5c9a_ae94_c8eb_e5a0),
+        (241, 0xc5a6_39ec_d203_0e5e, 0x99a8_0ecf_0ecf_c647_c5a6_39ec_d203_0e5e),
+        (1024,0xdd85_c9b5_c110_9c5c, 0x0d30_d240_71c6_4c57_dd85_c9b5_c110_9c5c),
+        (2367,0xcb37_aeb9_e5d3_61ed, 0xe89c_0f6f_f369_b427_cb37_aeb9_e5d3_61ed),
     ];
 
     #[test]

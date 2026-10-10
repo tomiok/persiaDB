@@ -4,6 +4,14 @@
 //! (the header's `header_crc` at 12 covers `0..12 + 16..4096`; a slot's `crc` at 2044 covers `0..2044`).
 //! A type describes its layout with [`ChecksummedLayout`]; [`Checksummed`] does the checksum, so no
 //! structure can forget to verify it, and corrupt bytes are rejected before any field is interpreted.
+//!
+//! Because the checksum comes first, a region that is not of this format at all (wrong magic, a future
+//! `format_major` with a different layout) is reported as a checksum mismatch. Callers that must tell those
+//! apart (SPEC §4.2: "reader MUST reject unknown major") peek at the raw prefix with a cloned [`Reader`]
+//! before calling [`Checksummed::decode`].
+//!
+//! Frames (SPEC §4.4) are variable-length and their CRC follows the payload, so they do not fit this
+//! helper; they use the streaming [`Crc32c`] directly.
 
 use crate::checksum::{Crc32c, check};
 use crate::error::{EncodeError, Result};
@@ -15,9 +23,10 @@ const CRC_LEN: usize = 4;
 
 /// The layout of a fixed-size structure whose integrity is a CRC32C field inside it.
 ///
-/// `CRC_OFFSET + 4 <= LEN` is checked at compile time when [`Checksummed`] is used with the type.
+/// `CRC_OFFSET + 4 <= LEN` is checked during const evaluation, so a crate using [`Checksummed`] with a bad
+/// layout fails to build (`cargo build`/`cargo test`; `cargo check` does not evaluate it).
 ///
-/// ```compile_fail
+/// ```compile_fail,E0080
 /// use persia_format::checksummed::{Checksummed, ChecksummedLayout};
 /// use persia_format::{Reader, Result, Writer};
 ///
