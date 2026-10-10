@@ -11,6 +11,7 @@ pub mod align;
 pub mod bitpack;
 pub mod delta;
 pub mod error;
+pub mod for_codec;
 pub mod offset;
 pub mod postings;
 pub mod reader;

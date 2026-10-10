@@ -214,6 +214,8 @@ horizontally bit-packed so any value can be read in O(1):
 ```
 Value `i` is `min + (bits [i·w, (i+1)·w) of a little-endian, least-significant-bit-first bit stream)`. The unused
 high bits of the last byte are zero. A value above `u64::MAX` is corruption. Writers use the minimal width.
+At width 0 the block has no packed bytes, so readers check `count` against the number of values the column
+expects (the doc count) rather than trusting it.
 
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
 the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;

@@ -44,3 +44,10 @@ path = "fuzz_targets/postings.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "for_block"
+path = "fuzz_targets/for_block.rs"
+test = false
+doc = false
+bench = false
