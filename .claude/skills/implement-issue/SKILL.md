@@ -36,12 +36,20 @@ cargo deny check   # if dependencies changed
 ```
 Fix everything before delegating.
 
-## 5. Delegate (in order)
-1. **`test-writer`** — "Add tests for <issue>: invariants <list>; layers: <unit/property/golden/fuzz/...>." Apply its findings; if it reports a bug, fix the code and keep its failing test.
-2. **`code-reviewer`** — "Review the current diff for <issue> against SPEC §<x>." Address all BLOCKER and Major findings; justify any you decline.
-3. **`integration-tester`** — only if the change touches storage, durability, blobs, server, SDKs, sharding/distribution, or relaxation quality. Pass the scenario list that applies.
+## 5. Delegate (batched, see CLAUDE.md "Workflow")
+Leaves are worked in batches (one ROADMAP subsection or a few related leaves per session).
+1. **Per leaf, yourself:** mutation sanity check — break the code (off-by-one, skipped check) and confirm a test fails; revert.
+2. **`test-writer`** — only for leaves that parse untrusted bytes, change the on-disk format, or touch durability:
+   "Add tests for <issue>: invariants <list>; layers: <unit/property/golden/fuzz/...>." Apply its findings; if it
+   reports a bug, fix the code and keep its failing test.
+3. **`code-reviewer`** — once per batch: "Review `git diff <batch-start>..HEAD` for leaves <ids> against SPEC §<x>."
+   Address all BLOCKER and Major findings in one fix-up commit; justify any you decline. A leaf that changes the
+   on-disk format or crash safety is reviewed on its own before the next leaf starts.
+4. **`integration-tester`** — only if the change touches storage, durability, blobs, server, SDKs, sharding/distribution,
+   or relaxation quality. Pass the scenario list that applies.
 
-Re-run step 4 after changes. Re-run `code-reviewer` if you made significant edits after its review.
+Re-run step 4 of "Verify locally" after changes. Leaves stay `[~]` until the batch review passes.
+When the batch is merged and pushed, suggest starting a fresh session for the next one.
 
 ## 6. Finish
 - Tick the Definition of Done list from `CLAUDE.md`.

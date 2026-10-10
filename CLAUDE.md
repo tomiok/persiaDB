@@ -145,10 +145,15 @@ Always run fmt, clippy and tests before declaring a task done.
 
 1. Pick one GitHub issue (maps to one ROADMAP leaf). Read the linked SPEC sections first.
 2. Use the `implement-issue` skill: plan → implement → tests → review.
-3. Before finishing, delegate in this order:
-   - `test-writer` — add/strengthen unit, property, golden, fuzz tests for the change.
-   - `code-reviewer` — independent review of the diff against SPEC and these rules.
+3. Work in **batches**: one ROADMAP subsection (e.g. `1.2`) or a few related leaves per session; start a fresh
+   session for the next batch (long contexts are what make sessions expensive). Within a batch:
+   - Every leaf: own branch and commit, fmt/clippy/tests/Miri pass, and a mutation sanity check of its tests.
+   - `test-writer` — only for leaves that parse untrusted bytes, change the on-disk format, or touch durability
+     (WAL, commit, recovery, compaction).
+   - `code-reviewer` — **once per batch**, over the whole range (`git diff <batch-start>..HEAD`), then one fix-up
+     commit. Exception: a leaf that changes the on-disk format or crash safety gets its own review before the next leaf.
    - `integration-tester` — only for items touching storage, durability, server, SDKs, distribution.
+   - Leaves stay `[~]` until the batch review passes; then tick them `[x]` and push.
 4. One issue = one PR = one focused change. Conventional commits (`feat(engine): ...`, `fix(format): ...`).
 5. Update `SPEC.md` / ADRs in the same PR when a decision changes.
 6. Progress: mark the leaf `[~]` in `ROADMAP.md` when starting, `[x]` when the DoD is met, then run
@@ -163,7 +168,7 @@ Always run fmt, clippy and tests before declaring a task done.
 - [ ] No new `unsafe` without `SAFETY` + ADR; no `unwrap` on external data
 - [ ] Public API documented; CHANGELOG entry if user-visible
 - [ ] Benchmarks added/updated if on a hot path (query, indexing, block decode)
-- [ ] Reviewed by `code-reviewer` with no unresolved blockers
+- [ ] Reviewed by `code-reviewer` (in its batch, or alone for format/crash-safety changes) with no unresolved blockers
 - [ ] ROADMAP leaf ticked and `PROGRESS.md` regenerated (`cargo xtask progress --check` passes)
 
 ## Things Claude must never do
