@@ -100,9 +100,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.2.4 Frame-of-reference codec for numeric columns (i64/f64 via order-preserving bits)
 
 ## 1.3 Checksums & hashing
-- [ ] 1.3.1 CRC32C wrapper (`crc32c` crate) with streaming API
-- [ ] 1.3.2 xxh3-64/128 wrapper for content hashes and routing
-- [ ] 1.3.3 `Checksummed<T>` helper for header structures; [T] bit-flip detection test (flip every bit in a sample, assert detected)
+- [~] 1.3.1 CRC32C wrapper (`crc32c` crate) with streaming API
+- [~] 1.3.2 xxh3-64/128 wrapper for content hashes and routing
+- [~] 1.3.3 `Checksummed<T>` helper for header structures; [T] bit-flip detection test (flip every bit in a sample, assert detected)
 
 ## 1.4 Compression
 - [ ] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`

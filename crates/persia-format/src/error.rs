@@ -96,6 +96,15 @@ pub enum Corruption {
         /// Largest valid count.
         max: u32,
     },
+    /// A stored CRC32C does not match the data it covers (SPEC §4.1); `Error::Corrupt::offset` points at the
+    /// stored checksum.
+    #[error("checksum mismatch: stored {stored:#010x}, computed {computed:#010x}")]
+    ChecksumMismatch {
+        /// The checksum read from the input.
+        stored: u32,
+        /// The checksum of the bytes actually read.
+        computed: u32,
+    },
 }
 
 /// Errors produced while encoding: the caller passed values the format cannot represent.
