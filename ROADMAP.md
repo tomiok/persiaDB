@@ -105,15 +105,17 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.3.3 `Checksummed<T>` helper for header structures; [T] bit-flip detection test (flip every bit in a sample, assert detected)
 
 ## 1.4 Compression
-- [~] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`
-- [~] 1.4.2 Decompression-bomb guard: caller supplies max uncompressed size, reject mismatches
-- [~] 1.4.3 [T] fuzz decompress with random/mutated inputs
+- [x] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`
+- [x] 1.4.2 Decompression-bomb guard: caller supplies max uncompressed size, reject mismatches
+- [x] 1.4.3 [T] fuzz decompress with random/mutated inputs
+- [ ] 1.4.4 Resource/I-O error class in `persia-format` so allocation failures (zstd context, output buffer) are not reported as `Corrupt`
 
 ## 1.5 Block framing (SPEC §5.2)
 - [ ] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len}` encode/decode
 - [ ] 1.5.2 `BlockWriter`: split a byte stream into fixed-size blocks, emit block table
 - [ ] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
 - [ ] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
+- [ ] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
 
 ## 1.6 Container header & superblock (SPEC §4.2–4.3)
 - 1.6.1 `Header` struct: magic, versions, flags, uuid, page size; encode/decode
@@ -130,6 +132,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [ ] 1.7.2.2 [T] property: truncate file at every byte offset → scanner yields exactly the complete prefix frames
   - [ ] 1.7.2.3 [T] fuzz scanner
 - [ ] 1.7.3 Frame kinds registry (WalChunk, Segment, Manifest, Padding, TombstoneSidecar) with forward-compat skip of unknown kinds
+- [ ] 1.7.4 Frame payload compression (§4.4 flags bit0): carry an uncompressed length and a bomb limit, decode via `decompress_block`
 
 ## 1.8 Memory-mapped reader (the only `unsafe`)
 - [ ] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)

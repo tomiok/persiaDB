@@ -1,6 +1,6 @@
 //! Block compression codecs (SPEC §4.1, §5.2; ADR-0005).
 //!
-//! Every compressed unit declares its [`Codec`] in a header byte. Decompression is bounded twice: the caller
+//! Every block declares its [`Codec`] in a header byte (SPEC §5.2). Decompression is bounded twice: the caller
 //! states the uncompressed length it expects (from the unit's header) and the largest length it is willing to
 //! allocate; anything larger, smaller, or otherwise malformed is [`Error::Corrupt`], never a panic or an
 //! unbounded allocation (SPEC §17, decompression bombs).
@@ -9,6 +9,8 @@
 //! context each time.
 
 use std::cell::RefCell;
+use std::io::Cursor;
+use std::thread::LocalKey;
 
 use zstd::zstd_safe::{self, CCtx, DCtx};
 
@@ -109,38 +111,27 @@ fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, Enc
     if !(min..=max).contains(&level) {
         return Err(EncodeError::InvalidCompressionLevel { level, min, max });
     }
-    let start = out.len();
-    let end = start
-        .checked_add(zstd_safe::compress_bound(src.len()))
-        .ok_or(EncodeError::CompressionFailed)?;
-    out.resize(end, 0);
-    let written = CCTX.with_borrow_mut(|cached| {
-        let cctx = match cached {
-            Some(cctx) => cctx,
-            None => cached.insert(CCtx::try_create().ok_or(EncodeError::CompressionFailed)?),
-        };
-        let dst = out.get_mut(start..).ok_or(EncodeError::CompressionFailed)?;
-        cctx.compress(dst, src, level)
-            .map_err(|_| EncodeError::CompressionFailed)
-    });
-    match written {
-        Ok(n) => {
-            out.truncate(start.saturating_add(n));
-            Ok(n)
-        }
-        Err(e) => {
-            out.truncate(start);
-            Err(e)
-        }
-    }
+    out.try_reserve(zstd_safe::compress_bound(src.len()))
+        .map_err(|_| EncodeError::CompressionFailed)?;
+    // zstd writes into `out`'s spare capacity after `start` and sets its length only on success, so `out` is
+    // untouched on error and no bytes are zero-filled first.
+    let start = to_u64(out.len());
+    let mut dst = Cursor::new(&mut *out);
+    dst.set_position(start);
+    with_context(&CCTX, CCtx::try_create, |cctx| {
+        cctx.compress(&mut dst, src, level)
+    })
+    .ok_or(EncodeError::CompressionFailed)?
+    .map_err(|_| EncodeError::CompressionFailed)
 }
 
 /// Decodes a `codec` payload `src` that must expand to exactly `uncompressed_len` bytes, and appends them to
 /// `out`.
 ///
-/// `uncompressed_len` comes from the unit's header, so it is untrusted: it is checked against `max_len`, the
-/// most the caller will allocate (e.g. the block size), *before* any work is done. `offset` is the absolute
-/// position of `src`, used in error reports.
+/// `uncompressed_len` comes from the unit's header, so it is untrusted (a `u64`, as stored): it is checked
+/// against `max_len`, the most the caller will allocate (e.g. the block size; a `usize`, as it bounds memory),
+/// *before* any work is done. `offset` is reported in every error: the absolute position of `src`, or of the
+/// unit's header if the caller prefers errors to point at its `uncompressed_len` field.
 ///
 /// # Errors
 /// [`Error::Corrupt`] at `offset`, with:
@@ -149,7 +140,7 @@ fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, Enc
 /// - [`Corruption::UncompressedLenMismatch`] when the payload expands (or, for zstd, declares it expands) to a
 ///   different length;
 /// - [`Corruption::InvalidCompressedData`] when a zstd payload is not exactly one well-formed zstd frame with
-///   a declared content size.
+///   a declared content size, or zstd cannot decode it (including a frame that needs a dictionary).
 ///
 /// On error `out` is left as it was.
 pub fn decompress_block(
@@ -212,36 +203,56 @@ fn decompress_zstd(
             len: to_u64(len),
             max: to_u64(max_len),
         })?;
+    // The output slice is exactly `len` long, a hard bound that does not rely on zstd enforcing the declared
+    // size. Zero-filling it first costs nothing measurable (`benches/compress.rs`).
     let start = out.len();
     let end = start
         .checked_add(len)
         .ok_or(Corruption::InvalidCompressedData)?;
     out.resize(end, 0);
-    let written = DCTX.with_borrow_mut(|cached| {
-        let dctx = match cached {
-            Some(dctx) => dctx,
-            None => cached.insert(DCtx::try_create().ok_or(Corruption::InvalidCompressedData)?),
-        };
-        // `dst` is exactly `len` long, so the frame cannot write more than it declared.
-        let dst = out
-            .get_mut(start..)
-            .ok_or(Corruption::InvalidCompressedData)?;
-        dctx.decompress(dst, src)
-            .map_err(|_| Corruption::InvalidCompressedData)
-    });
+    let written = out
+        .get_mut(start..)
+        .and_then(|dst| with_context(&DCTX, DCtx::try_create, |dctx| dctx.decompress(dst, src)));
     match written {
-        Ok(n) if n == len => Ok(()),
-        Ok(n) => {
+        Some(Ok(n)) if n == len => Ok(()),
+        // `None`: zstd could not allocate its context. Not corruption, but this crate's errors have no resource
+        // class yet, and Rust aborts on out-of-memory elsewhere anyway. A short `Ok(n)` is unreachable while
+        // zstd enforces the declared size; it is still never returned as success.
+        Some(Ok(n)) => {
             out.truncate(start);
             Err(Corruption::UncompressedLenMismatch {
                 expected: to_u64(len),
                 actual: to_u64(n),
             })
         }
-        Err(e) => {
+        Some(Err(_)) | None => {
             out.truncate(start);
-            Err(e)
+            Err(Corruption::InvalidCompressedData)
         }
+    }
+}
+
+/// Runs `f` with this thread's cached context, creating it on first use. During thread teardown (the cache is
+/// gone or in use) a temporary context is used instead, so this never panics. `None` if `create` fails.
+fn with_context<C, R>(
+    cache: &'static LocalKey<RefCell<Option<C>>>,
+    create: fn() -> Option<C>,
+    f: impl FnOnce(&mut C) -> R,
+) -> Option<R> {
+    let mut f = Some(f);
+    let cached = cache.try_with(|cell| {
+        let mut slot = cell.try_borrow_mut().ok()?;
+        let ctx = match &mut *slot {
+            Some(ctx) => ctx,
+            empty => empty.insert(create()?),
+        };
+        f.take().map(|f| f(ctx))
+    });
+    match (cached, f) {
+        (Ok(Some(result)), _) => Some(result),
+        (_, Some(f)) => create().map(|mut ctx| f(&mut ctx)),
+        // Unreachable: `f` is only taken by a run that returns `Some`.
+        (_, None) => None,
     }
 }
 
@@ -336,6 +347,30 @@ mod tests {
         let mut out = Vec::new();
         decompress_block(Codec::Zstd, &empty, 0, 0, 40, &mut out).unwrap();
         assert_eq!(out, b"");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI, which Miri cannot run")]
+    fn lying_frame_and_zero_limit_are_rejected() {
+        let text = b"persia ".repeat(8);
+        // The frame's 1-byte content size (offset 5) patched to agree with a lying header of 48.
+        let mut lying = zstd(&text);
+        assert_eq!(lying.get(5), Some(&56));
+        *lying.get_mut(5).unwrap() = 48;
+        let mut out = vec![4];
+        assert_eq!(
+            decompress_block(Codec::Zstd, &lying, 48, 64, 40, &mut out),
+            corrupt(Corruption::InvalidCompressedData)
+        );
+        // A zero limit with a zero header: the frame's own declared size still has to agree.
+        assert_eq!(
+            decompress_block(Codec::Zstd, &zstd(&text), 0, 0, 40, &mut out),
+            corrupt(Corruption::UncompressedLenMismatch {
+                expected: 0,
+                actual: 56
+            })
+        );
+        assert_eq!(out, [4]);
     }
 
     #[test]

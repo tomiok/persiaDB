@@ -176,17 +176,21 @@ All large sections are split into **fixed-size logical blocks (default 16 KiB un
 with `{crc32c, codec, uncompressed_len}` header. Blocks are independently decodable ⇒ range requests
 and per-block caching work on object storage.
 
-**Codecs** (ADR-0005). Every compressed unit (block, section table entry) names its codec in one `u8`:
+**Codecs** (ADR-0005). Every block names its codec in the `codec` byte of its header:
 
 | `codec` | Name | Payload |
 |---|---|---|
 | 0 | `None` | the bytes as is; length must equal `uncompressed_len` |
-| 1 | `Zstd` | exactly **one** zstd frame (RFC 8878, magic `0xFD2FB528`) whose header declares a content size equal to `uncompressed_len`; no skippable frames, no trailing bytes |
+| 1 | `Zstd` | exactly **one** zstd frame (RFC 8878, magic `0xFD2FB528`) whose header declares a content size equal to `uncompressed_len`; no skippable frames, no trailing bytes. Writers set neither a dictionary id nor the frame checksum (the block CRC covers the bytes); readers accept a checksum, and a frame that needs a dictionary fails to decode |
 
 Any other value is corruption. Readers apply a **decompression-bomb guard**: the caller passes the largest
 `uncompressed_len` it accepts (for blocks, the section's block size), and a larger value is rejected before any
 allocation or decoding. A payload that expands, or declares that it expands, to another length is corruption.
-Writers choose the codec per unit (e.g. `None` when zstd does not shrink it); the zstd level is not recorded.
+Writers choose the codec per block (e.g. `None` when zstd does not shrink it); the zstd level is not recorded.
+Still open, so not yet normative: where a reader finds a section's block size (the section table has no field
+for it yet), DocStore rows larger than one block, what the section table's own `codec` field means next to the
+per-block codecs (ROADMAP 1.5.5), and how frame payload compression (§4.4 flags bit0) gets an uncompressed
+length and a bomb limit (ROADMAP 1.7.4).
 
 ### 5.2.1 Integer codecs
 Building blocks of the Postings, Freqs, Skip and Columns sections (SPEC §5.3), ADR-0004. They live inside

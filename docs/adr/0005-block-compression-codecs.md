@@ -17,16 +17,22 @@ has been released, so this defines the codec byte rather than changing it.
    dictionary-trained zstd) is a new id plus a format version bump, and old readers fail cleanly.
 2. **A zstd payload is exactly one zstd frame that declares its content size**, and that size must equal the
    unit's `uncompressed_len`. The frame magic is checked (rejecting skippable and legacy frames), and the frame
-   must span the whole payload (rejecting concatenated frames and trailing bytes). One canonical shape keeps
-   the decoder small and lets the reader reject a lying header *before* allocating.
+   must span the whole payload (rejecting concatenated frames and trailing bytes). This one frame shape keeps
+   the decoder small and lets the reader reject a lying header *before* allocating. Within that frame,
+   writers set no dictionary id and no zstd checksum (the block CRC32C already covers the stored bytes);
+   readers accept and verify a checksum, and a frame that needs a dictionary fails to decode.
 3. **The caller bounds every decode** with `max_len` (for blocks: the section's block size). `uncompressed_len`
    above it is `UncompressedTooLarge`; the output buffer is exactly `uncompressed_len` long, so zstd cannot
-   write past it; a payload of another length is `UncompressedLenMismatch`.
+   write past it; a payload of another length is `UncompressedLenMismatch`. An output buffer that cannot be
+   allocated (only possible with a very large `max_len`) is `UncompressedTooLarge`, never a panic.
 4. **The zstd level is a writer choice and is not recorded**: any level decodes the same way. The default is
    zstd's own (3). Writers may store a unit as `None` when compressing does not help.
 5. **`zstd` is built without default features.** The `legacy` feature decodes pre-1.0 zstd frames, an old and
    unneeded parser; `zdict_builder` and `arrays` are not used.
 6. **zstd contexts are cached per thread**, so decoding many 16 KiB blocks does not allocate a context each time.
+   A context keeps the workspace of its largest recent job (zstd shrinks it only after many smaller calls), so
+   compressing large inputs at high levels on a thread pool costs memory per thread. During thread teardown a
+   temporary context is used, so access never panics.
 
 ## Consequences
 
@@ -37,7 +43,6 @@ has been released, so this defines the codec byte rather than changing it.
   frames (its odd mode) stand in. zstd's own decoder is fuzzed upstream (OSS-Fuzz).
 - zstd's encoder output may change between zstd versions; only *decoding* is pinned by a golden frame. Writers
   must not rely on byte-identical compressed output across versions (checksums cover the stored bytes).
-- The frame checksum flag of zstd is not used: the block CRC32C (SPEC §5.2) already covers the stored bytes.
 
 ## Alternatives considered
 

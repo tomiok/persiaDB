@@ -13,6 +13,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 persia-format = { path = "../crates/persia-format" }
+# Same version and features as the workspace (no `legacy`), to read a frame's declared size in the fuzz harness.
+zstd = { version = "0.14.0", default-features = false }
 
 [workspace]
 
