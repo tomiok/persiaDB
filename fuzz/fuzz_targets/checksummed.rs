@@ -4,8 +4,8 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use persia_format::checksummed::{Checksummed, ChecksummedLayout};
 use persia_format::checksum::Crc32c;
+use persia_format::checksummed::{Checksummed, ChecksummedLayout};
 use persia_format::{Corruption, Error, Reader, Result, Writer};
 
 /// A miniature header: `magic u32, crc u32, seq u64, 4 reserved, flags u32` (CRC in the middle, SPEC §4.2).
@@ -31,7 +31,11 @@ impl ChecksummedLayout for Mini {
         r.skip(4)?;
         let seq = r.read_u64()?;
         r.expect_zeros(4)?;
-        Ok(Self { magic, seq, flags: r.read_u32()? })
+        Ok(Self {
+            magic,
+            seq,
+            flags: r.read_u32()?,
+        })
     }
 }
 
@@ -58,7 +62,9 @@ fn fix_crc(region: &mut [u8]) {
 fuzz_target!(|input: &[u8]| {
     // The first byte picks the mode. Odd: fix every region's CRC first; random bytes almost never carry a
     // valid CRC, so without this field decoding and the round trip would only see the seed corpus.
-    let Some((&mode, rest)) = input.split_first() else { return };
+    let Some((&mode, rest)) = input.split_first() else {
+        return;
+    };
     let mut data = rest.to_vec();
     if mode & 1 == 1 {
         data.chunks_exact_mut(Mini::LEN).for_each(fix_crc);
@@ -75,15 +81,29 @@ fuzz_target!(|input: &[u8]| {
                 offset: (start + Mini::CRC_OFFSET) as u64,
                 reason: Corruption::ChecksumMismatch { stored, computed },
             };
-            assert_eq!(result.as_ref().err(), Some(&expected), "CRC mismatch not reported exactly");
+            assert_eq!(
+                result.as_ref().err(),
+                Some(&expected),
+                "CRC mismatch not reported exactly"
+            );
         }
         let Ok(Checksummed(value)) = result else {
-            assert_eq!(r.position(), start, "a failed decode must not move the cursor");
+            assert_eq!(
+                r.position(),
+                start,
+                "a failed decode must not move the cursor"
+            );
             break;
         };
         assert_eq!(r.position() - start, Mini::LEN);
         let mut w = Writer::new();
-        Checksummed(value).encode(&mut w).expect("decoded value re-encodes");
-        assert_eq!(w.as_slice(), &data[start..r.position()], "accepted region re-encodes differently");
+        Checksummed(value)
+            .encode(&mut w)
+            .expect("decoded value re-encodes");
+        assert_eq!(
+            w.as_slice(),
+            &data[start..r.position()],
+            "accepted region re-encodes differently"
+        );
     }
 });

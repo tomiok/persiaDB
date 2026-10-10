@@ -11,7 +11,11 @@ fuzz_target!(|data: &[u8]| {
     while !r.is_empty() {
         let start = r.position();
         let Ok(block) = r.read_for_block() else {
-            assert_eq!(r.position(), start, "a failed read must not move the cursor");
+            assert_eq!(
+                r.position(),
+                start,
+                "a failed read must not move the cursor"
+            );
             break;
         };
         let values: Vec<u64> = block.iter().collect();
@@ -23,13 +27,27 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(block.get(values.len()), None);
 
         let mut w = Writer::new();
-        w.write_for_block(&values).expect("decoded block re-encodes");
-        let again: Vec<u64> = Reader::new(w.as_slice()).read_for_block().expect("re-encoded block decodes").iter().collect();
+        w.write_for_block(&values)
+            .expect("decoded block re-encodes");
+        let again: Vec<u64> = Reader::new(w.as_slice())
+            .read_for_block()
+            .expect("re-encoded block decodes")
+            .iter()
+            .collect();
         assert_eq!(again, values);
         let true_min = values.iter().copied().min().unwrap_or(0);
-        let minimal = values.iter().map(|v| v - true_min).max().unwrap_or(0).bit_width();
+        let minimal = values
+            .iter()
+            .map(|v| v - true_min)
+            .max()
+            .unwrap_or(0)
+            .bit_width();
         if block.min() == true_min && u32::from(block.width()) == minimal {
-            assert_eq!(w.as_slice(), &data[start..r.position()], "canonical block re-encodes differently");
+            assert_eq!(
+                w.as_slice(),
+                &data[start..r.position()],
+                "canonical block re-encodes differently"
+            );
         }
     }
 });

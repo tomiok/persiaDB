@@ -32,7 +32,9 @@ has been released, so this defines the codec byte rather than changing it.
 
 - `persia-format` links zstd's C library (built from source by `zstd-sys`; needs a C compiler, no other tools).
   Miri cannot run C: tests that call zstd are `#[cfg_attr(miri, ignore = ...)]`; everything before the FFI call
-  (codec ids, the bomb guard, `None`) still runs under Miri. The fuzz target `decompress` covers the FFI path.
+  (codec ids, the bomb guard, `None`) still runs under Miri. The fuzz target `decompress` covers the FFI path,
+  but zstd's C code is not coverage-instrumented, so libFuzzer only steers through our wrapper; mutated real
+  frames (its odd mode) stand in. zstd's own decoder is fuzzed upstream (OSS-Fuzz).
 - zstd's encoder output may change between zstd versions; only *decoding* is pinned by a golden frame. Writers
   must not rely on byte-identical compressed output across versions (checksums cover the stored bytes).
 - The frame checksum flag of zstd is not used: the block CRC32C (SPEC §5.2) already covers the stored bytes.

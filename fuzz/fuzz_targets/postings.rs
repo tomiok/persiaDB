@@ -20,7 +20,10 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(r.position(), start);
                 break;
             };
-            assert!(u64::from(header.last_docid) >= prev.map_or(127, |p| u64::from(p) + 128), "skip went backwards");
+            assert!(
+                u64::from(header.last_docid) >= prev.map_or(127, |p| u64::from(p) + 128),
+                "skip went backwards"
+            );
             prev = Some(header.last_docid);
             continue;
         }
@@ -31,7 +34,8 @@ fuzz_target!(|data: &[u8]| {
                 break;
             };
             assert_eq!(out[BLOCK_LEN - 1], header.last_docid);
-            w.write_postings_block(&out, prev).expect("decoded block re-encodes");
+            w.write_postings_block(&out, prev)
+                .expect("decoded block re-encodes");
             if header.width != BitWidth::of(&gaps(&out, prev)) {
                 w = Writer::new(); // non-minimal width: no byte-for-byte comparison
             }
@@ -41,13 +45,21 @@ fuzz_target!(|data: &[u8]| {
                 assert_eq!(r.position(), start);
                 break;
             };
-            w.write_postings_tail(&out[..count], prev).expect("decoded tail re-encodes");
+            w.write_postings_tail(&out[..count], prev)
+                .expect("decoded tail re-encodes");
             &out[..count]
         };
-        assert!(decoded.windows(2).all(|p| p[0] < p[1]), "not strictly increasing");
+        assert!(
+            decoded.windows(2).all(|p| p[0] < p[1]),
+            "not strictly increasing"
+        );
         assert!(prev.is_none_or(|p| decoded[0] > p), "does not follow prev");
         if !w.is_empty() {
-            assert_eq!(w.as_slice(), &data[start..r.position()], "non-canonical bytes accepted");
+            assert_eq!(
+                w.as_slice(),
+                &data[start..r.position()],
+                "non-canonical bytes accepted"
+            );
         }
         prev = decoded.last().copied();
     }
