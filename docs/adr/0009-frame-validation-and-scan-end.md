@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-10-11
-- Related: SPEC §4.4, §5.2, §15; ADR-0005, ADR-0007; ROADMAP 1.7, 2.4.4, 2.4.9
+- Related: SPEC §4.4, §5.2, §15; ADR-0005, ADR-0007; ROADMAP 1.7, 2.4.4, 2.4.9, 2.4.10
 
 ## Context
 
@@ -38,21 +38,24 @@ No container has been written yet, so SPEC §4.4 is amended in place (SPEC §15,
    - *corruption*: an invalid frame followed by at least one non-zero byte;
    - *unsupported*: as above.
 
-   This follows the usual crash model for appends: sectors are written whole or not at all, and a file can grow
-   before its data reaches the disk, in which case the missing data reads as zeros. Under that model a crash leaves
-   either a short file or zeros, which is a torn tail. Non-zero bytes after an invalid frame mean that something
-   written later survived, so data was lost. That is either bit rot, or writeback that reordered frames which were
-   never synced (and so never acknowledged). The class is for reporting. Recovery truncates at `o` for torn tails
-   and corruption alike.
+   This follows the usual crash model for small appends: sectors are written whole or not at all, and a file can
+   grow before its data reaches the disk, in which case the missing data reads as zeros. Under that model a crash
+   leaves either a short file or zeros, which is a torn tail. Non-zero bytes after an invalid frame mean that
+   something written later survived. That is bit rot or a damaged synced frame (data was lost), or writeback that
+   reached the disk out of order: between unsynced frames, or inside one large frame, where delayed allocation can
+   leave a hole at the header with payload bytes behind it. The bytes alone cannot tell these apart, so the class
+   is a report, not a verdict. Recovery logically truncates at `o` in both cases.
 3. **Compressed payload layout**: `uncompressed_len u64`, then exactly one zstd frame that follows the `Zstd` block
    rules of SPEC §5.2 (declared content size equals `uncompressed_len`, no skippable frames, no trailing bytes).
-   The reader passes a per-kind maximum and `decompress_block` rejects a larger value before allocating. Scanning
-   checks framing only. A bad zstd payload inside a CRC-valid frame is corruption and is found when the payload is
-   decoded.
-4. **Physical truncation before appending**: after recovery stops at `o`, the writer truncates the file to `o`
-   and syncs it before appending (ROADMAP 2.4.4). What `frame_seq` numbers, and whether a scan should also stop at
-   a `frame_seq` that does not increase, is left to ROADMAP 2.4.9, which owns the WAL and rewrite semantics it
-   depends on.
+   The reader passes a per-kind maximum, which also bounds uncompressed payloads, and `decompress_block` rejects a
+   larger value before allocating. Scanning checks framing only. A bad zstd payload inside a CRC-valid frame is
+   corruption and is found when the payload is decoded.
+4. **Physical truncation before appending, on a torn tail only**: the writer truncates the file to `o` and syncs it
+   before appending (ROADMAP 2.4.4). After *corruption* the bytes past `o` may hold acknowledged writes (WAL frames
+   synced after `log_end`, SPEC §8.2), so they are not destroyed silently; what a read-write open does then
+   (quarantine, explicit repair) is ROADMAP 2.4.10. What `frame_seq` numbers, and whether a scan should also stop
+   at a `frame_seq` that does not increase, is ROADMAP 2.4.9, which owns the WAL and rewrite semantics it depends
+   on; it is also the likely way to tell acknowledged frames from reordered unsynced ones.
 
 ## Consequences
 
@@ -60,9 +63,10 @@ No container has been written yet, so SPEC §4.4 is amended in place (SPEC §15,
   instead.
 - The torn-tail check reads the rest of the input once, when the scan stops. That is linear in the tail and only
   happens on the failure path.
-- Under the crash model, a torn tail is never reported as corruption. The reverse can happen: a damaged length
-  field can push a frame's declared end past the end of the file, and that frame is reported as a torn tail. Both
-  are truncated the same way, so only the report differs.
+- Misclassification goes both ways. A damaged length field can push a frame's declared end past the end of the
+  file, so damage is reported as a torn tail; reordered writeback of an unacknowledged append can be reported as
+  corruption. Neither loses data by itself: a torn tail holds nothing behind it, and corruption keeps its bytes
+  (2.4.10).
 - A compressed frame costs 8 more bytes than the zstd frame. Segment frames gain nothing from it, since their
   sections already compress per block and are read in place, but the format does not forbid it.
 - Readers must choose a bomb limit per kind. The engine sets these limits when it defines each kind's payload.

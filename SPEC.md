@@ -188,27 +188,31 @@ MUST NOT interpret them. Padding frames carry no meaning: their payload exists t
 
 **Compressed payload** (flags bit0). The stored payload is `uncompressed_len u64` followed by exactly one zstd
 frame with the same rules as a `Zstd` block (SPEC §5.2): it declares a content size equal to `uncompressed_len`,
-with no skippable frames and no trailing bytes. `payload_len` counts both. A reader passes the largest
-`uncompressed_len` it accepts for the frame's kind (decompression-bomb guard) and rejects a larger value before
-decoding. A malformed compressed payload in a valid frame is corruption, found when the payload is decoded, not
-while scanning.
+with no skippable frames and no trailing bytes. `payload_len` counts both. A reader passes the largest payload it
+accepts for the frame's kind (decompression-bomb guard): a compressed payload whose `uncompressed_len` is larger is
+rejected before decoding, and an uncompressed one longer than it likewise, so the limit means the same whichever
+way the writer stored the frame. Either is corruption, as is a malformed compressed payload in a valid frame; both
+are found when the payload is decoded, not while scanning.
 
 **Scanning.** A scan reads frames from an offset until the first invalid or unsupported frame, or the end of the
 input. It ends in one of four ways, at the offset `o` where it stopped:
 - *clean end*: the input ends exactly at a frame boundary;
 - *torn tail*: the frame at `o` is invalid and is the last thing written: fewer than 32 bytes remain, or its
   total length runs past `E`, or no non-zero byte follows its end (a frame whose magic differs has no known end,
-  so every byte from `o` must be zero). This is what a crash during an append leaves: a short file, or a file
-  whose length grew before all of its data reached the disk (missing data reads as zeros);
-- *corruption*: the frame at `o` is invalid and non-zero bytes follow it, so data written after `o` exists and is
-  lost;
+  so every byte from `o` must be zero). This is the usual result of a crash during an append: a short file, or a
+  file whose length grew before all of its data reached the disk (missing data reads as zeros);
+- *corruption*: the frame at `o` is invalid and non-zero bytes follow it. Either written data after `o` is lost
+  (bit rot, a damaged synced frame), or the crash interrupted an append whose pages reached the disk out of order
+  (e.g. delayed allocation leaving a hole inside a large frame). The bytes alone cannot tell these apart;
 - *unsupported*: the frame at `o` is unsupported. Nothing is truncated; the container cannot be opened by this
   build.
 
 Recovery: starting at `log_end` from the chosen superblock, scan forward; a torn tail or corruption terminates
-the scan, and the file is logically truncated at `o` (the distinction is for reporting). Before appending again,
-the writer truncates the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new
-ones (ROADMAP 2.4.4).
+the scan, and the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
+the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new ones (ROADMAP 2.4.4).
+On corruption the bytes after `o` may hold acknowledged writes (WAL frames synced after `log_end`, SPEC §8.2), so
+they are not destroyed silently: what a read-write open does then is decided with `frame_seq` (ROADMAP 2.4.9,
+2.4.10).
 
 ### 4.5 Commit protocol (local)
 1. Append Segment / WalChunk frames. `fdatasync`.

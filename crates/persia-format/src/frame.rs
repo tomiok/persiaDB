@@ -51,8 +51,19 @@ pub enum FrameKind {
     /// A segment's deleted docids (SPEC §8.3).
     TombstoneSidecar,
     /// A kind this build does not know, written by a newer one. Readers skip it and MUST NOT interpret it.
-    /// [`FrameKind::from_u8`] never returns it for an assigned byte.
-    Unknown(u8),
+    Unknown(UnknownKind),
+}
+
+/// An unassigned `kind` byte. Only [`FrameKind::from_u8`] builds one, so it never holds an assigned byte and each
+/// byte has exactly one [`FrameKind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct UnknownKind(u8);
+
+impl UnknownKind {
+    /// The on-disk byte.
+    pub const fn get(self) -> u8 {
+        self.0
+    }
 }
 
 impl FrameKind {
@@ -62,7 +73,7 @@ impl FrameKind {
     /// use persia_format::frame::FrameKind;
     ///
     /// assert_eq!(FrameKind::from_u8(3), FrameKind::Manifest);
-    /// assert_eq!(FrameKind::from_u8(200), FrameKind::Unknown(200));
+    /// assert!(matches!(FrameKind::from_u8(200), FrameKind::Unknown(k) if k.get() == 200));
     /// ```
     pub const fn from_u8(byte: u8) -> Self {
         match byte {
@@ -71,7 +82,7 @@ impl FrameKind {
             3 => Self::Manifest,
             4 => Self::Padding,
             5 => Self::TombstoneSidecar,
-            other => Self::Unknown(other),
+            other => Self::Unknown(UnknownKind(other)),
         }
     }
 
@@ -83,13 +94,13 @@ impl FrameKind {
             Self::Manifest => 3,
             Self::Padding => 4,
             Self::TombstoneSidecar => 5,
-            Self::Unknown(byte) => byte,
+            Self::Unknown(kind) => kind.0,
         }
     }
 
     /// Whether this build knows the kind, i.e. may interpret the frame.
     pub const fn is_known(self) -> bool {
-        !matches!(Self::from_u8(self.to_u8()), Self::Unknown(_))
+        !matches!(self, Self::Unknown(_))
     }
 }
 
@@ -352,14 +363,17 @@ pub enum ScanEnd {
         /// End of the input.
         offset: u64,
     },
-    /// The frame at `offset` is invalid and nothing but zeros follows it: what a crash during an append leaves.
+    /// The frame at `offset` is invalid and nothing but zeros follows it: the usual result of a crash during an
+    /// append. Recovery truncates here.
     TornTail {
         /// Start of the invalid frame.
         offset: u64,
         /// Why it is invalid.
         error: Error,
     },
-    /// The frame at `offset` is invalid and non-zero bytes follow it: data written after `offset` is lost.
+    /// The frame at `offset` is invalid and non-zero bytes follow it: lost data, or an interrupted append whose
+    /// pages reached the disk out of order (SPEC §4.4). The bytes after `offset` must not be destroyed silently
+    /// (ROADMAP 2.4.10).
     Corrupt {
         /// Start of the invalid frame.
         offset: u64,
@@ -396,7 +410,8 @@ impl ScanEnd {
         }
     }
 
-    /// Whether recovery truncates the container at [`ScanEnd::offset`] (a torn tail or corruption, SPEC §4.4).
+    /// Whether the valid prefix ends before the input does: a torn tail or corruption, where recovery logically
+    /// truncates (SPEC §4.4). Only a torn tail may also be truncated physically.
     pub const fn truncates(&self) -> bool {
         matches!(self, Self::TornTail { .. } | Self::Corrupt { .. })
     }
@@ -453,7 +468,8 @@ pub struct FrameScanner<'a> {
 
 impl<'a> FrameScanner<'a> {
     /// A scanner over `bytes`, which start at absolute offset `base` (a frame boundary, e.g. `log_end`) and run to
-    /// the end of the container.
+    /// the end of the container. `base + bytes.len()` must fit in `u64` (true of any real file); otherwise offsets
+    /// saturate and are wrong, though nothing panics.
     pub fn new(bytes: &'a [u8], base: u64) -> Self {
         Self {
             r: Reader::with_base_offset(bytes, base),
@@ -797,8 +813,8 @@ mod tests {
             kinds,
             [
                 FrameKind::WalChunk,
-                FrameKind::Unknown(0),
-                FrameKind::Unknown(200),
+                FrameKind::from_u8(0),
+                FrameKind::from_u8(200),
                 FrameKind::Padding,
                 FrameKind::Manifest
             ]
@@ -851,7 +867,7 @@ mod tests {
         }
 
         // The file grew but the data did not land: zeros, from inside the second frame or from its start.
-        // (Not from inside the 4-byte magic: an aligned 4-byte field never straddles f1 sector. Not only `reserved`:
+        // (Not from inside the 4-byte magic: an aligned 4-byte field never straddles a sector. Not only `reserved`:
         // it is zero already.)
         for zero_from in
             (f1.len()..log.len() - 4).filter(|z| !(f1.len() + 1..f1.len() + 4).contains(z))
@@ -865,13 +881,13 @@ mod tests {
             );
         }
 
-        // Zeros after f1 clean end are f1 torn tail too (an empty magic), not f1 clean end.
+        // Zeros after a clean end are a torn tail too (an empty magic), not a clean end.
         let zeroed = [log.clone(), vec![0; 40]].concat();
         assert!(
             matches!(class(&zeroed).1, ScanEnd::TornTail { offset, .. } if offset == BASE + log.len() as u64)
         );
 
-        // A damaged first frame with f1 valid one behind it: corruption.
+        // A damaged first frame with a valid one behind it: corruption.
         let mut bad = log.clone();
         bad[30] ^= 1;
         let (count, end) = class(&bad);
@@ -897,9 +913,44 @@ mod tests {
         bad[log.len() + 15] = 9;
         assert!(matches!(class(&bad).1, ScanEnd::Corrupt { offset, .. } if offset == second));
 
-        // Fewer than 32 bytes left, even non-zero ones, cannot hold f1 frame: torn tail.
+        // Fewer than 32 bytes left, even non-zero ones, cannot hold a frame: torn tail.
         let bad = [f1.clone(), vec![0xaa; 31]].concat();
         assert!(matches!(class(&bad).1, ScanEnd::TornTail { offset, .. } if offset == second));
+    }
+
+    /// A compressed frame written once and pinned: zstd output may change across versions, so the encoder cannot
+    /// be pinned, but these bytes must decode forever (SPEC §4.4 compressed payload).
+    #[test]
+    fn golden_compressed_frame_decodes() {
+        const HEX: &str = "50465231030100001f0000000000000007000000000000008c00000000000000\
+                           28b52ffd208c750000387065727369612001000251c508000159f1b500000000";
+        let bytes: Vec<u8> = HEX
+            .as_bytes()
+            .chunks(2)
+            .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap())
+            .collect();
+        let f = Frame::decode(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(
+            (f.kind(), f.frame_seq(), f.is_compressed()),
+            (FrameKind::Manifest, 7, true)
+        );
+        assert_eq!(f.total_len(), 64);
+        assert_eq!(&*f.payload(140).unwrap(), &b"persia ".repeat(20)[..]);
+    }
+
+    /// Writeback out of order inside one large unsynced frame (a hole at its header, payload bytes behind it) is
+    /// reported as corruption: the bytes cannot tell it from lost data (SPEC §4.4), so they are kept, not erased.
+    #[test]
+    fn hole_inside_last_frame_is_reported_as_corruption() {
+        let first = raw(1, 1, b"first");
+        let log = [first.clone(), raw(2, 2, &[0xab; 4096])].concat();
+        let mut holed = log.clone();
+        holed[first.len()..first.len() + 512].fill(0);
+        let (frames, end) = scan(&holed);
+        assert_eq!(frames.len(), 1);
+        assert!(
+            matches!(end, ScanEnd::Corrupt { offset, .. } if offset == BASE + first.len() as u64)
+        );
     }
 
     #[test]

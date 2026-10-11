@@ -128,13 +128,14 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.6.4 ADR: superblock slot geometry (one slot per aligned 4 KiB page vs both in one page), what `page_size` governs, and `format_minor` on rewrite (ADR-0007 open questions; decide before 2.4.1)
 
 ## 1.7 Frames (SPEC §4.4)
-- [~] 1.7.1 `FrameHeader`/`Frame` encode with trailing CRC and 8-byte padding
-- 1.7.2 `FrameScanner<R>`: iterate frames from an offset, stop at first invalid frame, report reason
-  - [~] 1.7.2.1 Distinguish clean EOF vs torn tail vs mid-file corruption
-  - [~] 1.7.2.2 [T] property: truncate file at every byte offset → scanner yields exactly the complete prefix frames
-  - [~] 1.7.2.3 [T] fuzz scanner
-- [~] 1.7.3 Frame kinds registry (WalChunk, Segment, Manifest, Padding, TombstoneSidecar) with forward-compat skip of unknown kinds
-- [~] 1.7.4 Frame payload compression (§4.4 flags bit0): carry an uncompressed length and a bomb limit, decode via `decompress_block`
+- [x] 1.7.1 `Frame` decode and one-shot `encode_frame` with trailing CRC and 8-byte padding
+- 1.7.2 `FrameScanner` (over a byte slice: mmap or a ranged read): iterate frames from an offset, stop at first invalid frame, report reason
+  - [x] 1.7.2.1 Distinguish clean EOF vs torn tail vs mid-file corruption
+  - [x] 1.7.2.2 [T] property: truncate file at every byte offset → scanner yields exactly the complete prefix frames
+  - [x] 1.7.2.3 [T] fuzz scanner
+- [x] 1.7.3 Frame kinds registry (WalChunk, Segment, Manifest, Padding, TombstoneSidecar) with forward-compat skip of unknown kinds
+- [x] 1.7.4 Frame payload compression (§4.4 flags bit0): carry an uncompressed length and a bomb limit, decode via `decompress_block`
+- [ ] 1.7.5 Streaming frame encoder for large payloads (header with declared `payload_len`, incremental CRC, byte count verified on finish) and a public 24-byte header parser so range readers can size reads
 
 ## 1.8 Memory-mapped reader (the only `unsafe`)
 - [ ] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)
@@ -192,6 +193,7 @@ Deps: M1.
 - [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
 - [ ] 2.4.9 Define `frame_seq` (SPEC §4.4): what it numbers, its first value after a rewrite, and whether recovery stops at a non-increasing one
+- [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
