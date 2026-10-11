@@ -91,7 +91,7 @@ A local database is two files:
 - Zigzag: a signed integer `n` is stored as the unsigned `(n << 1) ^ (n >> (bits - 1))` (arithmetic shift), i.e.
   `0, -1, 1, -2, ...` → `0, 1, 2, 3, ...`; a signed varint is the varint of its zigzag value.
 
-### 4.2 Header (first 8192 bytes)
+### 4.2 Header (first 12288 bytes: header page + two superblock pages)
 ```
 0      8   magic          "PERSIA\0\1"
 8      2   format_major   u16   (reader MUST reject unknown major)
@@ -102,8 +102,14 @@ A local database is two files:
 32    16   db_uuid
 48     4   page_size      u32   (default 4096)
 52  4044   reserved       MUST be zero
-4096  2×2048  superblock slots A and B (see 4.3)
+4096  4096  superblock slot A (see 4.3)
+8192  4096  superblock slot B
+12288       first frame (SPEC §4.4)
 ```
+The header and each slot occupy their own 4096-byte page (ADR-0008), so a torn or unreadable sector damages at most
+one of the three; 4096 bytes is the largest physical sector in common use. These offsets are fixed: they do not
+depend on `page_size`.
+
 Validation (ADR-0007), in this order, so a newer format is never misreported as corruption:
 1. `magic` differs ⇒ corruption (not a Persia container).
 2. `format_major` ≠ 1 (the only major so far) ⇒ *unsupported*, not corruption: a future major may move every other
@@ -113,10 +119,16 @@ Validation (ADR-0007), in this order, so a newer format is never misreported as 
 5. `page_size` not a power of two in `4096..=65536`, or non-zero `reserved` bytes ⇒ corruption.
 6. Any `rocompat_flags` bit this reader does not know ⇒ the container opens **read-only**. No bits are assigned yet.
 
-A writer sets only bits it knows.
+A writer sets only bits it knows, and records `format_minor = max(the container's minor, its own minor)`, also
+when it rewrites the container (SPEC §4.6): minors are additive (SPEC §15), so the field names the newest minor that
+has written the container and never decreases (ADR-0008).
+
+`page_size` is advisory (ADR-0008): the alignment a writer may give Segment frame payloads, using Padding frames
+(SPEC §4.4), so a mapped segment starts on a page boundary. No offset a reader computes depends on it, and a
+container may be rewritten with a different value.
 
 ### 4.3 Superblock (double-buffered, LMDB-style)
-Each 2048-byte slot (slot A at 4096, slot B at 6144):
+Each slot is one 4096-byte page (slot A at 4096, slot B at 8192; ADR-0008):
 ```
 0   8  seq            u64  (monotonic commit counter)
 8   8  manifest_off   u64  (offset of the Manifest frame)
@@ -125,7 +137,7 @@ Each 2048-byte slot (slot A at 4096, slot B at 6144):
 32  8  wal_start      u64  (first WAL frame still needed)
 40  8  fence_token    u64  (writer fencing, SPEC §11.3)
 48  ..  reserved      MUST be zero
-2044 4 crc            u32  (CRC32C over bytes 0..2044 of the slot)
+4092 4 crc            u32  (CRC32C over bytes 0..4092 of the slot)
 ```
 A slot is *valid* when its CRC matches and its reserved bytes are zero; a never-written (all-zero) slot is invalid.
 The offsets are checked against the container by its reader (ROADMAP 2.4.4), not by slot decoding.

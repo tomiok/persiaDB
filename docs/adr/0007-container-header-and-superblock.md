@@ -1,6 +1,6 @@
 # ADR-0007: Container header and superblock validation
 
-- Status: accepted
+- Status: accepted (amended by ADR-0008: slot geometry, `page_size`, `format_minor` on rewrite)
 - Date: 2026-10-11
 - Related: SPEC §4.2, §4.3, §15, §17; ROADMAP 1.6.1–1.6.3, 2.4.1, 2.4.4
 
@@ -21,10 +21,10 @@ released, so this fixes the rules rather than changing the layout.
    to upgrade instead of to restore a backup.
 3. **Unknown `rocompat_flags` bits are not an error**: decoding succeeds and reports that the container must be
    opened read-only. No incompat or rocompat bits are assigned yet; a writer sets only bits it knows.
-4. **`page_size` is a power of two in `4096..=65536`**. The header occupies 8192 bytes whatever the page size, so
+4. **`page_size` is a power of two in `4096..=65536`**. The header and slots occupy fixed offsets whatever the page size, so
    smaller pages buy nothing; larger ones are not useful for mmap or `O_DIRECT` and would only widen what a
    hostile header can ask for.
-5. **Reserved bytes are zero** (header 52..4096, slot 48..2044), and non-zero reserved bytes are
+5. **Reserved bytes are zero** (header 52..4096; slot 48..2044, 48..4092 since ADR-0008), and non-zero reserved bytes are
    corruption, as for frames (SPEC §4.4). New fields arrive with a flag or a minor bump, which tells readers how
    to read them; garbage there means the writer was broken.
 6. **Slot selection** is a pure function of the two decode results: the valid slot with the higher `seq` wins;
@@ -46,7 +46,7 @@ released, so this fixes the rules rather than changing the layout.
   latest commit; a CRC-valid slot with wrong contents is a writer bug that must surface.
 - `read_active` reports only that no slot is valid, not why; diagnostics decode each slot on its own.
 
-## Open questions (ROADMAP 1.6.4, before 2.4.1)
+## Open questions (resolved by ADR-0008)
 
 - **Slot geometry.** Both slots share the 4 KiB page 4096..8192, so a torn or unreadable sector on a 4Kn device can
   lose both at once; LMDB keeps its two meta pages on separate pages. Moving slot B to its own aligned page (and
