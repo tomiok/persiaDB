@@ -230,11 +230,18 @@ and atomically `rename`-ing it over the old one (fsync file, then directory). Tr
 A local reader may memory-map byte ranges of the container instead of reading them (ADR-0010). Only bytes that are
 never written again may be mapped: frames in `12288..log_end` of a superblock the reader has read. The header and
 superblock pages are rewritten in place, so they are always read with ordinary reads. To keep every mapping valid,
-a writer never truncates, hole-punches or rewrites the container below the highest `log_end` it has committed or
-recovered: torn-tail truncation (§4.4) cuts at or after `log_end`, and compaction (§4.6) writes a new file instead of
-shrinking the old one, so existing mappings keep the old file's contents. A read error on a mapped page (or a
-truncation by another program) raises `SIGBUS` and ends the process; a reader that cannot accept that reads with
-ordinary reads instead.
+a writer never truncates, hole-punches or rewrites the container below the `log_end` of the superblock it opened
+with or has since committed:
+- recovery (§8.6) truncates only at the end of the §4.4 scan, which starts at `log_end`; an invalid frame below
+  `log_end` is corruption and is never truncated;
+- compaction (§4.6) writes a new file instead of shrinking the old one, so existing mappings keep the old file's
+  contents;
+- creating a container never truncates an existing file (create-new, or write elsewhere and rename).
+
+A slot damaged after another process read it is outside this contract: recovery may then pick the older slot and
+truncate below the `log_end` that process mapped. A fault on a mapped page (a read error, or a truncation by another
+program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
+accept that reads with ordinary reads instead.
 
 ---
 
@@ -559,8 +566,10 @@ Merges run in background threads, are crash-safe (new segment + new manifest com
 Obsolete segments are deleted only after no snapshot references them (reference counting / epoch).
 
 ### 8.6 Recovery
-On open: pick superblock → load manifest → replay WAL frames after `wal_start` into a memtable (validating CRCs,
-truncating at the first invalid frame) → ready. Recovery MUST be idempotent.
+On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs)
+→ ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated. Only
+the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
+Recovery MUST be idempotent.
 
 ---
 

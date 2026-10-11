@@ -215,21 +215,4 @@ mod tests {
         let err = r.read_u8().unwrap_err();
         assert_eq!(err.corruption().map(|(offset, _)| offset), Some(4100));
     }
-
-    #[cfg_attr(miri, ignore = "Miri has no file-backed mmap (ADR-0010)")]
-    #[test]
-    fn mapped_source_slices_and_outlives_the_mapping_handle() {
-        use std::io::Write;
-
-        let data: Vec<u8> = (0..=255u8).cycle().take(20_000).collect();
-        let mut file = tempfile::tempfile().unwrap();
-        file.write_all(&data).unwrap();
-        let s = ByteSource::from(MmapFile::map(&file, 12_288..20_000).unwrap());
-        drop(file);
-        assert_eq!(s.base_offset(), 12_288);
-        assert_eq!(s.end_offset(), 20_000);
-        let sub = s.slice(13_000..13_008).unwrap();
-        drop(s);
-        assert_eq!(&*sub, &data[13_000..13_008]);
-    }
 }

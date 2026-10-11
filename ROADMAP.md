@@ -138,9 +138,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [ ] 1.7.5 Streaming frame encoder for large payloads (header with declared `payload_len`, incremental CRC, byte count verified on finish) and a public 24-byte header parser so range readers can size reads
 
 ## 1.8 Memory-mapped reader (the only `unsafe`)
-- [~] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)
-- [~] 1.8.2 `Bytes`-like slice abstraction unifying mmap, heap and remote-cached buffers (`ByteSource`)
-- [~] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
+- [x] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)
+- [x] 1.8.2 `Bytes`-like slice abstraction unifying mmap, heap and remote-cached buffers (`ByteSource`)
+- [x] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
 
 ## 1.9 Golden fixtures
 - [ ] 1.9.1 Fixture generator binary producing deterministic sample containers (incl. a golden 12288-byte prefix: header + both slots at their absolute offsets, ADR-0008)
@@ -161,7 +161,7 @@ Deps: M1.
 
 ## 2.1 Core trait and types (SPEC §10.1)
 - [ ] 2.1.1 `Key`, `ObjectMeta`, `PutOutcome`, `Capabilities`, error taxonomy (`NotFound`, `Conflict`, `Transient`, `Corrupt`, `Io`)
-- [ ] 2.1.2 Define `Storage` trait + `ByteSource` integration
+- [ ] 2.1.2 Define `Storage` trait + `ByteSource` integration (decide whether `get_range` returns `ByteSource`; a fallible `ByteSource` constructor that checks a ranged read returned exactly the requested length)
 - [ ] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
 
 ## 2.2 In-memory backend
@@ -177,7 +177,7 @@ Deps: M1.
 - [ ] 2.3.3 `get_range` using pread; `list` with prefix; `delete`
 - [ ] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; [T] traversal attempts
 - [ ] 2.3.5 Run conformance suite
-- [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise
+- [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots
@@ -186,11 +186,13 @@ Deps: M1.
 - [ ] 2.4.2 Append frames with group-fsync API (`append`, `sync`)
 - 2.4.3 Commit: write inactive superblock slot, alternate (SPEC §4.5)
   - [ ] 2.4.3.1 [T] crash simulation: fail after each step 1/2/3, reopen, assert previous or new commit visible, never partial
-- [ ] 2.4.4 Recovery on open: choose superblock, scan from `log_end`, truncate torn tail
+- 2.4.4 Recovery on open (SPEC §4.4, §8.6)
+  - [ ] 2.4.4.1 Choose superblock, scan from `log_end`, truncate torn tail
+  - [ ] 2.4.4.2 [T] an invalid frame in `wal_start..log_end` is `Corrupt` and never truncated; creating a container never truncates an existing file (SPEC §4.7, §8.6)
 - 2.4.5 Container compaction: rewrite live frames into new file + atomic rename (SPEC §4.6)
   - [ ] 2.4.5.1 Dead-space accounting
   - [ ] 2.4.5.2 [T] crash during compaction leaves a valid old or new file
-  - [ ] 2.4.5.3 Windows: an open mapping blocks `rename` over the container; close mappings or defer the swap until readers drain (ADR-0010)
+  - [ ] 2.4.5.3 Windows: test whether an open mapping blocks `rename` over the container; if so, close mappings or defer the swap until readers drain (ADR-0010)
 - [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
 - [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible

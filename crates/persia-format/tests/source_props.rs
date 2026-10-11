@@ -5,7 +5,8 @@
 #![allow(
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
-    clippy::unwrap_used
+    clippy::unwrap_used,
+    unsafe_code // maps temporary files this test owns (ADR-0010)
 )]
 
 use std::io::Write;
@@ -57,7 +58,8 @@ proptest! {
         let data = data(len);
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(&data).unwrap();
-        match MmapFile::map(&file, a as u64..b as u64) {
+        // SAFETY: an unnamed temporary file of this case, never written again.
+        match unsafe { MmapFile::map(&file, a as u64..b as u64) } {
             Ok(map) => {
                 prop_assert!(a <= b && b <= len);
                 prop_assert_eq!(&*map, &data[a..b]);

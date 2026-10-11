@@ -1,6 +1,7 @@
 //! On-disk primitives for Persia DB: encodings, frames, superblock, checksums (SPEC §4, §5). No I/O policy.
 //!
-//! The only crate allowed to contain `unsafe`: one block in [`mmap`], under ADR-0010; everywhere else it stays denied.
+//! The only crate allowed to contain `unsafe`: one block in [`mmap`], whose `unsafe fn map` callers justify
+//! (ADR-0010); everywhere else it stays denied.
 
 // Offsets and lengths come from disk: arithmetic must be checked or explicitly wrapping (ROADMAP 1.1.5).
 #![deny(clippy::arithmetic_side_effects)]

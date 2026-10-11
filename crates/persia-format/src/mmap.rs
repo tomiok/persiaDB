@@ -1,10 +1,10 @@
-//! Read-only memory mapping of an immutable file range: the crate's only `unsafe` (ADR-0010).
+//! Read-only memory mapping of an immutable file range (ADR-0010).
 //!
-//! Soundness rests on the contract in SPEC §4.7: Persia maps only bytes it never writes again (frames below a
-//! read superblock's `log_end`, or other append-only, immutable files), and never truncates, hole-punches or
-//! rewrites a file below what may be mapped. Another program modifying the file is outside that contract.
-//! A disk error on a mapped page raises `SIGBUS`, which ends the process; callers that cannot accept that read
-//! with `pread` instead (ADR-0010).
+//! [`MmapFile::map`] is an `unsafe fn`: whether a range is immutable is a whole-program property (SPEC §4.7) that
+//! only its caller can vouch for, so each call site states why in a `// SAFETY:` comment. The one `unsafe` block
+//! here wraps memmap2. A fault on a mapped page (a read error, a truncation by another program) raises `SIGBUS` on
+//! Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows), which ends the process; callers that cannot accept that read with
+//! `pread` instead.
 #![allow(unsafe_code)]
 
 use std::fs::File;
@@ -26,10 +26,12 @@ use memmap2::{Mmap, MmapOptions};
 ///
 /// let mut file = tempfile::tempfile()?;
 /// file.write_all(b"header..frames")?;
-/// let map = MmapFile::map(&file, 8..14)?;
+/// // SAFETY: an unnamed temporary file that nothing else can open, and this example never writes it again.
+/// let map = unsafe { MmapFile::map(&file, 8..14)? };
 /// assert_eq!(map.offset(), 8);
 /// assert_eq!(&*map, b"frames");
-/// assert!(MmapFile::map(&file, 8..15).is_err()); // past the end of the file
+/// // SAFETY: as above.
+/// assert!(unsafe { MmapFile::map(&file, 8..15) }.is_err()); // past the end of the file
 /// # Ok(())
 /// # }
 /// ```
@@ -42,18 +44,22 @@ pub struct MmapFile {
 impl MmapFile {
     /// Maps bytes `range` (absolute offsets) of `file` read-only.
     ///
-    /// The caller upholds SPEC §4.7: no byte in `range` is written, and the file is not truncated or hole-punched
-    /// below `range.end`, for as long as the mapping (or any [`crate::source::ByteSource`] made from it) lives.
+    /// # Safety
+    /// For as long as the mapping (or any [`crate::source::ByteSource`] made from it) lives, no byte in `range` may
+    /// be written, and the file may not be truncated or hole-punched below `range.end`, by this or any other
+    /// process. For a container, SPEC §4.7 says which ranges qualify. Writing mapped bytes changes memory behind a
+    /// live `&[u8]` (undefined behavior); truncating them makes the next access fault.
     ///
     /// # Errors
-    /// [`io::ErrorKind::InvalidInput`] if `range` is inverted, does not fit in `usize`, or ends past the file's
+    /// [`io::ErrorKind::InvalidInput`] if `range` is inverted, longer than `isize::MAX`, or ends past the file's
     /// current length; otherwise the error from `fstat` or `mmap`.
-    pub fn map(file: &File, range: Range<u64>) -> io::Result<Self> {
+    pub unsafe fn map(file: &File, range: Range<u64>) -> io::Result<Self> {
         let Range { start, end } = range;
         let file_len = file.metadata()?.len();
         let len = end
             .checked_sub(start)
             .filter(|_| end <= file_len)
+            .and_then(|len| isize::try_from(len).ok())
             .and_then(|len| usize::try_from(len).ok())
             .ok_or_else(|| {
                 io::Error::new(
@@ -61,10 +67,10 @@ impl MmapFile {
                     format!("cannot map {start}..{end} of a {file_len}-byte file"),
                 )
             })?;
-        // SAFETY: the mapping is read-only, and `start..end` lies within the file's current length, so no page is
-        // mapped past its end. The caller's contract (SPEC §4.7, ADR-0010) is that these bytes are never written,
-        // truncated or hole-punched while mapped, so the `&[u8]` handed out by `Deref` never changes and never
-        // faults on a missing page. memmap2 aligns `start` down to a page itself and hides the extra bytes.
+        // SAFETY: the mapping is read-only, and `start..end` lies within the file's current length, so no byte of
+        // the slice `Deref` hands out lies past EOF. (memmap2 aligns `start` down to a page and maps at least one
+        // byte, so an empty range may map a page past EOF, but an empty slice never touches it.) That those bytes
+        // never change or disappear while mapped is this function's own safety precondition.
         let map = unsafe { MmapOptions::new().offset(start).len(len).map(file)? };
         Ok(Self { map, offset: start })
     }
@@ -100,6 +106,11 @@ mod tests {
 
     use super::*;
 
+    fn map(file: &File, range: Range<u64>) -> io::Result<MmapFile> {
+        // SAFETY: every test maps an unnamed temporary file of its own and only appends past the mapped range.
+        unsafe { MmapFile::map(file, range) }
+    }
+
     fn file_with(bytes: &[u8]) -> File {
         let mut file = tempfile::tempfile().unwrap();
         file.write_all(bytes).unwrap();
@@ -123,7 +134,7 @@ mod tests {
             (5, 5),
             (len, len),
         ] {
-            let map = MmapFile::map(&file, start..end).unwrap();
+            let map = map(&file, start..end).unwrap();
             assert_eq!(map.offset(), start);
             assert_eq!(&*map, &data[start as usize..end as usize], "{start}..{end}");
         }
@@ -142,17 +153,22 @@ mod tests {
             u64::MAX..u64::MAX,
             0..u64::MAX,
         ] {
-            let err = MmapFile::map(&file, range.clone()).unwrap_err();
+            let err = map(&file, range.clone()).unwrap_err();
             assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{range:?}");
         }
     }
 
     #[test]
     #[cfg_attr(miri, ignore = "Miri has no file-backed mmap (ADR-0010)")]
-    fn empty_file_maps_empty_range() {
-        let file = file_with(&[]);
-        let map = MmapFile::map(&file, 0..0).unwrap();
-        assert!(map.is_empty());
+    fn empty_ranges_map_nothing() {
+        // memmap2 maps at least one byte, so an empty range at a page-aligned EOF maps a page past it; the slice
+        // stays empty and is never touched.
+        for (file_len, start) in [(0, 0), (4096, 4096), (8192, 4096), (100, 100)] {
+            let file = file_with(&vec![1; file_len]);
+            let map = map(&file, start..start).unwrap();
+            assert!(map.is_empty());
+            assert_eq!(map.offset(), start);
+        }
     }
 
     #[test]
@@ -160,7 +176,7 @@ mod tests {
     fn appends_after_the_range_do_not_change_it() {
         // The writer keeps appending frames past a reader's `log_end` (SPEC §4.7).
         let mut file = file_with(b"committed");
-        let map = MmapFile::map(&file, 0..9).unwrap();
+        let map = map(&file, 0..9).unwrap();
         file.write_all(&[0xAB; 10_000]).unwrap();
         assert_eq!(&*map, b"committed");
     }
@@ -168,7 +184,29 @@ mod tests {
     #[test]
     #[cfg_attr(miri, ignore = "Miri has no file-backed mmap (ADR-0010)")]
     fn outlives_the_file_handle() {
-        let map = MmapFile::map(&file_with(b"abc"), 1..3).unwrap();
+        let map = map(&file_with(b"abc"), 1..3).unwrap();
         assert_eq!(map.as_ref(), b"bc");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri has no file-backed mmap (ADR-0010)")]
+    fn mapped_source_slices_and_outlives_the_mapping_handle() {
+        let data: Vec<u8> = (0..=255u8).cycle().take(20_000).collect();
+        let file = file_with(&data);
+        let map = map(&file, 12_288..20_000).unwrap();
+        let s = crate::source::ByteSource::from(map);
+        drop(file);
+        assert_eq!(s.base_offset(), 12_288);
+        assert_eq!(s.end_offset(), 20_000);
+        let sub = s.slice(13_000..13_008).unwrap();
+        drop(s);
+        assert_eq!(&*sub, &data[13_000..13_008]);
+        let mut r = sub.reader();
+        assert_eq!(
+            r.read_u64().unwrap(),
+            u64::from_le_bytes(data[13_000..13_008].try_into().unwrap())
+        );
+        let err = r.read_u8().unwrap_err();
+        assert_eq!(err.corruption().map(|(offset, _)| offset), Some(13_008));
     }
 }
