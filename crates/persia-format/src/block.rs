@@ -3,8 +3,9 @@
 //! A block-framed section stores a logical byte stream cut into fixed-size blocks, each with a 16-byte
 //! [`BlockHeader`], followed by a block table that locates every block. [`BlockWriter`] produces a section;
 //! [`BlockReader`] validates its table once and then decodes any block, or any stream range, on its own, so
-//! a block needs only its own bytes once the table is known. [`BlockReader`] takes the whole section (in
-//! memory or mapped); reading the table and single blocks by range request is ROADMAP 1.5.6.
+//! a block needs only its own bytes once the table is known. [`BlockTable`] opens from the section's tail alone
+//! and decodes blocks fetched separately (object storage); [`BlockReader`] wraps it for a section held in
+//! memory or mapped.
 //!
 //! Everything read is hostile (SPEC §17): the table's `block_size` (at most [`MAX_BLOCK_SIZE`]) bounds every
 //! decode, every block's CRC is verified before its header is interpreted, and errors in block `i` are
@@ -342,13 +343,34 @@ impl BlockWriter {
     }
 }
 
-/// Random access to the blocks of a block-framed section (SPEC §5.2).
+/// A validated block table: everything needed to locate and decode any block of a block-framed section
+/// without holding the section (SPEC §5.2; ADR-0006).
 ///
-/// [`BlockReader::open`] validates the whole block table; each block is checked when it is decoded.
+/// Over object storage: fetch the section's last [`TABLE_TRAILER_LEN`] bytes (or more, speculatively), ask
+/// [`BlockTable::required_len`] how many tail bytes the table needs, fetch them if needed, then
+/// [`BlockTable::open`]. Each block is then one range request for [`BlockTable::block_range`], decoded with
+/// [`BlockTable::decode_block`].
+///
+/// ```
+/// use persia_format::block::{BlockTable, BlockWriter, Compression, TABLE_TRAILER_LEN};
+///
+/// let mut w = BlockWriter::new(4, Compression::None)?;
+/// w.write(b"hello world")?;
+/// let section = w.finish()?;
+/// let section_len = section.len() as u64;
+///
+/// // Only the tail and one block are "fetched".
+/// let trailer = section[section.len() - TABLE_TRAILER_LEN..].try_into()?;
+/// let needed = BlockTable::required_len(trailer) as usize;
+/// let table = BlockTable::open(&section[section.len() - needed..], section_len, 0)?;
+/// let range = table.block_range(2)?;
+/// let mut out = Vec::new();
+/// table.decode_block(2, &section[range.start as usize..range.end as usize], &mut out)?;
+/// assert_eq!(out, b"rld");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Copy)]
-pub struct BlockReader<'a> {
-    /// The section up to the start of the block table.
-    blocks: &'a [u8],
+pub struct BlockTable<'a> {
     /// The table's `block_end` entries, already validated.
     ends: &'a [u8],
     /// Absolute offset of the section start.
@@ -358,52 +380,82 @@ pub struct BlockReader<'a> {
     block_count: u32,
 }
 
-impl<'a> BlockReader<'a> {
-    /// Opens the block-framed `section`, which starts at absolute offset `base` (for error reports).
+impl<'a> BlockTable<'a> {
+    /// How many bytes at the end of the section the block table occupies (`8·block_count + 24`), read from
+    /// the trailer (the section's last [`TABLE_TRAILER_LEN`] bytes). Not verified: [`BlockTable::open`] checks
+    /// it against the table CRC.
+    pub fn required_len(trailer: &[u8; TABLE_TRAILER_LEN]) -> u64 {
+        let [.., c0, c1, c2, c3, _, _, _, _, _, _, _, _] = *trailer;
+        let block_count = u32::from_le_bytes([c0, c1, c2, c3]);
+        u64::from(block_count)
+            .saturating_mul(to_u64(END_LEN))
+            .saturating_add(to_u64(TABLE_TRAILER_LEN))
+    }
+
+    /// Opens the block table from `tail`, the last bytes of a block-framed section of `section_len` bytes
+    /// that starts at absolute offset `base` (for error reports). `tail` may be the whole section.
     ///
     /// # Errors
-    /// [`Error::Corrupt`] if the block table is short, fails its CRC, or breaks a rule of SPEC §5.2.
-    pub fn open(section: &'a [u8], base: u64) -> Result<Self> {
-        let at = |pos: usize| base.saturating_add(to_u64(pos));
-        let eof = |needed: usize| Error::Corrupt {
+    /// - [`Error::Corrupt`] if the section is too short for its table, the table fails its CRC, or it breaks a
+    ///   rule of SPEC §5.2.
+    /// - [`Error::OutOfBounds`] if `tail` is longer than `section_len`, or shorter than the table: then
+    ///   `index` is the number of tail bytes needed; fetch them and retry.
+    pub fn open(tail: &'a [u8], section_len: u64, base: u64) -> Result<Self> {
+        let tail_len = to_u64(tail.len());
+        if tail_len > section_len {
+            return Err(Error::OutOfBounds {
+                index: tail_len,
+                len: section_len,
+            });
+        }
+        let eof = |needed: u64| Error::Corrupt {
             offset: base,
             reason: Corruption::UnexpectedEof {
-                needed: to_u64(needed),
-                available: to_u64(section.len()),
+                needed,
+                available: section_len,
             },
         };
-        let trailer_start = section
-            .len()
-            .checked_sub(TABLE_TRAILER_LEN)
-            .ok_or_else(|| eof(TABLE_TRAILER_LEN))?;
-        let mut trailer = Reader::with_base_offset(section, base);
-        trailer.skip(trailer_start)?;
-        let total_len = trailer.read_u64()?;
-        let block_size = trailer.read_u32()?;
-        let block_count = trailer.read_u32()?;
-        let reserved = trailer.clone();
-        trailer.skip(4)?;
-        let crc_offset = trailer.offset();
-        let stored_crc = trailer.read_u32()?;
-
+        let too_short = |needed: u64| Error::OutOfBounds {
+            index: needed,
+            len: tail_len,
+        };
+        let trailer_len = to_u64(TABLE_TRAILER_LEN);
+        if section_len < trailer_len {
+            return Err(eof(trailer_len));
+        }
+        let trailer: &[u8; TABLE_TRAILER_LEN] =
+            tail.last_chunk().ok_or_else(|| too_short(trailer_len))?;
         // Only `block_count` is used before the CRC check, to find where the table starts.
-        let table_len = usize::try_from(block_count)
-            .ok()
-            .and_then(|n| n.checked_mul(END_LEN))
-            .and_then(|n| n.checked_add(TABLE_TRAILER_LEN))
-            .unwrap_or(usize::MAX);
-        let table_start = section
-            .len()
+        let table_len = Self::required_len(trailer);
+        let table_start = section_len
             .checked_sub(table_len)
             .ok_or_else(|| eof(table_len))?;
-        let crc_start = section.len().saturating_sub(4);
-        let covered = section
-            .get(table_start..crc_start)
-            .ok_or_else(|| eof(table_len))?;
+        let table = usize::try_from(table_len)
+            .ok()
+            .and_then(|len| tail.len().checked_sub(len))
+            .and_then(|start| tail.get(start..))
+            .ok_or_else(|| too_short(table_len))?;
+        // Absolute offset of a position within the table.
+        let at = |pos: usize| base.saturating_add(table_start).saturating_add(to_u64(pos));
+
+        let mut r = Reader::with_base_offset(table, at(0));
+        let ends_len = table.len().saturating_sub(TABLE_TRAILER_LEN);
+        let ends = r.read_bytes(ends_len)?;
+        let total_len = r.read_u64()?;
+        let size_offset = r.offset();
+        let block_size = r.read_u32()?;
+        let count_offset = r.offset();
+        let block_count = r.read_u32()?;
+        let reserved = r.clone();
+        r.skip(4)?;
+        let crc_offset = r.offset();
+        let stored_crc = r.read_u32()?;
+        let covered = table
+            .get(..table.len().saturating_sub(4))
+            .unwrap_or_default();
         check(crc32c(covered), stored_crc, crc_offset)?;
 
         reserved.clone().expect_zeros(4)?;
-        let size_offset = at(trailer_start.saturating_add(8));
         if !(1..=MAX_BLOCK_SIZE).contains(&block_size) {
             return Err(Error::Corrupt {
                 offset: size_offset,
@@ -416,21 +468,16 @@ impl<'a> BlockReader<'a> {
         let expected = total_len.div_ceil(u64::from(block_size));
         if expected != u64::from(block_count) {
             return Err(Error::Corrupt {
-                offset: size_offset.saturating_add(4),
+                offset: count_offset,
                 reason: Corruption::BlockCountMismatch {
                     count: block_count,
                     expected,
                 },
             });
         }
-
-        let ends = section
-            .get(table_start..trailer_start)
-            .ok_or_else(|| eof(table_len))?;
         validate_ends(ends, block_count, block_size, base, table_start)?;
 
         Ok(Self {
-            blocks: section.get(..table_start).unwrap_or_default(),
             ends,
             base,
             total_len,
@@ -459,7 +506,8 @@ impl<'a> BlockReader<'a> {
         self.total_len == 0
     }
 
-    /// Where block `index` is stored, relative to the section start (e.g. for a range request).
+    /// Where block `index` is stored, relative to the section start (e.g. for a range request). At most
+    /// `16 + block_size` bytes long.
     ///
     /// # Errors
     /// [`Error::OutOfBounds`] if `index >= block_count`.
@@ -477,32 +525,37 @@ impl<'a> BlockReader<'a> {
         Ok(start..end)
     }
 
-    /// Stream position where block `index` starts; the block holds the next [`BlockReader::block_size`] bytes
-    /// (fewer for the last). Pure arithmetic: unlike [`BlockReader::block_range`], it does not check `index`.
+    /// Stream position where block `index` starts; the block holds the next [`BlockTable::block_size`] bytes
+    /// (fewer for the last). Pure arithmetic: unlike [`BlockTable::block_range`], it does not check `index`.
     pub fn block_start(&self, index: u32) -> u64 {
         u64::from(index).saturating_mul(u64::from(self.block_size))
     }
 
-    /// Decodes block `index` and appends its bytes to `out`.
+    /// Decodes block `index` from `block`, its stored bytes (exactly [`BlockTable::block_range`]), and appends
+    /// the decoded bytes to `out`.
     ///
     /// # Errors
-    /// [`Error::OutOfBounds`] if `index >= block_count`; [`Error::CorruptBlock`] with this `index` if the
-    /// block fails its CRC, its header disagrees with the table, or its payload does not decode. On error
-    /// `out` is left as it was.
-    pub fn read_block(&self, index: u32, out: &mut Vec<u8>) -> Result<()> {
+    /// [`Error::OutOfBounds`] if `index >= block_count`, or if `block` is not exactly the block's length (then
+    /// `index` is `block.len()` and `len` the expected length); [`Error::CorruptBlock`] with this `index` if
+    /// the block fails its CRC, its header disagrees with the table, or its payload does not decode;
+    /// [`Error::OutOfMemory`] as for [`decompress_block`]. On error `out` is left as it was.
+    pub fn decode_block(&self, index: u32, block: &[u8], out: &mut Vec<u8>) -> Result<()> {
         let range = self.block_range(index)?;
+        let expected_len = range.end.saturating_sub(range.start);
+        if to_u64(block.len()) != expected_len {
+            return Err(Error::OutOfBounds {
+                index: to_u64(block.len()),
+                len: expected_len,
+            });
+        }
         let block_err = |offset: u64, reason: Corruption| Error::CorruptBlock {
             index,
             offset,
             reason,
         };
-        // In-section ranges were validated by `open`.
-        let start = usize::try_from(range.start).unwrap_or(usize::MAX);
-        let end = usize::try_from(range.end).unwrap_or(usize::MAX);
-        let block = self.blocks.get(start..end).unwrap_or_default();
         let base = self.base.saturating_add(range.start);
 
-        // `open` guarantees at least a header; a shorter block is still an error, never a vacuous CRC match.
+        // The table guarantees at least a header; a shorter block is still an error, never a vacuous CRC match.
         let (stored_crc, checked) = block.split_first_chunk::<4>().ok_or_else(|| {
             block_err(
                 base,
@@ -548,23 +601,113 @@ impl<'a> BlockReader<'a> {
         .map_err(|e| in_block(index, e))
     }
 
+    /// End of block `i` relative to the section start.
+    fn end(&self, i: usize) -> Option<u64> {
+        let at = i.checked_mul(END_LEN)?;
+        let entry = self.ends.get(at..at.checked_add(END_LEN)?)?;
+        Some(u64::from_le_bytes(entry.try_into().ok()?))
+    }
+
+    /// Uncompressed length of block `index` per SPEC §5.2: full blocks, then the remainder.
+    fn uncompressed_len_of(&self, index: u32) -> u64 {
+        let block_size = u64::from(self.block_size);
+        self.total_len
+            .saturating_sub(self.block_start(index))
+            .min(block_size)
+    }
+}
+
+/// Random access to the blocks of a block-framed section held in memory or mapped (SPEC §5.2): a
+/// [`BlockTable`] plus the section's bytes.
+///
+/// [`BlockReader::open`] validates the whole block table; each block is checked when it is decoded.
+#[derive(Debug, Clone, Copy)]
+pub struct BlockReader<'a> {
+    table: BlockTable<'a>,
+    /// The whole section.
+    section: &'a [u8],
+}
+
+impl<'a> BlockReader<'a> {
+    /// Opens the block-framed `section`, which starts at absolute offset `base` (for error reports).
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] if the block table is short, fails its CRC, or breaks a rule of SPEC §5.2.
+    pub fn open(section: &'a [u8], base: u64) -> Result<Self> {
+        let table = BlockTable::open(section, to_u64(section.len()), base)?;
+        Ok(Self { table, section })
+    }
+
+    /// The validated block table.
+    pub const fn table(&self) -> &BlockTable<'a> {
+        &self.table
+    }
+
+    /// Number of blocks.
+    pub const fn block_count(&self) -> u32 {
+        self.table.block_count
+    }
+
+    /// Uncompressed size of every block but the last.
+    pub const fn block_size(&self) -> u32 {
+        self.table.block_size
+    }
+
+    /// Length of the stream (all blocks, uncompressed).
+    pub const fn len(&self) -> u64 {
+        self.table.total_len
+    }
+
+    /// Whether the stream is empty (then there are no blocks).
+    pub const fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+
+    /// As [`BlockTable::block_range`].
+    ///
+    /// # Errors
+    /// [`Error::OutOfBounds`] if `index >= block_count`.
+    pub fn block_range(&self, index: u32) -> Result<Range<u64>> {
+        self.table.block_range(index)
+    }
+
+    /// As [`BlockTable::block_start`].
+    pub fn block_start(&self, index: u32) -> u64 {
+        self.table.block_start(index)
+    }
+
+    /// Decodes block `index` and appends its bytes to `out`.
+    ///
+    /// # Errors
+    /// [`Error::OutOfBounds`] if `index >= block_count`; otherwise as [`BlockTable::decode_block`]. On error
+    /// `out` is left as it was.
+    pub fn read_block(&self, index: u32, out: &mut Vec<u8>) -> Result<()> {
+        let range = self.table.block_range(index)?;
+        // In-section ranges were validated by `open`.
+        let start = usize::try_from(range.start).unwrap_or(usize::MAX);
+        let end = usize::try_from(range.end).unwrap_or(usize::MAX);
+        let block = self.section.get(start..end).unwrap_or_default();
+        self.table.decode_block(index, block, out)
+    }
+
     /// Appends stream bytes `start..start + len` to `out`, decoding every block they overlap.
     ///
     /// # Errors
     /// [`Error::OutOfBounds`] if the range ends past the stream; otherwise as [`BlockReader::read_block`]. On
     /// error `out` is left as it was.
     pub fn read_range(&self, start: u64, len: u64, out: &mut Vec<u8>) -> Result<()> {
+        let total_len = self.table.total_len;
         let end = start
             .checked_add(len)
-            .filter(|&end| end <= self.total_len)
+            .filter(|&end| end <= total_len)
             .ok_or(Error::OutOfBounds {
                 index: start.saturating_add(len),
-                len: self.total_len,
+                len: total_len,
             })?;
         if len == 0 {
             return Ok(());
         }
-        let block_size = u64::from(self.block_size);
+        let block_size = u64::from(self.table.block_size);
         let first = start.checked_div(block_size).unwrap_or(0);
         let last = end.saturating_sub(1).checked_div(block_size).unwrap_or(0);
         let rollback = out.len();
@@ -582,21 +725,6 @@ impl<'a> BlockReader<'a> {
             out.extend_from_slice(scratch.get(lo..hi.min(scratch.len())).unwrap_or_default());
         }
         Ok(())
-    }
-
-    /// End of block `i` relative to the section start.
-    fn end(&self, i: usize) -> Option<u64> {
-        let at = i.checked_mul(END_LEN)?;
-        let entry = self.ends.get(at..at.checked_add(END_LEN)?)?;
-        Some(u64::from_le_bytes(entry.try_into().ok()?))
-    }
-
-    /// Uncompressed length of block `index` per SPEC §5.2: full blocks, then the remainder.
-    fn uncompressed_len_of(&self, index: u32) -> u64 {
-        let block_size = u64::from(self.block_size);
-        self.total_len
-            .saturating_sub(self.block_start(index))
-            .min(block_size)
     }
 }
 
@@ -619,11 +747,11 @@ fn validate_ends(
     block_count: u32,
     block_size: u32,
     base: u64,
-    table_start: usize,
+    table_start: u64,
 ) -> Result<()> {
-    let table_start_u64 = to_u64(table_start);
-    let corrupt = |pos: usize, end: u64, min: u64, max: u64| Error::Corrupt {
-        offset: base.saturating_add(to_u64(pos)),
+    let table_start_u64 = table_start;
+    let corrupt = |pos: u64, end: u64, min: u64, max: u64| Error::Corrupt {
+        offset: base.saturating_add(pos),
         reason: Corruption::InvalidBlockEnd { end, min, max },
     };
     if block_count == 0 && table_start != 0 {
@@ -645,7 +773,7 @@ fn validate_ends(
             (shortest, longest)
         };
         if end < min || end > max {
-            let pos = table_start.saturating_add(i.saturating_mul(END_LEN));
+            let pos = table_start.saturating_add(to_u64(i.saturating_mul(END_LEN)));
             return Err(corrupt(pos, end, min, max));
         }
         prev = end;

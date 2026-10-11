@@ -33,8 +33,8 @@ mod common;
 
 use common::{apply, mutation};
 use persia_format::block::{
-    BLOCK_HEADER_LEN, BlockHeader, BlockReader, BlockWriter, Compression, DEFAULT_BLOCK_SIZE,
-    MAX_BLOCK_SIZE, TABLE_TRAILER_LEN,
+    BLOCK_HEADER_LEN, BlockHeader, BlockReader, BlockTable, BlockWriter, Compression,
+    DEFAULT_BLOCK_SIZE, MAX_BLOCK_SIZE, TABLE_TRAILER_LEN,
 };
 use persia_format::compress::{Codec, DEFAULT_ZSTD_LEVEL};
 use persia_format::{Corruption, Error, Writer};
@@ -592,6 +592,130 @@ proptest! {
         section.extend(table(&ends, total_len, block_size, reserved));
         read_hostile(&section, base)?;
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// 6. Table-only reads (ROADMAP 1.5.6): `BlockTable` over a tail agrees with `BlockReader` over the section
+// ---------------------------------------------------------------------------------------------------------
+
+/// Opens `section` both ways: whole (`BlockReader`) and from a tail of `required_len + extra` bytes
+/// (`BlockTable`), and checks they agree on every outcome, block by block. A tail one byte short of the table
+/// is a caller error that names the length needed.
+fn assert_table_only_agrees(section: &[u8], base: u64, extra: Index) -> Result<(), TestCaseError> {
+    let len = section.len();
+    let whole = BlockReader::open(section, base);
+    let Some(trailer) = section.last_chunk::<TABLE_TRAILER_LEN>() else {
+        let table = BlockTable::open(section, len as u64, base).map(|_| ());
+        prop_assert_eq!(table, whole.map(|_| ()));
+        return Ok(());
+    };
+    let required = BlockTable::required_len(trailer);
+    if required > len as u64 {
+        let table =
+            BlockTable::open(&section[len - TABLE_TRAILER_LEN..], len as u64, base).map(|_| ());
+        prop_assert_eq!(table, whole.map(|_| ()));
+        return Ok(());
+    }
+    let required = required as usize;
+    if required > TABLE_TRAILER_LEN {
+        let short = &section[len - (required - 1)..];
+        prop_assert_eq!(
+            BlockTable::open(short, len as u64, base).map(|_| ()),
+            Err(Error::OutOfBounds {
+                index: required as u64,
+                len: required as u64 - 1
+            })
+        );
+    }
+    let k = required + extra.index(len - required + 1);
+    let table = BlockTable::open(&section[len - k..], len as u64, base);
+    let (table, reader) = match (table, whole) {
+        (Ok(t), Ok(r)) => (t, r),
+        (t, r) => {
+            prop_assert_eq!(t.map(|_| ()), r.map(|_| ()));
+            return Ok(());
+        }
+    };
+    prop_assert_eq!(
+        (table.block_count(), table.block_size(), table.len()),
+        (reader.block_count(), reader.block_size(), reader.len())
+    );
+    for i in 0..table.block_count().min(32) {
+        let range = to_usize(table.block_range(i).unwrap());
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let via_table = table.decode_block(i, &section[range], &mut a);
+        prop_assert_eq!(via_table, reader.read_block(i, &mut b));
+        prop_assert_eq!(a, b);
+    }
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI")]
+    fn table_only_open_agrees_with_whole_section(
+        (bs, compression, data) in section_input(16),
+        m in mutation(),
+        base in base(),
+        extra in any::<Index>(),
+    ) {
+        let section = apply(build(bs, compression, &data), &m);
+        assert_table_only_agrees(&section, base, extra)?;
+    }
+
+    #[test]
+    fn table_only_open_agrees_on_noise(
+        noise in proptest::collection::vec(any::<u8>(), 0..200),
+        block_count in 0_u32..8,
+        base in base(),
+        extra in any::<Index>(),
+    ) {
+        // Noise with a plausible `block_count`, so the tail-length logic is reached.
+        let mut section = noise;
+        if section.len() >= TABLE_TRAILER_LEN {
+            let at = section.len() - 12;
+            section[at..at + 4].copy_from_slice(&block_count.to_le_bytes());
+        }
+        assert_table_only_agrees(&section, base, extra)?;
+    }
+}
+
+#[test]
+fn table_only_caller_errors() {
+    let section = build(4, Compression::None, b"hello world");
+    let len = section.len() as u64;
+    let table = BlockTable::open(&section, len, 7).unwrap();
+    // A tail longer than the section it claims to end.
+    assert_eq!(
+        BlockTable::open(&section, len - 1, 7).map(|_| ()),
+        Err(Error::OutOfBounds {
+            index: len,
+            len: len - 1
+        })
+    );
+    // Less than the trailer.
+    assert_eq!(
+        BlockTable::open(&section[section.len() - 23..], len, 7).map(|_| ()),
+        Err(Error::OutOfBounds { index: 24, len: 23 })
+    );
+    // A block slice of the wrong length.
+    let range = to_usize(table.block_range(1).unwrap());
+    let mut out = vec![1];
+    for slice in [
+        &section[range.start..range.end - 1],
+        &section[range.start..=range.end],
+    ] {
+        assert_eq!(
+            table.decode_block(1, slice, &mut out),
+            Err(Error::OutOfBounds {
+                index: slice.len() as u64,
+                len: range.len() as u64
+            })
+        );
+    }
+    assert_eq!(out, [1]);
+    table.decode_block(1, &section[range], &mut out).unwrap();
+    assert_eq!(out, b"\x01o wo");
 }
 
 // ---------------------------------------------------------------------------------------------------------
