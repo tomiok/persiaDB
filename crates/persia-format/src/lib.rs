@@ -17,6 +17,7 @@ pub mod delta;
 pub mod error;
 pub mod for_codec;
 pub mod hash;
+pub mod header;
 pub mod offset;
 pub mod postings;
 pub mod reader;
@@ -25,7 +26,7 @@ pub mod writer;
 pub mod zigzag;
 
 pub use align::ALIGNMENT;
-pub use error::{Corruption, EncodeError, Error, Result};
+pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
 pub use writer::Writer;

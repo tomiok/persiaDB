@@ -3,8 +3,8 @@
 //! Every byte read from disk or the network is hostile (SPEC §17): malformed input must surface as
 //! [`Error::Corrupt`] (or [`Error::CorruptBlock`] inside a block-framed section, SPEC §5.2), never as a panic.
 //! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. The other classes are caller errors
-//! ([`Error::OutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]) and a resource error
-//! ([`Error::OutOfMemory`]: the input may be fine).
+//! ([`Error::OutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]), a resource error
+//! ([`Error::OutOfMemory`]: the input may be fine), and [`Error::Unsupported`] (a valid input from a newer format).
 //!
 //! Offsets are absolute positions in the enclosing object so that a report points at the exact byte
 //! (CLAUDE.md "Safety & errors"), provided the reader knows where its input starts
@@ -76,6 +76,15 @@ pub enum Error {
         /// Bytes requested, when known (`None`: an allocation inside zstd).
         bytes: Option<u64>,
     },
+    /// The input is valid as far as this build can tell but uses a format version or feature it does not support
+    /// (SPEC §4.2; ADR-0007): upgrade, do not repair. Neither corruption nor a caller error.
+    #[error("unsupported format at offset {offset}: {reason}")]
+    Unsupported {
+        /// Absolute byte offset of the field that names the unsupported version or feature.
+        offset: u64,
+        /// What is unsupported.
+        reason: Unsupported,
+    },
 }
 
 impl Error {
@@ -94,7 +103,8 @@ impl Error {
             Self::OutOfBounds { .. }
             | Self::NeedMoreBytes { .. }
             | Self::InvalidInputLen { .. }
-            | Self::OutOfMemory { .. } => None,
+            | Self::OutOfMemory { .. }
+            | Self::Unsupported { .. } => None,
         }
     }
 }
@@ -240,6 +250,48 @@ pub enum Corruption {
         /// The length the block table implies.
         table: u64,
     },
+    /// The container header does not start with the magic bytes `PERSIA\0\1` (SPEC §4.2): not a Persia container.
+    #[error("bad magic: not a Persia container")]
+    BadMagic,
+    /// A header's `page_size` is not a power of two in `min..=max` (SPEC §4.2).
+    #[error("page size {size} is not a power of two in {min}..={max}")]
+    InvalidPageSize {
+        /// The size read.
+        size: u32,
+        /// Smallest valid size.
+        min: u32,
+        /// Largest valid size.
+        max: u32,
+    },
+    /// Neither superblock slot is valid (SPEC §4.3).
+    #[error("no valid superblock slot")]
+    NoValidSuperblock,
+    /// Both superblock slots are valid with the same `seq` but different contents, so neither can be trusted
+    /// (SPEC §4.3; ADR-0007).
+    #[error("both superblock slots have seq {seq} but differ")]
+    SuperblockConflict {
+        /// The shared `seq`.
+        seq: u64,
+    },
+}
+
+/// What a valid input uses that this build does not support (SPEC §4.2, §15; ADR-0007).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum Unsupported {
+    /// A `format_major` other than the one this build reads.
+    #[error("format major version {major} (this build reads {supported})")]
+    FormatMajor {
+        /// The major version read.
+        major: u16,
+        /// The major version this build reads.
+        supported: u16,
+    },
+    /// `incompat_flags` bits this build does not know.
+    #[error("incompatible feature flags {flags:#x}")]
+    IncompatFlags {
+        /// The unknown bits only.
+        flags: u64,
+    },
 }
 
 /// Errors produced while encoding: the caller passed values the format cannot represent.
@@ -304,6 +356,22 @@ pub enum EncodeError {
     /// A block-framed section would need more than `u32::MAX` blocks (SPEC §5.2).
     #[error("too many blocks")]
     TooManyBlocks,
+    /// A page size that is not a power of two in `min..=max` (SPEC §4.2).
+    #[error("page size {size} is not a power of two in {min}..={max}")]
+    InvalidPageSize {
+        /// The requested size.
+        size: u32,
+        /// Smallest valid size.
+        min: u32,
+        /// Largest valid size.
+        max: u32,
+    },
+    /// Feature flag bits this build does not know; a writer sets only bits it knows (SPEC §4.2).
+    #[error("unknown feature flags {flags:#x}")]
+    UnknownFlags {
+        /// The unknown bits only.
+        flags: u64,
+    },
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.
@@ -335,6 +403,13 @@ mod tests {
             Error::OutOfBounds { index: 5, len: 4 },
             Error::OutOfMemory { bytes: Some(8) },
             Error::OutOfMemory { bytes: None },
+            Error::Unsupported {
+                offset: 8,
+                reason: Unsupported::FormatMajor {
+                    major: 2,
+                    supported: 1,
+                },
+            },
             Error::NeedMoreBytes {
                 needed: 2,
                 available: 1,
