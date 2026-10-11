@@ -24,7 +24,7 @@ What each file says about itself:
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | Module docs only. |
 
 `persia-server` and `persia-cli` are empty `main` functions. `persia-proto` is a stub library.
-The public modules of `persia-format` are the list in
+The public modules and re-exports of `persia-format` are the list in
 [lib.rs lines 10–30](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L30):
 
 ```rust
@@ -131,7 +131,7 @@ pub struct Checksummed<T>(pub T);
 
 `encode` writes the fields, checksums every byte except the CRC field, and fills that field in.
 `decode` checks the CRC before it interprets the fields
-([checksummed.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/checksummed.rs#L42-L167)).
+([checksummed.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/checksummed.rs#L42-L168)).
 Frames are variable-length and do not use this helper. The frame scanner is roadmap 1.7.
 
 ## Block codecs
@@ -172,7 +172,7 @@ pub fn compress_block(
 
 Decompression takes the declared length and a caller-supplied maximum, and rejects a larger
 length before it allocates
-([decompress_block](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/compress.rs#L127-L153)):
+([decompress_block](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/compress.rs#L146-L153)):
 
 ```rust
 pub fn decompress_block(

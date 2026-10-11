@@ -119,8 +119,17 @@ header.header a.site-title:focus-visible {
     text-underline-offset: 0.18em;
 }
 
+header.header a {
+    color: var(--ink);
+}
+
+header.header a:visited {
+    color: var(--ink);
+}
+
 header.header button,
-header.header select {
+header.header select,
+button.sl-menu-button {
     background: transparent;
     color: var(--ink);
     border: 1px solid var(--line);
@@ -142,7 +151,7 @@ header.header select {
 }
 
 .sidebar a:visited {
-    color: var(--accent-2);
+    color: var(--accent);
 }
 
 .sidebar a[aria-current='page'] {
@@ -201,6 +210,15 @@ header.header select {
     color: var(--accent-2);
 }
 
+.sl-markdown-content blockquote {
+    border: 1px solid var(--accent-2);
+    border-left: 3px solid var(--accent-2);
+    background: var(--accent-wash-2);
+    color: var(--ink);
+    padding: 0.75rem 1rem;
+    margin: 1.25rem 0;
+}
+
 .sl-markdown-content a:hover,
 .sl-markdown-content a:focus-visible {
     background: var(--wash);
@@ -217,6 +235,8 @@ header.header select {
     border-collapse: collapse;
     background: transparent;
     font-size: 0.9375rem;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
 }
 
 .sl-markdown-content th,
@@ -244,8 +264,19 @@ header.header select {
     padding: 0.05rem 0.25rem;
 }
 
+.expressive-code {
+    max-width: 100%;
+}
+
 .expressive-code figure.frame {
     box-shadow: inset 3px 0 0 var(--accent);
+}
+
+/* Long lines scroll inside the block. Otherwise they widen the whole page. */
+.expressive-code pre,
+.sl-markdown-content pre {
+    max-width: 100%;
+    overflow-x: auto;
 }
 
 .starlight-aside {
@@ -271,7 +302,7 @@ header.header select {
 }
 
 .pagination-links a:visited {
-    color: var(--accent-2);
+    color: var(--accent);
 }
 
 :focus-visible {
@@ -354,13 +385,15 @@ header.header select {
     color: var(--ink);
     border: none;
     border-radius: 0;
-    padding: 0.25rem 0;
+    padding: 0.25rem 0 0.45rem;
     margin: 0;
     tab-size: 4;
+    scrollbar-width: thin;
+    scrollbar-color: var(--line) transparent;
 }
 
 .ascii-hero pre {
-    font-size: clamp(0.7rem, 1.35vw, 0.9375rem);
+    font-size: clamp(0.8125rem, 1.35vw, 0.9375rem);
     line-height: 1.05;
 }
 
@@ -425,7 +458,7 @@ header.header select {
     }
 
     .right-sidebar-panel a:visited {
-        color: var(--accent-2);
+        color: var(--accent);
     }
 
     .right-sidebar-panel a[aria-current='true'] {

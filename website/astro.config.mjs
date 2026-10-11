@@ -48,6 +48,10 @@ const prefixBaseLinks = [
 export default defineConfig({
     site: 'https://tomiok.github.io',
     base,
+    // Starlight serves docs/404.md from its own 404 route, and the docs
+    // collection also emits that path. The dedicated route wins; ignore the
+    // expected collision instead of warning on every build.
+    prerenderConflictBehavior: 'ignore',
     integrations: [
         starlight({
             title: 'Persia DB',
