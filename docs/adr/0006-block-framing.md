@@ -39,8 +39,9 @@ has been released, so this defines the layout rather than changing it.
    position; a reader decodes the blocks that overlap the record. A large document then costs no special case,
    and blocks keep a fixed size for caching.
 7. **Block errors carry the block index** (`Error::CorruptBlock`) besides the absolute offset, so tools such as
-   `persia verify` can name the damaged block. A request beyond the stream is `Error::OutOfBounds`, a caller
-   error, not corruption.
+   `persia verify` can name the damaged block. Caller errors are not corruption: a request beyond the stream
+   is `Error::OutOfBounds`, a section tail shorter than its table is `Error::NeedMoreBytes` (fetch `needed` and
+   retry), and a block slice of the wrong length is `Error::InvalidInputLen`.
 
 ## Consequences
 

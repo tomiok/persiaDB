@@ -383,7 +383,8 @@ pub struct BlockTable<'a> {
 impl<'a> BlockTable<'a> {
     /// How many bytes at the end of the section the block table occupies (`8·block_count + 24`), read from
     /// the trailer (the section's last [`TABLE_TRAILER_LEN`] bytes). Not verified: [`BlockTable::open`] checks
-    /// it against the table CRC.
+    /// it against the table CRC, so a corrupt trailer can ask for up to `8·u32::MAX + 24` bytes. Cap the fetch
+    /// at the section length (more is corruption, which `open` reports without needing the bytes).
     pub fn required_len(trailer: &[u8; TABLE_TRAILER_LEN]) -> u64 {
         let [.., c0, c1, c2, c3, _, _, _, _, _, _, _, _] = *trailer;
         let block_count = u32::from_le_bytes([c0, c1, c2, c3]);
@@ -398,14 +399,15 @@ impl<'a> BlockTable<'a> {
     /// # Errors
     /// - [`Error::Corrupt`] if the section is too short for its table, the table fails its CRC, or it breaks a
     ///   rule of SPEC §5.2.
-    /// - [`Error::OutOfBounds`] if `tail` is longer than `section_len`, or shorter than the table: then
-    ///   `index` is the number of tail bytes needed; fetch them and retry.
+    /// - [`Error::NeedMoreBytes`] if `tail` is shorter than the table: fetch `needed` tail bytes and retry.
+    /// - [`Error::InvalidInputLen`] if `tail` is longer than `section_len`.
     pub fn open(tail: &'a [u8], section_len: u64, base: u64) -> Result<Self> {
         let tail_len = to_u64(tail.len());
         if tail_len > section_len {
-            return Err(Error::OutOfBounds {
-                index: tail_len,
-                len: section_len,
+            return Err(Error::InvalidInputLen {
+                len: tail_len,
+                min: 0,
+                max: section_len,
             });
         }
         let eof = |needed: u64| Error::Corrupt {
@@ -415,9 +417,9 @@ impl<'a> BlockTable<'a> {
                 available: section_len,
             },
         };
-        let too_short = |needed: u64| Error::OutOfBounds {
-            index: needed,
-            len: tail_len,
+        let too_short = |needed: u64| Error::NeedMoreBytes {
+            needed,
+            available: tail_len,
         };
         let trailer_len = to_u64(TABLE_TRAILER_LEN);
         if section_len < trailer_len {
@@ -535,17 +537,18 @@ impl<'a> BlockTable<'a> {
     /// the decoded bytes to `out`.
     ///
     /// # Errors
-    /// [`Error::OutOfBounds`] if `index >= block_count`, or if `block` is not exactly the block's length (then
-    /// `index` is `block.len()` and `len` the expected length); [`Error::CorruptBlock`] with this `index` if
-    /// the block fails its CRC, its header disagrees with the table, or its payload does not decode;
-    /// [`Error::OutOfMemory`] as for [`decompress_block`]. On error `out` is left as it was.
+    /// [`Error::OutOfBounds`] if `index >= block_count`; [`Error::InvalidInputLen`] if `block` is not exactly
+    /// the block's length (a caller error: a short read is the storage layer's to report);
+    /// [`Error::CorruptBlock`] with this `index` if the block fails its CRC, its header disagrees with the
+    /// table, or its payload does not decode; [`Error::OutOfMemory`] as for [`decompress_block`]. On error `out` is left as it was.
     pub fn decode_block(&self, index: u32, block: &[u8], out: &mut Vec<u8>) -> Result<()> {
         let range = self.block_range(index)?;
         let expected_len = range.end.saturating_sub(range.start);
         if to_u64(block.len()) != expected_len {
-            return Err(Error::OutOfBounds {
-                index: to_u64(block.len()),
-                len: expected_len,
+            return Err(Error::InvalidInputLen {
+                len: to_u64(block.len()),
+                min: expected_len,
+                max: expected_len,
             });
         }
         let block_err = |offset: u64, reason: Corruption| Error::CorruptBlock {
@@ -749,13 +752,12 @@ fn validate_ends(
     base: u64,
     table_start: u64,
 ) -> Result<()> {
-    let table_start_u64 = table_start;
     let corrupt = |pos: u64, end: u64, min: u64, max: u64| Error::Corrupt {
         offset: base.saturating_add(pos),
         reason: Corruption::InvalidBlockEnd { end, min, max },
     };
     if block_count == 0 && table_start != 0 {
-        return Err(corrupt(0, 0, table_start_u64, table_start_u64));
+        return Err(corrupt(0, 0, table_start, table_start));
     }
     let header = to_u64(BLOCK_HEADER_LEN);
     let largest = header.saturating_add(u64::from(block_size));
@@ -766,9 +768,9 @@ fn validate_ends(
     for (i, entry) in ends.as_chunks::<END_LEN>().0.iter().enumerate() {
         let end = u64::from_le_bytes(*entry);
         let shortest = prev.saturating_add(header);
-        let longest = prev.saturating_add(largest).min(table_start_u64);
+        let longest = prev.saturating_add(largest).min(table_start);
         let (min, max) = if i == last {
-            (shortest.max(table_start_u64), longest)
+            (shortest.max(table_start), longest)
         } else {
             (shortest, longest)
         };

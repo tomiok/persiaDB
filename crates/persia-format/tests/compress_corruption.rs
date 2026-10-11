@@ -288,6 +288,11 @@ fn bomb_payloads() -> Vec<Vec<u8>> {
     ]
 }
 
+/// The limit `decompress_block` reports: the caller's, capped at `isize::MAX` (no allocation is larger).
+fn effective(max: usize) -> u64 {
+    max.min(isize::MAX as usize) as u64
+}
+
 #[test]
 fn bomb_guard_fires_first_for_every_codec_and_payload() {
     for codec in [Codec::None, Codec::Zstd] {
@@ -309,7 +314,7 @@ fn bomb_guard_fires_first_for_every_codec_and_payload() {
                             offset,
                             Corruption::UncompressedTooLarge {
                                 len,
-                                max: max as u64
+                                max: effective(max)
                             }
                         )),
                         "{codec:?} {payload:x?}"
@@ -337,7 +342,7 @@ proptest! {
         let mut out = PREFIX.to_vec();
         prop_assert_eq!(
             decompress_block(codec, &payload, len, max, offset, &mut out),
-            Err(corrupt(offset, Corruption::UncompressedTooLarge { len, max: max as u64 }))
+            Err(corrupt(offset, Corruption::UncompressedTooLarge { len, max: effective(max) }))
         );
         prop_assert_eq!(out, PREFIX);
     }
@@ -345,28 +350,52 @@ proptest! {
 
 /// With the guard opened all the way (`max_len == usize::MAX`), a frame that declares a length no `Vec` can
 /// hold, and a header that agrees with it, must still be a clean error: library code never panics on input
-/// from disk (CLAUDE.md "Safety & errors"). Such a length can never be allocated, which is a resource error, not
-/// corruption (ROADMAP 1.4.4).
+/// from disk (CLAUDE.md "Safety & errors"). Above `isize::MAX` no allocation can ever succeed, so that is
+/// corruption; at `isize::MAX` the allocation itself fails, which is a resource error (ROADMAP 1.4.4).
 #[test]
 fn impossible_declared_len_with_open_guard_is_an_error_not_a_panic() {
+    let isize_max = isize::MAX as u64;
     // u64::MAX - 2 is the largest value zstd does not reserve as "unknown"/"error".
-    let declared = u64::MAX - 2;
-    let mut frame = Frame::raw(b"");
-    frame.single_segment = false;
-    frame.fcs = Fcs::Field(8, declared);
-    frame.blocks = vec![Block::Rle(0, 1)];
-    let payload = frame.encode();
-    let result = std::panic::catch_unwind(|| {
-        let mut out = Vec::new();
-        decompress_block(Codec::Zstd, &payload, declared, usize::MAX, 9, &mut out)
-    });
-    let result = result.expect("decompress_block panicked instead of returning an error");
-    assert_eq!(
-        result,
-        Err(Error::OutOfMemory {
-            bytes: Some(declared)
-        })
-    );
+    for (declared, expected) in [
+        (
+            u64::MAX - 2,
+            corrupt(
+                9,
+                Corruption::UncompressedTooLarge {
+                    len: u64::MAX - 2,
+                    max: isize_max,
+                },
+            ),
+        ),
+        (
+            isize_max + 1,
+            corrupt(
+                9,
+                Corruption::UncompressedTooLarge {
+                    len: isize_max + 1,
+                    max: isize_max,
+                },
+            ),
+        ),
+        (
+            isize_max,
+            Error::OutOfMemory {
+                bytes: Some(isize_max),
+            },
+        ),
+    ] {
+        let mut frame = Frame::raw(b"");
+        frame.single_segment = false;
+        frame.fcs = Fcs::Field(8, declared);
+        frame.blocks = vec![Block::Rle(0, 1)];
+        let payload = frame.encode();
+        let result = std::panic::catch_unwind(|| {
+            let mut out = Vec::new();
+            decompress_block(Codec::Zstd, &payload, declared, usize::MAX, 9, &mut out)
+        });
+        let result = result.expect("decompress_block panicked instead of returning an error");
+        assert_eq!(result, Err(expected));
+    }
 }
 
 // ---------------------------------------------------------------------------------------------------------

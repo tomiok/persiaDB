@@ -2,9 +2,9 @@
 //!
 //! Every byte read from disk or the network is hostile (SPEC §17): malformed input must surface as
 //! [`Error::Corrupt`] (or [`Error::CorruptBlock`] inside a block-framed section, SPEC §5.2), never as a panic.
-//! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. The other classes are
-//! [`Error::OutOfBounds`], a caller error (a request past the end of valid data), and [`Error::OutOfMemory`], a
-//! resource error (the input may be fine).
+//! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. The other classes are caller errors
+//! ([`Error::OutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]) and a resource error
+//! ([`Error::OutOfMemory`]: the input may be fine).
 //!
 //! Offsets are absolute positions in the enclosing object so that a report points at the exact byte
 //! (CLAUDE.md "Safety & errors"), provided the reader knows where its input starts
@@ -40,18 +40,38 @@ pub enum Error {
         /// What was wrong.
         reason: Corruption,
     },
-    /// The caller asked for `index` (a block, or a stream position) but only `len` exist. A caller error, not
-    /// corruption.
+    /// The caller asked for `index` (a block, or the end of a stream range) but only `len` exist. A caller
+    /// error, not corruption.
     #[error("index {index} out of bounds (length {len})")]
     OutOfBounds {
-        /// The requested index or end position.
+        /// The requested block index or range end (saturating).
         index: u64,
         /// How many exist.
         len: u64,
     },
+    /// The caller supplied fewer bytes than needed, e.g. a section tail shorter than its block table: supply at
+    /// least `needed` and retry. A caller error, not corruption.
+    #[error("need {needed} bytes, {available} supplied")]
+    NeedMoreBytes {
+        /// Bytes needed.
+        needed: u64,
+        /// Bytes supplied.
+        available: u64,
+    },
+    /// The caller supplied input whose length is outside `min..=max`, e.g. a block slice that is not exactly the
+    /// block, or a section tail longer than the section. A caller error, not corruption.
+    #[error("input length {len} outside {min}..={max}")]
+    InvalidInputLen {
+        /// The length supplied.
+        len: u64,
+        /// Smallest valid length.
+        min: u64,
+        /// Largest valid length.
+        max: u64,
+    },
     /// Memory needed to decode could not be allocated (ROADMAP 1.4.4). A resource error, not corruption: the
-    /// input may be valid, and retrying with more memory can succeed.
-    #[error("out of memory{}", .bytes.map_or(String::new(), |b| format!(" allocating {b} bytes")))]
+    /// input may be valid. (A length no allocation could ever hold is corruption instead.)
+    #[error("out of memory")]
     OutOfMemory {
         /// Bytes requested, when known (`None`: an allocation inside zstd).
         bytes: Option<u64>,
@@ -71,7 +91,10 @@ impl Error {
             Self::Corrupt { offset, reason } | Self::CorruptBlock { offset, reason, .. } => {
                 Some((offset, reason))
             }
-            Self::OutOfBounds { .. } | Self::OutOfMemory { .. } => None,
+            Self::OutOfBounds { .. }
+            | Self::NeedMoreBytes { .. }
+            | Self::InvalidInputLen { .. }
+            | Self::OutOfMemory { .. } => None,
         }
     }
 }
@@ -312,17 +335,18 @@ mod tests {
             Error::OutOfBounds { index: 5, len: 4 },
             Error::OutOfMemory { bytes: Some(8) },
             Error::OutOfMemory { bytes: None },
+            Error::NeedMoreBytes {
+                needed: 2,
+                available: 1,
+            },
+            Error::InvalidInputLen {
+                len: 3,
+                min: 0,
+                max: 2,
+            },
         ] {
             assert!(!e.is_corruption());
             assert_eq!(e.corruption(), None);
         }
-        assert_eq!(
-            Error::OutOfMemory { bytes: Some(8) }.to_string(),
-            "out of memory allocating 8 bytes"
-        );
-        assert_eq!(
-            Error::OutOfMemory { bytes: None }.to_string(),
-            "out of memory"
-        );
     }
 }

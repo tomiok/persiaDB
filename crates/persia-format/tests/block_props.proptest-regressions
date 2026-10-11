@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 028381a81ce23747705bcdcce283497de8642d4df91a28fefb134c8305b1fab0 # shrinks to (bs, compression, data) = (17, None, [197]), m = FlipBit(Index(1757635144048699118), 3), base = 18446744073709551615, extra = Index(14470422757049131546)
+cc 7c9e075232443e3cc36821d85674747666638c300aaab72e9d6b3324112b43a0 # shrinks to noise = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], block_count = 1, base = 0, extra = Index(0)

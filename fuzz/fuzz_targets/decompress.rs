@@ -95,6 +95,8 @@ fuzz_target!(|input: &[u8]| {
                 panic!("intact frame with its true length rejected: {reason:?}");
             }
         }
-        Err(other) => panic!("decompression returns only Error::Corrupt: {other:?}"),
+        // A resource error (a zstd context under the fuzzer's malloc limit), not a finding.
+        Err(Error::OutOfMemory { .. }) => {}
+        Err(other) => panic!("decompression returns only Error::Corrupt or OutOfMemory: {other:?}"),
     }
 });

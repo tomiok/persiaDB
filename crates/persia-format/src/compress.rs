@@ -142,7 +142,8 @@ fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, Enc
 ///
 /// # Errors
 /// [`Error::Corrupt`] at `offset`, with:
-/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`;
+/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`, or above `isize::MAX` (no allocation
+///   can hold it, whatever `max_len` allows), with `max` the effective limit;
 /// - [`Corruption::UncompressedLenMismatch`] when the payload expands (or, for zstd, declares it expands) to a
 ///   different length;
 /// - [`Corruption::InvalidCompressedData`] when a zstd payload is not exactly one well-formed zstd frame with
@@ -161,6 +162,8 @@ pub fn decompress_block(
     out: &mut Vec<u8>,
 ) -> Result<()> {
     let corrupt = |reason| Error::Corrupt { offset, reason };
+    // No allocation can exceed `isize::MAX` bytes, so a longer unit is corrupt whatever the caller allows.
+    let max_len = max_len.min(usize::try_from(isize::MAX).unwrap_or(usize::MAX));
     let len = usize::try_from(uncompressed_len)
         .ok()
         .filter(|&len| len <= max_len)
@@ -201,8 +204,8 @@ fn decompress_zstd(src: &[u8], len: usize, offset: u64, out: &mut Vec<u8>) -> Re
         }
         Ok(None) | Err(_) => return Err(corrupt(Corruption::InvalidCompressedData)),
     }
-    // A length within the caller's limit can still be unallocatable (above `isize::MAX`, or out of memory):
-    // a resource error, never a capacity-overflow panic or an abort, and not corruption.
+    // A length within the limit can still fail to allocate (out of memory): a resource error, never a panic or
+    // an abort, and not corruption.
     let out_of_memory = Error::OutOfMemory {
         bytes: Some(to_u64(len)),
     };

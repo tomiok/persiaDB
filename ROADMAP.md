@@ -108,7 +108,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.4.1 Codec enum (`None`, `Zstd`) + `compress_block`/`decompress_block`
 - [x] 1.4.2 Decompression-bomb guard: caller supplies max uncompressed size, reject mismatches
 - [x] 1.4.3 [T] fuzz decompress with random/mutated inputs
-- [~] 1.4.4 Resource/I-O error class in `persia-format` so allocation failures (zstd context, output buffer) are not reported as `Corrupt`
+- [x] 1.4.4 Resource/I-O error class in `persia-format` so allocation failures (zstd context, output buffer) are not reported as `Corrupt`
 
 ## 1.5 Block framing (SPEC §5.2)
 - [x] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len, stored_len}` encode/decode
@@ -116,7 +116,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
 - [x] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
 - [x] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
-- [~] 1.5.6 Table-only block reader for object storage: open from the section tail (`block_count` first, then the table) and decode a separately fetched block (ADR-0006)
+- [x] 1.5.6 Table-only block reader for object storage: open from the section tail (`block_count` first, then the table) and decode a separately fetched block (ADR-0006)
 
 ## 1.6 Container header & superblock (SPEC §4.2–4.3)
 - 1.6.1 `Header` struct: magic, versions, flags, uuid, page size; encode/decode
@@ -583,7 +583,7 @@ Deps: M2, M6, M9, M11.
 - [ ] 12.4.2 NVMe disk cache tier with crash-safe index (or rebuild-on-start)
 - [ ] 12.4.3 Range coalescing and readahead for sequential sections
 - [ ] 12.4.4 Singleflight (dedup concurrent identical fetches)
-- [ ] 12.4.5 Pinning of segment footers/FSTs; cache metrics
+- [ ] 12.4.5 Pinning of segment footers/FSTs and block tables (an owned, `Bytes`-backed `BlockTable`, ADR-0006); cache metrics
 - [ ] 12.4.6 Optional request hedging for tail latency
 - [ ] 12.4.7 Benchmark: cold vs warm query latency on MinIO
 

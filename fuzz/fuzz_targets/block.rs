@@ -1,8 +1,10 @@
 //! Fuzz block-framed sections (ROADMAP 1.5.4, SPEC §5.2 "Block layout" and "Block-framed sections", ADR-0006):
 //! hostile sections never panic or over-allocate; `open` fails only with `Error::Corrupt`, block reads only with
-//! `CorruptBlock` naming the block; error offsets lie within the section; failed reads leave `out` untouched;
-//! a successful read appends exactly the block's length per the table (at most `block_size`, the bomb guard);
-//! one flipped byte in a valid section is caught where it lands.
+//! `CorruptBlock` naming the block (or a resource error, which ends the input); error offsets lie within the
+//! section; failed reads leave `out` untouched; a successful read appends exactly the block's length per the table
+//! (at most `block_size`, the bomb guard);
+//! one flipped byte in a valid section is caught where it lands; a `BlockTable` opened from a tail of the section
+//! agrees with `BlockReader` (ROADMAP 1.5.6).
 //!
 //! Input: `mode u8, bs0 u8, bs1 u8, chunk u8, flip0 u8, flip1 u8, flip_xor u8, data..`. Even `mode`: `data` is the
 //! section as is. Odd `mode`: `data` is the stream, written with `block_size = u16(bs) + 1` in pieces of
@@ -12,7 +14,7 @@
 
 use libfuzzer_sys::fuzz_target;
 use persia_format::Error;
-use persia_format::block::{BlockReader, BlockWriter, Compression, TABLE_TRAILER_LEN};
+use persia_format::block::{BlockReader, BlockTable, BlockWriter, Compression, TABLE_TRAILER_LEN};
 
 const BASE: u64 = 0x1234_5678;
 const PREFIX: [u8; 3] = [0xaa, 0xbb, 0xcc];
@@ -71,6 +73,8 @@ fn read_hostile(section: &[u8], range_seed: u64) -> Option<Vec<Option<Vec<u8>>>>
                 assert_eq!(out, PREFIX, "a failed read must not touch the output");
                 blocks.push(None);
             }
+            // A resource error (e.g. a zstd context under the fuzzer's malloc limit), not a finding.
+            Err(Error::OutOfMemory { .. }) => return None,
             Err(other) => panic!("block {i} read gave {other:?}"),
         }
     }
@@ -119,6 +123,56 @@ fn read_hostile(section: &[u8], range_seed: u64) -> Option<Vec<Option<Vec<u8>>>>
     Some(blocks)
 }
 
+/// The table-only path (ROADMAP 1.5.6): `BlockTable` opened from a tail of the section (at least the table,
+/// plus a seeded over-fetch) agrees with `BlockReader` over the whole section, block by block; a tail one byte
+/// short of the table asks for exactly the table.
+fn check_tail(section: &[u8], seed: u64) {
+    let len = section.len();
+    let whole = BlockReader::open(section, BASE);
+    let k = match section.last_chunk::<TABLE_TRAILER_LEN>() {
+        Some(trailer) if BlockTable::required_len(trailer) <= len as u64 => {
+            let required = BlockTable::required_len(trailer) as usize;
+            if required > TABLE_TRAILER_LEN {
+                let short = BlockTable::open(&section[len - (required - 1)..], len as u64, BASE);
+                assert_eq!(
+                    short.map(|_| ()),
+                    Err(Error::NeedMoreBytes {
+                        needed: required as u64,
+                        available: required as u64 - 1
+                    })
+                );
+            }
+            required + (seed % (len - required + 1) as u64) as usize
+        }
+        _ => len,
+    };
+    let (table, reader) = match (
+        BlockTable::open(&section[len - k..], len as u64, BASE),
+        whole,
+    ) {
+        (Ok(t), Ok(r)) => (t, r),
+        (t, r) => {
+            assert_eq!(t.map(|_| ()), r.map(|_| ()));
+            return;
+        }
+    };
+    assert_eq!(
+        (table.block_count(), table.block_size(), table.len()),
+        (reader.block_count(), reader.block_size(), reader.len())
+    );
+    for i in 0..table.block_count().min(MAX_BLOCKS / 4) {
+        let range = table.block_range(i).expect("in-bounds block");
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        let via_table = table.decode_block(
+            i,
+            &section[range.start as usize..range.end as usize],
+            &mut a,
+        );
+        assert_eq!(via_table, reader.read_block(i, &mut b));
+        assert_eq!(a, b);
+    }
+}
+
 fuzz_target!(|input: &[u8]| {
     let Some((header, data)) = input.split_first_chunk::<7>() else {
         return;
@@ -127,6 +181,7 @@ fuzz_target!(|input: &[u8]| {
     let range_seed = u64::from_le_bytes([bs0, bs1, chunk, f0, f1, flip_xor, mode, 0x5a]);
     if mode & 1 == 0 {
         read_hostile(data, range_seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+        check_tail(data, range_seed);
         return;
     }
 
@@ -153,6 +208,7 @@ fuzz_target!(|input: &[u8]| {
     if flipped {
         section[flip_at] ^= flip_xor;
     }
+    check_tail(&section, range_seed);
     let blocks = read_hostile(&section, range_seed);
 
     if !flipped {

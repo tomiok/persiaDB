@@ -24,6 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Block framing of segment sections (SPEC §5.2; ADR-0006): 16-byte block header (CRC32C, codec, lengths), fixed-size
   blocks over a byte stream, and a CRC-protected block table that records the block size (the bomb limit) and
   each block's end; corrupt blocks are reported with their index. The section table has no `codec` field.
+  A block table can be opened from the section's tail alone and blocks decoded from separately fetched bytes
+  (object storage). Decoding errors now separate corruption from caller errors and from running out of memory
+  (an unallocatable decompression buffer is no longer reported as corrupt data).
 
 <!--
 Sections per release, in this order, only when non-empty:

@@ -621,9 +621,9 @@ fn assert_table_only_agrees(section: &[u8], base: u64, extra: Index) -> Result<(
         let short = &section[len - (required - 1)..];
         prop_assert_eq!(
             BlockTable::open(short, len as u64, base).map(|_| ()),
-            Err(Error::OutOfBounds {
-                index: required as u64,
-                len: required as u64 - 1
+            Err(Error::NeedMoreBytes {
+                needed: required as u64,
+                available: required as u64 - 1
             })
         );
     }
@@ -688,15 +688,19 @@ fn table_only_caller_errors() {
     // A tail longer than the section it claims to end.
     assert_eq!(
         BlockTable::open(&section, len - 1, 7).map(|_| ()),
-        Err(Error::OutOfBounds {
-            index: len,
-            len: len - 1
+        Err(Error::InvalidInputLen {
+            len,
+            min: 0,
+            max: len - 1
         })
     );
     // Less than the trailer.
     assert_eq!(
         BlockTable::open(&section[section.len() - 23..], len, 7).map(|_| ()),
-        Err(Error::OutOfBounds { index: 24, len: 23 })
+        Err(Error::NeedMoreBytes {
+            needed: 24,
+            available: 23
+        })
     );
     // A block slice of the wrong length.
     let range = to_usize(table.block_range(1).unwrap());
@@ -707,15 +711,79 @@ fn table_only_caller_errors() {
     ] {
         assert_eq!(
             table.decode_block(1, slice, &mut out),
-            Err(Error::OutOfBounds {
-                index: slice.len() as u64,
-                len: range.len() as u64
+            Err(Error::InvalidInputLen {
+                len: slice.len() as u64,
+                min: range.len() as u64,
+                max: range.len() as u64
             })
         );
     }
     assert_eq!(out, [1]);
     table.decode_block(1, &section[range], &mut out).unwrap();
     assert_eq!(out, b"\x01o wo");
+}
+
+/// A trailer claiming `u32::MAX` blocks asks for more than the section holds: corruption, reported from the
+/// section length alone, not a request for more tail bytes.
+#[test]
+fn huge_block_count_is_corrupt_not_a_fetch() {
+    let mut section = build(4, Compression::None, b"hello world");
+    let len = section.len();
+    section[len - 12..len - 8].copy_from_slice(&u32::MAX.to_le_bytes());
+    let trailer = section.last_chunk().unwrap();
+    let needed = 8 * u64::from(u32::MAX) + 24;
+    assert_eq!(BlockTable::required_len(trailer), needed);
+    let eof = Error::Corrupt {
+        offset: 7,
+        reason: Corruption::UnexpectedEof {
+            needed,
+            available: len as u64,
+        },
+    };
+    for tail in [&section[len - 24..], &section[..]] {
+        assert_eq!(
+            BlockTable::open(tail, len as u64, 7).map(|_| ()),
+            Err(eof.clone())
+        );
+    }
+}
+
+/// Exact absolute offsets when only the tail is held (the differential tests above cannot catch an offset bug
+/// shared with `BlockReader`): a bad `block_end` entry, and a corrupt block decoded from its own slice.
+#[test]
+fn tail_only_errors_point_at_the_exact_byte() {
+    const SECTION_BASE: u64 = 5_000;
+    // Blocks "hell" (20 bytes) and "o" (17 bytes); the table starts at 37.
+    let blocks = [block(Codec::None, 4, b"hell"), block(Codec::None, 1, b"o")].concat();
+    let section = [blocks.clone(), table(&[15, 37], 5, 4, 0)].concat();
+    let tail = &section[37..];
+    assert_eq!(
+        BlockTable::open(tail, section.len() as u64, SECTION_BASE).map(|_| ()),
+        Err(Error::Corrupt {
+            offset: SECTION_BASE + 37,
+            reason: Corruption::InvalidBlockEnd {
+                end: 15,
+                min: 16,
+                max: 20
+            },
+        })
+    );
+
+    let section = [blocks, table(&[20, 37], 5, 4, 0)].concat();
+    let table = BlockTable::open(&section[37..], section.len() as u64, SECTION_BASE).unwrap();
+    let mut bad = section[20..37].to_vec();
+    bad[16] ^= 1;
+    assert_eq!(
+        table.decode_block(1, &bad, &mut Vec::new()),
+        Err(Error::CorruptBlock {
+            index: 1,
+            offset: SECTION_BASE + 20,
+            reason: Corruption::ChecksumMismatch {
+                stored: u32::from_le_bytes(bad[..4].try_into().unwrap()),
+                computed: persia_format::checksum::crc32c(&bad[4..]),
+            },
+        })
+    );
 }
 
 // ---------------------------------------------------------------------------------------------------------

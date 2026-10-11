@@ -38,7 +38,7 @@ pub(crate) fn check(computed: u32, stored: u32, offset: u64) -> Result<()> {
 
 /// Incremental CRC32C over data that arrives in pieces (e.g. a frame's `kind..padding` range, SPEC §4.4).
 ///
-/// Feeding the same bytes in any split gives the same result as [`crc32c`] over their concatenation.
+/// Feeding the same bytes in any split gives the same result as [`crc32c()`] over their concatenation.
 ///
 /// ```
 /// use persia_format::checksum::{Crc32c, crc32c};
