@@ -3,7 +3,7 @@
 //! decode moves nothing; an accepted header or slot re-encodes to the same bytes; the active slot is the one the
 //! SPEC §4.3 table picks from the two slots decoded on their own.
 //!
-//! Input: `mode u8, data..`, `data` laid out as a container prefix (header at 0, slots at 4096 and 6144). Mode
+//! Input: `mode u8, data..`, `data` laid out as a container prefix (header at 0, slots at 4096 and 8192). Mode
 //! bits, applied in this order: 3 = write the magic and `format_major` 1; 0 = fix `header_crc`; 1 and 2 = fix the
 //! CRC of slot A and B. Random bytes almost never carry a valid CRC, so without them field validation and
 //! slot selection would only see the seed corpus.

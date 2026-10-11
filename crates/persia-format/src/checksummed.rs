@@ -1,7 +1,7 @@
 //! Fixed-size header structures protected by a CRC32C field (SPEC §4.2 header, §4.3 superblock slot).
 //!
 //! Both layouts follow one rule: the checksum covers every byte of the region except its own 4-byte field
-//! (the header's `header_crc` at 12 covers `0..12 + 16..4096`; a slot's `crc` at 2044 covers `0..2044`).
+//! (the header's `header_crc` at 12 covers `0..12 + 16..4096`; a slot's `crc` at 4092 covers `0..4092`).
 //! A type describes its layout with [`ChecksummedLayout`]; [`Checksummed`] does the checksum, so no
 //! structure can forget to verify it, and corrupt bytes are rejected before any field is interpreted.
 //!

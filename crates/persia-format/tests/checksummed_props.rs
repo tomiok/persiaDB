@@ -1,6 +1,7 @@
-//! Property tests for `Checksummed<T>` (ROADMAP 1.3.3) on regions with the SPEC's sizes: a container header
-//! (4096 bytes, CRC at 12, SPEC §4.2) and a superblock slot (2048 bytes, CRC at 2044, SPEC §4.3). Opaque
-//! payload bytes stand in for the fields, so every bit of the region is exercised.
+//! Property tests for `Checksummed<T>` (ROADMAP 1.3.3) on two region shapes: a container header (4096 bytes, CRC
+//! at 12, SPEC §4.2) and a CRC-last region like a superblock slot (2048 bytes, CRC at 2044; real slots are 4096
+//! bytes since ADR-0008, but the sizes only need to differ). Opaque payload bytes stand in for the fields, so every
+//! bit of the region is exercised.
 
 // Test-only helpers index on purpose (see reader_writer_props.rs).
 #![allow(clippy::indexing_slicing, clippy::unwrap_used)]

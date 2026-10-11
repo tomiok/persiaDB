@@ -11,12 +11,14 @@ use crate::header::HEADER_LEN;
 use crate::reader::Reader;
 use crate::writer::Writer;
 
-/// Size of one superblock slot.
-pub const SLOT_LEN: usize = 2048;
+/// Size of one superblock slot: a whole page, so the slots never share a sector (ADR-0008).
+pub const SLOT_LEN: usize = 4096;
 /// Size of both slots together, as read by [`Superblock::read_active`].
 pub const SLOTS_LEN: usize = 2 * SLOT_LEN;
+/// Where the first frame starts: right after slot B (SPEC §4.2).
+pub const FIRST_FRAME_OFFSET: u64 = (HEADER_LEN + SLOTS_LEN) as u64;
 
-/// Bytes 48..2044.
+/// Bytes 48..4092.
 const RESERVED_LEN: usize = SLOT_LEN - 48 - 4;
 
 /// One of the two superblock slots.
@@ -24,7 +26,7 @@ const RESERVED_LEN: usize = SLOT_LEN - 48 - 4;
 pub enum Slot {
     /// The slot at byte 4096.
     A,
-    /// The slot at byte 6144.
+    /// The slot at byte 8192.
     B,
 }
 
@@ -269,13 +271,14 @@ mod tests {
         expected.extend_from_slice(&crc.to_le_bytes());
         assert_eq!(encode(&sb(7)), expected);
         // Pins the CRC32C itself, independently of the computation above.
-        assert_eq!(crc, 0x346b_f587);
+        assert_eq!(crc, 0x5c53_1d71);
         assert_eq!(Superblock::decode(&mut Reader::new(&expected)), Ok(sb(7)));
     }
 
     #[test]
     fn slots() {
-        assert_eq!((Slot::A.offset(), Slot::B.offset()), (4096, 6144));
+        assert_eq!((Slot::A.offset(), Slot::B.offset()), (4096, 8192));
+        assert_eq!(FIRST_FRAME_OFFSET, 12288);
         assert_eq!((Slot::A.other(), Slot::B.other()), (Slot::B, Slot::A));
     }
 

@@ -31,7 +31,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   database id, page size) and double-buffered `Superblock` slots with CRC32C, and selection of the active slot. An
   unknown `format_major` or `incompat_flags` bit is a new `Unsupported` error class rather than corruption; unknown
   `rocompat_flags` bits open the container read-only; reserved bytes must be zero; two valid slots with the same
-  `seq` but different contents are corruption.
+  `seq` but different contents are corruption. Each slot is a full 4096-byte page (A at 4096, B at 8192, first frame
+  at 12288) so one bad sector cannot lose both (ADR-0008); `page_size` is an advisory alignment hint; a writer never
+  lowers `format_minor`.
 
 <!--
 Sections per release, in this order, only when non-empty:

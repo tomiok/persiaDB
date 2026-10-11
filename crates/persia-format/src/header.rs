@@ -4,7 +4,8 @@
 //! ([`crate::superblock`]). [`Header::decode`] checks the magic and `format_major` from the raw bytes *before* the
 //! CRC, because a future major may move every other field, `header_crc` included: such a file is
 //! [`Error::Unsupported`], not corrupt. Unknown `incompat_flags` bits are unsupported too; unknown
-//! `rocompat_flags` bits only make [`Header::access`] say [`Access::ReadOnly`].
+//! `rocompat_flags` bits only make [`Header::access`] say [`Access::ReadOnly`]. `page_size` is advisory and no offset
+//! depends on it (ADR-0008).
 
 use crate::checksummed::{Checksummed, ChecksummedLayout};
 use crate::error::{Corruption, EncodeError, Error, Result, Unsupported};
@@ -72,7 +73,8 @@ pub struct Header {
     pub rocompat_flags: u64,
     /// Identifies the database across copies and replicas.
     pub db_uuid: [u8; 16],
-    /// A power of two in [`MIN_PAGE_SIZE`]`..=`[`MAX_PAGE_SIZE`].
+    /// A power of two in [`MIN_PAGE_SIZE`]`..=`[`MAX_PAGE_SIZE`]. Advisory: the alignment a writer may give Segment
+    /// frame payloads (ADR-0008); no offset depends on it.
     pub page_size: u32,
 }
 
@@ -85,6 +87,25 @@ impl Header {
             rocompat_flags: 0,
             db_uuid,
             page_size: DEFAULT_PAGE_SIZE,
+        }
+    }
+
+    /// The header this build writes back to a container it opened with this header: `format_minor` becomes
+    /// `max(format_minor, FORMAT_MINOR)`, so it never decreases (SPEC §4.2; ADR-0008). Everything else is kept.
+    ///
+    /// ```
+    /// use persia_format::header::{FORMAT_MINOR, Header};
+    ///
+    /// let newer = Header { format_minor: FORMAT_MINOR + 3, ..Header::new([0; 16]) };
+    /// assert_eq!(newer.for_write(), newer);
+    /// ```
+    #[must_use]
+    // While FORMAT_MINOR is 0 the `max` is a no-op; it is the rule for every later minor.
+    #[allow(clippy::unnecessary_min_or_max)]
+    pub fn for_write(&self) -> Self {
+        Self {
+            format_minor: self.format_minor.max(FORMAT_MINOR),
+            ..*self
         }
     }
 
@@ -297,6 +318,30 @@ mod tests {
             (FORMAT_MINOR, DEFAULT_PAGE_SIZE, 0, 0)
         );
         assert_eq!(decode(&encode(&h)), Ok(h));
+    }
+
+    #[test]
+    fn for_write_never_lowers_the_minor() {
+        for minor in [FORMAT_MINOR, FORMAT_MINOR + 1, u16::MAX] {
+            let h = Header {
+                format_minor: minor,
+                ..sample()
+            };
+            assert_eq!(h.for_write(), h);
+        }
+        // An older minor is raised to this build's (vacuous while FORMAT_MINOR is 0).
+        let old = Header {
+            format_minor: 0,
+            ..sample()
+        };
+        assert_eq!(old.for_write().format_minor, FORMAT_MINOR);
+        assert_eq!(
+            Header {
+                format_minor: FORMAT_MINOR,
+                ..old
+            },
+            old.for_write()
+        );
     }
 
     #[test]
