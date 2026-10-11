@@ -20,7 +20,11 @@ const diagram = `
 `.slice(1, -1);
 ---
 
-<AsciiFigure label='Local file and object storage' diagram={diagram}>
+<AsciiFigure
+    label="Local file and object storage"
+    diagram={diagram}
+    accent={['sections, then', 'footer: stats', '16 KiB blocks']}
+>
     The same segment bytes in a local frame and in object storage
         (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#5-segment-format">SPEC §5</a>,
         <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#10-storage-abstraction-and-cloud-backends">§10</a>).

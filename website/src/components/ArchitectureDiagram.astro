@@ -41,7 +41,12 @@ const diagram = `
 `.slice(1, -1);
 ---
 
-<AsciiFigure label='Crate layers' diagram={diagram} hero={hero}>
+<AsciiFigure
+    label="Crate layers"
+    diagram={diagram}
+    hero={hero}
+    accent={['persia-format', 'encodings, checksums', 'in progress']}
+>
     Layers from <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview">SPEC §3</a>.
         Only <code>persia-format</code> has real code today. The other crates are workspace stubs.
         Arrows point down: each layer is used by the one above it.

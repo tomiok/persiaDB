@@ -28,7 +28,11 @@ const diagram = `
 `.slice(1, -1);
 ---
 
-<AsciiFigure label='Life of a write' diagram={diagram}>
+<AsciiFigure
+    label="Life of a write"
+    diagram={diagram}
+    accent={['3. commit', 'data, then manifest', 'inactive superblock']}
+>
     Planned local write path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local">SPEC §4.5</a>,
         <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#82-flow">§8.2</a>).
         A crash before the superblock write keeps the previous commit. Deletions live in tombstone sidecars.

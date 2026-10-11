@@ -33,7 +33,12 @@ const diagram = `
 `.slice(1, -1);
 ---
 
-<AsciiFigure label="Zero-results relaxation cascade" diagram={diagram}>
+<AsciiFigure
+    label="Zero-results relaxation cascade"
+    diagram={diagram}
+    accent={['L0 exact']}
+    accentAlt={['L5 fallback']}
+>
     The cascade in <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on">SPEC §7.6</a>.
     Stop at the first level with enough hits. A stricter level ranks above a looser one.
     Filters stay as written unless <code>relax.filters</code> is <code>last_resort</code>.

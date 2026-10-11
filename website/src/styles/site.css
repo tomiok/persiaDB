@@ -12,6 +12,10 @@
     --muted: #3e4652;
     --line: #cfd3da;
     --wash: #e6e8ec;
+    --accent: #0c5c6b;
+    --accent-2: #8e3a26;
+    --accent-wash: #e5f3f4;
+    --accent-wash-2: #f8ece8;
     --sl-font: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --sl-font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
     --sl-color-bg: var(--paper);
@@ -20,7 +24,7 @@
     --sl-color-black: var(--paper);
     --sl-color-white: var(--ink);
     --sl-color-text: var(--ink);
-    --sl-color-text-accent: var(--ink);
+    --sl-color-text-accent: var(--accent);
     --sl-color-text-invert: var(--paper);
     --sl-color-accent: var(--ink);
     --sl-color-accent-high: var(--ink);
@@ -56,13 +60,17 @@
     --muted: #c2c6ce;
     --line: #343944;
     --wash: #1c2028;
+    --accent: #5dccc0;
+    --accent-2: #f0a090;
+    --accent-wash: #163330;
+    --accent-wash-2: #3a2420;
     --sl-color-bg: var(--paper);
     --sl-color-bg-nav: var(--paper);
     --sl-color-bg-sidebar: var(--paper);
     --sl-color-black: var(--paper);
     --sl-color-white: var(--ink);
     --sl-color-text: var(--ink);
-    --sl-color-text-accent: var(--ink);
+    --sl-color-text-accent: var(--accent);
     --sl-color-text-invert: #121418;
     --sl-color-accent: var(--ink);
     --sl-color-accent-high: var(--ink);
@@ -127,21 +135,21 @@ header.header select {
 }
 
 .sidebar a {
-    color: var(--ink);
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 0.15em;
     border-radius: 0;
 }
 
 .sidebar a:visited {
-    color: var(--ink);
+    color: var(--accent-2);
 }
 
 .sidebar a[aria-current='page'] {
-    background: var(--wash);
+    background: var(--accent-wash);
     color: var(--ink);
     font-weight: 600;
-    box-shadow: inset 2px 0 0 var(--ink);
+    box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .sidebar summary,
@@ -176,19 +184,21 @@ header.header select {
 }
 
 .sl-markdown-content h2,
-.sl-markdown-content h3 {
+.sl-markdown-content h3,
+.sl-markdown-content h4 {
+    color: var(--accent);
     font-weight: 600;
     letter-spacing: -0.03em;
 }
 
 .sl-markdown-content a {
-    color: var(--ink);
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 0.15em;
 }
 
 .sl-markdown-content a:visited {
-    color: var(--ink);
+    color: var(--accent-2);
 }
 
 .sl-markdown-content a:hover,
@@ -220,36 +230,40 @@ header.header select {
 
 .sl-markdown-content th {
     background: transparent;
-    color: var(--muted);
+    color: var(--accent);
     font-weight: 600;
-    border-bottom: 1px solid var(--ink);
+    border-bottom: 1px solid var(--accent);
 }
 
 .sl-markdown-content :not(pre) > code {
-    background: var(--wash);
-    color: var(--ink);
+    background: var(--accent-wash);
+    color: var(--accent);
     border: none;
     border-radius: 0;
     font-family: inherit;
     padding: 0.05rem 0.25rem;
 }
 
+.expressive-code figure.frame {
+    box-shadow: inset 3px 0 0 var(--accent);
+}
+
 .starlight-aside {
     border: 1px solid var(--line);
-    border-left: 3px solid var(--ink);
+    border-left: 3px solid var(--accent);
     border-radius: 0;
-    background: var(--wash);
+    background: var(--accent-wash);
     color: var(--ink);
 }
 
 .starlight-aside__title {
-    color: var(--ink);
+    color: var(--accent);
     font-weight: 600;
 }
 
 .pagination-links a {
     background: transparent;
-    color: var(--ink);
+    color: var(--accent);
     text-decoration: underline;
     text-underline-offset: 0.15em;
     border: none;
@@ -257,17 +271,18 @@ header.header select {
 }
 
 .pagination-links a:visited {
-    color: var(--ink);
+    color: var(--accent-2);
 }
 
 :focus-visible {
-    outline: 2px solid var(--ink);
+    outline: 2px solid var(--accent);
     outline-offset: 2px;
 }
 
 .notice {
-    border: 1px solid var(--line);
-    border-left: 3px solid var(--ink);
+    border: 1px solid var(--accent-2);
+    border-left: 3px solid var(--accent-2);
+    background: var(--accent-wash-2);
     padding: 0.75rem 1rem 0.9rem;
     margin: 1.25rem 0;
     max-width: 42rem;
@@ -279,7 +294,7 @@ header.header select {
     font-weight: 600;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--muted);
+    color: var(--accent-2);
 }
 
 .notice-body > :first-child {
@@ -300,23 +315,23 @@ header.header select {
 .action {
     display: inline-block;
     background: transparent;
-    color: var(--ink);
+    color: var(--accent);
     font-family: inherit;
     text-decoration: none;
-    border: 1px solid var(--ink);
+    border: 1px solid var(--accent);
     padding: 0.35rem 0.7rem;
     border-radius: 0;
 }
 
 .action:hover,
 .action:focus-visible {
-    background: var(--ink);
+    background: var(--accent);
     color: var(--paper);
     text-decoration: none;
 }
 
 .action:visited {
-    color: var(--ink);
+    color: var(--accent);
 }
 
 .action:hover:visited,
@@ -356,8 +371,68 @@ header.header select {
     font-size: 0.875rem;
 }
 
+.ascii .tone {
+    color: var(--accent);
+}
+
+.ascii .tone-alt {
+    color: var(--accent-2);
+}
+
 .ascii figcaption a {
-    color: var(--ink);
+    color: var(--accent);
+}
+
+.ascii figcaption a:visited {
+    color: var(--accent-2);
+}
+
+/*
+ * The desktop "On this page" rail shares Starlight's left-nav width and then
+ * grows with the viewport. Pin it so the article keeps the extra space.
+ */
+@media (min-width: 72rem) {
+    .right-sidebar-container {
+        width: 10.5rem;
+    }
+
+    [data-has-sidebar][data-has-toc] .main-pane {
+        width: calc(100% - 10.5rem);
+    }
+
+    .right-sidebar-panel {
+        padding: 0.75rem 0.55rem 1rem;
+    }
+
+    .right-sidebar-panel .sl-container {
+        width: auto;
+        max-width: none;
+    }
+
+    .right-sidebar-panel h2 {
+        font-size: 0.6875rem;
+        letter-spacing: 0.06em;
+        text-transform: uppercase;
+        color: var(--muted);
+    }
+
+    .right-sidebar-panel a {
+        font-size: 0.75rem;
+        line-height: 1.35;
+        color: var(--accent);
+        text-decoration: underline;
+        text-underline-offset: 0.12em;
+    }
+
+    .right-sidebar-panel a:visited {
+        color: var(--accent-2);
+    }
+
+    .right-sidebar-panel a[aria-current='true'] {
+        color: var(--ink);
+        font-weight: 600;
+        background: var(--accent-wash);
+    }
 }
 
 @media (prefers-reduced-motion: reduce) {
