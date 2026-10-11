@@ -1,0 +1,42 @@
+---
+import AsciiFigure from './AsciiFigure.astro';
+
+const diagram = `
+╔═ query ══════════════════════════════════════════════════════════╗ 
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 1. analyze the text              ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 2. each segment                  ┃               ║░
+║               ┃ and the memtable                 ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 3. merge the top hits            ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 4. too few hits?                 ┃               ║░
+║               ┃ no: return them                  ┃               ║░
+║               ┃ yes: relax                       ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 5. cascade, L0 to L5             ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+╚══════════════════════════════════════════════════════════════════╝░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+`.slice(1, -1);
+---
+
+<AsciiFigure
+    label="Life of a query"
+    diagram={diagram}
+    accent={['5. cascade']}
+    accentAlt={['4. too few', 'no: return', 'yes: relax']}
+>
+    Planned query path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#7-search">SPEC §7</a>).
+        Step 4 is the branch into zero-results relaxation. Filters stay strict unless the caller opts in.
+        The response names the level and what changed. Milestones M7 and M8.
+</AsciiFigure>

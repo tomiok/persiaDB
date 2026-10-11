@@ -1,0 +1,40 @@
+---
+import AsciiFigure from './AsciiFigure.astro';
+
+const diagram = `
+╔═ write ══════════════════════════════════════════════════════════╗ 
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 1. put or delete                 ┃               ║░
+║               ┃ WAL, then memtable               ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 2. flush                         ┃               ║░
+║               ┃ memtable becomes a segment       ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 3. commit                        ┃               ║░
+║               ┃ data, then manifest, then        ┃               ║░
+║               ┃ the inactive superblock          ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 4. merge, later                  ┃               ║░
+║               ┃ new segment, new manifest        ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+╚══════════════════════════════════════════════════════════════════╝░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+`.slice(1, -1);
+---
+
+<AsciiFigure
+    label="Life of a write"
+    diagram={diagram}
+    accent={['3. commit', 'data, then manifest', 'inactive superblock']}
+>
+    Planned local write path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local">SPEC §4.5</a>,
+        <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#82-flow">§8.2</a>).
+        A crash before the superblock write keeps the previous commit. Deletions live in tombstone sidecars.
+        This path is specified and not built yet (M2, M6).
+</AsciiFigure>

@@ -1,0 +1,64 @@
+---
+interface Props {
+    label: string;
+    diagram: string;
+    hero?: boolean;
+    /** Lines containing one of these are drawn in the primary accent, box border included. */
+    accent?: string[];
+    /** Lines containing one of these are drawn in the second accent, box border included. */
+    accentAlt?: string[];
+}
+
+const { label, diagram, hero = false, accent = [], accentAlt = [] } = Astro.props;
+
+const lines = diagram.split('\n');
+const tone = lines.map(() => '');
+const seeds: number[] = [];
+for (let i = 0; i < lines.length; i++) {
+    const line = lines[i] ?? '';
+    if (accentAlt.some((phrase) => phrase.length > 0 && line.includes(phrase))) {
+        tone[i] = 'tone-alt';
+        seeds.push(i);
+    } else if (accent.some((phrase) => phrase.length > 0 && line.includes(phrase))) {
+        tone[i] = 'tone';
+        seeds.push(i);
+    } else if (line.includes('▼')) {
+        tone[i] = 'tone-alt';
+    }
+}
+
+// Spread a highlighted label onto the box rules above and below it. Arrow rows already
+// have a tone, so the color stops at the gap between boxes.
+const chrome = /[┏┓┗┛┃━]/;
+const queue = [...seeds];
+while (queue.length > 0) {
+    const i = queue.pop();
+    if (i === undefined) continue;
+    for (const j of [i - 1, i + 1]) {
+        if (j < 0 || j >= lines.length || tone[j]) continue;
+        const neighbor = lines[j] ?? '';
+        if (chrome.test(neighbor)) {
+            tone[j] = tone[i] ?? '';
+            queue.push(j);
+        }
+    }
+}
+
+const html = lines
+    .map((line, i) => {
+        const text = `${line}\n`
+            .replaceAll('&', '&amp;')
+            .replaceAll('<', '&lt;')
+            .replaceAll('>', '&gt;');
+        const kind = tone[i];
+        return kind ? `<span class="${kind}">${text}</span>` : text;
+    })
+    .join('');
+---
+
+<figure class:list={['ascii', { 'ascii-hero': hero }]} aria-label={label}>
+    <pre tabindex="0" set:html={html} />
+    <figcaption>
+        <slot />
+    </figcaption>
+</figure>

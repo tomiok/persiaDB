@@ -1,0 +1,42 @@
+---
+title: Features
+description: What Persia DB is designed to do, and which of those features exist today.
+---
+
+import RelaxationFlow from '../../components/RelaxationFlow.astro';
+import WinButton from '../../components/WinButton.astro';
+
+The product is a search database: ranked full-text search, filters, facets, and a default that
+avoids an empty page. Almost all of that is still **planned**. The table says which milestone
+builds it. The long form, including the schema sketch and the relaxation JSON, is the
+[features guide](/guide/features/).
+
+| Capability | Status |
+|---|---|
+| Open a file and search | Planned (M10) |
+| Full-text search, filters, facets, sort | Planned (M7) |
+| Zero-results relaxation | Planned (M8), on by default in the design |
+| Schema, documents, analyzers | Planned (M3, M4). Text analysis is ready to start. |
+| Crash-safe commit and recovery | Planned (M2, M6) |
+| Blob storage | Planned (M9) |
+| gRPC and HTTP server | Planned (M11) |
+| S3, GCS, Azure, replication | Planned (M12) |
+| Kubernetes and sharding | Planned (M13) |
+| Rust and Go SDKs | Planned (M14) |
+| Integer codecs and `None` / `Zstd` block codecs | Done, as library code in `persia-format` (M1, except leaf 1.4.4) |
+
+## Zero-results relaxation
+
+When a query matches nothing, the design walks a cascade and stops at the first level that
+returns enough hits. Stricter levels rank above looser ones. The response says what changed.
+Filters stay strict unless the caller opts in.
+
+<RelaxationFlow />
+
+Out of scope for v1: text extraction and OCR, vector search, SQL and joins, more than one writer
+on a shard, and encryption inside the file format. Those are [SPEC §1.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-non-goals-v1).
+
+<p class="actions">
+    <WinButton href="/guide/features/">Full features guide</WinButton>
+    <WinButton href="/architecture/">How it works</WinButton>
+</p>

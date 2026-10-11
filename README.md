@@ -43,6 +43,7 @@ let results = products.search("runing")?;
 | Document | What it is |
 |---|---|
 | [`docs/guide.md`](./docs/guide.md) | User-facing guide (source for the project website): concepts, planned features, milestone status |
+| [`website/`](./website/) | Project website (Astro Starlight), deployed to GitHub Pages |
 | [`SPEC.md`](./SPEC.md) | The design: file format, segments, search, relaxation, storage, distribution |
 | [`ROADMAP.md`](./ROADMAP.md) | All planned work; every leaf is one issue |
 | [`PROGRESS.md`](./PROGRESS.md) | Generated status graph of the roadmap |

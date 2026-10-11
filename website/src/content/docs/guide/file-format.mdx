@@ -1,0 +1,89 @@
+---
+title: "File format and storage"
+description: "The local container, segments, block codecs, and the storage backends. High level."
+---
+
+import StorageDiagram from '../../../components/StorageDiagram.astro';
+
+This page describes how the files are organized. Offsets, magic numbers, and CRC coverage are
+[SPEC §4](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#4-local-file-container) and [SPEC §5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#5-segment-format).
+
+## Local container
+
+`<name>.persia` starts with an 8 KiB header: magic, format versions, compatibility flags, a database
+UUID, and two superblock slots. The slots are a double buffer. Open reads both, throws away a slot
+whose CRC fails, and uses the higher commit sequence (SPEC §4.2–§4.3). After the header the file is
+append-only frames. Each frame has a kind, a length, a payload padded to 8 bytes, and a CRC32C.
+A torn or corrupt frame ends recovery; the file is logically truncated there (SPEC §4.4).
+
+Integers are little-endian. Headers and frames use CRC32C. Internal content hashes and shard routing
+use xxh3 with seed 0. Blob ids are SHA-256 (ADR-0002), a content address that stays stable for the
+life of the blob.
+
+The compatibility rules (SPEC §15) are part of the design, and the bytes may still change before v1.0.
+An unknown major version or an unknown incompatible flag is a hard reject. An unknown
+read-only-compatible flag opens the file read-only. Every format change is a SPEC update, a version
+or flag bump, an ADR, and a golden fixture (see [Contributing](/guide/contributing/)).
+
+Header, superblock, and frame codecs are still ahead (ROADMAP 1.6 and 1.7).
+`persia-format` already has the encodings those structures will use, plus the compression codecs
+below.
+
+## Segments and blocks
+
+A segment is a self-contained byte string: sections, then a footer with statistics, a section table,
+and a CRC (SPEC §5.1). It is a frame payload locally and a standalone object remotely, and the bytes
+match. Sections hold the term dictionary, postings, frequencies, skip lists, optional positions,
+length norms, columnar values, stored documents, the id map, and blob references (SPEC §5.3).
+Deleted ids are not a section.
+
+<StorageDiagram />
+
+Large sections are fixed-size blocks, 16 KiB uncompressed by default. Each block carries its own
+CRC, codec, and uncompressed length, so object storage can fetch one block with a range request
+(SPEC §5.2). Codecs:
+
+| Codec byte | Name | Meaning |
+|---|---|---|
+| 0 | `None` | The payload is the raw bytes. Its length equals `uncompressed_len`. |
+| 1 | `Zstd` | Exactly one zstd frame whose declared content size equals `uncompressed_len`. |
+
+Any other codec byte is corruption. The reader refuses a declared length above the caller's maximum
+before it allocates (the decompression-bomb guard, ADR-0005). Writers may store `None` when zstd
+does not shrink the block. The zstd level is a writer choice and is not stored.
+
+`compress` / `decompress` for those two codecs is done (ROADMAP 1.4.1–1.4.3). The on-disk block
+header, the block table, and random-access reads are not (ROADMAP 1.5). A few layout questions are
+explicitly still open there: where a section records its block size, how a stored document larger
+than one block is split, and what the section table's own codec field means next to the per-block
+codec (ROADMAP 1.5.5, SPEC §5.2).
+
+Integer codecs that will sit *inside* blocks (delta-coded doc ids, bit-packing, postings blocks,
+frame-of-reference for numbers) are implemented and tested (ROADMAP 1.2, ADR-0004). They are not
+wired into a segment writer yet (that is M5).
+
+## One storage interface, several backends
+
+The engine will see every backend as the same trait: get, ranged get, put, put-if-absent, list,
+delete (SPEC §10.1). The trait sketch in the SPEC is illustrative; the Rust types are ROADMAP 2.1.
+
+| Backend | How a database is addressed | Milestone |
+|---|---|---|
+| Local file | `app.persia`, or `file:///…` | M2 |
+| Memory | `memory://` | M2 |
+| S3 (and MinIO) | `s3://bucket/prefix` | M12 |
+| GCS | `gs://bucket/prefix` | M12 |
+| Azure Blob | `az://account/container/prefix` | M12 |
+
+Cloud credentials use each provider's normal chain (environment, config files, instance metadata).
+Persia-specific configuration is an override, not a requirement. An endpoint override exists for
+the development emulators (MinIO, fake-gcs-server, Azurite).
+
+A remote commit uploads new segments, then creates `manifests/<seq+1>` with put-if-absent
+(SPEC §10.4). Conflict means another writer won. Readers discover the newest manifest by listing,
+with an optional `CURRENT` hint. Remote reads go through a block cache (memory, and optionally local
+disk) keyed by object and block (SPEC §10.6).
+
+`replicate` mode keeps the local file as the primary and uploads committed manifests in order,
+without blocking local writes on the network (SPEC §10.5). Remote readers of that replica are
+eventually consistent; lag is a metric.

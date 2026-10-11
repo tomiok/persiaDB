@@ -25,3 +25,8 @@ lcov.info
 .idea/
 *.swp
 .DS_Store
+
+# Website (Astro). Not a Cargo workspace member. website/.gitignore repeats these.
+/website/node_modules/
+/website/dist/
+/website/.astro/
