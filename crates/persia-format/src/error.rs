@@ -3,7 +3,7 @@
 //! Every byte read from disk or the network is hostile (SPEC §17): malformed input must surface as
 //! [`Error::Corrupt`] (or [`Error::CorruptBlock`] inside a block-framed section, SPEC §5.2), never as a panic.
 //! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. The other classes are caller errors
-//! ([`Error::OutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]), a resource error
+//! ([`Error::OutOfBounds`], [`Error::RangeOutOfBounds`], [`Error::NeedMoreBytes`], [`Error::InvalidInputLen`]), a resource error
 //! ([`Error::OutOfMemory`]: the input may be fine), and [`Error::Unsupported`] (a valid input from a newer format).
 //!
 //! Offsets are absolute positions in the enclosing object so that a report points at the exact byte
@@ -48,6 +48,19 @@ pub enum Error {
         index: u64,
         /// How many exist.
         len: u64,
+    },
+    /// The caller asked for bytes `start..end` (absolute offsets) of a buffer that holds only
+    /// `available_start..available_end`, or `start > end`. A caller error, not corruption.
+    #[error("range {start}..{end} outside the available {available_start}..{available_end}")]
+    RangeOutOfBounds {
+        /// Start of the requested range.
+        start: u64,
+        /// End of the requested range.
+        end: u64,
+        /// Absolute offset of the buffer's first byte.
+        available_start: u64,
+        /// Absolute offset just past the buffer's last byte.
+        available_end: u64,
     },
     /// The caller supplied fewer bytes than needed, e.g. a section tail shorter than its block table: supply at
     /// least `needed` and retry. A caller error, not corruption.
@@ -102,6 +115,7 @@ impl Error {
                 Some((offset, reason))
             }
             Self::OutOfBounds { .. }
+            | Self::RangeOutOfBounds { .. }
             | Self::NeedMoreBytes { .. }
             | Self::InvalidInputLen { .. }
             | Self::OutOfMemory { .. }
@@ -411,6 +425,12 @@ mod tests {
         }
         for e in [
             Error::OutOfBounds { index: 5, len: 4 },
+            Error::RangeOutOfBounds {
+                start: 1,
+                end: 9,
+                available_start: 2,
+                available_end: 8,
+            },
             Error::OutOfMemory { bytes: Some(8) },
             Error::OutOfMemory { bytes: None },
             Error::Unsupported {

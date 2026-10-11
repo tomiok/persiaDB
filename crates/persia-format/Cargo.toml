@@ -11,8 +11,11 @@ crc32c.workspace = true
 zstd.workspace = true
 xxhash-rust.workspace = true
 thiserror.workspace = true
+bytes.workspace = true
+memmap2.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 criterion.workspace = true
 proptest.workspace = true
 zstd.workspace = true

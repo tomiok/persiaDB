@@ -1,6 +1,6 @@
 //! On-disk primitives for Persia DB: encodings, frames, superblock, checksums (SPEC §4, §5). No I/O policy.
 //!
-//! The only crate allowed to contain `unsafe` (in `mmap`, under the ADR from ROADMAP 1.8.3); everywhere else it stays denied.
+//! The only crate allowed to contain `unsafe`: one block in [`mmap`], under ADR-0010; everywhere else it stays denied.
 
 // Offsets and lengths come from disk: arithmetic must be checked or explicitly wrapping (ROADMAP 1.1.5).
 #![deny(clippy::arithmetic_side_effects)]
@@ -19,9 +19,11 @@ pub mod for_codec;
 pub mod frame;
 pub mod hash;
 pub mod header;
+pub mod mmap;
 pub mod offset;
 pub mod postings;
 pub mod reader;
+pub mod source;
 pub mod superblock;
 pub mod varint;
 pub mod writer;
@@ -31,4 +33,5 @@ pub use align::ALIGNMENT;
 pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
+pub use source::ByteSource;
 pub use writer::Writer;
