@@ -7,6 +7,8 @@
 
 :root,
 :root[data-theme='light'] {
+    /* Wide enough for a short heading; longer ones wrap inside the rail. */
+    --persia-toc-width: 13rem;
     --paper: #f3f4f6;
     --ink: #1b1e23;
     --muted: #3e4652;
@@ -421,29 +423,48 @@ button.sl-menu-button {
 }
 
 /*
- * The desktop "On this page" rail shares Starlight's left-nav width and then
- * grows with the viewport. Pin it narrow. Starlight sticks the article to that
- * rail (`--sl-content-margin-inline: auto 0`), so the space the rail gives up
- * shows up as a gap beside the left nav. Center the 45rem column in the pane
- * between the two sidebars instead.
+ * Desktop "On this page" rail.
+ *
+ * Starlight's rail is position:fixed with width:100%. On a fixed box that
+ * percentage is the viewport, so the labels laid out almost 100vw wide and
+ * the ends were clipped at the right edge. The flex slot is also what
+ * Starlight uses to shove the article against the rail
+ * (`--sl-content-margin-inline: auto 0` on the pane). Give the rail an
+ * explicit width, anchor it to the viewport edge, and center the 45rem
+ * article in the pane between the two sidebars. The margin is set on the
+ * article container itself so it does not depend on the custom property.
  */
 @media (min-width: 72rem) {
     .right-sidebar-container {
-        width: 10.5rem;
+        width: var(--persia-toc-width);
+        max-width: var(--persia-toc-width);
+    }
+
+    .right-sidebar {
+        inset-inline-end: 0;
+        width: var(--persia-toc-width);
+        max-width: var(--persia-toc-width);
+        overflow-x: hidden;
     }
 
     [data-has-sidebar][data-has-toc] .main-pane {
-        width: calc(100% - 10.5rem);
+        width: calc(100% - var(--persia-toc-width));
         --sl-content-margin-inline: auto;
     }
 
+    [data-has-sidebar][data-has-toc] .content-panel > .sl-container {
+        margin-inline: auto;
+        max-width: var(--sl-content-width);
+    }
+
     .right-sidebar-panel {
-        padding: 0.75rem 0.55rem 1rem;
+        padding: 0.75rem 0.65rem 1rem;
+        overflow-wrap: anywhere;
     }
 
     .right-sidebar-panel .sl-container {
         width: auto;
-        max-width: none;
+        max-width: 100%;
     }
 
     .right-sidebar-panel h2 {
@@ -459,6 +480,8 @@ button.sl-menu-button {
         color: var(--accent);
         text-decoration: underline;
         text-underline-offset: 0.12em;
+        overflow-wrap: anywhere;
+        white-space: normal;
     }
 
     .right-sidebar-panel a:visited {
@@ -470,6 +493,22 @@ button.sl-menu-button {
         font-weight: 600;
         background: var(--accent-wash);
     }
+}
+
+footer .agent-links {
+    margin: 0.25rem 0 0;
+    font-size: 0.8125rem;
+    line-height: 1.45;
+    color: var(--muted);
+}
+
+footer .agent-links a {
+    color: var(--accent);
+    text-underline-offset: 0.12em;
+}
+
+footer .agent-links a:visited {
+    color: var(--accent);
 }
 
 @media (prefers-reduced-motion: reduce) {

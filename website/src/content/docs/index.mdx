@@ -18,14 +18,15 @@ import WinButton from '../../components/WinButton.astro';
     Nothing works end to end yet, and the on-disk format is unstable until v1.0.
     There is no compatibility promise
     ([SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)).
-    On 2026-10-10 the roadmap stood at **51 of 400 leaves (13%)**: project bootstrap is done, and
-    format primitives are half done. The live counter is
+    On 2026-10-11 the roadmap stood at **63 of 403 leaves (16%)**: project bootstrap is done, and
+    format primitives are in progress (header and superblock included; frames are not). The live counter is
     [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 </PreAlpha>
 
 <ArchitectureDiagram hero />
 
 <p class="actions">
+    <WinButton href="/guide/getting-started/">Getting started</WinButton>
     <WinButton href="/guide/overview/">Read the guide</WinButton>
     <WinButton href="/features/">Features</WinButton>
     <WinButton href="/architecture/">How it works</WinButton>
@@ -48,6 +49,7 @@ When this site and the SPEC disagree, the SPEC wins.
 
 ## Where to go next
 
+- [Getting started](/guide/getting-started/) separates the codecs you can call from the database API, which is still illustrative.
 - [Guide overview](/guide/overview/) is the full narrative, split from the repository guide.
-- [Code](/guide/code/) quotes the format primitives that already compile, with links to the files.
+- [For AI agents](/guide/for-agents/) is the short list of constraints. [llms.txt](/llms.txt) indexes the pages.
 - [About](/about/) covers license, conduct, and how to contribute.

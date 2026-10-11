@@ -44,6 +44,8 @@ let results = products.search("runing")?;
 |---|---|
 | [`docs/guide.md`](./docs/guide.md) | User-facing guide (source for the project website): concepts, planned features, milestone status |
 | [`website/`](./website/) | Project website (Astro Starlight), deployed to GitHub Pages |
+| [Getting started](https://tomiok.github.io/persiaDB/guide/getting-started/) | What you can call today, and the intended API (illustrative where it is not implemented) |
+| [llms.txt](https://tomiok.github.io/persiaDB/llms.txt) | Index of the site for agents. [llms-full.txt](https://tomiok.github.io/persiaDB/llms-full.txt) is the pages in Markdown |
 | [`SPEC.md`](./SPEC.md) | The design: file format, segments, search, relaxation, storage, distribution |
 | [`ROADMAP.md`](./ROADMAP.md) | All planned work; every leaf is one issue |
 | [`PROGRESS.md`](./PROGRESS.md) | Generated status graph of the roadmap |

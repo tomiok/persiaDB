@@ -5,7 +5,7 @@ description: "What Persia DB is, what already works, and why it is built this wa
 
 > **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.
 > There is no compatibility promise. Counts on the [roadmap page](/guide/roadmap/) are the 2026-10-10 snapshot
-> in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **51 of 400 leaves done (13%)**.
+> in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **63 of 403 leaves done (16%)** on 2026-10-11.
 
 [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) is the design contract (draft v0.1, format version 1.0, unstable).
 When these pages and the SPEC disagree, the SPEC wins.
