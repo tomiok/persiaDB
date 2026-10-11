@@ -142,12 +142,14 @@ fn compress_zstd(level: i32, src: &[u8], out: &mut Vec<u8>) -> Result<usize, Enc
 ///
 /// # Errors
 /// [`Error::Corrupt`] at `offset`, with:
-/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`, or when a zstd payload that passes
-///   every other check needs an output buffer that cannot be allocated;
+/// - [`Corruption::UncompressedTooLarge`] when `uncompressed_len > max_len`;
 /// - [`Corruption::UncompressedLenMismatch`] when the payload expands (or, for zstd, declares it expands) to a
 ///   different length;
 /// - [`Corruption::InvalidCompressedData`] when a zstd payload is not exactly one well-formed zstd frame with
 ///   a declared content size, or zstd cannot decode it (including a frame that needs a dictionary).
+///
+/// [`Error::OutOfMemory`] when a zstd payload that passes every other check needs an output buffer that cannot be
+/// allocated, or zstd cannot allocate its context: the input may be valid.
 ///
 /// On error `out` is left as it was.
 pub fn decompress_block(
@@ -177,66 +179,56 @@ pub fn decompress_block(
             out.extend_from_slice(src);
             Ok(())
         }
-        Codec::Zstd => decompress_zstd(src, len, max_len, out).map_err(corrupt),
+        Codec::Zstd => decompress_zstd(src, len, offset, out),
     }
 }
 
 /// Checks the frame structure first, so a hostile payload is rejected before `len` bytes are allocated for it.
-fn decompress_zstd(
-    src: &[u8],
-    len: usize,
-    max_len: usize,
-    out: &mut Vec<u8>,
-) -> Result<(), Corruption> {
+fn decompress_zstd(src: &[u8], len: usize, offset: u64, out: &mut Vec<u8>) -> Result<()> {
+    let corrupt = |reason| Error::Corrupt { offset, reason };
     // Exactly one frame: the magic rules out skippable and legacy frames, the size rules out trailing bytes.
     if !src.starts_with(&ZSTD_MAGIC) || zstd_safe::find_frame_compressed_size(src) != Ok(src.len())
     {
-        return Err(Corruption::InvalidCompressedData);
+        return Err(corrupt(Corruption::InvalidCompressedData));
     }
     match zstd_safe::get_frame_content_size(src) {
         Ok(Some(declared)) if declared == to_u64(len) => {}
         Ok(Some(declared)) => {
-            return Err(Corruption::UncompressedLenMismatch {
+            return Err(corrupt(Corruption::UncompressedLenMismatch {
                 expected: to_u64(len),
                 actual: declared,
-            });
+            }));
         }
-        Ok(None) | Err(_) => return Err(Corruption::InvalidCompressedData),
+        Ok(None) | Err(_) => return Err(corrupt(Corruption::InvalidCompressedData)),
     }
     // A length within the caller's limit can still be unallocatable (above `isize::MAX`, or out of memory):
-    // that is an error too, never a capacity-overflow panic or an abort.
+    // a resource error, never a capacity-overflow panic or an abort, and not corruption.
+    let out_of_memory = Error::OutOfMemory {
+        bytes: Some(to_u64(len)),
+    };
     out.try_reserve_exact(len)
-        .map_err(|_| Corruption::UncompressedTooLarge {
-            len: to_u64(len),
-            max: to_u64(max_len),
-        })?;
+        .map_err(|_| out_of_memory.clone())?;
     // The output slice is exactly `len` long, a hard bound that does not rely on zstd enforcing the declared
     // size. Zero-filling it first costs nothing measurable (`benches/compress.rs`).
     let start = out.len();
-    let end = start
-        .checked_add(len)
-        .ok_or(Corruption::InvalidCompressedData)?;
+    let end = start.checked_add(len).ok_or(out_of_memory)?;
     out.resize(end, 0);
     let written = out
         .get_mut(start..)
         .and_then(|dst| with_context(&DCTX, DCtx::try_create, |dctx| dctx.decompress(dst, src)));
-    match written {
-        Some(Ok(n)) if n == len => Ok(()),
-        // `None`: zstd could not allocate its context. Not corruption, but this crate's errors have no resource
-        // class yet, and Rust aborts on out-of-memory elsewhere anyway. A short `Ok(n)` is unreachable while
-        // zstd enforces the declared size; it is still never returned as success.
-        Some(Ok(n)) => {
-            out.truncate(start);
-            Err(Corruption::UncompressedLenMismatch {
-                expected: to_u64(len),
-                actual: to_u64(n),
-            })
-        }
-        Some(Err(_)) | None => {
-            out.truncate(start);
-            Err(Corruption::InvalidCompressedData)
-        }
-    }
+    let result = match written {
+        Some(Ok(n)) if n == len => return Ok(()),
+        // Unreachable while zstd enforces the declared size; still never returned as success.
+        Some(Ok(n)) => corrupt(Corruption::UncompressedLenMismatch {
+            expected: to_u64(len),
+            actual: to_u64(n),
+        }),
+        Some(Err(_)) => corrupt(Corruption::InvalidCompressedData),
+        // zstd could not allocate its context.
+        None => Error::OutOfMemory { bytes: None },
+    };
+    out.truncate(start);
+    Err(result)
 }
 
 /// Runs `f` with this thread's cached context, creating it on first use. During thread teardown (the cache is

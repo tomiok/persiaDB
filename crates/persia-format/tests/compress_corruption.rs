@@ -345,7 +345,8 @@ proptest! {
 
 /// With the guard opened all the way (`max_len == usize::MAX`), a frame that declares a length no `Vec` can
 /// hold, and a header that agrees with it, must still be a clean error: library code never panics on input
-/// from disk (CLAUDE.md "Safety & errors"), and such a length can never be allocated.
+/// from disk (CLAUDE.md "Safety & errors"). Such a length can never be allocated, which is a resource error, not
+/// corruption (ROADMAP 1.4.4).
 #[test]
 fn impossible_declared_len_with_open_guard_is_an_error_not_a_panic() {
     // u64::MAX - 2 is the largest value zstd does not reserve as "unknown"/"error".
@@ -359,10 +360,12 @@ fn impossible_declared_len_with_open_guard_is_an_error_not_a_panic() {
         let mut out = Vec::new();
         decompress_block(Codec::Zstd, &payload, declared, usize::MAX, 9, &mut out)
     });
-    let result = result.expect("decompress_block panicked instead of returning Err(Corrupt)");
-    assert!(
-        matches!(result, Err(Error::Corrupt { offset: 9, .. })),
-        "{result:?}"
+    let result = result.expect("decompress_block panicked instead of returning an error");
+    assert_eq!(
+        result,
+        Err(Error::OutOfMemory {
+            bytes: Some(declared)
+        })
     );
 }
 

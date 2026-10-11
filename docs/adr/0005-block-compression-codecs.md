@@ -1,6 +1,6 @@
 # ADR-0005: Block compression codecs and the decompression-bomb guard
 
-- Status: accepted
+- Status: accepted (decision 3 amended 2026-10-11, ROADMAP 1.4.4)
 - Date: 2026-10-10
 - Related: SPEC §4.1, §5.2, §17; ROADMAP 1.4.1–1.4.3, 1.5
 
@@ -24,7 +24,8 @@ has been released, so this defines the codec byte rather than changing it.
 3. **The caller bounds every decode** with `max_len` (for blocks: the section's block size). `uncompressed_len`
    above it is `UncompressedTooLarge`; the output buffer is exactly `uncompressed_len` long, so zstd cannot
    write past it; a payload of another length is `UncompressedLenMismatch`. An output buffer that cannot be
-   allocated (only possible with a very large `max_len`) is `UncompressedTooLarge`, never a panic.
+   allocated (only possible with a very large `max_len`), or a zstd context that cannot be, is `Error::OutOfMemory`:
+   never a panic, and not corruption, since the input may be valid (amended for ROADMAP 1.4.4).
 4. **The zstd level is a writer choice and is not recorded**: any level decodes the same way. The default is
    zstd's own (3). Writers may store a unit as `None` when compressing does not help.
 5. **`zstd` is built without default features.** The `legacy` feature decodes pre-1.0 zstd frames, an old and

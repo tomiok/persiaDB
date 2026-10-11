@@ -2,8 +2,9 @@
 //!
 //! Every byte read from disk or the network is hostile (SPEC §17): malformed input must surface as
 //! [`Error::Corrupt`] (or [`Error::CorruptBlock`] inside a block-framed section, SPEC §5.2), never as a panic.
-//! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. [`Error::OutOfBounds`] is the one
-//! caller error: a request past the end of valid data.
+//! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. The other classes are
+//! [`Error::OutOfBounds`], a caller error (a request past the end of valid data), and [`Error::OutOfMemory`], a
+//! resource error (the input may be fine).
 //!
 //! Offsets are absolute positions in the enclosing object so that a report points at the exact byte
 //! (CLAUDE.md "Safety & errors"), provided the reader knows where its input starts
@@ -48,22 +49,29 @@ pub enum Error {
         /// How many exist.
         len: u64,
     },
+    /// Memory needed to decode could not be allocated (ROADMAP 1.4.4). A resource error, not corruption: the
+    /// input may be valid, and retrying with more memory can succeed.
+    #[error("out of memory{}", .bytes.map_or(String::new(), |b| format!(" allocating {b} bytes")))]
+    OutOfMemory {
+        /// Bytes requested, when known (`None`: an allocation inside zstd).
+        bytes: Option<u64>,
+    },
 }
 
 impl Error {
-    /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller
-    /// error.
+    /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller or
+    /// resource error.
     pub const fn is_corruption(&self) -> bool {
         self.corruption().is_some()
     }
 
-    /// The absolute offset and reason of a corruption error; `None` for [`Error::OutOfBounds`].
+    /// The absolute offset and reason of a corruption error; `None` for the caller and resource errors.
     pub const fn corruption(&self) -> Option<(u64, Corruption)> {
         match *self {
             Self::Corrupt { offset, reason } | Self::CorruptBlock { offset, reason, .. } => {
                 Some((offset, reason))
             }
-            Self::OutOfBounds { .. } => None,
+            Self::OutOfBounds { .. } | Self::OutOfMemory { .. } => None,
         }
     }
 }
@@ -281,4 +289,40 @@ const _: () = assert!(usize::BITS <= u64::BITS);
 /// Lossless `usize` -> `u64` (see the assertion above).
 pub(crate) fn to_u64(n: usize) -> u64 {
     u64::try_from(n).unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn error_classes() {
+        let reason = Corruption::InvalidCompressedData;
+        let corrupt = Error::Corrupt { offset: 3, reason };
+        let block = Error::CorruptBlock {
+            index: 1,
+            offset: 3,
+            reason,
+        };
+        for e in [&corrupt, &block] {
+            assert!(e.is_corruption());
+            assert_eq!(e.corruption(), Some((3, reason)));
+        }
+        for e in [
+            Error::OutOfBounds { index: 5, len: 4 },
+            Error::OutOfMemory { bytes: Some(8) },
+            Error::OutOfMemory { bytes: None },
+        ] {
+            assert!(!e.is_corruption());
+            assert_eq!(e.corruption(), None);
+        }
+        assert_eq!(
+            Error::OutOfMemory { bytes: Some(8) }.to_string(),
+            "out of memory allocating 8 bytes"
+        );
+        assert_eq!(
+            Error::OutOfMemory { bytes: None }.to_string(),
+            "out of memory"
+        );
+    }
 }
