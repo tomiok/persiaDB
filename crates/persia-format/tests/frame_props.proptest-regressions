@@ -1,0 +1,12 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e3e6f5b5c0b908cb8108d645cf298eccbc85af617caf29f14d4852d054cf343d # shrinks to specs = [], edits = [Append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])], fix_crcs = false, base = 12288
+cc 050e22115c6e13aba7ac9be4930ae2a262815c3b49c729dca1a19d50c5522803 # shrinks to specs = [Spec { kind: 1, seq: 0, payload: [], compression: None }], frame = Index(0), at = Index(16140901064495857664), bit = 0, base = 12288
+cc 78db8c2e5767aedc5c224a3cbd750ea7e6ed8c5b146ff79c44f5335e58846b33 # shrinks to specs = [Spec { kind: 1, seq: 0, payload: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], compression: None }], edits = [Truncate(Index(5178033424199172384)), Append([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])], fix_crcs = true, base = 12288
+cc 69c653dec684273e2f6b3923bc1f3bd775130065b646310963cfc38470fff230 # shrinks to specs = [Spec { kind: 1, seq: 0, payload: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], compression: None }], edits = [SetPadding(Index(0), Index(0), 1)], fix_crcs = true, base = 12288
+cc cd087c6e40b9ee3c17b5aed6a481feee855815c969b77cdf7aca3163db804740 # shrinks to specs = [Spec { kind: 1, seq: 0, payload: [], compression: None }, Spec { kind: 1, seq: 0, payload: [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], compression: None }], edits = [SetFlags(Index(0), 2)], fix_crcs = true, base = 12288
+cc 4e8d1d8a6cb4275c6ecab2218464dc38fbc9a884d161d2ca75078a32015288f1 # shrinks to specs = [Spec { kind: 1, seq: 0, payload: [0], compression: None }], edits = [Truncate(Index(14397458789236723213))], fix_crcs = false, base = 12288
