@@ -28,7 +28,7 @@ allowed libraries.
 ## What works today
 
 The workspace exists, CI runs, and `persia-format` implements the byte-level primitives that later
-layers will build on (ROADMAP M0, and half of M1):
+layers will build on (ROADMAP M0, and most of M1):
 
 - Bounds-checked little-endian readers and writers, canonical LEB128 varints, zigzag signed integers,
   and checked offset and length types (SPEC §4.1).
@@ -36,12 +36,14 @@ layers will build on (ROADMAP M0, and half of M1):
   blocks, and frame-of-reference blocks for numeric columns (SPEC §5.2.1, [ADR-0004](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0004-integer-block-codecs.md)).
 - CRC32C, xxh3-64/128, and a helper for CRC-protected fixed-size structures (SPEC §4.1–§4.3).
 - Block compression codecs `None` and `Zstd`, with a decompression-bomb guard on every decode
-  (SPEC §5.2, [ADR-0005](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0005-block-compression-codecs.md), ROADMAP 1.4.1–1.4.3).
+  (SPEC §5.2, [ADR-0005](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0005-block-compression-codecs.md), ROADMAP 1.4).
+- Block framing of segment sections: per-block CRC and codec, and a block table that locates every
+  block, so one block can be fetched and decoded on its own (SPEC §5.2, [ADR-0006](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0006-block-framing.md), ROADMAP 1.5).
+- The container header (magic, versions, feature flags, page size) and the two superblock slots, with
+  the rules for picking the active slot (SPEC §4.2–§4.3, [ADR-0007](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0007-container-header-and-superblock.md), ROADMAP 1.6).
 
 Those pieces are library code. They do not open a database, index a document, or answer a query.
-Block framing, the file header, frames, segments, storage, the write path, and search are still ahead
-(see [Roadmap](/guide/roadmap/)). One M1 follow-up is still open inside compression: allocation failures are
-reported as corruption until a resource error class exists (ROADMAP 1.4.4).
+Frames, segments, storage, the write path, and search are still ahead (see [Roadmap](/guide/roadmap/)).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 

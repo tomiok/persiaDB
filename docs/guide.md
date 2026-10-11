@@ -31,7 +31,7 @@ allowed libraries.
 ### What works today
 
 The workspace exists, CI runs, and `persia-format` implements the byte-level primitives that later
-layers will build on (ROADMAP M0, and half of M1):
+layers will build on (ROADMAP M0, and most of M1):
 
 - Bounds-checked little-endian readers and writers, canonical LEB128 varints, zigzag signed integers,
   and checked offset and length types (SPEC §4.1).
@@ -39,12 +39,14 @@ layers will build on (ROADMAP M0, and half of M1):
   blocks, and frame-of-reference blocks for numeric columns (SPEC §5.2.1, [ADR-0004](./adr/0004-integer-block-codecs.md)).
 - CRC32C, xxh3-64/128, and a helper for CRC-protected fixed-size structures (SPEC §4.1–§4.3).
 - Block compression codecs `None` and `Zstd`, with a decompression-bomb guard on every decode
-  (SPEC §5.2, [ADR-0005](./adr/0005-block-compression-codecs.md), ROADMAP 1.4.1–1.4.3).
+  (SPEC §5.2, [ADR-0005](./adr/0005-block-compression-codecs.md), ROADMAP 1.4).
+- Block framing of segment sections: per-block CRC and codec, and a block table that locates every
+  block, so one block can be fetched and decoded on its own (SPEC §5.2, [ADR-0006](./adr/0006-block-framing.md), ROADMAP 1.5).
+- The container header (magic, versions, feature flags, page size) and the two superblock slots, with
+  the rules for picking the active slot (SPEC §4.2–§4.3, [ADR-0007](./adr/0007-container-header-and-superblock.md), ROADMAP 1.6).
 
 Those pieces are library code. They do not open a database, index a document, or answer a query.
-Block framing, the file header, frames, segments, storage, the write path, and search are still ahead
-(see [Roadmap](#roadmap)). One M1 follow-up is still open inside compression: allocation failures are
-reported as corruption until a resource error class exists (ROADMAP 1.4.4).
+Frames, segments, storage, the write path, and search are still ahead (see [Roadmap](#roadmap)).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 
@@ -331,9 +333,10 @@ This page describes how the files are organized. Offsets, magic numbers, and CRC
 
 ### Local container
 
-`<name>.persia` starts with an 8 KiB header: magic, format versions, compatibility flags, a database
-UUID, and two superblock slots. The slots are a double buffer. Open reads both, throws away a slot
-whose CRC fails, and uses the higher commit sequence (SPEC §4.2–§4.3). After the header the file is
+`<name>.persia` starts with a 12 KiB prefix: a 4 KiB header page (magic, format versions, compatibility
+flags, a database UUID) and two 4 KiB superblock pages. The slots are a double buffer on separate
+pages, so one bad sector cannot lose both. Open reads both, throws away a slot whose CRC fails, and
+uses the higher commit sequence (SPEC §4.2–§4.3). From byte 12288 the file is
 append-only frames. Each frame has a kind, a length, a payload padded to 8 bytes, and a CRC32C.
 A torn or corrupt frame ends recovery; the file is logically truncated there (SPEC §4.4).
 
@@ -577,18 +580,18 @@ ADR-0002, and [`docs/architecture.md`](./architecture.md). No dependencies.
 
 ### M1 — Format primitives
 
-In progress (25 of 50). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
+In progress (37 of 52). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
 bar for corruption handling is high: hostile bytes return an error.
 
 Done: little-endian cursors, varints, zigzag, checked offsets, delta coding, bit-packing, postings
-blocks, frame-of-reference, CRC32C, xxh3, checksummed structs, and the `None` / `Zstd` codecs with
-the bomb guard (1.4.1–1.4.3). Still open inside that section: classifying allocation failure as
-something other than corruption (1.4.4).
+blocks, frame-of-reference, CRC32C, xxh3, checksummed structs, the `None` / `Zstd` codecs with the
+bomb guard and a separate out-of-memory error (1.4), block framing with a block table that opens from
+a section's tail (1.5), and the container header and double-buffered superblock with slot selection
+(1.6; ADR-0007, ADR-0008).
 
-Not started: on-disk block framing (1.5), the 8 KiB header and superblock (1.6), frames and the
-frame scanner (1.7), the memory-map reader and its safety ADR (1.8, the only planned `unsafe`),
-golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs for fuzz, benchmark
-history, and coverage (1.11). M2 and M3 wait on this milestone.
+Not started: frames and the frame scanner (1.7), the memory-map reader and its safety ADR (1.8, the
+only planned `unsafe`), golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs
+for fuzz, benchmark history, and coverage (1.11). M2 and M3 wait on this milestone.
 
 ### M2 — Storage abstraction and local backends
 

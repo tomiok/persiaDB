@@ -140,6 +140,8 @@ Each slot is one 4096-byte page (slot A at 4096, slot B at 8192; ADR-0008):
 4092 4 crc            u32  (CRC32C over bytes 0..4092 of the slot)
 ```
 A slot is *valid* when its CRC matches and its reserved bytes are zero; a never-written (all-zero) slot is invalid.
+A new container has no frames yet: both slots hold `seq = 0`, `log_end = wal_start = 12288` (the first frame
+offset) and zero manifest fields, so recovery (SPEC §4.4) scans from 12288 (ADR-0008).
 The offsets are checked against the container by its reader (ROADMAP 2.4.4), not by slot decoding.
 
 Open: read both slots, discard invalid ones, use the one with the highest `seq` (ADR-0007):
@@ -156,7 +158,7 @@ different contents means one slot is wrong and there is no way to tell which. Co
 commit writes the slot that is not active.
 
 ### 4.4 Frames
-After the header the file is an append-only sequence of frames:
+From byte 12288 (after slot B) the file is an append-only sequence of frames:
 ```
 0   4  frame_magic   bytes "PFR1" (0x50 0x46 0x52 0x31)
 4   1  kind          1=WalChunk 2=Segment 3=Manifest 4=Padding 5=TombstoneSidecar
@@ -688,11 +690,15 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 
 ## 15. Versioning and compatibility
 
-- `format_major` bump = breaking; readers reject. `format_minor` bump = additive.
+- `format_major` bump = breaking; readers reject. `format_minor` bump = additive: a writer of an older minor may
+  still write (and rewrite, SPEC §4.6) a newer-minor container, so anything an older writer could not maintain must
+  be gated by a `rocompat_flags` bit instead. Readers never branch on `format_minor`, only on flags (ADR-0008).
 - `incompat_flags` for features old readers cannot handle; `rocompat_flags` for read-only-safe features.
 - Each segment records its own format version ⇒ mixed-version databases are valid; compaction upgrades gradually.
 - Golden files for every released format version live in `tests/fixtures/` and are opened by CI forever.
-- Until v1.0: no compatibility promise, but every change still bumps the version and updates fixtures.
+- A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
+  (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
+  compatibility promise across released versions.
 
 ---
 

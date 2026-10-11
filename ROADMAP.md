@@ -125,7 +125,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.6.2 `Superblock` slot encode/decode with CRC
 - 1.6.3 Slot selection logic: pick highest valid `seq`; handle both invalid, one invalid, equal seq
   - [x] 1.6.3.1 [T] truth-table unit tests + property test with random corruption
-- [ ] 1.6.4 ADR: superblock slot geometry (one slot per aligned 4 KiB page vs both in one page), what `page_size` governs, and `format_minor` on rewrite (ADR-0007 open questions; decide before 2.4.1)
+- [x] 1.6.4 ADR: superblock slot geometry (one slot per aligned 4 KiB page vs both in one page), what `page_size` governs, and `format_minor` on rewrite (ADR-0007 open questions; decide before 2.4.1)
 
 ## 1.7 Frames (SPEC §4.4)
 - [ ] 1.7.1 `FrameHeader`/`Frame` encode with trailing CRC and 8-byte padding
@@ -142,7 +142,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [ ] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
 
 ## 1.9 Golden fixtures
-- [ ] 1.9.1 Fixture generator binary producing deterministic sample containers
+- [ ] 1.9.1 Fixture generator binary producing deterministic sample containers (incl. a golden 12288-byte prefix: header + both slots at their absolute offsets, ADR-0008)
 - [ ] 1.9.2 Check-in small fixtures (< 100 KB) + test that opens all fixtures
 
 ## 1.10 Shared value types

@@ -10,9 +10,10 @@ This page describes how the files are organized. Offsets, magic numbers, and CRC
 
 ## Local container
 
-`<name>.persia` starts with an 8 KiB header: magic, format versions, compatibility flags, a database
-UUID, and two superblock slots. The slots are a double buffer. Open reads both, throws away a slot
-whose CRC fails, and uses the higher commit sequence (SPEC §4.2–§4.3). After the header the file is
+`<name>.persia` starts with a 12 KiB prefix: a 4 KiB header page (magic, format versions, compatibility
+flags, a database UUID) and two 4 KiB superblock pages. The slots are a double buffer on separate
+pages, so one bad sector cannot lose both. Open reads both, throws away a slot whose CRC fails, and
+uses the higher commit sequence (SPEC §4.2–§4.3). From byte 12288 the file is
 append-only frames. Each frame has a kind, a length, a payload padded to 8 bytes, and a CRC32C.
 A torn or corrupt frame ends recovery; the file is logically truncated there (SPEC §4.4).
 

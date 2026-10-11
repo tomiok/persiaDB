@@ -16,7 +16,7 @@ What each file says about itself:
 
 | Crate | Source | What the file says | In the tree |
 |---|---|---|---|
-| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, and block codecs. Frames and the superblock are not written yet. |
+| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header and superblock. Frames are not written yet. |
 | `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
 | `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | Module docs only. |
 | `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | Module docs only. |
@@ -25,11 +25,12 @@ What each file says about itself:
 
 `persia-server` and `persia-cli` are empty `main` functions. `persia-proto` is a stub library.
 The public modules and re-exports of `persia-format` are the list in
-[lib.rs lines 10–30](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L30):
+[lib.rs lines 10–33](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L33):
 
 ```rust
 pub mod align;
 pub mod bitpack;
+pub mod block;
 pub mod checksum;
 pub mod checksummed;
 pub mod compress;
@@ -37,15 +38,17 @@ pub mod delta;
 pub mod error;
 pub mod for_codec;
 pub mod hash;
+pub mod header;
 pub mod offset;
 pub mod postings;
 pub mod reader;
+pub mod superblock;
 pub mod varint;
 pub mod writer;
 pub mod zigzag;
 
 pub use align::ALIGNMENT;
-pub use error::{Corruption, EncodeError, Error, Result};
+pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
 pub use writer::Writer;
@@ -110,8 +113,7 @@ pub fn xxh3_64(data: &[u8]) -> u64 {
 
 Fixed-size structures whose CRC sits inside the region use
 [`Checksummed<T>`](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/checksummed.rs#L98-L99).
-The header and the superblock slots are the intended callers (SPEC §4.2, §4.3). Those two
-structures are not encoded yet. The helper is. A type describes where the CRC field sits:
+The container header and the superblock slots use it (SPEC §4.2, §4.3; `header.rs`, `superblock.rs`). A type describes where the CRC field sits:
 
 ```rust
 pub trait ChecksummedLayout: Sized {
@@ -186,9 +188,8 @@ pub fn decompress_block(
 ```
 
 A zstd payload has to be exactly one frame whose declared content size equals
-`uncompressed_len`. The on-disk block header, the block table, and random-access reads are
-roadmap 1.5. They are not in this file. One follow-up is still open: allocation failure is
-reported as corruption until a resource error class exists (roadmap 1.4.4).
+`uncompressed_len`. The on-disk block header, the block table, and random-access reads live in `block.rs` (roadmap 1.5).
+An allocation failure while decoding is `Error::OutOfMemory`, not corruption (roadmap 1.4.4).
 
 ## What is not here
 

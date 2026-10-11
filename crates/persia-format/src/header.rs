@@ -100,11 +100,9 @@ impl Header {
     /// assert_eq!(newer.for_write(), newer);
     /// ```
     #[must_use]
-    // While FORMAT_MINOR is 0 the `max` is a no-op; it is the rule for every later minor.
-    #[allow(clippy::unnecessary_min_or_max)]
-    pub fn for_write(&self) -> Self {
+    pub const fn for_write(&self) -> Self {
         Self {
-            format_minor: self.format_minor.max(FORMAT_MINOR),
+            format_minor: merged_minor(self.format_minor, FORMAT_MINOR),
             ..*self
         }
     }
@@ -159,6 +157,12 @@ impl Header {
         let Checksummed(Layout(header)) = Checksummed::<Layout>::decode(r)?;
         Ok(header)
     }
+}
+
+/// The minor a writer of minor `own` records in a container of minor `container`: it never decreases (ADR-0008).
+/// A separate function so the rule is tested for `own > container`, which `FORMAT_MINOR = 0` cannot reach.
+const fn merged_minor(container: u16, own: u16) -> u16 {
+    if own > container { own } else { container }
 }
 
 /// SPEC §4.2: a power of two in `MIN_PAGE_SIZE..=MAX_PAGE_SIZE`.
@@ -329,7 +333,8 @@ mod tests {
             };
             assert_eq!(h.for_write(), h);
         }
-        // An older minor is raised to this build's (vacuous while FORMAT_MINOR is 0).
+        // An older minor is raised to this build's: vacuous while FORMAT_MINOR is 0, so
+        // `merged_minor_takes_the_newer` tests the rule itself.
         let old = Header {
             format_minor: 0,
             ..sample()
@@ -342,6 +347,19 @@ mod tests {
             },
             old.for_write()
         );
+    }
+
+    #[test]
+    fn merged_minor_takes_the_newer() {
+        for (container, own, merged) in [
+            (0, 0, 0),
+            (3, 1, 3),
+            (1, 3, 3),
+            (0, u16::MAX, u16::MAX),
+            (u16::MAX, 0, u16::MAX),
+        ] {
+            assert_eq!(merged_minor(container, own), merged, "{container} {own}");
+        }
     }
 
     #[test]

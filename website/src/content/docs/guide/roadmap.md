@@ -44,18 +44,18 @@ ADR-0002, and [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/m
 
 ## M1 — Format primitives
 
-In progress (25 of 50). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
+In progress (37 of 52). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
 bar for corruption handling is high: hostile bytes return an error.
 
 Done: little-endian cursors, varints, zigzag, checked offsets, delta coding, bit-packing, postings
-blocks, frame-of-reference, CRC32C, xxh3, checksummed structs, and the `None` / `Zstd` codecs with
-the bomb guard (1.4.1–1.4.3). Still open inside that section: classifying allocation failure as
-something other than corruption (1.4.4).
+blocks, frame-of-reference, CRC32C, xxh3, checksummed structs, the `None` / `Zstd` codecs with the
+bomb guard and a separate out-of-memory error (1.4), block framing with a block table that opens from
+a section's tail (1.5), and the container header and double-buffered superblock with slot selection
+(1.6; ADR-0007, ADR-0008).
 
-Not started: on-disk block framing (1.5), the 8 KiB header and superblock (1.6), frames and the
-frame scanner (1.7), the memory-map reader and its safety ADR (1.8, the only planned `unsafe`),
-golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs for fuzz, benchmark
-history, and coverage (1.11). M2 and M3 wait on this milestone.
+Not started: frames and the frame scanner (1.7), the memory-map reader and its safety ADR (1.8, the
+only planned `unsafe`), golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs
+for fuzz, benchmark history, and coverage (1.11). M2 and M3 wait on this milestone.
 
 ## M2 — Storage abstraction and local backends
 

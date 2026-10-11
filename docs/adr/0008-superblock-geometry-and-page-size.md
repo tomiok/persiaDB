@@ -19,16 +19,20 @@ ADR-0007 left three questions open:
 
 No container has been written by any build yet: the container adapter (ROADMAP 2.4) does not exist, and no format
 version has been released. Changing the layout now costs nothing. This ADR therefore amends format major 1 instead
-of bumping it, as ADR-0006 did for block framing. A new major would leave major 1 as a format that no build ever
-wrote.
+of bumping it. It is the first in-place amendment of an already specified layout (ADR-0006 and ADR-0007 defined
+layouts and rules that had none), so SPEC §15 now states the rule: a format version is frozen once released
+(tagged), and until then may be amended in place by an ADR. A new major would leave major 1 as a format that no
+build ever wrote.
 
 ## Decision
 
 1. **Each slot is a full 4096-byte page.** Slot A is at 4096 and slot B at 8192. Each slot is 4096 bytes, with the
    CRC at 4092 and bytes 48..4092 reserved. The first frame starts at 12288. The header page, slot A and slot B
    share no 4096-byte sector, so a torn or unreadable sector loses at most one of them. One commit writes one
-   aligned page. 4096 bytes is the largest physical sector in common use. The offsets are fixed and do not depend
-   on `page_size`, so a reader finds the slots without trusting the header.
+   aligned page. 4096 bytes is the largest physical sector in common use. Filesystem blocks larger than 4 KiB are
+   harmless: rewriting one page leaves the neighbouring page's bytes as they were. The offsets are fixed and do
+   not depend on `page_size`, so a reader finds the slots without trusting the header. A new container writes both
+   slots with `seq = 0`, `log_end = wal_start = 12288` and zero manifest fields.
 2. **`page_size` is advisory.** It is the alignment a writer may give Segment frame payloads, using Padding frames
    (SPEC §4.4), so that a mapped segment starts on a page boundary. No offset a reader computes depends on it, and
    a container may be rewritten with a different value. ADR-0007's validation stays: a power of two in
