@@ -27,6 +27,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   A block table can be opened from the section's tail alone and blocks decoded from separately fetched bytes
   (object storage). Decoding errors now separate corruption from caller errors and from running out of memory
   (an unallocatable decompression buffer is no longer reported as corrupt data).
+- Container header and superblock (SPEC §4.2, §4.3; ADR-0007): `Header` (magic, format version, feature flags,
+  database id, page size) and double-buffered `Superblock` slots with CRC32C, and selection of the active slot. An
+  unknown `format_major` or `incompat_flags` bit is a new `Unsupported` error class rather than corruption; unknown
+  `rocompat_flags` bits open the container read-only; reserved bytes must be zero; two valid slots with the same
+  `seq` but different contents are corruption.
 
 <!--
 Sections per release, in this order, only when non-empty:

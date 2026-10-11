@@ -74,3 +74,10 @@ path = "fuzz_targets/block.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "container_header"
+path = "fuzz_targets/container_header.rs"
+test = false
+doc = false
+bench = false
