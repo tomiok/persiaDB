@@ -1,0 +1,23 @@
+---
+import EditLink from 'virtual:starlight/components/EditLink';
+import LastUpdated from 'virtual:starlight/components/LastUpdated';
+import Pagination from 'virtual:starlight/components/Pagination';
+
+const root = import.meta.env.BASE_URL;
+const base = root.endsWith('/') ? root : `${root}/`;
+---
+
+<footer class="sl-flex">
+	<div class="meta sl-flex">
+		<EditLink />
+		<LastUpdated />
+	</div>
+	<p class="agent-links">
+		<a href={`${base}llms.txt`}>llms.txt</a>
+		{' · '}
+		<a href={`${base}llms-full.txt`}>llms-full.txt</a>
+		{' · '}
+		<a href={`${base}guide/for-agents/`}>For AI agents</a>
+	</p>
+	<Pagination />
+</footer>

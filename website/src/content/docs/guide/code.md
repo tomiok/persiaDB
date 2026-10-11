@@ -16,7 +16,7 @@ What each file says about itself:
 
 | Crate | Source | What the file says | In the tree |
 |---|---|---|---|
-| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header and superblock. Frames are not written yet. |
+| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, and frames (encode, decode, scan). The streaming frame encoder (1.7.5) is not written yet. |
 | `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
 | `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | Module docs only. |
 | `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | Module docs only. |
@@ -25,7 +25,7 @@ What each file says about itself:
 
 `persia-server` and `persia-cli` are empty `main` functions. `persia-proto` is a stub library.
 The public modules and re-exports of `persia-format` are the list in
-[lib.rs lines 10–33](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L33):
+[lib.rs lines 10–34](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L34):
 
 ```rust
 pub mod align;
@@ -37,6 +37,7 @@ pub mod compress;
 pub mod delta;
 pub mod error;
 pub mod for_codec;
+pub mod frame;
 pub mod hash;
 pub mod header;
 pub mod offset;

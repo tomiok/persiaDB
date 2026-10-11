@@ -1,0 +1,147 @@
+---
+title: "Getting started"
+description: "How to use Persia DB. What you can call today, and the intended open, schema, index, commit, and search API, marked as illustrative where it is not implemented."
+---
+
+Persia DB does not yet open a database, index a document, or answer a query.
+This page separates the library code that exists from the API the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) describes.
+When the two disagree, the SPEC wins. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves (17%)** on 2026-10-11.
+
+## What works today
+
+The crates are not published (`publish = false` in the workspace). There is no crates.io release and no `cargo add persia`.
+
+`persia`, the embedded API crate, exports no types. Its source is the module docs in [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs). There is no `Db` and no `Collection`.
+
+`persia-cli` and `persia-server` are empty `main` functions. No `inspect`, `dump`, `verify`, `compact`, or search command runs.
+
+`persia-format` is the crate with an implementation. It encodes and decodes bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
+
+```toml
+[dependencies]
+persia-format = { git = "https://github.com/tomiok/persiaDB" }
+```
+
+This round-trips a container header (SPEC §4.2). It is the doctest on [`Header`](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/header.rs). It does not create `app.persia` and it does not search:
+
+```rust
+use persia_format::header::{Access, HEADER_LEN, Header};
+use persia_format::{Reader, Writer};
+
+let header = Header::new([7; 16]);
+let mut w = Writer::new();
+header.encode(&mut w)?;
+assert_eq!(w.len(), HEADER_LEN);
+
+let decoded = Header::decode(&mut Reader::new(w.as_slice()))?;
+assert_eq!(decoded, header);
+assert_eq!(decoded.access(), Access::ReadWrite);
+```
+
+Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, and frames (encode, decode, and scan; ROADMAP 1.7.1–1.7.4). The streaming frame encoder (1.7.5) is not written yet. The public module list is [lib.rs lines 10–34](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L34). The [code](/guide/code/) page quotes the exports.
+
+## Intended API
+
+**Illustrative. Not implemented.** Nothing in this section is a function you can call. Names match the README sketch and SPEC §6.2, §7.1, §7.6, §8.1, and §9.6. They are not a stability promise. The first release that is supposed to provide them is `v0.1` (ROADMAP M10), which is blocked on the write path, query, relaxation, and blobs.
+
+The shape a caller is meant to use:
+
+```rust
+// ILLUSTRATIVE — these methods are not in the persia crate.
+let db = persia::Db::open("app.persia")?;
+
+// Schema is declared up front (SPEC §6.2). Adding a field later is allowed.
+// Changing a field's type is not.
+let products = db.create_collection(schema)?;
+
+products.put(doc)?;
+products.commit()?;
+
+// A typo still returns hits. The response says what changed (SPEC §7.6).
+let results = products.search("runing")?;
+let relaxation = &results.relaxation;
+```
+
+The collection schema in SPEC §6.2, as JSON. This is the design, not a parser that exists:
+
+```json
+{
+  "name": "products",
+  "fields": {
+    "title": { "type": "text", "analyzer": "en", "boost": 3.0 },
+    "body": { "type": "text", "analyzer": "en" },
+    "brand": { "type": "keyword", "facet": true },
+    "price": { "type": "f64" },
+    "sales": { "type": "i64" }
+  },
+  "ranking": { "static_rank": { "field": "sales", "weight": 0.1, "fn": "log1p" } },
+  "relaxation": { "enabled": true, "min_results": 1, "levels": "default", "fallback": "static_rank" }
+}
+```
+
+Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored` (SPEC §6.1). Every document also has a string `id` (at most 512 bytes, unique in the collection). Documents are submitted as JSON, or as a `serde` struct via a planned `put_struct`, and stored as CBOR (SPEC §6.4).
+
+`put` is an upsert by id. `delete` writes a tombstone. `commit` publishes a manifest. A `put` is specified to be visible to a later search on that database before commit (read-your-writes, SPEC §8.2–§8.4). One writer; a second writer fails immediately. Handles are specified as `Send` and `Sync`.
+
+Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2).
+
+### Relaxation
+
+**Planned (M8).** Default on. If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6):
+
+| Level | Name | What changes |
+|---|---|---|
+| L0 | `exact` | Every analyzed term is required |
+| L1 | `synonyms` | Collection synonyms, OR within a group |
+| L2 | `drop_terms` | Require fewer terms, dropping low-IDF terms first |
+| L3 | `prefix` | Prefix-expand terms of length at least 3 |
+| L4 | `fuzzy` | Edit distance 1 or 2, and report the corrected terms |
+| L5 | `fallback` | `static_rank`, or `none` |
+
+Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
+
+The response is specified to carry what happened. This object is from SPEC §7.6. No function returns it today:
+
+```json
+{
+  "level": "fuzzy",
+  "applied": ["drop_terms:75%", "fuzzy"],
+  "original": "zapatilas rojs",
+  "effective": "zapatillas rojas",
+  "corrected": { "zapatilas": "zapatillas", "rojs": "rojas" }
+}
+```
+
+### Command line
+
+**Planned (ROADMAP 10.4).** The `persia` binary is specified to grow `inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary in the tree does none of those. `main` is empty.
+
+## Common questions
+
+### Can I add Persia to a Rust project today?
+
+Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs. That dependency does not give you `Db::open`.
+
+### How do I open a database, index, and search?
+
+You don't, yet. Those calls are the illustrative block on this page. The milestone that is supposed to ship them is M10 (`v0.1`). It waits on storage, segments, the write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
+
+### How do I read which relaxation was applied?
+
+On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. Nothing in the repository computes this.
+
+### Is the on-disk format stable?
+
+No. Format version 1.0 is a draft until the v1.0 release (SPEC §15). There is no compatibility promise. A change to the bytes requires a SPEC edit, a version or feature-flag bump, an ADR, and a golden fixture.
+
+### Is there a server, a cloud backend, or a client SDK?
+
+Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are M14. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
+
+### Why is a query supposed to avoid empty results?
+
+That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. It is not implemented.
+
+### Where is the source of truth?
+
+[SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) for behavior. [ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md) for planned work. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) for what is done. This site is a reading of those files. [For AI agents](/guide/for-agents/) is the short version of the same constraints.

@@ -5,7 +5,7 @@ description: "What Persia DB is, what already works, and why it is built this wa
 
 > **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.
 > There is no compatibility promise. Counts on the [roadmap page](/guide/roadmap/) are the 2026-10-10 snapshot
-> in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **51 of 400 leaves done (13%)**.
+> in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves done (17%)** on 2026-10-11.
 
 [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) is the design contract (draft v0.1, format version 1.0, unstable).
 When these pages and the SPEC disagree, the SPEC wins.
@@ -41,9 +41,11 @@ layers will build on (ROADMAP M0, and most of M1):
   block, so one block can be fetched and decoded on its own (SPEC §5.2, [ADR-0006](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0006-block-framing.md), ROADMAP 1.5).
 - The container header (magic, versions, feature flags, page size) and the two superblock slots, with
   the rules for picking the active slot (SPEC §4.2–§4.3, [ADR-0007](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0007-container-header-and-superblock.md), ROADMAP 1.6).
+- Frames: encode, decode, and scan, including a zstd payload flag and the classes of scan end
+  (SPEC §4.4, [ADR-0009](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0009-frame-validation-and-scan-end.md), ROADMAP 1.7.1–1.7.4).
 
 Those pieces are library code. They do not open a database, index a document, or answer a query.
-Frames, segments, storage, the write path, and search are still ahead (see [Roadmap](/guide/roadmap/)).
+The streaming frame encoder (1.7.5), segments, storage, the write path, and search are still ahead (see [Roadmap](/guide/roadmap/)).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 

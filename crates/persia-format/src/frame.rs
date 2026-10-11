@@ -603,6 +603,10 @@ mod tests {
             (&text[..], Compression::None, false),
             (&text[..], ZSTD, true),
         ] {
+            // zstd is C behind FFI, which Miri cannot run. The uncompressed cases stay.
+            if cfg!(miri) && matches!(compression, Compression::Zstd { .. }) {
+                continue;
+            }
             let bytes = frame(FrameKind::Segment, 9, payload, compression);
             let mut r = Reader::with_base_offset(&bytes, BASE);
             let f = Frame::decode(&mut r).unwrap();
@@ -621,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI, which Miri cannot run")]
     fn bad_compression_level_appends_nothing() {
         let mut w = Writer::new();
         let err = encode_frame(
@@ -641,6 +646,10 @@ mod tests {
     fn bomb_limit() {
         let text = b"persia ".repeat(100);
         for compression in [Compression::None, ZSTD] {
+            // zstd is C behind FFI, which Miri cannot run. The uncompressed case stays.
+            if cfg!(miri) && matches!(compression, Compression::Zstd { .. }) {
+                continue;
+            }
             let bytes = frame(FrameKind::Manifest, 1, &text, compression);
             let f = Frame::decode(&mut Reader::new(&bytes)).unwrap();
             assert_eq!(f.payload(text.len()).unwrap().len(), text.len());
@@ -660,6 +669,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI, which Miri cannot run")]
     fn malformed_compressed_payload_fails_on_decode_not_scan() {
         let text = b"persia ".repeat(100);
         let mut bytes = frame(FrameKind::Manifest, 1, &text, ZSTD);
@@ -921,6 +931,7 @@ mod tests {
     /// A compressed frame written once and pinned: zstd output may change across versions, so the encoder cannot
     /// be pinned, but these bytes must decode forever (SPEC §4.4 compressed payload).
     #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI, which Miri cannot run")]
     fn golden_compressed_frame_decodes() {
         const HEX: &str = "50465231030100001f0000000000000007000000000000008c00000000000000\
                            28b52ffd208c750000387065727369612001000251c508000159f1b500000000";

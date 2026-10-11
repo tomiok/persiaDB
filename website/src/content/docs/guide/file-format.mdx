@@ -26,8 +26,9 @@ An unknown major version or an unknown incompatible flag is a hard reject. An un
 read-only-compatible flag opens the file read-only. Every format change is a SPEC update, a version
 or flag bump, an ADR, and a golden fixture (see [Contributing](/guide/contributing/)).
 
-Header, superblock, and frame codecs are still ahead (ROADMAP 1.6 and 1.7).
-`persia-format` already has the encodings those structures will use, plus the compression codecs
+The container header, the superblock slots, and frame encode, decode, and scan are implemented in `persia-format` (ROADMAP 1.6 and 1.7.1–1.7.4).
+The streaming frame encoder (1.7.5) is still ahead.
+`persia-format` already has the encodings those structures use, plus the compression codecs
 below.
 
 ## Segments and blocks

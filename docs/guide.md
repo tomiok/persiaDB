@@ -2,7 +2,7 @@
 
 > **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.
 > There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-10-10 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **51 of 400 leaves done (13%)**. That file is regenerated from
+> in [`PROGRESS.md`](../PROGRESS.md): **69 of 406 leaves done (17%)** on 2026-10-11. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -410,6 +410,22 @@ disk) keyed by object and block (SPEC §10.6).
 without blocking local writes on the network (SPEC §10.5). Remote readers of that replica are
 eventually consistent; lag is a metric.
 
+## Getting started
+
+Nothing opens a database yet. `persia` exports no types, the crates are not published, and
+`persia-cli` / `persia-server` have empty `main` functions. `persia-format` is the crate with
+code: header, superblock, checksums, integer codecs, block compression, block framing, and frames
+(encode, decode, and scan; the streaming encoder, 1.7.5, is not written yet).
+A git dependency on `persia-format` does not provide `Db::open`.
+
+The calls in [Embedded API](#embedded-api) (`Db::open`, `create_collection`, `put`, `commit`,
+`search`) are illustrative. They are the SPEC §6.2 / §7.6 / §8.1 shape, not functions in the tree.
+A search response is specified to include a `relaxation` object (`level`, `applied`, `original`,
+`effective`, `corrected`). No function returns it. The same walkthrough, with a FAQ, is the
+website page [Getting started](https://tomiok.github.io/persiaDB/guide/getting-started/).
+Agents should start from [llms.txt](https://tomiok.github.io/persiaDB/llms.txt) and the
+[For AI agents](https://tomiok.github.io/persiaDB/guide/for-agents/) page.
+
 ## Embedded API
 
 **Planned.** The public crate `persia` is a stub. The first usable release is `v0.1` (ROADMAP M10),
@@ -551,8 +567,8 @@ while a dependency is unfinished.
 | Milestone | Delivers | Depends on | Snapshot |
 |---|---|---|---|
 | **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | Done, 26/26 |
-| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 25/50 |
-| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/23 |
+| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 43/53 |
+| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/25 |
 | **M3** Schema | Collections, documents, manifests | M1 | Blocked, 0/15 |
 | **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Ready, 0/22 |
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Blocked, 0/35 |
@@ -567,9 +583,9 @@ while a dependency is unfinished.
 | **M14** SDKs | Rust and Go clients | M11; M13 for shard routing | Blocked, 0/17 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
 
-The next format leaves are a resource-error class for compression (1.4.4), then block framing
-(1.5), then the container header and superblock (1.6). Text analysis (M4) may proceed alongside
-them. The generated ready-next list is in [`PROGRESS.md`](../PROGRESS.md).
+Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan
+(1.7.1–1.7.4) are done. The next format leaves are the streaming frame encoder (1.7.5), then mmap (1.8).
+Text analysis (M4) may proceed alongside them. The generated ready-next list is in [`PROGRESS.md`](../PROGRESS.md).
 
 ### M0 — Project bootstrap
 
@@ -580,7 +596,7 @@ ADR-0002, and [`docs/architecture.md`](./architecture.md). No dependencies.
 
 ### M1 — Format primitives
 
-In progress (37 of 52). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
+In progress (43 of 53). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
 bar for corruption handling is high: hostile bytes return an error.
 
 Done: little-endian cursors, varints, zigzag, checked offsets, delta coding, bit-packing, postings
