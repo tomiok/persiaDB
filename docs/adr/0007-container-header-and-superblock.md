@@ -37,12 +37,23 @@ released, so this fixes the rules rather than changing the layout.
 ## Consequences
 
 - A bit flip in `format_major` reads as "unsupported", not "corrupt". Accepted: the alternative risks calling a
-  newer, valid file corrupt, which invites users to "repair" it.
+  newer, valid file corrupt, which invites users to "repair" it. Major 0 is included: one rule ("any major but
+  1"), and a header with a valid magic and major 0 was never written by any build.
 - An equal-`seq` conflict makes a container unopenable even though one slot may be right. Correctness over
   availability (CLAUDE.md pillar 5); `persia verify` can show both slots.
 - Slot selection never looks at offsets, so a slot with a valid CRC and absurd offsets is selected and then
   rejected by recovery rather than falling back to the other slot. Falling back would silently drop the
   latest commit; a CRC-valid slot with wrong contents is a writer bug that must surface.
+- `read_active` reports only that no slot is valid, not why; diagnostics decode each slot on its own.
+
+## Open questions (ROADMAP 1.6.4, before 2.4.1)
+
+- **Slot geometry.** Both slots share the 4 KiB page 4096..8192, so a torn or unreadable sector on a 4Kn device can
+  lose both at once; LMDB keeps its two meta pages on separate pages. Moving slot B to its own aligned page (and
+  the first frame to 12288) is a layout change and gets its own ADR.
+- **What `page_size` governs**, given that the header, slot and first-frame offsets are fixed.
+- **`format_minor` on rewrite**: whether a writer of minor *m* may rewrite (e.g. compact, SPEC §4.6) a container
+  of a newer minor, and which minor it records.
 
 ## Alternatives considered
 

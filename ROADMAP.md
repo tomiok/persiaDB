@@ -120,11 +120,12 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 
 ## 1.6 Container header & superblock (SPEC §4.2–4.3)
 - 1.6.1 `Header` struct: magic, versions, flags, uuid, page size; encode/decode
-  - [ ] 1.6.1.1 Reject unknown `format_major`, unknown `incompat_flags`; accept unknown `rocompat_flags` as read-only
-  - [ ] 1.6.1.2 [T] golden header bytes; fuzz decode
-- [ ] 1.6.2 `Superblock` slot encode/decode with CRC
+  - [x] 1.6.1.1 Reject unknown `format_major`, unknown `incompat_flags`; accept unknown `rocompat_flags` as read-only
+  - [x] 1.6.1.2 [T] golden header bytes; fuzz decode
+- [x] 1.6.2 `Superblock` slot encode/decode with CRC
 - 1.6.3 Slot selection logic: pick highest valid `seq`; handle both invalid, one invalid, equal seq
-  - [ ] 1.6.3.1 [T] truth-table unit tests + property test with random corruption
+  - [x] 1.6.3.1 [T] truth-table unit tests + property test with random corruption
+- [ ] 1.6.4 ADR: superblock slot geometry (one slot per aligned 4 KiB page vs both in one page), what `page_size` governs, and `format_minor` on rewrite (ADR-0007 open questions; decide before 2.4.1)
 
 ## 1.7 Frames (SPEC §4.4)
 - [ ] 1.7.1 `FrameHeader`/`Frame` encode with trailing CRC and 8-byte padding

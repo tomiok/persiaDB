@@ -298,3 +298,50 @@ proptest! {
         prop_assert!(eof, "{:?}", got);
     }
 }
+
+/// The committed fuzz seeds (`fuzz/corpus/container_header/`, first byte = mode) are what their names say, so
+/// they keep covering each case if the layout changes.
+#[test]
+fn fuzz_seeds_match_their_names() {
+    let dir = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fuzz/corpus/container_header/"
+    );
+    let seed = |name: &str| std::fs::read(format!("{dir}{name}")).unwrap()[1..].to_vec();
+    let slots = |name: &str| {
+        let bytes = seed(name);
+        Superblock::read_active(&mut Reader::new(&bytes[HEADER_LEN..]))
+    };
+
+    for name in [
+        "valid_b_newer",
+        "valid_fresh",
+        "seq_conflict",
+        "torn_slot_b",
+        "header_only",
+    ] {
+        assert!(
+            Header::decode(&mut Reader::new(&seed(name))).is_ok(),
+            "{name}"
+        );
+    }
+    let major = Header::decode(&mut Reader::new(&seed("unknown_major")));
+    assert!(matches!(major, Err(Error::Unsupported { .. })), "{major:?}");
+    assert_eq!(seed("zeros_fix_all"), vec![0; HEADER_LEN + SLOTS_LEN]);
+
+    assert_eq!(slots("valid_b_newer").unwrap().slot, Slot::B);
+    assert_eq!(slots("valid_fresh").unwrap().slot, Slot::A);
+    assert_eq!(slots("torn_slot_b").unwrap().slot, Slot::A);
+    let conflict = slots("seq_conflict");
+    assert!(
+        matches!(
+            conflict,
+            Err(Error::Corrupt {
+                reason: Corruption::SuperblockConflict { seq: 3 },
+                ..
+            })
+        ),
+        "{conflict:?}"
+    );
+    assert_eq!(seed("header_only").len(), HEADER_LEN);
+}

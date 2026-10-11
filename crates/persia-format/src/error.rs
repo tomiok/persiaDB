@@ -88,13 +88,14 @@ pub enum Error {
 }
 
 impl Error {
-    /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller or
-    /// resource error.
+    /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller,
+    /// resource or [`Error::Unsupported`] error.
     pub const fn is_corruption(&self) -> bool {
         self.corruption().is_some()
     }
 
-    /// The absolute offset and reason of a corruption error; `None` for the caller and resource errors.
+    /// The absolute offset and reason of a corruption error; `None` for the caller, resource and unsupported
+    /// errors.
     pub const fn corruption(&self) -> Option<(u64, Corruption)> {
         match *self {
             Self::Corrupt { offset, reason } | Self::CorruptBlock { offset, reason, .. } => {

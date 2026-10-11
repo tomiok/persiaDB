@@ -89,7 +89,7 @@ impl Superblock {
     /// Appends the [`SLOT_LEN`] slot bytes, CRC included.
     ///
     /// # Errors
-    /// None in practice: every field value is representable. The signature follows [`Checksummed::encode`].
+    /// Only [`EncodeError::LayoutLen`], which would be a bug in this module: every field value is representable.
     pub fn encode(&self, w: &mut Writer) -> Result<(), EncodeError> {
         Checksummed(*self).encode(w)
     }
@@ -128,7 +128,8 @@ impl Superblock {
     /// [`Error::Corrupt`] with [`Corruption::UnexpectedEof`] if fewer than [`SLOTS_LEN`] bytes remain,
     /// [`Corruption::NoValidSuperblock`] (at slot A) if neither slot is valid, or
     /// [`Corruption::SuperblockConflict`] (at slot B) for equal `seq` with different contents. On error the
-    /// position is unchanged.
+    /// position is unchanged. Why each slot is invalid is not reported: diagnostics (`persia verify`) call
+    /// [`Superblock::decode`] on each slot.
     pub fn read_active(r: &mut Reader<'_>) -> Result<ActiveSuperblock> {
         let mut ahead = r.clone();
         let mut slots = ahead.sub_reader(SLOTS_LEN)?;
@@ -318,6 +319,11 @@ mod tests {
         assert_eq!(
             read_active(&encode(&sb(0)), &encode(&sb(0))),
             active(Slot::A, sb(0))
+        );
+        // Equal seq, but B differs only in a reserved byte (CRC fixed): B is invalid, not a conflict.
+        assert_eq!(
+            read_active(&encode(&sb(5)), &invalid(Invalid::Reserved, 5)),
+            active(Slot::A, sb(5))
         );
         // Equal seq, different contents: corruption at slot B.
         let other = Superblock {

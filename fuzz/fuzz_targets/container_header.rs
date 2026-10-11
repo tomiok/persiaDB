@@ -33,10 +33,13 @@ fn check_header(data: &[u8]) {
                     header.encode(&mut w).expect("accepted header re-encodes");
                     assert_eq!(w.as_slice(), &data[..HEADER_LEN], "accepted header re-encodes differently");
                 }
-                Access::ReadOnly => assert!(matches!(
-                    header.encode(&mut w),
-                    Err(EncodeError::UnknownFlags { .. })
-                )),
+                Access::ReadOnly => {
+                    assert_eq!(header.rocompat_flags.to_le_bytes(), data[24..32]);
+                    assert!(matches!(
+                        header.encode(&mut w),
+                        Err(EncodeError::UnknownFlags { .. })
+                    ));
+                }
             }
         }
         Err(err) => {
@@ -66,6 +69,8 @@ fn check_slots(slots: &[u8]) {
             assert_eq!(w.as_slice(), bytes, "accepted slot re-encodes differently");
         }
     }
+    // A restatement of the SPEC §4.3 table over independently decoded slots; the property test
+    // `selection_matches_truth_table` also checks slot validity with a reference decoder.
     let expected = match (a, b) {
         (Some(a), Some(b)) if a.seq == b.seq && a != b => None,
         (Some(a), Some(b)) if b.seq > a.seq => Some((Slot::B, b)),
