@@ -101,12 +101,22 @@ A local database is two files:
 24     8   rocompat_flags u64   (unknown bits => open read-only)
 32    16   db_uuid
 48     4   page_size      u32   (default 4096)
-52     4   reserved
+52  4044   reserved       MUST be zero
 4096  2×2048  superblock slots A and B (see 4.3)
 ```
+Validation (ADR-0007), in this order, so a newer format is never misreported as corruption:
+1. `magic` differs ⇒ corruption (not a Persia container).
+2. `format_major` ≠ 1 (the only major so far) ⇒ *unsupported*, not corruption: a future major may move every other
+   field, `header_crc` included, so nothing past `format_major` is interpreted. Any `format_minor` is accepted.
+3. `header_crc` mismatch ⇒ corruption.
+4. Any `incompat_flags` bit this reader does not know ⇒ *unsupported*. No bits are assigned yet.
+5. `page_size` not a power of two in `4096..=65536`, or non-zero `reserved` bytes ⇒ corruption.
+6. Any `rocompat_flags` bit this reader does not know ⇒ the container opens **read-only**. No bits are assigned yet.
+
+A writer sets only bits it knows.
 
 ### 4.3 Superblock (double-buffered, LMDB-style)
-Each 2048-byte slot:
+Each 2048-byte slot (slot A at 4096, slot B at 6144):
 ```
 0   8  seq            u64  (monotonic commit counter)
 8   8  manifest_off   u64  (offset of the Manifest frame)
@@ -114,10 +124,24 @@ Each 2048-byte slot:
 24  8  log_end        u64  (end of last durable frame)
 32  8  wal_start      u64  (first WAL frame still needed)
 40  8  fence_token    u64  (writer fencing, SPEC §11.3)
-48  ..  reserved
+48  ..  reserved      MUST be zero
 2044 4 crc            u32  (CRC32C over bytes 0..2044 of the slot)
 ```
-Open: read both slots, discard invalid CRC, use the highest `seq`. Commit alternates slots.
+A slot is *valid* when its CRC matches and its reserved bytes are zero; a never-written (all-zero) slot is invalid.
+The offsets are checked against the container by its reader (ROADMAP 2.4.4), not by slot decoding.
+
+Open: read both slots, discard invalid ones, use the one with the highest `seq` (ADR-0007):
+
+| Slot A  | Slot B  | Active                                                                       |
+|---------|---------|------------------------------------------------------------------------------|
+| valid   | valid   | higher `seq`; equal `seq` with identical bytes ⇒ A; equal `seq` with different contents ⇒ corruption |
+| valid   | invalid | A                                                                            |
+| invalid | valid   | B                                                                            |
+| invalid | invalid | corruption (no valid superblock)                                             |
+
+Two different commits can never share a `seq` (each writes `seq+1` into the inactive slot), so equal `seq` with
+different contents means one slot is wrong and there is no way to tell which. Commit alternates slots: the next
+commit writes the slot that is not active.
 
 ### 4.4 Frames
 After the header the file is an append-only sequence of frames:
