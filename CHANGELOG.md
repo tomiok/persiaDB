@@ -13,6 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Apache-2.0 license.
 - Project website under `website/` (Astro Starlight), for GitHub Pages at `https://tomiok.github.io/persiaDB/`.
 
+### Fixed
+- Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
+
 ### Format
 - Integer codecs for segment sections (SPEC §4.1, §5.2.1; ADR-0004): zigzag signed varints, delta coding of
   sorted docids, 128-value bit-packed blocks (SIMD-BP128 layout), postings full and tail blocks, and

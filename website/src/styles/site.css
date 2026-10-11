@@ -422,7 +422,10 @@ button.sl-menu-button {
 
 /*
  * The desktop "On this page" rail shares Starlight's left-nav width and then
- * grows with the viewport. Pin it so the article keeps the extra space.
+ * grows with the viewport. Pin it narrow. Starlight sticks the article to that
+ * rail (`--sl-content-margin-inline: auto 0`), so the space the rail gives up
+ * shows up as a gap beside the left nav. Center the 45rem column in the pane
+ * between the two sidebars instead.
  */
 @media (min-width: 72rem) {
     .right-sidebar-container {
@@ -431,6 +434,7 @@ button.sl-menu-button {
 
     [data-has-sidebar][data-has-toc] .main-pane {
         width: calc(100% - 10.5rem);
+        --sl-content-margin-inline: auto;
     }
 
     .right-sidebar-panel {
