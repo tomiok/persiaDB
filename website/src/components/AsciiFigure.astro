@@ -1,0 +1,16 @@
+---
+interface Props {
+    label: string;
+    diagram: string;
+    hero?: boolean;
+}
+
+const { label, diagram, hero = false } = Astro.props;
+---
+
+<figure class:list={['ascii', { 'ascii-hero': hero }]} aria-label={label}>
+    <pre tabindex="0">{diagram}</pre>
+    <figcaption>
+        <slot />
+    </figcaption>
+</figure>

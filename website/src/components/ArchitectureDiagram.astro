@@ -1,53 +1,48 @@
-<figure class="diagram">
-    <div class="diagram-scroll">
-        <svg viewBox="0 0 440 460" role="img" aria-labelledby="arch-title arch-desc">
-            <title id="arch-title">Crate layers</title>
-            <desc id="arch-desc">
-                Five layers. The format crate is in progress. Storage, analysis, the engine, blobs,
-                the embedded API, the server, and the SDKs are planned. The server and SDKs call the same engine.
-            </desc>
-            <rect width="440" height="460" fill="#ffffff" />
-            <g font-family="Courier New, Courier, monospace" font-size="13" fill="#000000">
-                <rect x="16" y="16" width="408" height="52" fill="#c0c0c0" stroke="#000080" stroke-width="2" />
-                <text x="28" y="38">persia-server, Rust SDK, Go SDK</text>
-                <text x="28" y="56" fill="#000080">planned · M11, M13, M14</text>
+---
+import AsciiFigure from './AsciiFigure.astro';
 
-                <rect x="16" y="84" width="408" height="52" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="28" y="106">persia · Db and Collection</text>
-                <text x="28" y="124" fill="#000080">planned · M10 · crate is a stub</text>
+interface Props {
+    hero?: boolean;
+}
 
-                <rect x="16" y="152" width="132" height="72" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="24" y="174">engine</text>
-                <text x="24" y="192">segments, query</text>
-                <text x="24" y="210" fill="#000080">planned</text>
+const { hero = false } = Astro.props;
 
-                <rect x="154" y="152" width="132" height="72" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="162" y="174">blob</text>
-                <text x="162" y="192">chunks, dedup</text>
-                <text x="162" y="210" fill="#000080">planned</text>
+const diagram = `
+╔═ layers ═════════════════════════════════════════════════════════╗ 
+║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
+║       ┃ persia-server, Rust SDK, Go SDK                  ┃       ║░
+║       ┃ planned                                          ┃       ║░
+║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
+║                                ▼                                 ║░
+║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
+║       ┃ persia · Db and Collection                       ┃       ║░
+║       ┃ stub · no methods yet                            ┃       ║░
+║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
+║                                ▼                                 ║░
+║ ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓ ║░
+║ ┃ engine           ┃  ┃ blob             ┃  ┃ analysis         ┃ ║░
+║ ┃ segments, query  ┃  ┃ chunks, dedup    ┃  ┃ tokenizers       ┃ ║░
+║ ┃ planned          ┃  ┃ planned          ┃  ┃ stub · M4        ┃ ║░
+║ ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛ ║░
+║                                ▼                                 ║░
+║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
+║       ┃ persia-storage                                   ┃       ║░
+║       ┃ memory, file, s3, gcs, azure                     ┃       ║░
+║       ┃ planned                                          ┃       ║░
+║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
+║                                ▼                                 ║░
+║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
+║       ┃ persia-format                                    ┃       ║░
+║       ┃ encodings, checksums, codecs                     ┃       ║░
+║       ┃ in progress · code exists                        ┃       ║░
+║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
+╚══════════════════════════════════════════════════════════════════╝░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+`.slice(1, -1);
+---
 
-                <rect x="292" y="152" width="132" height="72" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="300" y="174">analysis</text>
-                <text x="300" y="192">tokenizers</text>
-                <text x="300" y="210" fill="#000080">stub · M4</text>
-
-                <rect x="16" y="240" width="408" height="52" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="28" y="262">persia-storage · memory, file, S3, GCS, Azure</text>
-                <text x="28" y="280" fill="#000080">planned · M2, M12</text>
-
-                <rect x="16" y="308" width="408" height="64" fill="#d4d0c8" stroke="#000080" stroke-width="3" />
-                <text x="28" y="334">persia-format · encodings, checksums, codecs</text>
-                <text x="28" y="354" fill="#000080">in progress · M1 · this code exists</text>
-
-                <text x="16" y="404">Arrows point upward: each layer is used by the one above it.</text>
-                <text x="16" y="426">Segment bytes are the same in a local file and in object storage.</text>
-                <text x="16" y="448">SPEC section 3. The SPEC wins if this picture drifts.</text>
-            </g>
-        </svg>
-    </div>
-    <figcaption>
-        Layers from
-        <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview">SPEC §3</a>.
+<AsciiFigure label='Crate layers' diagram={diagram} hero={hero}>
+    Layers from <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview">SPEC §3</a>.
         Only <code>persia-format</code> has real code today. The other crates are workspace stubs.
-    </figcaption>
-</figure>
+        Arrows point down: each layer is used by the one above it.
+</AsciiFigure>

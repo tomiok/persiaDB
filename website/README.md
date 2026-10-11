@@ -23,6 +23,6 @@ The dev server prints a URL. Because the site is configured with `base: '/persia
 <http://localhost:4321/persiaDB/>
 
 Markdown links that start with `/` are prefixed with that base at build time. Component
-links (`WinButton`) do the same with `import.meta.env.BASE_URL`.
+links do the same with `import.meta.env.BASE_URL`.
 
 `npm run build` writes the static site to `website/dist/`. `npm run preview` serves that build.

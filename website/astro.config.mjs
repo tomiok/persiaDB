@@ -53,13 +53,14 @@ export default defineConfig({
             title: 'Persia DB',
             description:
                 'An embedded, single-file, cloud-native search database, written in Rust. Pre-alpha.',
-            logo: {
-                src: './src/assets/logo.svg',
-                alt: 'Persia DB',
-            },
-            customCss: ['./src/styles/retro.css'],
+            customCss: [
+                '@fontsource/jetbrains-mono/latin-400.css',
+                '@fontsource/jetbrains-mono/latin-500.css',
+                '@fontsource/jetbrains-mono/latin-600.css',
+                './src/styles/site.css',
+            ],
             expressiveCode: {
-                themes: ['min-light'],
+                themes: ['github-light', 'github-dark'],
             },
             social: [
                 {

@@ -1,45 +1,37 @@
-<figure class="diagram">
-    <div class="diagram-scroll">
-        <svg viewBox="0 0 440 560" role="img" aria-labelledby="query-title query-desc">
-            <title id="query-title">Life of a query</title>
-            <desc id="query-desc">
-                Planned query path. Analyze the text, search each segment and the memtable, merge the top hits.
-                If there are fewer hits than requested, run the relaxation cascade and say what changed.
-            </desc>
-            <rect width="440" height="560" fill="#ffffff" />
-            <g font-family="Courier New, Courier, monospace" font-size="14" fill="#000000">
-                <rect x="70" y="16" width="300" height="56" fill="#c0c0c0" stroke="#000080" stroke-width="2" />
-                <text x="86" y="48">1. Analyze the query text</text>
+---
+import AsciiFigure from './AsciiFigure.astro';
 
-                <polygon points="220,80 210,100 230,100" fill="#000080" />
+const diagram = `
+╔═ query ══════════════════════════════════════════════════════════╗ 
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 1. analyze the text              ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 2. each segment                  ┃               ║░
+║               ┃ and the memtable                 ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 3. merge the top hits            ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 4. too few hits?                 ┃               ║░
+║               ┃ no: return them                  ┃               ║░
+║               ┃ yes: relax                       ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+║                                ▼                                 ║░
+║               ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓               ║░
+║               ┃ 5. cascade, L0 to L5             ┃               ║░
+║               ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛               ║░
+╚══════════════════════════════════════════════════════════════════╝░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+`.slice(1, -1);
+---
 
-                <rect x="70" y="108" width="300" height="72" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="86" y="136">2. Search each segment</text>
-                <text x="86" y="158">and the memtable</text>
-
-                <polygon points="220,188 210,208 230,208" fill="#000080" />
-
-                <rect x="70" y="216" width="300" height="56" fill="#ffffff" stroke="#000080" stroke-width="2" />
-                <text x="86" y="248">3. Merge per-segment top hits</text>
-
-                <polygon points="220,280 210,300 230,300" fill="#000080" />
-
-                <rect x="40" y="308" width="360" height="72" fill="#ffffcc" stroke="#000080" stroke-width="2" />
-                <text x="56" y="336">4. Fewer hits than min_results?</text>
-                <text x="56" y="360">No: return them. Yes: relax.</text>
-
-                <polygon points="220,388 210,408 230,408" fill="#000080" />
-
-                <rect x="40" y="416" width="360" height="56" fill="#ffffff" stroke="#800000" stroke-width="2" />
-                <text x="56" y="448">5. Relaxation cascade, L0 through L5</text>
-
-                <text x="16" y="504">Filters stay strict unless the caller opts in.</text>
-                <text x="16" y="528">The response names the level and the words that changed.</text>
-                <text x="16" y="552">Planned. SPEC section 7. Milestones M7 and M8.</text>
-            </g>
-        </svg>
-    </div>
-    <figcaption>
-        Planned query path (SPEC §7). Step 4 is the branch into zero-results relaxation.
-    </figcaption>
-</figure>
+<AsciiFigure label='Life of a query' diagram={diagram}>
+    Planned query path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#7-search">SPEC §7</a>).
+        Step 4 is the branch into zero-results relaxation. Filters stay strict unless the caller opts in.
+        The response names the level and what changed. Milestones M7 and M8.
+</AsciiFigure>

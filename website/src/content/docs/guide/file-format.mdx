@@ -3,6 +3,8 @@ title: "File format and storage"
 description: "The local container, segments, block codecs, and the storage backends. High level."
 ---
 
+import StorageDiagram from '../../../components/StorageDiagram.astro';
+
 This page describes how the files are organized. Offsets, magic numbers, and CRC coverage are
 [SPEC §4](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#4-local-file-container) and [SPEC §5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#5-segment-format).
 
@@ -34,6 +36,8 @@ and a CRC (SPEC §5.1). It is a frame payload locally and a standalone object re
 match. Sections hold the term dictionary, postings, frequencies, skip lists, optional positions,
 length norms, columnar values, stored documents, the id map, and blob references (SPEC §5.3).
 Deleted ids are not a section.
+
+<StorageDiagram />
 
 Large sections are fixed-size blocks, 16 KiB uncompressed by default. Each block carries its own
 CRC, codec, and uncompressed length, so object storage can fetch one block with a range request

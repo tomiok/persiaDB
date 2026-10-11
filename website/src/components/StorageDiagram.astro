@@ -1,0 +1,28 @@
+---
+import AsciiFigure from './AsciiFigure.astro';
+
+const diagram = `
+╔═ storage ════════════════════════════════════════════════════════╗ 
+║         local file                         object storage        ║░
+║  ┏━━━━━━━━━━━━━━━━━━━━━━┓             ┏━━━━━━━━━━━━━━━━━━━━━━┓   ║░
+║  ┃ header, 8 KiB        ┃  same bytes ┃ manifests/seq        ┃   ║░
+║  ┃ two superblocks      ┃             ┃ segments/...         ┃   ║░
+║  ┃ append-only frames   ┃             ┃ blobs/...            ┃   ║░
+║  ┗━━━━━━━━━━━━━━━━━━━━━━┛             ┗━━━━━━━━━━━━━━━━━━━━━━┛   ║░
+║                                ▼                                 ║░
+║           ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓           ║░
+║           ┃ sections, then sections                  ┃           ║░
+║           ┃ footer: stats, table, CRC                ┃           ║░
+║           ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛           ║░
+║                16 KiB blocks · codec None or Zstd                ║░
+╚══════════════════════════════════════════════════════════════════╝░
+ ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+`.slice(1, -1);
+---
+
+<AsciiFigure label='Local file and object storage' diagram={diagram}>
+    The same segment bytes in a local frame and in object storage
+        (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#5-segment-format">SPEC §5</a>,
+        <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#10-storage-abstraction-and-cloud-backends">§10</a>).
+        Deleted ids are not a section. The container, the block header, and the backends are not built yet.
+</AsciiFigure>

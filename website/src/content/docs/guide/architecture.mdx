@@ -3,6 +3,8 @@ title: "Architecture"
 description: "How the crates are layered, and the path of a write and a query."
 ---
 
+import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
+
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
 `persia-format` is the only crate with real code,
 and it currently covers encodings, checksums, and block codecs. Frames and the superblock are still
@@ -10,22 +12,8 @@ ROADMAP 1.6–1.7. Every other crate is a workspace stub.
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
 
-```
- ┌───────────────── persia (embedded facade) ─────────────────┐
- │  Db ── Collection ── put/get/delete/search/blob             │
- ├──────────────┬──────────────┬───────────────┬──────────────┤
- │ persia-engine│ persia-blob  │persia-analysis│              │
- │ memtable/WAL │ chunks/dedup │ analyzers     │              │
- │ segments     │              │               │              │
- │ query+rank   │              │               │              │
- ├──────────────┴──────────────┴───────────────┴──────────────┤
- │ persia-storage:  Storage trait                              │
- │   memory │ local file container │ s3 │ gcs │ azure          │
- ├─────────────────────────────────────────────────────────────┤
- │ persia-format: encodings, frames, superblock, checksums     │
- └─────────────────────────────────────────────────────────────┘
-      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
-```
+<ArchitectureDiagram />
+
 
 Three rules shape the rest of the design:
 

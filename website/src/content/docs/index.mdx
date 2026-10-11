@@ -3,16 +3,16 @@ title: Persia DB
 description: An embedded, single-file, cloud-native search database, written in Rust. Pre-alpha. Think SQLite for search.
 ---
 
-import Logo from '../../components/Logo.astro';
+import ArchitectureDiagram from '../../components/ArchitectureDiagram.astro';
 import PreAlpha from '../../components/PreAlpha.astro';
 import WinButton from '../../components/WinButton.astro';
 
-<Logo size={128} />
-
-Persia DB is an embedded, single-file, cloud-native search database, written in Rust.
-Think "SQLite for search": open a file, index documents, and get ranked results that, by default,
-never come back empty. The same segment bytes can live in a local file or in object storage
-(S3, GCS, or Azure Blob) and can be served by stateless query nodes on Kubernetes.
+<p class="pitch">
+    Persia DB is an embedded, single-file, cloud-native search database, written in Rust.
+    Think "SQLite for search": open a file, index documents, and get ranked results that, by default,
+    never come back empty. The same segment bytes can live in a local file or in object storage
+    (S3, GCS, or Azure Blob) and can be served by stateless query nodes on Kubernetes.
+</p>
 
 <PreAlpha>
     Nothing works end to end yet, and the on-disk format is unstable until v1.0.
@@ -23,7 +23,9 @@ never come back empty. The same segment bytes can live in a local file or in obj
     [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 </PreAlpha>
 
-<p class="win-actions">
+<ArchitectureDiagram hero />
+
+<p class="actions">
     <WinButton href="/guide/overview/">Read the guide</WinButton>
     <WinButton href="/features/">Features</WinButton>
     <WinButton href="/architecture/">How it works</WinButton>
