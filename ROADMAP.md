@@ -111,11 +111,12 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [ ] 1.4.4 Resource/I-O error class in `persia-format` so allocation failures (zstd context, output buffer) are not reported as `Corrupt`
 
 ## 1.5 Block framing (SPEC §5.2)
-- [~] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len}` encode/decode
-- [~] 1.5.2 `BlockWriter`: split a byte stream into fixed-size blocks, emit block table
-- [~] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
-- [~] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
-- [~] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
+- [x] 1.5.1 `BlockHeader {crc32c, codec, uncompressed_len, stored_len}` encode/decode
+- [x] 1.5.2 `BlockWriter`: split a byte stream into fixed-size blocks, emit block table
+- [x] 1.5.3 `BlockReader`: random-access decode of block *i*, verifying checksum
+- [x] 1.5.4 [T] property round-trip with random sizes; corrupted block detected and reported with block index
+- [x] 1.5.5 Record each section's block size on disk so readers derive the bomb-guard `max_len` (SPEC §5.2); define DocStore rows larger than one block and the meaning of the section table's `codec` field
+- [ ] 1.5.6 Table-only block reader for object storage: open from the section tail (`block_count` first, then the table) and decode a separately fetched block (ADR-0006)
 
 ## 1.6 Container header & superblock (SPEC §4.2–4.3)
 - 1.6.1 `Header` struct: magic, versions, flags, uuid, page size; encode/decode
@@ -282,6 +283,7 @@ Deps: M1, M3, M4. The heart of the index format.
 - [ ] 5.2.6 DocStore, IdMap, BlobRefs section writers
 - [ ] 5.2.7 Segment footer writer: stats, section table, schema hash, CRC; trailing locator (SPEC §5.1)
 - [ ] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
+- [ ] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
 
 ## 5.3 Segment reader
 - [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash and version

@@ -1,13 +1,18 @@
 //! Error type for decoding on-disk structures.
 //!
 //! Every byte read from disk or the network is hostile (SPEC §17): malformed input must surface as
-//! [`Error::Corrupt`], never as a panic. Offsets are absolute positions in the enclosing object so that a
-//! report points at the exact byte (CLAUDE.md "Safety & errors"), provided the reader knows where its input
-//! starts ([`crate::Reader::with_base_offset`], [`crate::Reader::sub_reader`]).
+//! [`Error::Corrupt`] (or [`Error::CorruptBlock`] inside a block-framed section, SPEC §5.2), never as a panic.
+//! [`Error::is_corruption`] and [`Error::corruption`] treat both alike. [`Error::OutOfBounds`] is the one
+//! caller error: a request past the end of valid data.
+//!
+//! Offsets are absolute positions in the enclosing object so that a report points at the exact byte
+//! (CLAUDE.md "Safety & errors"), provided the reader knows where its input starts
+//! ([`crate::Reader::with_base_offset`], [`crate::Reader::sub_reader`]).
 //!
 //! The enums are deliberately *not* `#[non_exhaustive]`: their users are crates in this workspace, and an
 //! exhaustive `match` makes every new corruption kind a compile error where errors are mapped. Context about
-//! *which* object was being decoded is added by the caller's error type (e.g. `persia-storage`), not here.
+//! *which* object was being decoded is added by the caller's error type (e.g. `persia-storage`); the one
+//! exception is a block's index, which only this crate knows.
 
 /// Result alias for this crate.
 pub type Result<T, E = Error> = core::result::Result<T, E>;
@@ -43,6 +48,24 @@ pub enum Error {
         /// How many exist.
         len: u64,
     },
+}
+
+impl Error {
+    /// Whether the input was corrupt ([`Error::Corrupt`] or [`Error::CorruptBlock`]), as opposed to a caller
+    /// error.
+    pub const fn is_corruption(&self) -> bool {
+        self.corruption().is_some()
+    }
+
+    /// The absolute offset and reason of a corruption error; `None` for [`Error::OutOfBounds`].
+    pub const fn corruption(&self) -> Option<(u64, Corruption)> {
+        match *self {
+            Self::Corrupt { offset, reason } | Self::CorruptBlock { offset, reason, .. } => {
+                Some((offset, reason))
+            }
+            Self::OutOfBounds { .. } => None,
+        }
+    }
 }
 
 /// The specific way input was corrupt.

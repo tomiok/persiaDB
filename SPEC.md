@@ -79,7 +79,8 @@ A local database is two files:
 - `<name>.persia.blobs` — blob pack file (SPEC §9.3).
 
 ### 4.1 Conventions
-- All integers little-endian. All structures 8-byte aligned. Offsets are absolute `u64`.
+- All integers little-endian. All structures 8-byte aligned, except inside a block-framed section (SPEC §5.2), whose
+  blocks and block table are byte-aligned (only the section start is aligned). Offsets are absolute `u64`.
 - Checksum: **CRC32C** for headers/frames; **xxh3-64** (or xxh3-128) for internal content hashes and routing where
   noted, always with the default secret and seed 0: persisted hashes depend on it, so changing it is a format change.
   Blob ids are **SHA-256** (SPEC §9.1, ADR-0002).
@@ -173,7 +174,7 @@ Sections are block-oriented (SPEC §5.2). The footer (last 4096 bytes max, locat
 
 ### 5.2 Blocks
 All large sections are split into **fixed-size logical blocks (default 16 KiB uncompressed)**, each
-with `{crc32c, codec, uncompressed_len}` header. Blocks are independently decodable ⇒ range requests
+with a header holding its CRC32C, codec and lengths (layout below). Blocks are independently decodable ⇒ range requests
 and per-block caching work on object storage.
 
 **Codecs** (ADR-0005). Every block names its codec in the `codec` byte of its header:
@@ -188,19 +189,22 @@ Any other value is corruption. Readers apply a **decompression-bomb guard**: the
 allocation or decoding. A payload that expands, or declares that it expands, to another length is corruption.
 Writers choose the codec per block (e.g. `None` when zstd does not shrink it); the zstd level is not recorded.
 Still open, so not yet normative: how frame payload compression (§4.4 flags bit0) gets an uncompressed length
-and a bomb limit (ROADMAP 1.7.4).
+and a bomb limit (ROADMAP 1.7.4); which `section_kind`s are block-framed (ROADMAP 5.2.9).
 
 **Block layout** (ADR-0006). A block is a 16-byte header followed by its payload; blocks are byte-aligned
 and not padded:
 ```
-0   4  crc32c            u32  over bytes 4..(16 + stored_len): the rest of the header and the payload
+0   4  crc32c            u32  over bytes 4 up to the block's end (from the block table): the rest of the
+                              header and the payload
 4   1  codec             u8   (table above)
 5   3  reserved          MUST be zero
 8   4  uncompressed_len  u32
 12  4  stored_len        u32  (payload length)
 16  ..  payload           stored_len bytes
 ```
-The CRC is verified before any other field is interpreted.
+The CRC is verified before any other field is interpreted; its range comes from the block table, not from
+`stored_len`. In this section "block" means such a framed block, not the 128-docid postings blocks or 1024-value
+FOR blocks of §5.2.1, which are encoded inside a framed block's stream.
 
 **Block-framed sections** (ADR-0006). A block-framed section stores a logical byte stream of `total_len`
 bytes cut into blocks of `block_size` uncompressed bytes: block `i` holds stream bytes
@@ -221,18 +225,21 @@ block table (8·n + 24 bytes)
 ```
 A reader reads `block_count` from the fixed 24-byte trailer, checks that the table fits in the section, then
 verifies the table CRC before using any other field. The following are corruption: a `block_size` outside
-`1..=1 MiB`; `block_count ≠ ceil(total_len / block_size)`; a block shorter than its 16-byte header; a
-`block_end` that does not increase; a last `block_end` (or `0` when `n = 0`) other than the table's start. When
+`1..=1 MiB`; `block_count ≠ ceil(total_len / block_size)`; a block shorter than its 16-byte header; a block
+longer than its header plus `block_size`; a last `block_end` (or `0` when `n = 0`) other than the table's start.
+The length bound means fetching one block never costs more than `16 + block_size` bytes, whatever its header
+says; writers store a block as `None` when zstd would not shrink it, which keeps every block within it. When
 block `i` is decoded, its header must agree with the table: `stored_len = block_end[i] - start - 16`, and
 `uncompressed_len` equals the length the formula above gives for block `i`. A block's errors name its index.
 
 The table's `block_size` is the decompression-bomb limit for its blocks, so a reader needs nothing outside
 the section to decode it (no footer field). Any reader may use a smaller limit of its own.
-Records in a block-framed section are addressed by stream position, not by block, so a record may span blocks:
-a reader decodes every block that overlaps the record. In particular a DocStore row may be larger than one
+Records in a block-framed section are addressed by stream position, not by block, and every offset that points
+into a block-framed section (from TermInfo, Skip, ...) is a stream position. So a record may span blocks: a
+reader decodes every block that overlaps the record. In particular a DocStore row may be larger than one
 block (row offsets are defined with the DocStore writer, ROADMAP 5.2.6). Whether a section is block-framed is
-fixed by its `section_kind` (SPEC §5.3) and each block names its own codec, so the section table has no `codec`
-field.
+fixed by its `section_kind` (SPEC §5.3, ROADMAP 5.2.9), and each block names its own codec, so the section
+table has no `codec` field.
 
 ### 5.2.1 Integer codecs
 Building blocks of the Postings, Freqs, Skip and Columns sections (SPEC §5.3), ADR-0004. They live inside

@@ -3,7 +3,8 @@
 //! A block-framed section stores a logical byte stream cut into fixed-size blocks, each with a 16-byte
 //! [`BlockHeader`], followed by a block table that locates every block. [`BlockWriter`] produces a section;
 //! [`BlockReader`] validates its table once and then decodes any block, or any stream range, on its own, so
-//! a reader over object storage needs one range request for the table and one per block.
+//! a block needs only its own bytes once the table is known. [`BlockReader`] takes the whole section (in
+//! memory or mapped); reading the table and single blocks by range request is ROADMAP 1.5.6.
 //!
 //! Everything read is hostile (SPEC §17): the table's `block_size` (at most [`MAX_BLOCK_SIZE`]) bounds every
 //! decode, every block's CRC is verified before its header is interpreted, and errors in block `i` are
@@ -103,14 +104,9 @@ impl BlockHeader {
 
     /// Bytes 4..16, the part of the header the CRC covers.
     fn checked_fields(&self) -> [u8; 12] {
-        let mut fields = [0; 12];
-        let mut w = Writer::new();
-        w.write_u8(self.codec.to_u8());
-        w.write_zeros(3);
-        w.write_u32(self.uncompressed_len);
-        w.write_u32(self.stored_len);
-        fields.copy_from_slice(w.as_slice());
-        fields
+        let [u0, u1, u2, u3] = self.uncompressed_len.to_le_bytes();
+        let [s0, s1, s2, s3] = self.stored_len.to_le_bytes();
+        [self.codec.to_u8(), 0, 0, 0, u0, u1, u2, u3, s0, s1, s2, s3]
     }
 
     /// Appends the 16 header bytes.
@@ -164,7 +160,9 @@ impl Default for Compression {
 
 /// Builds a block-framed section from a byte stream written in pieces of any size (SPEC §5.2).
 ///
-/// It buffers at most one block of input. Call [`BlockWriter::finish`] to get the section bytes.
+/// It buffers at most one block of input, plus the encoded section until the caller takes it: call
+/// [`BlockWriter::take_output`] to drain the bytes encoded so far (e.g. to stream them to storage), and
+/// [`BlockWriter::finish`] for the rest, block table included. The concatenation is the section.
 ///
 /// ```
 /// use persia_format::block::{BlockReader, BlockWriter, Compression};
@@ -192,6 +190,8 @@ pub struct BlockWriter {
     /// Stream bytes already in blocks.
     flushed_len: u64,
     scratch: Vec<u8>,
+    /// Set by a failed `write` or `finish`: the stream lost bytes, so every later call fails.
+    failed: Option<EncodeError>,
 }
 
 impl BlockWriter {
@@ -218,6 +218,7 @@ impl BlockWriter {
             ends: Vec::new(),
             flushed_len: 0,
             scratch: Vec::new(),
+            failed: None,
         })
     }
 
@@ -230,8 +231,20 @@ impl BlockWriter {
     ///
     /// # Errors
     /// [`EncodeError::TooManyBlocks`] past `u32::MAX` blocks; [`EncodeError::CompressionFailed`] if zstd runs
-    /// out of memory. After an error the writer's content is unspecified: drop it.
-    pub fn write(&mut self, mut bytes: &[u8]) -> Result<(), EncodeError> {
+    /// out of memory. An error poisons the writer: an unknown prefix of `bytes` was taken, so every later
+    /// `write` or `finish` returns the same error rather than a section with bytes missing.
+    pub fn write(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
+        let result = self.write_blocks(bytes);
+        if let Err(e) = result {
+            self.failed = Some(e);
+        }
+        result
+    }
+
+    fn write_blocks(&mut self, mut bytes: &[u8]) -> Result<(), EncodeError> {
         let block_size = self.block_len();
         while !bytes.is_empty() {
             // Whole blocks straight from the input, without copying them into `pending`.
@@ -252,11 +265,22 @@ impl BlockWriter {
         Ok(())
     }
 
-    /// Emits the last, partial block and the block table, and returns the section.
+    /// Removes and returns the section bytes encoded so far (whole blocks only). Later output continues
+    /// where this ends, so the caller can stream a large section instead of holding it in memory.
+    pub fn take_output(&mut self) -> Vec<u8> {
+        let next = Writer::with_base_offset(self.out.offset());
+        std::mem::replace(&mut self.out, next).into_inner()
+    }
+
+    /// Emits the last, partial block and the block table, and returns the section bytes not yet taken by
+    /// [`BlockWriter::take_output`].
     ///
     /// # Errors
-    /// As [`BlockWriter::write`].
+    /// As [`BlockWriter::write`], including an earlier `write` error.
     pub fn finish(mut self) -> Result<Vec<u8>, EncodeError> {
+        if let Some(e) = self.failed {
+            return Err(e);
+        }
         if !self.pending.is_empty() {
             self.flush_pending()?;
         }
@@ -403,7 +427,7 @@ impl<'a> BlockReader<'a> {
         let ends = section
             .get(table_start..trailer_start)
             .ok_or_else(|| eof(table_len))?;
-        validate_ends(ends, block_count, base, table_start)?;
+        validate_ends(ends, block_count, block_size, base, table_start)?;
 
         Ok(Self {
             blocks: section.get(..table_start).unwrap_or_default(),
@@ -454,7 +478,7 @@ impl<'a> BlockReader<'a> {
     }
 
     /// Stream position where block `index` starts; the block holds the next [`BlockReader::block_size`] bytes
-    /// (fewer for the last).
+    /// (fewer for the last). Pure arithmetic: unlike [`BlockReader::block_range`], it does not check `index`.
     pub fn block_start(&self, index: u32) -> u64 {
         u64::from(index).saturating_mul(u64::from(self.block_size))
     }
@@ -478,7 +502,16 @@ impl<'a> BlockReader<'a> {
         let block = self.blocks.get(start..end).unwrap_or_default();
         let base = self.base.saturating_add(range.start);
 
-        let (stored_crc, checked) = block.split_first_chunk::<4>().unwrap_or((&[0; 4], &[]));
+        // `open` guarantees at least a header; a shorter block is still an error, never a vacuous CRC match.
+        let (stored_crc, checked) = block.split_first_chunk::<4>().ok_or_else(|| {
+            block_err(
+                base,
+                Corruption::UnexpectedEof {
+                    needed: to_u64(BLOCK_HEADER_LEN),
+                    available: to_u64(block.len()),
+                },
+            )
+        })?;
         check(crc32c(checked), u32::from_le_bytes(*stored_crc), base)
             .map_err(|e| in_block(index, e))?;
         let mut r = Reader::with_base_offset(block, base);
@@ -579,32 +612,41 @@ fn in_block(index: u32, e: Error) -> Error {
     }
 }
 
-/// Checks the table's `block_end` entries (SPEC §5.2): each block is at least a header long, and the last one
-/// (or position 0 when there are none) ends where the table starts.
-fn validate_ends(ends: &[u8], block_count: u32, base: u64, table_start: usize) -> Result<()> {
-    let max = to_u64(table_start);
-    let corrupt = |pos: usize, end: u64, min: u64| Error::Corrupt {
+/// Checks the table's `block_end` entries (SPEC §5.2): each block is at least a header long and at most a
+/// header plus `block_size`, and the last one (or position 0 when there are none) ends where the table starts.
+fn validate_ends(
+    ends: &[u8],
+    block_count: u32,
+    block_size: u32,
+    base: u64,
+    table_start: usize,
+) -> Result<()> {
+    let table_start_u64 = to_u64(table_start);
+    let corrupt = |pos: usize, end: u64, min: u64, max: u64| Error::Corrupt {
         offset: base.saturating_add(to_u64(pos)),
         reason: Corruption::InvalidBlockEnd { end, min, max },
     };
     if block_count == 0 && table_start != 0 {
-        return Err(corrupt(0, 0, max));
+        return Err(corrupt(0, 0, table_start_u64, table_start_u64));
     }
+    let header = to_u64(BLOCK_HEADER_LEN);
+    let largest = header.saturating_add(u64::from(block_size));
     let last = usize::try_from(block_count)
         .unwrap_or(usize::MAX)
         .saturating_sub(1);
     let mut prev = 0_u64;
     for (i, entry) in ends.as_chunks::<END_LEN>().0.iter().enumerate() {
         let end = u64::from_le_bytes(*entry);
-        let shortest = prev.saturating_add(to_u64(BLOCK_HEADER_LEN));
-        let min = if i == last {
-            shortest.max(max)
+        let shortest = prev.saturating_add(header);
+        let longest = prev.saturating_add(largest).min(table_start_u64);
+        let (min, max) = if i == last {
+            (shortest.max(table_start_u64), longest)
         } else {
-            shortest
+            (shortest, longest)
         };
         if end < min || end > max {
             let pos = table_start.saturating_add(i.saturating_mul(END_LEN));
-            return Err(corrupt(pos, end, min));
+            return Err(corrupt(pos, end, min, max));
         }
         prev = end;
     }
@@ -677,11 +719,32 @@ mod tests {
         assert_eq!(read_all(&r).unwrap(), b"hello");
     }
 
+    /// Reader side of a zstd block, built by hand around the zstd frame pinned in `compress.rs` (zstd 1.5.7,
+    /// level 3, `b"persia "` × 8): writer output depends on the zstd version, decoding must not.
+    #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI")]
+    fn golden_zstd_block() {
+        const FRAME: &[u8] = &[
+            0x28, 0xb5, 0x2f, 0xfd, 0x20, 0x38, 0x6d, 0x00, 0x00, 0x38, 0x70, 0x65, 0x72, 0x73,
+            0x69, 0x61, 0x20, 0x01, 0x00, 0x2a, 0x2a, 0x46,
+        ];
+        let mut block = vec![0, 0, 0, 0, 1, 0, 0, 0, 56, 0, 0, 0, 22, 0, 0, 0];
+        block.extend_from_slice(FRAME);
+        let crc = crc32c(&block[4..]).to_le_bytes();
+        block[..4].copy_from_slice(&crc);
+        block.extend(table(&[38], 56, 64));
+
+        let r = BlockReader::open(&block, BASE).unwrap();
+        let mut out = Vec::new();
+        r.read_block(0, &mut out).unwrap();
+        assert_eq!(out, b"persia ".repeat(8));
+    }
+
     #[test]
     fn golden_empty_section() {
         let expected = table(&[], 0, DEFAULT_BLOCK_SIZE);
         assert_eq!(
-            section(DEFAULT_BLOCK_SIZE, Compression::default(), b""),
+            section(DEFAULT_BLOCK_SIZE, Compression::None, b""),
             expected
         );
         let r = BlockReader::open(&expected, BASE).unwrap();
@@ -729,6 +792,11 @@ mod tests {
                 }
             );
         }
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "zstd is C behind FFI")]
+    fn writer_rejects_bad_zstd_level() {
         assert!(matches!(
             BlockWriter::new(16, Compression::Zstd { level: i32::MAX }),
             Err(EncodeError::InvalidCompressionLevel { .. })
@@ -760,6 +828,17 @@ mod tests {
         }
         assert_eq!(w.position(), 256);
         assert_eq!(w.finish().unwrap(), whole);
+
+        // Draining output as it is produced yields the same section.
+        let mut w = BlockWriter::new(7, Compression::None).unwrap();
+        let mut streamed = w.take_output();
+        assert_eq!(streamed, [0_u8; 0]);
+        for piece in data.chunks(30) {
+            w.write(piece).unwrap();
+            streamed.extend(w.take_output());
+        }
+        streamed.extend(w.finish().unwrap());
+        assert_eq!(streamed, whole);
     }
 
     #[test]
@@ -941,6 +1020,20 @@ mod tests {
 
     #[test]
     fn table_block_ends_and_reserved() {
+        // A block longer than a header plus `block_size` (here 16 + 4): a CRC-valid table cannot make one block
+        // fetch unbounded bytes. 20 bytes of block 0 plus 17 of block 1 become one 37-byte block of 5 bytes.
+        let bytes = [none_block(b"hell"), none_block(b"o"), table(&[37], 4, 5)].concat();
+        assert_eq!(
+            open(&bytes),
+            Err(corrupt(
+                BASE + 37,
+                Corruption::InvalidBlockEnd {
+                    end: 37,
+                    min: 37,
+                    max: 21
+                }
+            ))
+        );
         // Block 0 shorter than a header; last block not ending at the table.
         let bytes = with_table(table(&[15, 37], 5, 4));
         assert_eq!(
@@ -950,7 +1043,7 @@ mod tests {
                 Corruption::InvalidBlockEnd {
                     end: 15,
                     min: 16,
-                    max: 37
+                    max: 20
                 }
             ))
         );

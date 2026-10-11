@@ -1,8 +1,8 @@
 # ADR-0006: Block framing of segment sections
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-10
-- Related: SPEC §5.1, §5.2, §5.3, §17; ADR-0005; ROADMAP 1.5.1–1.5.5
+- Related: SPEC §4.1, §5.1, §5.2, §5.3, §17; ADR-0005; ROADMAP 1.5.1–1.5.6, 5.2.9
 
 ## Context
 
@@ -25,12 +25,13 @@ has been released, so this defines the layout rather than changing it.
    `uncompressed_len` in advance, so a lying header is caught before decoding.
 3. **A block table ends the section**: one `block_end u64` per block (relative to the section start), then a
    fixed 24-byte trailer `total_len u64, block_size u32, block_count u32, reserved u32, crc32c u32`. A writer can
-   stream blocks without knowing their count; a reader finds the trailer from the section's `len`, so one
-   range request fetches the table and one more fetches any block. The table has its own CRC, so a corrupt
-   table is reported as such, not as a block error.
+   stream blocks without knowing their count; a reader finds the trailer from the section's `len`, then the table
+   (two range requests, or one that over-fetches the tail), and then fetches any block on its own (ROADMAP
+   1.5.6). The table has its own CRC, so a corrupt table is reported as such, not as a block error.
 4. **`block_size` lives in the block table**, capped at 1 MiB. The section therefore carries its own bomb limit,
    and the footer's section table needs no extra field. The cap bounds what any reader allocates per block,
-   whatever the table claims.
+   whatever the table claims. Each block is also at most `16 + block_size` bytes long (writers fall back to `None`
+   when zstd does not shrink a block), so a CRC-valid but hostile table cannot make one block fetch gigabytes.
 5. **The section table has no `codec` field.** Every block names its codec, and whether a section is
    block-framed is a property of its `section_kind`. A section-level codec would only be a second, possibly
    contradicting, source of truth.
@@ -45,7 +46,14 @@ has been released, so this defines the layout rather than changing it.
 
 - Readers validate the whole table on open (O(blocks)); decoding a block then needs no further table checks.
 - A block is at least 16 bytes and the section has 24 bytes of fixed overhead, even when empty.
-- Writers buffer at most one block of input, plus one compressed copy.
+- Writers buffer at most one block of input, plus one compressed copy and the encoded bytes the caller has not
+  yet drained (`BlockWriter::take_output`), so a large section can be streamed to storage.
+- Blocks and the block table are byte-aligned, an explicit exception to SPEC §4.1: `u64` fields are read with
+  `from_le_bytes`, never through a zero-copy `&[u64]` view. Only the section start is aligned.
+- A block CRC covers the block's own bytes, not its index or section: two equal-length blocks swapped inside
+  one section pass their CRCs. Segments are immutable and written in one pass, so this needs a misdirected
+  write inside a segment; detecting it is left to segment-level integrity (footer CRC, ROADMAP 5.2.7) rather than
+  a per-block field.
 
 ## Alternatives considered
 
