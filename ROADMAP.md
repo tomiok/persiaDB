@@ -138,9 +138,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [ ] 1.7.5 Streaming frame encoder for large payloads (header with declared `payload_len`, incremental CRC, byte count verified on finish) and a public 24-byte header parser so range readers can size reads
 
 ## 1.8 Memory-mapped reader (the only `unsafe`)
-- [ ] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)
-- [ ] 1.8.2 `Bytes`-like slice abstraction unifying mmap, heap and remote-cached buffers (`ByteSource`)
-- [ ] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
+- [~] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)
+- [~] 1.8.2 `Bytes`-like slice abstraction unifying mmap, heap and remote-cached buffers (`ByteSource`)
+- [~] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
 
 ## 1.9 Golden fixtures
 - [ ] 1.9.1 Fixture generator binary producing deterministic sample containers (incl. a golden 12288-byte prefix: header + both slots at their absolute offsets, ADR-0008)
@@ -177,6 +177,7 @@ Deps: M1.
 - [ ] 2.3.3 `get_range` using pread; `list` with prefix; `delete`
 - [ ] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; [T] traversal attempts
 - [ ] 2.3.5 Run conformance suite
+- [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots
@@ -189,6 +190,7 @@ Deps: M1.
 - 2.4.5 Container compaction: rewrite live frames into new file + atomic rename (SPEC §4.6)
   - [ ] 2.4.5.1 Dead-space accounting
   - [ ] 2.4.5.2 [T] crash during compaction leaves a valid old or new file
+  - [ ] 2.4.5.3 Windows: an open mapping blocks `rename` over the container; close mappings or defer the swap until readers drain (ADR-0010)
 - [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
 - [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible

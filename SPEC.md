@@ -226,6 +226,16 @@ A crash before step 3 completes leaves the previous superblock valid ⇒ the pri
 Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by **rewriting live segments into a new file**
 and atomically `rename`-ing it over the old one (fsync file, then directory). Triggered by dead-space ratio (default 40%).
 
+### 4.7 Memory-mapped reads
+A local reader may memory-map byte ranges of the container instead of reading them (ADR-0010). Only bytes that are
+never written again may be mapped: frames in `12288..log_end` of a superblock the reader has read. The header and
+superblock pages are rewritten in place, so they are always read with ordinary reads. To keep every mapping valid,
+a writer never truncates, hole-punches or rewrites the container below the highest `log_end` it has committed or
+recovered: torn-tail truncation (§4.4) cuts at or after `log_end`, and compaction (§4.6) writes a new file instead of
+shrinking the old one, so existing mappings keep the old file's contents. A read error on a mapped page (or a
+truncation by another program) raises `SIGBUS` and ends the process; a reader that cannot accept that reads with
+ordinary reads instead.
+
 ---
 
 ## 5. Segment format
