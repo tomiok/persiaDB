@@ -5,7 +5,7 @@ description: "How to use Persia DB. What you can call today, and the intended op
 
 Persia DB does not yet open a database, index a document, or answer a query.
 This page separates the library code that exists from the API the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) describes.
-When the two disagree, the SPEC wins. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **63 of 403 leaves (16%)** on 2026-10-11.
+When the two disagree, the SPEC wins. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves (17%)** on 2026-10-11.
 
 ## What works today
 
@@ -38,7 +38,7 @@ assert_eq!(decoded, header);
 assert_eq!(decoded.access(), Access::ReadWrite);
 ```
 
-Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, and the two superblock slots. The public module list is [lib.rs lines 10–33](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L33). Frames (ROADMAP 1.7) are not written yet. The [code](/guide/code/) page quotes the exports.
+Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, and frames (encode, decode, and scan; ROADMAP 1.7.1–1.7.4). The streaming frame encoder (1.7.5) is not written yet. The public module list is [lib.rs lines 10–34](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L34). The [code](/guide/code/) page quotes the exports.
 
 ## Intended API
 

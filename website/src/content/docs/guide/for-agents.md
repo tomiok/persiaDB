@@ -10,7 +10,7 @@ Machine-readable copies of these pages: [llms.txt](/llms.txt) and [llms-full.txt
 
 ## Status
 
-Pre-alpha. **63 of 403** roadmap leaves were done on 2026-10-11 (16%).
+Pre-alpha. **69 of 406** roadmap leaves were done on 2026-10-11 (17%).
 The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Do not treat a number on an older page as newer than that file.
 
 Nothing works end to end. You cannot open a `.persia` file, put a document, commit, or search.
@@ -21,8 +21,8 @@ The on-disk format is unstable until v1.0 (SPEC §15).
 | Usable database API? | No. `persia` exports no types. |
 | Published on crates.io? | No. `publish = false`. |
 | CLI? | No. `persia-cli` `main` is empty. |
-| Working library code? | `persia-format`: header, superblock, checksums, integer codecs, block compression, block framing. |
-| Next format work? | Frames (ROADMAP 1.7). |
+| Working library code? | `persia-format`: header, superblock, checksums, integer codecs, block compression, block framing, and frames (encode, decode, scan). |
+| Next format work? | Streaming frame encoder (1.7.5), then mmap (1.8). |
 | First callable release? | `v0.1`, ROADMAP M10. Blocked. |
 
 The walkthrough with the illustrative calls, and the FAQ, is [Getting started](/guide/getting-started/).

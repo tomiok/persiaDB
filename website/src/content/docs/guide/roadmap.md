@@ -6,7 +6,7 @@ description: "What each milestone delivers, what it depends on, and where to rea
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md)
 derives the rest, and it is the live status. The table below is the **2026-10-11** snapshot
-(63 / 403 leaves, 16%). No leaf is currently marked `[~]`.
+(69 / 406 leaves, 17%). No leaf is currently marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -15,8 +15,8 @@ while a dependency is unfinished.
 | Milestone | Delivers | Depends on | Snapshot |
 |---|---|---|---|
 | **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | Done, 26/26 |
-| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 37/52 |
-| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/23 |
+| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 43/53 |
+| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/25 |
 | **M3** Schema | Collections, documents, manifests | M1 | Blocked, 0/15 |
 | **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Ready, 0/22 |
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Blocked, 0/36 |
@@ -31,8 +31,8 @@ while a dependency is unfinished.
 | **M14** SDKs | Rust and Go clients | M11; M13 for shard routing | Blocked, 0/17 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
 
-Block framing (1.5) and the container header and superblock (1.6) are done.
-The next format leaves are frames (1.7): the frame header, torn-tail recovery, and the frame-kind registry.
+Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan (1.7.1–1.7.4) are done.
+The next format leaves are the streaming frame encoder (1.7.5), then mmap (1.8).
 Text analysis (M4) may proceed alongside them.
 The generated ready-next list is in [`PROGRESS.md`](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
@@ -45,7 +45,7 @@ ADR-0002, and [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/m
 
 ## M1 — Format primitives
 
-In progress (37 of 52). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
+In progress (43 of 53). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
 bar for corruption handling is high: hostile bytes return an error.
 
 Done: little-endian cursors, varints, zigzag, checked offsets, delta coding, bit-packing, postings
