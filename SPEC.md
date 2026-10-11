@@ -170,13 +170,45 @@ From byte 12288 (after slot B) the file is an append-only sequence of frames:
 ..  4  reserved      u32  MUST be zero
 ```
 Total frame length is `24 + pad8(payload_len) + 8`, so every frame starts 8-byte aligned (SPEC §4.1).
-Non-zero padding or `reserved` bytes are corruption.
+`flags` is a 24-bit little-endian integer. `frame_seq` is stored and covered by the CRC, but its meaning (and
+whether recovery checks it) is not defined yet (ROADMAP 2.4.9); frame decoding does not interpret it.
 
-Unknown `kind` values with a valid checksum are skipped (forward compatibility); a reader MUST NOT
-interpret them.
+Validation (ADR-0009), in this order. A frame at offset `o` in input that ends at `E` is *invalid* when:
+1. fewer than 32 bytes (the smallest frame) remain, or `frame_magic` differs;
+2. its total length overflows `u64` or runs past `E`;
+3. `crc32c` does not match;
+4. padding or `reserved` bytes are non-zero.
 
-Recovery: starting at `log_end` from the chosen superblock, scan forward; any frame
-failing checksum or length validation terminates the scan, and the file is logically truncated there.
+A frame that passes these checks but sets a `flags` bit this reader does not know is *unsupported*, not invalid
+(bit0 is the only one assigned). New flags, like any feature older readers cannot handle, also set an
+`incompat_flags` bit (SPEC §15), so a reader that opened the container never sees one from a correct writer.
+
+**Kinds.** Unknown `kind` values (including 0) with a valid frame are skipped (forward compatibility); a reader
+MUST NOT interpret them. Padding frames carry no meaning: their payload exists to align what follows.
+
+**Compressed payload** (flags bit0). The stored payload is `uncompressed_len u64` followed by exactly one zstd
+frame with the same rules as a `Zstd` block (SPEC §5.2): it declares a content size equal to `uncompressed_len`,
+with no skippable frames and no trailing bytes. `payload_len` counts both. A reader passes the largest
+`uncompressed_len` it accepts for the frame's kind (decompression-bomb guard) and rejects a larger value before
+decoding. A malformed compressed payload in a valid frame is corruption, found when the payload is decoded, not
+while scanning.
+
+**Scanning.** A scan reads frames from an offset until the first invalid or unsupported frame, or the end of the
+input. It ends in one of four ways, at the offset `o` where it stopped:
+- *clean end*: the input ends exactly at a frame boundary;
+- *torn tail*: the frame at `o` is invalid and is the last thing written: fewer than 32 bytes remain, or its
+  total length runs past `E`, or no non-zero byte follows its end (a frame whose magic differs has no known end,
+  so every byte from `o` must be zero). This is what a crash during an append leaves: a short file, or a file
+  whose length grew before all of its data reached the disk (missing data reads as zeros);
+- *corruption*: the frame at `o` is invalid and non-zero bytes follow it, so data written after `o` exists and is
+  lost;
+- *unsupported*: the frame at `o` is unsupported. Nothing is truncated; the container cannot be opened by this
+  build.
+
+Recovery: starting at `log_end` from the chosen superblock, scan forward; a torn tail or corruption terminates
+the scan, and the file is logically truncated at `o` (the distinction is for reporting). Before appending again,
+the writer truncates the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new
+ones (ROADMAP 2.4.4).
 
 ### 4.5 Commit protocol (local)
 1. Append Segment / WalChunk frames. `fdatasync`.
@@ -226,8 +258,8 @@ Any other value is corruption. Readers apply a **decompression-bomb guard**: the
 `uncompressed_len` it accepts (for blocks, the section's block size), and a larger value is rejected before any
 allocation or decoding. A payload that expands, or declares that it expands, to another length is corruption.
 Writers choose the codec per block (e.g. `None` when zstd does not shrink it); the zstd level is not recorded.
-Still open, so not yet normative: how frame payload compression (§4.4 flags bit0) gets an uncompressed length
-and a bomb limit (ROADMAP 1.7.4); which `section_kind`s are block-framed (ROADMAP 5.2.9).
+Frame payloads compress with the same zstd rules (SPEC §4.4). Still open, so not yet normative: which
+`section_kind`s are block-framed (ROADMAP 5.2.9).
 
 **Block layout** (ADR-0006). A block is a 16-byte header followed by its payload; blocks are byte-aligned
 and not padded:
