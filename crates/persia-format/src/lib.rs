@@ -21,6 +21,7 @@ pub mod header;
 pub mod offset;
 pub mod postings;
 pub mod reader;
+pub mod superblock;
 pub mod varint;
 pub mod writer;
 pub mod zigzag;
