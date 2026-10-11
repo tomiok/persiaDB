@@ -16,6 +16,7 @@ pub mod compress;
 pub mod delta;
 pub mod error;
 pub mod for_codec;
+pub mod frame;
 pub mod hash;
 pub mod header;
 pub mod offset;

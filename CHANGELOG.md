@@ -39,6 +39,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `seq` but different contents are corruption. Each slot is a full 4096-byte page (A at 4096, B at 8192, first frame
   at 12288) so one bad sector cannot lose both (ADR-0008); `page_size` is an advisory alignment hint; a writer never
   lowers `format_minor`.
+- Frames (SPEC §4.4; ADR-0009): encode and validate the checksummed records after the superblock, with 8-byte
+  padding, a kind registry whose unknown kinds are skipped, and optional zstd payloads that carry their uncompressed
+  length and decode under a caller-supplied bomb limit. A frame scanner stops at the first invalid frame and reports a
+  clean end, a torn tail (only zeros or nothing follow), corruption (non-zero bytes follow) or a frame with unknown
+  flags, which is `Unsupported` and never truncated.
 
 <!--
 Sections per release, in this order, only when non-empty:

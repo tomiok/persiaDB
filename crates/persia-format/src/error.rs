@@ -264,6 +264,9 @@ pub enum Corruption {
         /// Largest valid size.
         max: u32,
     },
+    /// A frame does not start with the magic bytes `PFR1` (SPEC §4.4).
+    #[error("bad frame magic")]
+    BadFrameMagic,
     /// Neither superblock slot is valid (SPEC §4.3).
     #[error("no valid superblock slot")]
     NoValidSuperblock,
@@ -292,6 +295,12 @@ pub enum Unsupported {
     IncompatFlags {
         /// The unknown bits only.
         flags: u64,
+    },
+    /// Frame `flags` bits this build does not know, in a valid frame (SPEC §4.4; ADR-0009).
+    #[error("unknown frame flags {flags:#x}")]
+    FrameFlags {
+        /// The unknown bits only.
+        flags: u32,
     },
 }
 
