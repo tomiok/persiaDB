@@ -503,6 +503,7 @@ dependencies = [
 name = "persia-storage"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "persia-format",
  "proptest",
  "thiserror",

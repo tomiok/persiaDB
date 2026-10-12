@@ -74,3 +74,27 @@ proptest! {
         }
     }
 }
+
+proptest! {
+    // ROADMAP 2.1.2: a ranged read is accepted iff it returned exactly the requested length.
+    #[test]
+    fn for_range_accepts_only_the_exact_length(
+        start in prop_oneof![0u64..10_000, (u64::MAX - 100)..=u64::MAX],
+        want in 0u64..100,
+        got in 0usize..100,
+    ) {
+        let end = start.saturating_add(want);
+        let bytes = data(got);
+        match ByteSource::for_range(bytes.clone().into(), start..end) {
+            Ok(s) => {
+                prop_assert_eq!(got as u64, end - start);
+                prop_assert_eq!((s.base_offset(), s.end_offset()), (start, end));
+                prop_assert_eq!(&*s, &bytes[..]);
+            }
+            Err(err) => {
+                prop_assert_ne!(got as u64, end - start);
+                prop_assert!(matches!(err, Error::InvalidInputLen { .. }), "{:?}", err);
+            }
+        }
+    }
+}

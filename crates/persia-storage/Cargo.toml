@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 persia-format.workspace = true
 thiserror.workspace = true
+bytes.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

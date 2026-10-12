@@ -46,6 +46,41 @@ impl ByteSource {
         Self { bytes, base }
     }
 
+    /// The result of a ranged read of `range`: checks that exactly the requested bytes came back, so a short (or
+    /// long) read never passes for the range (SPEC §10.1).
+    ///
+    /// ```
+    /// use persia_format::source::ByteSource;
+    ///
+    /// let src = ByteSource::for_range(b"abcd".to_vec().into(), 4096..4100)?;
+    /// assert_eq!(src.base_offset(), 4096);
+    /// assert!(ByteSource::for_range(b"abc".to_vec().into(), 4096..4100).is_err()); // short read
+    /// # Ok::<(), persia_format::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::RangeOutOfBounds`] if `range` is inverted; [`Error::InvalidInputLen`] if `bytes` is not exactly
+    /// `range.end - range.start` long.
+    pub fn for_range(bytes: Bytes, range: Range<u64>) -> Result<Self> {
+        let Some(expected) = range.end.checked_sub(range.start) else {
+            return Err(Error::RangeOutOfBounds {
+                start: range.start,
+                end: range.end,
+                available_start: range.start,
+                available_end: range.start,
+            });
+        };
+        let len = to_u64(bytes.len());
+        if len != expected {
+            return Err(Error::InvalidInputLen {
+                len,
+                min: expected,
+                max: expected,
+            });
+        }
+        Ok(Self::with_base_offset(bytes, range.start))
+    }
+
     /// The mapped bytes, at the mapping's offset. The mapping lives as long as any clone or slice.
     pub fn from_mmap(map: MmapFile) -> Self {
         let base = map.offset();
@@ -214,5 +249,35 @@ mod tests {
         assert_eq!(r.read_u16().unwrap(), u16::from_le_bytes([2, 3]));
         let err = r.read_u8().unwrap_err();
         assert_eq!(err.corruption().map(|(offset, _)| offset), Some(4100));
+    }
+
+    #[test]
+    fn for_range_accepts_exactly_the_requested_length() {
+        let s = ByteSource::for_range(vec![7; 4].into(), 4096..4100).unwrap();
+        assert_eq!((s.base_offset(), s.end_offset()), (4096, 4100));
+        let empty = ByteSource::for_range(Bytes::new(), u64::MAX..u64::MAX).unwrap();
+        assert_eq!(empty.base_offset(), u64::MAX);
+        for len in [0, 3, 5] {
+            let err = ByteSource::for_range(vec![7; len].into(), 4096..4100).unwrap_err();
+            assert_eq!(
+                err,
+                Error::InvalidInputLen {
+                    len: len as u64,
+                    min: 4,
+                    max: 4
+                }
+            );
+            assert!(!err.is_corruption());
+        }
+        #[allow(clippy::reversed_empty_ranges)]
+        let err = ByteSource::for_range(Bytes::new(), 5..4).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::RangeOutOfBounds {
+                start: 5,
+                end: 4,
+                ..
+            }
+        ));
     }
 }
