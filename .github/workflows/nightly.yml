@@ -1,4 +1,4 @@
-# Nightly extended checks (ROADMAP 0.2.3). Slow suites are excluded from PR CI to keep it under 2 minutes.
+# Nightly extended checks (ROADMAP 0.2.3, 1.11.3). Slow suites are excluded from PR CI to keep it under 2 minutes.
 # Actions are pinned to commit SHAs (SPEC §17).
 name: nightly
 
@@ -33,3 +33,38 @@ jobs:
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - run: cargo test --workspace --features slow --release
+
+  coverage:
+    # ROADMAP 1.11.3. Report only, no gating yet. Doctests are not measured (needs nightly).
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain with llvm-tools
+        run: |
+          rustup toolchain install
+          rustup component add llvm-tools
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-llvm-cov@0.9.1
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: cargo llvm-cov --workspace --no-report
+      - run: cargo llvm-cov report --lcov --output-path lcov.info
+      - run: cargo llvm-cov report --html
+      - name: Summary
+        run: |
+          {
+            echo '## Line coverage'
+            echo '```'
+            cargo llvm-cov report --summary-only
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage
+          path: |
+            lcov.info
+            target/llvm-cov/html
+          retention-days: 30

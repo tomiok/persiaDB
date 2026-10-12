@@ -66,6 +66,10 @@ fuzz target seconds="60":
 bench package="persia-engine":
     cargo bench -p {{ package }}
 
+# Line coverage report (what nightly CI uploads); needs cargo-llvm-cov and the llvm-tools component
+coverage:
+    cargo llvm-cov --workspace --html
+
 # Cloud-emulator integration tests: MinIO, fake-gcs-server, Azurite (ROADMAP 12.2.4)
 integration:
     @echo "not implemented yet: emulator integration tests land with M12 (ROADMAP 12.2.4)"; exit 1
