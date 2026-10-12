@@ -14,6 +14,10 @@ permissions:
   contents: read
   actions: read # download the previous run's artifact
 
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
@@ -32,15 +36,17 @@ jobs:
       - name: Restore previous results
         env:
           GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           mkdir -p bench-results
-          prev="$(gh run list -R "$GITHUB_REPOSITORY" --workflow bench.yml --status success --limit 1 \
-            --json databaseId --jq '.[0].databaseId // empty')"
-          if [ -n "$prev" ]; then
-            gh run download "$prev" -R "$GITHUB_REPOSITORY" -n bench-results -D previous
-            if [ -d previous/criterion ]; then mv previous/criterion bench-results/; fi
+          prev="$(gh run list -R "$GITHUB_REPOSITORY" --workflow bench.yml --branch "$DEFAULT_BRANCH" \
+            --status success --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+          # Only default-branch runs form the history; a missing or expired (90 days) artifact starts a new one.
+          if [ -n "$prev" ] && gh run download "$prev" -R "$GITHUB_REPOSITORY" -n bench-results -D previous \
+            && [ -d previous/criterion ]; then
+            mv previous/criterion bench-results/
           else
-            echo "No previous successful run: this one becomes the first baseline."
+            echo "No previous results: this run becomes the first baseline."
           fi
       # `--bench '*'` selects only [[bench]] targets: lib harnesses reject Criterion's flags.
       # Criterion's progress goes to stderr; results (stdout) go to bench.txt. CRITERION_HOME must be absolute.

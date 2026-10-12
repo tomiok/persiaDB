@@ -13,11 +13,17 @@ on:
   workflow_dispatch:
     inputs:
       seconds:
-        description: Fuzzing time per target, in seconds
-        default: "300"
+        description: Fuzzing time per target, in seconds (1-2400; the job times out at 45 min)
+        type: number
+        default: 300
 
 permissions:
   contents: read
+
+# Serializes overlapping dispatches; a scheduled run is never cancelled.
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -48,7 +54,7 @@ jobs:
     timeout-minutes: 45
     env:
       TARGET: ${{ matrix.target }}
-      MAX_TOTAL_TIME: ${{ inputs.seconds || '300' }}
+      MAX_TOTAL_TIME: ${{ inputs.seconds || 300 }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -56,17 +62,17 @@ jobs:
       - name: Install dated nightly
         run: |
           nightly="$(cat .github/nightly-toolchain)"
-          echo "NIGHTLY=$nightly" >> "$GITHUB_ENV"
           rustup toolchain install "$nightly" --profile minimal
+          # Overrides rust-toolchain.toml (stable) for every later step, rust-cache's cache key included.
+          echo "RUSTUP_TOOLCHAIN=$nightly" >> "$GITHUB_ENV"
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: cargo-fuzz@0.13.2
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
-          # All targets share the dependency build; the key follows the nightly (rust-toolchain.toml says stable).
+          # All targets share the dependency build.
           shared-key: fuzz
-          key: ${{ env.NIGHTLY }}
       - name: Restore corpus
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -77,12 +83,19 @@ jobs:
       - name: Fuzz
         working-directory: fuzz
         run: |
-          mkdir -p "corpus-local/$TARGET"
-          cargo "+$NIGHTLY" fuzz run "$TARGET" "corpus-local/$TARGET" "corpus/$TARGET" -- \
+          case "$MAX_TOTAL_TIME" in
+            '' | *[!0-9]*) echo "seconds must be a positive integer: $MAX_TOTAL_TIME"; exit 1 ;;
+          esac
+          if [ "$MAX_TOTAL_TIME" -lt 1 ] || [ "$MAX_TOTAL_TIME" -gt 2400 ]; then
+            echo "seconds must be in 1..2400: $MAX_TOTAL_TIME"; exit 1
+          fi
+          # A target without committed seeds still runs (libFuzzer exits on a missing corpus directory).
+          mkdir -p "corpus-local/$TARGET" "corpus/$TARGET"
+          cargo fuzz run "$TARGET" "corpus-local/$TARGET" "corpus/$TARGET" -- \
             -max_total_time="$MAX_TOTAL_TIME" -timeout=30
       - name: Minimize corpus
         working-directory: fuzz
-        run: cargo "+$NIGHTLY" fuzz cmin "$TARGET" "corpus-local/$TARGET"
+        run: cargo fuzz cmin "$TARGET" "corpus-local/$TARGET"
       # Saved even when a crash was found, so the next run resumes from the grown corpus.
       - name: Save corpus
         if: ${{ !cancelled() }}
