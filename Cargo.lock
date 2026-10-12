@@ -504,6 +504,8 @@ name = "persia-storage"
 version = "0.0.0"
 dependencies = [
  "persia-format",
+ "proptest",
+ "thiserror",
 ]
 
 [[package]]
