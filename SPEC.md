@@ -639,20 +639,49 @@ Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the ri
 
 ## 10. Storage abstraction and cloud backends
 
-### 10.1 Trait (sketch)
+### 10.1 Trait
 ```rust
 pub trait Storage: Send + Sync {
-    fn get_range(&self, key: &Key, range: Range<u64>) -> Result<Bytes>;
+    fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource>;
     fn get(&self, key: &Key) -> Result<Bytes>;
     fn put(&self, key: &Key, data: Bytes) -> Result<()>;                 // atomic visibility
     fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome>; // commit primitive
-    fn list(&self, prefix: &Key) -> Result<Vec<ObjectMeta>>;
+    fn list(&self, prefix: &KeyPrefix) -> Result<Vec<ObjectMeta>>;
     fn delete(&self, key: &Key) -> Result<()>;
-    fn capabilities(&self) -> Capabilities; // e.g. conditional_put, strong_list, append
+    fn capabilities(&self) -> Capabilities; // conditional_put, strong_list, append
 }
 ```
 A **container adapter** implements the local single-file layout (SPEC §4) on top of the filesystem and
 presents the same logical objects to the engine.
+
+**Keys.** A `Key` is UTF-8, 1–1024 bytes (the S3/GCS limit), made of `/`-separated segments. Every segment is
+non-empty (so no leading, trailing or doubled `/`) and is not `.` or `..`; no character is a control character
+(U+0000–U+001F, U+007F) or `\`. Keys are validated on construction, so no backend can be handed a key that escapes
+its root (ROADMAP 2.3.4). A `KeyPrefix` follows the same rules except that it may be empty and may end with `/`
+(its last segment is incomplete, so it may also be `.` or `..`); it matches keys by plain byte prefix, as in S3.
+
+**Semantics.**
+- `get` / `get_range` of a missing key: `NotFound`. `get_range` returns a `ByteSource` whose base offset is
+  `range.start` (SPEC §4.1: decoders report absolute offsets) and holds exactly `range.end - range.start` bytes.
+  An inverted range is a caller error; a range that extends past the object's end, or a backend returning a
+  different length than requested, is `ShortRead`, which is corruption: offsets come from committed metadata.
+- `put` replaces the object; readers see the old or the new bytes, never a mix.
+- `put_if_absent` returns `Created` or `AlreadyExists`, atomically. A backend without `conditional_put` returns
+  `Unsupported` instead of emulating it with a racy check.
+- `list` returns every object whose key starts with the prefix, sorted by key bytes. Without `strong_list` a
+  just-written object may be missing from it.
+- `delete` of a missing key succeeds (idempotent).
+
+**Errors.** Every error has one kind: `NotFound`, `Conflict` (a conditional update lost a race; `put_if_absent`
+reports `AlreadyExists` instead), `Transient` (throttling, timeouts, 5xx: the operation may succeed if repeated),
+`Corrupt` (stored bytes violate the format, incl. `ShortRead`), `Io` (a local I/O failure), `InvalidInput` (bad key
+or range) and `Unsupported` (missing capability). Only `Transient` is retryable; backends classify their native
+errors into it, so callers never inspect backend-specific errors.
+
+**Retries.** Backends retry `Transient` errors with a shared policy: at most `max_attempts` attempts (default 5),
+waiting before retry `n` (from 0) a uniformly random duration in `0..=min(max_delay, base_delay·2ⁿ)` ("full
+jitter"; defaults 50 ms and 5 s). Sleeping goes through an injectable clock and the randomness through a seeded
+generator, so tests are deterministic.
 
 ### 10.2 URL schemes
 `persia::open("app.persia")`, `file:///…`, `s3://bucket/prefix`, `gs://bucket/prefix`, `az://account/container/prefix`,
