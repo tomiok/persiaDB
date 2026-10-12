@@ -407,7 +407,8 @@ pub enum EncodeError {
     PayloadLenMismatch {
         /// `payload_len` written in the header.
         declared: u64,
-        /// Bytes given: the total so far when it exceeds `declared`, the final total when it falls short.
+        /// Bytes given: the total so far when it exceeds `declared` (saturating at `u64::MAX`), the final total when
+        /// it falls short.
         actual: u64,
     },
 }

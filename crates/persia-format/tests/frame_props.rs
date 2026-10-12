@@ -657,6 +657,14 @@ fn check_header_against_frame(b: &[u8], base: u64, pos: usize) -> Result<(), Tes
     if let Ok(h) = &header {
         prop_assert_eq!(hr.offset(), o + FRAME_HEADER_LEN as u64);
         prop_assert_eq!(h.flags() >> 24, 0, "flags is a 24-bit field");
+        prop_assert_eq!(h.offset(), o);
+        // The range reader's bound (SPEC §4.4 rule 2): with the input ending at `o + available`, it fails exactly
+        // when the frame runs past the end, with the error `Frame::decode` gives once 32 bytes remain.
+        let fits = h.check_fits(o + available);
+        prop_assert_eq!(fits.is_ok(), h.total_len() <= available, "at {}", pos);
+        if let (Err(e), true) = (&fits, rest.len() >= MIN_FRAME_LEN) {
+            prop_assert_eq!(frame.as_ref().err(), Some(e), "at {}", pos);
+        }
     }
     let frame_pos = frame.as_ref().map_or(0, |f| f.total_len() as usize);
     prop_assert_eq!(fr.position(), frame_pos, "at {}", pos);

@@ -204,6 +204,7 @@ pub fn encode_frame(
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FrameHeader {
+    offset: u64,
     kind: FrameKind,
     flags: u32,
     payload_len: u64,
@@ -212,9 +213,16 @@ pub struct FrameHeader {
 }
 
 impl FrameHeader {
-    /// A header whose frame length fits in `u64`, or `None`. `flags` keeps its low 24 bits.
-    fn new(kind: FrameKind, flags: u32, payload_len: u64, frame_seq: u64) -> Option<Self> {
+    /// The header at `offset` of a frame whose length fits in `u64`, or `None`. `flags` keeps its low 24 bits.
+    fn new(
+        offset: u64,
+        kind: FrameKind,
+        flags: u32,
+        payload_len: u64,
+        frame_seq: u64,
+    ) -> Option<Self> {
         Some(Self {
+            offset,
             kind,
             flags: flags & 0x00FF_FFFF,
             payload_len,
@@ -224,8 +232,8 @@ impl FrameHeader {
     }
 
     /// Reads [`FRAME_HEADER_LEN`] bytes and checks the magic and that the frame's total length fits in `u64`.
-    /// Whether the frame fits in the container is the caller's check: compare [`FrameHeader::total_len`] with what
-    /// remains.
+    /// Whether the frame fits in the container is not checked: call [`FrameHeader::check_fits`] before fetching or
+    /// allocating `total_len` bytes (SPEC §4.4).
     ///
     /// # Errors
     /// [`Error::Corrupt`] with [`Corruption::UnexpectedEof`] if fewer than [`FRAME_HEADER_LEN`] bytes remain,
@@ -256,13 +264,14 @@ impl FrameHeader {
         let len_offset = ahead.offset();
         let payload_len = ahead.read_u64()?;
         let frame_seq = ahead.read_u64()?;
-        let header = Self::new(kind, flags, payload_len, frame_seq).ok_or(Error::Corrupt {
-            offset: len_offset,
-            reason: Corruption::UnexpectedEof {
-                needed: u64::MAX,
-                available,
-            },
-        })?;
+        let header =
+            Self::new(offset, kind, flags, payload_len, frame_seq).ok_or(Error::Corrupt {
+                offset: len_offset,
+                reason: Corruption::UnexpectedEof {
+                    needed: u64::MAX,
+                    available,
+                },
+            })?;
         *r = ahead;
         Ok(header)
     }
@@ -276,10 +285,46 @@ impl FrameHeader {
         w.write_u64(self.payload_len);
         w.write_u64(self.frame_seq);
         // Exactly FRAME_HEADER_LEN bytes were written.
+        debug_assert_eq!(w.len(), FRAME_HEADER_LEN);
         w.as_slice()
             .first_chunk()
             .copied()
             .unwrap_or([0; FRAME_HEADER_LEN])
+    }
+
+    /// Absolute offset of the frame.
+    pub const fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Checks that the frame fits before `end`, the absolute end of the container or object: what a range reader
+    /// MUST do before fetching or allocating [`FrameHeader::total_len`] bytes (SPEC §4.4, validation rule 2).
+    ///
+    /// ```
+    /// use persia_format::frame::{FrameEncoder, FrameHeader, FrameKind};
+    /// use persia_format::Reader;
+    ///
+    /// let enc = FrameEncoder::new(FrameKind::Segment, 1, 1 << 40)?;
+    /// let header = FrameHeader::decode(&mut Reader::with_base_offset(enc.header(), 12288))?;
+    /// assert!(header.check_fits(12288 + 4096).is_err()); // a 1 TiB frame in a 16 KiB file
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] with [`Corruption::UnexpectedEof`] at the `payload_len` field when the frame runs past
+    /// `end`: the error [`Frame::decode`] gives for an input ending at `end` with at least [`MIN_FRAME_LEN`] bytes.
+    pub fn check_fits(&self, end: u64) -> Result<()> {
+        let available = end.saturating_sub(self.offset);
+        if self.total_len <= available {
+            return Ok(());
+        }
+        Err(Error::Corrupt {
+            offset: self.offset.saturating_add(to_u64(PAYLOAD_LEN_OFFSET)),
+            reason: Corruption::UnexpectedEof {
+                needed: self.total_len,
+                available,
+            },
+        })
     }
 
     /// The `kind` field. Unverified until the frame is decoded.
@@ -314,9 +359,10 @@ impl FrameHeader {
 /// The payload length is declared up front because it is in the header, which comes first. The caller writes
 /// [`FrameEncoder::header`], then each chunk it passes to [`FrameEncoder::update`], then the bytes
 /// [`FrameEncoder::finish`] returns. The CRC is computed incrementally over exactly the bytes passed to `update`,
-/// so the caller must write those same bytes. The payload is stored uncompressed: a compressed length is not
-/// known before compressing, so compressed frames use [`encode_frame`] (segments compress their own blocks,
-/// SPEC §5.2). The output is byte-for-byte what [`encode_frame`] writes with [`Compression::None`].
+/// so the caller must write those same bytes: a difference is only detected on read, as a checksum mismatch. The
+/// payload is stored uncompressed: a compressed length is not known before compressing, so compressed frames use
+/// [`encode_frame`] (segments compress their own blocks, SPEC §5.2). The output is byte-for-byte what
+/// [`encode_frame`] writes with [`Compression::None`].
 ///
 /// ```
 /// use persia_format::block::Compression;
@@ -351,7 +397,7 @@ impl FrameEncoder {
     /// # Errors
     /// [`EncodeError::FrameTooLarge`] if the frame's total length would overflow `u64`.
     pub fn new(kind: FrameKind, frame_seq: u64, payload_len: u64) -> Result<Self, EncodeError> {
-        let header = FrameHeader::new(kind, 0, payload_len, frame_seq)
+        let header = FrameHeader::new(0, kind, 0, payload_len, frame_seq)
             .ok_or(EncodeError::FrameTooLarge { payload_len })?;
         let bytes = header.encode();
         let mut crc = Crc32c::new();
@@ -1371,6 +1417,29 @@ mod tests {
                 assert_eq!(header(&b[..24]), Err(expected), "{byte}.{bit}");
             }
         }
+    }
+
+    /// `check_fits(end)` agrees with `Frame::decode` on an input ending at `end`, for ends around the frame length.
+    #[test]
+    fn check_fits_matches_frame_decode() {
+        let mut log = raw(1, 4, b"a payload of 23 bytes!!");
+        let total = log.len();
+        log.extend_from_slice(&raw(2, 5, b"next"));
+        let h = header(&log).unwrap();
+        assert_eq!((h.offset(), h.total_len()), (BASE, total as u64));
+        for len in total - 8..=total + 8 {
+            let end = BASE + len as u64;
+            let mut r = Reader::with_base_offset(&log[..len], BASE);
+            match Frame::decode(&mut r) {
+                Ok(f) => {
+                    assert_eq!(h.check_fits(end), Ok(()), "{len}");
+                    assert_eq!(f.total_len(), h.total_len());
+                }
+                Err(e) => assert_eq!(h.check_fits(end), Err(e), "{len}"),
+            }
+        }
+        // An end before the frame start fits nothing and does not underflow.
+        assert!(h.check_fits(0).is_err());
     }
 
     #[test]

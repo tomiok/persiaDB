@@ -135,7 +135,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
   - [x] 1.7.2.3 [T] fuzz scanner
 - [x] 1.7.3 Frame kinds registry (WalChunk, Segment, Manifest, Padding, TombstoneSidecar) with forward-compat skip of unknown kinds
 - [x] 1.7.4 Frame payload compression (§4.4 flags bit0): carry an uncompressed length and a bomb limit, decode via `decompress_block`
-- [ ] 1.7.5 Streaming frame encoder for large payloads (header with declared `payload_len`, incremental CRC, byte count verified on finish) and a public 24-byte header parser so range readers can size reads
+- [x] 1.7.5 Streaming frame encoder for large payloads (header with declared `payload_len`, incremental CRC, byte count verified on finish) and a public 24-byte header parser so range readers can size reads
 
 ## 1.8 Memory-mapped reader (the only `unsafe`)
 - [x] 1.8.1 `MmapFile` wrapper over `memmap2` with documented safety contract (file not truncated while mapped)

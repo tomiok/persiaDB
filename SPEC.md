@@ -186,8 +186,9 @@ A frame that passes these checks but sets a `flags` bit this reader does not kno
 **Streaming and ranged access.** A writer that streams a payload too large to buffer declares `payload_len` in the
 header before the payload follows, and stores it uncompressed (a compressed length is unknown until compression
 ends); the frame must then hold exactly that many payload bytes. A range reader fetches the 24-byte header first and
-sizes the read of the whole frame from its magic and `payload_len`; nothing else in the header is trusted until the
-frame passes the checks below.
+sizes the read of the whole frame from its magic and `payload_len`. Before fetching or allocating, it MUST bound the
+total length by the end `E` of the container or object (validation rule 2 above); nothing else in the header is
+trusted until the whole frame passes the validation checks above (ADR-0009).
 
 **Kinds.** Unknown `kind` values (including 0) with a valid frame are skipped (forward compatibility); a reader
 MUST NOT interpret them. Padding frames carry no meaning: their payload exists to align what follows.
