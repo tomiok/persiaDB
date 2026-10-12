@@ -143,8 +143,8 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.8.3 ADR documenting the unsafe boundary + SIGBUS strategy
 
 ## 1.9 Golden fixtures
-- [ ] 1.9.1 Fixture generator binary producing deterministic sample containers (incl. a golden 12288-byte prefix: header + both slots at their absolute offsets, ADR-0008)
-- [ ] 1.9.2 Check-in small fixtures (< 100 KB) + test that opens all fixtures
+- [x] 1.9.1 Fixture generator binary producing deterministic sample containers (incl. a golden 12288-byte prefix: header + both slots at their absolute offsets, ADR-0008)
+- [x] 1.9.2 Check-in small fixtures (< 100 KB) + test that opens all fixtures
 
 ## 1.10 Shared value types
 - [ ] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002

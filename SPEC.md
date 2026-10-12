@@ -750,7 +750,9 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
   be gated by a `rocompat_flags` bit instead. Readers never branch on `format_minor`, only on flags (ADR-0008).
 - `incompat_flags` for features old readers cannot handle; `rocompat_flags` for read-only-safe features.
 - Each segment records its own format version ⇒ mixed-version databases are valid; compaction upgrades gradually.
-- Golden files for every released format version live in `tests/fixtures/` and are opened by CI forever.
+- Golden files for every released format version live in `tests/fixtures/format/v<major>.<minor>/` and are opened
+  by CI forever. `cargo xtask fixtures` writes (and CI checks) only the directory of the version the build writes;
+  a released version's directory is never regenerated.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

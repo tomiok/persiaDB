@@ -1,28 +1,30 @@
-//! `cargo xtask fixtures`: write the golden container fixtures in `tests/fixtures/format/` (SPEC §15).
+//! `cargo xtask fixtures`: write the golden container fixtures of the current format version (SPEC §15).
 //!
 //! Like generated code (ADR-0003), the fixtures are produced here, committed, and `--check` fails if regenerating
 //! them would change a byte. `persia-format`'s `tests/fixtures.rs` opens every file and checks what it must hold,
 //! so a reader change that breaks an old container is caught even when the writer changed along with it.
 //!
-//! Every fixture is built from fixed inputs, so the bytes depend only on the format code and on zstd's output for
-//! the one compressed frame. Frame payloads are opaque: the WAL, segment and manifest formats do not exist yet, so
-//! only the container layer (header, superblock slots, frames; SPEC §4.2–4.4) may read these files.
+//! Each format version has its own directory, `tests/fixtures/format/v<major>.<minor>/`. This command writes and
+//! checks only the directory of the version this build writes ([`FORMAT_MAJOR`].[`FORMAT_MINOR`]). Once that
+//! version is released it is frozen (SPEC §15): its directory is never regenerated, the version bump moves the
+//! generator to a new directory, and the reader test keeps opening the old one.
 //!
-//! A format version is frozen once released (SPEC §15); then its fixtures must stay byte-for-byte as they are and
-//! a new version gets its own directory.
+//! Every fixture is built from fixed inputs, so the bytes depend only on the format code and on zstd's output for
+//! the one compressed frame: a zstd upgrade may change that frame, which `--check` reports. That is harmless before
+//! release (regenerate) and impossible after it (the directory is no longer checked here). Frame payloads are
+//! opaque: the WAL, segment and manifest formats do not exist yet, so only the container layer (header, superblock
+//! slots, frames; SPEC §4.2–4.4) may read these files.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail, ensure};
 use persia_format::Writer;
 use persia_format::block::Compression;
-use persia_format::frame::{FrameKind, encode_frame, frame_len};
-use persia_format::header::Header;
+use persia_format::frame::{FRAME_HEADER_LEN, FrameKind, MIN_FRAME_LEN, encode_frame};
+use persia_format::header::{FORMAT_MAJOR, FORMAT_MINOR, Header};
 use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN, Superblock};
 
 const COMMAND: &str = "cargo xtask fixtures";
-/// Where the fixtures live, relative to the repository root.
-pub(crate) const DIR: &str = "tests/fixtures/format";
 /// The `db_uuid` of every fixture.
 const DB_UUID: [u8; 16] = *b"persia-fixtures!";
 /// Fixed so the compressed frame is reproducible (the default level could change with zstd).
@@ -30,11 +32,18 @@ const ZSTD_LEVEL: i32 = 3;
 /// A kind byte no build assigns yet: readers must skip the frame (SPEC §4.4).
 const UNKNOWN_KIND: u8 = 0x7F;
 
-/// One fixture file: its name in [`DIR`] and its bytes.
+/// One fixture file: its name in [`dir`] and its bytes.
 #[derive(Debug)]
 pub(crate) struct Fixture {
     pub(crate) name: &'static str,
     pub(crate) bytes: Vec<u8>,
+}
+
+/// The fixture directory of the format version this build writes, relative to the repository root.
+pub(crate) fn dir() -> PathBuf {
+    PathBuf::from(format!(
+        "tests/fixtures/format/v{FORMAT_MAJOR}.{FORMAT_MINOR}"
+    ))
 }
 
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
@@ -43,51 +52,60 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         [flag] if flag == "--check" => true,
         _ => bail!("usage: {COMMAND} [--check]"),
     };
-    let dir = root.join(DIR);
     let fixtures = generate()?;
     if check {
-        return check_dir(&dir, &fixtures);
+        return check_dir(root, &fixtures);
     }
-    std::fs::create_dir_all(&dir).with_context(|| format!("creating {DIR}"))?;
+    let rel = dir();
+    let dir = root.join(&rel);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", rel.display()))?;
     for f in &fixtures {
         std::fs::write(dir.join(f.name), &f.bytes)
-            .with_context(|| format!("writing {DIR}/{}", f.name))?;
+            .with_context(|| format!("writing {}/{}", rel.display(), f.name))?;
     }
-    println!("wrote {} fixtures to {DIR}", fixtures.len());
+    println!("wrote {} fixtures to {}", fixtures.len(), rel.display());
     Ok(true)
 }
 
-/// Whether `dir` holds exactly `fixtures`, byte for byte. Reports every difference.
-fn check_dir(dir: &Path, fixtures: &[Fixture]) -> Result<bool> {
+/// Whether the current version's directory holds exactly `fixtures`, byte for byte. Reports every difference.
+fn check_dir(root: &Path, fixtures: &[Fixture]) -> Result<bool> {
+    let rel = dir();
+    let dir = root.join(&rel);
+    let rel = rel.display();
     let mut ok = true;
     for f in fixtures {
         match std::fs::read(dir.join(f.name)) {
             Ok(bytes) if bytes == f.bytes => {}
             Ok(_) => {
-                eprintln!("{DIR}/{} differs from what the generator writes", f.name);
+                eprintln!("{rel}/{} differs from what the generator writes", f.name);
                 ok = false;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                eprintln!("{DIR}/{} is missing", f.name);
+                eprintln!("{rel}/{} is missing", f.name);
                 ok = false;
             }
-            Err(e) => return Err(e).with_context(|| format!("reading {DIR}/{}", f.name)),
+            Err(e) => return Err(e).with_context(|| format!("reading {rel}/{}", f.name)),
         }
     }
-    for entry in std::fs::read_dir(dir).with_context(|| format!("listing {DIR}"))? {
-        let name = entry?.file_name();
-        if !fixtures.iter().any(|f| name == f.name) {
-            eprintln!(
-                "{DIR}/{} is not written by the generator",
-                name.to_string_lossy()
-            );
-            ok = false;
+    match std::fs::read_dir(&dir) {
+        Ok(entries) => {
+            for entry in entries {
+                let name = entry?.file_name();
+                if !fixtures.iter().any(|f| name == f.name) {
+                    eprintln!(
+                        "{rel}/{} is not written by the generator",
+                        name.to_string_lossy()
+                    );
+                    ok = false;
+                }
+            }
         }
+        // Every fixture was already reported missing.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("listing {rel}")),
     }
     if !ok {
-        eprintln!(
-            "run `{COMMAND}` and commit the result (never for a released format version, SPEC §15)"
-        );
+        eprintln!("run `{COMMAND}` and commit the result");
     }
     Ok(ok)
 }
@@ -95,58 +113,105 @@ fn check_dir(dir: &Path, fixtures: &[Fixture]) -> Result<bool> {
 /// Every fixture, in a fixed order.
 pub(crate) fn generate() -> Result<Vec<Fixture>> {
     let header = Header::new(DB_UUID);
-    let created = Superblock {
+    let created = encode_slot(&Superblock {
         log_end: FIRST_FRAME_OFFSET,
         wal_start: FIRST_FRAME_OFFSET,
         ..Superblock::default()
-    };
+    })?;
     let log = committed_log()?;
+    let commit_1 = encode_slot(&log.superblock)?;
+    let committed = prefix(&header, &created, &commit_1)?;
+    let with_tail = |tail: &[u8]| [committed.as_slice(), &log.bytes, tail].concat();
 
-    let mut torn = log.bytes.clone();
-    torn.extend_from_slice(&torn_append()?);
+    // An append cut short: the frame header claims more payload than the file holds.
+    let mut runs_past_end = frame(FrameKind::WalChunk, 8, &[0xA5; 256], Compression::None)?;
+    runs_past_end.truncate(100);
 
-    // A crash while commit 2 wrote slot A: only the first half of the page reached the disk, so its CRC fails and
-    // slot B (commit 1) stays active (SPEC §4.3, §4.5).
-    let next = Superblock {
-        seq: 2,
-        ..log.superblock
-    };
-    let mut torn_slot = encode_slot(&next)?;
-    let old_slot = encode_slot(&created)?;
-    let half = SLOT_LEN / 2;
-    torn_slot.truncate(half);
-    torn_slot.extend_from_slice(old_slot.get(half..).context("slot shorter than SLOT_LEN")?);
+    // An append whose file length grew but whose data never reached the disk: after the header, zeros to the end.
+    let mut zero_filled = frame(FrameKind::WalChunk, 8, &[0xA5; 256], Compression::None)?;
+    zero_filled
+        .get_mut(FRAME_HEADER_LEN..)
+        .context("frame shorter than its header")?
+        .fill(0);
+
+    // A damaged frame followed by a valid one: corruption, not a torn tail (SPEC §4.4).
+    let mut damaged = frame(FrameKind::WalChunk, 8, b"wal: put doc 3", Compression::None)?;
+    *damaged
+        .get_mut(FRAME_HEADER_LEN)
+        .context("frame shorter than its header")? ^= 0x01;
+    damaged.extend(frame(
+        FrameKind::WalChunk,
+        9,
+        b"wal: put doc 4",
+        Compression::None,
+    )?);
 
     Ok(vec![
         Fixture {
             name: "empty.persia",
-            bytes: prefix(&header, &old_slot, &old_slot)?,
+            bytes: prefix(&header, &created, &created)?,
         },
         Fixture {
             name: "frames.persia",
-            bytes: [
-                prefix(&header, &old_slot, &encode_slot(&log.superblock)?)?,
-                log.bytes.clone(),
-            ]
-            .concat(),
+            bytes: with_tail(&[]),
         },
         Fixture {
             name: "torn-tail.persia",
-            bytes: [
-                prefix(&header, &old_slot, &encode_slot(&log.superblock)?)?,
-                torn,
-            ]
-            .concat(),
+            bytes: with_tail(&runs_past_end),
+        },
+        Fixture {
+            name: "torn-zeros.persia",
+            bytes: with_tail(&zero_filled),
+        },
+        Fixture {
+            name: "corrupt-frame.persia",
+            bytes: with_tail(&damaged),
         },
         Fixture {
             name: "torn-slot.persia",
-            bytes: [
-                prefix(&header, &torn_slot, &encode_slot(&log.superblock)?)?,
-                log.bytes,
-            ]
-            .concat(),
+            bytes: torn_slot(&header, &created, &commit_1, &log)?,
         },
     ])
+}
+
+/// A crash during step 3 of commit 2 (SPEC §4.5): its `WalChunk` and `Manifest` frames are durable after commit 1's
+/// `log_end`, but only the first half of its slot A page reached the disk, so slot A fails its CRC and slot B
+/// (commit 1) stays active (SPEC §4.3). Recovery finds commit 2's frames after `log_end`.
+fn torn_slot(header: &Header, created: &[u8], commit_1: &[u8], log: &Log) -> Result<Vec<u8>> {
+    let mut w = Writer::with_base_offset(log.superblock.log_end);
+    encode_frame(
+        &mut w,
+        FrameKind::WalChunk,
+        8,
+        b"wal: put doc 3",
+        Compression::None,
+    )?;
+    let manifest_off = w.offset();
+    encode_frame(
+        &mut w,
+        FrameKind::Manifest,
+        9,
+        b"manifest: segment frame 5, commit 2",
+        Compression::None,
+    )?;
+    let log_end = w.offset();
+    let commit_2 = Superblock {
+        seq: 2,
+        manifest_off,
+        manifest_len: log_end - manifest_off,
+        log_end,
+        ..log.superblock
+    };
+    let half = SLOT_LEN / 2;
+    let mut slot_a = encode_slot(&commit_2)?;
+    slot_a.truncate(half);
+    slot_a.extend_from_slice(created.get(half..).context("slot shorter than SLOT_LEN")?);
+    Ok([
+        prefix(header, &slot_a, commit_1)?,
+        log.bytes.clone(),
+        w.into_inner(),
+    ]
+    .concat())
 }
 
 /// The 12288-byte prefix: header page, slot A, slot B (SPEC §4.2; ADR-0008).
@@ -166,6 +231,12 @@ fn prefix(header: &Header, slot_a: &[u8], slot_b: &[u8]) -> Result<Vec<u8>> {
 fn encode_slot(sb: &Superblock) -> Result<Vec<u8>> {
     let mut w = Writer::new();
     sb.encode(&mut w)?;
+    Ok(w.into_inner())
+}
+
+fn frame(kind: FrameKind, seq: u64, payload: &[u8], compression: Compression) -> Result<Vec<u8>> {
+    let mut w = Writer::new();
+    encode_frame(&mut w, kind, seq, payload, compression)?;
     Ok(w.into_inner())
 }
 
@@ -202,15 +273,14 @@ fn committed_log() -> Result<Log> {
         Compression::None,
     )?;
 
+    // The Padding frame ends where the Segment frame starts: the first offset with room for an empty frame whose
+    // header ends on a page boundary. Frames are 8-byte multiples and so is the page size, so this is exact.
     let page = u64::from(Header::new(DB_UUID).page_size);
-    let header_len = 24;
-    let min_frame = frame_len(0).context("frame length overflow")?;
-    // The Padding frame must end where the Segment frame header starts, `header_len` before a page boundary.
-    let mut target = w.offset().next_multiple_of(page) - header_len;
-    if target - w.offset() < min_frame {
-        target += page;
-    }
-    let pad_payload = usize::try_from(target - w.offset() - min_frame)?;
+    let header_len = u64::try_from(FRAME_HEADER_LEN)?;
+    let min_frame = u64::try_from(MIN_FRAME_LEN)?;
+    let start = w.offset();
+    let target = (start + min_frame + header_len).next_multiple_of(page) - header_len;
+    let pad_payload = usize::try_from(target - start - min_frame)?;
     encode_frame(
         &mut w,
         FrameKind::Padding,
@@ -257,22 +327,6 @@ fn committed_log() -> Result<Log> {
     })
 }
 
-/// A WAL chunk whose append was cut short by a crash: its header claims more payload than the file holds, so a
-/// scan ends with a torn tail where it starts (SPEC §4.4).
-fn torn_append() -> Result<Vec<u8>> {
-    let mut w = Writer::new();
-    encode_frame(
-        &mut w,
-        FrameKind::WalChunk,
-        8,
-        &[0xA5; 256],
-        Compression::None,
-    )?;
-    let mut bytes = w.into_inner();
-    bytes.truncate(100);
-    Ok(bytes)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +345,7 @@ mod tests {
     fn committed_fixtures_are_current() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         assert!(
-            check_dir(&root.join(DIR), &generate().unwrap()).unwrap(),
+            check_dir(root, &generate().unwrap()).unwrap(),
             "run `{COMMAND}`"
         );
     }

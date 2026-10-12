@@ -43,7 +43,7 @@ deny:
 # Everything CI runs, in CI order
 check: lint test repo-checks deny
 
-# Regenerate the golden container fixtures in tests/fixtures/format/ (unreleased format versions only, SPEC §15)
+# Regenerate the golden container fixtures of the current format version (tests/fixtures/format/v<major>.<minor>/)
 fixtures:
     cargo xtask fixtures
 

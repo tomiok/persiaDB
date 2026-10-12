@@ -39,7 +39,7 @@ sdk/
   rust/             # persia-client (network client)
   go/               # persia-go (network client)
 tests/
-  fixtures/         # golden files opened by CI forever (SPEC §15); written by `cargo xtask fixtures`
+  fixtures/         # golden files opened by CI forever (SPEC §15); format/v<major>.<minor>/ per format version
   integration/      # cross-crate + docker-compose based tests
   synthetic/        # data generators, load & chaos scenarios
 benches/            # criterion + end-to-end benchmark harness
@@ -111,7 +111,8 @@ Always run fmt, clippy and tests before declaring a task done.
   - `persia-blob` depends on `persia-format` + `persia-storage`; it is used by `persia` (not by the engine).
     Shared value types (`BlobRef`, `BlobId`) live in `persia-format` so the engine can store them.
   - `persia-testutil` is a `[dev-dependencies]` entry only.
-  - `xtask` may depend on `persia-format` (it writes the golden fixtures).
+  - `xtask` may depend on `persia-format` (it writes the golden fixtures; so every `cargo xtask` command also builds
+    `persia-format` and its zstd C library the first time).
 - Public APIs are small, documented (`#![deny(missing_docs)]` on public crates), and have doctests.
 
 **Dependencies**

@@ -19,7 +19,7 @@ const USAGE: &str = "usage: cargo xtask <command>
 commands:
   check-deps   enforce crate dependency rules (CLAUDE.md \"Architecture\", \"Dependencies\")
   progress     regenerate PROGRESS.md from ROADMAP.md [--record [--date YYYY-MM-DD] | --check]
-  fixtures     write the golden container fixtures in tests/fixtures/format/ [--check]
+  fixtures     write the current format version's golden fixtures in tests/fixtures/format/ [--check]
   github-setup create/update GitHub labels and milestones [--repo OWNER/NAME] [--apply]";
 
 fn main() -> ExitCode {

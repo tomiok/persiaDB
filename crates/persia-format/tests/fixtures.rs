@@ -1,16 +1,17 @@
 //! Opens every golden container fixture in `tests/fixtures/format/` (ROADMAP 1.9.2; SPEC §4.2–4.4, §15).
 //!
-//! The fixtures are written by `cargo xtask fixtures`. These tests only read them: each file must open through the
-//! container layer (header, active superblock slot, frame scan) and hold what its entry in [`EXPECTED`] says.
-//! The 12288-byte prefix of `empty.persia` is also checked byte by byte against values written down here, so a
-//! writer and reader that drift together still fail.
+//! The fixtures are written by `cargo xtask fixtures`, one directory per format version. These tests only read
+//! them: each file must open through the container layer (header, active superblock slot, frame scan) and hold
+//! what its entry in [`V1_0`] says. The 12288-byte prefix of `empty.persia` and the first frame of `frames.persia`
+//! are also checked byte by byte against values written down here, so a writer and reader that drift together
+//! still fail.
 
 // Test-only helpers index and unwrap on purpose (see reader_writer_props.rs).
 #![allow(clippy::indexing_slicing, clippy::unwrap_used, clippy::panic)]
 
 use std::path::{Path, PathBuf};
 
-use persia_format::frame::{Frame, FrameKind, FrameScanner, ScanEnd};
+use persia_format::frame::{FRAME_HEADER_LEN, Frame, FrameKind, FrameScanner, ScanEnd};
 use persia_format::header::{Access, HEADER_LEN, Header, MAGIC};
 use persia_format::superblock::{ActiveSuperblock, FIRST_FRAME_OFFSET, SLOT_LEN, Slot, Superblock};
 use persia_format::{Corruption, Error, Reader};
@@ -21,15 +22,26 @@ const MAX_PAYLOAD: usize = 1 << 20;
 const MAX_FIXTURE_LEN: usize = 100 * 1024;
 const DB_UUID: [u8; 16] = *b"persia-fixtures!";
 
+/// How the scan of a fixture ends (SPEC §4.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    Clean,
+    TornTail,
+    Corrupt,
+}
+
 /// What one fixture holds.
 struct Expected {
     name: &'static str,
     slot: Slot,
     seq: u64,
-    /// `(kind byte, compressed)` of every frame from [`FIRST_FRAME_OFFSET`], in order.
-    frames: &'static [(u8, bool)],
-    /// Whether an interrupted append follows `log_end`.
-    torn_tail: bool,
+    /// `(kind byte, compressed)` of every frame from [`FIRST_FRAME_OFFSET`] to the active `log_end`, in order.
+    committed: &'static [(u8, bool)],
+    /// Valid frames after `log_end`: durable but not committed (SPEC §4.4, §8.2).
+    after_log_end: &'static [(u8, bool)],
+    end: End,
+    /// Whether slot A is still the slot of a new container (commit 1 went to slot B, SPEC §4.5).
+    slot_a_is_new: bool,
 }
 
 /// The committed log of `frames.persia`: `WalChunk`, `TombstoneSidecar`, an unknown kind, `Padding`, `Segment`, a
@@ -44,45 +56,79 @@ const LOG: &[(u8, bool)] = &[
     (3, false),
 ];
 
-const EXPECTED: &[Expected] = &[
+const COMMIT_1: Expected = Expected {
+    name: "frames.persia",
+    slot: Slot::B,
+    seq: 1,
+    committed: LOG,
+    after_log_end: &[],
+    end: End::Clean,
+    slot_a_is_new: true,
+};
+
+/// Format version 1.0 (unreleased: `cargo xtask fixtures` still writes it).
+const V1_0: &[Expected] = &[
     Expected {
         name: "empty.persia",
         slot: Slot::A,
         seq: 0,
-        frames: &[],
-        torn_tail: false,
+        committed: &[],
+        ..COMMIT_1
     },
-    Expected {
-        name: "frames.persia",
-        slot: Slot::B,
-        seq: 1,
-        frames: LOG,
-        torn_tail: false,
-    },
+    COMMIT_1,
+    // An append that runs past the end of the file.
     Expected {
         name: "torn-tail.persia",
-        slot: Slot::B,
-        seq: 1,
-        frames: LOG,
-        torn_tail: true,
+        end: End::TornTail,
+        ..COMMIT_1
     },
+    // An append whose length grew but whose data is zeros.
+    Expected {
+        name: "torn-zeros.persia",
+        end: End::TornTail,
+        ..COMMIT_1
+    },
+    // A damaged frame followed by a valid one.
+    Expected {
+        name: "corrupt-frame.persia",
+        end: End::Corrupt,
+        ..COMMIT_1
+    },
+    // Commit 2's frames are durable, its slot A write was torn.
     Expected {
         name: "torn-slot.persia",
-        slot: Slot::B,
-        seq: 1,
-        frames: LOG,
-        torn_tail: false,
+        after_log_end: &[(1, false), (3, false)],
+        slot_a_is_new: false,
+        ..COMMIT_1
     },
 ];
 
-fn fixtures_dir() -> PathBuf {
+/// Every fixture directory and what it must hold. Released versions stay here forever (SPEC §15).
+const VERSIONS: &[(&str, &[Expected])] = &[("v1.0", V1_0)];
+
+fn fixtures_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/format")
 }
 
-fn read_fixture(name: &str) -> Vec<u8> {
-    let path = fixtures_dir().join(name);
+fn read_fixture(version: &str, name: &str) -> Vec<u8> {
+    let path = fixtures_root().join(version).join(name);
     std::fs::read(&path)
         .unwrap_or_else(|e| panic!("{}: {e} (run `cargo xtask fixtures`)", path.display()))
+}
+
+fn all_fixtures() -> impl Iterator<Item = (&'static str, &'static Expected)> {
+    VERSIONS
+        .iter()
+        .flat_map(|(v, expected)| expected.iter().map(move |e| (*v, e)))
+}
+
+fn sorted_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 /// A container opened the way recovery does: header, active slot, then frames scanned from the first frame offset.
@@ -116,36 +162,49 @@ fn open(bytes: &[u8]) -> Result<Opened<'_>, Error> {
 }
 
 #[test]
-fn directory_holds_exactly_the_expected_fixtures() {
-    let mut found: Vec<String> = std::fs::read_dir(fixtures_dir())
-        .unwrap()
-        .map(|e| e.unwrap().file_name().into_string().unwrap())
-        .collect();
-    found.sort();
-    let mut expected: Vec<&str> = EXPECTED.iter().map(|e| e.name).collect();
-    expected.sort_unstable();
-    assert_eq!(found, expected, "every fixture needs an entry in EXPECTED");
+fn directories_hold_exactly_the_expected_fixtures() {
+    let versions: Vec<&str> = VERSIONS.iter().map(|(v, _)| *v).collect();
+    assert_eq!(
+        sorted_names(&fixtures_root()),
+        versions,
+        "every version needs an entry in VERSIONS"
+    );
+    for (version, expected) in VERSIONS {
+        let mut names: Vec<&str> = expected.iter().map(|e| e.name).collect();
+        names.sort_unstable();
+        assert_eq!(
+            sorted_names(&fixtures_root().join(version)),
+            names,
+            "{version}"
+        );
+    }
 }
 
 #[test]
 fn fixtures_are_small() {
-    for e in EXPECTED {
-        let len = read_fixture(e.name).len();
-        assert!(len < MAX_FIXTURE_LEN, "{}: {len} bytes", e.name);
+    for (v, e) in all_fixtures() {
+        let len = read_fixture(v, e.name).len();
+        assert!(len < MAX_FIXTURE_LEN, "{v}/{}: {len} bytes", e.name);
     }
 }
 
 #[test]
 fn every_fixture_opens_and_holds_what_it_should() {
-    for e in EXPECTED {
-        let bytes = read_fixture(e.name);
-        let opened = open(&bytes).unwrap_or_else(|err| panic!("{}: {err}", e.name));
-        check(e, &bytes, &opened);
+    for (v, e) in all_fixtures() {
+        let bytes = read_fixture(v, e.name);
+        let opened = open(&bytes).unwrap_or_else(|err| panic!("{v}/{}: {err}", e.name));
+        check(&format!("{v}/{}", e.name), e, &bytes, &opened);
     }
 }
 
-fn check(e: &Expected, bytes: &[u8], o: &Opened<'_>) {
-    let name = e.name;
+fn kinds(frames: &[Frame<'_>]) -> Vec<(u8, bool)> {
+    frames
+        .iter()
+        .map(|f| (f.kind().to_u8(), f.is_compressed()))
+        .collect()
+}
+
+fn check(name: &str, e: &Expected, bytes: &[u8], o: &Opened<'_>) {
     assert_eq!(o.header, Header::new(DB_UUID), "{name}: header");
     assert_eq!(o.header.access(), Access::ReadWrite, "{name}");
     assert_eq!(
@@ -154,54 +213,52 @@ fn check(e: &Expected, bytes: &[u8], o: &Opened<'_>) {
         "{name}: active slot"
     );
 
-    let kinds: Vec<(u8, bool)> = o
-        .frames
-        .iter()
-        .map(|f| (f.kind().to_u8(), f.is_compressed()))
-        .collect();
-    assert_eq!(kinds, e.frames, "{name}: frames");
-
     let sb = o.active.superblock;
-    let file_end = u64::try_from(bytes.len()).unwrap();
-    let log_end = o.frames.last().map_or(FIRST_FRAME_OFFSET, Frame::end);
+    let (committed, after) = o.frames.split_at(e.committed.len().min(o.frames.len()));
+    assert_eq!(kinds(committed), e.committed, "{name}: committed frames");
+    assert_eq!(
+        kinds(after),
+        e.after_log_end,
+        "{name}: frames after log_end"
+    );
+    let log_end = committed.last().map_or(FIRST_FRAME_OFFSET, Frame::end);
     assert_eq!(
         sb.log_end, log_end,
-        "{name}: log_end is the end of the last frame"
+        "{name}: log_end is the end of the last committed frame"
     );
-    assert_eq!(o.end.offset(), log_end, "{name}: scan end");
-    if e.torn_tail {
-        assert!(
-            matches!(o.end, ScanEnd::TornTail { .. }),
-            "{name}: {:?}",
-            o.end
-        );
-        assert!(file_end > log_end, "{name}");
-    } else {
-        assert_eq!(o.end, ScanEnd::Clean { offset: file_end }, "{name}");
-    }
 
-    // Recovery scans from `log_end` (SPEC §4.4) and must stop at the same place.
+    let file_end = u64::try_from(bytes.len()).unwrap();
+    let valid_end = o.frames.last().map_or(FIRST_FRAME_OFFSET, Frame::end);
+    assert_eq!(o.end.offset(), valid_end, "{name}: scan end");
+    let end = match o.end {
+        ScanEnd::Clean { .. } => End::Clean,
+        ScanEnd::TornTail { .. } => End::TornTail,
+        ScanEnd::Corrupt { .. } => End::Corrupt,
+        ScanEnd::Unsupported { .. } => panic!("{name}: {:?}", o.end),
+    };
+    assert_eq!(end, e.end, "{name}: {:?}", o.end);
+    assert_eq!(end == End::Clean, valid_end == file_end, "{name}");
+
+    // Recovery scans from `log_end` (SPEC §4.4) and must find the same frames and stop at the same place.
     let from_log_end = usize::try_from(sb.log_end).unwrap();
     let mut tail = FrameScanner::new(&bytes[from_log_end..], sb.log_end);
-    assert_eq!(
-        tail.by_ref().count(),
-        0,
-        "{name}: no valid frame after log_end"
-    );
+    let tail_frames: Vec<Frame<'_>> = tail.by_ref().collect();
+    assert_eq!(tail_frames, after, "{name}: recovery scan from log_end");
     assert_eq!(tail.end(), Some(&o.end), "{name}");
 
     if sb.seq == 0 {
         assert_eq!(sb, created(), "{name}: a new container's slot (SPEC §4.3)");
         return;
     }
-    let manifest = frame_at(o, sb.manifest_off).unwrap_or_else(|| panic!("{name}: manifest_off"));
+    let manifest =
+        frame_at(committed, sb.manifest_off).unwrap_or_else(|| panic!("{name}: manifest_off"));
     assert_eq!(manifest.kind(), FrameKind::Manifest, "{name}");
     assert_eq!(
         manifest.total_len(),
         sb.manifest_len,
         "{name}: manifest_len"
     );
-    let wal = frame_at(o, sb.wal_start).unwrap_or_else(|| panic!("{name}: wal_start"));
+    let wal = frame_at(committed, sb.wal_start).unwrap_or_else(|| panic!("{name}: wal_start"));
     assert_eq!(wal.kind(), FrameKind::WalChunk, "{name}");
     assert!(
         wal.payload(MAX_PAYLOAD)
@@ -212,9 +269,10 @@ fn check(e: &Expected, bytes: &[u8], o: &Opened<'_>) {
 
     // `page_size` is advisory: the writer aligned the Segment payload to it (ADR-0008).
     let page = u64::from(o.header.page_size);
+    let header_len = u64::try_from(FRAME_HEADER_LEN).unwrap();
     for f in o.frames.iter().filter(|f| f.kind() == FrameKind::Segment) {
         assert_eq!(
-            (f.offset() + 24) % page,
+            (f.offset() + header_len) % page,
             0,
             "{name}: segment payload alignment"
         );
@@ -222,8 +280,8 @@ fn check(e: &Expected, bytes: &[u8], o: &Opened<'_>) {
     }
 }
 
-fn frame_at<'a>(o: &Opened<'a>, offset: u64) -> Option<Frame<'a>> {
-    o.frames.iter().copied().find(|f| f.offset() == offset)
+fn frame_at<'a>(frames: &[Frame<'a>], offset: u64) -> Option<Frame<'a>> {
+    frames.iter().copied().find(|f| f.offset() == offset)
 }
 
 fn created() -> Superblock {
@@ -234,14 +292,20 @@ fn created() -> Superblock {
     }
 }
 
+/// Slot A of `torn-slot.persia` is commit 2's slot with only its first half written: it fails its CRC, and what
+/// survives points at commit 2's Manifest after commit 1's `log_end`.
 #[test]
-fn torn_slot_is_invalid_and_slot_b_wins() {
-    let bytes = read_fixture("torn-slot.persia");
+fn torn_slot_is_invalid_and_points_past_log_end() {
+    let bytes = read_fixture("v1.0", "torn-slot.persia");
     let a = &bytes[HEADER_LEN..HEADER_LEN + SLOT_LEN];
     let err = Superblock::decode(&mut Reader::new(a)).unwrap_err();
     assert!(matches!(err, Error::Corrupt { .. }), "{err}");
-    // Only the first half of the page is new: commit 2's seq is there, the old CRC is not its CRC.
-    assert_eq!(u64_at(a, 0), 2);
+    let o = open(&bytes).unwrap();
+    assert_eq!(u64_at(a, 0), 2, "seq");
+    let manifest = frame_at(&o.frames, u64_at(a, 8)).unwrap();
+    assert_eq!(manifest.kind(), FrameKind::Manifest);
+    assert!(manifest.offset() >= o.active.superblock.log_end);
+    assert_eq!(u64_at(a, 24), o.end.offset(), "log_end of commit 2");
 }
 
 fn u32_at(b: &[u8], at: usize) -> u32 {
@@ -256,7 +320,7 @@ fn u64_at(b: &[u8], at: usize) -> u64 {
 /// offset (SPEC §4.2, §4.3). CRCs are written down, not recomputed.
 #[test]
 fn golden_prefix_of_a_new_container() {
-    let b = read_fixture("empty.persia");
+    let b = read_fixture("v1.0", "empty.persia");
     assert_eq!(b.len(), 12288);
     assert_eq!(FIRST_FRAME_OFFSET, 12288);
 
@@ -284,33 +348,52 @@ fn golden_prefix_of_a_new_container() {
     }
 }
 
+/// The first frame of `frames.persia`, byte by byte (SPEC §4.4), CRC written down.
+#[test]
+fn golden_first_frame() {
+    let b = read_fixture("v1.0", "frames.persia");
+    let f = &b[12288..12288 + 48];
+    assert_eq!(&f[0..4], b"PFR1", "frame_magic");
+    assert_eq!(f[4], 1, "kind WalChunk");
+    assert_eq!(&f[5..8], &[0, 0, 0], "flags");
+    assert_eq!(u64_at(f, 8), 14, "payload_len");
+    assert_eq!(u64_at(f, 16), 1, "frame_seq");
+    assert_eq!(&f[24..38], b"wal: put doc 1");
+    assert_eq!(&f[38..40], &[0, 0], "padding to 8 bytes");
+    assert_eq!(u32_at(f, 40), 0x1C9E_8C3F, "crc32c over kind..padding");
+    assert_eq!(u32_at(f, 44), 0, "reserved");
+}
+
 /// Every fixture is a container this build created: they share the header page, and slot A of the committed ones
-/// is the slot of a new container (commit 1 went to slot B, SPEC §4.5).
+/// is the slot of a new container unless a later commit tore it.
 #[test]
 fn fixtures_share_the_new_container_prefix() {
-    let empty = read_fixture("empty.persia");
-    for e in EXPECTED {
-        let b = read_fixture(e.name);
+    let empty = read_fixture("v1.0", "empty.persia");
+    for (v, e) in all_fixtures() {
+        let b = read_fixture(v, e.name);
         assert_eq!(
             b[..HEADER_LEN],
             empty[..HEADER_LEN],
-            "{}: header page",
+            "{v}/{}: header page",
             e.name
         );
-        if e.name != "torn-slot.persia" {
-            assert_eq!(b[4096..8192], empty[4096..8192], "{}: slot A", e.name);
-        }
+        assert_eq!(
+            b[4096..8192] == empty[4096..8192],
+            e.slot_a_is_new,
+            "{v}/{}: slot A",
+            e.name
+        );
     }
 }
 
-/// Damaging the golden prefix is detected: guards against a fixture test that would accept anything.
+/// Damaging a fixture is detected: guards against a fixture test that would accept anything.
 #[test]
 fn damaged_fixture_does_not_open() {
-    let mut b = read_fixture("frames.persia");
+    let mut b = read_fixture("v1.0", "frames.persia");
     b[40] ^= 1; // db_uuid, covered by header_crc
     assert!(matches!(open(&b), Err(Error::Corrupt { .. })));
 
-    let mut b = read_fixture("frames.persia");
+    let mut b = read_fixture("v1.0", "frames.persia");
     b[4096 + 100] = 1; // slot A reserved
     b[8192] ^= 1; // slot B seq
     match open(&b) {
