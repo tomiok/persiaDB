@@ -20,6 +20,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (SPEC §4.4).
 - `persia-format`: `BlobId` (SHA-256, lowercase hex text form) and `BlobRef { blob_id, size, mime, chunk_size, user_meta }`
   with validated limits and a canonical binary encoding (SPEC §9.1; ADR-0011).
+- `persia-storage`: the `Storage` trait with validated `Key`/`KeyPrefix`, `ObjectMeta`, `PutOutcome`, `Capabilities`,
+  an error taxonomy (`ErrorKind`: not found, conflict, transient, corrupt, I/O, invalid input, unsupported), length-checked
+  ranged reads returning `ByteSource` (`ByteSource::for_range`), and a retry policy for transient errors (exponential
+  backoff with full jitter, injectable clock) (SPEC §10.1).
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.

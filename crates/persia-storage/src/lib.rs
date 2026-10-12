@@ -9,6 +9,7 @@
 pub mod error;
 pub mod key;
 pub mod meta;
+pub mod retry;
 pub mod storage;
 
 pub use error::{BoxError, Error, ErrorKind, Op, Result};
