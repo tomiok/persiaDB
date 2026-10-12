@@ -160,9 +160,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 Deps: M1.
 
 ## 2.1 Core trait and types (SPEC §10.1)
-- [ ] 2.1.1 `Key`, `ObjectMeta`, `PutOutcome`, `Capabilities`, error taxonomy (`NotFound`, `Conflict`, `Transient`, `Corrupt`, `Io`)
-- [ ] 2.1.2 Define `Storage` trait + `ByteSource` integration (decide whether `get_range` returns `ByteSource`; a fallible `ByteSource` constructor that checks a ranged read returned exactly the requested length)
-- [ ] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
+- [~] 2.1.1 `Key`, `ObjectMeta`, `PutOutcome`, `Capabilities`, error taxonomy (`NotFound`, `Conflict`, `Transient`, `Corrupt`, `Io`)
+- [~] 2.1.2 Define `Storage` trait + `ByteSource` integration (decide whether `get_range` returns `ByteSource`; a fallible `ByteSource` constructor that checks a ranged read returned exactly the requested length)
+- [~] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
 
 ## 2.2 In-memory backend
 - [ ] 2.2.1 `MemoryStorage` implementing all ops incl. `put_if_absent` atomicity
