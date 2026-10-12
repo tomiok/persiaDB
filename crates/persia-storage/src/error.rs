@@ -57,14 +57,18 @@ pub enum Error {
         /// The missing key.
         key: Key,
     },
-    /// A conditional update of `key` lost a race with another writer. (`put_if_absent` reports
-    /// [`PutOutcome::AlreadyExists`](crate::PutOutcome::AlreadyExists) instead.)
+    /// A compare-and-swap update of `key` lost a race, e.g. renewing the writer lease (SPEC §11.3). No [`Storage`]
+    /// operation returns it yet; `put_if_absent` reports
+    /// [`PutOutcome::AlreadyExists`](crate::PutOutcome::AlreadyExists) instead.
+    ///
+    /// [`Storage`]: crate::Storage
     #[error("conflicting concurrent update of {key}")]
     Conflict {
         /// The contended key.
         key: Key,
     },
-    /// A failure that may go away if the operation is repeated: throttling, a timeout, a 5xx response.
+    /// A failure that may go away if the operation is repeated: throttling, a timeout, a 5xx response, a transfer
+    /// cut off mid-body, or a conditional write that conflicts with one still in flight (S3's 409).
     #[error("transient failure in {op} of {target:?}: {source}")]
     Transient {
         /// The failed operation.
@@ -82,9 +86,13 @@ pub enum Error {
         /// Where and how decoding failed (absolute offsets).
         source: persia_format::Error,
     },
-    /// A ranged read did not return exactly the requested bytes, e.g. the range extends past the object's end.
+    /// A ranged read did not return exactly the requested bytes (fewer, e.g. the range extends past the object's
+    /// end, or more, e.g. a server that ignored the range).
     /// Corruption: ranges come from committed metadata.
-    #[error("short read of {key}: requested {}..{}, got {returned} bytes", requested.start, requested.end)]
+    #[error(
+        "read of {key} {}..{} returned {returned} bytes, expected {}",
+        requested.start, requested.end, requested.end.saturating_sub(requested.start)
+    )]
     ShortRead {
         /// The object read.
         key: Key,
@@ -248,12 +256,19 @@ mod tests {
                 "conflicting concurrent update of segments/c/1.seg",
                 r#"transient failure in get of "k": 503 slow down"#,
                 "corrupt object segments/c/1.seg: corrupt data at offset 7: overlong varint (non-canonical encoding)",
-                "short read of segments/c/1.seg: requested 10..20, got 4 bytes",
+                "read of segments/c/1.seg 10..20 returned 4 bytes, expected 10",
                 r#"I/O error in put of "k": disk full"#,
                 r#"invalid key "../x": '.' or '..' segment"#,
                 "invalid range 5..4 of segments/c/1.seg",
                 "put_if_absent is not supported by this backend",
             ]
         );
+    }
+
+    // The engine and server move errors across threads and into `anyhow`.
+    #[test]
+    fn error_is_send_sync_static() {
+        fn assert<E: std::error::Error + Send + Sync + 'static>() {}
+        assert::<Error>();
     }
 }

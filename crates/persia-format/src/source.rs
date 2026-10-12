@@ -59,7 +59,8 @@ impl ByteSource {
     /// ```
     ///
     /// # Errors
-    /// [`Error::RangeOutOfBounds`] if `range` is inverted; [`Error::InvalidInputLen`] if `bytes` is not exactly
+    /// [`Error::RangeOutOfBounds`] if `range` is inverted (reported as an empty buffer at `range.start`);
+    /// [`Error::InvalidInputLen`] if `bytes` is not exactly
     /// `range.end - range.start` long.
     pub fn for_range(bytes: Bytes, range: Range<u64>) -> Result<Self> {
         let Some(expected) = range.end.checked_sub(range.start) else {

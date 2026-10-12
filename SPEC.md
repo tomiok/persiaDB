@@ -656,32 +656,46 @@ presents the same logical objects to the engine.
 
 **Keys.** A `Key` is UTF-8, 1–1024 bytes (the S3/GCS limit), made of `/`-separated segments. Every segment is
 non-empty (so no leading, trailing or doubled `/`) and is not `.` or `..`; no character is a control character
-(U+0000–U+001F, U+007F) or `\`. Keys are validated on construction, so no backend can be handed a key that escapes
-its root (ROADMAP 2.3.4). A `KeyPrefix` follows the same rules except that it may be empty and may end with `/`
-(its last segment is incomplete, so it may also be `.` or `..`); it matches keys by plain byte prefix, as in S3.
+(U+0000–U+001F, U+007F), `\` or `:` (a Windows drive or alternate data stream). Keys are validated on construction,
+so no key can name a parent directory, an absolute path or a drive. Filesystem-specific limits are the local
+backend's job (ROADMAP 2.3.4): names over 255 bytes per segment, and on Windows reserved names (`CON`, `NUL`, …)
+and segments ending in `.` or a space, are rejected there as `InvalidInput`. A `KeyPrefix` follows the same rules
+except that it may be empty and may end with `/` (its last segment is incomplete, so it may also be `.` or `..`); it
+matches keys by plain byte prefix, as in S3. A backend never resolves a prefix as a path: it lists the directory
+part (up to the last `/`) and filters names by the rest.
 
 **Semantics.**
 - `get` / `get_range` of a missing key: `NotFound`. `get_range` returns a `ByteSource` whose base offset is
   `range.start` (SPEC §4.1: decoders report absolute offsets) and holds exactly `range.end - range.start` bytes.
   An inverted range is a caller error; a range that extends past the object's end, or a backend returning a
   different length than requested, is `ShortRead`, which is corruption: offsets come from committed metadata.
+  A transfer the backend knows was cut off (connection dropped, body shorter than its `Content-Length`) is
+  `Transient`, detected before the length check.
 - `put` replaces the object; readers see the old or the new bytes, never a mix.
 - `put_if_absent` returns `Created` or `AlreadyExists`, atomically. A backend without `conditional_put` returns
-  `Unsupported` instead of emulating it with a racy check.
+  `Unsupported` instead of emulating it with a racy check. **A retried `put_if_absent` is ambiguous**: the failed
+  attempt may have been applied, so a retry that finds the object may be finding its own write. The backend resolves
+  it before answering: it reads the object and returns `Created` if the bytes equal `data`, `AlreadyExists`
+  otherwise (manifests embed their writer's fence token, SPEC §11.3, so two writers never produce equal bytes). It
+  never reports a plain `AlreadyExists` after a retry, which the commit protocol (§10.4) would take as a lost commit.
 - `list` returns every object whose key starts with the prefix, sorted by key bytes. Without `strong_list` a
-  just-written object may be missing from it.
+  just-written object may be missing from it. Names under the prefix that are not valid keys were not written by
+  Persia (e.g. a shared bucket) and are skipped.
 - `delete` of a missing key succeeds (idempotent).
 
-**Errors.** Every error has one kind: `NotFound`, `Conflict` (a conditional update lost a race; `put_if_absent`
-reports `AlreadyExists` instead), `Transient` (throttling, timeouts, 5xx: the operation may succeed if repeated),
-`Corrupt` (stored bytes violate the format, incl. `ShortRead`), `Io` (a local I/O failure), `InvalidInput` (bad key
-or range) and `Unsupported` (missing capability). Only `Transient` is retryable; backends classify their native
-errors into it, so callers never inspect backend-specific errors.
+**Errors.** Every error has one kind: `NotFound`, `Conflict` (a compare-and-swap update lost a race, e.g. renewing
+the writer lease, SPEC §11.3; no `Storage` operation returns it yet, and `put_if_absent` reports `AlreadyExists`
+instead), `Transient` (throttling, timeouts, 5xx, and a conditional write that conflicts with one still in flight,
+e.g. S3's 409 `ConditionalRequestConflict`: the operation may succeed if repeated), `Corrupt` (stored bytes violate
+the format, incl. `ShortRead`), `Io` (a local I/O failure), `InvalidInput` (bad key or range) and `Unsupported`
+(missing capability). Only `Transient` is retryable; backends classify their native errors into it, so callers
+never inspect backend-specific errors.
 
 **Retries.** Backends retry `Transient` errors with a shared policy: at most `max_attempts` attempts (default 5),
 waiting before retry `n` (from 0) a uniformly random duration in `0..=min(max_delay, base_delay·2ⁿ)` ("full
 jitter"; defaults 50 ms and 5 s). Sleeping goes through an injectable clock and the randomness through a seeded
-generator, so tests are deterministic.
+generator, so tests are deterministic. `put_if_absent` is the exception to blind retries: see its ambiguity rule
+above.
 
 ### 10.2 URL schemes
 `persia::open("app.persia")`, `file:///…`, `s3://bucket/prefix`, `gs://bucket/prefix`, `az://account/container/prefix`,
@@ -704,7 +718,7 @@ Remote layout:
   LEASE                          writer lease (SPEC §11.3)
 ```
 1. Upload new segments/WAL objects (any order, immutable, content-named).
-2. **Commit = `put_if_absent(manifests/<seq+1>.mf)`**. Success ⇒ committed. Conflict ⇒ another writer won ⇒ fence/abort.
+2. **Commit = `put_if_absent(manifests/<seq+1>.mf)`**. `Created` ⇒ committed. `AlreadyExists` ⇒ another writer won ⇒ fence/abort (a retried attempt is resolved first, §10.1).
 3. Readers find the latest manifest by `list` (or a best-effort `CURRENT` hint) and may tail for newer ones.
 
 ### 10.5 Local-first replication ("replicated" mode)

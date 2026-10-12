@@ -49,6 +49,10 @@ pub trait Storage: Send + Sync {
 
     /// Creates the object only if no object has the key, atomically: the commit primitive (SPEC §10.4).
     ///
+    /// A backend that retries resolves the ambiguity of a retried attempt before answering, with
+    /// [`RetryPolicy::run_put_if_absent`](crate::retry::RetryPolicy::run_put_if_absent): `AlreadyExists` always
+    /// means another writer won.
+    ///
     /// # Errors
     /// [`Error::Unsupported`] without [`Capabilities::conditional_put`], or a backend failure.
     fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome>;
@@ -86,7 +90,8 @@ pub fn check_range(key: &Key, range: &Range<u64>) -> Result<()> {
 
 /// The result of reading `range` of `key`, checked to be exactly the requested length.
 ///
-/// A backend passes whatever its read returned; a short read (the object ends inside the range, a truncated
+/// A backend passes whatever its read returned, after classifying a transfer it knows was cut off as
+/// [`Error::Transient`]; a short read (the object ends inside the range)
 /// response) or a long one (a server that ignored the range) becomes an error instead of misaligned bytes.
 ///
 /// ```
@@ -112,10 +117,14 @@ pub fn range_source(key: &Key, range: Range<u64>, bytes: Bytes) -> Result<ByteSo
             requested: range,
             returned: len,
         },
-        // Only an inverted range, which `check_range` already rejected.
-        _ => Error::InvalidRange {
+        persia_format::Error::RangeOutOfBounds { .. } => Error::InvalidRange {
             key: key.clone(),
             range,
+        },
+        // `for_range` fails in no other way; should it ever, the bytes are not what the range promised.
+        source => Error::Corrupt {
+            key: key.clone(),
+            source,
         },
     })
 }

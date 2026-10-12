@@ -1,7 +1,8 @@
 //! Object keys and list prefixes (SPEC §10.1).
 //!
-//! Keys are validated when they are built, so a backend never sees a key that could escape its root
-//! (`..`, an absolute path, a Windows separator) or that an object store would reject (too long).
+//! Keys are validated when they are built, so a backend never sees a key that names a parent directory, an
+//! absolute path or a Windows drive, or that an object store would reject (too long). Filesystem-specific limits
+//! (segment length, Windows reserved names) are the local backend's job (SPEC §10.1).
 
 use core::fmt;
 use core::str::FromStr;
@@ -52,6 +53,9 @@ impl Key {
 ///
 /// The same rules as [`Key`], except that it may be empty (every key) and may end with `/`; its last segment is
 /// incomplete, so it may be `.` or `..` (a prefix of `..x`).
+///
+/// A backend never resolves a prefix as a path (`a/..` is a valid prefix): it lists the directory part, up to the
+/// last `/`, and filters names by the rest (SPEC §10.1).
 ///
 /// ```
 /// use persia_storage::{Key, KeyPrefix};
@@ -111,7 +115,10 @@ fn check(s: &str, prefix: bool) -> Result<(), KeyDefect> {
             Err(KeyDefect::Empty)
         };
     }
-    if let Some(ch) = s.chars().find(|&c| c.is_ascii_control() || c == '\\') {
+    if let Some(ch) = s
+        .chars()
+        .find(|&c| c.is_ascii_control() || c == '\\' || c == ':')
+    {
         return Err(KeyDefect::ForbiddenChar { ch });
     }
     let mut segments = s.split('/').peekable();
@@ -220,7 +227,7 @@ pub enum KeyDefect {
     /// A `.` or `..` segment.
     #[error("'.' or '..' segment")]
     DotSegment,
-    /// A control character or `\`.
+    /// A control character, `\` or `:` (a Windows drive or alternate data stream).
     #[error("forbidden character {ch:?}")]
     ForbiddenChar {
         /// The first forbidden character.
@@ -279,7 +286,9 @@ mod tests {
             ("a/./b", KeyDefect::DotSegment),
             ("a/..", KeyDefect::DotSegment),
             ("..\\x", KeyDefect::ForbiddenChar { ch: '\\' }),
-            ("C:\\x", KeyDefect::ForbiddenChar { ch: '\\' }),
+            ("C:\\x", KeyDefect::ForbiddenChar { ch: ':' }),
+            ("C:/x", KeyDefect::ForbiddenChar { ch: ':' }),
+            ("a:b", KeyDefect::ForbiddenChar { ch: ':' }),
             ("a\0b", KeyDefect::ForbiddenChar { ch: '\0' }),
             ("a\nb", KeyDefect::ForbiddenChar { ch: '\n' }),
             ("a\x7f", KeyDefect::ForbiddenChar { ch: '\x7f' }),

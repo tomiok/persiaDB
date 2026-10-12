@@ -169,13 +169,14 @@ Deps: M1.
 - 2.2.2 Deterministic failure-injection wrapper `FaultyStorage`
   - [ ] 2.2.2.1 Inject: error on Nth call, latency, torn put (partial bytes), dropped put
   - [ ] 2.2.2.2 Seeded RNG schedule so failures are reproducible
+  - [ ] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
 - [ ] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
 
 ## 2.3 Local filesystem backend (object-per-file)
 - [ ] 2.3.1 Atomic `put`: write temp → fsync → rename → fsync dir
 - [ ] 2.3.2 `put_if_absent` via `O_EXCL`/`link` semantics
 - [ ] 2.3.3 `get_range` using pread; `list` with prefix; `delete`
-- [ ] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; [T] traversal attempts
+- [ ] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; segments over 255 bytes and (Windows) reserved names and trailing `.`/space as `InvalidInput`; `list` never resolves a prefix as a path (SPEC §10.1); [T] traversal attempts
 - [ ] 2.3.5 Run conformance suite
 - [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
 
@@ -490,6 +491,7 @@ Deps: M1, M2.
 - [ ] 9.5.1 Mark: collect referenced ids from all live manifests/snapshots
 - [ ] 9.5.2 Sweep: orphans older than grace period; pack-file rewrite for local
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
+- [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 - [ ] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
 
 ---

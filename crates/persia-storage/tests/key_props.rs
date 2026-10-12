@@ -16,6 +16,7 @@ fn text(max_len: usize) -> impl Strategy<Value = String> {
         1 => Just('\0'),
         1 => Just('\x7f'),
         1 => Just('é'),
+        1 => Just(':'),
     ];
     prop::collection::vec(ch, 0..max_len).prop_map(|cs| cs.into_iter().collect())
 }
@@ -24,7 +25,7 @@ fn chars_ok(s: &str) -> bool {
     s.len() <= Key::MAX_LEN
         && !s
             .chars()
-            .any(|c| matches!(c, '\0'..='\x1f' | '\x7f' | '\\'))
+            .any(|c| matches!(c, '\0'..='\x1f' | '\x7f' | '\\' | ':'))
 }
 
 fn segment_ok(seg: &str) -> bool {
