@@ -267,8 +267,8 @@ keeps anything a live manifest still references, and deletes orphans older than 
 (default 24 hours). `verify` must fail if a referenced blob is missing.
 
 How chunks are staged before the hash is known is an open question (SPEC §18.8) and has to be
-decided before the pack-file work (ROADMAP 9.1.0). The `BlobId` and `BlobRef` types themselves are
-ROADMAP 1.10, not written yet.
+decided before the pack-file work (ROADMAP 9.1.0). The `BlobId` and `BlobRef` value types
+exist in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
 
 ## Architecture
 

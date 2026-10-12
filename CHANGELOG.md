@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-format`: `FrameEncoder` streams a frame whose payload is too large to buffer (declared length, incremental
   CRC, length verified on finish), and `FrameHeader` parses a frame's 24-byte header so range readers can size reads
   (SPEC §4.4).
+- `persia-format`: `BlobId` (SHA-256, lowercase hex text form) and `BlobRef { blob_id, size, mime, chunk_size, user_meta }`
+  with validated limits and a canonical binary encoding (SPEC §9.1; ADR-0011).
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.

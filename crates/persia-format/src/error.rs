@@ -15,6 +15,8 @@
 //! *which* object was being decoded is added by the caller's error type (e.g. `persia-storage`); the one
 //! exception is a block's index, which only this crate knows.
 
+use crate::blob::BlobRefDefect;
+
 /// Result alias for this crate.
 pub type Result<T, E = Error> = core::result::Result<T, E>;
 
@@ -291,6 +293,13 @@ pub enum Corruption {
         /// The shared `seq`.
         seq: u64,
     },
+    /// A blob reference breaks a value rule of SPEC §9.1 (ADR-0011); `Error::Corrupt::offset` points at the
+    /// offending field.
+    #[error("invalid blob reference: {defect}")]
+    InvalidBlobRef {
+        /// The rule that does not hold.
+        defect: BlobRefDefect,
+    },
 }
 
 /// What a valid input uses that this build does not support (SPEC §4.2, §15; ADR-0007).
@@ -315,6 +324,12 @@ pub enum Unsupported {
     FrameFlags {
         /// The unknown bits only.
         flags: u32,
+    },
+    /// A blob reference `version` this build does not know (SPEC §9.1; ADR-0011).
+    #[error("blob reference version {version}")]
+    BlobRefVersion {
+        /// The version read.
+        version: u8,
     },
 }
 
@@ -410,6 +425,12 @@ pub enum EncodeError {
         /// Bytes given: the total so far when it exceeds `declared` (saturating at `u64::MAX`), the final total when
         /// it falls short.
         actual: u64,
+    },
+    /// Blob reference fields that break a value rule of SPEC §9.1 (ADR-0011).
+    #[error("invalid blob reference: {defect}")]
+    InvalidBlobRef {
+        /// The rule that does not hold.
+        defect: BlobRefDefect,
     },
 }
 

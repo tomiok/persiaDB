@@ -147,7 +147,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.9.2 Check-in small fixtures (< 100 KB) + test that opens all fixtures
 
 ## 1.10 Shared value types
-- [ ] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002
+- [~] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002
 
 ## 1.11 CI for fuzz targets, benchmarks and coverage (moved from M0: they need M1's first targets)
 - [ ] 1.11.1 Nightly fuzz job for every `fuzz/` target (time-boxed per target, corpus cached as artifact); clippy + `cargo deny` over `fuzz/Cargo.lock`

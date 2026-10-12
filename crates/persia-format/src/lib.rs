@@ -10,6 +10,7 @@
 
 pub mod align;
 pub mod bitpack;
+pub mod blob;
 pub mod block;
 pub mod checksum;
 pub mod checksummed;
@@ -31,6 +32,7 @@ pub mod writer;
 pub mod zigzag;
 
 pub use align::ALIGNMENT;
+pub use blob::{BlobId, BlobRef};
 pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
