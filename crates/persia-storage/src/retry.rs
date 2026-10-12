@@ -168,31 +168,26 @@ impl RetryPolicy {
         }
     }
 
-    /// Retries a backend's raw `put_if_absent` (`put`) and resolves the ambiguity of a retry (SPEC §10.1): an attempt
-    /// that failed may still have been applied, so `AlreadyExists` after a retry may be this caller's own write. The
-    /// object is then read back (`get`, retried too): equal to `data` ⇒ [`PutOutcome::Created`].
+    /// Retries a backend's raw `put_if_absent` (`put`) and resolves the ambiguity of `AlreadyExists` (SPEC §10.1):
+    /// an attempt that failed, here or in a retry inside the backend's SDK, may still have been applied, so the
+    /// object found may be this caller's own write. On every `AlreadyExists` the object is read back (`get`, retried
+    /// too): equal to `data` ⇒ [`PutOutcome::Created`].
     ///
     /// Plain [`run`](Self::run) must not be used for `put_if_absent`: it would report a won commit as lost.
     ///
     /// # Errors
-    /// As [`run`](Self::run), for either operation.
+    /// As [`run`](Self::run), for either operation. An error leaves the outcome unknown: the write may have been
+    /// applied (SPEC §10.4).
     pub fn run_put_if_absent(
         &self,
         clock: &dyn Clock,
         jitter: &Jitter,
         data: &[u8],
-        mut put: impl FnMut() -> Result<PutOutcome>,
+        put: impl FnMut() -> Result<PutOutcome>,
         get: impl FnMut() -> Result<Bytes>,
     ) -> Result<PutOutcome> {
-        let mut attempts = 0u32;
-        let outcome = self.run(clock, jitter, || {
-            attempts = attempts.saturating_add(1);
-            put()
-        })?;
-        if outcome == PutOutcome::AlreadyExists
-            && attempts > 1
-            && self.run(clock, jitter, get)? == data
-        {
+        let outcome = self.run(clock, jitter, put)?;
+        if outcome == PutOutcome::AlreadyExists && self.run(clock, jitter, get)? == data {
             return Ok(PutOutcome::Created);
         }
         Ok(outcome)
@@ -425,19 +420,38 @@ mod tests {
     }
 
     #[test]
-    fn put_if_absent_without_retry_is_not_read_back() {
+    fn already_exists_is_always_read_back() {
         let clock = RecordingClock::default();
-        for outcome in [PutOutcome::Created, PutOutcome::AlreadyExists] {
+        // Created needs no read-back; AlreadyExists is resolved even without a retry here, since the SDK may have
+        // retried internally.
+        let out = policy()
+            .run_put_if_absent(
+                &clock,
+                &Jitter::new(1),
+                b"x",
+                || Ok(PutOutcome::Created),
+                || panic!("Created needs no read-back"),
+            )
+            .unwrap();
+        assert_eq!(out, PutOutcome::Created);
+        for (stored, expected) in [
+            (&b"x"[..], PutOutcome::Created),
+            (b"y", PutOutcome::AlreadyExists),
+        ] {
+            let mut gets = 0;
             let out = policy()
                 .run_put_if_absent(
                     &clock,
                     &Jitter::new(1),
                     b"x",
-                    || Ok(outcome),
-                    || panic!("no retry, nothing to resolve"),
+                    || Ok(PutOutcome::AlreadyExists),
+                    || {
+                        gets += 1;
+                        Ok(Bytes::from_static(stored))
+                    },
                 )
                 .unwrap();
-            assert_eq!(out, outcome);
+            assert_eq!((out, gets), (expected, 1));
         }
     }
 

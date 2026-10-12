@@ -49,9 +49,9 @@ pub trait Storage: Send + Sync {
 
     /// Creates the object only if no object has the key, atomically: the commit primitive (SPEC §10.4).
     ///
-    /// A backend that retries resolves the ambiguity of a retried attempt before answering, with
-    /// [`RetryPolicy::run_put_if_absent`](crate::retry::RetryPolicy::run_put_if_absent): `AlreadyExists` always
-    /// means another writer won.
+    /// A backend resolves the ambiguity of `AlreadyExists` (an attempt that failed may have been applied) before
+    /// answering, with [`RetryPolicy::run_put_if_absent`](crate::retry::RetryPolicy::run_put_if_absent), so
+    /// `AlreadyExists` always means another writer won. An error leaves the outcome unknown.
     ///
     /// # Errors
     /// [`Error::Unsupported`] without [`Capabilities::conditional_put`], or a backend failure.
@@ -91,8 +91,7 @@ pub fn check_range(key: &Key, range: &Range<u64>) -> Result<()> {
 /// The result of reading `range` of `key`, checked to be exactly the requested length.
 ///
 /// A backend passes whatever its read returned, after classifying a transfer it knows was cut off as
-/// [`Error::Transient`]; a short read (the object ends inside the range)
-/// response) or a long one (a server that ignored the range) becomes an error instead of misaligned bytes.
+/// [`Error::Transient`]; a short read (the object ends inside the range) or a long one (a server that ignored the range) becomes an error instead of misaligned bytes.
 ///
 /// ```
 /// use bytes::Bytes;

@@ -160,9 +160,9 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 Deps: M1.
 
 ## 2.1 Core trait and types (SPEC §10.1)
-- [~] 2.1.1 `Key`, `ObjectMeta`, `PutOutcome`, `Capabilities`, error taxonomy (`NotFound`, `Conflict`, `Transient`, `Corrupt`, `Io`)
-- [~] 2.1.2 Define `Storage` trait + `ByteSource` integration (decide whether `get_range` returns `ByteSource`; a fallible `ByteSource` constructor that checks a ranged read returned exactly the requested length)
-- [~] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
+- [x] 2.1.1 `Key`, `ObjectMeta`, `PutOutcome`, `Capabilities`, error taxonomy (`NotFound`, `Conflict`, `Transient`, `Corrupt`, `Io`)
+- [x] 2.1.2 Define `Storage` trait + `ByteSource` integration (decide whether `get_range` returns `ByteSource`; a fallible `ByteSource` constructor that checks a ranged read returned exactly the requested length)
+- [x] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
 
 ## 2.2 In-memory backend
 - [ ] 2.2.1 `MemoryStorage` implementing all ops incl. `put_if_absent` atomicity
@@ -491,8 +491,8 @@ Deps: M1, M2.
 - [ ] 9.5.1 Mark: collect referenced ids from all live manifests/snapshots
 - [ ] 9.5.2 Sweep: orphans older than grace period; pack-file rewrite for local
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
-- [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 - [ ] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
+- [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 
 ---
 
@@ -587,6 +587,7 @@ Deps: M2, M6, M9, M11.
 - [ ] 12.3.3 Reader: latest-manifest discovery (`list` + `CURRENT` hint) and snapshot open
 - [ ] 12.3.4 WAL on object storage: chunk upload policy and latency/durability trade-off docs
 - [ ] 12.3.5 [T] fault-injection suite: partial uploads, duplicate commits, reordered visibility, eventual-consistency simulation
+- [ ] 12.3.6 Unknown commit outcome (`put_if_absent` error): keep uploads, resolve by reading `manifests/<seq+1>.mf` before retry/abort (SPEC §10.4); [T] error-after-apply never deletes referenced segments
 
 ## 12.4 Block cache (SPEC §10.6)
 - [ ] 12.4.1 RAM cache (sharded LRU/ARC) keyed by `(object, block)`

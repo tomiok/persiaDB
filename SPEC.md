@@ -673,11 +673,13 @@ part (up to the last `/`) and filters names by the rest.
   `Transient`, detected before the length check.
 - `put` replaces the object; readers see the old or the new bytes, never a mix.
 - `put_if_absent` returns `Created` or `AlreadyExists`, atomically. A backend without `conditional_put` returns
-  `Unsupported` instead of emulating it with a racy check. **A retried `put_if_absent` is ambiguous**: the failed
-  attempt may have been applied, so a retry that finds the object may be finding its own write. The backend resolves
-  it before answering: it reads the object and returns `Created` if the bytes equal `data`, `AlreadyExists`
-  otherwise (manifests embed their writer's fence token, SPEC §11.3, so two writers never produce equal bytes). It
-  never reports a plain `AlreadyExists` after a retry, which the commit protocol (§10.4) would take as a lost commit.
+  `Unsupported` instead of emulating it with a racy check. **`AlreadyExists` is ambiguous**: an attempt that failed
+  may have been applied (including a retry inside the backend's SDK, invisible to Persia), so the object found may be
+  this writer's own. The backend resolves it before answering: on every `AlreadyExists` it reads the object and
+  returns `Created` if the bytes equal `data`, `AlreadyExists` otherwise (manifests embed their writer's fence token,
+  SPEC §11.3, so two writers never produce equal bytes). It never reports an unresolved `AlreadyExists`, which the
+  commit protocol (§10.4) would take as a lost commit. An **error** from `put_if_absent` (retries exhausted) leaves
+  the outcome unknown: the write may have been applied.
 - `list` returns every object whose key starts with the prefix, sorted by key bytes. Without `strong_list` a
   just-written object may be missing from it. Names under the prefix that are not valid keys were not written by
   Persia (e.g. a shared bucket) and are skipped.
@@ -718,7 +720,7 @@ Remote layout:
   LEASE                          writer lease (SPEC §11.3)
 ```
 1. Upload new segments/WAL objects (any order, immutable, content-named).
-2. **Commit = `put_if_absent(manifests/<seq+1>.mf)`**. `Created` ⇒ committed. `AlreadyExists` ⇒ another writer won ⇒ fence/abort (a retried attempt is resolved first, §10.1).
+2. **Commit = `put_if_absent(manifests/<seq+1>.mf)`**. `Created` ⇒ committed. `AlreadyExists` ⇒ another writer won ⇒ fence/abort (resolved against the writer's own bytes first, §10.1). An error ⇒ outcome unknown: the writer keeps its uploads (they may be referenced by the manifest) and reads `manifests/<seq+1>.mf` to resolve the outcome before retrying or aborting.
 3. Readers find the latest manifest by `list` (or a best-effort `CURRENT` hint) and may tail for newer ones.
 
 ### 10.5 Local-first replication ("replicated" mode)
