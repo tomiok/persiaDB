@@ -55,6 +55,7 @@ jobs:
     env:
       TARGET: ${{ matrix.target }}
       MAX_TOTAL_TIME: ${{ inputs.seconds || 300 }}
+      FUZZ_TRIPLE: x86_64-unknown-linux-gnu
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -89,13 +90,14 @@ jobs:
           if [ "$MAX_TOTAL_TIME" -lt 1 ] || [ "$MAX_TOTAL_TIME" -gt 2400 ]; then
             echo "seconds must be in 1..2400: $MAX_TOTAL_TIME"; exit 1
           fi
+          # The prebuilt cargo-fuzz is a musl binary and would default to its own triple; fuzz the gnu target.
           # A target without committed seeds still runs (libFuzzer exits on a missing corpus directory).
           mkdir -p "corpus-local/$TARGET" "corpus/$TARGET"
-          cargo fuzz run "$TARGET" "corpus-local/$TARGET" "corpus/$TARGET" -- \
+          cargo fuzz run --target "$FUZZ_TRIPLE" "$TARGET" "corpus-local/$TARGET" "corpus/$TARGET" -- \
             -max_total_time="$MAX_TOTAL_TIME" -timeout=30
       - name: Minimize corpus
         working-directory: fuzz
-        run: cargo fuzz cmin "$TARGET" "corpus-local/$TARGET"
+        run: cargo fuzz cmin --target "$FUZZ_TRIPLE" "$TARGET" "corpus-local/$TARGET"
       # Saved even when a crash was found, so the next run resumes from the grown corpus.
       - name: Save corpus
         if: ${{ !cancelled() }}
