@@ -590,6 +590,26 @@ if a caller supplies an expected id, a mismatch is an error. Chunks must not bec
 `blob_id` before it is verified (upload staging: SPEC §18.8). `BlobRef`/`BlobId` are value types in `persia-format` so
 that documents and segments can carry them without depending on `persia-blob`.
 
+Fields: `size` is the blob length in bytes (0 is valid); `chunk_size` is the chunk length used to store it (SPEC
+§9.2), `1..=64 MiB`, and the chunk count `ceil(size / chunk_size)` fits in a `u32`; `mime` is 1..=255 bytes of
+printable ASCII (`0x20..=0x7E`), stored as given (RFC 6838 caps type and subtype at 127 characters each);
+`user_meta` is an optional map of UTF-8 strings, at most 32 entries, keys 1..=128 bytes, values 0..=1024 bytes. An
+absent `user_meta` and an empty one are the same value. Searchable metadata belongs in document fields, not here.
+
+Binary encoding (ADR-0011), byte-aligned and self-delimiting, embedded in structures that carry their own checksum
+(the `BlobRefs` column, DocStore, WAL records), so it has none itself:
+```
+0   1   version     u8 = 1
+1   32  blob_id     SHA-256 bytes
+33  ..  size        varint u64
+..  ..  chunk_size  varint u32
+..  1   mime_len    u8, then mime_len bytes of mime
+..  ..  meta_count  varint u32, then per entry: key_len varint u32, key, value_len varint u32, value
+```
+Entries are sorted by key bytes, strictly increasing, so each value has exactly one encoding. Any rule above that
+does not hold is corruption; an unknown `version` is unsupported (not corruption). The largest encoding is
+37 295 bytes.
+
 ### 9.2 Properties
 - Content-addressed ⇒ automatic **dedup**, idempotent `put`.
 - Chunked (default **4 MiB**), each chunk with CRC32C ⇒ resumable upload, **range reads**, streaming.
