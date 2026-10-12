@@ -31,7 +31,11 @@ fn check_header(data: &[u8]) {
             match header.access() {
                 Access::ReadWrite => {
                     header.encode(&mut w).expect("accepted header re-encodes");
-                    assert_eq!(w.as_slice(), &data[..HEADER_LEN], "accepted header re-encodes differently");
+                    assert_eq!(
+                        w.as_slice(),
+                        &data[..HEADER_LEN],
+                        "accepted header re-encodes differently"
+                    );
                 }
                 Access::ReadOnly => {
                     assert_eq!(header.rocompat_flags.to_le_bytes(), data[24..32]);
@@ -56,7 +60,10 @@ fn check_slots(slots: &[u8]) {
     let mut r = Reader::new(slots);
     let result = Superblock::read_active(&mut r);
     let Some(both) = slots.get(..SLOTS_LEN) else {
-        assert!(result.is_err_and(|e| e.is_corruption()), "short slots region accepted");
+        assert!(
+            result.is_err_and(|e| e.is_corruption()),
+            "short slots region accepted"
+        );
         assert_eq!(r.position(), 0);
         return;
     };
@@ -107,10 +114,16 @@ fuzz_target!(|input: &[u8]| {
         data[12..16].copy_from_slice(&crc.finish().to_le_bytes());
     }
     if mode & 2 != 0 {
-        fix_slot_crc(data.get_mut(HEADER_LEN..HEADER_LEN + SLOT_LEN).unwrap_or_default());
+        fix_slot_crc(
+            data.get_mut(HEADER_LEN..HEADER_LEN + SLOT_LEN)
+                .unwrap_or_default(),
+        );
     }
     if mode & 4 != 0 {
-        fix_slot_crc(data.get_mut(HEADER_LEN + SLOT_LEN..HEADER_LEN + SLOTS_LEN).unwrap_or_default());
+        fix_slot_crc(
+            data.get_mut(HEADER_LEN + SLOT_LEN..HEADER_LEN + SLOTS_LEN)
+                .unwrap_or_default(),
+        );
     }
     check_header(&data);
     check_slots(data.get(HEADER_LEN..).unwrap_or_default());

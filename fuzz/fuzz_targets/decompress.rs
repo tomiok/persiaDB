@@ -42,10 +42,8 @@ fuzz_target!(|input: &[u8]| {
         let intact = flip_xor == 0 || flip_at >= packed.len();
         (Codec::Zstd, packed, intact.then_some(data))
     } else {
-        if honest {
-            if let Ok(Some(declared)) = zstd_safe::get_frame_content_size(data) {
-                claimed = declared;
-            }
+        if honest && let Ok(Some(declared)) = zstd_safe::get_frame_content_size(data) {
+            claimed = declared;
         }
         match Codec::from_u8(codec_byte, OFFSET) {
             Ok(codec) => (codec, data.to_vec(), None),

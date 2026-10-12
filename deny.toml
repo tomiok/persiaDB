@@ -29,6 +29,10 @@ allow = [
 confidence-threshold = 0.93
 # The allow list anticipates the allowed crates (CLAUDE.md); not all are used yet.
 unused-allowed-license = "allow"
+# NCSA (permissive, OSI-approved) covers the bundled libFuzzer C++ sources. Fuzz-only (fuzz/Cargo.lock), never shipped.
+exceptions = [
+    { allow = ["NCSA"], crate = "libfuzzer-sys" },
+]
 
 [licenses.private]
 # Our own crates are `publish = false` until release; they are Apache-2.0 regardless.

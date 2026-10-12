@@ -11,11 +11,14 @@ default:
 # Format all code
 fmt:
     cargo fmt --all
+    cargo fmt --manifest-path fuzz/Cargo.toml --all
 
-# fmt check + clippy with warnings as errors
+# fmt check + clippy with warnings as errors (workspace and fuzz/)
 lint:
     cargo fmt --all -- --check
     cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo fmt --manifest-path fuzz/Cargo.toml --all -- --check
+    cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
 
 # Unit + property tests (fast suite)
 test:
@@ -36,9 +39,10 @@ miri:
     cargo +{{ nightly }} miri test -p persia-format --lib
     cargo +{{ nightly }} miri test -p persia-format --doc
 
-# Licenses, advisories, banned engines
+# Licenses, advisories, banned engines (workspace and fuzz/Cargo.lock)
 deny:
     cargo deny check
+    cargo deny --manifest-path fuzz/Cargo.toml check
 
 # Everything CI runs, in CI order
 check: lint test repo-checks deny

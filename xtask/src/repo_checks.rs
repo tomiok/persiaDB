@@ -1,4 +1,4 @@
-//! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning and
+//! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming and
 //! `.gitignore`/`.gitattributes` behavior, verified through git itself rather than by parsing the files.
 
 #[cfg(test)]
@@ -146,6 +146,34 @@ mod tests {
                 manifest.display()
             );
         }
+    }
+
+    // --- Fuzz targets (ROADMAP 1.11.1) ---
+
+    #[test]
+    fn fuzz_bins_are_named_after_their_files() {
+        // .github/workflows/fuzz.yml builds its matrix from fuzz_targets/*.rs and runs `cargo fuzz run <stem>`.
+        let mut bins: Vec<(String, String)> = get(&read_toml("fuzz/Cargo.toml"), &["bin"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| {
+                let field = |k: &str| b[k].as_str().unwrap().to_owned();
+                (field("name"), field("path"))
+            })
+            .collect();
+        bins.sort();
+        let mut files: Vec<(String, String)> = std::fs::read_dir(root().join("fuzz/fuzz_targets"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter_map(|f| {
+                let stem = f.strip_suffix(".rs")?.to_owned();
+                Some((stem, format!("fuzz_targets/{f}")))
+            })
+            .collect();
+        files.sort();
+        assert_ne!(files.len(), 0);
+        assert_eq!(bins, files);
     }
 
     // --- .gitignore / .gitattributes (golden fixtures must stay byte-exact, SPEC §15) ---

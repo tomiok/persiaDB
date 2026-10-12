@@ -67,7 +67,10 @@ fuzz_target!(|input: &[u8]| {
     };
     let mut data = rest.to_vec();
     if mode & 1 == 1 {
-        data.chunks_exact_mut(Mini::LEN).for_each(fix_crc);
+        data.as_chunks_mut::<{ Mini::LEN }>()
+            .0
+            .iter_mut()
+            .for_each(|c| fix_crc(c));
     }
     let data = &data[..];
     let mut r = Reader::new(data);

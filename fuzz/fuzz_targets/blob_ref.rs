@@ -12,15 +12,28 @@ fuzz_target!(|data: &[u8]| {
         Ok(b) => {
             let mut w = Writer::new();
             b.encode(&mut w);
-            assert_eq!(w.as_slice(), &data[..r.position()], "non-canonical input accepted");
+            assert_eq!(
+                w.as_slice(),
+                &data[..r.position()],
+                "non-canonical input accepted"
+            );
             assert_eq!(w.len(), b.encoded_len());
             assert!(w.len() <= BlobRef::MAX_ENCODED_LEN);
-            let rebuilt = BlobRef::new(b.blob_id(), b.size(), b.mime(), b.chunk_size(), b.user_meta().clone());
+            let rebuilt = BlobRef::new(
+                b.blob_id(),
+                b.size(),
+                b.mime(),
+                b.chunk_size(),
+                b.user_meta().clone(),
+            );
             assert_eq!(rebuilt.as_ref(), Ok(&b));
         }
         Err(e) => {
             assert_eq!(r.position(), 0, "a failed decode moves nothing");
-            assert!(e.is_corruption() || matches!(e, Error::Unsupported { .. }), "{e:?}");
+            assert!(
+                e.is_corruption() || matches!(e, Error::Unsupported { .. }),
+                "{e:?}"
+            );
         }
     }
 });
