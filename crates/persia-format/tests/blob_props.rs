@@ -87,7 +87,14 @@ proptest! {
     }
 
     #[test]
-    fn arbitrary_bytes_never_panic(bytes in proptest::collection::vec(any::<u8>(), 0..128)) {
+    fn arbitrary_bytes_never_panic(
+        mut bytes in proptest::collection::vec(any::<u8>(), 0..128),
+        valid_version in any::<bool>(),
+    ) {
+        // Half the cases get past the version byte, so random bytes reach the field parsers.
+        if valid_version && !bytes.is_empty() {
+            bytes[0] = BlobRef::VERSION;
+        }
         let _ = check_decode(&bytes);
     }
 

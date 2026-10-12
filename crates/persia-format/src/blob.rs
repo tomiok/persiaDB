@@ -167,6 +167,9 @@ pub enum BlobRefDefect {
     /// An encoded `user_meta` key or value is not UTF-8 (decoding only).
     #[error("user_meta string is not UTF-8")]
     InvalidUtf8,
+    /// An encoded `version` of 0, which no writer produces (decoding only).
+    #[error("blob reference version 0")]
+    ZeroVersion,
 }
 
 /// A document's reference to a blob: `{ blob_id, size, mime, chunk_size, user_meta? }` (SPEC §9.1).
@@ -301,11 +304,11 @@ impl BlobRef {
         // The value rules bound every length below, so the conversions cannot fail.
         w.write_u8(u8::try_from(self.mime.len()).unwrap_or(u8::MAX));
         w.write_bytes(self.mime.as_bytes());
-        w.write_varint_u64(to_u64(self.user_meta.len()));
+        w.write_varint_u32(len_u32(self.user_meta.len()));
         for (key, value) in &self.user_meta {
-            w.write_varint_u64(to_u64(key.len()));
+            w.write_varint_u32(len_u32(key.len()));
             w.write_bytes(key.as_bytes());
-            w.write_varint_u64(to_u64(value.len()));
+            w.write_varint_u32(len_u32(value.len()));
             w.write_bytes(value.as_bytes());
         }
     }
@@ -313,10 +316,9 @@ impl BlobRef {
     /// Decodes one reference and advances past it; on error the reader does not move.
     ///
     /// # Errors
-    /// - [`Error::Unsupported`] with [`Unsupported::BlobRefVersion`] for a `version` other than
-    ///   [`BlobRef::VERSION`];
-    /// - [`Error::Corrupt`] if the input ends early, a varint is not canonical, or a value rule does not hold
-    ///   ([`Corruption::InvalidBlobRef`] at the offending field or byte).
+    /// - [`Error::Unsupported`] with [`Unsupported::BlobRefVersion`] for a `version` above [`BlobRef::VERSION`];
+    /// - [`Error::Corrupt`] for `version` 0, input that ends early, a non-canonical varint, or a value rule that
+    ///   does not hold ([`Corruption::InvalidBlobRef`] at the offending field or byte).
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
         let mut c = r.clone();
         let blob_ref = Self::decode_fields(&mut c)?;
@@ -327,6 +329,10 @@ impl BlobRef {
     fn decode_fields(r: &mut Reader<'_>) -> Result<Self> {
         let at = r.offset();
         let version = r.read_u8()?;
+        if version == 0 {
+            // No writer ever produces 0: a zeroed region, not a newer format.
+            return Err(corrupt(at, BlobRefDefect::ZeroVersion));
+        }
         if version != Self::VERSION {
             return Err(Error::Unsupported {
                 offset: at,
@@ -349,7 +355,7 @@ impl BlobRef {
         let mime: String = mime.iter().copied().map(char::from).collect();
 
         let at = r.offset();
-        let count = r.read_varint_u64()?;
+        let count = u64::from(r.read_varint_u32()?);
         check_meta_count(count).map_err(|d| corrupt(at, d))?;
         let mut user_meta = BTreeMap::new();
         let mut prev: Option<&str> = None;
@@ -379,13 +385,23 @@ fn read_string<'a>(
     check_len: fn(u64) -> Result<(), BlobRefDefect>,
 ) -> Result<&'a str> {
     let at = r.offset();
-    let len = r.read_varint_u64()?;
+    let len = u64::from(r.read_varint_u32()?);
     check_len(len).map_err(|d| corrupt(at, d))?;
     // The checked length is at most a few KiB; were it not, `read_bytes` would fail.
     let len = usize::try_from(len).unwrap_or(usize::MAX);
     let at = r.offset();
     let bytes = r.read_bytes(len)?;
-    core::str::from_utf8(bytes).map_err(|_| corrupt(at, BlobRefDefect::InvalidUtf8))
+    core::str::from_utf8(bytes).map_err(|e| {
+        corrupt(
+            at.saturating_add(to_u64(e.valid_up_to())),
+            BlobRefDefect::InvalidUtf8,
+        )
+    })
+}
+
+/// A length the value rules already bounded, as written in a `varint u32`.
+fn len_u32(len: usize) -> u32 {
+    u32::try_from(len).unwrap_or(u32::MAX)
 }
 
 fn corrupt(offset: u64, defect: BlobRefDefect) -> Error {
@@ -637,8 +653,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_version_is_unsupported() {
-        for version in [0, 2, 0xff] {
+    fn newer_version_is_unsupported_and_zero_is_corrupt() {
+        let mut bytes = header_then(&[0]);
+        bytes[0] = 0;
+        assert_eq!(
+            decode_err(&bytes),
+            corrupt_at(100, BlobRefDefect::ZeroVersion)
+        );
+        for version in [2, 0xff] {
             let mut bytes = header_then(&[0]);
             bytes[0] = version;
             assert_eq!(
@@ -720,6 +742,19 @@ mod tests {
         assert_eq!(
             decode_err(&header_then(&[1, 1, b'k', 1, 0xc3])),
             corrupt_at(141, BlobRefDefect::InvalidUtf8)
+        );
+        // The offset points at the first invalid byte, not at the start of the string.
+        assert_eq!(
+            decode_err(&header_then(&[1, 3, b'a', b'b', 0xff, 0])),
+            corrupt_at(141, BlobRefDefect::InvalidUtf8)
+        );
+        // Counts and lengths are varint u32.
+        assert_eq!(
+            decode_err(&header_then(&[0x80, 0x80, 0x80, 0x80, 0x10])),
+            Error::Corrupt {
+                offset: 137,
+                reason: Corruption::VarintOverflow { bits: 32 }
+            }
         );
         // Equal and decreasing keys.
         assert_eq!(

@@ -607,8 +607,10 @@ Binary encoding (ADR-0011), byte-aligned and self-delimiting, embedded in struct
 ..  ..  meta_count  varint u32, then per entry: key_len varint u32, key, value_len varint u32, value
 ```
 Entries are sorted by key bytes, strictly increasing, so each value has exactly one encoding. Any rule above that
-does not hold is corruption; an unknown `version` is unsupported (not corruption). The largest encoding is
-37 295 bytes.
+does not hold is corruption (the chunk-count rule is reported at `chunk_size`), and so is `version` 0, which no
+writer produces; a `version` above 1 is unsupported. Writing a new `version` must be gated by an `incompat_flags`
+bit or a format major bump (SPEC §15), so a reader rejects the container at open rather than mid-query or
+mid-replay; the byte is a safety net. The largest encoding is 37 295 bytes.
 
 ### 9.2 Properties
 - Content-addressed ⇒ automatic **dedup**, idempotent `put`.

@@ -24,22 +24,28 @@ filename or a client checksum label).
   varints, `mime_len u8` + bytes, `meta_count` varint + entries as `key_len` varint, key, `value_len` varint, value.
   Keys are strictly increasing by bytes. Byte-aligned, no padding, no checksum of its own.
 - **Validation.** One rule set is checked when a `BlobRef` is built (so encoding cannot fail) and when it is
-  decoded (a violation is corruption at the offending field). An unknown `version` is unsupported, not corrupt: the
-  enclosing checksum passed, so a newer writer produced it.
+  decoded (a violation is corruption at the offending field; the chunk-count rule at `chunk_size`). A `version` above
+  1 is unsupported, not corrupt: the enclosing checksum passed, so a newer writer produced it. `version` 0 is
+  corruption, since no writer produces it and zeroed bytes are a common failure.
+- **Rolling out a new version.** Readers decide on container flags, not on minor versions (SPEC §15), so a writer
+  emits a new `BlobRef` version only behind an `incompat_flags` bit (or a format major bump). An old reader then
+  refuses the container at open instead of failing mid-query or during WAL replay; the per-value byte is a safety
+  net and lets one container hold both versions after the flag is set.
 
 ## Consequences
 
 - Every value has exactly one encoding, so checksums of enclosing blocks and golden files are stable.
-- The largest encoding is 37 295 bytes, and a decoder allocates at most that much per reference whatever the input.
+- The largest encoding is 37 295 bytes, so the input a decoder reads per reference is bounded whatever the bytes say;
+  what it allocates is that plus `String`/`BTreeMap` overhead.
 - 64 MiB chunks cap the memory a chunk-at-a-time reader needs; 4 MiB (the default) stays well inside.
-- Changing a limit or a field is a new `version`; readers of version 1 report it as unsupported.
+- Changing a limit or a field is a new `version` behind an `incompat_flags` bit (see above).
 
 ## Alternatives considered
 
 - **CBOR** (already allowed for DocStore): self-describing but not canonical without extra rules, larger, and the
   `BlobRefs` column wants a compact fixed-order record.
-- **Fixed-width fields:** simpler random access, but the column is read per hit, not scanned, and varints save
-  ~10 bytes per reference.
+- **Fixed-width fields:** simpler random access, but the column is read per hit, not scanned, and varints save a
+  few bytes per reference (more with fixed-width lengths).
 - **Opaque bytes for `user_meta`:** no UTF-8 check, but every API (JSON, gRPC, SDKs) would have to pick an
   encoding for them; a string map maps directly onto JSON objects.
 - **A CRC per reference:** redundant inside checksummed blocks, frames and WAL records.

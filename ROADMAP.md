@@ -147,7 +147,7 @@ Deps: M0. Pure functions, no I/O. This is the foundation: be paranoid.
 - [x] 1.9.2 Check-in small fixtures (< 100 KB) + test that opens all fixtures
 
 ## 1.10 Shared value types
-- [~] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002
+- [x] 1.10.1 `BlobId` + `BlobRef { blob_id, size, mime, chunk_size, user_meta? }` with encode/decode (SPEC §9.1); hash algorithm per ADR-0002
 
 ## 1.11 CI for fuzz targets, benchmarks and coverage (moved from M0: they need M1's first targets)
 - [ ] 1.11.1 Nightly fuzz job for every `fuzz/` target (time-boxed per target, corpus cached as artifact); clippy + `cargo deny` over `fuzz/Cargo.lock`
@@ -288,7 +288,7 @@ Deps: M1, M3, M4. The heart of the index format.
 - [ ] 5.2.3 Positions writer (opt-in per field)
 - [ ] 5.2.4 Norms writer (1-byte quantization table; document quantization error bounds)
 - [ ] 5.2.5 Columns writer (dictionary-encoded keyword, FOR numeric, roaring sparse)
-- [ ] 5.2.6 DocStore, IdMap, BlobRefs section writers
+- [ ] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden container fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011)
 - [ ] 5.2.7 Segment footer writer: stats, section table, schema hash, CRC; trailing locator (SPEC §5.1)
 - [ ] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
 - [ ] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
