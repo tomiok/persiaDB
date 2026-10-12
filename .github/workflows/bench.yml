@@ -1,0 +1,85 @@
+# Weekly benchmark run (ROADMAP 1.11.2, SPEC §16.3). Stores results for regression tracking; no gating yet:
+# the > 5% gate with stored baselines is ROADMAP 15.1.5 (shared GitHub runners are too noisy for it today).
+# Criterion compares each run against the previous successful one (baseline `weekly`, restored from that run's
+# artifact; artifacts outlive the 7-day cache eviction) and the job summary lists significant changes.
+# Raw output, Criterion data and the host description are uploaded. Actions are pinned to commit SHAs (SPEC §17).
+name: bench
+
+on:
+  schedule:
+    - cron: "23 4 * * 0"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # download the previous run's artifact
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  criterion:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Restore previous results
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p bench-results
+          prev="$(gh run list -R "$GITHUB_REPOSITORY" --workflow bench.yml --status success --limit 1 \
+            --json databaseId --jq '.[0].databaseId // empty')"
+          if [ -n "$prev" ]; then
+            gh run download "$prev" -R "$GITHUB_REPOSITORY" -n bench-results -D previous
+            if [ -d previous/criterion ]; then mv previous/criterion bench-results/; fi
+          else
+            echo "No previous successful run: this one becomes the first baseline."
+          fi
+      # `--bench '*'` selects only [[bench]] targets: lib harnesses reject Criterion's flags.
+      # Criterion's progress goes to stderr; results (stdout) go to bench.txt. CRITERION_HOME must be absolute.
+      - name: Run benchmarks
+        shell: bash
+        env:
+          CRITERION_HOME: ${{ github.workspace }}/bench-results/criterion
+        run: |
+          {
+            echo "commit: $GITHUB_SHA"
+            rustc -vV
+            lscpu
+          } > bench-results/host.txt
+          cargo bench --workspace --bench '*' -- --save-baseline weekly --noplot | tee bench-results/bench.txt
+      - name: Summarize changes
+        shell: bash
+        run: |
+          changes="$(awk '
+            /^[^ ]+ +time: +\[/ || /^[^ ]+$/ { name = $1 }
+            /^ +change:$/ { in_change = 1; next }
+            in_change && /^ +time: +\[/ { change = $3; in_change = 0 }
+            /Performance has regressed/ { print "| `" name "` | regressed | " change " |" }
+            /Performance has improved/ { print "| `" name "` | improved | " change " |" }
+          ' bench-results/bench.txt)"
+          {
+            echo "## Benchmarks vs previous weekly run"
+            if [ -z "$changes" ]; then
+              echo "No significant changes (or no previous run)."
+            else
+              echo "| Benchmark | Change | Median time delta |"
+              echo "|---|---|---|"
+              echo "$changes"
+            fi
+            echo
+            echo "Shared runner: treat single-run changes as hints. Full output in the \`bench-results\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload results
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: bench-results
+          path: bench-results
+          retention-days: 90
