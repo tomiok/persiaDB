@@ -36,7 +36,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("persia-server", &["persia", "persia-proto"]),
     ("persia-cli", &["persia"]),
     (TESTUTIL, &[]),
-    (XTASK, &[]),
+    (XTASK, &["persia-format"]),
 ];
 
 const BINARIES: &[&str] = &["persia-server", "persia-cli", XTASK];

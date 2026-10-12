@@ -70,6 +70,8 @@ jobs:
         run: cargo xtask check-deps
       - name: PROGRESS.md is up to date
         run: cargo xtask progress --check
+      - name: Golden fixtures are up to date
+        run: cargo xtask fixtures --check
 
   miri:
     # ROADMAP 0.2.5: UB detection for persia-format, the only crate allowed to contain `unsafe`.

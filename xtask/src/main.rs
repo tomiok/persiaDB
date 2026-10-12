@@ -4,6 +4,7 @@
 #![forbid(unsafe_code)]
 
 mod check_deps;
+mod fixtures;
 mod github_setup;
 mod progress;
 mod repo_checks;
@@ -18,6 +19,7 @@ const USAGE: &str = "usage: cargo xtask <command>
 commands:
   check-deps   enforce crate dependency rules (CLAUDE.md \"Architecture\", \"Dependencies\")
   progress     regenerate PROGRESS.md from ROADMAP.md [--record [--date YYYY-MM-DD] | --check]
+  fixtures     write the golden container fixtures in tests/fixtures/format/ [--check]
   github-setup create/update GitHub labels and milestones [--repo OWNER/NAME] [--apply]";
 
 fn main() -> ExitCode {
@@ -38,6 +40,7 @@ fn run() -> Result<bool> {
     match args.first().map(String::as_str) {
         Some("check-deps") => check_deps::run(&repo_root()?),
         Some("progress") => progress::run(&repo_root()?, rest),
+        Some("fixtures") => fixtures::run(&repo_root()?, rest),
         Some("github-setup") => github_setup::run(&repo_root()?, rest),
         _ => {
             eprintln!("{USAGE}");

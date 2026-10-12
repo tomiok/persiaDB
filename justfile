@@ -29,6 +29,7 @@ test-slow:
 repo-checks:
     cargo xtask check-deps
     cargo xtask progress --check
+    cargo xtask fixtures --check
 
 # Undefined-behavior check of persia-format under Miri (needs the dated nightly with miri)
 miri:
@@ -41,6 +42,10 @@ deny:
 
 # Everything CI runs, in CI order
 check: lint test repo-checks deny
+
+# Regenerate the golden container fixtures in tests/fixtures/format/ (unreleased format versions only, SPEC §15)
+fixtures:
+    cargo xtask fixtures
 
 # Regenerate PROGRESS.md and record today's snapshot (after ticking a ROADMAP leaf)
 progress:

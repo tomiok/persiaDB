@@ -39,6 +39,7 @@ sdk/
   rust/             # persia-client (network client)
   go/               # persia-go (network client)
 tests/
+  fixtures/         # golden files opened by CI forever (SPEC §15); written by `cargo xtask fixtures`
   integration/      # cross-crate + docker-compose based tests
   synthetic/        # data generators, load & chaos scenarios
 benches/            # criterion + end-to-end benchmark harness
@@ -68,6 +69,7 @@ just integration                             # docker-compose: MinIO, fake-gcs, 
 cargo xtask progress --record                # regenerate PROGRESS.md + append today's snapshot
 cargo xtask progress --check                 # CI: fail if PROGRESS.md is stale
 cargo xtask check-deps                       # crate dependency rules (direction, allowed list, no build.rs)
+cargo xtask fixtures [--check]               # regenerate golden fixtures / CI: fail if they are stale
 ```
 
 Always run fmt, clippy and tests before declaring a task done.
@@ -109,6 +111,7 @@ Always run fmt, clippy and tests before declaring a task done.
   - `persia-blob` depends on `persia-format` + `persia-storage`; it is used by `persia` (not by the engine).
     Shared value types (`BlobRef`, `BlobId`) live in `persia-format` so the engine can store them.
   - `persia-testutil` is a `[dev-dependencies]` entry only.
+  - `xtask` may depend on `persia-format` (it writes the golden fixtures).
 - Public APIs are small, documented (`#![deny(missing_docs)]` on public crates), and have doctests.
 
 **Dependencies**
