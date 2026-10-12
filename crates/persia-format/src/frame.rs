@@ -1,9 +1,11 @@
 //! Frames: the checksummed records that follow the superblock slots in a container (SPEC §4.4; ADR-0009).
 //!
-//! [`encode_frame`] appends one frame, optionally with a zstd-compressed payload. [`Frame::decode`] reads one frame
-//! strictly, e.g. the Manifest frame a superblock points at. [`FrameScanner`] reads frames until the first invalid
-//! or unsupported one and reports why it stopped ([`ScanEnd`]): a clean end, a torn tail, corruption, or a frame
-//! from a newer writer. Frames of unknown kinds are yielded as [`FrameKind::Unknown`] and must be skipped.
+//! [`encode_frame`] appends one frame, optionally with a zstd-compressed payload; [`FrameEncoder`] streams one whose
+//! payload is too large to hold in memory. [`Frame::decode`] reads one frame strictly, e.g. the Manifest frame a
+//! superblock points at; [`FrameHeader::decode`] reads only its first 24 bytes, so a range reader can size the read
+//! of the whole frame. [`FrameScanner`] reads frames until the first invalid or unsupported one and reports why it
+//! stopped ([`ScanEnd`]): a clean end, a torn tail, corruption, or a frame from a newer writer. Frames of unknown
+//! kinds are yielded as [`FrameKind::Unknown`] and must be skipped.
 //!
 //! Scanning checks framing only. A compressed payload is decoded on demand by [`Frame::payload`], under a
 //! caller-supplied bomb limit.
@@ -14,7 +16,7 @@ use std::iter::FusedIterator;
 use crate::ALIGNMENT;
 use crate::align::padding_for;
 use crate::block::Compression;
-use crate::checksum::{crc32c, verify_crc32c};
+use crate::checksum::{Crc32c, crc32c, verify_crc32c};
 use crate::compress::{Codec, compress_block, decompress_block};
 use crate::error::{Corruption, EncodeError, Error, Result, Unsupported, to_u64};
 use crate::reader::Reader;
@@ -173,6 +175,250 @@ pub fn encode_frame(
     w.write_u32(crc);
     w.write_u32(0);
     Ok(())
+}
+
+/// The first [`FRAME_HEADER_LEN`] bytes of a frame, read on their own (SPEC §4.4).
+///
+/// A range reader (object storage, ADR-0006) fetches these 24 bytes first to learn how many to fetch for the whole
+/// frame ([`FrameHeader::total_len`]), then validates the frame with [`Frame::decode`]. Only the magic and the
+/// length are checked here: the CRC covering the header sits in the frame's trailer, so nothing else in it can be
+/// trusted yet. In particular unknown `flags` bits are not reported: whether they make the frame *unsupported* or
+/// *invalid* depends on the CRC.
+///
+/// ```
+/// use persia_format::block::Compression;
+/// use persia_format::frame::{Frame, FrameHeader, FrameKind, encode_frame};
+/// use persia_format::{Reader, Writer};
+///
+/// let mut w = Writer::with_base_offset(12288);
+/// encode_frame(&mut w, FrameKind::Segment, 9, &[7; 100], Compression::None)?;
+/// let file = w.as_slice();
+///
+/// // A ranged read of the header, then one of exactly the frame.
+/// let header = FrameHeader::decode(&mut Reader::with_base_offset(&file[..24], 12288))?;
+/// assert_eq!((header.kind(), header.payload_len(), header.total_len()), (FrameKind::Segment, 100, 136));
+/// let len = usize::try_from(header.total_len())?;
+/// let frame = Frame::decode(&mut Reader::with_base_offset(&file[..len], 12288))?;
+/// assert_eq!(frame.frame_seq(), header.frame_seq());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameHeader {
+    kind: FrameKind,
+    flags: u32,
+    payload_len: u64,
+    frame_seq: u64,
+    total_len: u64,
+}
+
+impl FrameHeader {
+    /// A header whose frame length fits in `u64`, or `None`. `flags` keeps its low 24 bits.
+    fn new(kind: FrameKind, flags: u32, payload_len: u64, frame_seq: u64) -> Option<Self> {
+        Some(Self {
+            kind,
+            flags: flags & 0x00FF_FFFF,
+            payload_len,
+            frame_seq,
+            total_len: frame_len(payload_len)?,
+        })
+    }
+
+    /// Reads [`FRAME_HEADER_LEN`] bytes and checks the magic and that the frame's total length fits in `u64`.
+    /// Whether the frame fits in the container is the caller's check: compare [`FrameHeader::total_len`] with what
+    /// remains.
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] with [`Corruption::UnexpectedEof`] if fewer than [`FRAME_HEADER_LEN`] bytes remain,
+    /// [`Corruption::BadFrameMagic`], or [`Corruption::UnexpectedEof`] at the `payload_len` field (needing
+    /// `u64::MAX` bytes) when the total length overflows, as [`Frame::decode`] reports it. On error the position
+    /// is unchanged.
+    pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
+        let mut ahead = r.clone();
+        let offset = ahead.offset();
+        let available = to_u64(ahead.remaining());
+        if ahead.remaining() < FRAME_HEADER_LEN {
+            return Err(Error::Corrupt {
+                offset,
+                reason: Corruption::UnexpectedEof {
+                    needed: to_u64(FRAME_HEADER_LEN),
+                    available,
+                },
+            });
+        }
+        if ahead.read_array::<4>()? != FRAME_MAGIC {
+            return Err(Error::Corrupt {
+                offset,
+                reason: Corruption::BadFrameMagic,
+            });
+        }
+        let kind = FrameKind::from_u8(ahead.read_u8()?);
+        let flags = u32::from_le_bytes(pad_flags(ahead.read_array::<3>()?));
+        let len_offset = ahead.offset();
+        let payload_len = ahead.read_u64()?;
+        let frame_seq = ahead.read_u64()?;
+        let header = Self::new(kind, flags, payload_len, frame_seq).ok_or(Error::Corrupt {
+            offset: len_offset,
+            reason: Corruption::UnexpectedEof {
+                needed: u64::MAX,
+                available,
+            },
+        })?;
+        *r = ahead;
+        Ok(header)
+    }
+
+    /// The header bytes.
+    fn encode(&self) -> [u8; FRAME_HEADER_LEN] {
+        let mut w = Writer::new();
+        w.write_bytes(&FRAME_MAGIC);
+        w.write_u8(self.kind.to_u8());
+        w.write_bytes(self.flags.to_le_bytes().get(..3).unwrap_or_default());
+        w.write_u64(self.payload_len);
+        w.write_u64(self.frame_seq);
+        // Exactly FRAME_HEADER_LEN bytes were written.
+        w.as_slice()
+            .first_chunk()
+            .copied()
+            .unwrap_or([0; FRAME_HEADER_LEN])
+    }
+
+    /// The `kind` field. Unverified until the frame is decoded.
+    pub const fn kind(&self) -> FrameKind {
+        self.kind
+    }
+
+    /// The 24-bit `flags` field, unknown bits included. Unverified until the frame is decoded.
+    pub const fn flags(&self) -> u32 {
+        self.flags
+    }
+
+    /// The `payload_len` field: the stored payload's length, without padding.
+    pub const fn payload_len(&self) -> u64 {
+        self.payload_len
+    }
+
+    /// The `frame_seq` field. Unverified until the frame is decoded.
+    pub const fn frame_seq(&self) -> u64 {
+        self.frame_seq
+    }
+
+    /// Total length of the frame, header to `reserved`: [`frame_len`] of `payload_len`.
+    pub const fn total_len(&self) -> u64 {
+        self.total_len
+    }
+}
+
+/// Encodes one frame whose payload arrives in pieces, for payloads too large to hold in memory, e.g. a Segment
+/// streamed to a file (SPEC §4.4).
+///
+/// The payload length is declared up front because it is in the header, which comes first. The caller writes
+/// [`FrameEncoder::header`], then each chunk it passes to [`FrameEncoder::update`], then the bytes
+/// [`FrameEncoder::finish`] returns. The CRC is computed incrementally over exactly the bytes passed to `update`,
+/// so the caller must write those same bytes. The payload is stored uncompressed: a compressed length is not
+/// known before compressing, so compressed frames use [`encode_frame`] (segments compress their own blocks,
+/// SPEC §5.2). The output is byte-for-byte what [`encode_frame`] writes with [`Compression::None`].
+///
+/// ```
+/// use persia_format::block::Compression;
+/// use persia_format::frame::{FrameEncoder, FrameKind, encode_frame};
+/// use persia_format::Writer;
+///
+/// let mut out = Vec::new();
+/// let mut enc = FrameEncoder::new(FrameKind::Segment, 9, 11)?;
+/// out.extend_from_slice(enc.header());
+/// for chunk in [&b"hello "[..], b"world"] {
+///     enc.update(chunk)?;
+///     out.extend_from_slice(chunk);
+/// }
+/// out.extend_from_slice(&enc.finish()?);
+///
+/// let mut w = Writer::new();
+/// encode_frame(&mut w, FrameKind::Segment, 9, b"hello world", Compression::None)?;
+/// assert_eq!(out, w.as_slice());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+#[derive(Debug, Clone)]
+pub struct FrameEncoder {
+    header: FrameHeader,
+    bytes: [u8; FRAME_HEADER_LEN],
+    crc: Crc32c,
+    written: u64,
+}
+
+impl FrameEncoder {
+    /// Starts a frame of `kind` whose payload is exactly `payload_len` bytes.
+    ///
+    /// # Errors
+    /// [`EncodeError::FrameTooLarge`] if the frame's total length would overflow `u64`.
+    pub fn new(kind: FrameKind, frame_seq: u64, payload_len: u64) -> Result<Self, EncodeError> {
+        let header = FrameHeader::new(kind, 0, payload_len, frame_seq)
+            .ok_or(EncodeError::FrameTooLarge { payload_len })?;
+        let bytes = header.encode();
+        let mut crc = Crc32c::new();
+        crc.update(bytes.get(KIND_OFFSET..).unwrap_or_default());
+        Ok(Self {
+            header,
+            bytes,
+            crc,
+            written: 0,
+        })
+    }
+
+    /// The [`FRAME_HEADER_LEN`] header bytes, written before the payload.
+    pub const fn header(&self) -> &[u8; FRAME_HEADER_LEN] {
+        &self.bytes
+    }
+
+    /// Total length of the frame being encoded.
+    pub const fn total_len(&self) -> u64 {
+        self.header.total_len
+    }
+
+    /// Payload bytes still expected.
+    pub const fn remaining(&self) -> u64 {
+        self.header.payload_len.saturating_sub(self.written)
+    }
+
+    /// Adds the next payload bytes to the CRC and the count.
+    ///
+    /// # Errors
+    /// [`EncodeError::PayloadLenMismatch`] if `chunk` would take the payload past its declared length. Nothing is
+    /// added then.
+    pub fn update(&mut self, chunk: &[u8]) -> Result<(), EncodeError> {
+        let declared = self.header.payload_len;
+        let total = self.written.checked_add(to_u64(chunk.len()));
+        match total {
+            Some(total) if total <= declared => {
+                self.crc.update(chunk);
+                self.written = total;
+                Ok(())
+            }
+            _ => Err(EncodeError::PayloadLenMismatch {
+                declared,
+                actual: total.unwrap_or(u64::MAX),
+            }),
+        }
+    }
+
+    /// The bytes after the payload: zero padding to 8 bytes, the CRC and `reserved`.
+    ///
+    /// # Errors
+    /// [`EncodeError::PayloadLenMismatch`] if fewer payload bytes were given than declared.
+    pub fn finish(mut self) -> Result<Vec<u8>, EncodeError> {
+        let declared = self.header.payload_len;
+        if self.written != declared {
+            return Err(EncodeError::PayloadLenMismatch {
+                declared,
+                actual: self.written,
+            });
+        }
+        let mut w = Writer::new();
+        w.write_zeros(padding_for(declared, ALIGNMENT));
+        self.crc.update(w.as_slice());
+        w.write_u32(self.crc.finish());
+        w.write_u32(0);
+        Ok(w.into_inner())
+    }
 }
 
 /// One valid frame, borrowing its payload from the input.
@@ -993,5 +1239,329 @@ mod tests {
             assert_eq!(end.truncates(), truncates);
             assert_eq!(end.error().is_some(), !matches!(end, ScanEnd::Clean { .. }));
         }
+    }
+
+    // -----------------------------------------------------------------------------------------------------
+    // FrameHeader and FrameEncoder (ROADMAP 1.7.5; SPEC §4.4 "Streaming and ranged access")
+    // -----------------------------------------------------------------------------------------------------
+
+    /// Decodes a header from `bytes` at `BASE`; on error asserts the reader did not move.
+    fn header(bytes: &[u8]) -> Result<FrameHeader> {
+        let mut r = Reader::with_base_offset(bytes, BASE);
+        let result = FrameHeader::decode(&mut r);
+        let expected_pos = if result.is_ok() { FRAME_HEADER_LEN } else { 0 };
+        assert_eq!(r.position(), expected_pos, "{result:?}");
+        result
+    }
+
+    /// Streams `payload` in `chunks`-sized pieces through a `FrameEncoder` and returns the frame bytes.
+    fn stream(kind: FrameKind, seq: u64, payload: &[u8], chunk: usize) -> Vec<u8> {
+        let mut enc = FrameEncoder::new(kind, seq, payload.len() as u64).unwrap();
+        let mut out = enc.header().to_vec();
+        for piece in payload.chunks(chunk.max(1)) {
+            enc.update(piece).unwrap();
+            out.extend_from_slice(piece);
+        }
+        assert_eq!(enc.remaining(), 0);
+        let total = enc.total_len();
+        out.extend_from_slice(&enc.finish().unwrap());
+        assert_eq!(out.len() as u64, total);
+        out
+    }
+
+    #[test]
+    fn golden_header_decodes() {
+        let bytes = raw(3, 0x0102_0304_0506_0708, b"hello");
+        // The first 24 bytes alone are enough; the rest of the frame is not read.
+        let h = header(&bytes[..FRAME_HEADER_LEN]).unwrap();
+        assert_eq!(h.kind(), FrameKind::Manifest);
+        assert_eq!(h.flags(), 0);
+        assert_eq!(h.payload_len(), 5);
+        assert_eq!(h.frame_seq(), 0x0102_0304_0506_0708);
+        assert_eq!(h.total_len(), 40);
+        assert_eq!(h.total_len(), bytes.len() as u64);
+        // The same header with the whole frame behind it.
+        assert_eq!(header(&bytes).unwrap(), h);
+
+        // Hand-written bytes, independent of the encoder: unknown kind, every flags bit set, odd length.
+        let mut b = b"PFR1\xc8\xff\xff\xff".to_vec();
+        b.extend_from_slice(&13_u64.to_le_bytes());
+        b.extend_from_slice(&u64::MAX.to_le_bytes());
+        let h = header(&b).unwrap();
+        assert_eq!(h.kind(), FrameKind::from_u8(200));
+        assert_eq!(
+            h.flags(),
+            0x00ff_ffff,
+            "unknown flags bits are kept, not rejected"
+        );
+        assert_eq!(
+            (h.payload_len(), h.frame_seq(), h.total_len()),
+            (13, u64::MAX, 48)
+        );
+    }
+
+    #[test]
+    fn header_offset_follows_the_reader_position() {
+        let frame_bytes = raw(1, 2, b"abc");
+        let buf = [vec![0xee; 16], frame_bytes.clone()].concat();
+        let mut r = Reader::with_base_offset(&buf, BASE);
+        r.skip(16).unwrap();
+        let h = FrameHeader::decode(&mut r).unwrap();
+        assert_eq!(r.offset(), BASE + 16 + 24);
+        assert_eq!(h.total_len(), frame_bytes.len() as u64);
+
+        // Errors are reported at the reader's absolute offset too.
+        let mut bad = buf.clone();
+        bad[16] = b'X';
+        let mut r = Reader::with_base_offset(&bad, BASE);
+        r.skip(16).unwrap();
+        assert_eq!(
+            FrameHeader::decode(&mut r),
+            Err(Error::Corrupt {
+                offset: BASE + 16,
+                reason: Corruption::BadFrameMagic
+            })
+        );
+        assert_eq!(r.position(), 16);
+    }
+
+    #[test]
+    fn header_too_short_is_eof_at_its_start() {
+        let bytes = raw(1, 4, b"payload!x");
+        for n in 0..FRAME_HEADER_LEN {
+            let eof = |needed: u64| Error::Corrupt {
+                offset: BASE,
+                reason: Corruption::UnexpectedEof {
+                    needed,
+                    available: n as u64,
+                },
+            };
+            assert_eq!(header(&bytes[..n]), Err(eof(24)), "{n}");
+            // Frame::decode reports the same place and availability, needing a whole minimal frame.
+            assert_eq!(decode_err(&bytes[..n]), eof(32), "{n}");
+        }
+        // Exactly 24 bytes are enough for the header, not for the frame.
+        assert!(header(&bytes[..24]).is_ok());
+        assert_eq!(
+            decode_err(&bytes[..24]).corruption(),
+            Some((
+                BASE,
+                Corruption::UnexpectedEof {
+                    needed: 32,
+                    available: 24
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn header_bad_magic_matches_frame_decode() {
+        let good = raw(1, 4, b"payload!x");
+        for byte in 0..FRAME_MAGIC.len() {
+            for bit in 0..8 {
+                let mut b = good.clone();
+                b[byte] ^= 1 << bit;
+                let expected = Error::Corrupt {
+                    offset: BASE,
+                    reason: Corruption::BadFrameMagic,
+                };
+                assert_eq!(header(&b), Err(expected.clone()), "{byte}.{bit}");
+                assert_eq!(decode_err(&b), expected, "{byte}.{bit}");
+                // With only the header's 24 bytes, the magic is still checked.
+                assert_eq!(header(&b[..24]), Err(expected), "{byte}.{bit}");
+            }
+        }
+    }
+
+    #[test]
+    fn header_length_overflow_is_eof_at_payload_len() {
+        let good = raw(1, 4, b"payload!x");
+        let with_len = |payload_len: u64| {
+            let mut b = good.clone();
+            b[8..16].copy_from_slice(&payload_len.to_le_bytes());
+            b
+        };
+        // u64::MAX - 39 is the largest payload_len whose frame length fits: 24 + (u64::MAX - 39) + 8.
+        for payload_len in u64::MAX - 38..=u64::MAX {
+            let b = with_len(payload_len);
+            let expected = Error::Corrupt {
+                offset: BASE + 8,
+                reason: Corruption::UnexpectedEof {
+                    needed: u64::MAX,
+                    available: b.len() as u64,
+                },
+            };
+            assert_eq!(header(&b), Err(expected.clone()), "{payload_len}");
+            assert_eq!(decode_err(&b), expected, "{payload_len}");
+        }
+        let b = with_len(u64::MAX - 39);
+        let h = header(&b).unwrap();
+        assert_eq!(
+            (h.payload_len(), h.total_len()),
+            (u64::MAX - 39, u64::MAX - 7)
+        );
+        // The header fits; the frame does not fit in the input.
+        assert_eq!(
+            decode_err(&b),
+            Error::Corrupt {
+                offset: BASE + 8,
+                reason: Corruption::UnexpectedEof {
+                    needed: u64::MAX - 7,
+                    available: b.len() as u64,
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn header_does_not_check_the_crc_or_the_tail() {
+        // Whatever follows the header, and a wrong CRC, are Frame::decode's business.
+        let mut b = raw(2, 7, b"abcdefgh");
+        let crc_at = b.len() - 8;
+        b[crc_at] ^= 1;
+        b[30] = 0xff;
+        let h = header(&b).unwrap();
+        assert_eq!(
+            (h.kind(), h.frame_seq(), h.payload_len()),
+            (FrameKind::Segment, 7, 8)
+        );
+        assert!(matches!(
+            decode_err(&b).corruption(),
+            Some((_, Corruption::ChecksumMismatch { .. }))
+        ));
+    }
+
+    #[test]
+    fn encoder_output_is_the_golden_frame() {
+        let golden = raw(3, 0x0102_0304_0506_0708, b"hello");
+        for chunk in 1..=6 {
+            assert_eq!(
+                stream(FrameKind::Manifest, 0x0102_0304_0506_0708, b"hello", chunk),
+                golden,
+                "{chunk}"
+            );
+        }
+        // Pins the CRC32C of the streamed frame (same value as `golden_frame`).
+        assert_eq!(golden[32..36], 0xfa9b_c56d_u32.to_le_bytes());
+    }
+
+    #[test]
+    fn encoder_matches_encode_frame_for_every_padding_width() {
+        for len in 0..=17_u8 {
+            let payload: Vec<u8> = (0..len).map(|i| i ^ 0xa5).collect();
+            let expected = raw(4, u64::from(len), &payload);
+            for chunk in [1, 3, 8, 64] {
+                assert_eq!(
+                    stream(FrameKind::Padding, u64::from(len), &payload, chunk),
+                    expected,
+                    "len {len} chunk {chunk}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn encoder_header_is_what_frame_header_decodes() {
+        let enc = FrameEncoder::new(FrameKind::from_u8(0), 42, 9).unwrap();
+        let h = header(enc.header()).unwrap();
+        assert_eq!(h.kind(), FrameKind::from_u8(0));
+        assert_eq!((h.flags(), h.payload_len(), h.frame_seq()), (0, 9, 42));
+        assert_eq!(h.total_len(), enc.total_len());
+        assert_eq!(enc.total_len(), 48);
+        assert_eq!(enc.remaining(), 9);
+    }
+
+    #[test]
+    fn encoder_rejects_a_frame_too_large_for_u64() {
+        for payload_len in u64::MAX - 38..=u64::MAX {
+            assert_eq!(
+                FrameEncoder::new(FrameKind::Segment, 0, payload_len).unwrap_err(),
+                EncodeError::FrameTooLarge { payload_len },
+                "{payload_len}"
+            );
+        }
+        // The boundary: the largest frame length that fits in u64.
+        let enc = FrameEncoder::new(FrameKind::Segment, 0, u64::MAX - 39).unwrap();
+        assert_eq!(enc.total_len(), u64::MAX - 7);
+        assert_eq!(enc.remaining(), u64::MAX - 39);
+        assert_eq!(enc.header()[8..16], (u64::MAX - 39).to_le_bytes());
+        assert_eq!(
+            enc.finish(),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: u64::MAX - 39,
+                actual: 0
+            })
+        );
+    }
+
+    #[test]
+    fn encoder_overrun_is_rejected_and_changes_nothing() {
+        let payload = b"0123456789";
+        let mut enc = FrameEncoder::new(FrameKind::Segment, 3, 10).unwrap();
+        enc.update(&payload[..4]).unwrap();
+        assert_eq!(enc.remaining(), 6);
+        assert_eq!(
+            enc.update(b"too many b"),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: 10,
+                actual: 14
+            })
+        );
+        assert_eq!(enc.remaining(), 6);
+        // One byte over is still over.
+        assert_eq!(
+            enc.update(b"abcdefg"),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: 10,
+                actual: 11
+            })
+        );
+        // The rejected bytes are not in the CRC: the correct rest still gives the exact frame.
+        enc.update(&payload[4..]).unwrap();
+        assert_eq!(enc.remaining(), 0);
+        // Nothing more fits, not even one byte; an empty chunk does.
+        assert_eq!(
+            enc.update(b"x"),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: 10,
+                actual: 11
+            })
+        );
+        enc.update(b"").unwrap();
+        let mut out = enc.header().to_vec();
+        out.extend_from_slice(payload);
+        out.extend_from_slice(&enc.finish().unwrap());
+        assert_eq!(out, raw(2, 3, payload));
+    }
+
+    #[test]
+    fn encoder_underrun_is_rejected_at_finish() {
+        let mut enc = FrameEncoder::new(FrameKind::Segment, 3, 10).unwrap();
+        assert_eq!(
+            enc.clone().finish(),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: 10,
+                actual: 0
+            })
+        );
+        enc.update(b"012345678").unwrap();
+        assert_eq!(
+            enc.finish(),
+            Err(EncodeError::PayloadLenMismatch {
+                declared: 10,
+                actual: 9
+            })
+        );
+    }
+
+    #[test]
+    fn empty_streamed_frame() {
+        let enc = FrameEncoder::new(FrameKind::Manifest, 1, 0).unwrap();
+        assert_eq!((enc.remaining(), enc.total_len()), (0, 32));
+        let mut out = enc.header().to_vec();
+        let tail = enc.finish().unwrap();
+        assert_eq!(tail.len(), FRAME_TRAILER_LEN);
+        out.extend_from_slice(&tail);
+        assert_eq!(out, raw(3, 1, b""));
     }
 }

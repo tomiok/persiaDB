@@ -396,6 +396,20 @@ pub enum EncodeError {
         /// The unknown bits only.
         flags: u64,
     },
+    /// A frame whose total length would overflow `u64` (SPEC §4.4).
+    #[error("frame payload of {payload_len} bytes is too large")]
+    FrameTooLarge {
+        /// The requested payload length.
+        payload_len: u64,
+    },
+    /// A streamed frame payload that does not match the length declared in its header (SPEC §4.4).
+    #[error("frame payload is {actual} bytes, its header declares {declared}")]
+    PayloadLenMismatch {
+        /// `payload_len` written in the header.
+        declared: u64,
+        /// Bytes given: the total so far when it exceeds `declared`, the final total when it falls short.
+        actual: u64,
+    },
 }
 
 // `to_u64` is lossless because of this; a wider-pointer target fails to compile instead of truncating.

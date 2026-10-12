@@ -21,6 +21,19 @@
 //!    written straight from SPEC §4.4 and ADR-0009.
 //! 5. A single bit flip inside frame `i` of a valid log never yields a frame with different content: the scan
 //!    yields frames `0..i` unchanged and stops at frame `i` with a truncating end (torn tail or corruption).
+//! 6. Ranged access (ROADMAP 1.7.5; SPEC §4.4 "Streaming and ranged access"): at every byte position of a
+//!    randomly mutated log (the edits of invariant 4), `FrameHeader::decode` agrees with `Frame::decode`:
+//!    - a valid frame has a header with the same kind, `frame_seq`, compression bit, no unknown flags,
+//!      `payload_len` = stored length and `total_len` = the frame's;
+//!    - with at least `MIN_FRAME_LEN` bytes left, a failed header is the identical `Frame::decode` error (bad
+//!      magic at the frame, or `UnexpectedEof { needed: u64::MAX }` at `payload_len` when the length overflows);
+//!      a header whose `total_len` runs past the input is `UnexpectedEof { needed: total_len }` at `payload_len`;
+//!      any other `Frame::decode` failure is behind the CRC (checksum, padding/`reserved`, unknown flags, whose
+//!      bits the header reports but does not reject);
+//!    - with fewer than `FRAME_HEADER_LEN` bytes both fail at the frame with `UnexpectedEof` and the same
+//!      `available`, needing 24 and 32; with 24..32 bytes `Frame::decode` fails that way and the header is
+//!      judged on magic and length alone;
+//!    - on error neither reader moves; a header advances exactly `FRAME_HEADER_LEN` bytes.
 
 // Test-only helpers index, cast and unwrap on purpose (see reader_writer_props.rs).
 #![allow(
@@ -32,7 +45,8 @@
 use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
-    FRAME_MAGIC, Frame, FrameKind, FrameScanner, MIN_FRAME_LEN, ScanEnd, encode_frame, frame_len,
+    FLAG_ZSTD, FRAME_HEADER_LEN, FRAME_MAGIC, Frame, FrameHeader, FrameKind, FrameScanner,
+    KNOWN_FRAME_FLAGS, MIN_FRAME_LEN, ScanEnd, encode_frame, frame_len,
 };
 use persia_format::{Corruption, Error, Reader, Unsupported, Writer};
 use proptest::prelude::*;
@@ -597,6 +611,126 @@ fn check_bit_flip(
     Ok(())
 }
 
+/// Invariant 6 for the frame starting at byte `pos` of `b` (absolute offset `base + pos`).
+fn check_header_against_frame(b: &[u8], base: u64, pos: usize) -> Result<(), TestCaseError> {
+    let rest = &b[pos..];
+    let o = base + pos as u64;
+    let available = rest.len() as u64;
+    let eof = |offset, needed| corrupt(offset, Corruption::UnexpectedEof { needed, available });
+
+    let mut hr = Reader::with_base_offset(rest, o);
+    let header = FrameHeader::decode(&mut hr);
+    let mut fr = Reader::with_base_offset(rest, o);
+    let frame = Frame::decode(&mut fr);
+
+    // The header against the bytes, straight from SPEC §4.4: 24 bytes, magic, a length that fits in u64.
+    let expected_header = if rest.len() < FRAME_HEADER_LEN {
+        Err(eof(o, 24))
+    } else if rest[..4] != FRAME_MAGIC {
+        Err(corrupt(o, Corruption::BadFrameMagic))
+    } else if ref_total_len(u64_at(rest, 8)) > u128::from(u64::MAX) {
+        Err(eof(o + 8, u64::MAX))
+    } else {
+        Ok((
+            rest[4],
+            u32::from_le_bytes([rest[5], rest[6], rest[7], 0]),
+            u64_at(rest, 8),
+            u64_at(rest, 16),
+            ref_total_len(u64_at(rest, 8)) as u64,
+        ))
+    };
+    let got_header = header
+        .as_ref()
+        .map(|h| {
+            (
+                h.kind().to_u8(),
+                h.flags(),
+                h.payload_len(),
+                h.frame_seq(),
+                h.total_len(),
+            )
+        })
+        .map_err(Clone::clone);
+    prop_assert_eq!(&got_header, &expected_header, "at {}", pos);
+    let header_pos = if header.is_ok() { FRAME_HEADER_LEN } else { 0 };
+    prop_assert_eq!(hr.position(), header_pos, "at {}", pos);
+    if let Ok(h) = &header {
+        prop_assert_eq!(hr.offset(), o + FRAME_HEADER_LEN as u64);
+        prop_assert_eq!(h.flags() >> 24, 0, "flags is a 24-bit field");
+    }
+    let frame_pos = frame.as_ref().map_or(0, |f| f.total_len() as usize);
+    prop_assert_eq!(fr.position(), frame_pos, "at {}", pos);
+
+    if rest.len() < MIN_FRAME_LEN {
+        prop_assert_eq!(frame.as_ref().err(), Some(&eof(o, 32)), "at {}", pos);
+        return Ok(());
+    }
+    match (&header, &frame) {
+        (_, Ok(f)) => {
+            let h = header.as_ref().unwrap();
+            prop_assert_eq!(h.kind(), f.kind());
+            prop_assert_eq!(h.frame_seq(), f.frame_seq());
+            prop_assert_eq!(h.flags() & FLAG_ZSTD != 0, f.is_compressed());
+            prop_assert_eq!(h.flags() & !KNOWN_FRAME_FLAGS, 0);
+            prop_assert_eq!(h.payload_len(), f.stored_payload().len() as u64);
+            prop_assert_eq!(h.total_len(), f.total_len());
+        }
+        (Err(he), Err(fe)) => prop_assert_eq!(he, fe, "at {}", pos),
+        (Ok(_), Err(fe)) if fe.is_corruption() => {
+            let h = header.as_ref().unwrap();
+            if h.total_len() > available {
+                prop_assert_eq!(fe, &eof(o + 8, h.total_len()), "at {}", pos);
+            } else {
+                prop_assert!(
+                    matches!(
+                        fe.corruption(),
+                        Some((
+                            _,
+                            Corruption::ChecksumMismatch { .. }
+                                | Corruption::NonZeroReserved { .. }
+                        ))
+                    ),
+                    "at {}: {:?}",
+                    pos,
+                    fe
+                );
+            }
+        }
+        (Ok(h), Err(fe)) => prop_assert_eq!(
+            fe,
+            &Error::Unsupported {
+                offset: o + 5,
+                reason: Unsupported::FrameFlags {
+                    flags: h.flags() & !KNOWN_FRAME_FLAGS
+                },
+            },
+            "at {}",
+            pos
+        ),
+    }
+    Ok(())
+}
+
+/// Invariant 6 on a mutated log: every byte position, so frame starts, mid-frame bytes and the short tail.
+fn check_headers_on_mutated_log(
+    specs: &[Spec],
+    edits: &[Edit],
+    fix_crcs: bool,
+    base: u64,
+) -> Result<(), TestCaseError> {
+    let (mut bytes, bounds) = encode_log(specs);
+    for e in edits {
+        apply_edit(&mut bytes, &bounds, e);
+    }
+    if fix_crcs {
+        fix_crcs_along_chain(&mut bytes);
+    }
+    for pos in 0..=bytes.len() {
+        check_header_against_frame(&bytes, base, pos)?;
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------------------
 // Fast suite
 // ---------------------------------------------------------------------------------------------------------
@@ -630,6 +764,16 @@ proptest! {
         let k = frame.index(bounds.len());
         let (start, end) = bounds[k];
         check_bit_flip(&log, &bounds, &full, base, k, at.index(end - start), bit)?;
+    }
+
+    #[test]
+    fn header_agrees_with_frame_decode_on_mutated_logs(
+        specs in specs(5, 100),
+        edits in proptest::collection::vec(edit(), 0..4),
+        fix_crcs in any::<bool>(),
+        base in aligned_base(),
+    ) {
+        check_headers_on_mutated_log(&specs, &edits, fix_crcs, base)?;
     }
 }
 
@@ -707,6 +851,16 @@ proptest! {
         base in aligned_base(),
     ) {
         check_matches_reference(&specs, &edits, fix_crcs, base)?;
+    }
+
+    #[test]
+    fn slow_header_agrees_with_frame_decode(
+        specs in specs(10, 300),
+        edits in proptest::collection::vec(edit(), 0..10),
+        fix_crcs in any::<bool>(),
+        base in aligned_base(),
+    ) {
+        check_headers_on_mutated_log(&specs, &edits, fix_crcs, base)?;
     }
 
     /// Every bit of every frame of a small log.

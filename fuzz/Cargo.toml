@@ -88,3 +88,10 @@ path = "fuzz_targets/frame.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "frame_header"
+path = "fuzz_targets/frame_header.rs"
+test = false
+doc = false
+bench = false
