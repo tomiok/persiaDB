@@ -24,6 +24,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   an error taxonomy (`ErrorKind`: not found, conflict, transient, corrupt, I/O, invalid input, unsupported), length-checked
   ranged reads returning `ByteSource` (`ByteSource::for_range`), and a retry policy for transient errors (exponential
   backoff with full jitter, injectable clock) (SPEC §10.1).
+- `persia-storage`: `MemoryStorage`, the in-memory backend with atomic `put_if_absent`, and `FaultyStorage`, a wrapper
+  that injects errors, latency, torn and dropped writes, and lost responses on a scripted or seeded schedule; a shared
+  conformance suite checks every backend against SPEC §10.1.
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
