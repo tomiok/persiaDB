@@ -165,12 +165,12 @@ Deps: M1.
 - [x] 2.1.3 Retry classification (`is_retryable`) and a generic retry policy helper (exp backoff + jitter, injectable clock)
 
 ## 2.2 In-memory backend
-- [ ] 2.2.1 `MemoryStorage` implementing all ops incl. `put_if_absent` atomicity
+- [~] 2.2.1 `MemoryStorage` implementing all ops incl. `put_if_absent` atomicity
 - 2.2.2 Deterministic failure-injection wrapper `FaultyStorage`
-  - [ ] 2.2.2.1 Inject: error on Nth call, latency, torn put (partial bytes), dropped put
-  - [ ] 2.2.2.2 Seeded RNG schedule so failures are reproducible
-  - [ ] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
-- [ ] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
+  - [~] 2.2.2.1 Inject: error on Nth call, latency, torn put (partial bytes), dropped put
+  - [~] 2.2.2.2 Seeded RNG schedule so failures are reproducible
+  - [~] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
+- [~] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
 
 ## 2.3 Local filesystem backend (object-per-file)
 - [ ] 2.3.1 Atomic `put`: write temp → fsync → rename → fsync dir
