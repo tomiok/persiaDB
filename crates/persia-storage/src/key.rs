@@ -198,6 +198,14 @@ impl AsRef<str> for Key {
     }
 }
 
+// `Eq`, `Ord` and `Hash` are derived from the inner `String`, so they agree with `str`'s, as `Borrow` requires: maps
+// keyed by `Key` can then be searched by `&str` (e.g. a range starting at a prefix).
+impl core::borrow::Borrow<str> for Key {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
 /// A string rejected as a [`Key`] or [`KeyPrefix`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 // `{key:?}`: the text may hold control characters, which must not reach a terminal or log raw.
