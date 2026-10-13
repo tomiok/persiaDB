@@ -663,6 +663,10 @@ and segments ending in `.` or a space, are rejected there as `InvalidInput`. A `
 except that it may be empty and may end with `/` (its last segment is incomplete, so it may also be `.` or `..`); it
 matches keys by plain byte prefix, as in S3. A backend never resolves a prefix as a path: it lists the directory
 part (up to the last `/`) and filters names by the rest.
+Keys form a flat namespace, as in S3: `a` and `a/b` may both exist. A backend on a hierarchical store (the local
+filesystem) must store both, e.g. by encoding names so that an object never collides with a directory (ROADMAP
+2.3.7). Keys are opaque bytes to a backend: it returns them exactly as written (no Unicode normalization, such as
+macOS NFD file names, and no case folding).
 
 **Semantics.**
 - `get` / `get_range` of a missing key: `NotFound`. `get_range` returns a `ByteSource` whose base offset is
@@ -842,7 +846,8 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
   reference model; results (hit sets, scores within epsilon) MUST match.
 - **Crash testing**: fault-injecting `Storage` (torn writes, dropped fsync, partial uploads, reordering) and `kill -9` loops.
   `FaultyStorage` wraps any backend and injects errors, latency, torn and dropped writes, and applied writes whose
-  response is lost, on a schedule scripted per call or drawn from a seed, so every failure replays from its seed.
+  response is lost, on a schedule scripted per call or drawn from a seed, so a failure replays from its seed when
+  the calls are made in a deterministic order (e.g. one thread).
 - **Storage conformance**: every `Storage` backend passes one shared suite of the §10.1 contract, including a
   model-based random operation sequence and concurrent `put_if_absent` races.
 - Integration against MinIO, fake-gcs-server, Azurite via docker-compose.

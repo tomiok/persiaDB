@@ -74,6 +74,39 @@ pub trait Storage: Send + Sync {
     fn capabilities(&self) -> Capabilities;
 }
 
+// Shared and boxed backends are backends: a test keeps an `Arc` clone of the store a wrapper faults, to reopen on
+// what survived; the engine holds `Arc<dyn Storage>`.
+macro_rules! forward_storage {
+    ($($ptr:ident)::+) => {
+        impl<T: Storage + ?Sized> Storage for $($ptr)::+<T> {
+            fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource> {
+                (**self).get_range(key, range)
+            }
+            fn get(&self, key: &Key) -> Result<Bytes> {
+                (**self).get(key)
+            }
+            fn put(&self, key: &Key, data: Bytes) -> Result<()> {
+                (**self).put(key, data)
+            }
+            fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
+                (**self).put_if_absent(key, data)
+            }
+            fn list(&self, prefix: &KeyPrefix) -> Result<Vec<ObjectMeta>> {
+                (**self).list(prefix)
+            }
+            fn delete(&self, key: &Key) -> Result<()> {
+                (**self).delete(key)
+            }
+            fn capabilities(&self) -> Capabilities {
+                (**self).capabilities()
+            }
+        }
+    };
+}
+
+forward_storage!(std::sync::Arc);
+forward_storage!(Box);
+
 /// Rejects an inverted `range` of `key`. Backends call it before any I/O.
 ///
 /// # Errors

@@ -6,6 +6,7 @@
 #[macro_use]
 mod conformance;
 
+use std::num::NonZeroU64;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -144,11 +145,75 @@ fn torn_put_writes_a_strict_prefix_and_fails() {
 }
 
 #[test]
-fn torn_put_if_absent_tears_only_a_new_object() {
+fn put_if_absent_is_never_torn() {
+    // Every backend's put_if_absent is atomic (SPEC §10.1), so a torn one is a state no store can reach.
     let s = faulty(3);
     s.inject(Trigger::Nth(Op::PutIfAbsent, 1), Fault::TornPut);
-    s.put_if_absent(&key("m"), data()).unwrap_err();
-    assert!(data().starts_with(&s.inner().get(&key("m")).unwrap()));
+    assert_eq!(
+        s.put_if_absent(&key("m"), data()).unwrap(),
+        PutOutcome::Created
+    );
+    assert_eq!(s.inner().get(&key("m")).unwrap(), data());
+    assert_eq!((s.injected(), s.pending()), (vec![], vec![]));
+}
+
+#[test]
+fn dropped_put_if_absent_still_reports_another_writers_object() {
+    let s = faulty(1);
+    let k = key("manifests/00000001");
+    let theirs = Bytes::from_static(b"manifest by writer B");
+    s.inner().put(&k, theirs.clone()).unwrap();
+    s.inject(Trigger::Nth(Op::PutIfAbsent, 1), Fault::DroppedPut);
+    s.inject(Trigger::Nth(Op::PutIfAbsent, 2), Fault::DroppedPut);
+    assert_eq!(
+        s.put_if_absent(&k, data()).unwrap(),
+        PutOutcome::AlreadyExists,
+        "fencing holds"
+    );
+    assert_eq!(
+        s.put_if_absent(&k, theirs.clone()).unwrap(),
+        PutOutcome::Created
+    );
+    assert_eq!(s.inner().get(&k).unwrap(), theirs);
+    assert_eq!(s.injected().len(), 2);
+}
+
+#[test]
+fn pending_lists_faults_that_have_not_fired() {
+    let s = faulty(1);
+    s.inject(Trigger::Call(2), Fault::Io);
+    s.inject(Trigger::Nth(Op::Delete, 1), Fault::Io);
+    s.get(&key("k")).unwrap_err();
+    assert_eq!(
+        s.pending(),
+        [
+            (Trigger::Call(2), Fault::Io),
+            (Trigger::Nth(Op::Delete, 1), Fault::Io)
+        ]
+    );
+    s.get(&key("k")).unwrap_err();
+    assert_eq!(s.pending(), [(Trigger::Nth(Op::Delete, 1), Fault::Io)]);
+}
+
+#[test]
+fn a_shared_inner_store_survives_the_wrapper() {
+    let store = Arc::new(MemoryStorage::new());
+    let s = FaultyStorage::new(Arc::clone(&store), 1);
+    s.inject(Trigger::Nth(Op::Put, 2), Fault::Io);
+    s.put(&key("a"), data()).unwrap();
+    s.put(&key("b"), data()).unwrap_err();
+    drop(s);
+    // "Reopen" on what survived, through the trait object the engine will hold.
+    let reopened: Box<dyn Storage> = Box::new(store);
+    assert_eq!(reopened.get(&key("a")).unwrap(), data());
+    assert_eq!(
+        reopened.get(&key("b")).unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+    assert!(reopened.capabilities().conditional_put);
+    let s = FaultyStorage::new(MemoryStorage::new(), 2);
+    s.put(&key("c"), data()).unwrap();
+    assert_eq!(s.into_inner().get(&key("c")).unwrap(), data());
 }
 
 #[test]
@@ -274,7 +339,7 @@ fn run_workload(s: &FaultyStorage<MemoryStorage>) -> (Vec<(Op, bool)>, Vec<Injec
 
 fn random_faults(one_in: u64) -> RandomFaults {
     RandomFaults {
-        one_in,
+        one_in: NonZeroU64::new(one_in).unwrap(),
         faults: vec![
             Fault::Transient,
             Fault::Io,
@@ -302,6 +367,20 @@ proptest! {
 }
 
 #[test]
+fn different_seeds_give_different_schedules() {
+    let schedule = |seed| {
+        let s = faulty(seed).with_clock(RecordingClock::default());
+        s.set_random(Some(random_faults(3)));
+        run_workload(&s).1
+    };
+    let first = schedule(0);
+    assert!(
+        (1..5).any(|seed| schedule(seed) != first),
+        "the schedule ignores the seed"
+    );
+}
+
+#[test]
 fn random_faults_hit_about_one_call_in_n_and_stop_when_disarmed() {
     let s = faulty(42).with_clock(RecordingClock::default());
     s.set_random(Some(random_faults(4)));
@@ -323,7 +402,7 @@ fn random_faults_hit_about_one_call_in_n_and_stop_when_disarmed() {
 fn scripted_faults_take_precedence_over_random_ones() {
     let s = faulty(5);
     s.set_random(Some(RandomFaults {
-        one_in: 1,
+        one_in: NonZeroU64::MIN,
         faults: vec![Fault::Io],
     }));
     s.inject(Trigger::Call(1), Fault::Transient);
@@ -331,7 +410,7 @@ fn scripted_faults_take_precedence_over_random_ones() {
     assert_eq!(s.get(&key("k")).unwrap_err().kind(), ErrorKind::Io);
     // No applicable fault to choose from: the call proceeds.
     s.set_random(Some(RandomFaults {
-        one_in: 1,
+        one_in: NonZeroU64::MIN,
         faults: vec![Fault::DroppedPut],
     }));
     assert_eq!(s.get(&key("k")).unwrap_err().kind(), ErrorKind::NotFound);

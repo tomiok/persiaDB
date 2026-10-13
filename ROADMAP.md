@@ -171,6 +171,9 @@ Deps: M1.
   - [~] 2.2.2.2 Seeded RNG schedule so failures are reproducible
   - [~] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
 - [~] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
+- 2.2.4 `FaultyStorage` crash modelling, needed by 6.3.5 (found in the 2.2 review)
+  - [ ] 2.2.4.1 Sticky crash: from a trigger on, every call fails (`Trigger::From(n)`), so a test models process death instead of one failed call
+  - [ ] 2.2.4.2 Volatile-until-crash writes (dropped fsync): writes are visible until `crash()`, then a seeded subset of the unsynced ones is lost
 
 ## 2.3 Local filesystem backend (object-per-file)
 - [ ] 2.3.1 Atomic `put`: write temp → fsync → rename → fsync dir
@@ -179,6 +182,7 @@ Deps: M1.
 - [ ] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; segments over 255 bytes and (Windows) reserved names and trailing `.`/space as `InvalidInput`; `list` never resolves a prefix as a path (SPEC §10.1); [T] traversal attempts
 - [ ] 2.3.5 Run conformance suite
 - [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
+- [ ] 2.3.7 Store keys that are segment-prefixes of each other (`a` and `a/b`, SPEC §10.1): name encoding so an object never collides with a directory; round-trip names byte-exactly on case-insensitive and normalizing filesystems (APFS NFD, NTFS); [T] the conformance model already generates such pairs
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots

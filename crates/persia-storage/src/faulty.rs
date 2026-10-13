@@ -4,6 +4,7 @@
 //! generator ([`RandomFaults`]), so a failing test is replayed from its seed. Every injected fault is logged
 //! ([`FaultyStorage::injected`]) for the failure message.
 
+use core::num::NonZeroU64;
 use core::ops::Range;
 use core::time::Duration;
 use std::io;
@@ -27,11 +28,13 @@ pub enum Fault {
     Io,
     /// The call sleeps this long on the injected [`Clock`], then proceeds normally.
     Latency(Duration),
-    /// `put` / `put_if_absent` only: a strict prefix of the data (length drawn from the seed) is written, then the
-    /// call returns [`Error::Io`], as a crash mid-write leaves a non-atomic store. An empty object is written whole.
+    /// `put` only: a strict prefix of the data (length drawn from the seed) is written, then the call returns
+    /// [`Error::Io`]. This deliberately breaks the atomicity SPEC §10.1 promises, as a crash mid-write does to a
+    /// store without atomic replace: it tests that readers detect the damage (checksums), not a backend behavior.
+    /// An empty object is written whole. `put_if_absent` is atomic on every backend, so it is never torn.
     TornPut,
-    /// `put` / `put_if_absent` only: nothing is written, yet the call succeeds (`Created`), as a write lost before
-    /// it was made durable.
+    /// `put` / `put_if_absent`: nothing is written, yet the call succeeds, as a write lost before it was made
+    /// durable. `put_if_absent` still answers `AlreadyExists` for another writer's object, so fencing holds.
     DroppedPut,
     /// Applied; the response is lost, so the call returns [`Error::Transient`] (SPEC §10.1: a failed attempt may
     /// have been applied). An error from the inner backend is returned as is.
@@ -39,20 +42,25 @@ pub enum Fault {
 }
 
 impl Fault {
-    /// Whether the fault can happen to `op`: write faults only to `put` and `put_if_absent`.
+    /// Whether the fault can happen to `op`: [`TornPut`](Self::TornPut) only to `put`,
+    /// [`DroppedPut`](Self::DroppedPut) to `put` and `put_if_absent`, the others to every operation.
     pub fn applies_to(self, op: Op) -> bool {
         match self {
-            Self::TornPut | Self::DroppedPut => matches!(op, Op::Put | Op::PutIfAbsent),
+            Self::TornPut => op == Op::Put,
+            Self::DroppedPut => matches!(op, Op::Put | Op::PutIfAbsent),
             Self::Transient | Self::Io | Self::Latency(_) | Self::ResponseLost => true,
         }
     }
 }
 
 /// Which call a scripted fault hits. Calls are counted from 1, in the order they reach the wrapper.
+///
+/// A fault whose trigger fires on a call it does not [apply](Fault::applies_to) to is discarded; one whose
+/// trigger never fires stays [pending](FaultyStorage::pending). Tests assert `pending()` is empty to be sure every
+/// scripted fault was injected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Trigger {
-    /// The n-th call of any operation. A fault that does not [apply](Fault::applies_to) to that call's operation is
-    /// discarded.
+    /// The n-th call of any operation.
     Call(u64),
     /// The n-th call of one operation.
     Nth(Op, u64),
@@ -62,8 +70,8 @@ pub enum Trigger {
 /// among those in `faults` that [apply](Fault::applies_to) to its operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RandomFaults {
-    /// The inverse of the fault probability; `0` and `1` fault every call.
-    pub one_in: u64,
+    /// The inverse of the fault probability; `1` faults every call.
+    pub one_in: NonZeroU64,
     /// The faults to choose from.
     pub faults: Vec<Fault>,
 }
@@ -83,19 +91,48 @@ pub struct Injection {
     pub kept: Option<usize>,
 }
 
-#[derive(Debug, Default)]
+/// Everything a call's fault depends on, behind one lock: the generator is only advanced while the call is
+/// counted, so the schedule is a function of the seed and the call order.
+#[derive(Debug)]
 struct State {
     calls: u64,
     per_op: [u64; 6],
     scripted: Vec<(Trigger, Fault)>,
     random: Option<RandomFaults>,
+    rng: Jitter,
     log: Vec<Injection>,
+}
+
+impl State {
+    fn draw(&self, op: Op) -> Option<Fault> {
+        let random = self.random.as_ref()?;
+        if self.rng.next_u64().checked_rem(random.one_in.get()) != Some(0) {
+            return None;
+        }
+        let applicable: Vec<Fault> = random
+            .faults
+            .iter()
+            .copied()
+            .filter(|f| f.applies_to(op))
+            .collect();
+        let n = u64::try_from(applicable.len()).ok()?;
+        let i = usize::try_from(self.rng.next_u64().checked_rem(n)?).ok()?;
+        applicable.get(i).copied()
+    }
+
+    /// A strict prefix length of a `len`-byte write (0 for an empty one).
+    fn torn_len(&self, len: usize) -> usize {
+        let len = u64::try_from(len).unwrap_or(u64::MAX);
+        let kept = self.rng.next_u64().checked_rem(len).unwrap_or(0);
+        usize::try_from(kept).unwrap_or(0)
+    }
 }
 
 /// A [`Storage`] that forwards to `inner` except for the calls chosen to fail.
 ///
 /// The schedule is a function of the seed and the order of calls, so it is reproducible when the calls are
-/// (e.g. one thread). Capabilities are the inner backend's.
+/// (e.g. one thread). Capabilities are the inner backend's. To reopen on what survived a faulted run, wrap an
+/// `Arc` of the backend and keep a clone.
 ///
 /// ```
 /// use bytes::Bytes;
@@ -115,7 +152,6 @@ struct State {
 pub struct FaultyStorage<S> {
     inner: S,
     seed: u64,
-    rng: Jitter,
     clock: Box<dyn Clock>,
     state: Mutex<State>,
 }
@@ -127,9 +163,15 @@ impl<S: Storage> FaultyStorage<S> {
         Self {
             inner,
             seed,
-            rng: Jitter::new(seed),
             clock: Box::new(SystemClock),
-            state: Mutex::default(),
+            state: Mutex::new(State {
+                calls: 0,
+                per_op: [0; 6],
+                scripted: Vec::new(),
+                random: None,
+                rng: Jitter::new(seed),
+                log: Vec::new(),
+            }),
         }
     }
 
@@ -140,9 +182,15 @@ impl<S: Storage> FaultyStorage<S> {
         self
     }
 
-    /// Arms `fault` for the call `trigger` selects; it fires once. Scripted faults take precedence over random ones.
+    /// Arms `fault` for the call `trigger` selects; it fires once. Scripted faults take precedence over random ones,
+    /// and the first armed of two on the same call wins.
     pub fn inject(&self, trigger: Trigger, fault: Fault) {
         self.state().scripted.push((trigger, fault));
+    }
+
+    /// Scripted faults whose trigger has not fired yet.
+    pub fn pending(&self) -> Vec<(Trigger, Fault)> {
+        self.state().scripted.clone()
     }
 
     /// Faults calls at random from now on (`None` stops).
@@ -170,6 +218,11 @@ impl<S: Storage> FaultyStorage<S> {
         &self.inner
     }
 
+    /// The wrapped backend, without the wrapper.
+    pub fn into_inner(self) -> S {
+        self.inner
+    }
+
     // A panic while the lock is held (only in this module's bookkeeping) leaves counters that are still usable.
     fn state(&self) -> std::sync::MutexGuard<'_, State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
@@ -193,15 +246,12 @@ impl<S: Storage> FaultyStorage<S> {
                 Trigger::Nth(o, n) => *o == op && *n == nth,
             });
         let fault = if let Some(i) = hit {
-            let (_, fault) = state.scripted.swap_remove(i);
+            let (_, fault) = state.scripted.remove(i);
             Some(fault).filter(|f| f.applies_to(op))
         } else {
-            state
-                .random
-                .as_ref()
-                .and_then(|random| self.draw(random, op))
+            state.draw(op)
         }?;
-        let kept = (fault == Fault::TornPut).then(|| self.torn_len(len));
+        let kept = (fault == Fault::TornPut).then(|| state.torn_len(len));
         let injection = Injection {
             call,
             op,
@@ -211,28 +261,6 @@ impl<S: Storage> FaultyStorage<S> {
         };
         state.log.push(injection.clone());
         Some(injection)
-    }
-
-    fn draw(&self, random: &RandomFaults, op: Op) -> Option<Fault> {
-        if self.rng.next_u64().checked_rem(random.one_in).unwrap_or(0) != 0 {
-            return None;
-        }
-        let applicable: Vec<Fault> = random
-            .faults
-            .iter()
-            .copied()
-            .filter(|f| f.applies_to(op))
-            .collect();
-        let n = u64::try_from(applicable.len()).ok()?;
-        let i = usize::try_from(self.rng.next_u64().checked_rem(n)?).ok()?;
-        applicable.get(i).copied()
-    }
-
-    /// A strict prefix length of a `len`-byte write (0 for an empty one).
-    fn torn_len(&self, len: usize) -> usize {
-        let len = u64::try_from(len).unwrap_or(u64::MAX);
-        let kept = self.rng.next_u64().checked_rem(len).unwrap_or(0);
-        usize::try_from(kept).unwrap_or(0)
     }
 
     fn sleep_or_fail(&self, injection: &Injection) -> Result<()> {
@@ -265,13 +293,14 @@ impl<S: Storage> FaultyStorage<S> {
         Ok(out)
     }
 
-    /// Runs a write of `data`: `write` is called with the bytes to store (a prefix for a torn put).
+    /// Runs a write of `data`: `write` is called with the bytes to store (a prefix for a torn put); `dropped`
+    /// answers a dropped write without writing.
     fn write_op<T>(
         &self,
         op: Op,
         key: &Key,
         data: Bytes,
-        acked: T,
+        dropped: impl FnOnce(&Bytes) -> Result<T>,
         write: impl FnOnce(Bytes) -> Result<T>,
     ) -> Result<T> {
         let Some(injection) = self.decide(op, key.as_str(), data.len()) else {
@@ -279,7 +308,7 @@ impl<S: Storage> FaultyStorage<S> {
         };
         self.sleep_or_fail(&injection)?;
         match injection.fault {
-            Fault::DroppedPut => Ok(acked),
+            Fault::DroppedPut => dropped(&data),
             Fault::TornPut => {
                 let kept = injection.kept.unwrap_or(0).min(data.len());
                 write(data.slice(..kept))?;
@@ -329,11 +358,25 @@ impl<S: Storage> Storage for FaultyStorage<S> {
     }
 
     fn put(&self, key: &Key, data: Bytes) -> Result<()> {
-        self.write_op(Op::Put, key, data, (), |data| self.inner.put(key, data))
+        self.write_op(
+            Op::Put,
+            key,
+            data,
+            |_| Ok(()),
+            |data| self.inner.put(key, data),
+        )
     }
 
     fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
-        self.write_op(Op::PutIfAbsent, key, data, PutOutcome::Created, |data| {
+        // A dropped write is only acknowledged as `Created` where the real call could have created the object;
+        // another writer's object is still reported, so a dropped write never breaks fencing (SPEC §11.3).
+        let dropped = |data: &Bytes| match self.inner.get(key) {
+            Ok(existing) if existing == *data => Ok(PutOutcome::Created),
+            Ok(_) => Ok(PutOutcome::AlreadyExists),
+            Err(Error::NotFound { .. }) => Ok(PutOutcome::Created),
+            Err(err) => Err(err),
+        };
+        self.write_op(Op::PutIfAbsent, key, data, dropped, |data| {
             self.inner.put_if_absent(key, data)
         })
     }

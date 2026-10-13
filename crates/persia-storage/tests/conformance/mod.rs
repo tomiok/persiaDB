@@ -3,6 +3,10 @@
 //! A backend's test crate declares `mod conformance;` and invokes [`storage_conformance!`] with an expression that
 //! builds a fresh, empty store; every check becomes its own `#[test]`. Checks that depend on a capability read
 //! [`Storage::capabilities`] and test the documented fallback (e.g. `Unsupported`) when it is absent.
+//!
+//! Teardown is the store's job: the expression runs once per test and once per model case, so a local backend owns
+//! its temporary directory (dropped with it), and a cloud backend works under a unique prefix per store and deletes
+//! it on drop (or the emulator is discarded after the run).
 
 // Test-only code: unwraps and indexing are the point.
 #![allow(dead_code, clippy::unwrap_used, clippy::indexing_slicing)]
@@ -11,14 +15,21 @@ use std::collections::BTreeMap;
 use std::sync::Barrier;
 
 use bytes::Bytes;
-use persia_storage::{ErrorKind, Key, KeyPrefix, PutOutcome, Storage};
+use persia_storage::{Error, ErrorKind, Key, KeyPrefix, PutOutcome, Storage};
 use proptest::prelude::*;
 
-/// Emits one `#[test]` per conformance check; `$make` is evaluated once per test (and per proptest case) and must
-/// yield a fresh, empty backend.
+/// Model cases by default: enough for a fast in-process backend; slow and remote backends pass fewer.
+pub const MODEL_CASES: u32 = if cfg!(feature = "slow") { 2048 } else { 128 };
+
+/// Emits one `#[test]` per conformance check; `$make` is evaluated once per test (and per model case) and must
+/// yield a fresh, empty backend. `cases = n` sets the number of random operation sequences checked against the
+/// model (default [`MODEL_CASES`]); failing sequences are saved next to the test file, like any proptest.
 #[macro_export]
 macro_rules! storage_conformance {
     ($make:expr) => {
+        $crate::storage_conformance!($make, cases = $crate::conformance::MODEL_CASES);
+    };
+    ($make:expr, cases = $cases:expr) => {
         $crate::storage_conformance!(@tests $make;
             missing_objects_are_not_found,
             put_then_get_round_trips,
@@ -26,14 +37,21 @@ macro_rules! storage_conformance {
             get_range_returns_exactly_the_range_at_its_offset,
             get_range_past_the_end_is_a_short_read,
             inverted_ranges_are_invalid_input,
+            longest_keys_round_trip,
             put_if_absent_creates_once,
             put_if_absent_finding_equal_bytes_is_created,
             list_is_sorted_and_filtered_by_byte_prefix,
             delete_is_idempotent,
             concurrent_put_if_absent_has_one_winner,
             concurrent_readers_never_see_a_torn_put,
-            operations_match_a_model,
         );
+        proptest::proptest! {
+            #![proptest_config(proptest::prelude::ProptestConfig::with_cases($cases))]
+            #[test]
+            fn operations_match_a_model(ops in $crate::conformance::model_ops()) {
+                $crate::conformance::check_against_model(&$make, &ops)?;
+            }
+        }
     };
     (@tests $make:expr; $($check:ident,)*) => {
         $(
@@ -123,8 +141,10 @@ pub fn get_range_past_the_end_is_a_short_read<S: Storage>(make: Make<'_, S>) {
     for range in [8..11, 0..11, 10..11, 11..11, 20..30, 0..u64::MAX] {
         let err = s.get_range(&k, range.clone()).unwrap_err();
         assert_eq!(err.kind(), ErrorKind::Corrupt, "{range:?}: {err}");
+        let available = 10u64.saturating_sub(range.start);
         assert!(
-            matches!(&err, persia_storage::Error::ShortRead { requested, .. } if *requested == range),
+            matches!(&err, Error::ShortRead { requested, returned, .. }
+                if *requested == range && *returned == available),
             "{range:?}: {err}"
         );
     }
@@ -139,6 +159,26 @@ pub fn inverted_ranges_are_invalid_input<S: Storage>(make: Make<'_, S>) {
     s.put(&k, Bytes::from_static(b"0123456789")).unwrap();
     assert_eq!(kind(s.get_range(&k, 5..4)), ErrorKind::InvalidInput);
     assert_eq!(kind(s.get_range(&k, u64::MAX..0)), ErrorKind::InvalidInput);
+}
+
+/// The longest key (1024 bytes, SPEC §10.1) with segments of up to 255 bytes, the longest file name most local
+/// filesystems accept.
+pub fn longest_keys_round_trip<S: Storage>(make: Make<'_, S>) {
+    let s = make();
+    let segs = [255, 255, 255, 254, 1].map(|n| "x".repeat(n));
+    let k = key(&segs.join("/"));
+    assert_eq!(k.as_str().len(), Key::MAX_LEN);
+    s.put(&k, Bytes::from_static(b"long")).unwrap();
+    assert_eq!(&s.get(&k).unwrap()[..], b"long");
+    assert_eq!(&*s.get_range(&k, 1..3).unwrap(), b"on");
+    if s.capabilities().strong_list {
+        assert_eq!(
+            listed(&s, &segs[..2].join("/")),
+            [(k.as_str().to_owned(), 4)]
+        );
+    }
+    s.delete(&k).unwrap();
+    assert_eq!(kind(s.get(&k)), ErrorKind::NotFound);
 }
 
 pub fn put_if_absent_creates_once<S: Storage>(make: Make<'_, S>) {
@@ -202,7 +242,8 @@ pub fn put_if_absent_finding_equal_bytes_is_created<S: Storage>(make: Make<'_, S
 
 pub fn list_is_sorted_and_filtered_by_byte_prefix<S: Storage>(make: Make<'_, S>) {
     let s = make();
-    // Inserted out of order; "b0" sorts after "b/…" ('/' < '0') and matches prefix "b" but not "b/".
+    // Inserted out of order; "b0" sorts after "b/…" ('/' < '0') and matches prefix "b" but not "b/". "é" (precomposed,
+    // NFC) must be listed byte-exact: a filesystem that normalizes names (HFS+ stores NFD) would list another key.
     for (k, len) in [
         ("c", 3),
         ("b0", 2),
@@ -273,26 +314,36 @@ pub fn concurrent_put_if_absent_has_one_winner<S: Storage>(make: Make<'_, S>) {
     for round in 0..20 {
         let k = key(&format!("manifests/{round:08}"));
         let barrier = Barrier::new(WRITERS);
-        let outcomes: Vec<(Bytes, PutOutcome)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = (0..WRITERS)
-                .map(|w| {
-                    let (s, k, barrier) = (&s, &k, &barrier);
-                    scope.spawn(move || {
-                        let data = Bytes::from(format!("manifest by writer {w}"));
-                        barrier.wait();
-                        (data.clone(), s.put_if_absent(k, data).unwrap())
+        let attempts: Vec<(Bytes, persia_storage::Result<PutOutcome>)> =
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..WRITERS)
+                    .map(|w| {
+                        let (s, k, barrier) = (&s, &k, &barrier);
+                        scope.spawn(move || {
+                            let data = Bytes::from(format!("manifest by writer {w}"));
+                            barrier.wait();
+                            (data.clone(), s.put_if_absent(k, data))
+                        })
                     })
-                })
-                .collect();
-            handles.into_iter().map(|h| h.join().unwrap()).collect()
-        });
-        let winners: Vec<&Bytes> = outcomes
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+        // SPEC §10.1: an error (retries exhausted, e.g. a storm of conditional-write conflicts) leaves the outcome
+        // unknown, so only a winner that answered is checked against the stored bytes.
+        let winners: Vec<&Bytes> = attempts
             .iter()
-            .filter(|(_, o)| *o == PutOutcome::Created)
+            .filter(|(_, o)| matches!(o, Ok(PutOutcome::Created)))
             .map(|(d, _)| d)
             .collect();
-        assert_eq!(winners.len(), 1, "round {round}: {outcomes:?}");
-        assert_eq!(&s.get(&k).unwrap(), winners[0], "round {round}");
+        assert!(winners.len() <= 1, "round {round}: {attempts:?}");
+        let stored = s.get(&k).unwrap();
+        match winners.first() {
+            Some(winner) => assert_eq!(&stored, *winner, "round {round}"),
+            None => assert!(
+                attempts.iter().any(|(d, o)| o.is_err() && *d == stored),
+                "round {round}: no winner, stored {stored:?}: {attempts:?}"
+            ),
+        }
     }
 }
 
@@ -307,14 +358,22 @@ pub fn concurrent_readers_never_see_a_torn_put<S: Storage>(make: Make<'_, S>) {
                 s.put(&k, versions[i % 2].clone()).unwrap();
             }
         });
-        for _ in 0..2 {
-            scope.spawn(|| {
-                for _ in 0..500 {
-                    let got = s.get(&k).unwrap();
-                    assert!(versions.contains(&got), "torn read of {} bytes", got.len());
-                }
-            });
-        }
+        scope.spawn(|| {
+            for _ in 0..500 {
+                let got = s.get(&k).unwrap();
+                assert!(versions.contains(&got), "torn read of {} bytes", got.len());
+            }
+        });
+        // Ranged reads are a separate code path in most backends; both versions cover 0..100.
+        scope.spawn(|| {
+            for _ in 0..500 {
+                let got = s.get_range(&k, 0..100).unwrap();
+                assert!(
+                    versions.iter().any(|v| *got == v[..100]),
+                    "torn ranged read"
+                );
+            }
+        });
     });
 }
 
@@ -421,13 +480,7 @@ pub fn check_against_model(s: &dyn Storage, ops: &[ModelOp]) -> Result<(), TestC
     Ok(())
 }
 
-pub fn operations_match_a_model<S: Storage>(make: Make<'_, S>) {
-    let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(
-        if cfg!(feature = "slow") { 2048 } else { 128 },
-    ));
-    runner
-        .run(&prop::collection::vec(model_op(), 0..40), |ops| {
-            check_against_model(&make(), &ops)
-        })
-        .unwrap();
+/// Random operation sequences for [`check_against_model`].
+pub fn model_ops() -> impl Strategy<Value = Vec<ModelOp>> {
+    prop::collection::vec(model_op(), 0..40)
 }
