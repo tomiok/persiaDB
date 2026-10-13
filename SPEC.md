@@ -841,6 +841,10 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 - **Differential testing**: random operation sequences (put/delete/commit/merge/reopen/crash) executed against the engine and the
   reference model; results (hit sets, scores within epsilon) MUST match.
 - **Crash testing**: fault-injecting `Storage` (torn writes, dropped fsync, partial uploads, reordering) and `kill -9` loops.
+  `FaultyStorage` wraps any backend and injects errors, latency, torn and dropped writes, and applied writes whose
+  response is lost, on a schedule scripted per call or drawn from a seed, so every failure replays from its seed.
+- **Storage conformance**: every `Storage` backend passes one shared suite of the §10.1 contract, including a
+  model-based random operation sequence and concurrent `put_if_absent` races.
 - Integration against MinIO, fake-gcs-server, Azurite via docker-compose.
 - Synthetic load + soak tests, relevance regression suite (fixed corpora + judged queries; nDCG@10 tracked).
 

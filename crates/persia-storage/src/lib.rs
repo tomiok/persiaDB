@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
 pub mod error;
+pub mod faulty;
 pub mod key;
 pub mod memory;
 pub mod meta;
