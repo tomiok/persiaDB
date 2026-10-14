@@ -675,7 +675,9 @@ macOS NFD file names, and no case folding).
   different length than requested, is `ShortRead`, which is corruption: offsets come from committed metadata.
   A transfer the backend knows was cut off (connection dropped, body shorter than its `Content-Length`) is
   `Transient`, detected before the length check.
-- `put` replaces the object; readers see the old or the new bytes, never a mix.
+- `put` replaces the object; readers see the old or the new bytes, never a mix. An acknowledged `put` or
+  `put_if_absent` is durable: it survives a crash of the process or the machine (the local backend fsyncs the file
+  and its directory before returning, ROADMAP 2.3.1).
 - `put_if_absent` returns `Created` or `AlreadyExists`, atomically. A backend without `conditional_put` returns
   `Unsupported` instead of emulating it with a racy check. **`AlreadyExists` is ambiguous**: an attempt that failed
   may have been applied (including a retry inside the backend's SDK, invisible to Persia), so the object found may be
@@ -848,10 +850,11 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
   `FaultyStorage` wraps any backend and injects errors, latency, torn and dropped writes, and applied writes whose
   response is lost, on a schedule scripted per call or drawn from a seed, so a failure replays from its seed when
   the calls are made in a deterministic order (e.g. one thread).
-  A crash fault models process death: that call and every later one fail. In volatile mode acknowledged writes stay
-  readable but unsynced until the test syncs them, and a crash loses a seeded subset: a suffix of all unsynced
-  writes (an ordered write-back cache, which correctly ordered software survives), or a suffix per object (writes
-  to different objects reordered, to check that the damage is detected rather than a panic).
+  A crash fault models process death: that call (applied or not) and every later one fail. In volatile mode, which
+  breaks the durability §10.1 promises on purpose, acknowledged writes stay readable but unsynced until the test
+  syncs them, and a crash loses a seeded subset: a suffix of all unsynced writes (an ordered write-back cache, which
+  correctly ordered software survives), or a suffix per object (writes to different objects reordered, to check
+  that the damage is detected rather than a panic). A crash never undoes an object another writer has replaced since.
 - **Storage conformance**: every `Storage` backend passes one shared suite of the §10.1 contract, including a
   model-based random operation sequence and concurrent `put_if_absent` races.
 - Integration against MinIO, fake-gcs-server, Azurite via docker-compose.

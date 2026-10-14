@@ -14,7 +14,7 @@ use core::num::NonZeroU64;
 use core::ops::Range;
 use core::time::Duration;
 use std::io;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use bytes::Bytes;
 use persia_format::ByteSource;
@@ -51,15 +51,21 @@ pub enum Fault {
     /// until [`restart`](FaultyStorage::restart); in volatile mode the crash first loses unsynced writes. Logged
     /// once, for the call that crashed.
     Crash,
+    /// `put` / `put_if_absent` / `delete`: the call is applied, then the process dies before answering, so the
+    /// caller never learns the outcome (SPEC §10.4: a commit whose result is unknown). Fails like [`Crash`](Self::Crash),
+    /// which it then is; in volatile mode the applied write may be among those the crash loses.
+    CrashAfter,
 }
 
 impl Fault {
     /// Whether the fault can happen to `op`: [`TornPut`](Self::TornPut) only to `put`,
-    /// [`DroppedPut`](Self::DroppedPut) to `put` and `put_if_absent`, the others to every operation.
+    /// [`DroppedPut`](Self::DroppedPut) to `put` and `put_if_absent`, [`CrashAfter`](Self::CrashAfter) to those and
+    /// `delete`, the others to every operation.
     pub fn applies_to(self, op: Op) -> bool {
         match self {
             Self::TornPut => op == Op::Put,
             Self::DroppedPut => matches!(op, Op::Put | Op::PutIfAbsent),
+            Self::CrashAfter => matches!(op, Op::Put | Op::PutIfAbsent | Op::Delete),
             Self::Transient | Self::Io | Self::Latency(_) | Self::ResponseLost | Self::Crash => {
                 true
             }
@@ -67,7 +73,8 @@ impl Fault {
     }
 }
 
-/// Which call a scripted fault hits. Calls are counted from 1, in the order they reach the wrapper.
+/// Which call a scripted fault hits. Calls are counted from 1, in the order they reach the wrapper, including the
+/// calls a crashed store fails; those fire no trigger, so a trigger that falls on one stays pending.
 ///
 /// A fault whose trigger fires on a call it does not [apply](Fault::applies_to) to is discarded; one whose
 /// trigger never fires stays [pending](FaultyStorage::pending). Tests assert `pending()` is empty to be sure every
@@ -171,9 +178,11 @@ pub struct FaultyStorage<S> {
     seed: u64,
     clock: Box<dyn Clock>,
     state: Mutex<State>,
-    // Held across a volatile write (reading what it replaces, then writing) and across a crash's undo, so no
-    // write lands between the two. Taken before `state`.
-    writes: Mutex<()>,
+    // Every call reaches `inner` under this lock and re-checks `crashed` there, so nothing lands after a crash.
+    // Shared by reads and durable writes, so they still race in the inner backend; exclusive for a volatile write
+    // (reading what it replaces, writing, reading what it left), a crash's undo, `sync`, `restart` and mode changes.
+    // Taken before `state`.
+    gate: RwLock<()>,
 }
 
 impl<S: Storage> FaultyStorage<S> {
@@ -184,7 +193,7 @@ impl<S: Storage> FaultyStorage<S> {
             inner,
             seed,
             clock: Box::new(SystemClock),
-            writes: Mutex::new(()),
+            gate: RwLock::new(()),
             state: Mutex::new(State {
                 calls: 0,
                 per_op: [0; 6],
@@ -250,12 +259,16 @@ impl<S: Storage> FaultyStorage<S> {
     /// Crashes now, as if [`Fault::Crash`] hit the next call: in volatile mode unsynced writes are lost, then every
     /// call fails until [`restart`](Self::restart). Crashing a crashed store does nothing.
     ///
+    /// A lost write is undone only if its object still holds what the write left: an object another writer has
+    /// since replaced (a second wrapper or process on the same inner store) keeps that writer's bytes, since one
+    /// process dying cannot undo another's write.
+    ///
     /// # Errors
-    /// The inner backend's error while undoing a lost write; the store is crashed all the same, with the
-    /// remaining lost writes still applied.
+    /// The inner backend's error while undoing a lost write. The store is crashed all the same; the writes not
+    /// undone stay unsynced (a later crash may lose them) and are not listed by [`lost`](Self::lost).
     pub fn crash(&self) -> Result<()> {
-        let _writes = self.writes();
-        let undo = {
+        let _gate = self.exclusive();
+        let mut undo = {
             let mut state = self.state();
             if state.crashed {
                 return Ok(());
@@ -267,15 +280,34 @@ impl<S: Storage> FaultyStorage<S> {
             let loss = volatile.loss;
             let undo = volatile.crash(&state.rng);
             state.volatile = Some(Volatile::new(loss));
-            state.lost.extend(undo.iter().map(|u| u.write.clone()));
             undo
-        };
-        for Unsynced { write, before } in undo {
-            match before {
-                Some(data) => self.inner.put(&write.key, data)?,
-                None => self.inner.delete(&write.key)?,
+        }
+        .into_iter();
+        while let Some(unsynced) = undo.next() {
+            if let Err(err) = self.undo(&unsynced) {
+                if let Some(volatile) = self.state().volatile.as_mut() {
+                    // `undo` is newest first; the log is oldest first.
+                    let mut left: Vec<Unsynced> = core::iter::once(unsynced).chain(undo).collect();
+                    left.reverse();
+                    volatile.writes.splice(0..0, left);
+                }
+                return Err(err);
             }
         }
+        Ok(())
+    }
+
+    /// Restores what `unsynced` replaced, if its object still holds what it left; lists it as lost if so.
+    fn undo(&self, unsynced: &Unsynced) -> Result<()> {
+        let key = &unsynced.write.key;
+        if self.read_back(key)? != unsynced.after {
+            return Ok(());
+        }
+        match &unsynced.before {
+            Some(data) => self.inner.put(key, data.clone())?,
+            None => self.inner.delete(key)?,
+        }
+        self.state().lost.push(unsynced.write.clone());
         Ok(())
     }
 
@@ -287,12 +319,18 @@ impl<S: Storage> FaultyStorage<S> {
     /// Comes back after a crash, on what survived: calls reach the inner backend again. Armed faults, call
     /// counters and the volatile mode are kept.
     pub fn restart(&self) {
+        let _gate = self.exclusive();
         self.state().crashed = false;
     }
 
     /// Makes acknowledged writes volatile from now on (`Some`), so a crash loses some of them as `loss` says; or
     /// durable (`None`), which also makes every write so far durable. Changing the mode keeps the unsynced writes.
+    ///
+    /// SPEC §10.1 promises that an acknowledged write is durable, so volatile mode breaks the contract on purpose:
+    /// a test under it must not expect an acknowledged commit to survive a crash unless it called
+    /// [`sync`](Self::sync) after it.
     pub fn set_volatile(&self, loss: Option<CrashLoss>) {
+        let _gate = self.exclusive();
         let mut state = self.state();
         state.volatile = match (loss, state.volatile.take()) {
             (None, _) => None,
@@ -306,6 +344,7 @@ impl<S: Storage> FaultyStorage<S> {
 
     /// Makes every write so far durable: a later crash cannot lose it (an fsync of everything).
     pub fn sync(&self) {
+        let _gate = self.exclusive();
         if let Some(volatile) = self.state().volatile.as_mut() {
             volatile.writes.clear();
         }
@@ -321,8 +360,21 @@ impl<S: Storage> FaultyStorage<S> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn writes(&self) -> MutexGuard<'_, ()> {
-        self.writes.lock().unwrap_or_else(PoisonError::into_inner)
+    fn shared(&self) -> RwLockReadGuard<'_, ()> {
+        self.gate.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn exclusive(&self) -> RwLockWriteGuard<'_, ()> {
+        self.gate.write().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// The object under `key`, or `None`, read past the wrapper.
+    fn read_back(&self, key: &Key) -> Result<Option<Bytes>> {
+        match self.inner.get(key) {
+            Ok(data) => Ok(Some(data)),
+            Err(Error::NotFound { .. }) => Ok(None),
+            Err(err) => Err(err),
+        }
     }
 
     /// Counts the call and decides its fault; `len` is the data length of a write. Returns the call number.
@@ -333,12 +385,12 @@ impl<S: Storage> FaultyStorage<S> {
         let mut state = self.state();
         state.calls = state.calls.saturating_add(1);
         let call = state.calls;
-        if state.crashed {
-            return Err(crashed(op, target));
-        }
         let slot = op_index(op);
         if let Some(n) = state.per_op.get_mut(slot) {
             *n = n.saturating_add(1);
+        }
+        if state.crashed {
+            return Err(crashed(op, target, None));
         }
         let nth = state.per_op.get(slot).copied().unwrap_or(0);
         let hit = state
@@ -381,17 +433,30 @@ impl<S: Storage> FaultyStorage<S> {
                 target: injection.target.clone(),
                 source: io::Error::other("injected I/O fault"),
             }),
-            Fault::Crash => {
-                self.crash()?;
-                Err(crashed(injection.op, &injection.target))
-            }
-            Fault::TornPut | Fault::DroppedPut | Fault::ResponseLost => Ok(()),
+            Fault::Crash => Err(self.die(injection)),
+            Fault::TornPut | Fault::DroppedPut | Fault::ResponseLost | Fault::CrashAfter => Ok(()),
         }
     }
 
-    /// Runs `write` of `key` unless the store crashed since the call was decided; in volatile mode records what it
-    /// replaces first, so a crash can undo it. Whatever the outcome is recorded: a failed write (torn, or with a lost
-    /// response) may have changed the object too. Writes through the wrapper are serialized, reads are not.
+    /// Crashes on behalf of `injection`'s call and returns its error: always the crashed one, never retryable,
+    /// with a failed undo kept in the message.
+    fn die(&self, injection: &Injection) -> Error {
+        crashed(injection.op, &injection.target, self.crash().err())
+    }
+
+    /// Runs a read (`call`) unless the store crashed since the call was decided (e.g. while it was delayed).
+    fn reach<T>(&self, op: Op, target: &str, call: impl FnOnce() -> Result<T>) -> Result<T> {
+        let _gate = self.shared();
+        if self.is_crashed() {
+            return Err(crashed(op, target, None));
+        }
+        call()
+    }
+
+    /// Runs `write` of `key` unless the store crashed since the call was decided. In volatile mode it also records
+    /// what the write replaced and what it left, so a crash can undo it; whatever its outcome, since a failed write
+    /// (torn, or with a lost response) may have changed the object too. A write that changed nothing is not
+    /// recorded.
     fn record<T>(
         &self,
         call: u64,
@@ -399,33 +464,40 @@ impl<S: Storage> FaultyStorage<S> {
         key: &Key,
         write: impl FnOnce() -> Result<T>,
     ) -> Result<T> {
-        let _writes = self.writes();
-        let (crashed_meanwhile, volatile) = {
-            let state = self.state();
-            (state.crashed, state.volatile.is_some())
-        };
-        if crashed_meanwhile {
-            // Crashed while this call was in flight (e.g. delayed): the process is dead, nothing more lands.
-            return Err(crashed(op, key.as_str()));
+        if self.state().volatile.is_none() {
+            let _gate = self.shared();
+            // The mode cannot change while the gate is held; re-check it under the gate.
+            if self.state().volatile.is_none() {
+                if self.is_crashed() {
+                    return Err(crashed(op, key.as_str(), None));
+                }
+                return write();
+            }
         }
-        if !volatile {
-            return write();
+        let _gate = self.exclusive();
+        if self.is_crashed() {
+            return Err(crashed(op, key.as_str(), None));
         }
-        let before = match self.inner.get(key) {
-            Ok(data) => Some(data),
-            Err(Error::NotFound { .. }) => None,
-            Err(err) => return Err(err),
-        };
+        let before = self
+            .read_back(key)
+            .map_err(|err| crashed_read(op, key, &err))?;
         let out = write();
-        if let Some(volatile) = self.state().volatile.as_mut() {
-            volatile.writes.push(Unsynced {
+        let after = self
+            .read_back(key)
+            .map_err(|err| crashed_read(op, key, &err))?;
+        let mut state = self.state();
+        match state.volatile.as_mut() {
+            Some(volatile) if before != after => volatile.writes.push(Unsynced {
                 write: LostWrite {
                     call,
                     op,
                     key: key.clone(),
                 },
                 before,
-            });
+                after,
+            }),
+            // Turned durable meanwhile is impossible under the gate; an unchanged object has nothing to undo.
+            _ => {}
         }
         out
     }
@@ -442,13 +514,17 @@ impl<S: Storage> FaultyStorage<S> {
         let (n, injection) = self.decide(op, target, 0)?;
         let call = || match written {
             Some(key) => self.record(n, op, key, call),
-            None => call(),
+            None => self.reach(op, target, call),
         };
         let Some(injection) = injection else {
             return call();
         };
         self.sleep_or_fail(&injection)?;
-        let out = call()?;
+        let out = call();
+        if injection.fault == Fault::CrashAfter {
+            return Err(self.die(&injection));
+        }
+        let out = out?;
         if injection.fault == Fault::ResponseLost {
             return Err(transient(&injection));
         }
@@ -472,7 +548,7 @@ impl<S: Storage> FaultyStorage<S> {
         };
         self.sleep_or_fail(&injection)?;
         match injection.fault {
-            Fault::DroppedPut => dropped(&data),
+            Fault::DroppedPut => self.reach(op, key.as_str(), || dropped(&data)),
             Fault::TornPut => {
                 let kept = injection.kept.unwrap_or(0).min(data.len());
                 write(data.slice(..kept))?;
@@ -486,17 +562,38 @@ impl<S: Storage> FaultyStorage<S> {
                 write(data)?;
                 Err(transient(&injection))
             }
+            Fault::CrashAfter => {
+                // Applied or not, the caller never learns: the process is gone.
+                let _outcome = write(data);
+                Err(self.die(&injection))
+            }
             Fault::Transient | Fault::Io | Fault::Latency(_) | Fault::Crash => write(data),
         }
     }
 }
 
-/// What every call of a crashed store returns: an I/O error, never retried.
-fn crashed(op: Op, target: &str) -> Error {
+/// What every call of a crashed store returns: an I/O error, never retried. `cause` is a failure while crashing.
+fn crashed(op: Op, target: &str, cause: Option<Error>) -> Error {
+    let message = match cause {
+        None => "storage crashed (injected)".to_owned(),
+        Some(err) => format!("storage crashed (injected); undoing lost writes failed: {err}"),
+    };
     Error::Io {
         op,
         target: target.to_owned(),
-        source: io::Error::other("storage crashed (injected)"),
+        source: io::Error::other(message),
+    }
+}
+
+/// A volatile write could not read its object back, so it cannot be recorded: reported as an I/O error of the
+/// write itself, never retried.
+fn crashed_read(op: Op, key: &Key, err: &Error) -> Error {
+    Error::Io {
+        op,
+        target: key.as_str().to_owned(),
+        source: io::Error::other(format!(
+            "volatile write could not read its object back: {err}"
+        )),
     }
 }
 

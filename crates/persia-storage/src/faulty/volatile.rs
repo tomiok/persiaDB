@@ -39,6 +39,8 @@ pub(super) struct Unsynced {
     pub(super) write: LostWrite,
     /// The object before the write (`None`: absent).
     pub(super) before: Option<Bytes>,
+    /// The object the write left; undone only while the object still holds it.
+    pub(super) after: Option<Bytes>,
 }
 
 /// The unsynced writes of a store in volatile mode, oldest first.
@@ -58,7 +60,8 @@ impl Volatile {
 
     /// Draws which writes a crash loses and returns them newest first: undoing them in that order (restoring each
     /// `before`) leaves every key as it was after the writes that survive, since the lost writes of a key are always
-    /// the newest of that key.
+    /// the newest of that key. The order across keys does not matter: keys are independent objects, and each
+    /// `before` is what the key's previous write left, since volatile writes are serialized.
     pub(super) fn crash(self, rng: &Jitter) -> Vec<Unsynced> {
         let lost = match self.loss {
             CrashLoss::Suffix => {
@@ -122,6 +125,7 @@ mod tests {
                     key: Key::new(*k).unwrap(),
                 },
                 before: None,
+                after: None,
             });
         }
         v

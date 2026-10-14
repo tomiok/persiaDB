@@ -172,7 +172,7 @@ Deps: M1.
   - [x] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
 - [x] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
 - 2.2.4 `FaultyStorage` crash modelling, needed by 6.3.5 (found in the 2.2 review)
-  - [~] 2.2.4.1 Sticky crash: from a trigger on, every call fails (`Trigger::From(n)`), so a test models process death instead of one failed call
+  - [~] 2.2.4.1 Sticky crash: `Fault::Crash` (or `crash()`) fails that call and every later one, so a test models process death instead of one failed call; `Fault::CrashAfter` applies the write first (commit outcome unknown, SPEC §10.4)
   - [~] 2.2.4.2 Volatile-until-crash writes (dropped fsync): writes are visible until `crash()`, then a seeded subset of the unsynced ones is lost
 
 ## 2.3 Local filesystem backend (object-per-file)
@@ -203,6 +203,9 @@ Deps: M1.
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
 - [ ] 2.4.9 Define `frame_seq` (SPEC §4.4): what it numbers, its first value after a rewrite, and whether recovery stops at a non-increasing one
 - [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9
+- 2.4.11 File-level fault injection for the local backend and the container (found in the 2.2.4 review: `FaultyStorage` sits above the fsync points)
+  - [ ] 2.4.11.1 A file-system shim under the 2.3 backend and the container adapter that can fail or drop `fsync`, lose a `rename` or directory entry while the data survives (or the reverse), and tear the tail of an append
+  - [ ] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests

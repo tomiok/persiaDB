@@ -106,6 +106,9 @@ fn a_random_schedule_can_crash() {
         }
     }
     let first = first_failure.expect("crashes within 1000 calls at 1 in 20");
+    let last_ok = first
+        .checked_sub(1)
+        .expect("seed 9 does not crash on the first call");
     assert!(s.is_crashed());
     assert_eq!(
         s.injected().len(),
@@ -114,7 +117,7 @@ fn a_random_schedule_can_crash() {
     );
     assert_eq!(
         s.inner().get(&key("k")).unwrap(),
-        Bytes::from((first - 1).to_le_bytes().to_vec()),
+        Bytes::from(last_ok.to_le_bytes().to_vec()),
         "the last write before the crash is what survives"
     );
 }
@@ -220,7 +223,8 @@ fn write() -> impl Strategy<Value = Write> {
 
 type Model = BTreeMap<Key, Bytes>;
 
-/// Applies `writes` to the store, returning per write its call number, key, and the model before and after it.
+/// Applies `writes` to the store, returning per write that changed its object its call number and key, the model
+/// before the first and after each of them, and how many of them a sync made durable.
 fn run(s: &FaultyStorage<MemoryStorage>, writes: &[Write]) -> (Vec<(u64, Key)>, Vec<Model>, usize) {
     let mut model = Model::new();
     let mut states = vec![model.clone()];
@@ -250,8 +254,14 @@ fn run(s: &FaultyStorage<MemoryStorage>, writes: &[Write]) -> (Vec<(u64, Key)>, 
                 continue;
             }
         };
-        calls.push((s.calls(), k.clone()));
-        states.push(model.clone());
+        // Only a write that changed its object is recorded, so only those can be lost.
+        if states
+            .last()
+            .is_some_and(|prev| prev.get(k) != model.get(k))
+        {
+            calls.push((s.calls(), k.clone()));
+            states.push(model.clone());
+        }
     }
     (calls, states, synced)
 }
@@ -334,30 +344,45 @@ proptest! {
 
 #[test]
 fn concurrent_writers_and_a_crash_leave_a_consistent_store() {
-    // Writes racing a crash either land before it (logged, so undoable) or fail with the crash: the store then
-    // only holds values that writer wrote, and every later call fails.
+    // Writes racing a crash either land before it (logged, so undoable) or fail with the crash. Each thread writes
+    // its own key, so the key's survivor is the thread's last write that the crash did not list as lost.
     for seed in 0..20 {
         let s = faulty(seed);
         s.set_volatile(Some(CrashLoss::Suffix));
-        std::thread::scope(|scope| {
-            for t in 0..4u8 {
-                let s = &s;
-                scope.spawn(move || {
-                    for i in 0..50u8 {
-                        if let Err(err) = s.put(&key(&format!("k{t}")), Bytes::from(vec![t, i])) {
-                            assert_eq!(err.kind(), ErrorKind::Io, "only the crash fails a write");
-                            break;
+        let acked: Vec<u8> = std::thread::scope(|scope| {
+            let writers: Vec<_> = (0..4u8)
+                .map(|t| {
+                    let s = &s;
+                    scope.spawn(move || {
+                        let mut acked = 0u8;
+                        for i in 0..50u8 {
+                            match s.put(&key(&format!("k{t}")), Bytes::from(vec![t, i])) {
+                                Ok(()) => acked += 1,
+                                Err(err) => {
+                                    assert_eq!(
+                                        err.kind(),
+                                        ErrorKind::Io,
+                                        "only the crash fails a write"
+                                    );
+                                    break;
+                                }
+                            }
                         }
-                    }
-                });
-            }
+                        acked
+                    })
+                })
+                .collect();
             scope.spawn(|| s.crash().unwrap());
+            writers.into_iter().map(|w| w.join().unwrap()).collect()
         });
         every_call_fails(&s);
+        let lost = s.lost();
         for t in 0..4u8 {
-            if let Ok(v) = s.inner().get(&key(&format!("k{t}"))) {
-                assert_eq!((v.len(), v[0]), (2, t), "seed {seed}");
-            }
+            let k = key(&format!("k{t}"));
+            let lost_here = u8::try_from(lost.iter().filter(|l| l.key == k).count()).unwrap();
+            let kept = acked[usize::from(t)] - lost_here;
+            let expected = kept.checked_sub(1).map(|i| Bytes::from(vec![t, i]));
+            assert_eq!(s.inner().get(&k).ok(), expected, "seed {seed}, thread {t}");
         }
     }
 }
@@ -405,4 +430,171 @@ fn write_decided_before_a_crash(volatile: Option<CrashLoss>) {
         ErrorKind::NotFound,
         "the process is dead: nothing lands after the crash"
     );
+}
+
+#[test]
+fn a_read_decided_before_a_crash_fails_after_it() {
+    let (entered_tx, entered) = mpsc::channel();
+    let (release, release_rx) = mpsc::channel();
+    let s = faulty(1).with_clock(Gate {
+        entered: Mutex::new(entered_tx),
+        release: Mutex::new(release_rx),
+    });
+    s.inner().put(&key("k"), bytes("x")).unwrap();
+    s.inject(Trigger::Call(1), Fault::Latency(Duration::from_secs(1)));
+    std::thread::scope(|scope| {
+        let reader = scope.spawn(|| s.get(&key("k")));
+        entered.recv().unwrap();
+        s.crash().unwrap();
+        release.send(()).unwrap();
+        assert_eq!(reader.join().unwrap().unwrap_err().kind(), ErrorKind::Io);
+    });
+}
+
+#[test]
+fn a_second_crash_loses_only_writes_since_the_restart() {
+    for seed in 0..30 {
+        let s = faulty(seed);
+        s.set_volatile(Some(CrashLoss::Suffix));
+        s.put(&key("a"), bytes("1")).unwrap();
+        s.crash().unwrap();
+        let first = s.lost();
+        s.restart();
+        s.put(&key("b"), bytes("2")).unwrap();
+        s.crash().unwrap();
+        let lost = s.lost();
+        assert_eq!(lost[..first.len()], first[..], "seed {seed}");
+        assert!(
+            lost[first.len()..].iter().all(|l| l.key == key("b")),
+            "seed {seed}: the first crash's survivors are durable: {lost:?}"
+        );
+        assert_eq!(
+            s.inner().get(&key("a")).is_ok(),
+            first.is_empty(),
+            "seed {seed}"
+        );
+    }
+}
+
+#[test]
+fn restart_and_mode_changes_keep_volatility_and_the_unsynced_log() {
+    // Over seeds, a write made before a mode change and one made after a restart can both be lost.
+    let (mut before_switch, mut after_restart) = (false, false);
+    for seed in 0..40 {
+        let s = faulty(seed);
+        s.set_volatile(Some(CrashLoss::PerKey));
+        s.put(&key("a"), bytes("1")).unwrap();
+        s.set_volatile(Some(CrashLoss::Suffix));
+        s.crash().unwrap();
+        before_switch |= s.lost().iter().any(|l| l.key == key("a"));
+        s.restart();
+        s.put(&key("b"), bytes("2")).unwrap();
+        s.crash().unwrap();
+        after_restart |= s.lost().iter().any(|l| l.key == key("b"));
+    }
+    assert!(before_switch && after_restart);
+}
+
+#[test]
+fn a_failed_undo_crashes_anyway_and_keeps_the_rest_unsynced() {
+    // The inner store fails the first undo (a delete). Over seeds, the writes left unsynced by the failed undo
+    // are lost by a later crash, once the inner store works again.
+    let (mut failed, mut lost_later) = (0, false);
+    for seed in 0..50 {
+        let s = FaultyStorage::new(faulty(seed), seed);
+        s.set_volatile(Some(CrashLoss::Suffix));
+        for k in ["a", "b", "c"] {
+            s.put(&key(k), bytes("x")).unwrap();
+        }
+        s.inner()
+            .inject(Trigger::Nth(Op::Delete, 1), Fault::Transient);
+        s.inject(Trigger::Call(4), Fault::Crash);
+        let err = s.get(&key("a")).unwrap_err();
+        if s.inner().injected().is_empty() {
+            continue; // nothing lost, nothing undone
+        }
+        failed += 1;
+        assert_eq!(
+            err.kind(),
+            ErrorKind::Io,
+            "a crash is never retryable, even if its undo was"
+        );
+        assert!(
+            err.to_string().contains("undoing lost writes failed"),
+            "{err}"
+        );
+        assert!(s.is_crashed());
+        assert_eq!(s.lost(), [], "nothing was undone");
+        s.restart();
+        s.crash().unwrap();
+        let survivors = ["a", "b", "c"]
+            .iter()
+            .filter(|k| s.inner().get(&key(k)).is_ok())
+            .count();
+        assert_eq!(survivors + s.lost().len(), 3, "seed {seed}");
+        lost_later |= !s.lost().is_empty();
+    }
+    assert!(failed > 0 && lost_later, "failed undos: {failed}");
+}
+
+#[test]
+fn a_crash_does_not_undo_another_writers_object() {
+    let mut lost_alone = false;
+    for seed in 0..30 {
+        for second_writer in [false, true] {
+            let store = Arc::new(MemoryStorage::new());
+            let a = FaultyStorage::new(Arc::clone(&store), seed);
+            a.set_volatile(Some(CrashLoss::Suffix));
+            a.put(&key("lease"), bytes("writer A")).unwrap();
+            if second_writer {
+                store.put(&key("lease"), bytes("writer B")).unwrap();
+            }
+            a.crash().unwrap();
+            let lease = store.get(&key("lease")).ok();
+            if second_writer {
+                assert_eq!(lease, Some(bytes("writer B")), "seed {seed}");
+                assert_eq!(a.lost(), [], "seed {seed}: B's object is not A's to lose");
+            } else {
+                lost_alone |= lease.is_none();
+            }
+        }
+    }
+    assert!(lost_alone, "without B, some seed loses A's write");
+}
+
+#[test]
+fn crash_after_applies_the_write_then_dies() {
+    let s = faulty(1);
+    s.inject(Trigger::Nth(Op::PutIfAbsent, 1), Fault::CrashAfter);
+    let err = s
+        .put_if_absent(&key("manifests/1"), bytes("m1"))
+        .unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Io);
+    assert!(s.is_crashed());
+    assert_eq!(
+        s.inner().get(&key("manifests/1")).unwrap(),
+        bytes("m1"),
+        "applied"
+    );
+    every_call_fails(&s);
+    assert!(!Fault::CrashAfter.applies_to(Op::Get));
+    // A delete too.
+    let s = faulty(1);
+    s.inner().put(&key("k"), bytes("x")).unwrap();
+    s.inject(Trigger::Nth(Op::Delete, 1), Fault::CrashAfter);
+    s.delete(&key("k")).unwrap_err();
+    assert_eq!(
+        s.inner().get(&key("k")).unwrap_err().kind(),
+        ErrorKind::NotFound
+    );
+    // In volatile mode the applied write is unsynced: over seeds it survives or is lost.
+    let mut outcomes = std::collections::BTreeSet::new();
+    for seed in 0..30 {
+        let s = faulty(seed);
+        s.set_volatile(Some(CrashLoss::Suffix));
+        s.inject(Trigger::Call(1), Fault::CrashAfter);
+        s.put(&key("k"), bytes("x")).unwrap_err();
+        outcomes.insert(s.inner().get(&key("k")).is_ok());
+    }
+    assert_eq!(outcomes.len(), 2);
 }
