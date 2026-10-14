@@ -28,8 +28,10 @@ persistent: once a build writes it, later builds must read it, so it is decided 
    characters therefore fits in 255 bytes as the last segment and in 254 before a `/`; an escaped byte costs three.
    On Windows, reserved names and names ending in `.` are rejected (uppercase letters and spaces are escaped, so
    `CON` and a trailing space never reach the filesystem; only lowercase `con` and a trailing `.` can).
-5. **Temporary files** are named `@tmp.<pid>.<counter>` in the target directory (so `rename` and `link` stay within
-   one filesystem). They start with `@`, which no encoded name does, and `list` skips them.
+5. **Temporary files** are named `@tmp.<nonce>.<counter>` in the target directory (so `rename` and `link` stay within
+   one filesystem). The nonce is random per process: a pid would repeat across the crash loop of a container (always
+   pid 1) and across pid namespaces sharing a volume. They start with `@`, which no encoded segment contains, so they
+   never decode and `list` skips them (independently of `@` marking directories at the end of a name).
 6. **Writes.** `put`: write temp, fsync, `rename` over the object, fsync the directory. `put_if_absent`: write temp,
    fsync, hard-link it to the object name (fails atomically if the name exists, also across processes), remove the
    temp, fsync the directory. On `AlreadyExists` the existing bytes are compared with the caller's (SPEC §10.1).
@@ -51,8 +53,9 @@ persistent: once a build writes it, later builds must read it, so it is decided 
   would race with a `put` into the same directory.
 - A crash can leave temporary files behind. They are invisible to `list` and hold no acknowledged data; sweeping
   them is a follow-up (ROADMAP 2.3.8).
-- Windows cannot fsync a directory through the standard library; there the rename's durability follows NTFS
-  journaling. ROADMAP 2.4.8 documents and tests it.
+- Directories are not fsynced on Windows yet: a directory handle needs `FILE_FLAG_BACKUP_SEMANTICS`, and whether
+  `FlushFileBuffers` on it persists NTFS entries is unverified. Until ROADMAP 2.4.8 settles it, an acknowledged write
+  on Windows may be lost in a machine crash. No CI job compiles the Windows code yet (ROADMAP 2.3.9).
 
 ## Alternatives considered
 
@@ -64,3 +67,10 @@ persistent: once a build writes it, later builds must read it, so it is decided 
   which collide on case-insensitive filesystems and change under NFD normalization.
 - **`O_EXCL` create of the final name for `put_if_absent`**: atomic, but readers would see a partly written object
   before the data is complete; `link` publishes a complete, synced file.
+
+## Golden fixture
+
+`tests/fixtures/local/v1/` is a store tree written by hand from this ADR (not by `cargo xtask fixtures`, which only
+writes container fixtures and may depend on `persia-format` alone). Next to valid objects it holds a stale temporary
+file, a non-canonical name and a foreign file, which every build must skip. It is read by
+`crates/persia-storage/tests/local.rs` and must never be changed; a new layout gets a new directory.

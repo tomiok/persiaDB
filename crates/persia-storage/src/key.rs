@@ -219,6 +219,7 @@ pub struct InvalidKey {
 
 /// Why a string is not a valid [`Key`] or [`KeyPrefix`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum KeyDefect {
     /// A key must not be empty.
     #[error("empty")]

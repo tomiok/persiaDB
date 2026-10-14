@@ -157,6 +157,47 @@ mod tests {
         }
     }
 
+    // Every one-byte escape, in both hex cases: exactly the uppercase escape of a non-plain ASCII byte other than
+    // `/` decodes, and to that byte. A name from disk is hostile input; no escape may alias another name.
+    #[test]
+    fn every_single_escape_decodes_only_when_canonical() {
+        for byte in 0..=u8::MAX {
+            let upper = format!("%{byte:02X}");
+            let lower = format!("%{byte:02x}");
+            let want = (!is_plain(byte) && byte.is_ascii() && byte != b'/')
+                .then(|| char::from(byte).to_string());
+            assert_eq!(decode(&upper), want, "{upper}");
+            if lower != upper {
+                assert_eq!(decode(&lower), None, "{lower}");
+            }
+            // Nothing may follow `@` in an encoded name, and a trailing marker is never a file name.
+            assert_eq!(decode(&format!("{upper}@")), None, "{upper}@");
+        }
+    }
+
+    #[test]
+    fn hostile_names_never_decode() {
+        for name in [
+            "a@b",          // unescaped marker inside
+            "@",            // marker alone
+            "@tmp",         // temporary prefix without numbers
+            "%%41",         // escape of '%' not followed by hex
+            "%2",           // truncated at the end
+            "a%",           // bare escape at the end
+            "%+1",          // sign is not hex
+            "% 1",          // space is not hex
+            "%\u{e9}1",     // non-ASCII after '%'
+            "\u{e9}",       // raw non-ASCII
+            "%C3%28",       // invalid UTF-8 sequence
+            "%ED%A0%80",    // a UTF-16 surrogate encoded as UTF-8
+            "%C0%80",       // overlong NUL
+            "%F4%90%80%80", // above U+10FFFF
+            "a/b",          // raw separator
+        ] {
+            assert_eq!(decode(name), None, "{name:?}");
+        }
+    }
+
     #[test]
     fn names_are_case_fold_and_normalization_safe() {
         // Distinct segments that a case-insensitive or normalizing filesystem would merge stay distinct, and every
@@ -222,6 +263,42 @@ mod props {
             let name = encode(&segment);
             prop_assert!(name.is_ascii() && !name.contains(DIR_MARKER), "{:?}", name);
             prop_assert_eq!(decode(&name), Some(segment));
+        }
+
+        // A directory name is never a file name, and without its marker it is the segment's file name.
+        #[test]
+        fn dir_names_round_trip_and_never_decode_as_files(segment in "[^/]{1,20}") {
+            // 20 chars of at most 4 UTF-8 bytes, 3 name bytes each: within 255 (Windows also rejects reserved names).
+            let (Ok(name), Ok(file)) = (dir_name(&segment), file_name(&segment)) else {
+                prop_assume!(cfg!(windows));
+                return Ok(());
+            };
+            prop_assert_eq!(decode(&name), None);
+            prop_assert_eq!(name.strip_suffix(DIR_MARKER).and_then(decode), Some(segment));
+            prop_assert_eq!(name.strip_suffix(DIR_MARKER), Some(file.as_str()));
+        }
+
+        // Two distinct segments never share a name, even after the case folding of NTFS and APFS.
+        #[test]
+        fn distinct_segments_never_fold_together(a in "[^/]{1,8}", b in "[^/]{1,8}") {
+            prop_assume!(a != b);
+            prop_assert_ne!(encode(&a).to_ascii_lowercase(), encode(&b).to_ascii_lowercase());
+        }
+
+        // Arbitrary bytes from a foreign tree, as the escapes that would spell them: decoding never panics and
+        // accepts only canonical names of valid UTF-8 segments.
+        #[test]
+        fn escaped_arbitrary_bytes_decode_only_when_valid(bytes in prop::collection::vec(any::<u8>(), 0..12),
+                                                          lower in any::<bool>()) {
+            let name: String = bytes
+                .iter()
+                .map(|b| if lower { format!("%{b:02x}") } else { format!("%{b:02X}") })
+                .collect();
+            let valid = !bytes.is_empty()
+                && !bytes.iter().any(|&b| is_plain(b) || b == b'/')
+                && core::str::from_utf8(&bytes).is_ok()
+                && (!lower || name == name.to_ascii_uppercase());
+            prop_assert_eq!(decode(&name).is_some(), valid, "{:?}", name);
         }
 
         // A name read from disk is hostile input: decoding never panics, and what decodes is the one name of its

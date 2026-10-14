@@ -323,5 +323,29 @@ fn a_range_past_the_end_reads_nothing() {
     s.put(&key("k"), Bytes::from_static(b"0123456789")).unwrap();
     // Checked against the file length before any allocation: a corrupt offset cannot ask for u64::MAX bytes.
     let err = s.get_range(&key("k"), 4..u64::MAX).unwrap_err();
-    assert_eq!(err.kind(), ErrorKind::Corrupt);
+    assert!(
+        matches!(err, persia_storage::Error::ShortRead { returned: 6, .. }),
+        "{err}"
+    );
+}
+
+// A directory removed behind the store's back (an operator cleaning up) is recreated, not a permanent `Io` error.
+#[test]
+fn a_directory_removed_externally_is_recreated() {
+    let (_dir, s) = store();
+    s.put(&key("segments/c/1.seg"), Bytes::from_static(b"1"))
+        .unwrap();
+    std::fs::remove_dir_all(s.root().join("segments@")).unwrap();
+    s.put(&key("segments/c/2.seg"), Bytes::from_static(b"2"))
+        .unwrap();
+    assert_eq!(keys(&s, "segments/"), ["segments/c/2.seg"]);
+}
+
+// An unmounted or removed root must not look like an empty store ("no manifests").
+#[test]
+fn listing_a_missing_root_is_an_error() {
+    let (_dir, s) = store();
+    std::fs::remove_dir(s.root()).unwrap();
+    let err = s.list(&KeyPrefix::default()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::Io, "{err}");
 }

@@ -720,21 +720,32 @@ above.
   segment of plain characters is at most 255 bytes as the last segment and 254 bytes before a `/`. On Windows a name
   that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
   or that ends in `.` is `InvalidInput` too.
-- **Temporary files** start with `@` (never a decodable name), live in the directory of the object they become, and
-  are skipped by `list`. A crash may leave one behind; it holds no acknowledged data.
+- **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
+  `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
+  leave one behind; it holds no acknowledged data.
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
-  (Windows cannot open a directory to sync it with the standard library; ROADMAP 2.4.8 covers it.)
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
-  if the name exists, atomically), then removes the temporary file; `AlreadyExists` is resolved as in §10.1. A
-  filesystem without hard links therefore cannot run `put_if_absent` (`Io` error). Before writing into a directory for
-  the first time, a store creates the missing directories and fsyncs the parent of each one on the path, so an
-  acknowledged object is never lost with a directory entry another writer has not synced yet. `delete` removes the
-  file and fsyncs its directory; directories are never removed, so a concurrent `put` never finds its directory gone.
+  if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome
+  (an object found may not be synced yet); `AlreadyExists` is resolved as in §10.1. A filesystem without hard links
+  therefore cannot run `put_if_absent` (`Io` error). Before writing into a directory for the first time, a store
+  creates the missing directories and fsyncs the parent of each one on the path, so an acknowledged object is never
+  lost with a directory entry another writer has not synced yet; a name on the path that exists but is not a real
+  directory (a file, a symbolic link) is an `Io` error. `open` does the same for the root's missing ancestors and
+  the root's own entry; ancestors that already existed are taken as durable. `delete` removes the file and fsyncs its
+  directory (an object behind a symbolic link or a file on the path does not exist, so `delete` succeeds without
+  touching it); directories are never removed by Persia, so a concurrent `put` never finds its directory gone. A
+  directory removed by someone else is created again by the next write into it.
+  **Windows:** directories are not synced yet (ROADMAP 2.4.8), so a machine crash may lose an acknowledged write
+  there; the guarantee above holds on Unix.
 - **Reads** open the file (a rename never changes an open file, so a read sees one version) and read with positioned
   reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
-  `ShortRead` without reading it. `list` lists the directory named by the prefix's directory part (missing: nothing
-  matches), keeps the decodable names whose decoded segment starts with the prefix's last part, descends into every
-  matching directory, and sorts the keys by bytes. Symbolic links and other non-regular entries are skipped.
+  `ShortRead` without reading it, as is a file found shorter while reading. An entry `list` would skip (a symbolic
+  link, also one on the path, a FIFO, a file where a directory of the path should be) reads as `NotFound`. `list` lists the directory named
+  by the prefix's directory part (missing, a file or a symbolic link: nothing matches; a missing root is `Io`, so an
+  unmounted store never looks empty), keeps the decodable names whose decoded segment starts
+  with the prefix's last part, descends into every matching directory, and sorts the keys by bytes. Symbolic links
+  and other non-regular entries are skipped. The root's contents are otherwise trusted: another program changing
+  files under it is outside this contract.
 
 ### 10.2 URL schemes
 `persia::open("app.persia")`, `file:///…`, `s3://bucket/prefix`, `gs://bucket/prefix`, `az://account/container/prefix`,
