@@ -34,3 +34,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0009](./0009-frame-validation-and-scan-end.md) | Frame validation, scan end classes and compressed frame payloads | accepted |
 | [0010](./0010-mmap-unsafe-boundary-and-sigbus.md) | The memory-mapping unsafe boundary and the SIGBUS strategy | accepted |
 | [0011](./0011-blob-ref-encoding.md) | `BlobRef` value limits and binary encoding | accepted |
+| [0012](./0012-local-backend-layout.md) | Local backend layout: encoded file names, directory marker, link-based `put_if_absent` | accepted |

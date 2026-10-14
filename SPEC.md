@@ -658,15 +658,15 @@ presents the same logical objects to the engine.
 non-empty (so no leading, trailing or doubled `/`) and is not `.` or `..`; no character is a control character
 (U+0000–U+001F, U+007F), `\` or `:` (a Windows drive or alternate data stream). Keys are validated on construction,
 so no key can name a parent directory, an absolute path or a drive. Filesystem-specific limits are the local
-backend's job (ROADMAP 2.3.4): names over 255 bytes per segment, and on Windows reserved names (`CON`, `NUL`, …)
-and segments ending in `.` or a space, are rejected there as `InvalidInput`. A `KeyPrefix` follows the same rules
+backend's job (§10.1.1): a segment whose file name is over 255 bytes, and on Windows a file name that is reserved
+(`con`, `nul`, …) or ends in `.`, are rejected there as `InvalidInput`. A `KeyPrefix` follows the same rules
 except that it may be empty and may end with `/` (its last segment is incomplete, so it may also be `.` or `..`); it
 matches keys by plain byte prefix, as in S3. A backend never resolves a prefix as a path: it lists the directory
 part (up to the last `/`) and filters names by the rest.
 Keys form a flat namespace, as in S3: `a` and `a/b` may both exist. A backend on a hierarchical store (the local
-filesystem) must store both, e.g. by encoding names so that an object never collides with a directory (ROADMAP
-2.3.7). Keys are opaque bytes to a backend: it returns them exactly as written (no Unicode normalization, such as
-macOS NFD file names, and no case folding).
+filesystem) must store both, by encoding names so that an object never collides with a directory (§10.1.1). Keys
+are opaque bytes to a backend: it returns them exactly as written (no Unicode normalization, such as macOS NFD file
+names, and no case folding).
 
 **Semantics.**
 - `get` / `get_range` of a missing key: `NotFound`. `get_range` returns a `ByteSource` whose base offset is
@@ -677,7 +677,7 @@ macOS NFD file names, and no case folding).
   `Transient`, detected before the length check.
 - `put` replaces the object; readers see the old or the new bytes, never a mix. An acknowledged `put` or
   `put_if_absent` is durable: it survives a crash of the process or the machine (the local backend fsyncs the file
-  and its directory before returning, ROADMAP 2.3.1).
+  and its directory before returning, §10.1.1).
 - `put_if_absent` returns `Created` or `AlreadyExists`, atomically. A backend without `conditional_put` returns
   `Unsupported` instead of emulating it with a racy check. **`AlreadyExists` is ambiguous**: an attempt that failed
   may have been applied (including a retry inside the backend's SDK, invisible to Persia), so the object found may be
@@ -704,6 +704,37 @@ waiting before retry `n` (from 0) a uniformly random duration in `0..=min(max_de
 jitter"; defaults 50 ms and 5 s). Sleeping goes through an injectable clock and the randomness through a seeded
 generator, so tests are deterministic. `put_if_absent` is the exception to blind retries: see its ambiguity rule
 above.
+
+### 10.1.1 Local backend layout (object-per-file, ADR-0012)
+`file:///…` stores each object as one file under a root directory. A key `s1/s2/…/sn` is the file
+`<root>/d(s1)/d(s2)/…/f(sn)`, where `f(s)` is the **encoded** segment and `d(s) = f(s) + "@"` names a directory:
+- **Encoding.** Bytes `a`–`z`, `0`–`9`, `.`, `_` and `-` stand for themselves; every other byte of the segment's
+  UTF-8 (uppercase letters, space, `%`, `@`, non-ASCII, …) is `%` followed by two **uppercase** hex digits
+  (`É` → `%C3%89`, `A` → `%41`). File names are therefore ASCII, so a normalizing filesystem (HFS+ stores NFD) has
+  nothing to rewrite, and they stay distinct under case folding (NTFS, APFS): outside an escape no letter is
+  uppercase, inside one none is lowercase. A name is decoded only if it is canonical (re-encoding the decoded segment
+  gives the name back) and the result is valid UTF-8; any other name was not written by Persia and is skipped.
+- **Objects never collide with directories.** A directory name ends with `@`, which an encoded segment never
+  contains, so the object `a` (file `a`) and the objects under `a/` (directory `a@`) coexist.
+- **Limits.** A file name `f(s)` or `d(s)` over 255 bytes is `InvalidInput` (the common filesystem limit), so a
+  segment of plain characters is at most 255 bytes as the last segment and 254 bytes before a `/`. On Windows a name
+  that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
+  or that ends in `.` is `InvalidInput` too.
+- **Temporary files** start with `@` (never a decodable name), live in the directory of the object they become, and
+  are skipped by `list`. A crash may leave one behind; it holds no acknowledged data.
+- **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
+  (Windows cannot open a directory to sync it with the standard library; ROADMAP 2.4.8 covers it.)
+  `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
+  if the name exists, atomically), then removes the temporary file; `AlreadyExists` is resolved as in §10.1. A
+  filesystem without hard links therefore cannot run `put_if_absent` (`Io` error). Before writing into a directory for
+  the first time, a store creates the missing directories and fsyncs the parent of each one on the path, so an
+  acknowledged object is never lost with a directory entry another writer has not synced yet. `delete` removes the
+  file and fsyncs its directory; directories are never removed, so a concurrent `put` never finds its directory gone.
+- **Reads** open the file (a rename never changes an open file, so a read sees one version) and read with positioned
+  reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
+  `ShortRead` without reading it. `list` lists the directory named by the prefix's directory part (missing: nothing
+  matches), keeps the decodable names whose decoded segment starts with the prefix's last part, descends into every
+  matching directory, and sorts the keys by bytes. Symbolic links and other non-regular entries are skipped.
 
 ### 10.2 URL schemes
 `persia::open("app.persia")`, `file:///…`, `s3://bucket/prefix`, `gs://bucket/prefix`, `az://account/container/prefix`,

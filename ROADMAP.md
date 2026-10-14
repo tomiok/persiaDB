@@ -183,6 +183,7 @@ Deps: M1.
 - [~] 2.3.5 Run conformance suite
 - [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010; needs 2.4.4: the mappable `log_end` comes from the container superblock, so it lands with 2.4): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
 - [~] 2.3.7 Store keys that are segment-prefixes of each other (`a` and `a/b`, SPEC §10.1): name encoding so an object never collides with a directory; round-trip names byte-exactly on case-insensitive and normalizing filesystems (APFS NFD, NTFS); [T] the conformance model already generates such pairs
+- [ ] 2.3.8 Sweep stale `@tmp.*` files a crashed writer left (ADR-0012): which process may delete them (pid no longer running, or age), and when (open, or a `persia` CLI command)
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots
