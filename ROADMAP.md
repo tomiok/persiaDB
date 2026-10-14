@@ -172,8 +172,8 @@ Deps: M1.
   - [x] 2.2.2.3 Inject "applied, response lost" (write lands, call returns `Transient`); [T] a retried `put_if_absent` finding its own write returns `Created` (SPEC §10.1)
 - [x] 2.2.3 [T] conformance test-suite (generic over `Storage`) reused by every backend
 - 2.2.4 `FaultyStorage` crash modelling, needed by 6.3.5 (found in the 2.2 review)
-  - [ ] 2.2.4.1 Sticky crash: from a trigger on, every call fails (`Trigger::From(n)`), so a test models process death instead of one failed call
-  - [ ] 2.2.4.2 Volatile-until-crash writes (dropped fsync): writes are visible until `crash()`, then a seeded subset of the unsynced ones is lost
+  - [~] 2.2.4.1 Sticky crash: from a trigger on, every call fails (`Trigger::From(n)`), so a test models process death instead of one failed call
+  - [~] 2.2.4.2 Volatile-until-crash writes (dropped fsync): writes are visible until `crash()`, then a seeded subset of the unsynced ones is lost
 
 ## 2.3 Local filesystem backend (object-per-file)
 - [ ] 2.3.1 Atomic `put`: write temp → fsync → rename → fsync dir
