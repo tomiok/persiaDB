@@ -13,6 +13,7 @@ bytes.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
+tempfile.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.

@@ -28,6 +28,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   that injects errors, latency, torn and dropped writes, lost responses and crashes (optionally losing unsynced writes,
   in order or per object) on a scripted or seeded schedule; a shared conformance
   suite checks every backend against SPEC §10.1.
+- `persia-storage`: `LocalStorage`, the local filesystem backend (one file per object): atomic, durable `put` (temp file,
+  fsync, rename, directory fsync) and `put_if_absent` (hard link), positioned reads, and file names encoded so every key
+  round-trips on case-insensitive and normalizing filesystems and `a` and `a/b` can coexist (SPEC §10.1.1; ADR-0012).
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.

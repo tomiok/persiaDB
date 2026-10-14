@@ -161,11 +161,11 @@ pub fn inverted_ranges_are_invalid_input<S: Storage>(make: Make<'_, S>) {
     assert_eq!(kind(s.get_range(&k, u64::MAX..0)), ErrorKind::InvalidInput);
 }
 
-/// The longest key (1024 bytes, SPEC §10.1) with segments of up to 255 bytes, the longest file name most local
-/// filesystems accept.
+/// The longest key (1024 bytes, SPEC §10.1) with the longest segments the local backend stores (SPEC §10.1.1): 255
+/// bytes as the last segment, 254 before a `/` (its directory name adds a marker byte).
 pub fn longest_keys_round_trip<S: Storage>(make: Make<'_, S>) {
     let s = make();
-    let segs = [255, 255, 255, 254, 1].map(|n| "x".repeat(n));
+    let segs = [254, 254, 254, 3, 255].map(|n| "x".repeat(n));
     let k = key(&segs.join("/"));
     assert_eq!(k.as_str().len(), Key::MAX_LEN);
     s.put(&k, Bytes::from_static(b"long")).unwrap();

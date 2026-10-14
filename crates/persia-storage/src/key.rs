@@ -241,6 +241,17 @@ pub enum KeyDefect {
         /// The first forbidden character.
         ch: char,
     },
+    /// A segment's file name in the local backend is longer than 255 bytes (SPEC §10.1.1). Only the local backend
+    /// reports it.
+    #[error("a segment's file name is {len} bytes, longer than 255")]
+    NameTooLong {
+        /// Length of the encoded file name in bytes.
+        len: usize,
+    },
+    /// A segment's file name in the local backend is a reserved Windows name (`con`, `nul`, …) or ends in `.`
+    /// (SPEC §10.1.1). Only the local backend on Windows reports it.
+    #[error("a segment's file name is reserved on Windows")]
+    WindowsName,
 }
 
 #[cfg(test)]
