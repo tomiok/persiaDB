@@ -536,7 +536,18 @@ fn assert_single_valid_container(dir: &Path, path: &Path) {
         vec![path.file_name().unwrap().to_owned()],
         "temporary files left behind"
     );
-    let c = Container::open(path, Mode::ReadWrite).unwrap();
+    // Other tests of this binary spawn children: between fork and exec a child holds copies of every open file
+    // description, so a `flock` the winner already dropped can outlive it for a moment. Retry `Locked` briefly.
+    let mut attempts = 0;
+    let c = loop {
+        match Container::open(path, Mode::ReadWrite) {
+            Err(Error::Locked) if attempts < 10_000 => {
+                attempts += 1;
+                std::thread::yield_now();
+            }
+            other => break other.unwrap(),
+        }
+    };
     assert_eq!(c.superblock().seq, 0);
     assert!(matches!(c.recovery().scan_end, ScanEnd::Clean { .. }));
     assert_eq!(c.frames(), &[]);

@@ -161,6 +161,8 @@ pub struct Container<F = File> {
     recovery: Recovery,
     /// Where [`Container::create`] or [`Container::open`] found the file; compaction renames over it.
     path: Option<PathBuf>,
+    /// On Windows, the locked `<name>.lock` file that holds the writer lock (SPEC §4.5.1); `None` elsewhere.
+    sidecar_lock: Option<File>,
 }
 
 impl Container<File> {
@@ -181,6 +183,14 @@ impl Container<File> {
         let name = path
             .file_name()
             .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
+        let sidecar_lock = match lock_sidecar(path) {
+            Err(Error::Locked) if path.exists() => {
+                return Err(Error::AlreadyExists {
+                    path: path.to_owned(),
+                });
+            }
+            other => other?,
+        };
         let n = CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let mut temp_name = name.to_owned();
         temp_name.push(format!(".tmp.{:016x}.{n}", temp_nonce()));
@@ -195,6 +205,7 @@ impl Container<File> {
             match std::fs::hard_link(&temp, path) {
                 Ok(()) => Ok(Container {
                     path: Some(std::fs::canonicalize(path).map_err(Error::io("canonicalize"))?),
+                    sidecar_lock,
                     ..container
                 }),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -222,6 +233,10 @@ impl Container<File> {
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
         // Canonical, so compaction renames over the real file, not over a symbolic link to it.
         let path = std::fs::canonicalize(path.as_ref()).map_err(Error::io("open"))?;
+        let sidecar_lock = match mode {
+            Mode::ReadWrite => lock_sidecar(&path)?,
+            Mode::ReadOnly => None,
+        };
         for _ in 0..OPEN_ATTEMPTS {
             let file = OpenOptions::new()
                 .read(true)
@@ -238,6 +253,7 @@ impl Container<File> {
             }
             let mut container = Self::recover(file, mode)?;
             container.path = Some(path);
+            container.sidecar_lock = sidecar_lock;
             return Ok(container);
         }
         // The path changed under every attempt: a writer is busy compacting.
@@ -302,6 +318,7 @@ impl Container<File> {
             return Err(discard(&temp, err));
         }
         new.path = Some(path);
+        new.sidecar_lock = self.sidecar_lock.take();
         let synced = sync_dir(&dir);
         new.poisoned = synced.is_err();
         *self = new;
@@ -395,6 +412,7 @@ impl<F: ContainerFile> Container<F> {
                 truncated_from: None,
             },
             path: None,
+            sidecar_lock: None,
         })
     }
 
@@ -457,6 +475,7 @@ impl<F: ContainerFile> Container<F> {
                 truncated_from: None,
             },
             path: None,
+            sidecar_lock: None,
         };
         container.recover_tail(file_len, &mut frames)?;
         container.frames = frames;
@@ -888,6 +907,7 @@ impl<F: ContainerFile> Container<F> {
                 truncated_from: None,
             },
             path: None,
+            sidecar_lock: None,
         };
         Ok((container, relocation))
     }
@@ -1127,6 +1147,37 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         encode_frame(&mut w, kind, seq, payload, compression)?;
         self.write(&w, kind, seq)
     }
+}
+
+/// Takes the writer lock of the container at `path` on Windows: an exclusive lock on `<name>.lock` next to it, created
+/// if missing and never removed (removing it would race with a writer taking it). `LockFileEx` locks are mandatory, so
+/// locking the container itself would keep every reader out (SPEC §4.5.1, ROADMAP 2.4.16).
+#[cfg(windows)]
+fn lock_sidecar(path: &Path) -> Result<Option<File>> {
+    let mut name = path
+        .file_name()
+        .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?
+        .to_owned();
+    name.push(".lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path.with_file_name(name))
+        .map_err(Error::io("open lock file"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Locked),
+        Err(std::fs::TryLockError::Error(err)) => Err(Error::io("lock")(err)),
+    }
+}
+
+/// Unix locks the container file itself (`flock`, advisory), through [`ContainerFile::try_lock`].
+#[cfg(not(windows))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the Windows version
+fn lock_sidecar(_path: &Path) -> Result<Option<File>> {
+    Ok(None)
 }
 
 /// Whether `path` still names the file open as `file` (same device and inode).

@@ -360,10 +360,12 @@ fn paths_over_the_platform_limit_are_invalid_input() {
     } else {
         4095
     };
+    // Canonical: on macOS `/var` is a symbolic link, and the kernel counts the expanded path against `PATH_MAX`.
     let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
     // A root of exactly `max - 256` bytes, so `<root>/<255-byte name>` is exactly `max` bytes.
     let target = max - 256;
-    let mut root = dir.path().to_path_buf();
+    let mut root = base;
     while root.as_os_str().len() < target {
         let left = target - root.as_os_str().len() - 1;
         root.push("d".repeat(left.clamp(1, 200)));

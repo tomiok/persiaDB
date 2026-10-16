@@ -70,13 +70,22 @@ impl ContainerFile for File {
         File::set_len(self, len)
     }
 
+    /// An advisory `flock` on Unix.
+    #[cfg(not(windows))]
     fn try_lock(&self) -> io::Result<bool> {
-        // An advisory `flock` on Unix. On Windows `LockFileEx` locks are mandatory, so other handles cannot read the
-        // file while a writer holds it (SPEC §4.5.1, ROADMAP 2.4.16).
         match File::try_lock(self) {
             Ok(()) => Ok(true),
             Err(std::fs::TryLockError::WouldBlock) => Ok(false),
             Err(std::fs::TryLockError::Error(err)) => Err(err),
         }
+    }
+
+    /// Always granted on Windows: `LockFileEx` locks are mandatory, so a lock on the container would keep readers
+    /// out. [`Container::create`](super::Container::create) and [`Container::open`](super::Container::open) lock
+    /// a `<name>.lock` file next to it instead (SPEC §4.5.1); `create_on` and `open_on` with a bare [`File`]
+    /// exclude no other writer there.
+    #[cfg(windows)]
+    fn try_lock(&self) -> io::Result<bool> {
+        Ok(true)
     }
 }

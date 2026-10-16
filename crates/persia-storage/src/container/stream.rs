@@ -31,7 +31,11 @@ impl<F: ContainerFile> Container<F> {
     /// # Errors
     /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::InvalidInput`] once `frame_seq` or the file offset would
     /// be exhausted, or [`Error::Io`] writing the header (which poisons the handle).
-    pub fn append_stream(&mut self, kind: FrameKind, payload_len: u64) -> Result<FrameWriter<'_, F>> {
+    pub fn append_stream(
+        &mut self,
+        kind: FrameKind,
+        payload_len: u64,
+    ) -> Result<FrameWriter<'_, F>> {
         self.writable()?;
         let frame_seq = self.next_frame_seq;
         // Fails exactly when `frame_seq = u64::MAX`, which is never written (SPEC §4.4).

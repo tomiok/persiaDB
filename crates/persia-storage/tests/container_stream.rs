@@ -36,7 +36,10 @@ fn with_one_frame() -> Container<SimFile> {
 fn assert_recovers_without_the_stream(file: &SimFile) {
     let c = Container::open_on(file.crash(CrashLoss::Nothing), Mode::ReadWrite).unwrap();
     assert_eq!(c.frames().len(), 1);
-    assert_eq!(c.read_frame(c.frames()[0].offset, MAX).unwrap().payload, b"before");
+    assert_eq!(
+        c.read_frame(c.frames()[0].offset, MAX).unwrap().payload,
+        b"before"
+    );
     assert!(matches!(
         c.recovery().scan_end,
         ScanEnd::TornTail { .. } | ScanEnd::Clean { .. }
@@ -126,7 +129,10 @@ fn a_failed_write_poisons_and_recovers_the_old_state() {
             w.write(&[5; 16])?;
             w.finish()
         })();
-        assert!(matches!(result, Err(Error::Io { .. })), "call {k}: {result:?}");
+        assert!(
+            matches!(result, Err(Error::Io { .. })),
+            "call {k}: {result:?}"
+        );
         assert!(matches!(c.sync(), Err(Error::Poisoned)), "call {k}");
         let file = c.file().clone();
         drop(c);
