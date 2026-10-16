@@ -111,7 +111,17 @@ version = "0.0.0"
 dependencies = [
  "libfuzzer-sys",
  "persia-format",
+ "persia-storage",
  "zstd",
+]
+
+[[package]]
+name = "persia-storage"
+version = "0.0.0"
+dependencies = [
+ "bytes",
+ "persia-format",
+ "thiserror",
 ]
 
 [[package]]
