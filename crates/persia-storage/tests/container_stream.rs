@@ -137,7 +137,8 @@ fn a_failed_write_poisons_and_recovers_the_old_state() {
         let file = c.file().clone();
         drop(c);
         for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(k)] {
-            // Read-only: a seeded loss may tear the frame out of order, which a read-write open reports (ROADMAP 2.4.10).
+            // Read-only: a seeded loss may tear the frame out of order, and a read-write open without a path cannot
+            // quarantine those bytes (ADR-0014).
             let r = Container::open_on(file.crash(loss), Mode::ReadOnly).unwrap();
             // A failed trailer write that landed completes the frame: the outcome is unknown, never a partial frame.
             match r.frames() {

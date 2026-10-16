@@ -14,11 +14,13 @@ pub mod file;
 mod path;
 pub mod sim;
 mod stream;
+mod tail;
 
 use std::fs::File;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
 use persia_format::block::Compression;
 use persia_format::frame::{
@@ -30,9 +32,12 @@ use persia_format::superblock::{
 };
 use persia_format::{Corruption, Reader, Writer};
 
+use crate::vfs::Vfs;
 pub use error::{Error, ReadOnlyReason, Result};
 pub use file::ContainerFile;
 pub use stream::FrameWriter;
+pub use tail::Repair;
+use tail::TailContents;
 
 /// How a container is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,8 +113,10 @@ pub struct Commit {
 pub struct Recovery {
     /// How the scan from the committed `log_end` ended.
     pub scan_end: ScanEnd,
-    /// The file length before a read-write open truncated a torn tail, if it did.
+    /// The file length before a read-write open truncated a torn tail or a corrupt one, if it did.
     pub truncated_from: Option<u64>,
+    /// Where a read-write open copied the bytes after a corrupt scan before truncating them (ADR-0014), if it did.
+    pub quarantined: Option<PathBuf>,
 }
 
 /// An open container file (SPEC §4).
@@ -220,6 +227,7 @@ impl<F: ContainerFile> Container<F> {
                     offset: FIRST_FRAME_OFFSET,
                 },
                 truncated_from: None,
+                quarantined: None,
             },
             location: None,
         })
@@ -244,11 +252,11 @@ impl<F: ContainerFile> Container<F> {
         if mode == Mode::ReadWrite {
             take_lock(&file)?;
         }
-        Self::recover(file, mode)
+        Self::recover(file, mode, TailPolicy::default())
     }
 
     /// [`Container::open_on`] after the lock, if any, was taken.
-    fn recover(file: F, mode: Mode) -> Result<Self> {
+    fn recover(file: F, mode: Mode, policy: TailPolicy<'_, F>) -> Result<Self> {
         let file_len = file.file_len().map_err(Error::io("stat"))?;
         let prefix = read_at(&file, 0, file_len.min(FIRST_FRAME_OFFSET))?;
         let mut r = Reader::new(&prefix);
@@ -282,16 +290,22 @@ impl<F: ContainerFile> Container<F> {
             recovery: Recovery {
                 scan_end: ScanEnd::Clean { offset: sb.log_end },
                 truncated_from: None,
+                quarantined: None,
             },
             location: None,
         };
-        container.recover_tail(file_len, &mut frames)?;
+        container.recover_tail(file_len, &mut frames, &policy)?;
         container.frames = frames;
         Ok(container)
     }
 
     /// Scans from `log_end` to `file_len` (SPEC §4.4) and appends the valid frames to `frames`.
-    fn recover_tail(&mut self, file_len: u64, frames: &mut Vec<FrameRef>) -> Result<()> {
+    fn recover_tail(
+        &mut self,
+        file_len: u64,
+        frames: &mut Vec<FrameRef>,
+        policy: &TailPolicy<'_, F>,
+    ) -> Result<()> {
         let log_end = self.active.superblock.log_end;
         let scanner = StreamScanner::new(log_end, file_len).expect_frame_seq(self.next_frame_seq);
         let (scanner, end) = scan(&self.file, scanner, frames)?;
@@ -311,10 +325,7 @@ impl<F: ContainerFile> Container<F> {
             }
             ScanEnd::Corrupt { offset, error } => {
                 if self.mode == Mode::ReadWrite {
-                    return Err(Error::CorruptTail {
-                        offset: *offset,
-                        source: error.clone(),
-                    });
+                    self.repair_tail(*offset, error, file_len, policy)?;
                 }
             }
             ScanEnd::Unsupported { error, .. } => return Err(Error::Format(error.clone())),
@@ -326,6 +337,40 @@ impl<F: ContainerFile> Container<F> {
             self.file.sync_data().map_err(Error::io("sync"))?;
         }
         self.recovery.scan_end = end;
+        Ok(())
+    }
+
+    /// A read-write open's scan ended in corruption at `offset` (SPEC §4.4): truncates there if what follows is
+    /// zeros and stale frames, or after quarantining it if the policy allows (ADR-0014), else fails.
+    fn repair_tail(
+        &mut self,
+        offset: u64,
+        error: &persia_format::Error,
+        file_len: u64,
+        policy: &TailPolicy<'_, F>,
+    ) -> Result<()> {
+        let refuse = |acknowledged| Error::CorruptTail {
+            offset,
+            source: error.clone(),
+            acknowledged,
+        };
+        // `next_frame_seq` is what the scan expected at `offset`.
+        let contents = tail::classify(&self.file, offset, file_len, self.next_frame_seq)?;
+        match (contents, policy.quarantine, policy.repair) {
+            (TailContents::Discardable, ..) => {}
+            (TailContents::Garbage, Some((vfs, path)), _)
+            | (TailContents::MayBeAcknowledged(_), Some((vfs, path)), Repair::Quarantine) => {
+                let copy = tail::quarantine(vfs, path, &self.file, offset, file_len)?;
+                self.recovery.quarantined = Some(copy);
+            }
+            (TailContents::Garbage, None, _) => return Err(refuse(None)),
+            (TailContents::MayBeAcknowledged(at), ..) => return Err(refuse(Some(at))),
+        }
+        // As for a torn tail; the sync that follows recovery makes it durable after the quarantine copy.
+        self.file
+            .set_len(offset)
+            .map_err(Error::io("truncate corrupt tail"))?;
+        self.recovery.truncated_from = Some(file_len);
         Ok(())
     }
 
@@ -713,6 +758,7 @@ impl<F: ContainerFile> Container<F> {
             recovery: Recovery {
                 scan_end: ScanEnd::Clean { offset: end },
                 truncated_from: None,
+                quarantined: None,
             },
             location: None,
         };
@@ -953,5 +999,29 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         let mut w = Writer::with_base_offset(self.end);
         encode_frame(&mut w, kind, seq, payload, compression)?;
         self.write(&w, kind, seq)
+    }
+}
+
+/// What recovery may do with a corrupt tail (ADR-0014): quarantine needs the container's path.
+#[derive(Debug)]
+struct TailPolicy<'a, F> {
+    quarantine: Option<(&'a dyn Vfs<File = F>, &'a Path)>,
+    repair: Repair,
+}
+
+impl<F> Clone for TailPolicy<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F> Copy for TailPolicy<'_, F> {}
+
+impl<F> Default for TailPolicy<'_, F> {
+    fn default() -> Self {
+        Self {
+            quarantine: None,
+            repair: Repair::Safe,
+        }
     }
 }

@@ -45,18 +45,23 @@ pub enum Error {
     /// ([`persia_format::Error::Corrupt`] or [`persia_format::Error::Unsupported`]).
     #[error(transparent)]
     Format(#[from] persia_format::Error),
-    /// The frames after the committed `log_end` end in corruption (SPEC §4.4). They may hold acknowledged writes,
-    /// so a read-write open refuses to truncate them (ROADMAP 2.4.10); a read-only open can still read the
-    /// committed state.
+    /// The frames after the committed `log_end` end in corruption (SPEC §4.4), and a read-write open may not
+    /// discard what follows (ADR-0014): a valid frame there may hold an acknowledged write (`acknowledged`), or the
+    /// bytes cannot be quarantined because the container was not opened by path (`acknowledged` is `None`). A
+    /// read-only open can still read the committed state; [`Repair::Quarantine`](super::Repair::Quarantine) moves the
+    /// bytes into a quarantine file and opens with what precedes them.
     #[error(
-        "frames after the last commit are corrupt at offset {offset} ({source}); open read-only to read the \
-         committed state"
+        "frames after the last commit are corrupt at offset {offset} ({source}){}; open read-only to read the \
+         committed state, or repair it with Repair::Quarantine",
+        acknowledged.map(|at| format!(", and the valid frame at {at} may hold acknowledged writes")).unwrap_or_default()
     )]
     CorruptTail {
         /// Where the valid frames end.
         offset: u64,
         /// Why the frame there was rejected.
         source: persia_format::Error,
+        /// The first later frame that may hold an acknowledged write, if one was found.
+        acknowledged: Option<u64>,
     },
     /// Another handle, in this process or another, holds the writer lock (SPEC §8.4).
     #[error("container is locked by another writer")]
@@ -132,7 +137,8 @@ mod tests {
         assert!(
             Error::CorruptTail {
                 offset: 9,
-                source: corrupt
+                source: corrupt,
+                acknowledged: Some(64),
             }
             .is_corruption()
         );

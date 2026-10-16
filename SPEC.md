@@ -235,8 +235,11 @@ frame) ends the scan as *corruption* at that frame (ADR-0013). A torn tail or co
 the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
 the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new ones (ROADMAP 2.4.4).
 On corruption the bytes after `o` may hold acknowledged writes (WAL frames synced after `log_end`, SPEC §8.2), so
-they are not destroyed silently: what a read-write open does then is decided with `frame_seq` (ROADMAP 2.4.9,
-2.4.10).
+they are not destroyed silently (ADR-0014): a read-write open searches them for valid frames (at 8-aligned offsets
+holding the magic). If one has a `frame_seq` at or above the one expected at `o`, it may be acknowledged: the open
+fails, naming it, unless the caller asks for quarantine. Zeros and stale frames (lower `frame_seq`, ADR-0013) are
+truncated like a torn tail. Anything else is first copied to `<name>.quarantine.<o>.<nonce>.<n>` next to the
+container (file and directory synced), then truncated. Without a path there is nowhere to copy to, and the open fails.
 
 ### 4.5 Commit protocol (local)
 1. Append Segment / WalChunk frames. `fdatasync`.
@@ -276,8 +279,8 @@ nothing. The container is reopened, and recovery decides what survived.
   check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
   bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:
   clean, the next frame goes at the end of the file; torn tail, a read-write open truncates the file there;
-  corruption, a read-write open fails (ROADMAP 2.4.10) and a read-only open reads up to it; unsupported, the open
-  fails. A read-write open then syncs the file before anything else: what it read may still be only in the page
+  corruption, a read-write open truncates or quarantines as in §4.4 (or fails) and a read-only open reads up to it;
+  unsupported, the open fails. A read-write open then syncs the file before anything else: what it read may still be only in the page
   cache of a writer that died without syncing, and a commit must never reach the disk before the frames it covers
   (§4.5). Valid frames after `log_end` are then durable but not committed (synced WAL frames, §8.2, or the frames
   of a commit that did not complete); the next commit's `log_end` covers them. Recovery reads frames in bounded chunks

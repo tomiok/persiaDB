@@ -603,30 +603,55 @@ fn corrupt_tail_is_never_truncated() {
     assert_eq!(file.bytes(), bytes);
 }
 
-/// ADR-0013: a whole frame after `log_end` with the wrong `frame_seq` is a leftover, not acknowledged data.
+/// ADR-0013, ADR-0014: a whole frame after `log_end` with the wrong `frame_seq` ends the scan as corruption. One
+/// below the expected value is a leftover and is truncated; one above it (or `u64::MAX`) may follow a lost frame and
+/// hold an acknowledged write, so a read-write open refuses.
 #[test]
 fn stale_frame_after_log_end_is_corruption() {
     for seq in [4, 3, 6, 0, u64::MAX] {
         let mut c = new_sim();
         commit_batch(&mut c, &[b"w1", b"w2"], b"m1"); // frames 1..=3, next 4
         let mut bytes = c.file().bytes();
+        let committed_len = bytes.len() as u64;
         let mut w = Writer::new();
         encode_frame(&mut w, FrameKind::WalChunk, seq, b"x", NONE).unwrap();
         bytes.extend_from_slice(w.as_slice());
-        let rw = Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadWrite);
+        let ro = Container::open_on(SimFile::from_bytes(bytes.clone()), Mode::ReadOnly).unwrap();
+        let file = SimFile::from_bytes(bytes.clone());
+        let rw = Container::open_on(file.clone(), Mode::ReadWrite);
         if seq == 4 {
             assert_eq!(rw.unwrap().uncommitted_frames().len(), 1);
             continue;
         }
-        let err = rw.unwrap_err();
-        assert!(matches!(err, Error::CorruptTail { .. }), "{seq}: {err}");
         assert!(
             matches!(
-                corruption(&err),
-                Some(Corruption::FrameSeqMismatch { expected: 4, .. })
+                ro.recovery().scan_end,
+                ScanEnd::Corrupt {
+                    error: persia_format::Error::Corrupt {
+                        reason: Corruption::FrameSeqMismatch { expected: 4, .. }
+                            | Corruption::FrameSeqOutOfRange { .. },
+                        ..
+                    },
+                    ..
+                }
             ),
-            "{seq}: {err}"
+            "{seq}: {:?}",
+            ro.recovery()
         );
+        if seq < 4 {
+            let c = rw.unwrap();
+            assert_eq!(c.end(), committed_len, "{seq}");
+            assert_eq!(c.recovery().truncated_from, Some(bytes.len() as u64));
+            assert_eq!(c.recovery().quarantined, None, "nothing worth keeping");
+            assert_eq!(file.durable_bytes().len() as u64, committed_len);
+        } else {
+            let err = rw.unwrap_err();
+            assert!(
+                matches!(err, Error::CorruptTail { acknowledged: Some(at), .. } if at == committed_len),
+                "{seq}: {err}"
+            );
+            assert_eq!(file.bytes(), bytes, "{seq}: nothing changed");
+        }
     }
 }
 

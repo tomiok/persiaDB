@@ -10,7 +10,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use persia_format::block::Compression;
 
-use super::{Container, ContainerFile, Error, Mode, Relocation, Result, new_db_uuid, take_lock};
+use super::{
+    Container, ContainerFile, Error, Mode, Relocation, Repair, Result, TailPolicy, new_db_uuid,
+    take_lock,
+};
 use crate::local::fs::parent_or_cwd;
 use crate::local::temp_nonce;
 use crate::vfs::{RealFs, Vfs};
@@ -32,7 +35,7 @@ pub(super) struct Location<F> {
 }
 
 /// `<dir>/<name><suffix>.<nonce>.<n>`, a fresh temporary name next to `path`.
-fn temp_path(path: &Path, suffix: &str) -> Result<PathBuf> {
+pub(super) fn temp_path(path: &Path, suffix: &str) -> Result<PathBuf> {
     let mut name = path
         .file_name()
         .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?
@@ -65,6 +68,14 @@ impl Container<File> {
     /// See [`Container::open_in`].
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
         Self::open_in(Arc::new(RealFs), path, mode)
+    }
+
+    /// [`Container::open_in_with`] on the operating system's file system.
+    ///
+    /// # Errors
+    /// See [`Container::open_in_with`].
+    pub fn open_with(path: impl AsRef<Path>, mode: Mode, repair: Repair) -> Result<Self> {
+        Self::open_in_with(Arc::new(RealFs), path, mode, repair)
     }
 }
 
@@ -131,6 +142,23 @@ impl<F: ContainerFile + 'static> Container<F> {
         path: impl AsRef<Path>,
         mode: Mode,
     ) -> Result<Self> {
+        Self::open_in_with(vfs, path, mode, Repair::Safe)
+    }
+
+    /// [`Container::open_in`], choosing what a read-write open may do when the frames after the last commit end in
+    /// corruption (SPEC §4.5.1, ADR-0014): with [`Repair::Safe`] (what `open_in` does), zeros and stale frames are
+    /// truncated, other bytes are first copied to `<name>.quarantine.<offset>.<nonce>.<n>` next to the container
+    /// ([`Recovery::quarantined`](super::Recovery::quarantined)), and frames that may hold acknowledged writes make
+    /// the open fail with [`Error::CorruptTail`]; [`Repair::Quarantine`] quarantines those too.
+    ///
+    /// # Errors
+    /// As [`Container::open_in`].
+    pub fn open_in_with(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: impl AsRef<Path>,
+        mode: Mode,
+        repair: Repair,
+    ) -> Result<Self> {
         // Canonical, so compaction renames over the real file, not over a symbolic link to it.
         let path = vfs.canonicalize(path.as_ref()).map_err(Error::io("open"))?;
         let mut lock = match mode {
@@ -149,7 +177,11 @@ impl<F: ContainerFile + 'static> Container<F> {
                     continue;
                 }
             }
-            let mut container = Self::recover(file, mode)?;
+            let policy = TailPolicy {
+                quarantine: Some((&*vfs, &path)),
+                repair,
+            };
+            let mut container = Self::recover(file, mode, policy)?;
             container.location = Some(Location {
                 vfs,
                 path,

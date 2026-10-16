@@ -40,8 +40,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   40% dead-space ratio, and `compact` rewrites the live frames, the WAL range and the uncommitted tail into a new
   file (renumbered, payloads copied as stored, a new Manifest built from the returned `Relocation`) that is synced
   and renamed over the container; the old file is never written. `persia-format`: `Frame::reframe`.
+- `persia-storage`: recovery reads the container in bounded 64 KiB chunks (`persia-format`: `StreamScanner`), so
+  opening a container with a large uncommitted Segment frame or a long torn tail no longer needs that much memory.
+- `persia-storage`: `Container::append_stream` appends a frame whose payload is written in chunks (`FrameWriter`).
+- `persia-storage`: a read-write open whose frames after the last commit end in corruption no longer always fails
+  (ADR-0014): zeros and stale frames are truncated, other bytes are copied to a `<name>.quarantine.*` file first, and
+  only frames that may hold acknowledged writes still fail the open, unless `Container::open_with(.., Repair::Quarantine)`.
+- `persia-storage`: `vfs::Vfs`, the file-system operations of `LocalStorage` and the container's path API, with
+  `RealFs` and `SimFs`, a simulated file system that loses unsynced data and directory entries in a crash;
+  `LocalStorage::open_in` and `Container::create_in` / `open_in` run on any of them.
 
 ### Fixed
+- `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers
+  are no longer locked out while a writer is open (SPEC §4.5.1).
+- `persia-storage`: a local-backend object whose path exceeds `PATH_MAX` (1024 bytes on macOS) is `InvalidInput`
+  (`KeyDefect::PathTooLong`) instead of an I/O error.
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 

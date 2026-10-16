@@ -292,9 +292,8 @@ fn commit_through_the_path_api_is_the_previous_or_the_next() {
             })
         },
         |crashed, result, ctx| {
-            // Read-only: a seeded loss can tear the unsynced Manifest out of order, which a read-write open reports
-            // as a corrupt tail (ROADMAP 2.4.10); the committed state is what is checked here.
-            let c = Container::open_in(vfs(crashed), DB, Mode::ReadOnly)
+            // A seeded loss can tear the unsynced Manifest out of order: the read-write open quarantines it (ADR-0014).
+            let c = Container::open_in(vfs(crashed), DB, Mode::ReadWrite)
                 .unwrap_or_else(|e| panic!("{ctx}: {e}"));
             let sb = *c.superblock();
             let manifest = c.read_frame(sb.manifest_off, MAX).unwrap().payload;
