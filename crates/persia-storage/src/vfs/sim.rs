@@ -305,9 +305,12 @@ impl SimFs {
 
     /// Runs a mutating directory operation: counts it, applies the fault, then `f`.
     fn mutate<T>(&self, f: impl FnOnce(&mut State) -> io::Result<T>) -> io::Result<T> {
-        let mut state = lock(&self.state);
-        let ok = state.begin()?;
-        let value = f(&mut state)?;
+        let (ok, value) = {
+            let mut state = lock(&self.state);
+            let ok = state.begin()?;
+            (ok, f(&mut state)?)
+        };
+        // After the state lock is released: dropping a `SimFsFile` here takes it.
         Faults::finish(ok).map(|()| value)
     }
 }
