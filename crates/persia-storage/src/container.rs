@@ -12,6 +12,7 @@
 mod error;
 pub mod file;
 pub mod sim;
+mod stream;
 
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
@@ -32,6 +33,7 @@ use persia_format::{Corruption, Reader, Writer};
 
 pub use error::{Error, ReadOnlyReason, Result};
 pub use file::ContainerFile;
+pub use stream::FrameWriter;
 
 use crate::local::fs::{parent_or_cwd, sync_dir};
 use crate::local::temp_nonce;
