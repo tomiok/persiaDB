@@ -39,6 +39,9 @@ use crate::local::temp_nonce;
 /// Distinguishes the temporary files of one process's [`Container::create`] calls.
 static CREATE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+/// How often [`Container::open`] reopens a path that a compaction renamed over while it was taking the lock.
+const OPEN_ATTEMPTS: u32 = 8;
+
 /// How a container is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -180,7 +183,7 @@ impl Container<File> {
         let result = Self::create_on(file, new_db_uuid()).and_then(|container| {
             match std::fs::hard_link(&temp, path) {
                 Ok(()) => Ok(Container {
-                    path: Some(path.to_owned()),
+                    path: Some(std::fs::canonicalize(path).map_err(Error::io("canonicalize"))?),
                     ..container
                 }),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -206,15 +209,28 @@ impl Container<File> {
     /// # Errors
     /// [`Error::Locked`] if another handle holds the writer lock, and the errors of [`Container::open_on`].
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
-        let path = path.as_ref();
-        let file = OpenOptions::new()
-            .read(true)
-            .write(mode == Mode::ReadWrite)
-            .open(path)
-            .map_err(Error::io("open"))?;
-        let mut container = Self::open_on(file, mode)?;
-        container.path = Some(path.to_owned());
-        Ok(container)
+        // Canonical, so compaction renames over the real file, not over a symbolic link to it.
+        let path = std::fs::canonicalize(path.as_ref()).map_err(Error::io("open"))?;
+        for _ in 0..OPEN_ATTEMPTS {
+            let file = OpenOptions::new()
+                .read(true)
+                .write(mode == Mode::ReadWrite)
+                .open(&path)
+                .map_err(Error::io("open"))?;
+            if mode == Mode::ReadWrite {
+                take_lock(&file)?;
+                // A compaction may have renamed a new file over the path between our open and our lock; the lock
+                // we got is then on the old, unlinked file, which its writer has just released. Open again.
+                if !same_file(&file, &path)? {
+                    continue;
+                }
+            }
+            let mut container = Self::recover(file, mode)?;
+            container.path = Some(path);
+            return Ok(container);
+        }
+        // The path changed under every attempt: a writer is busy compacting.
+        Err(Error::Locked)
     }
 
     /// Compacts the container in place (SPEC §4.6): [`Container::compact_into`] a temporary file
@@ -223,12 +239,16 @@ impl Container<File> {
     /// [`Relocation`]. Handles that opened the old file keep reading it.
     ///
     /// The path names a complete old or new container at every instant. On an error before the rename, the
-    /// temporary file is removed and this handle is unchanged. If the directory sync fails after the rename, this
-    /// handle moves to the new file but is poisoned: the rename may not be durable, so reopen.
+    /// temporary file is removed and this handle is as [`Container::compact_into`] left it. The rename goes to the
+    /// canonical path found at open (a symbolic link to the container keeps pointing at it; other hard links to the
+    /// file are not supported: they keep the old contents), and is refused if that path no longer names this
+    /// file. If the directory sync fails after the rename, [`Error::CompactedNotDurable`] carries the
+    /// [`Relocation`] and this handle moves to the new file, poisoned. On Windows an open mapping may block the
+    /// rename (ROADMAP 2.4.5.3) and the path identity is not checked (2.4.16).
     ///
     /// # Errors
-    /// [`Error::InvalidInput`] if the container was not opened from a path, and the errors of
-    /// [`Container::compact_into`].
+    /// [`Error::InvalidInput`] if the container was not opened from a path or the path names another file,
+    /// [`Error::CompactedNotDurable`], and the errors of [`Container::compact_into`].
     pub fn compact(
         &mut self,
         live: &[Range<u64>],
@@ -240,7 +260,10 @@ impl Container<File> {
         })?;
         self.writable()?;
         let dir = parent_or_cwd(&path).to_owned();
-        let mut temp_name = path.file_name().unwrap_or_default().to_owned();
+        let mut temp_name = path
+            .file_name()
+            .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?
+            .to_owned();
         let n = CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
         temp_name.push(format!(".compact.{:016x}.{n}", temp_nonce()));
         let temp = dir.join(temp_name);
@@ -254,15 +277,27 @@ impl Container<File> {
             Ok(done) => done,
             Err(err) => return Err(discard(&temp, err)),
         };
-        if let Err(err) = std::fs::rename(&temp, &path) {
+        // Never rename over a path that no longer names this file (replaced from outside): that file is not ours.
+        let renamed = match same_file(&self.file, &path) {
+            Ok(true) => std::fs::rename(&temp, &path).map_err(Error::io("rename")),
+            Ok(false) => Err(Error::InvalidInput(format!(
+                "{} no longer names this container",
+                path.display()
+            ))),
+            Err(err) => Err(err),
+        };
+        if let Err(err) = renamed {
             drop(new);
-            return Err(discard(&temp, Error::io("rename")(err)));
+            return Err(discard(&temp, err));
         }
         new.path = Some(path);
-        let synced = sync_dir(&dir).map_err(Error::io("sync directory"));
+        let synced = sync_dir(&dir);
         new.poisoned = synced.is_err();
         *self = new;
-        synced.map(|()| relocation)
+        match synced {
+            Ok(()) => Ok(relocation),
+            Err(source) => Err(Error::CompactedNotDurable { relocation, source }),
+        }
     }
 }
 
@@ -372,6 +407,11 @@ impl<F: ContainerFile> Container<F> {
         if mode == Mode::ReadWrite {
             take_lock(&file)?;
         }
+        Self::recover(file, mode)
+    }
+
+    /// [`Container::open_on`] after the lock, if any, was taken.
+    fn recover(file: F, mode: Mode) -> Result<Self> {
         let file_len = file.file_len().map_err(Error::io("stat"))?;
         let prefix = read_at(&file, 0, file_len.min(FIRST_FRAME_OFFSET))?;
         let mut r = Reader::new(&prefix);
@@ -707,7 +747,8 @@ impl<F: ContainerFile> Container<F> {
     }
 
     /// How much of the container is live, given the live frames below `wal_start` that the writer's manifest
-    /// references (SPEC §4.6). Every frame from `wal_start` on counts as live.
+    /// references (SPEC §4.6). Every frame from `wal_start` on counts as live. Ranges are checked for bounds and
+    /// overlap only, not read: a wrong range skews the result (compaction does check them).
     ///
     /// # Errors
     /// [`Error::InvalidInput`] if a range is outside `12288..wal_start` or overlaps another.
@@ -731,9 +772,13 @@ impl<F: ContainerFile> Container<F> {
     /// manifest records them); every frame from `wal_start` on is copied too. `manifest` builds the new Manifest
     /// payload from the [`Relocation`]; it is stored with `compression`.
     ///
-    /// This container's file is only read, so on error it is unchanged and still writable; `target` is then
-    /// garbage. Unsynced appends are synced first. [`Container::compact`] wraps this with the temporary file and
-    /// the rename.
+    /// Unsynced appends are synced first; a failure there poisons this handle like any failed sync. Otherwise this
+    /// container's file is only read, so on error it is unchanged and still writable, and `target` is garbage.
+    /// [`Container::compact`] wraps this with the temporary file and the rename.
+    ///
+    /// `live` must come from the writer's own manifest: a range is accepted if the bytes there decode as one valid
+    /// frame of exactly that length. The [`Relocation`] passed to `manifest` covers the frames below `log_end` (a
+    /// manifest never references uncommitted frames); the returned one also covers the tail.
     ///
     /// # Errors
     /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::Locked`] (on `target`), [`Error::InvalidInput`] for bad
@@ -1051,5 +1096,47 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         let mut w = Writer::with_base_offset(self.end);
         encode_frame(&mut w, kind, seq, payload, compression)?;
         self.write(&w, kind, seq)
+    }
+}
+
+/// Whether `path` still names the file open as `file` (same device and inode).
+#[cfg(unix)]
+fn same_file(file: &File, path: &Path) -> Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let open = file.metadata().map_err(Error::io("stat"))?;
+    match std::fs::metadata(path) {
+        Ok(named) => Ok((open.dev(), open.ino()) == (named.dev(), named.ino())),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(Error::io("stat")(err)),
+    }
+}
+
+/// The standard library exposes no stable file identity on Windows; the check is part of ROADMAP 2.4.16.
+#[cfg(not(unix))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
+fn same_file(_file: &File, _path: &Path) -> Result<bool> {
+    Ok(true)
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_file_sees_a_rename_over_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, b"old").unwrap();
+        let old = File::open(&path).unwrap();
+        assert!(same_file(&old, &path).unwrap());
+        let other = dir.path().join("b");
+        std::fs::write(&other, b"new").unwrap();
+        std::fs::rename(&other, &path).unwrap();
+        assert!(
+            !same_file(&old, &path).unwrap(),
+            "the path names another inode now"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert!(!same_file(&old, &path).unwrap(), "the path names nothing");
     }
 }

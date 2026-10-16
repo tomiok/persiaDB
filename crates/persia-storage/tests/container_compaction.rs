@@ -563,3 +563,114 @@ fn compact_needs_a_path() {
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert_eq!(names(dir.path()), ["app.persia"]);
 }
+
+/// After a compaction, the path names the new file; a writer opening it later gets the new file, never the old
+/// inode the compacting handle released (the identity check in `Container::open` covers the race in between).
+#[test]
+fn opening_after_compaction_gets_the_new_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let b = build(Container::create(&path).unwrap());
+    let mut c = b.c;
+    let early = std::fs::File::open(&path).unwrap(); // a process that opened the path before the rename
+    c.compact(&[range(b.live)], new_manifest(b.live), NONE)
+        .unwrap();
+    let seq = c.superblock().seq;
+    drop(c);
+    // The old inode's lock is free again, but the path no longer names it.
+    early.try_lock().unwrap();
+    let r = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert_eq!(r.superblock().seq, seq);
+}
+
+#[cfg(unix)]
+#[test]
+fn compacting_through_a_symlink_replaces_the_target() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.persia");
+    let link = dir.path().join("link.persia");
+    let b = build(Container::create(&real).unwrap());
+    drop(b.c);
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let mut c = Container::open(&link, Mode::ReadWrite).unwrap();
+    c.compact(&[range(b.live)], new_manifest(b.live), NONE)
+        .unwrap();
+    let seq = c.superblock().seq;
+    drop(c);
+    assert!(
+        std::fs::symlink_metadata(&link)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    for name in [&real, &link] {
+        assert_eq!(
+            Container::open(name, Mode::ReadOnly)
+                .unwrap()
+                .superblock()
+                .seq,
+            seq
+        );
+    }
+    assert_eq!(names(dir.path()), ["link.persia", "real.persia"]);
+}
+
+#[test]
+fn compact_refuses_a_path_replaced_from_outside() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let b = build(Container::create(&path).unwrap());
+    let mut c = b.c;
+    let intruder = dir.path().join("other");
+    std::fs::write(&intruder, b"someone else's file").unwrap();
+    std::fs::rename(&intruder, &path).unwrap();
+    let err = c
+        .compact(&[range(b.live)], new_manifest(b.live), NONE)
+        .unwrap_err();
+    if cfg!(unix) {
+        assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+        assert_eq!(std::fs::read(&path).unwrap(), b"someone else's file");
+        assert_eq!(names(dir.path()), ["app.persia"]);
+    }
+}
+
+#[test]
+fn compacting_twice_keeps_numbering_and_offsets_stable() {
+    let mut b = sim();
+    let (mut first, r1) =
+        b.c.compact_into(SimFile::new(), &[range(b.live)], new_manifest(b.live), NONE)
+            .unwrap();
+    let live1 = r1.get(b.live.offset).unwrap();
+    let next1 = first.next_frame_seq();
+    let (second, r2) = first
+        .compact_into(SimFile::new(), &[range(live1)], new_manifest(live1), NONE)
+        .unwrap();
+    let live2 = r2.get(live1.offset).unwrap();
+    assert_eq!(live2.offset, live1.offset, "the live frame stays first");
+    assert_eq!(live2.frame_seq, next1);
+    assert!(second.next_frame_seq() > next1);
+    // The first compaction's Manifest lies in the WAL range, so it is kept; the file grows by the new Manifest.
+    let new_manifest_len = second.superblock().manifest_len as usize;
+    assert_eq!(
+        second.file().bytes().len(),
+        first.file().bytes().len() + new_manifest_len
+    );
+    let r =
+        Container::open_on(SimFile::from_bytes(second.file().bytes()), Mode::ReadWrite).unwrap();
+    assert_eq!(payload(&r, live2.offset), vec![2; 4000]);
+}
+
+#[test]
+fn a_failed_pre_sync_poisons_and_writes_no_target() {
+    let mut b = sim();
+    b.c.append(FrameKind::WalChunk, b"unsynced", NONE).unwrap();
+    let file = b.c.file().clone();
+    file.set_fault(Some(SimFault::FailAt(file.mutations())));
+    let target = SimFile::new();
+    let err =
+        b.c.compact_into(target.clone(), &[], |_| Vec::new(), NONE)
+            .unwrap_err();
+    assert!(matches!(err, Error::Io { .. }), "{err}");
+    assert_eq!(target.mutations(), 0);
+    assert!(matches!(b.c.sync(), Err(Error::Poisoned)));
+}

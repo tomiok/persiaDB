@@ -80,6 +80,17 @@ pub enum Error {
     /// The caller passed an argument the container cannot accept.
     #[error("invalid argument: {0}")]
     InvalidInput(String),
+    /// [`Container::compact`](super::Container::compact) renamed the new file over the container, but syncing the
+    /// directory failed, so the rename may not be durable. The handle now works on the new file and is poisoned:
+    /// reopen it. `relocation` says where the frames moved; offsets from before the compaction must not be used on
+    /// this handle.
+    #[error("compacted the container, but syncing its directory failed ({source}); reopen it")]
+    CompactedNotDurable {
+        /// Where compaction moved each frame.
+        relocation: super::Relocation,
+        /// The OS error.
+        source: io::Error,
+    },
     /// Recovery needed a buffer of `bytes` bytes that could not be allocated (ROADMAP 2.4.12 bounds it).
     #[error("cannot allocate {bytes} bytes to read the container")]
     OutOfMemory {

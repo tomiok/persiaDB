@@ -198,7 +198,7 @@ Deps: M1.
   - [x] 2.4.4.2 [T] an invalid frame in `wal_start..log_end` is `Corrupt` and never truncated; creating a container never truncates an existing file (SPEC §4.7, §8.6)
 - 2.4.5 Container compaction: rewrite live frames into new file + atomic rename (SPEC §4.6)
   - [~] 2.4.5.1 Dead-space accounting
-  - [~] 2.4.5.2 [T] crash during compaction leaves a valid old or new file
+  - [~] 2.4.5.2 [T] crash during compaction leaves a valid old or new file (crashes while writing the new file; the rename and directory-sync windows are tested in 2.4.11.2)
   - [ ] 2.4.5.3 Windows: test whether an open mapping blocks `rename` over the container; if so, close mappings or defer the swap until readers drain (ADR-0010)
 - [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
 - [x] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
@@ -207,11 +207,11 @@ Deps: M1.
 - [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9 (ADR-0013: a valid frame past the stop whose `frame_seq` is not above the last valid one can never be acknowledged data, e.g. stale blocks exposed by a crash during a file extension; decide whether "only such frames and zeros" may be truncated)
 - 2.4.11 File-level fault injection for the local backend and the container (found in the 2.2.4 review: `FaultyStorage` sits above the fsync points)
   - [ ] 2.4.11.1 A file-system shim under the 2.3 backend and the container adapter that can fail or drop `fsync`, lose a `rename` or directory entry while the data survives (or the reverse), and tear the tail of an append
-  - [ ] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir), of `Container::create` (temp → sync → link → remove → sync dir) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix
+  - [ ] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir), of `Container::create` (temp → sync → link → remove → sync dir), of `Container::compact` (temp → sync → rename → sync dir, incl. `CompactedNotDurable`) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix
 - [ ] 2.4.12 Bound recovery memory (found in 2.4): open reads `wal_start..log_end` and the tail after `log_end` into memory; scan frame by frame (header, bound, frame) with a streaming zero check for the torn-tail rule, so a large uncommitted Segment frame does not need its size in RAM
 - [ ] 2.4.13 Streaming append of large frames through `FrameEncoder` (a Segment written in chunks), with the same poisoning and `frame_seq` rules as `append`
-- [ ] 2.4.14 Record `format_minor = max(stored, own)` on read-write open when this build's minor is newer (SPEC §4.2): the header page is rewritten in place and not double-buffered, so decide how a torn header write is survived (e.g. only rewrite during a container rewrite, 2.4.5) before any minor bump
-- [ ] 2.4.15 Sweep stale `<name>.tmp.*` files left by a `Container::create` that crashed (same policy question as 2.3.8)
+- [ ] 2.4.14 Record `format_minor = max(stored, own)` on read-write open when this build's minor is newer (SPEC §4.2): the header page is rewritten in place and not double-buffered, so decide how a torn header write is survived (compaction, 2.4.5, already writes the merged minor into the new file) before any minor bump
+- [ ] 2.4.15 Sweep stale `<name>.tmp.*` and `<name>.compact.*` files left by a `Container::create` or `compact` that crashed (same policy question as 2.3.8)
 - [ ] 2.4.16 Windows writer lock (found in the 2.4 review): `LockFileEx` is mandatory, so a writer blocks every reader of the container (SPEC §4.5.1); lock a sidecar `<name>.lock` file or a byte range past any data instead, and test it in the 2.3.9 Windows CI job
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)

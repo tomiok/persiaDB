@@ -262,7 +262,9 @@ nothing. The container is reopened, and recovery decides what survived.
   file. The file system must support hard links.
 - **Writer lock.** A read-write open holds an exclusive lock on the container file (`flock` on Unix, `LockFileEx`
   on Windows) while it is open, and fails at once if another handle holds it, in this process or another (§8.4).
-  Read-only opens take no lock. Limits: on Windows the lock is mandatory, so while a writer is open no other handle
+  After locking, it checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
+  have renamed a new file over it, and the old one's lock is released when its writer moves on. Read-only opens
+  take no lock. Limits: on Windows the lock is mandatory, so while a writer is open no other handle
   can read the file (ROADMAP 2.4.16); on NFS, Linux emulates `flock` with per-process POSIX locks, so two handles of
   one process are not excluded from each other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
@@ -306,7 +308,11 @@ synced, renamed over the container, and the directory synced. The old file is ne
 the rename leaves the old container (and a stale temporary file); the rename replaces the name atomically, so the
 path names a complete old or new container at every instant. Readers that opened the old file keep reading it
 (§4.7). If the directory sync fails after the rename, the writer continues on the new file but stops writing until
-reopened, since the rename may not be durable.
+reopened, since the rename may not be durable; it still learns where the frames moved. The rename goes to the
+canonical path resolved at open, so a symbolic link to the container keeps pointing at it; other hard links to the
+file are not supported (they keep the old contents). The writer refuses to rename if that path no longer names its
+file. Because a compaction changes which file the path names, a read-write open checks after taking the lock that
+the path still names the file it locked, and opens again if not (§4.5.1).
 
 ### 4.7 Memory-mapped reads
 A local reader may memory-map byte ranges of the container instead of reading them (ADR-0010). Only bytes that are

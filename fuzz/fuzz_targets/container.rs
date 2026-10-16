@@ -16,7 +16,7 @@ use std::sync::OnceLock;
 use libfuzzer_sys::fuzz_target;
 use persia_format::block::Compression;
 use persia_format::checksum::{Crc32c, crc32c};
-use persia_format::frame::{FrameKind, MIN_FRAME_LEN};
+use persia_format::frame::{FrameKind, FrameScanner, MIN_FRAME_LEN};
 use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN};
 use persia_storage::container::sim::SimFile;
 use persia_storage::container::{Commit, Container, ContainerFile, Error, Mode, ReadOnlyReason};
@@ -202,13 +202,21 @@ fuzz_target!(|input: &[u8]| {
                         .payload,
                     b"next"
                 );
-                // Compacting what recovery accepted (no live frames below wal_start) yields a container that
-                // reopens with the same uncommitted frames, and leaves the old file untouched.
+                // Compacting what recovery accepted, keeping an input-chosen subset of the valid frames below
+                // wal_start, yields a container that reopens with the same uncommitted frames and the same live
+                // payloads where the Relocation says, and leaves the old file untouched.
                 let before = rw_file.bytes();
+                let wal_start = c.superblock().wal_start;
+                let below = &before[FIRST_FRAME_OFFSET as usize..wal_start as usize];
+                let live: Vec<_> = FrameScanner::new(below, FIRST_FRAME_OFFSET)
+                    .enumerate()
+                    .filter(|(i, _)| (u32::from(*o0) >> (i % 8)) & 1 == 1)
+                    .map(|(_, f)| f.offset()..f.end())
+                    .collect();
                 let target = SimFile::new();
                 let tail = c.uncommitted_frames().len();
-                let (new, _) = c
-                    .compact_into(target.clone(), &[], |_| b"compacted".to_vec(), NONE)
+                let (new, relocation) = c
+                    .compact_into(target.clone(), &live, |_| b"compacted".to_vec(), NONE)
                     .unwrap();
                 assert_eq!(
                     rw_file.bytes(),
@@ -220,6 +228,14 @@ fuzz_target!(|input: &[u8]| {
                 assert_eq!(r.superblock().seq, seq + 2);
                 assert_eq!(r.uncommitted_frames().len(), tail);
                 assert_eq!(r.frames(), new.frames());
+                for range in &live {
+                    let moved = relocation
+                        .get(range.start)
+                        .expect("every live frame is copied");
+                    let old = c.read_frame(range.start, MAX).map(|p| p.payload);
+                    let copy = r.read_frame(moved.offset, MAX).map(|p| p.payload);
+                    assert_eq!(old.ok(), copy.ok(), "a live frame keeps its payload");
+                }
             }
         }
         Err(err) => {
