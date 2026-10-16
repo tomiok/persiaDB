@@ -300,6 +300,75 @@ pub enum Corruption {
         /// The rule that does not hold.
         defect: BlobRefDefect,
     },
+    /// A superblock field contradicts the container it was read from (SPEC §4.3), e.g. a `log_end` past the end of
+    /// the file; `Error::Corrupt::offset` points at the field.
+    #[error("superblock {field} = {value} does not fit the container")]
+    InvalidSuperblock {
+        /// The offending field.
+        field: SuperblockField,
+        /// Its value.
+        value: u64,
+    },
+    /// The frame at the superblock's `manifest_off` is not a Manifest frame of `manifest_len` bytes (SPEC §4.3).
+    #[error("superblock manifest is a frame of kind {kind} and {len} bytes")]
+    NotAManifest {
+        /// The frame's kind byte.
+        kind: u8,
+        /// The frame's total length.
+        len: u64,
+    },
+    /// A valid frame whose `frame_seq` breaks its container's run (SPEC §4.4; ADR-0013): a leftover or misplaced
+    /// frame, or a frame missing before it.
+    #[error("frame_seq {found}, expected {expected}")]
+    FrameSeqMismatch {
+        /// The `frame_seq` the run continues with.
+        expected: u64,
+        /// The frame's `frame_seq`.
+        found: u64,
+    },
+    /// A frame with `frame_seq = u64::MAX`, which no writer appends (SPEC §4.4; ADR-0013).
+    #[error("frame_seq {} is never written", u64::MAX)]
+    FrameSeqExhausted,
+}
+
+/// A superblock field, named in [`Corruption::InvalidSuperblock`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SuperblockField {
+    /// `manifest_off`.
+    ManifestOff,
+    /// `manifest_len`.
+    ManifestLen,
+    /// `log_end`.
+    LogEnd,
+    /// `wal_start`.
+    WalStart,
+    /// `next_frame_seq`.
+    NextFrameSeq,
+}
+
+impl SuperblockField {
+    /// Offset of the field within its slot (SPEC §4.3).
+    pub const fn offset(self) -> u64 {
+        match self {
+            Self::ManifestOff => 8,
+            Self::ManifestLen => 16,
+            Self::LogEnd => 24,
+            Self::WalStart => 32,
+            Self::NextFrameSeq => 48,
+        }
+    }
+}
+
+impl core::fmt::Display for SuperblockField {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::ManifestOff => "manifest_off",
+            Self::ManifestLen => "manifest_len",
+            Self::LogEnd => "log_end",
+            Self::WalStart => "wal_start",
+            Self::NextFrameSeq => "next_frame_seq",
+        })
+    }
 }
 
 /// What a valid input uses that this build does not support (SPEC §4.2, §15; ADR-0007).

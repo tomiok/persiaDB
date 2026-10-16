@@ -136,13 +136,21 @@ Each slot is one 4096-byte page (slot A at 4096, slot B at 8192; ADR-0008):
 24  8  log_end        u64  (end of last durable frame)
 32  8  wal_start      u64  (first WAL frame still needed)
 40  8  fence_token    u64  (writer fencing, SPEC §11.3)
-48  ..  reserved      MUST be zero
+48  8  next_frame_seq u64  (frame_seq of the frame at log_end, SPEC §4.4)
+56  ..  reserved      MUST be zero
 4092 4 crc            u32  (CRC32C over bytes 0..4092 of the slot)
 ```
 A slot is *valid* when its CRC matches and its reserved bytes are zero; a never-written (all-zero) slot is invalid.
 A new container has no frames yet: both slots hold `seq = 0`, `log_end = wal_start = 12288` (the first frame
-offset) and zero manifest fields, so recovery (SPEC §4.4) scans from 12288 (ADR-0008).
-The offsets are checked against the container by its reader (ROADMAP 2.4.4), not by slot decoding.
+offset), `next_frame_seq = 1` and zero manifest fields, so recovery (SPEC §4.4) scans from 12288 (ADR-0008).
+Slot decoding does not check the offsets; the container reader checks the active slot against the file before
+using any of them, and any violation is corruption:
+- `wal_start` and `log_end` are multiples of 8 with `12288 ≤ wal_start ≤ log_end ≤` file length;
+- `next_frame_seq ≥ 1`;
+- `seq = 0` (never committed) holds exactly the new-container values above for `log_end`, `next_frame_seq` and the
+  manifest fields;
+- otherwise the Manifest frame lies in `12288..log_end` (`manifest_off` and `manifest_len` multiples of 8,
+  `manifest_len ≥ 32`), and the frame there is a valid Manifest frame of exactly `manifest_len` bytes.
 
 Open: read both slots, discard invalid ones, use the one with the highest `seq` (ADR-0007):
 
@@ -170,8 +178,13 @@ From byte 12288 (after slot B) the file is an append-only sequence of frames:
 ..  4  reserved      u32  MUST be zero
 ```
 Total frame length is `24 + pad8(payload_len) + 8`, so every frame starts 8-byte aligned (SPEC §4.1).
-`flags` is a 24-bit little-endian integer. `frame_seq` is stored and covered by the CRC, but its meaning (and
-whether recovery checks it) is not defined yet (ROADMAP 2.4.9); frame decoding does not interpret it.
+`flags` is a 24-bit little-endian integer.
+
+`frame_seq` numbers the frames of a container file in append order (ADR-0013): each frame's is one more than the
+previous frame's, Padding and unknown kinds included, so a file's frames form one contiguous run. The first frame
+of a new container has `frame_seq = 1`; a rewrite (§4.6) numbers its frames on from the old file's
+`next_frame_seq`, so a database never gives one `frame_seq` to two different frames. A writer never appends a frame
+with `frame_seq = u64::MAX`. Frame decoding does not interpret the field; the container reader checks it (below).
 
 Validation (ADR-0009), in this order. A frame at offset `o` in input that ends at `E` is *invalid* when:
 1. fewer than 32 bytes (the smallest frame) remain, or `frame_magic` differs;
@@ -214,8 +227,10 @@ input. It ends in one of four ways, at the offset `o` where it stopped:
 - *unsupported*: the frame at `o` is unsupported. Nothing is truncated; the container cannot be opened by this
   build.
 
-Recovery: starting at `log_end` from the chosen superblock, scan forward; a torn tail or corruption terminates
-the scan, and the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
+Recovery: starting at `log_end` from the chosen superblock, scan forward, expecting `frame_seq = next_frame_seq`
+at `log_end` and one more for each later frame; a valid frame with any other `frame_seq` (a leftover or misplaced
+frame) ends the scan as *corruption* at that frame (ADR-0013). A torn tail or corruption terminates the scan, and
+the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
 the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new ones (ROADMAP 2.4.4).
 On corruption the bytes after `o` may hold acknowledged writes (WAL frames synced after `log_end`, SPEC §8.2), so
 they are not destroyed silently: what a read-write open does then is decided with `frame_seq` (ROADMAP 2.4.9,
@@ -574,7 +589,8 @@ Obsolete segments are deleted only after no snapshot references them (reference 
 
 ### 8.6 Recovery
 On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs)
-→ ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated. Only
+→ ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated, and
+so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
 

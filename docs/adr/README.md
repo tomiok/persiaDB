@@ -35,3 +35,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0010](./0010-mmap-unsafe-boundary-and-sigbus.md) | The memory-mapping unsafe boundary and the SIGBUS strategy | accepted |
 | [0011](./0011-blob-ref-encoding.md) | `BlobRef` value limits and binary encoding | accepted |
 | [0012](./0012-local-backend-layout.md) | Local backend layout: encoded file names, directory marker, link-based `put_if_absent` | accepted |
+| [0013](./0013-frame-seq.md) | `frame_seq` numbers a container's frames contiguously; the superblock anchors it | accepted |

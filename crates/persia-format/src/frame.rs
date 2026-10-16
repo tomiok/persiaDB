@@ -26,6 +26,8 @@ use crate::writer::Writer;
 pub const FRAME_MAGIC: [u8; 4] = *b"PFR1";
 /// Bytes before the payload: magic, kind, flags, `payload_len`, `frame_seq`.
 pub const FRAME_HEADER_LEN: usize = 24;
+/// Offset of `frame_seq` within a frame.
+const FRAME_SEQ_OFFSET: u64 = 16;
 /// Bytes after the padded payload: CRC and `reserved`.
 pub const FRAME_TRAILER_LEN: usize = 8;
 /// The smallest frame: an empty payload.
@@ -664,7 +666,8 @@ pub enum ScanEnd {
         error: Error,
     },
     /// The frame at `offset` is invalid and non-zero bytes follow it: lost data, or an interrupted append whose
-    /// pages reached the disk out of order (SPEC §4.4). The bytes after `offset` must not be destroyed silently
+    /// pages reached the disk out of order (SPEC §4.4). Also a valid frame that breaks a checked `frame_seq` run
+    /// ([`FrameScanner::expect_frame_seq`]). The bytes after `offset` must not be destroyed silently
     /// (ROADMAP 2.4.10).
     Corrupt {
         /// Start of the invalid frame.
@@ -756,6 +759,34 @@ impl ScanEnd {
 pub struct FrameScanner<'a> {
     r: Reader<'a>,
     end: Option<ScanEnd>,
+    seq: SeqCheck,
+}
+
+/// Which `frame_seq` the next frame must have (SPEC §4.4; ADR-0013).
+#[derive(Debug, Clone, Copy)]
+enum SeqCheck {
+    /// Not checked.
+    Off,
+    /// Any value below `u64::MAX` for the first frame, then one more each.
+    Contiguous,
+    /// Exactly this value, then one more each.
+    Next(u64),
+}
+
+impl SeqCheck {
+    /// The check for the frame after one with `found`, or why `found` breaks the run.
+    fn advance(self, found: u64) -> Result<Self, Corruption> {
+        match self {
+            Self::Off => Ok(Self::Off),
+            Self::Next(expected) if expected != found => {
+                Err(Corruption::FrameSeqMismatch { expected, found })
+            }
+            Self::Contiguous | Self::Next(_) => found
+                .checked_add(1)
+                .map(Self::Next)
+                .ok_or(Corruption::FrameSeqExhausted),
+        }
+    }
 }
 
 impl<'a> FrameScanner<'a> {
@@ -766,6 +797,35 @@ impl<'a> FrameScanner<'a> {
         Self {
             r: Reader::with_base_offset(bytes, base),
             end: None,
+            seq: SeqCheck::Off,
+        }
+    }
+
+    /// Also requires the first frame to have `frame_seq = first` and each later one one more (SPEC §4.4;
+    /// ADR-0013), as recovery does from `log_end` with the superblock's `next_frame_seq`. A valid frame that
+    /// breaks the run, or has `frame_seq = u64::MAX`, ends the scan as [`ScanEnd::Corrupt`] at that frame.
+    #[must_use]
+    pub fn expect_frame_seq(mut self, first: u64) -> Self {
+        self.seq = SeqCheck::Next(first);
+        self
+    }
+
+    /// Like [`FrameScanner::expect_frame_seq`], but the first frame may have any `frame_seq` below `u64::MAX`:
+    /// for a range that starts at a frame whose number is not known, such as `wal_start`.
+    #[must_use]
+    pub fn contiguous(mut self) -> Self {
+        if matches!(self.seq, SeqCheck::Off) {
+            self.seq = SeqCheck::Contiguous;
+        }
+        self
+    }
+
+    /// The `frame_seq` the next frame must have, once a checked scan (see [`FrameScanner::expect_frame_seq`])
+    /// has seen a frame or was given its first value; `None` otherwise.
+    pub const fn next_frame_seq(&self) -> Option<u64> {
+        match self.seq {
+            SeqCheck::Next(next) => Some(next),
+            SeqCheck::Off | SeqCheck::Contiguous => None,
         }
     }
 
@@ -792,8 +852,26 @@ impl<'a> Iterator for FrameScanner<'a> {
             self.end = Some(ScanEnd::Clean { offset });
             return None;
         }
+        let before = self.r.clone();
         match Frame::decode(&mut self.r) {
-            Ok(frame) => Some(frame),
+            Ok(frame) => match self.seq.advance(frame.frame_seq()) {
+                Ok(seq) => {
+                    self.seq = seq;
+                    Some(frame)
+                }
+                Err(reason) => {
+                    // The frame is whole, so this is never a torn tail; stop before it.
+                    self.r = before;
+                    self.end = Some(ScanEnd::Corrupt {
+                        offset,
+                        error: Error::Corrupt {
+                            offset: offset.saturating_add(FRAME_SEQ_OFFSET),
+                            reason,
+                        },
+                    });
+                    None
+                }
+            },
             Err(error) => {
                 self.end = Some(ScanEnd::classify(self.r.rest(), offset, error));
                 None
@@ -1285,6 +1363,126 @@ mod tests {
             assert_eq!(end.truncates(), truncates);
             assert_eq!(end.error().is_some(), !matches!(end, ScanEnd::Clean { .. }));
         }
+    }
+
+    /// Runs a checked scan; `first` selects `expect_frame_seq(first)`, `None` selects `contiguous()`.
+    fn scan_seq(bytes: &[u8], first: Option<u64>) -> (Vec<u64>, ScanEnd, Option<u64>) {
+        let scanner = FrameScanner::new(bytes, BASE);
+        let mut scanner = match first {
+            Some(first) => scanner.expect_frame_seq(first),
+            None => scanner.contiguous(),
+        };
+        let seqs = scanner.by_ref().map(|f| f.frame_seq()).collect();
+        assert_eq!(scanner.offset(), scanner.end().unwrap().offset());
+        (
+            seqs,
+            scanner.end().unwrap().clone(),
+            scanner.next_frame_seq(),
+        )
+    }
+
+    fn run(seqs: &[u64]) -> Vec<u8> {
+        seqs.iter().flat_map(|&s| raw(1, s, b"wal")).collect()
+    }
+
+    #[test]
+    fn frame_seq_run_is_checked_only_when_asked() {
+        let bytes = run(&[5, 9, 2]);
+        let (frames, end) = scan(&bytes);
+        assert_eq!((frames.len(), end.offset()), (3, BASE + bytes.len() as u64));
+        assert_eq!(FrameScanner::new(&bytes, BASE).next_frame_seq(), None);
+        assert_eq!(
+            FrameScanner::new(&[], BASE)
+                .expect_frame_seq(4)
+                .next_frame_seq(),
+            Some(4)
+        );
+        assert_eq!(
+            FrameScanner::new(&[], BASE).contiguous().next_frame_seq(),
+            None
+        );
+        // `contiguous` does not override a known first value.
+        let scanner = FrameScanner::new(&[], BASE)
+            .expect_frame_seq(4)
+            .contiguous();
+        assert_eq!(scanner.next_frame_seq(), Some(4));
+    }
+
+    #[test]
+    fn frame_seq_run_accepts_contiguous_frames() {
+        let bytes = run(&[7, 8, 9]);
+        let end = ScanEnd::Clean {
+            offset: BASE + bytes.len() as u64,
+        };
+        assert_eq!(
+            scan_seq(&bytes, Some(7)),
+            (vec![7, 8, 9], end.clone(), Some(10))
+        );
+        assert_eq!(scan_seq(&bytes, None), (vec![7, 8, 9], end, Some(10)));
+        let empty = ScanEnd::Clean { offset: BASE };
+        assert_eq!(scan_seq(&[], Some(1)), (vec![], empty, Some(1)));
+    }
+
+    /// `(frame_seqs, first, frames accepted, expected, found)`.
+    type SeqCase = (&'static [u64], Option<u64>, usize, u64, u64);
+
+    #[test]
+    fn frame_seq_break_is_corruption_at_the_frame() {
+        let len = raw(1, 1, b"wal").len() as u64;
+        let mismatch = |at: u64, expected, found| ScanEnd::Corrupt {
+            offset: at,
+            error: Error::Corrupt {
+                offset: at + 16,
+                reason: Corruption::FrameSeqMismatch { expected, found },
+            },
+        };
+        // Wrong first value, a gap, a repeat, a step back.
+        let cases: [SeqCase; 5] = [
+            (&[2, 3], Some(1), 0, 1, 2),
+            (&[1, 3], Some(1), 1, 2, 3),
+            (&[1, 3], None, 1, 2, 3),
+            (&[4, 4], None, 1, 5, 4),
+            (&[4, 5, 3], Some(4), 2, 6, 3),
+        ];
+        for (seqs, first, valid, expected, found) in cases {
+            let (got, end, _) = scan_seq(&run(seqs), first);
+            assert_eq!(got, seqs[..valid], "{seqs:?}");
+            let at = BASE + valid as u64 * len;
+            assert_eq!(end, mismatch(at, expected, found), "{seqs:?}");
+            assert!(end.truncates());
+        }
+    }
+
+    #[test]
+    fn frame_seq_max_is_never_valid() {
+        let exhausted = |at: u64| ScanEnd::Corrupt {
+            offset: at,
+            error: Error::Corrupt {
+                offset: at + 16,
+                reason: Corruption::FrameSeqExhausted,
+            },
+        };
+        let len = raw(1, 1, b"wal").len() as u64;
+        assert_eq!(scan_seq(&run(&[u64::MAX]), None).1, exhausted(BASE));
+        assert_eq!(
+            scan_seq(&run(&[u64::MAX]), Some(u64::MAX)).1,
+            exhausted(BASE)
+        );
+        let (seqs, end, next) = scan_seq(&run(&[u64::MAX - 1, u64::MAX]), None);
+        assert_eq!(
+            (seqs, end, next),
+            (vec![u64::MAX - 1], exhausted(BASE + len), Some(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn invalid_frame_still_classified_in_a_checked_scan() {
+        let mut bytes = run(&[1, 2]);
+        let len = bytes.len();
+        bytes.truncate(len - 3);
+        let (seqs, end, _) = scan_seq(&bytes, Some(1));
+        assert_eq!(seqs, [1]);
+        assert!(matches!(end, ScanEnd::TornTail { .. }), "{end:?}");
     }
 
     // -----------------------------------------------------------------------------------------------------
