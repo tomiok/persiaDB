@@ -146,7 +146,7 @@ offset), `next_frame_seq = 1` and zero manifest fields, so recovery (SPEC §4.4)
 Slot decoding does not check the offsets; the container reader checks the active slot against the file before
 using any of them, and any violation is corruption:
 - `wal_start` and `log_end` are multiples of 8 with `12288 ≤ wal_start ≤ log_end ≤` file length;
-- `next_frame_seq ≥ 1`;
+- `next_frame_seq ≥ 1`, and `≥ 2` after a commit (a commit has at least its Manifest frame);
 - `seq = 0` (never committed) holds exactly the new-container values above for `log_end`, `next_frame_seq` and the
   manifest fields;
 - otherwise the Manifest frame lies in `12288..log_end` (`manifest_off` and `manifest_len` multiples of 8,
@@ -181,10 +181,12 @@ Total frame length is `24 + pad8(payload_len) + 8`, so every frame starts 8-byte
 `flags` is a 24-bit little-endian integer.
 
 `frame_seq` numbers the frames of a container file in append order (ADR-0013): each frame's is one more than the
-previous frame's, Padding and unknown kinds included, so a file's frames form one contiguous run. The first frame
-of a new container has `frame_seq = 1`; a rewrite (§4.6) numbers its frames on from the old file's
-`next_frame_seq`, so a database never gives one `frame_seq` to two different frames. A writer never appends a frame
-with `frame_seq = u64::MAX`. Frame decoding does not interpret the field; the container reader checks it (below).
+previous frame's, Padding and unknown kinds included, so a file's frames form one contiguous run. Values are in
+`1..u64::MAX`: 0 and `u64::MAX` are never written. The first frame of a new container has `frame_seq = 1`; a
+rewrite (§4.6) numbers the frames of the new file on from one more than the `frame_seq` of the last valid frame of
+the old file (committed or not, so acknowledged WAL frames after `log_end` keep their numbers unique), and writes
+both of its slots as commits (`seq ≥ 1`), so a database never gives one `frame_seq` to two different frames. Frame
+decoding does not interpret the field; the container reader checks it (below).
 
 Validation (ADR-0009), in this order. A frame at offset `o` in input that ends at `E` is *invalid* when:
 1. fewer than 32 bytes (the smallest frame) remain, or `frame_magic` differs;

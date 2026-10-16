@@ -326,9 +326,12 @@ pub enum Corruption {
         /// The frame's `frame_seq`.
         found: u64,
     },
-    /// A frame with `frame_seq = u64::MAX`, which no writer appends (SPEC §4.4; ADR-0013).
-    #[error("frame_seq {} is never written", u64::MAX)]
-    FrameSeqExhausted,
+    /// A frame with `frame_seq` 0 or `u64::MAX`, which no writer appends (SPEC §4.4; ADR-0013).
+    #[error("frame_seq {found} is never written (valid: 1..u64::MAX)")]
+    FrameSeqOutOfRange {
+        /// The frame's `frame_seq`.
+        found: u64,
+    },
 }
 
 /// A superblock field, named in [`Corruption::InvalidSuperblock`].

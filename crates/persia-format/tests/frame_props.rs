@@ -957,3 +957,75 @@ fn fuzz_seeds_match_their_names() {
     assert!(frames.len() == 1 && frames[0].is_compressed());
     assert!(frames[0].payload(1024).unwrap_err().is_corruption());
 }
+
+/// A checked scan (ADR-0013) accepts the longest prefix of the unchecked scan's frames whose `frame_seq` values are
+/// in `1..u64::MAX`, start at `first` (if given) and step by one (a mismatch is reported before a value out of range);
+/// where it stops early it reports corruption at the
+/// breaking frame, and otherwise it ends exactly like the unchecked scan.
+fn check_seq_run(specs: &[Spec], first: Option<u64>, base: u64) -> Result<(), TestCaseError> {
+    let (log, _) = encode_log(specs);
+    let (frames, unchecked_end) = scan(&log, base);
+    let scanner = FrameScanner::new(&log, base);
+    let mut scanner = match first {
+        Some(first) => scanner.expect_frame_seq(first),
+        None => scanner.contiguous(),
+    };
+    let checked: Vec<Frame<'_>> = scanner.by_ref().collect();
+    let end = scanner.end().unwrap().clone();
+    prop_assert_eq!(scanner.offset(), end.offset());
+
+    let mut expected = first;
+    let mut accepted = 0;
+    let mut stop = None;
+    for f in &frames {
+        let seq = f.frame_seq();
+        if let Some(e) = expected.filter(|&e| e != seq) {
+            stop = Some((
+                f.offset(),
+                Corruption::FrameSeqMismatch {
+                    expected: e,
+                    found: seq,
+                },
+            ));
+            break;
+        }
+        if seq == 0 || seq == u64::MAX {
+            stop = Some((f.offset(), Corruption::FrameSeqOutOfRange { found: seq }));
+            break;
+        }
+        expected = Some(seq + 1);
+        accepted += 1;
+    }
+    prop_assert_eq!(&checked[..], &frames[..accepted]);
+    if let Some((offset, reason)) = stop {
+        let error = corrupt(offset + 16, reason);
+        prop_assert_eq!(end, ScanEnd::Corrupt { offset, error });
+    } else {
+        prop_assert_eq!(end, unchecked_end);
+        prop_assert_eq!(scanner.next_frame_seq(), expected);
+    }
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn checked_scan_accepts_the_longest_valid_run(
+        mut specs in specs(6, 60),
+        start in prop_oneof![0_u64..3, (u64::MAX - 3)..=u64::MAX, any::<u64>()],
+        jumps in proptest::collection::vec(prop_oneof![6 => Just(None), 1 => any::<u64>().prop_map(Some)], 6),
+        first in prop_oneof![Just(None), Just(Some(0)), any::<u64>().prop_map(Some), Just(Some(u64::MAX))],
+        use_start in any::<bool>(),
+        base in aligned_base(),
+    ) {
+        let mut seq = start;
+        for (i, (s, jump)) in specs.iter_mut().zip(&jumps).enumerate() {
+            if i > 0 {
+                seq = seq.wrapping_add(1);
+            }
+            seq = jump.unwrap_or(seq);
+            s.seq = seq;
+        }
+        let first = if use_start { Some(start) } else { first };
+        check_seq_run(&specs, first, base)?;
+    }
+}

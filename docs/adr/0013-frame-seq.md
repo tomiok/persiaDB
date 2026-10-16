@@ -21,8 +21,10 @@ No format version has been released, so the v1.0 layout is amended in place (SPE
 1. **What it numbers.** `frame_seq` counts the frames of one container file in append order. Each frame's
    `frame_seq` is one more than that of the frame before it, Padding and unknown kinds included, so the frames of a
    file form one contiguous run. The first frame of a new container has `frame_seq = 1`.
-2. **Rewrites continue the count.** A rewrite (§4.6) numbers the frames of the new file on from the old file's
-   next value, so within one database a `frame_seq` is never given to two different frames, even across rewrites.
+2. **Rewrites continue the count.** A rewrite (§4.6) numbers the frames of the new file on from one more than the
+   `frame_seq` of the last valid frame of the old file. That is not the old superblock's `next_frame_seq` when
+   acknowledged WAL frames follow `log_end` (§8.2): they already hold those numbers. The new file's slots are both
+   commits (`seq ≥ 1`), never the `seq = 0` state of a new container, whose `next_frame_seq` is 1. So, so within one database a `frame_seq` is never given to two different frames, even across rewrites.
    A frame copied by a rewrite gets a new number. `frame_seq` therefore stays monotonic over the database's life,
    which later WAL or replication bookkeeping may rely on; nothing does yet.
 3. **The superblock anchors the run.** The superblock gains `next_frame_seq u64` at offset 48 (taken from the
@@ -35,8 +37,10 @@ No format version has been released, so the v1.0 layout is amended in place (SPE
      like any corruption it is never truncated (ADR-0009, ROADMAP 2.4.10);
    - frames in `wal_start..log_end` were committed: they must be contiguous and the last one must have
      `next_frame_seq - 1`, else the container is corrupt. Frames below `wal_start` are checked when read, by kind.
-5. **Exhaustion.** A writer never appends a frame with `frame_seq = u64::MAX`, so `next_frame_seq` always fits.
-   At one frame per microsecond that takes over 500,000 years.
+5. **Range.** Values are in `1..u64::MAX`. A writer never appends a frame with `frame_seq = u64::MAX`, so
+   `next_frame_seq` always fits (at one frame per microsecond, exhausting it takes over 500,000 years), and 0 is
+   never written, so a checked scan rejects both. A committed superblock has `next_frame_seq ≥ 2`: a commit has at
+   least its Manifest frame.
 
 ## Consequences
 
@@ -51,7 +55,9 @@ No format version has been released, so the v1.0 layout is amended in place (SPE
 ## Alternatives considered
 
 - **Derive the anchor from the Manifest frame at `log_end`**: commits put the Manifest last (§4.5), but a new
-  container has none, and the rule would tie frame order inside a commit to the recovery check.
+  container has none, and the rule would tie frame order inside a commit to the recovery check. For the same
+  reason the Manifest is not used as a cross-check either (e.g. `manifest_off + manifest_len = log_end`): a writer
+  may append frames after the Manifest and before the slot write, and they are committed with it.
 - **Monotonic but not contiguous**: a scan could accept gaps, so a lost frame between two valid ones would go
   unnoticed. Contiguity costs nothing for a single appending writer.
 - **Restart at 1 after a rewrite**: simpler, but then the same `frame_seq` names different frames before and after

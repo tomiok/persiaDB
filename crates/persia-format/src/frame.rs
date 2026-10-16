@@ -670,7 +670,7 @@ pub enum ScanEnd {
     /// ([`FrameScanner::expect_frame_seq`]). The bytes after `offset` must not be destroyed silently
     /// (ROADMAP 2.4.10).
     Corrupt {
-        /// Start of the invalid frame.
+        /// Start of the frame where the scan stopped: invalid, or valid but breaking the `frame_seq` run.
         offset: u64,
         /// Why it is invalid.
         error: Error,
@@ -767,7 +767,7 @@ pub struct FrameScanner<'a> {
 enum SeqCheck {
     /// Not checked.
     Off,
-    /// Any value below `u64::MAX` for the first frame, then one more each.
+    /// Any value in `1..u64::MAX` for the first frame, then one more each.
     Contiguous,
     /// Exactly this value, then one more each.
     Next(u64),
@@ -781,10 +781,10 @@ impl SeqCheck {
             Self::Next(expected) if expected != found => {
                 Err(Corruption::FrameSeqMismatch { expected, found })
             }
-            Self::Contiguous | Self::Next(_) => found
-                .checked_add(1)
-                .map(Self::Next)
-                .ok_or(Corruption::FrameSeqExhausted),
+            Self::Contiguous | Self::Next(_) => match found.checked_add(1) {
+                Some(next) if found != 0 => Ok(Self::Next(next)),
+                _ => Err(Corruption::FrameSeqOutOfRange { found }),
+            },
         }
     }
 }
@@ -803,14 +803,14 @@ impl<'a> FrameScanner<'a> {
 
     /// Also requires the first frame to have `frame_seq = first` and each later one one more (SPEC §4.4;
     /// ADR-0013), as recovery does from `log_end` with the superblock's `next_frame_seq`. A valid frame that
-    /// breaks the run, or has `frame_seq = u64::MAX`, ends the scan as [`ScanEnd::Corrupt`] at that frame.
+    /// breaks the run, or has `frame_seq` 0 or `u64::MAX` (never written), ends the scan as [`ScanEnd::Corrupt`] at that frame.
     #[must_use]
     pub fn expect_frame_seq(mut self, first: u64) -> Self {
         self.seq = SeqCheck::Next(first);
         self
     }
 
-    /// Like [`FrameScanner::expect_frame_seq`], but the first frame may have any `frame_seq` below `u64::MAX`:
+    /// Like [`FrameScanner::expect_frame_seq`], but the first frame may have any `frame_seq` in `1..u64::MAX`:
     /// for a range that starts at a frame whose number is not known, such as `wal_start`.
     #[must_use]
     pub fn contiguous(mut self) -> Self {
@@ -1454,25 +1454,58 @@ mod tests {
     }
 
     #[test]
-    fn frame_seq_max_is_never_valid() {
-        let exhausted = |at: u64| ScanEnd::Corrupt {
+    fn frame_seq_zero_and_max_are_never_valid() {
+        let out_of_range = |at: u64, found| ScanEnd::Corrupt {
             offset: at,
             error: Error::Corrupt {
                 offset: at + 16,
-                reason: Corruption::FrameSeqExhausted,
+                reason: Corruption::FrameSeqOutOfRange { found },
             },
         };
         let len = raw(1, 1, b"wal").len() as u64;
-        assert_eq!(scan_seq(&run(&[u64::MAX]), None).1, exhausted(BASE));
-        assert_eq!(
-            scan_seq(&run(&[u64::MAX]), Some(u64::MAX)).1,
-            exhausted(BASE)
-        );
+        for found in [0, u64::MAX] {
+            assert_eq!(scan_seq(&run(&[found]), None).1, out_of_range(BASE, found));
+            assert_eq!(
+                scan_seq(&run(&[found]), Some(found)).1,
+                out_of_range(BASE, found)
+            );
+        }
         let (seqs, end, next) = scan_seq(&run(&[u64::MAX - 1, u64::MAX]), None);
         assert_eq!(
             (seqs, end, next),
-            (vec![u64::MAX - 1], exhausted(BASE + len), Some(u64::MAX))
+            (
+                vec![u64::MAX - 1],
+                out_of_range(BASE + len, u64::MAX),
+                Some(u64::MAX)
+            )
         );
+    }
+
+    #[test]
+    fn frame_seq_run_counts_every_kind() {
+        let bytes = [
+            raw(1, 3, b"wal"),
+            raw(4, 4, &[0; 16]),
+            raw(9, 5, b"unknown kind"),
+            raw(0, 6, b"kind zero"),
+            raw(3, 7, b"manifest"),
+        ]
+        .concat();
+        let (seqs, end, next) = scan_seq(&bytes, Some(3));
+        assert_eq!((seqs, next), (vec![3, 4, 5, 6, 7], Some(8)));
+        assert!(matches!(end, ScanEnd::Clean { .. }));
+    }
+
+    // Decoding comes first: a newer writer's frame is unsupported even if its `frame_seq` is also wrong.
+    #[test]
+    fn unknown_flags_win_over_a_frame_seq_break() {
+        let mut b = raw(1, 9, b"x");
+        b[5] = 2;
+        fix_crc(&mut b);
+        let log = [raw(1, 1, b"a"), b].concat();
+        let (seqs, end, _) = scan_seq(&log, Some(1));
+        assert_eq!(seqs, [1]);
+        assert!(matches!(end, ScanEnd::Unsupported { offset, .. } if offset == BASE + 40));
     }
 
     #[test]

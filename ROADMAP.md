@@ -204,7 +204,7 @@ Deps: M1.
 - [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
 - [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
 - [~] 2.4.9 Define `frame_seq` (SPEC §4.4): what it numbers, its first value after a rewrite, and whether recovery stops at a non-increasing one
-- [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9
+- [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9 (ADR-0013: a valid frame past the stop whose `frame_seq` is not above the last valid one can never be acknowledged data, e.g. stale blocks exposed by a crash during a file extension; decide whether "only such frames and zeros" may be truncated)
 - 2.4.11 File-level fault injection for the local backend and the container (found in the 2.2.4 review: `FaultyStorage` sits above the fsync points)
   - [ ] 2.4.11.1 A file-system shim under the 2.3 backend and the container adapter that can fail or drop `fsync`, lose a `rename` or directory entry while the data survives (or the reverse), and tear the tail of an append
   - [ ] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix

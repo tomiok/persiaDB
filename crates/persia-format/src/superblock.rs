@@ -2,8 +2,8 @@
 //! (SPEC §4.3; ADR-0007).
 //!
 //! [`Superblock::decode`] checks a slot structurally (CRC, reserved bytes). [`Superblock::read_active`] decodes
-//! both slots and applies the selection table of SPEC §4.3. Offsets such as `manifest_off` and `log_end` are
-//! validated against the container by its reader (ROADMAP 2.4.4), which knows the file length.
+//! both slots and applies the selection table of SPEC §4.3. [`ActiveSuperblock::check_bounds`] checks the offsets
+//! against the file length, which slot decoding does not know.
 
 use crate::checksummed::{Checksummed, ChecksummedLayout};
 use crate::error::{Corruption, EncodeError, Error, Result, SuperblockField};
@@ -176,7 +176,7 @@ impl Superblock {
 impl ActiveSuperblock {
     /// Checks the offsets against a container of `file_len` bytes (SPEC §4.3), before any of them is used:
     /// - `wal_start` and `log_end` are multiples of 8 with `12288 <= wal_start <= log_end <= file_len`;
-    /// - `next_frame_seq >= 1`;
+    /// - `next_frame_seq >= 2` after a commit (it has at least its Manifest frame);
     /// - `seq = 0` (never committed): the state of a new container, `log_end = 12288`, `next_frame_seq = 1` and
     ///   zero manifest fields;
     /// - otherwise the Manifest frame lies in `12288..log_end`: `manifest_off` a multiple of 8, `manifest_len` a
@@ -242,7 +242,11 @@ impl ActiveSuperblock {
             (
                 SuperblockField::NextFrameSeq,
                 sb.next_frame_seq,
-                sb.next_frame_seq >= 1 && (committed || sb.next_frame_seq == 1),
+                if committed {
+                    sb.next_frame_seq >= 2
+                } else {
+                    sb.next_frame_seq == 1
+                },
             ),
         ];
         match checks.into_iter().find(|&(_, _, ok)| !ok) {
@@ -647,6 +651,13 @@ mod tests {
             ),
             (
                 Superblock {
+                    next_frame_seq: 1,
+                    ..c
+                },
+                NextFrameSeq,
+            ),
+            (
+                Superblock {
                     next_frame_seq: 2,
                     ..n
                 },
@@ -699,6 +710,28 @@ mod tests {
                 v,
                 "{field}"
             );
+        }
+    }
+
+    #[test]
+    fn a_file_shorter_than_the_prefix_fits_nothing() {
+        for len in [0, 8, F - 8] {
+            for sb in [new_container(), committed()] {
+                let err = bounds(Slot::A, sb, len).unwrap_err();
+                assert!(
+                    matches!(
+                        err.corruption(),
+                        Some((
+                            _,
+                            Corruption::InvalidSuperblock {
+                                field: SuperblockField::LogEnd,
+                                ..
+                            }
+                        ))
+                    ),
+                    "{len}: {err}"
+                );
+            }
         }
     }
 }

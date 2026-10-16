@@ -2,7 +2,8 @@
 //! frames are contiguous from the base, 8-aligned, and re-encode to their exact bytes; the scanner stops where
 //! its `ScanEnd` says, and the `ScanEnd` (variant, offset and error) is what SPEC §4.4 and ADR-0009 give when
 //! recomputed from the raw bytes; `Frame::decode` at that offset fails with the same error and moves nothing;
-//! `Frame::payload` on a yielded frame returns at most its limit or fails as corruption or out of memory.
+//! `Frame::payload` on a yielded frame returns at most its limit or fails as corruption or out of memory; a scan
+//! that checks the `frame_seq` run (ADR-0013) yields a prefix of those frames and stops at a run break as corruption.
 //!
 //! Input: `mode u8, data..`. Mode bit 0: fix the CRC of every frame along the chain from the start; bit 1: fix the
 //! CRC of every frame found at an 8-aligned offset (in order). Random bytes almost never carry a valid CRC, so
@@ -158,7 +159,9 @@ fuzz_target!(|input: &[u8]| {
 
     let mut scanner = FrameScanner::new(&data, base);
     let mut next = base;
+    let mut seen = Vec::new();
     for f in scanner.by_ref() {
+        seen.push((f.offset(), f.frame_seq()));
         assert_eq!(f.offset(), next, "frames are contiguous from the base");
         assert_eq!(f.offset() % 8, 0, "frames start 8-aligned");
         let start = (f.offset() - base) as usize;
@@ -203,4 +206,45 @@ fuzz_target!(|input: &[u8]| {
         assert_eq!(Frame::decode(&mut r).as_ref().err(), Some(error));
         assert_eq!(r.position(), 0, "a failed decode moves nothing");
     }
+    check_seq_runs(&data, base, &seen, &end);
 });
+
+/// A checked scan (ADR-0013) yields a prefix of the unchecked frames and stops either where the unchecked scan did,
+/// with the same end, or before the first frame whose `frame_seq` breaks the run, as corruption there.
+fn check_seq_runs(data: &[u8], base: u64, seen: &[(u64, u64)], unchecked: &ScanEnd) {
+    let first = seen.first().map_or(1, |&(_, s)| s);
+    for checked in [
+        FrameScanner::new(data, base).contiguous(),
+        FrameScanner::new(data, base).expect_frame_seq(1),
+        FrameScanner::new(data, base).expect_frame_seq(first),
+    ] {
+        let mut checked = checked;
+        let got: Vec<(u64, u64)> = checked
+            .by_ref()
+            .map(|f| (f.offset(), f.frame_seq()))
+            .collect();
+        let end = checked.end().expect("a stopped scanner has an end").clone();
+        assert_eq!(checked.offset(), end.offset());
+        assert_eq!(&seen[..got.len()], &got[..], "checked frames are a prefix");
+        if got.len() == seen.len() {
+            assert_eq!(
+                &end, unchecked,
+                "a run that never breaks ends like the unchecked scan"
+            );
+        } else {
+            let (offset, _) = seen[got.len()];
+            assert!(
+                matches!(
+                    &end,
+                    ScanEnd::Corrupt { offset: o, error: Error::Corrupt { offset: e, reason } }
+                        if *o == offset && *e == offset + 16 && matches!(
+                            reason,
+                            persia_format::Corruption::FrameSeqMismatch { .. }
+                                | persia_format::Corruption::FrameSeqOutOfRange { .. }
+                        )
+                ),
+                "a run break is corruption at the frame: {end:?}"
+            );
+        }
+    }
+}
