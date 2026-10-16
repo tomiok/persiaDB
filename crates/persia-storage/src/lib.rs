@@ -6,6 +6,7 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+pub mod container;
 pub mod error;
 pub mod faulty;
 pub mod key;

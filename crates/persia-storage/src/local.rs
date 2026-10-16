@@ -5,7 +5,7 @@
 //! and readers never see a partial object. File names are encoded ([`name`]) so that every valid key round-trips
 //! byte for byte, on case-insensitive and normalizing filesystems too.
 
-mod fs;
+pub(crate) mod fs;
 mod name;
 
 use core::ops::Range;
@@ -25,7 +25,7 @@ use crate::error::{Error, Op, Result};
 use crate::key::{InvalidKey, Key, KeyPrefix};
 use crate::meta::{Capabilities, ObjectMeta, PutOutcome};
 use crate::storage::{Storage, check_range, range_source};
-use fs::{read_exact_at, sync_dir};
+use fs::{parent_or_cwd, read_exact_at, sync_dir};
 
 /// Distinguishes the temporary files of one process; [`temp_nonce`] distinguishes processes.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -575,19 +575,11 @@ fn discard_temp(temp: &Path, err: io::Error) -> io::Error {
 }
 
 /// A random value per process for temporary names: `RandomState` seeds its keys from the OS in each process.
-fn temp_nonce() -> u64 {
+pub(crate) fn temp_nonce() -> u64 {
     static NONCE: OnceLock<u64> = OnceLock::new();
     *NONCE.get_or_init(|| {
         let mut hasher = RandomState::new().build_hasher();
         hasher.write_u32(std::process::id());
         hasher.finish()
     })
-}
-
-/// The directory to sync for an entry of `path`: its parent, or the current directory for a relative single name.
-fn parent_or_cwd(path: &Path) -> &Path {
-    match path.parent() {
-        Some(parent) if !parent.as_os_str().is_empty() => parent,
-        _ => Path::new("."),
-    }
 }

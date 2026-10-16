@@ -246,6 +246,34 @@ they are not destroyed silently: what a read-write open does then is decided wit
 
 A crash before step 3 completes leaves the previous superblock valid ⇒ the prior commit.
 
+The new slot holds `log_end` = the end of the last appended frame (frames appended after the Manifest are committed
+with it), `next_frame_seq` = the next frame's `frame_seq`, and a `wal_start` that is a frame start (or `log_end`)
+no lower than the previous one: the WAL only advances (§8.2). Appends between commits are made durable in groups,
+with one `fdatasync` for every frame appended since the last (group commit); a synced frame survives a crash before
+the next commit, and recovery finds it after `log_end` (§4.4). If any write, truncation or `fdatasync` fails, the
+writer stops writing: after a failed `fdatasync` the OS may have dropped the unwritten pages, so repeating it proves
+nothing. The container is reopened, and recovery decides what survived.
+
+### 4.5.1 Opening a container
+- **Create** never truncates or replaces a file (§4.7): the header and both slots (the new-container state of
+  §4.3, with a random `db_uuid`) are written to a temporary file `<name>.tmp.<nonce>.<n>` in the same directory and
+  synced; the file is hard-linked to the container name, which fails if the name exists; then the temporary name is
+  removed and the directory synced. A crash leaves no container or a complete one, and possibly a stale temporary
+  file. The file system must support hard links.
+- **Writer lock.** A read-write open holds an exclusive advisory lock on the container file (`flock` on Unix,
+  `LockFileEx` on Windows) while it is open, and fails at once if another handle holds it, in this process or
+  another (§8.4). Read-only opens take no lock.
+- **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
+  logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
+  the flags.
+- **Recovery** (§8.6), in this order, for both modes: validate the header (§4.2); pick the active slot (§4.3) and
+  check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
+  bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:
+  clean, the next frame goes at the end of the file; torn tail, a read-write open truncates the file there and
+  syncs it before anything else; corruption, a read-write open fails (ROADMAP 2.4.10) and a read-only open reads
+  up to it; unsupported, the open fails. Valid frames after `log_end` are durable but not committed (synced WAL
+  frames, §8.2, or the frames of a commit that did not complete); the next commit's `log_end` covers them.
+
 ### 4.6 Compaction of the container
 Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by **rewriting live segments into a new file**
 and atomically `rename`-ing it over the old one (fsync file, then directory). Triggered by dead-space ratio (default 40%).

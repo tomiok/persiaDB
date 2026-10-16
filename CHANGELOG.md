@@ -31,6 +31,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-storage`: `LocalStorage`, the local filesystem backend (one file per object): atomic, durable `put` (temp file,
   fsync, rename, directory fsync) and `put_if_absent` (hard link), positioned reads, and file names encoded so every key
   round-trips on case-insensitive and normalizing filesystems and `a` and `a/b` can coexist (SPEC §10.1.1; ADR-0012).
+- `persia-storage`: `Container`, the single-file container (SPEC §4): creation that never replaces a file, an
+  exclusive writer lock, read-only opens, frame appends with group `fdatasync`, commits that write the inactive
+  superblock slot, and recovery on open (superblock checks, validation of the committed WAL frames, torn-tail
+  truncation; a corrupt tail keeps its bytes and opens read-only only). A failed write or sync poisons the handle.
+  `SimFile` simulates crashes (lost, kept or sector-torn unsynced writes) for crash tests.
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
@@ -62,6 +67,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   length and decode under a caller-supplied bomb limit. A frame scanner stops at the first invalid frame and reports a
   clean end, a torn tail (only zeros or nothing follow), corruption (non-zero bytes follow) or a frame with unknown
   flags, which is `Unsupported` and never truncated.
+- `frame_seq` (SPEC §4.4; ADR-0013): numbers a container's frames contiguously from 1, continuing across rewrites;
+  the superblock gains `next_frame_seq` at offset 48, and recovery treats a frame that breaks the run as corruption.
+  The container reader checks the superblock's offsets against the file (SPEC §4.3).
 
 <!--
 Sections per release, in this order, only when non-empty:
