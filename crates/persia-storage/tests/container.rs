@@ -871,3 +871,74 @@ fn rewrite_slot(bytes: &mut [u8], slot: Slot, edit: impl FnOnce(&mut Superblock)
     sb.encode(&mut w).unwrap();
     bytes[at..at + SLOT_LEN].copy_from_slice(w.as_slice());
 }
+
+/// A file that records the largest read, to check that recovery reads in bounded chunks (ROADMAP 2.4.12).
+#[derive(Debug, Clone)]
+struct ReadMeter {
+    file: SimFile,
+    largest: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ContainerFile for ReadMeter {
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        self.largest
+            .fetch_max(buf.len(), std::sync::atomic::Ordering::Relaxed);
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> std::io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+#[test]
+fn recovery_memory_does_not_grow_with_frame_size() {
+    const BIG: usize = 8 << 20;
+    let mut c = new_sim();
+    let wal = c
+        .append(FrameKind::WalChunk, &vec![1; BIG], Compression::None)
+        .unwrap();
+    c.sync().unwrap();
+    let m = c
+        .append(FrameKind::Manifest, b"m", Compression::None)
+        .unwrap();
+    c.commit(Commit {
+        manifest: m,
+        wal_start: wal.offset,
+        fence_token: 0,
+    })
+    .unwrap();
+    // An uncommitted, synced Segment frame, then a large torn tail of zeros.
+    c.append(FrameKind::Segment, &vec![2; BIG], Compression::None)
+        .unwrap();
+    c.sync().unwrap();
+    let file = c.file().clone();
+    drop(c);
+    let len = file.file_len().unwrap();
+    file.set_len(len + BIG as u64).unwrap();
+    for mode in [Mode::ReadOnly, Mode::ReadWrite] {
+        let meter = ReadMeter {
+            file: SimFile::from_bytes(file.bytes()),
+            largest: std::sync::Arc::default(),
+        };
+        let c = Container::open_on(meter.clone(), mode).unwrap();
+        assert_eq!(c.frames().len(), 3, "{mode:?}");
+        assert!(matches!(c.recovery().scan_end, ScanEnd::TornTail { offset, .. } if offset == len));
+        let largest = meter.largest.load(std::sync::atomic::Ordering::Relaxed);
+        assert!(
+            largest <= persia_format::frame::DEFAULT_SCAN_CHUNK.max(FIRST_FRAME_OFFSET as usize),
+            "{mode:?}: read {largest} bytes at once"
+        );
+    }
+}

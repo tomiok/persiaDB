@@ -22,6 +22,10 @@ use crate::error::{Corruption, EncodeError, Error, Result, Unsupported, to_u64};
 use crate::reader::Reader;
 use crate::writer::Writer;
 
+mod stream;
+
+pub use stream::{DEFAULT_SCAN_CHUNK, StreamScanner};
+
 /// The first 4 bytes of every frame.
 pub const FRAME_MAGIC: [u8; 4] = *b"PFR1";
 /// Bytes before the payload: magic, kind, flags, `payload_len`, `frame_seq`.
@@ -895,10 +899,7 @@ impl<'a> Iterator for FrameScanner<'a> {
                     self.r = before;
                     self.end = Some(ScanEnd::Corrupt {
                         offset,
-                        error: Error::Corrupt {
-                            offset: offset.saturating_add(FRAME_SEQ_OFFSET),
-                            reason,
-                        },
+                        error: frame_seq_error(offset, reason),
                     });
                     None
                 }
@@ -912,6 +913,14 @@ impl<'a> Iterator for FrameScanner<'a> {
 }
 
 impl FusedIterator for FrameScanner<'_> {}
+
+/// The error for a valid frame at `offset` whose `frame_seq` breaks the run.
+fn frame_seq_error(offset: u64, reason: Corruption) -> Error {
+    Error::Corrupt {
+        offset: offset.saturating_add(FRAME_SEQ_OFFSET),
+        reason,
+    }
+}
 
 #[cfg(test)]
 mod tests {

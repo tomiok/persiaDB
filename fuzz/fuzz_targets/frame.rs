@@ -15,7 +15,8 @@ use libfuzzer_sys::fuzz_target;
 use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
-    FLAG_ZSTD, FRAME_MAGIC, Frame, FrameScanner, MIN_FRAME_LEN, ScanEnd, encode_frame,
+    FLAG_ZSTD, FRAME_MAGIC, Frame, FrameScanner, MIN_FRAME_LEN, ScanEnd, StreamScanner,
+    encode_frame,
 };
 use persia_format::{Corruption, Error, Reader, Unsupported, Writer};
 
@@ -207,7 +208,49 @@ fuzz_target!(|input: &[u8]| {
         assert_eq!(r.position(), 0, "a failed decode moves nothing");
     }
     check_seq_runs(&data, base, &seen, &end);
+    check_stream(&data, base, &seen);
 });
+
+/// `StreamScanner` (ROADMAP 2.4.12) yields the frames and the end of `FrameScanner` over the same bytes, for every
+/// `frame_seq` check and a chunk length picked from the input.
+fn check_stream(data: &[u8], base: u64, seen: &[(u64, u64)]) {
+    let chunk = 1 + data.len() % 61;
+    let end = base + data.len() as u64;
+    let first = seen.first().map_or(1, |&(_, s)| s);
+    let pairs = [
+        (FrameScanner::new(data, base), StreamScanner::new(base, end)),
+        (
+            FrameScanner::new(data, base).contiguous(),
+            StreamScanner::new(base, end).contiguous(),
+        ),
+        (
+            FrameScanner::new(data, base).expect_frame_seq(first),
+            StreamScanner::new(base, end).expect_frame_seq(first),
+        ),
+    ];
+    for (mut slice, stream) in pairs {
+        let mut stream = stream.with_chunk_len(chunk);
+        let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), ()> {
+            assert!(
+                !buf.is_empty() && buf.len() <= chunk.max(24),
+                "bounded reads"
+            );
+            let start = (offset - base) as usize;
+            buf.copy_from_slice(&data[start..start + buf.len()]);
+            Ok(())
+        };
+        let want: Vec<(u64, u64)> = slice
+            .by_ref()
+            .map(|f| (f.offset(), f.frame_seq()))
+            .collect();
+        let mut got = Vec::new();
+        while let Some(h) = stream.next_frame(&mut read).unwrap() {
+            got.push((h.offset(), h.frame_seq()));
+        }
+        assert_eq!(got, want, "the stream scanner yields the same frames");
+        assert_eq!(stream.end(), slice.end(), "and ends the same way");
+    }
+}
 
 /// A checked scan (ADR-0013) yields a prefix of the unchecked frames and stops either where the unchecked scan did,
 /// with the same end, or before the first frame whose `frame_seq` breaks the run, as corruption there.

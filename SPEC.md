@@ -278,8 +278,9 @@ nothing. The container is reopened, and recovery decides what survived.
   fails. A read-write open then syncs the file before anything else: what it read may still be only in the page
   cache of a writer that died without syncing, and a commit must never reach the disk before the frames it covers
   (§4.5). Valid frames after `log_end` are then durable but not committed (synced WAL frames, §8.2, or the frames
-  of a commit that did not complete); the next commit's `log_end` covers them. Recovery currently reads
-  `wal_start..log_end` and the tail into memory (ROADMAP 2.4.12 bounds this).
+  of a commit that did not complete); the next commit's `log_end` covers them. Recovery reads frames in bounded chunks
+  (64 KiB), never a whole frame or tail at once, so its memory does not grow with the size of a frame or of the file
+  (ROADMAP 2.4.12).
 
 ### 4.6 Compaction of the container
 Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by

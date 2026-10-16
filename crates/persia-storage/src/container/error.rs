@@ -91,7 +91,8 @@ pub enum Error {
         /// The OS error.
         source: io::Error,
     },
-    /// Recovery needed a buffer of `bytes` bytes that could not be allocated (ROADMAP 2.4.12 bounds it).
+    /// Reading a whole frame ([`Container::read_frame`](super::Container::read_frame), compaction) needed a buffer of
+    /// `bytes` bytes that could not be allocated. Recovery reads in bounded chunks and never needs one.
     #[error("cannot allocate {bytes} bytes to read the container")]
     OutOfMemory {
         /// The requested size.

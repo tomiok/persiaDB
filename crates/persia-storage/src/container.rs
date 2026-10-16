@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use persia_format::block::Compression;
 use persia_format::frame::{
-    FRAME_HEADER_LEN, Frame, FrameHeader, FrameKind, FrameScanner, ScanEnd, encode_frame,
+    FRAME_HEADER_LEN, Frame, FrameHeader, FrameKind, ScanEnd, StreamScanner, encode_frame,
 };
 use persia_format::header::{Access, HEADER_LEN, Header, KNOWN_ROCOMPAT_FLAGS};
 use persia_format::superblock::{
@@ -69,6 +69,15 @@ impl FrameRef {
     pub fn end(&self) -> u64 {
         // Fits: the frame was read from, or written to, a file.
         self.offset.saturating_add(self.len)
+    }
+
+    fn of_header(header: &FrameHeader) -> Self {
+        Self {
+            offset: header.offset(),
+            len: header.total_len(),
+            kind: header.kind(),
+            frame_seq: header.frame_seq(),
+        }
     }
 
     fn of(frame: &Frame<'_>) -> Self {
@@ -401,8 +410,7 @@ impl<F: ContainerFile> Container<F> {
     /// # Errors
     /// [`Error::Format`] for corruption up to `log_end` or an unsupported format or frame, [`Error::CorruptTail`]
     /// for a read-write open whose scan from `log_end` ends in corruption (ROADMAP 2.4.10), [`Error::Locked`],
-    /// [`Error::OutOfMemory`], [`Error::ReadOnly`] for
-    /// a read-write open of a container with unknown `rocompat_flags`, or [`Error::Io`].
+    /// [`Error::ReadOnly`] for a read-write open of a container with unknown `rocompat_flags`, or [`Error::Io`].
     pub fn open_on(file: F, mode: Mode) -> Result<Self> {
         if mode == Mode::ReadWrite {
             take_lock(&file)?;
@@ -456,13 +464,8 @@ impl<F: ContainerFile> Container<F> {
     /// Scans from `log_end` to `file_len` (SPEC §4.4) and appends the valid frames to `frames`.
     fn recover_tail(&mut self, file_len: u64, frames: &mut Vec<FrameRef>) -> Result<()> {
         let log_end = self.active.superblock.log_end;
-        let tail = read_at(&self.file, log_end, file_len.saturating_sub(log_end))?;
-        let mut scanner = FrameScanner::new(&tail, log_end).expect_frame_seq(self.next_frame_seq);
-        frames.extend(scanner.by_ref().map(|f| FrameRef::of(&f)));
-        let end = scanner
-            .end()
-            .cloned()
-            .unwrap_or(ScanEnd::Clean { offset: file_len });
+        let scanner = StreamScanner::new(log_end, file_len).expect_frame_seq(self.next_frame_seq);
+        let (scanner, end) = scan(&self.file, scanner, frames)?;
         self.next_frame_seq = scanner.next_frame_seq().unwrap_or(self.next_frame_seq);
         self.end = end.offset();
         match &end {
@@ -900,11 +903,38 @@ fn read_at<F: ContainerFile>(file: &F, offset: u64, len: u64) -> Result<Vec<u8>>
     Ok(buf)
 }
 
+/// Scans the range of `scanner` in `file` with bounded memory (ROADMAP 2.4.12), appending the valid frames to
+/// `frames`; returns the stopped scanner and why it stopped.
+fn scan<F: ContainerFile>(
+    file: &F,
+    mut scanner: StreamScanner,
+    frames: &mut Vec<FrameRef>,
+) -> Result<(StreamScanner, ScanEnd)> {
+    let mut read = |offset, buf: &mut [u8]| file.read_exact_at(buf, offset);
+    while let Some(h) = scanner.next_frame(&mut read).map_err(Error::io("read"))? {
+        frames.push(FrameRef::of_header(&h));
+    }
+    let end = scanner.end().cloned().unwrap_or(ScanEnd::Clean {
+        offset: scanner.offset(),
+    });
+    Ok((scanner, end))
+}
+
 /// Checks that the superblock's manifest is one valid Manifest frame of exactly `manifest_len` bytes (SPEC §4.3).
 fn check_manifest<F: ContainerFile>(file: &F, sb: &Superblock) -> Result<()> {
-    let bytes = read_at(file, sb.manifest_off, sb.manifest_len)?;
-    let mut r = Reader::with_base_offset(&bytes, sb.manifest_off);
-    let frame = Frame::decode(&mut r)?;
+    // `check_bounds` put the frame inside the file, so its end fits.
+    let range_end = sb.manifest_off.saturating_add(sb.manifest_len);
+    let mut scanner = StreamScanner::new(sb.manifest_off, range_end);
+    let mut read = |offset, buf: &mut [u8]| file.read_exact_at(buf, offset);
+    let Some(frame) = scanner.next_frame(&mut read).map_err(Error::io("read"))? else {
+        let error = scanner.end().and_then(ScanEnd::error).cloned();
+        return Err(Error::Format(error.unwrap_or(
+            persia_format::Error::Corrupt {
+                offset: sb.manifest_off,
+                reason: Corruption::NotAManifest { kind: 0, len: 0 },
+            },
+        )));
+    };
     if frame.kind() != FrameKind::Manifest || frame.total_len() != sb.manifest_len {
         return Err(Error::Format(persia_format::Error::Corrupt {
             offset: sb.manifest_off,
@@ -920,16 +950,14 @@ fn check_manifest<F: ContainerFile>(file: &F, sb: &Superblock) -> Result<()> {
 /// The committed frames of `wal_start..log_end`, validated (SPEC §8.6; ADR-0013): every one valid, ending exactly
 /// at `log_end`, one `frame_seq` run whose last value is `next_frame_seq - 1`. None is ever truncated.
 fn committed_frames<F: ContainerFile>(file: &F, sb: &Superblock) -> Result<Vec<FrameRef>> {
-    let bytes = read_at(file, sb.wal_start, sb.log_end.saturating_sub(sb.wal_start))?;
-    let mut scanner = FrameScanner::new(&bytes, sb.wal_start).contiguous();
-    let frames: Vec<FrameRef> = scanner.by_ref().map(|f| FrameRef::of(&f)).collect();
-    match scanner.end() {
-        Some(ScanEnd::Clean { .. }) | None => {}
+    let mut frames = Vec::new();
+    let scanner = StreamScanner::new(sb.wal_start, sb.log_end).contiguous();
+    match scan(file, scanner, &mut frames)?.1 {
+        ScanEnd::Clean { .. } => {}
         // A torn tail below `log_end` is still corruption: these frames were committed.
-        Some(ScanEnd::TornTail { error, .. } | ScanEnd::Corrupt { error, .. }) => {
-            return Err(Error::Format(error.clone()));
-        }
-        Some(ScanEnd::Unsupported { error, .. }) => return Err(Error::Format(error.clone())),
+        ScanEnd::TornTail { error, .. }
+        | ScanEnd::Corrupt { error, .. }
+        | ScanEnd::Unsupported { error, .. } => return Err(Error::Format(error)),
     }
     if let Some(last) = frames.last() {
         let expected = sb.next_frame_seq.saturating_sub(1);

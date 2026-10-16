@@ -34,6 +34,9 @@
 //!      `available`, needing 24 and 32; with 24..32 bytes `Frame::decode` fails that way and the header is
 //!      judged on magic and length alone;
 //!    - on error neither reader moves; a header advances exactly `FRAME_HEADER_LEN` bytes.
+//! 7. Streaming (ROADMAP 2.4.12): on the mutated logs of invariant 4, with any chunk length and any `frame_seq`
+//!    check, `StreamScanner` yields the headers of exactly the frames `FrameScanner` yields and ends with the same
+//!    `ScanEnd`, reading only inside the range and never more than the chunk length at once.
 
 // Test-only helpers index, cast and unwrap on purpose (see reader_writer_props.rs).
 #![allow(
@@ -46,7 +49,7 @@ use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
     FLAG_ZSTD, FRAME_HEADER_LEN, FRAME_MAGIC, Frame, FrameHeader, FrameKind, FrameScanner,
-    KNOWN_FRAME_FLAGS, MIN_FRAME_LEN, ScanEnd, encode_frame, frame_len,
+    KNOWN_FRAME_FLAGS, MIN_FRAME_LEN, ScanEnd, StreamScanner, encode_frame, frame_len,
 };
 use persia_format::{Corruption, Error, Reader, Unsupported, Writer};
 use proptest::prelude::*;
@@ -1048,5 +1051,94 @@ proptest! {
         prop_assert_eq!(copy.stored_payload(), original.stored_payload());
         prop_assert_eq!(&copy_bytes[..16], &log[..16]);
         prop_assert_eq!(&copy_bytes[24..copy_bytes.len() - 8], &log[24..log.len() - 8]);
+    }
+}
+
+/// Which `frame_seq` check both scanners run (invariant 7).
+#[derive(Debug, Clone, Copy)]
+enum SeqMode {
+    Off,
+    Contiguous,
+    Expect(u64),
+}
+
+/// Invariant 7.
+fn check_stream_matches_slice_scan(
+    bytes: &[u8],
+    base: u64,
+    chunk: usize,
+    mode: SeqMode,
+) -> Result<(), TestCaseError> {
+    let (slice, mut stream) = match mode {
+        SeqMode::Off => (
+            FrameScanner::new(bytes, base),
+            StreamScanner::new(base, base + bytes.len() as u64),
+        ),
+        SeqMode::Contiguous => (
+            FrameScanner::new(bytes, base).contiguous(),
+            StreamScanner::new(base, base + bytes.len() as u64).contiguous(),
+        ),
+        SeqMode::Expect(first) => (
+            FrameScanner::new(bytes, base).expect_frame_seq(first),
+            StreamScanner::new(base, base + bytes.len() as u64).expect_frame_seq(first),
+        ),
+    };
+    stream = stream.with_chunk_len(chunk);
+    let mut slice = slice;
+    let expected: Vec<(u64, u64, FrameKind, u64)> = slice
+        .by_ref()
+        .map(|f| (f.offset(), f.total_len(), f.kind(), f.frame_seq()))
+        .collect();
+    let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), String> {
+        if buf.is_empty() || buf.len() > chunk.max(FRAME_HEADER_LEN) {
+            return Err(format!("read of {} bytes, chunk {chunk}", buf.len()));
+        }
+        let start = usize::try_from(offset.checked_sub(base).ok_or("below the range")?).unwrap();
+        let src = bytes
+            .get(start..start + buf.len())
+            .ok_or("past the range")?;
+        buf.copy_from_slice(src);
+        Ok(())
+    };
+    let mut got = Vec::new();
+    while let Some(h) = stream.next_frame(&mut read).map_err(TestCaseError::fail)? {
+        got.push((h.offset(), h.total_len(), h.kind(), h.frame_seq()));
+    }
+    prop_assert!(stream.next_frame(&mut read).unwrap().is_none(), "fused");
+    prop_assert_eq!(got, expected);
+    prop_assert_eq!(stream.end(), slice.end());
+    prop_assert_eq!(stream.offset(), slice.offset());
+    prop_assert_eq!(stream.next_frame_seq(), slice.next_frame_seq());
+    Ok(())
+}
+
+fn seq_mode() -> impl Strategy<Value = SeqMode> {
+    prop_oneof![
+        Just(SeqMode::Off),
+        Just(SeqMode::Contiguous),
+        prop_oneof![Just(0_u64), Just(1), 0_u64..8, any::<u64>()].prop_map(SeqMode::Expect),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn stream_scan_matches_slice_scan(
+        specs in specs(6, 160),
+        edits in proptest::collection::vec(edit(), 0..4),
+        fix_crcs in any::<bool>(),
+        grow in prop_oneof![Just(0_usize), 1_usize..80],
+        chunk in prop_oneof![1_usize..40, Just(4096)],
+        mode in seq_mode(),
+        base in aligned_base(),
+    ) {
+        let (mut bytes, bounds) = encode_log(&specs);
+        for e in &edits {
+            apply_edit(&mut bytes, &bounds, e);
+        }
+        if fix_crcs {
+            fix_crcs_along_chain(&mut bytes);
+        }
+        bytes.resize(bytes.len() + grow, 0);
+        check_stream_matches_slice_scan(&bytes, base, chunk, mode)?;
     }
 }
