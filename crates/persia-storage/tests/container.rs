@@ -967,3 +967,33 @@ fn recovery_memory_does_not_grow_with_frame_size() {
         );
     }
 }
+
+/// ADR-0015: no operation on a published container writes its header page: not a read-write open (of a container
+/// whose `format_minor` is newer than this build's, too), appends, syncs, commits or tail truncation.
+#[test]
+fn the_header_page_is_never_written_in_place() {
+    use persia_format::header::{FORMAT_MINOR, Header};
+    let mut c = new_sim();
+    commit_batch(&mut c, &[b"w"], b"m1");
+    let mut bytes = c.file().bytes();
+    let newer = Header {
+        format_minor: FORMAT_MINOR + 1,
+        ..Header::new([7; 16])
+    };
+    let mut w = Writer::new();
+    newer.encode(&mut w).unwrap();
+    bytes[..4096].copy_from_slice(w.as_slice());
+    bytes.extend_from_slice(&[0; 20]); // a torn tail to truncate
+    let file = SimFile::from_bytes(bytes.clone());
+    let mut c = Container::open_on(file.clone(), Mode::ReadWrite).unwrap();
+    assert_eq!(c.header().format_minor, FORMAT_MINOR + 1);
+    assert!(c.recovery().truncated_from.is_some());
+    commit_batch(&mut c, &[b"w2", b"w3"], b"m2");
+    commit_batch(&mut c, &[], b"m3");
+    assert_eq!(file.bytes()[..4096], bytes[..4096]);
+    // A rewrite keeps the newer minor: it never decreases (ADR-0008).
+    let (new, _) = c
+        .compact_into(SimFile::new(), &[], |_| b"m".to_vec(), NONE)
+        .unwrap();
+    assert_eq!(new.header().format_minor, FORMAT_MINOR + 1);
+}

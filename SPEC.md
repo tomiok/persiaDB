@@ -119,9 +119,11 @@ Validation (ADR-0007), in this order, so a newer format is never misreported as 
 5. `page_size` not a power of two in `4096..=65536`, or non-zero `reserved` bytes ⇒ corruption.
 6. Any `rocompat_flags` bit this reader does not know ⇒ the container opens **read-only**. No bits are assigned yet.
 
-A writer sets only bits it knows, and records `format_minor = max(the container's minor, its own minor)`, also
-when it rewrites the container (SPEC §4.6): minors are additive (SPEC §15), so the field names the newest minor that
-has written the container and never decreases (ADR-0008).
+A writer sets only bits it knows, and records `format_minor = max(the container's minor, its own minor)` when it
+creates or rewrites the container (SPEC §4.6): minors are additive (SPEC §15), so the field names the newest minor
+that has created or rewritten the container and never decreases (ADR-0008). The header page is never written in
+place, since it has no second copy (ADR-0015): a read-write open by a newer build leaves `format_minor` as it is
+until the next rewrite, so the field is a lower bound on the minors that have written the container.
 
 `page_size` is advisory (ADR-0008): the alignment a writer may give Segment frame payloads, using Padding frames
 (SPEC §4.4), so a mapped segment starts on a page boundary. No offset a reader computes depends on it, and a
