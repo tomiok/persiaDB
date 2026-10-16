@@ -9,7 +9,7 @@ use crate::local::fs;
 ///
 /// Implemented for [`File`] and for [`SimFile`](super::sim::SimFile). Every method takes `&self`, like the
 /// positioned I/O of [`File`]; the container serializes its writes.
-pub trait ContainerFile: Send + Sync {
+pub trait ContainerFile: Send + Sync + std::fmt::Debug {
     /// The file's current length.
     ///
     /// # Errors
@@ -34,6 +34,15 @@ pub trait ContainerFile: Send + Sync {
     /// The OS error. What reached the disk is then unknown, and repeating the call proves nothing: the OS may have
     /// dropped the unwritten data.
     fn sync_data(&self) -> io::Result<()>;
+
+    /// Like [`sync_data`](Self::sync_data), and also makes the file's metadata (timestamps) durable (`fsync`). The
+    /// local backend uses it for new objects; the default is `sync_data`.
+    ///
+    /// # Errors
+    /// As [`sync_data`](Self::sync_data).
+    fn sync_all(&self) -> io::Result<()> {
+        self.sync_data()
+    }
 
     /// Truncates or extends the file to `len` bytes. Not durable until [`sync_data`](Self::sync_data).
     ///
@@ -64,6 +73,10 @@ impl ContainerFile for File {
 
     fn sync_data(&self) -> io::Result<()> {
         File::sync_data(self)
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        File::sync_all(self)
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {

@@ -1,5 +1,4 @@
-//! Whether a live mapping of a file blocks renaming another file over it (ROADMAP 2.4.5.3; SPEC §4.6, §4.7;
-//! ADR-0010): container compaction renames the new file over the container while readers may have it mapped.
+//! Renaming over a mapped file (ROADMAP 2.4.5.3).
 
 #![allow(
     clippy::unwrap_used,
@@ -41,17 +40,13 @@ fn rename_over_mapped(close_handle: bool) -> std::io::Result<()> {
     renamed
 }
 
-#[cfg(unix)]
+/// Whether a live mapping of a file blocks renaming another file over it (ROADMAP 2.4.5.3; SPEC §4.6, §4.7;
+/// ADR-0010): container compaction renames the new file over the container while readers may have it mapped. It does
+/// not, on Unix nor on Windows (where the standard library's rename falls back to POSIX semantics), with the mapped
+/// file's handle open or closed; the mapping keeps the old file's bytes.
 #[test]
 fn a_mapping_never_blocks_a_rename_over_the_file() {
     for close_handle in [false, true] {
         rename_over_mapped(close_handle).unwrap();
     }
-}
-
-#[cfg(windows)]
-#[test]
-fn a_mapping_blocks_a_rename_over_the_file_on_windows() {
-    let outcomes = [false, true].map(rename_over_mapped);
-    panic!("discovery run: {outcomes:?}");
 }

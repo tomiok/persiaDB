@@ -474,6 +474,8 @@ fn list_through_a_file_in_place_of_a_directory_matches_the_full_listing() {
 // ---------------------------------------------------------------------------------------------------------------
 
 // `a@/a@/…` far deeper than any key: only the keys within `Key::MAX_LEN` are listed, and the walk stops.
+// Not on macOS: its `PATH_MAX` (1024 bytes) cannot hold such a tree, nor the longest key (SPEC §10.1.1).
+#[cfg(not(target_vendor = "apple"))]
 #[test]
 fn list_over_a_tree_deeper_than_any_key_returns_the_valid_keys() {
     let (_dir, s) = store();
@@ -515,12 +517,15 @@ fn list_skips_non_utf8_names_and_symlinks_without_looping() {
     s.put(&key("d/obj"), Bytes::from_static(b"1")).unwrap();
     s.put(&key("e"), Bytes::from_static(b"2")).unwrap();
     let root = s.root();
-    // Non-UTF-8 file and directory names (only possible on Unix), with valid-looking content inside.
-    std::fs::write(root.join(OsStr::from_bytes(b"\xFFbad")), b"x").unwrap();
-    let bad_dir = root.join(OsStr::from_bytes(b"\xC3@"));
-    std::fs::create_dir(&bad_dir).unwrap();
-    std::fs::write(bad_dir.join("x"), b"x").unwrap();
-    std::fs::write(root.join("d@").join(OsStr::from_bytes(b"ok\x80")), b"x").unwrap();
+    // Non-UTF-8 file and directory names (only possible on Unix, and not on APFS, which rejects them), with
+    // valid-looking content inside.
+    if !cfg!(target_vendor = "apple") {
+        std::fs::write(root.join(OsStr::from_bytes(b"\xFFbad")), b"x").unwrap();
+        let bad_dir = root.join(OsStr::from_bytes(b"\xC3@"));
+        std::fs::create_dir(&bad_dir).unwrap();
+        std::fs::write(bad_dir.join("x"), b"x").unwrap();
+        std::fs::write(root.join("d@").join(OsStr::from_bytes(b"ok\x80")), b"x").unwrap();
+    }
     // Symlinked directories, including loops back to the root and to an ancestor, and one leaving the root.
     symlink(root, root.join("loop@")).unwrap();
     symlink(root.join("d@"), root.join("d@/self@")).unwrap();

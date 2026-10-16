@@ -15,6 +15,7 @@ pub mod memory;
 pub mod meta;
 pub mod retry;
 pub mod storage;
+pub mod vfs;
 
 pub use error::{BoxError, Error, ErrorKind, Op, Result};
 pub use key::{InvalidKey, Key, KeyDefect, KeyPrefix};

@@ -260,13 +260,15 @@ nothing. The container is reopened, and recovery decides what survived.
   synced; the file is hard-linked to the container name, which fails if the name exists; then the temporary name is
   removed and the directory synced. A crash leaves no container or a complete one, and possibly a stale temporary
   file. The file system must support hard links.
-- **Writer lock.** A read-write open holds an exclusive lock on the container file (`flock` on Unix, `LockFileEx`
-  on Windows) while it is open, and fails at once if another handle holds it, in this process or another (§8.4).
-  After locking, it checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
-  have renamed a new file over it, and the old one's lock is released when its writer moves on. Read-only opens
-  take no lock. Limits: on Windows the lock is mandatory, so while a writer is open no other handle
-  can read the file (ROADMAP 2.4.16); on NFS, Linux emulates `flock` with per-process POSIX locks, so two handles of
-  one process are not excluded from each other.
+- **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
+  holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
+  locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
+  have renamed a new file over it, and the old one's lock is released when its writer moves on. On Windows,
+  `LockFileEx` locks are mandatory, so a lock on the container would keep every reader out: the lock is on a file
+  `<name>.lock` next to the container instead, created if missing and never removed (removing it would race with a
+  writer taking it); since it is never renamed, no recheck is needed. Read-only opens take no lock. Limit: on NFS,
+  Linux emulates `flock` with per-process POSIX locks, so two handles of one process are not excluded from each
+  other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
   logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
   the flags.
@@ -324,7 +326,7 @@ with or has since committed:
 - recovery (§8.6) truncates only at the end of the §4.4 scan, which starts at `log_end`; an invalid frame below
   `log_end` is corruption and is never truncated;
 - compaction (§4.6) writes a new file instead of shrinking the old one, so existing mappings keep the old file's
-  contents;
+  contents; a live mapping does not block the rename over the container, on Unix nor on Windows (ROADMAP 2.4.5.3);
 - creating a container never truncates an existing file (create-new, or write elsewhere and rename).
 
 A slot damaged after another process read it is outside this contract: recovery may then pick the older slot and

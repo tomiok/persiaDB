@@ -1,0 +1,313 @@
+//! The file-system operations the local backend and the container's path API use, behind a trait, so crash tests can
+//! run them on a simulated file system that loses unsynced data and directory entries (ROADMAP 2.4.11).
+//!
+//! [`RealFs`] is the operating system's. [`sim::SimFs`] keeps each directory's entries twice, as readers see them and
+//! as a directory sync last made them durable, and its files are [`SimFile`](crate::container::sim::SimFile)s; a
+//! crash keeps the durable state plus some, all or none of the rest. One fault schedule counts every mutating call
+//! of the file system and its files, so a test can stop the "process" at any of them.
+
+pub mod sim;
+
+use std::ffi::OsString;
+use std::fs::{File, OpenOptions};
+use std::io;
+use std::path::{Path, PathBuf};
+
+use crate::container::ContainerFile;
+use crate::local::fs;
+
+/// What a directory entry is, without following a symbolic link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryKind {
+    /// A regular file of `len` bytes.
+    File {
+        /// Its length.
+        len: u64,
+    },
+    /// A directory.
+    Dir,
+    /// Anything else: a symbolic link, a FIFO, a device. Persia never creates these.
+    Other,
+}
+
+/// One entry of a directory listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    /// The entry's name.
+    pub name: OsString,
+    /// What it is.
+    pub kind: EntryKind,
+}
+
+/// File-system operations, by path. Paths are absolute.
+///
+/// Every method that changes something counts as one mutating call for [`sim::SimFs`]'s fault schedule. Created,
+/// renamed, linked and removed names are durable only after [`Vfs::sync_dir`] of their directory; file contents
+/// only after [`ContainerFile::sync_data`].
+pub trait Vfs: Send + Sync + std::fmt::Debug {
+    /// An open file.
+    type File: ContainerFile;
+
+    /// Opens the existing regular file at `path`, read-only or read-write.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] if it does not exist, or the OS error.
+    fn open(&self, path: &Path, write: bool) -> io::Result<Self::File>;
+
+    /// Creates the file at `path`, which must not exist, and opens it read-write.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::AlreadyExists`] if `path` exists, [`io::ErrorKind::NotFound`] if its directory does not, or
+    /// the OS error.
+    fn create_new(&self, path: &Path) -> io::Result<Self::File>;
+
+    /// Creates the directory `path`, whose parent must exist.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::AlreadyExists`] if `path` exists, or the OS error.
+    fn create_dir(&self, path: &Path) -> io::Result<()>;
+
+    /// Renames `from` to `to`, replacing a file at `to` atomically.
+    ///
+    /// # Errors
+    /// The OS error.
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// Gives the file at `from` the second name `to`.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::AlreadyExists`] if `to` exists, or the OS error.
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()>;
+
+    /// Removes the name `path` of a file.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] if it does not exist, or the OS error.
+    fn remove_file(&self, path: &Path) -> io::Result<()>;
+
+    /// Makes the entries of directory `dir` durable.
+    ///
+    /// # Errors
+    /// The OS error.
+    fn sync_dir(&self, dir: &Path) -> io::Result<()>;
+
+    /// What `path` is, without following a symbolic link at its end.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] or [`io::ErrorKind::NotADirectory`] if it does not exist, or the OS error.
+    fn entry_kind(&self, path: &Path) -> io::Result<EntryKind>;
+
+    /// Whether `path` is a directory, following symbolic links.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] if it does not exist, or the OS error.
+    fn is_dir(&self, path: &Path) -> io::Result<bool>;
+
+    /// The entries of directory `dir`, in no particular order.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] if `dir` does not exist, or the OS error.
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>>;
+
+    /// The absolute path of `path` with symbolic links resolved.
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::NotFound`] if it does not exist, or the OS error.
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
+
+    /// Whether `path` names the file open as `file` (on Windows, where the standard library exposes no file identity,
+    /// always `true`).
+    ///
+    /// # Errors
+    /// The OS error; a missing `path` is `Ok(false)`.
+    fn same_file(&self, file: &Self::File, path: &Path) -> io::Result<bool>;
+
+    /// Takes the container writer lock that does not live on the container file itself: on Windows a locked
+    /// `<name>.lock` file next to `path` (SPEC §4.5.1), which the returned handle holds until dropped. `None` where
+    /// the container file is locked instead ([`ContainerFile::try_lock`]).
+    ///
+    /// # Errors
+    /// [`io::ErrorKind::WouldBlock`] if another handle holds it, or the OS error.
+    fn lock_beside(&self, path: &Path) -> io::Result<Option<Self::File>>;
+}
+
+/// The operating system's file system.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealFs;
+
+impl Vfs for RealFs {
+    type File = File;
+
+    fn open(&self, path: &Path, write: bool) -> io::Result<File> {
+        OpenOptions::new().read(true).write(write).open(path)
+    }
+
+    fn create_new(&self, path: &Path) -> io::Result<File> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    fn create_dir(&self, path: &Path) -> io::Result<()> {
+        std::fs::create_dir(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::hard_link(from, to)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn sync_dir(&self, dir: &Path) -> io::Result<()> {
+        fs::sync_dir(dir)
+    }
+
+    fn entry_kind(&self, path: &Path) -> io::Result<EntryKind> {
+        let meta = std::fs::symlink_metadata(path)?;
+        Ok(if meta.is_file() {
+            EntryKind::File { len: meta.len() }
+        } else if meta.is_dir() {
+            EntryKind::Dir
+        } else {
+            EntryKind::Other
+        })
+    }
+
+    fn is_dir(&self, path: &Path) -> io::Result<bool> {
+        Ok(std::fs::metadata(path)?.is_dir())
+    }
+
+    fn read_dir(&self, dir: &Path) -> io::Result<Vec<DirEntry>> {
+        let mut out = Vec::new();
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            // Does not follow symbolic links. May `lstat` (filesystems without `d_type`); an entry removed meanwhile
+            // is left out.
+            let file_type = match entry.file_type() {
+                Ok(file_type) => file_type,
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(err),
+            };
+            let kind = if file_type.is_dir() {
+                EntryKind::Dir
+            } else if file_type.is_file() {
+                match entry.metadata() {
+                    Ok(meta) => EntryKind::File { len: meta.len() },
+                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                    Err(err) => return Err(err),
+                }
+            } else {
+                EntryKind::Other
+            };
+            out.push(DirEntry {
+                name: entry.file_name(),
+                kind,
+            });
+        }
+        Ok(out)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        std::fs::canonicalize(path)
+    }
+
+    #[cfg(unix)]
+    fn same_file(&self, file: &File, path: &Path) -> io::Result<bool> {
+        use std::os::unix::fs::MetadataExt;
+        let open = file.metadata()?;
+        match std::fs::metadata(path) {
+            Ok(named) => Ok((open.dev(), open.ino()) == (named.dev(), named.ino())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn same_file(&self, _file: &File, _path: &Path) -> io::Result<bool> {
+        Ok(true)
+    }
+
+    #[cfg(windows)]
+    fn lock_beside(&self, path: &Path) -> io::Result<Option<File>> {
+        let mut name = path
+            .file_name()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?
+            .to_owned();
+        name.push(".lock");
+        // Created if missing and never removed: removing it would race with a writer taking it.
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path.with_file_name(name))?;
+        match file.try_lock() {
+            Ok(()) => Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::ErrorKind::WouldBlock.into()),
+            Err(std::fs::TryLockError::Error(err)) => Err(err),
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn lock_beside(&self, _path: &Path) -> io::Result<Option<File>> {
+        Ok(None)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn same_file_sees_a_rename_over_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, b"old").unwrap();
+        let old = File::open(&path).unwrap();
+        assert!(RealFs.same_file(&old, &path).unwrap());
+        let other = dir.path().join("b");
+        std::fs::write(&other, b"new").unwrap();
+        RealFs.rename(&other, &path).unwrap();
+        assert!(
+            !RealFs.same_file(&old, &path).unwrap(),
+            "the path names another inode now"
+        );
+        RealFs.remove_file(&path).unwrap();
+        assert!(
+            !RealFs.same_file(&old, &path).unwrap(),
+            "the path names nothing"
+        );
+    }
+
+    #[test]
+    fn entries_are_classified_without_following_links() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f"), b"abc").unwrap();
+        std::fs::create_dir(dir.path().join("d")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("d"), dir.path().join("l")).unwrap();
+        let mut entries = RealFs.read_dir(dir.path()).unwrap();
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        let kinds: Vec<_> = entries.iter().map(|e| e.kind).collect();
+        assert_eq!(
+            kinds,
+            [EntryKind::Dir, EntryKind::File { len: 3 }, EntryKind::Other]
+        );
+        assert_eq!(
+            RealFs.entry_kind(&dir.path().join("l")).unwrap(),
+            EntryKind::Other
+        );
+        assert!(
+            RealFs.is_dir(&dir.path().join("l")).unwrap(),
+            "is_dir follows links"
+        );
+        assert!(RealFs.lock_beside(dir.path()).unwrap().is_none());
+    }
+}

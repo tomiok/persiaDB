@@ -11,15 +11,14 @@
 
 mod error;
 pub mod file;
+mod path;
 pub mod sim;
 mod stream;
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
 use std::ops::Range;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use persia_format::block::Compression;
 use persia_format::frame::{
@@ -34,15 +33,6 @@ use persia_format::{Corruption, Reader, Writer};
 pub use error::{Error, ReadOnlyReason, Result};
 pub use file::ContainerFile;
 pub use stream::FrameWriter;
-
-use crate::local::fs::{parent_or_cwd, sync_dir};
-use crate::local::temp_nonce;
-
-/// Distinguishes the temporary files of one process's [`Container::create`] calls.
-static CREATE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// How often [`Container::open`] reopens a path that a compaction renamed over while it was taking the lock.
-const OPEN_ATTEMPTS: u32 = 8;
 
 /// How a container is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,188 +149,8 @@ pub struct Container<F = File> {
     dirty: bool,
     poisoned: bool,
     recovery: Recovery,
-    /// Where [`Container::create`] or [`Container::open`] found the file; compaction renames over it.
-    path: Option<PathBuf>,
-    /// On Windows, the locked `<name>.lock` file that holds the writer lock (SPEC §4.5.1); `None` elsewhere.
-    sidecar_lock: Option<File>,
-}
-
-impl Container<File> {
-    /// Creates a new container at `path` and opens it read-write, holding the writer lock.
-    ///
-    /// Never truncates or replaces a file (SPEC §4.7): the container is written to a temporary file in the same
-    /// directory, synced, and hard-linked to `path`, which fails if the name exists; then the temporary name is
-    /// removed and the directory synced. A crash leaves no container, or a complete one, at `path` (and possibly a
-    /// stale temporary file, `<name>.tmp.<nonce>.<n>`). The file system must support hard links.
-    ///
-    /// # Errors
-    /// [`Error::AlreadyExists`] if `path` exists, or [`Error::Io`]. An `Io` error from removing the temporary name
-    /// or syncing the directory comes after the link: the container then exists at `path`, unlocked, and a retry
-    /// gets `AlreadyExists`.
-    pub fn create(path: impl AsRef<Path>) -> Result<Self> {
-        let path = path.as_ref();
-        let dir = parent_or_cwd(path);
-        let name = path
-            .file_name()
-            .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?;
-        let sidecar_lock = match lock_sidecar(path) {
-            Err(Error::Locked) if path.exists() => {
-                return Err(Error::AlreadyExists {
-                    path: path.to_owned(),
-                });
-            }
-            other => other?,
-        };
-        let n = CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let mut temp_name = name.to_owned();
-        temp_name.push(format!(".tmp.{:016x}.{n}", temp_nonce()));
-        let temp = dir.join(temp_name);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(Error::io("create"))?;
-        let result = Self::create_on(file, new_db_uuid()).and_then(|container| {
-            match std::fs::hard_link(&temp, path) {
-                Ok(()) => Ok(Container {
-                    path: Some(std::fs::canonicalize(path).map_err(Error::io("canonicalize"))?),
-                    sidecar_lock,
-                    ..container
-                }),
-                Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
-                    Err(Error::AlreadyExists {
-                        path: path.to_owned(),
-                    })
-                }
-                Err(err) => Err(Error::io("link")(err)),
-            }
-        });
-        // The temporary name goes whatever happened. One directory sync then covers the link and the removal, and
-        // runs even if the removal failed, so a container reported or not is durable either way.
-        let removed = std::fs::remove_file(&temp).map_err(Error::io("remove temporary file"));
-        let synced = sync_dir(dir).map_err(Error::io("sync directory"));
-        let container = result?;
-        removed?;
-        synced?;
-        Ok(container)
-    }
-
-    /// Opens the container at `path` and recovers it (SPEC §4.4, §8.6). [`Mode::ReadWrite`] takes the writer lock.
-    ///
-    /// # Errors
-    /// [`Error::Locked`] if another handle holds the writer lock, and the errors of [`Container::open_on`].
-    pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
-        // Canonical, so compaction renames over the real file, not over a symbolic link to it.
-        let path = std::fs::canonicalize(path.as_ref()).map_err(Error::io("open"))?;
-        let sidecar_lock = match mode {
-            Mode::ReadWrite => lock_sidecar(&path)?,
-            Mode::ReadOnly => None,
-        };
-        for _ in 0..OPEN_ATTEMPTS {
-            let file = OpenOptions::new()
-                .read(true)
-                .write(mode == Mode::ReadWrite)
-                .open(&path)
-                .map_err(Error::io("open"))?;
-            if mode == Mode::ReadWrite {
-                take_lock(&file)?;
-                // A compaction may have renamed a new file over the path between our open and our lock; the lock
-                // we got is then on the old, unlinked file, which its writer has just released. Open again.
-                if !same_file(&file, &path)? {
-                    continue;
-                }
-            }
-            let mut container = Self::recover(file, mode)?;
-            container.path = Some(path);
-            container.sidecar_lock = sidecar_lock;
-            return Ok(container);
-        }
-        // The path changed under every attempt: a writer is busy compacting.
-        Err(Error::Locked)
-    }
-
-    /// Compacts the container in place (SPEC §4.6): [`Container::compact_into`] a temporary file
-    /// `<name>.compact.<nonce>.<n>` next to it, then renames that over the container and syncs the directory. This
-    /// handle then works on the new file; frame offsets the caller held are replaced by the returned
-    /// [`Relocation`]. Handles that opened the old file keep reading it.
-    ///
-    /// The path names a complete old or new container at every instant. On an error before the rename, the
-    /// temporary file is removed and this handle is as [`Container::compact_into`] left it. The rename goes to the
-    /// canonical path found at open (a symbolic link to the container keeps pointing at it; other hard links to the
-    /// file are not supported: they keep the old contents), and is refused if that path no longer names this
-    /// file. If the directory sync fails after the rename, [`Error::CompactedNotDurable`] carries the
-    /// [`Relocation`] and this handle moves to the new file, poisoned. On Windows an open mapping may block the
-    /// rename (ROADMAP 2.4.5.3) and the path identity is not checked (2.4.16).
-    ///
-    /// # Errors
-    /// [`Error::InvalidInput`] if the container was not opened from a path or the path names another file,
-    /// [`Error::CompactedNotDurable`], and the errors of [`Container::compact_into`].
-    pub fn compact(
-        &mut self,
-        live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
-        compression: Compression,
-    ) -> Result<Relocation> {
-        let path = self.path.clone().ok_or_else(|| {
-            Error::InvalidInput("the container was not opened from a path".into())
-        })?;
-        self.writable()?;
-        let dir = parent_or_cwd(&path).to_owned();
-        let mut temp_name = path
-            .file_name()
-            .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?
-            .to_owned();
-        let n = CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        temp_name.push(format!(".compact.{:016x}.{n}", temp_nonce()));
-        let temp = dir.join(temp_name);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&temp)
-            .map_err(Error::io("create compaction file"))?;
-        let (mut new, relocation) = match self.compact_into(file, live, manifest, compression) {
-            Ok(done) => done,
-            Err(err) => return Err(discard(&temp, err)),
-        };
-        // Never rename over a path that no longer names this file (replaced from outside): that file is not ours.
-        let renamed = match same_file(&self.file, &path) {
-            Ok(true) => std::fs::rename(&temp, &path).map_err(Error::io("rename")),
-            Ok(false) => Err(Error::InvalidInput(format!(
-                "{} no longer names this container",
-                path.display()
-            ))),
-            Err(err) => Err(err),
-        };
-        if let Err(err) = renamed {
-            drop(new);
-            return Err(discard(&temp, err));
-        }
-        new.path = Some(path);
-        new.sidecar_lock = self.sidecar_lock.take();
-        let synced = sync_dir(&dir);
-        new.poisoned = synced.is_err();
-        *self = new;
-        match synced {
-            Ok(()) => Ok(relocation),
-            Err(source) => Err(Error::CompactedNotDurable { relocation, source }),
-        }
-    }
-}
-
-/// Removes an unused compaction file after `err`; a failed removal is added to the error rather than lost.
-fn discard(temp: &Path, err: Error) -> Error {
-    match std::fs::remove_file(temp) {
-        Ok(()) => err,
-        Err(cleanup) => Error::Io {
-            op: "compact",
-            source: io::Error::other(format!(
-                "{err}; removing {} also failed: {cleanup}",
-                temp.display()
-            )),
-        },
-    }
+    /// Where [`Container::create_in`] or [`Container::open_in`] found the file.
+    location: Option<path::Location<F>>,
 }
 
 /// A random database id: 128 bits from the standard library's per-process hash keys, the time and the pid. Ids
@@ -411,8 +221,7 @@ impl<F: ContainerFile> Container<F> {
                 },
                 truncated_from: None,
             },
-            path: None,
-            sidecar_lock: None,
+            location: None,
         })
     }
 
@@ -474,8 +283,7 @@ impl<F: ContainerFile> Container<F> {
                 scan_end: ScanEnd::Clean { offset: sb.log_end },
                 truncated_from: None,
             },
-            path: None,
-            sidecar_lock: None,
+            location: None,
         };
         container.recover_tail(file_len, &mut frames)?;
         container.frames = frames;
@@ -906,8 +714,7 @@ impl<F: ContainerFile> Container<F> {
                 scan_end: ScanEnd::Clean { offset: end },
                 truncated_from: None,
             },
-            path: None,
-            sidecar_lock: None,
+            location: None,
         };
         Ok((container, relocation))
     }
@@ -1146,78 +953,5 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         let mut w = Writer::with_base_offset(self.end);
         encode_frame(&mut w, kind, seq, payload, compression)?;
         self.write(&w, kind, seq)
-    }
-}
-
-/// Takes the writer lock of the container at `path` on Windows: an exclusive lock on `<name>.lock` next to it, created
-/// if missing and never removed (removing it would race with a writer taking it). `LockFileEx` locks are mandatory, so
-/// locking the container itself would keep every reader out (SPEC §4.5.1, ROADMAP 2.4.16).
-#[cfg(windows)]
-fn lock_sidecar(path: &Path) -> Result<Option<File>> {
-    let mut name = path
-        .file_name()
-        .ok_or_else(|| Error::InvalidInput(format!("{} has no file name", path.display())))?
-        .to_owned();
-    name.push(".lock");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path.with_file_name(name))
-        .map_err(Error::io("open lock file"))?;
-    match file.try_lock() {
-        Ok(()) => Ok(Some(file)),
-        Err(std::fs::TryLockError::WouldBlock) => Err(Error::Locked),
-        Err(std::fs::TryLockError::Error(err)) => Err(Error::io("lock")(err)),
-    }
-}
-
-/// Unix locks the container file itself (`flock`, advisory), through [`ContainerFile::try_lock`].
-#[cfg(not(windows))]
-#[allow(clippy::unnecessary_wraps)] // same signature as the Windows version
-fn lock_sidecar(_path: &Path) -> Result<Option<File>> {
-    Ok(None)
-}
-
-/// Whether `path` still names the file open as `file` (same device and inode).
-#[cfg(unix)]
-fn same_file(file: &File, path: &Path) -> Result<bool> {
-    use std::os::unix::fs::MetadataExt;
-    let open = file.metadata().map_err(Error::io("stat"))?;
-    match std::fs::metadata(path) {
-        Ok(named) => Ok((open.dev(), open.ino()) == (named.dev(), named.ino())),
-        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(err) => Err(Error::io("stat")(err)),
-    }
-}
-
-/// The standard library exposes no stable file identity on Windows; the check is part of ROADMAP 2.4.16.
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
-fn same_file(_file: &File, _path: &Path) -> Result<bool> {
-    Ok(true)
-}
-
-#[cfg(all(test, unix))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn same_file_sees_a_rename_over_the_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("a");
-        std::fs::write(&path, b"old").unwrap();
-        let old = File::open(&path).unwrap();
-        assert!(same_file(&old, &path).unwrap());
-        let other = dir.path().join("b");
-        std::fs::write(&other, b"new").unwrap();
-        std::fs::rename(&other, &path).unwrap();
-        assert!(
-            !same_file(&old, &path).unwrap(),
-            "the path names another inode now"
-        );
-        std::fs::remove_file(&path).unwrap();
-        assert!(!same_file(&old, &path).unwrap(), "the path names nothing");
     }
 }

@@ -50,9 +50,65 @@ struct Inner {
     current: Vec<u8>,
     durable: Vec<u8>,
     pending: Vec<Pending>,
+}
+
+/// A fault schedule: shared by the clones of a file, and by every file of a [`SimFs`](crate::vfs::sim::SimFs).
+#[derive(Debug, Default)]
+pub(crate) struct Faults {
     mutations: u64,
     fault: Option<SimFault>,
     crashed: bool,
+}
+
+impl Faults {
+    /// Counts a mutating call and applies the armed fault: `Ok(true)` to run it and succeed, `Ok(false)` to run it
+    /// and then fail, `Err` to fail without running it.
+    pub(crate) fn begin(&mut self) -> io::Result<bool> {
+        let n = self.mutations;
+        self.mutations = n.saturating_add(1);
+        if self.crashed {
+            return Err(io::Error::other("simulated crash: the process is gone"));
+        }
+        match self.fault {
+            Some(SimFault::FailAt(k)) if k == n => {
+                self.crashed = true;
+                Err(io::Error::other(format!("simulated failure of call {n}")))
+            }
+            Some(SimFault::ApplyThenFail(k)) if k == n => {
+                self.crashed = true;
+                Ok(false)
+            }
+            _ => Ok(true),
+        }
+    }
+
+    /// The result of a call that [`Faults::begin`] let run.
+    pub(crate) fn finish(ok: bool) -> io::Result<()> {
+        if ok {
+            Ok(())
+        } else {
+            Err(io::Error::other(
+                "simulated failure after the call took effect",
+            ))
+        }
+    }
+
+    pub(crate) fn set(&mut self, fault: Option<SimFault>) {
+        self.fault = fault;
+    }
+
+    pub(crate) fn mutations(&self) -> u64 {
+        self.mutations
+    }
+
+    pub(crate) fn crashed(&self) -> bool {
+        self.crashed
+    }
+}
+
+/// Locks a mutex whose data stays consistent across a panic (every update is a single assignment or push).
+pub(crate) fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// An in-memory file with crash semantics. Clones share the file.
@@ -75,20 +131,20 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct SimFile {
     inner: Arc<Mutex<Inner>>,
+    faults: Arc<Mutex<Faults>>,
 }
 
 impl std::fmt::Debug for SimFile {
     // Sizes, not contents: a container is at least 12 KiB.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let inner = self.lock();
+        let faults = lock(&self.faults);
         f.debug_struct("SimFile")
             .field("len", &inner.current.len())
             .field("durable_len", &inner.durable.len())
             .field("unsynced", &inner.pending.len())
-            .field("mutations", &inner.mutations)
-            .field("fault", &inner.fault)
-            .field("crashed", &inner.crashed)
-            .finish()
+            .field("faults", &*faults)
+            .finish_non_exhaustive()
     }
 }
 
@@ -100,34 +156,40 @@ impl SimFile {
 
     /// A file holding `bytes`, all durable.
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
+        Self::with_faults(bytes, Arc::default())
+    }
+
+    /// A durable file holding `bytes` whose mutating calls count against `faults`.
+    pub(crate) fn with_faults(bytes: Vec<u8>, faults: Arc<Mutex<Faults>>) -> Self {
         let inner = Inner {
             durable: bytes.clone(),
             current: bytes,
-            ..Inner::default()
+            pending: Vec::new(),
         };
         Self {
             inner: Arc::new(Mutex::new(inner)),
+            faults,
         }
     }
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
-        // A panic while holding the lock leaves consistent data: every update is a single assignment or push.
-        self.inner.lock().unwrap_or_else(PoisonError::into_inner)
+        lock(&self.inner)
     }
 
-    /// Arms (or with `None` disarms) a fault. Mutating calls are counted from the file's creation.
+    /// Arms (or with `None` disarms) a fault. Mutating calls are counted from the file's creation (for a file of a
+    /// [`SimFs`](crate::vfs::sim::SimFs), across the whole file system).
     pub fn set_fault(&self, fault: Option<SimFault>) {
-        self.lock().fault = fault;
+        lock(&self.faults).set(fault);
     }
 
     /// How many mutating calls the file has seen, failed ones included: the `n` of the next call.
     pub fn mutations(&self) -> u64 {
-        self.lock().mutations
+        lock(&self.faults).mutations()
     }
 
     /// Whether a fault has fired.
     pub fn crashed(&self) -> bool {
-        self.lock().crashed
+        lock(&self.faults).crashed()
     }
 
     /// What readers see now.
@@ -143,47 +205,24 @@ impl SimFile {
     /// The file a restart finds after a crash now: a new, independent, fully synced file with no fault armed.
     #[must_use]
     pub fn crash(&self, loss: CrashLoss) -> Self {
+        Self::from_bytes(self.crash_image(loss))
+    }
+
+    /// The bytes a crash now leaves.
+    pub(crate) fn crash_image(&self, loss: CrashLoss) -> Vec<u8> {
         let inner = self.lock();
-        let image = match loss {
+        match loss {
             CrashLoss::All => inner.durable.clone(),
             CrashLoss::Nothing => inner.current.clone(),
             CrashLoss::Seeded(seed) => seeded_image(&inner, &Jitter::new(seed)),
-        };
-        Self::from_bytes(image)
-    }
-
-    /// Counts a mutating call and applies the armed fault: `Ok(true)` to run it and succeed, `Ok(false)` to run it
-    /// and then fail, `Err` to fail without running it.
-    fn begin(inner: &mut Inner) -> io::Result<bool> {
-        let n = inner.mutations;
-        inner.mutations = n.saturating_add(1);
-        if inner.crashed {
-            return Err(io::Error::other("simulated crash: the process is gone"));
-        }
-        match inner.fault {
-            Some(SimFault::FailAt(k)) if k == n => {
-                inner.crashed = true;
-                Err(io::Error::other(format!("simulated failure of call {n}")))
-            }
-            Some(SimFault::ApplyThenFail(k)) if k == n => {
-                inner.crashed = true;
-                Ok(false)
-            }
-            _ => Ok(true),
         }
     }
 
-    fn finish(n_ok: bool) -> io::Result<()> {
-        if n_ok {
-            Ok(())
-        } else {
-            Err(io::Error::other(
-                "simulated failure after the call took effect",
-            ))
-        }
+    /// Counts a mutating call against the fault schedule (see [`Faults::begin`]).
+    fn begin(&self) -> io::Result<bool> {
+        lock(&self.faults).begin()
     }
 }
-
 /// `durable` plus a seeded subset of the pending changes, applied in call order.
 fn seeded_image(inner: &Inner, rng: &Jitter) -> Vec<u8> {
     let coin = || rng.next_u64() & 1 == 1;
@@ -252,7 +291,7 @@ impl ContainerFile for SimFile {
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
         let mut inner = self.lock();
-        let ok = Self::begin(&mut inner)?;
+        let ok = self.begin()?;
         if offset
             .checked_add(buf.len() as u64)
             .and_then(|end| usize::try_from(end).ok())
@@ -265,27 +304,27 @@ impl ContainerFile for SimFile {
             offset,
             data: buf.to_vec(),
         });
-        Self::finish(ok)
+        Faults::finish(ok)
     }
 
     fn sync_data(&self) -> io::Result<()> {
         let mut inner = self.lock();
-        let ok = Self::begin(&mut inner)?;
+        let ok = self.begin()?;
         let Inner {
             current, durable, ..
         } = &mut *inner;
         durable.clone_from(current);
         inner.pending.clear();
-        Self::finish(ok)
+        Faults::finish(ok)
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         let mut inner = self.lock();
-        let ok = Self::begin(&mut inner)?;
+        let ok = self.begin()?;
         let new_len = usize::try_from(len).map_err(|_| io::ErrorKind::InvalidInput)?;
         inner.current.resize(new_len, 0);
         inner.pending.push(Pending::SetLen(len));
-        Self::finish(ok)
+        Faults::finish(ok)
     }
 
     /// Always granted: a `SimFile` models one process's view of a file, and its clones stand for the same file

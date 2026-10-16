@@ -11,9 +11,8 @@ mod name;
 use core::ops::Range;
 use std::collections::HashSet;
 use std::collections::hash_map::RandomState;
-use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
-use std::io::{self, Read, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock, PoisonError};
@@ -21,11 +20,13 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use bytes::Bytes;
 use persia_format::ByteSource;
 
+use crate::container::ContainerFile;
 use crate::error::{Error, Op, Result};
 use crate::key::{InvalidKey, Key, KeyPrefix};
 use crate::meta::{Capabilities, ObjectMeta, PutOutcome};
 use crate::storage::{Storage, check_range, range_source};
-use fs::{parent_or_cwd, read_exact_at, sync_dir};
+use crate::vfs::{EntryKind, RealFs, Vfs};
+use fs::parent_or_cwd;
 
 /// Distinguishes the temporary files of one process; [`temp_nonce`] distinguishes processes.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -58,7 +59,8 @@ const LINK_ATTEMPTS: u32 = 8;
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
 #[derive(Debug)]
-pub struct LocalStorage {
+pub struct LocalStorage<V: Vfs = RealFs> {
+    vfs: V,
     root: PathBuf,
     /// Directories whose entry in their parent this store has fsynced (SPEC §10.1.1): writing into one needs no
     /// further directory sync on its path.
@@ -69,11 +71,23 @@ pub struct LocalStorage {
 }
 
 impl LocalStorage {
-    /// Opens the store rooted at `root`, creating the directory (and its missing parents, durably) if needed.
+    /// Opens the store rooted at `root` on the operating system's file system, creating the directory (and its
+    /// missing parents, durably) if needed.
     ///
     /// # Errors
     /// The OS error if a directory cannot be created or synced, or if `root` exists and is not a directory.
     pub fn open(root: impl Into<PathBuf>) -> io::Result<Self> {
+        Self::open_in(RealFs, root)
+    }
+}
+
+impl<V: Vfs> LocalStorage<V> {
+    /// Opens the store rooted at `root` on `vfs`, creating the directory (and its missing parents, durably) if
+    /// needed.
+    ///
+    /// # Errors
+    /// The OS error if a directory cannot be created or synced, or if `root` exists and is not a directory.
+    pub fn open_in(vfs: V, root: impl Into<PathBuf>) -> io::Result<Self> {
         // Absolute, so a later change of the working directory cannot move the store.
         let root = std::path::absolute(root.into())?;
         // Create from the outermost missing ancestor inwards, syncing each new directory's parent. Ancestors that
@@ -81,25 +95,26 @@ impl LocalStorage {
         let missing: Vec<&Path> = root
             .ancestors()
             .filter(|p| !p.as_os_str().is_empty())
-            .take_while(|p| !p.exists())
+            .take_while(|p| vfs.is_dir(p).is_err())
             .collect();
         for dir in missing.iter().rev() {
-            match std::fs::create_dir(dir) {
+            match vfs.create_dir(dir) {
                 Err(err) if err.kind() != io::ErrorKind::AlreadyExists => return Err(err),
-                _ => sync_dir(parent_or_cwd(dir))?,
+                _ => vfs.sync_dir(parent_or_cwd(dir))?,
             }
         }
-        if !std::fs::metadata(&root)?.is_dir() {
+        if !vfs.is_dir(&root)? {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("{} is not a directory", root.display()),
             ));
         }
         // The root's own entry may have been created by another process that has not synced it yet.
-        sync_dir(parent_or_cwd(&root))?;
+        vfs.sync_dir(parent_or_cwd(&root))?;
         let synced_dirs = Mutex::new(HashSet::from([root.clone()]));
         let real_dirs = Mutex::new(HashSet::new());
         Ok(Self {
+            vfs,
             root,
             synced_dirs,
             real_dirs,
@@ -147,12 +162,12 @@ impl LocalStorage {
             if self.is_synced(&path) {
                 continue;
             }
-            match std::fs::create_dir(&path) {
+            match self.vfs.create_dir(&path) {
                 Ok(()) => {}
                 // Not followed if it is a symbolic link: writes never leave the root through a planted link.
                 Err(err)
                     if err.kind() == io::ErrorKind::AlreadyExists
-                        && std::fs::symlink_metadata(&path)?.is_dir() => {}
+                        && self.vfs.entry_kind(&path)? == EntryKind::Dir => {}
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                     return Err(io::Error::other(format!(
                         "{} exists and is not a directory",
@@ -162,7 +177,7 @@ impl LocalStorage {
                 Err(err) => return Err(err),
             }
             // Synced whoever created it: another writer may not have synced it yet (SPEC §10.1.1).
-            sync_dir(parent_or_cwd(&path))?;
+            self.vfs.sync_dir(parent_or_cwd(&path))?;
             self.synced_dirs
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
@@ -202,8 +217,8 @@ impl LocalStorage {
             if known(&path) {
                 continue;
             }
-            match std::fs::symlink_metadata(&path) {
-                Ok(meta) if meta.is_dir() => {}
+            match self.vfs.entry_kind(&path) {
+                Ok(EntryKind::Dir) => {}
                 Ok(_) => return Ok(false),
                 Err(err)
                     if matches!(
@@ -225,13 +240,13 @@ impl LocalStorage {
 
     /// Opens `key`'s file for reading. A missing file, or an entry `list` would skip (not a regular file, a symbolic
     /// link on the path, a foreign file where a directory of the path should be), is [`Error::NotFound`].
-    fn open_object(&self, op: Op, key: &Key, dir: &Path, path: &Path) -> Result<File> {
+    fn open_object(&self, op: Op, key: &Key, dir: &Path, path: &Path) -> Result<V::File> {
         match self.is_real_dir(dir) {
             Ok(true) => {}
             Ok(false) => return Err(Error::NotFound { key: key.clone() }),
             Err(err) => return Err(io_error(op, key, err)),
         }
-        open_regular(path).map_err(|err| match err.kind() {
+        self.open_regular(path).map_err(|err| match err.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
                 Error::NotFound { key: key.clone() }
             }
@@ -250,19 +265,19 @@ impl LocalStorage {
     }
 
     /// Writes `data` to a new temporary file in `dir` and fsyncs it.
-    fn write_temp(dir: &Path, data: &[u8]) -> io::Result<PathBuf> {
+    fn write_temp(&self, dir: &Path, data: &[u8]) -> io::Result<PathBuf> {
         for _ in 0..TEMP_ATTEMPTS {
             let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
             // Starts with `@`, which no encoded segment contains, so `list` never decodes it (SPEC §10.1.1).
             let path = dir.join(format!("@tmp.{:016x}.{n}", temp_nonce()));
-            let mut file = match OpenOptions::new().write(true).create_new(true).open(&path) {
+            let file = match self.vfs.create_new(&path) {
                 Ok(file) => file,
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(err) => return Err(err),
             };
-            if let Err(err) = file.write_all(data).and_then(|()| file.sync_all()) {
+            if let Err(err) = file.write_all_at(data, 0).and_then(|()| file.sync_all()) {
                 drop(file);
-                return Err(discard_temp(&path, err));
+                return Err(self.discard_temp(&path, err));
             }
             return Ok(path);
         }
@@ -277,7 +292,7 @@ impl LocalStorage {
         let (dir, path) = self.object_path(key)?;
         let write = || {
             self.ensure_dir(&dir)
-                .and_then(|()| Self::write_temp(&dir, data))
+                .and_then(|()| self.write_temp(&dir, data))
         };
         let temp = match write() {
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
@@ -291,16 +306,22 @@ impl LocalStorage {
     }
 
     /// `put_if_absent` after the temporary file is written; the caller removes it.
-    fn link_or_resolve(key: &Key, data: &Bytes, path: &Path, temp: &Path) -> Result<PutOutcome> {
+    fn link_or_resolve(
+        &self,
+        key: &Key,
+        data: &Bytes,
+        path: &Path,
+        temp: &Path,
+    ) -> Result<PutOutcome> {
         let io = |err| io_error(Op::PutIfAbsent, key, err);
         for _ in 0..LINK_ATTEMPTS {
-            match std::fs::hard_link(temp, path) {
+            match self.vfs.hard_link(temp, path) {
                 Ok(()) => return Ok(PutOutcome::Created),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(err) => return Err(io(err)),
             }
             // SPEC §10.1: the object found may be this caller's own earlier attempt.
-            match read_file(path) {
+            match self.read_file(path) {
                 Ok(existing) if existing == *data => return Ok(PutOutcome::Created),
                 Ok(_) => return Ok(PutOutcome::AlreadyExists),
                 // Deleted since the link failed: the name is free again.
@@ -316,6 +337,7 @@ impl LocalStorage {
     /// Appends every object below `dir` (whose keys start with `base`) to `out`; with `filter`, only names whose
     /// segment starts with it.
     fn collect(
+        &self,
         dir: &Path,
         base: &str,
         filter: Option<&str>,
@@ -326,19 +348,17 @@ impl LocalStorage {
         if base.len() > Key::MAX_LEN {
             return Ok(());
         }
-        let entries = match std::fs::read_dir(dir) {
+        let entries = match self.vfs.read_dir(dir) {
             Ok(entries) => entries,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
             Err(err) => return Err(err),
         };
         for entry in entries {
-            let entry = entry?;
-            let file_name = entry.file_name();
+            let file_name = &entry.name;
             // A name that is not even UTF-8 was not written by Persia.
             let Some(file_name) = file_name.to_str() else {
                 continue;
             };
-            // Names first: temporary files, which come and go during a list, never reach a `stat`.
             let (encoded, is_dir) = match file_name.strip_suffix(name::DIR_MARKER) {
                 Some(encoded) => (encoded, true),
                 None => (file_name, false),
@@ -349,27 +369,23 @@ impl LocalStorage {
             if filter.is_some_and(|f| !segment.starts_with(f)) {
                 continue;
             }
-            // Does not follow symbolic links: Persia never creates them. May `lstat` (filesystems without `d_type`).
-            let file_type = match entry.file_type() {
-                Ok(file_type) => file_type,
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
+            // Symbolic links and other entries Persia never creates are skipped, never followed.
+            let size = match (is_dir, entry.kind) {
+                (true, EntryKind::Dir) => None,
+                (false, EntryKind::File { len }) => Some(len),
+                _ => continue,
             };
-            if (is_dir && !file_type.is_dir()) || (!is_dir && !file_type.is_file()) {
+            let Some(size) = size else {
+                self.collect(
+                    &dir.join(&entry.name),
+                    &format!("{base}{segment}/"),
+                    None,
+                    out,
+                )?;
                 continue;
-            }
-            if is_dir {
-                Self::collect(&entry.path(), &format!("{base}{segment}/"), None, out)?;
-                continue;
-            }
+            };
             let Ok(key) = Key::new(format!("{base}{segment}")) else {
                 continue;
-            };
-            let size = match entry.metadata() {
-                Ok(meta) => meta.len(),
-                // Deleted since the directory was read.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(err),
             };
             out.push(ObjectMeta { key, size });
         }
@@ -377,13 +393,13 @@ impl LocalStorage {
     }
 }
 
-impl Storage for LocalStorage {
+impl<V: Vfs> Storage for LocalStorage<V> {
     fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource> {
         check_range(key, &range)?;
         let (dir, path) = self.object_path(key)?;
         let io = |err| io_error(Op::GetRange, key, err);
         let file = self.open_object(Op::GetRange, key, &dir, &path)?;
-        let len = file.metadata().map_err(io)?.len();
+        let len = file.file_len().map_err(io)?;
         // Checked before allocating: the range comes from metadata that may be corrupt.
         if range.end > len {
             return Err(Error::ShortRead {
@@ -399,11 +415,11 @@ impl Storage for LocalStorage {
             ))
         })?;
         let mut buf = vec![0; want];
-        match read_exact_at(&file, &mut buf, range.start) {
+        match file.read_exact_at(&mut buf, range.start) {
             Ok(()) => range_source(key, range, Bytes::from(buf)),
             // Truncated since the length check, by something other than Persia (objects are never rewritten).
             Err(err) if err.kind() == io::ErrorKind::UnexpectedEof => {
-                let len = file.metadata().map_err(io)?.len();
+                let len = file.file_len().map_err(io)?;
                 Err(Error::ShortRead {
                     key: key.clone(),
                     returned: len.saturating_sub(range.start),
@@ -416,30 +432,29 @@ impl Storage for LocalStorage {
 
     fn get(&self, key: &Key) -> Result<Bytes> {
         let (dir, path) = self.object_path(key)?;
-        let mut file = self.open_object(Op::Get, key, &dir, &path)?;
-        // A hint only: the read stops at the end of the file, whatever its length now.
-        let len = file.metadata().map_or(0, |meta| meta.len());
-        let mut buf = Vec::with_capacity(usize::try_from(len).unwrap_or(0));
-        file.read_to_end(&mut buf)
-            .map_err(|err| io_error(Op::Get, key, err))?;
-        Ok(Bytes::from(buf))
+        let file = self.open_object(Op::Get, key, &dir, &path)?;
+        read_all(&file)
+            .map(Bytes::from)
+            .map_err(|err| io_error(Op::Get, key, err))
     }
 
     fn put(&self, key: &Key, data: Bytes) -> Result<()> {
         let (dir, path, temp) = self.prepare(Op::Put, key, &data)?;
         let io = |err| io_error(Op::Put, key, err);
-        std::fs::rename(&temp, &path).map_err(|err| io(discard_temp(&temp, err)))?;
-        sync_dir(&dir).map_err(io)
+        self.vfs
+            .rename(&temp, &path)
+            .map_err(|err| io(self.discard_temp(&temp, err)))?;
+        self.vfs.sync_dir(&dir).map_err(io)
     }
 
     fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
         let (dir, path, temp) = self.prepare(Op::PutIfAbsent, key, &data)?;
         let io = |err| io_error(Op::PutIfAbsent, key, err);
-        let outcome = match Self::link_or_resolve(key, &data, &path, &temp) {
+        let outcome = match self.link_or_resolve(key, &data, &path, &temp) {
             Ok(outcome) => outcome,
             Err(err) => {
                 // The link error is the one to report; a failed cleanup only leaves a skipped temporary file.
-                return Err(match std::fs::remove_file(&temp) {
+                return Err(match self.vfs.remove_file(&temp) {
                     Ok(()) => err,
                     Err(cleanup) => io(io::Error::other(format!(
                         "{err}; removing temporary file {} also failed: {cleanup}",
@@ -448,10 +463,10 @@ impl Storage for LocalStorage {
                 });
             }
         };
-        std::fs::remove_file(&temp).map_err(io)?;
+        self.vfs.remove_file(&temp).map_err(io)?;
         // For every outcome: an object found may be this caller's earlier attempt or another writer's, linked but not
         // yet synced. What this call reports is durable.
-        sync_dir(&dir).map_err(io)?;
+        self.vfs.sync_dir(&dir).map_err(io)?;
         Ok(outcome)
     }
 
@@ -467,7 +482,7 @@ impl Storage for LocalStorage {
             source,
         };
         // A missing root is an error, not an empty store: an unmounted volume must not look like "no manifests".
-        if !std::fs::metadata(&self.root).map_err(io)?.is_dir() {
+        if !self.vfs.is_dir(&self.root).map_err(io)? {
             return Err(io(io::Error::other("the store root is not a directory")));
         }
         let mut dir = self.root.clone();
@@ -481,8 +496,8 @@ impl Storage for LocalStorage {
                 dir.push(name);
                 // A file, a symbolic link or nothing where the directory should be: `list("")` skips it, so nothing
                 // matches here either (and a link never leads outside the root).
-                match std::fs::symlink_metadata(&dir) {
-                    Ok(meta) if meta.is_dir() => {}
+                match self.vfs.entry_kind(&dir) {
+                    Ok(EntryKind::Dir) => {}
                     Ok(_) => return Ok(Vec::new()),
                     Err(err)
                         if matches!(
@@ -498,7 +513,8 @@ impl Storage for LocalStorage {
             base = format!("{dir_part}/");
         }
         let mut out = Vec::new();
-        Self::collect(&dir, &base, Some(last), &mut out).map_err(io)?;
+        self.collect(&dir, &base, Some(last), &mut out)
+            .map_err(io)?;
         out.sort_unstable_by(|a, b| a.key.cmp(&b.key));
         Ok(out)
     }
@@ -510,8 +526,8 @@ impl Storage for LocalStorage {
         if !self.is_real_dir(&dir).map_err(io)? {
             return Ok(());
         }
-        match std::fs::remove_file(&path) {
-            Ok(()) => sync_dir(&dir).map_err(io),
+        match self.vfs.remove_file(&path) {
+            Ok(()) => self.vfs.sync_dir(&dir).map_err(io),
             // Missing, or a file where a directory of the path should be: no such object.
             Err(err)
                 if matches!(
@@ -559,36 +575,50 @@ fn io_error(op: Op, key: &Key, source: io::Error) -> Error {
     }
 }
 
-/// Opens `path` if it is a regular file. Symbolic links and FIFOs are neither followed nor opened (a FIFO would
-/// block): Persia never creates them, and `list` skips them (SPEC §10.1.1).
-fn open_regular(path: &Path) -> io::Result<File> {
-    if !std::fs::symlink_metadata(path)?.is_file() {
-        return Err(io::Error::new(
-            io::ErrorKind::NotFound,
-            "not a regular file",
-        ));
-    }
-    File::open(path)
-}
-
-fn read_file(path: &Path) -> io::Result<Vec<u8>> {
-    let mut buf = Vec::new();
-    open_regular(path)?.read_to_end(&mut buf)?;
+/// The whole of an object's file. Objects are never rewritten in place (`put` renames a new file over the name), so
+/// the length read first is the length of the file.
+fn read_all<F: ContainerFile>(file: &F) -> io::Result<Vec<u8>> {
+    let len = usize::try_from(file.file_len()?).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "file larger than the address space",
+        )
+    })?;
+    let mut buf = vec![0; len];
+    file.read_exact_at(&mut buf, 0)?;
     Ok(buf)
 }
 
-/// Removes a temporary file after `err`, and returns `err`, noting a failed removal in it: a leftover temporary file
-/// is skipped by `list` and holds no acknowledged data, so the write's own error is the one to report.
-fn discard_temp(temp: &Path, err: io::Error) -> io::Error {
-    match std::fs::remove_file(temp) {
-        Ok(()) => err,
-        Err(cleanup) => io::Error::new(
-            err.kind(),
-            format!(
-                "{err}; removing temporary file {} also failed: {cleanup}",
-                temp.display()
+impl<V: Vfs> LocalStorage<V> {
+    /// Opens `path` if it is a regular file. Symbolic links and FIFOs are neither followed nor opened (a FIFO would
+    /// block): Persia never creates them, and `list` skips them (SPEC §10.1.1).
+    fn open_regular(&self, path: &Path) -> io::Result<V::File> {
+        if !matches!(self.vfs.entry_kind(path)?, EntryKind::File { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "not a regular file",
+            ));
+        }
+        self.vfs.open(path, false)
+    }
+
+    fn read_file(&self, path: &Path) -> io::Result<Vec<u8>> {
+        read_all(&self.open_regular(path)?)
+    }
+
+    /// Removes a temporary file after `err`, and returns `err`, noting a failed removal in it: a leftover temporary
+    /// file is skipped by `list` and holds no acknowledged data, so the write's own error is the one to report.
+    fn discard_temp(&self, temp: &Path, err: io::Error) -> io::Error {
+        match self.vfs.remove_file(temp) {
+            Ok(()) => err,
+            Err(cleanup) => io::Error::new(
+                err.kind(),
+                format!(
+                    "{err}; removing temporary file {} also failed: {cleanup}",
+                    temp.display()
+                ),
             ),
-        ),
+        }
     }
 }
 
