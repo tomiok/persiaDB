@@ -457,10 +457,12 @@ fn crash_while_writing_the_new_file_leaves_the_old_container() {
 // In place, on disk
 // ---------------------------------------------------------------------------------------------------------------
 
+/// The entries of `dir`, sorted, without the writer lock files Windows keeps beside containers (SPEC §4.5.1).
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| !(cfg!(windows) && n.ends_with(".lock")))
         .collect();
     names.sort();
     names

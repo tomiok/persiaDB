@@ -530,6 +530,8 @@ fn assert_single_valid_container(dir: &Path, path: &Path) {
     let entries: Vec<_> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name())
+        // Windows keeps the writer lock beside the container (SPEC §4.5.1).
+        .filter(|n| !(cfg!(windows) && n.to_string_lossy().ends_with(".lock")))
         .collect();
     assert_eq!(
         entries,

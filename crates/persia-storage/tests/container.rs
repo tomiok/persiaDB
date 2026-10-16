@@ -159,7 +159,17 @@ fn create_never_replaces_an_existing_file() {
 fn create_in_a_missing_directory_fails_cleanly() {
     let dir = tempfile::tempdir().unwrap();
     let err = Container::create(dir.path().join("missing/app.persia")).unwrap_err();
-    assert!(matches!(err, Error::Io { op: "create", .. }), "{err}");
+    // "lock" on Windows, whose writer lock file beside the container is created first (SPEC §4.5.1).
+    assert!(
+        matches!(
+            err,
+            Error::Io {
+                op: "create" | "lock",
+                ..
+            }
+        ),
+        "{err}"
+    );
 }
 
 /// ROADMAP 2.4.1.1: one writer at a time, in this process or another; readers take no lock.
@@ -867,10 +877,12 @@ fn golden_fixtures_open() {
 // Helpers that damage containers
 // ---------------------------------------------------------------------------------------------------------------
 
+/// The entries of `dir`, sorted, without the writer lock files Windows keeps beside containers (SPEC §4.5.1).
 fn names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| !(cfg!(windows) && n.ends_with(".lock")))
         .collect();
     names.sort();
     names
