@@ -123,6 +123,7 @@ fn check_error(err: &Error, mode: Mode) {
             e.is_corruption() || matches!(e, persia_format::Error::Unsupported { .. })
         }
         Error::CorruptTail { .. } => mode == Mode::ReadWrite,
+        Error::OutOfMemory { .. } => true,
         Error::ReadOnly {
             reason: ReadOnlyReason::UnknownRocompatFlags { .. },
         } => mode == Mode::ReadWrite,

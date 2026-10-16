@@ -80,6 +80,12 @@ pub enum Error {
     /// The caller passed an argument the container cannot accept.
     #[error("invalid argument: {0}")]
     InvalidInput(String),
+    /// Recovery needed a buffer of `bytes` bytes that could not be allocated (ROADMAP 2.4.12 bounds it).
+    #[error("cannot allocate {bytes} bytes to read the container")]
+    OutOfMemory {
+        /// The requested size.
+        bytes: u64,
+    },
     /// A frame could not be encoded (e.g. a bad compression level).
     #[error(transparent)]
     Encode(#[from] persia_format::EncodeError),

@@ -155,7 +155,9 @@ impl Container<File> {
     /// stale temporary file, `<name>.tmp.<nonce>.<n>`). The file system must support hard links.
     ///
     /// # Errors
-    /// [`Error::AlreadyExists`] if `path` exists, or [`Error::Io`].
+    /// [`Error::AlreadyExists`] if `path` exists, or [`Error::Io`]. An `Io` error from removing the temporary name
+    /// or syncing the directory comes after the link: the container then exists at `path`, unlocked, and a retry
+    /// gets `AlreadyExists`.
     pub fn create(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let dir = parent_or_cwd(path);
@@ -172,8 +174,7 @@ impl Container<File> {
             .create_new(true)
             .open(&temp)
             .map_err(Error::io("create"))?;
-        let result = lock(&file).and_then(|()| {
-            let container = Self::create_on(file, new_db_uuid())?;
+        let result = Self::create_on(file, new_db_uuid()).and_then(|container| {
             match std::fs::hard_link(&temp, path) {
                 Ok(()) => Ok(container),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
@@ -184,11 +185,13 @@ impl Container<File> {
                 Err(err) => Err(Error::io("link")(err)),
             }
         });
-        // The temporary name goes whatever happened; a failed cleanup only leaves a stale file.
+        // The temporary name goes whatever happened. One directory sync then covers the link and the removal, and
+        // runs even if the removal failed, so a container reported or not is durable either way.
         let removed = std::fs::remove_file(&temp).map_err(Error::io("remove temporary file"));
+        let synced = sync_dir(dir).map_err(Error::io("sync directory"));
         let container = result?;
         removed?;
-        sync_dir(dir).map_err(Error::io("sync directory"))?;
+        synced?;
         Ok(container)
     }
 
@@ -202,19 +205,8 @@ impl Container<File> {
             .write(mode == Mode::ReadWrite)
             .open(path)
             .map_err(Error::io("open"))?;
-        if mode == Mode::ReadWrite {
-            lock(&file)?;
-        }
         Self::open_on(file, mode)
     }
-}
-
-/// Takes the exclusive writer lock on `file` without waiting; it is released when the file is closed.
-fn lock(file: &File) -> Result<()> {
-    file.try_lock().map_err(|err| match err {
-        std::fs::TryLockError::WouldBlock => Error::Locked,
-        std::fs::TryLockError::Error(err) => Error::io("lock")(err),
-    })
 }
 
 /// A random database id: 128 bits from the standard library's per-process hash keys, the time and the pid. Ids
@@ -237,14 +229,15 @@ fn new_db_uuid() -> [u8; 16] {
 }
 
 impl<F: ContainerFile> Container<F> {
-    /// Writes a new container into `file`, which must be empty, and opens it read-write. The caller holds whatever
-    /// lock the file needs.
+    /// Writes a new container into `file`, which must be empty, and opens it read-write, taking the writer lock
+    /// ([`ContainerFile::try_lock`]).
     ///
     /// Writes the header and both slots in the new-container state of SPEC §4.3, then syncs.
     ///
     /// # Errors
-    /// [`Error::InvalidInput`] if `file` is not empty, or [`Error::Io`].
+    /// [`Error::Locked`], [`Error::InvalidInput`] if `file` is not empty, or [`Error::Io`].
     pub fn create_on(file: F, db_uuid: [u8; 16]) -> Result<Self> {
+        take_lock(&file)?;
         let len = file.file_len().map_err(Error::io("stat"))?;
         if len != 0 {
             return Err(Error::InvalidInput(format!(
@@ -287,8 +280,8 @@ impl<F: ContainerFile> Container<F> {
         })
     }
 
-    /// Opens the container in `file` and recovers it (SPEC §4.4, §8.6). The caller holds whatever lock the mode
-    /// needs.
+    /// Opens the container in `file` and recovers it (SPEC §4.4, §8.6). [`Mode::ReadWrite`] takes the writer lock
+    /// ([`ContainerFile::try_lock`]); [`Mode::ReadOnly`] takes none.
     ///
     /// 1. Validates the header (SPEC §4.2). Unknown `rocompat_flags` allow only [`Mode::ReadOnly`].
     /// 2. Picks the active superblock slot (SPEC §4.3) and checks its offsets against the file length.
@@ -300,9 +293,13 @@ impl<F: ContainerFile> Container<F> {
     ///
     /// # Errors
     /// [`Error::Format`] for corruption up to `log_end` or an unsupported format or frame, [`Error::CorruptTail`]
-    /// for a read-write open whose scan from `log_end` ends in corruption (ROADMAP 2.4.10), [`Error::ReadOnly`] for
+    /// for a read-write open whose scan from `log_end` ends in corruption (ROADMAP 2.4.10), [`Error::Locked`],
+    /// [`Error::OutOfMemory`], [`Error::ReadOnly`] for
     /// a read-write open of a container with unknown `rocompat_flags`, or [`Error::Io`].
     pub fn open_on(file: F, mode: Mode) -> Result<Self> {
+        if mode == Mode::ReadWrite {
+            take_lock(&file)?;
+        }
         let file_len = file.file_len().map_err(Error::io("stat"))?;
         let prefix = read_at(&file, 0, file_len.min(FIRST_FRAME_OFFSET))?;
         let mut r = Reader::new(&prefix);
@@ -364,7 +361,6 @@ impl<F: ContainerFile> Container<F> {
                     self.file
                         .set_len(*offset)
                         .map_err(Error::io("truncate torn tail"))?;
-                    self.file.sync_data().map_err(Error::io("sync"))?;
                     self.recovery.truncated_from = Some(file_len);
                 }
             }
@@ -377,6 +373,12 @@ impl<F: ContainerFile> Container<F> {
                 }
             }
             ScanEnd::Unsupported { error, .. } => return Err(Error::Format(error.clone())),
+        }
+        if self.mode == Mode::ReadWrite {
+            // What the scan read may still be only in the page cache of a writer that died before syncing (frames,
+            // a truncation, even the slot it chose). Make it durable before this handle builds on it: a commit
+            // that covers those frames must never reach the disk before them (SPEC §4.5 step 2).
+            self.file.sync_data().map_err(Error::io("sync"))?;
         }
         self.recovery.scan_end = end;
         Ok(())
@@ -413,8 +415,9 @@ impl<F: ContainerFile> Container<F> {
     }
 
     /// Every frame from the committed `wal_start` to [`Container::end`], in order. Those from `log_end` on are
-    /// durable or appended but not committed: WAL frames synced after the last commit (SPEC §8.2), or the frames
-    /// of a commit that did not complete.
+    /// not committed: appended through this handle (durable once synced), or found by recovery (WAL frames synced
+    /// after the last commit, SPEC §8.2, or the frames of a commit that did not complete; a read-write open makes
+    /// them durable).
     pub fn frames(&self) -> &[FrameRef] {
         &self.frames
     }
@@ -434,11 +437,6 @@ impl<F: ContainerFile> Container<F> {
     /// Whether appends since the last [`Container::sync`] are waiting for it.
     pub fn has_unsynced(&self) -> bool {
         self.dirty
-    }
-
-    /// The underlying file.
-    pub fn file(&self) -> &F {
-        &self.file
     }
 
     fn writable(&self) -> Result<()> {
@@ -503,7 +501,8 @@ impl<F: ContainerFile> Container<F> {
     }
 
     /// Makes every frame appended so far durable with one `fdatasync` (group commit); nothing to do if none is
-    /// waiting. Synced frames survive a crash even before they are committed: recovery finds them after `log_end`.
+    /// waiting (frames found by a read-write open's recovery are already durable). Synced frames survive a crash
+    /// even before they are committed: recovery finds them after `log_end`.
     ///
     /// # Errors
     /// [`Error::ReadOnly`], [`Error::Poisoned`], or [`Error::Io`] (which poisons the handle).
@@ -531,7 +530,11 @@ impl<F: ContainerFile> Container<F> {
     pub fn commit(&mut self, commit: Commit) -> Result<()> {
         self.writable()?;
         let old = self.active.superblock;
-        if commit.manifest.kind != FrameKind::Manifest || !self.frames.contains(&commit.manifest) {
+        let known = self
+            .frames
+            .binary_search_by_key(&commit.manifest.offset, |f| f.offset)
+            .is_ok_and(|i| self.frames.get(i) == Some(&commit.manifest));
+        if commit.manifest.kind != FrameKind::Manifest || !known {
             return Err(Error::InvalidInput(format!(
                 "{:?} is not a Manifest frame of this container after wal_start",
                 commit.manifest
@@ -577,7 +580,8 @@ impl<F: ContainerFile> Container<F> {
     }
 
     /// Reads and validates the frame at `offset`, which must lie below [`Container::end`], and returns its payload,
-    /// decompressed under the bomb limit `max_payload` (SPEC §4.4).
+    /// decompressed under the bomb limit `max_payload` (SPEC §4.4). Works on a poisoned handle too, where it may
+    /// return frames that never became durable.
     ///
     /// # Errors
     /// [`Error::InvalidInput`] if `offset` is outside the frames, [`Error::Format`] if the frame there is invalid
@@ -607,15 +611,10 @@ impl<F: ContainerFile> Container<F> {
 
 /// Reads `len` bytes at `offset`, which the caller has bounded by the file length.
 fn read_at<F: ContainerFile>(file: &F, offset: u64, len: u64) -> Result<Vec<u8>> {
-    let len = usize::try_from(len).map_err(|_| {
-        Error::InvalidInput(format!("a read of {len} bytes does not fit in memory"))
-    })?;
+    let oom = || Error::OutOfMemory { bytes: len };
+    let len = usize::try_from(len).map_err(|_| oom())?;
     let mut buf = Vec::new();
-    buf.try_reserve_exact(len).map_err(|_| {
-        Error::Format(persia_format::Error::OutOfMemory {
-            bytes: Some(len as u64),
-        })
-    })?;
+    buf.try_reserve_exact(len).map_err(|_| oom())?;
     buf.resize(len, 0);
     file.read_exact_at(&mut buf, offset)
         .map_err(Error::io("read"))?;
@@ -648,14 +647,8 @@ fn committed_frames<F: ContainerFile>(file: &F, sb: &Superblock) -> Result<Vec<F
     match scanner.end() {
         Some(ScanEnd::Clean { .. }) | None => {}
         // A torn tail below `log_end` is still corruption: these frames were committed.
-        Some(ScanEnd::TornTail { offset, error } | ScanEnd::Corrupt { offset, error }) => {
-            return Err(Error::Format(match error {
-                persia_format::Error::Corrupt { .. } => error.clone(),
-                _ => persia_format::Error::Corrupt {
-                    offset: *offset,
-                    reason: Corruption::BadFrameMagic,
-                },
-            }));
+        Some(ScanEnd::TornTail { error, .. } | ScanEnd::Corrupt { error, .. }) => {
+            return Err(Error::Format(error.clone()));
         }
         Some(ScanEnd::Unsupported { error, .. }) => return Err(Error::Format(error.clone())),
     }
@@ -672,4 +665,21 @@ fn committed_frames<F: ContainerFile>(file: &F, sb: &Superblock) -> Result<Vec<F
         }
     }
     Ok(frames)
+}
+
+/// Takes the exclusive writer lock on `file` without waiting (SPEC §8.4).
+fn take_lock<F: ContainerFile>(file: &F) -> Result<()> {
+    match file.try_lock() {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(Error::Locked),
+        Err(err) => Err(Error::io("lock")(err)),
+    }
+}
+
+impl Container<sim::SimFile> {
+    /// The simulated file, for tests to inspect, fault or crash it. A real [`File`] is not exposed: writing it
+    /// directly would bypass poisoning and the `frame_seq` run.
+    pub fn file(&self) -> &sim::SimFile {
+        &self.file
+    }
 }

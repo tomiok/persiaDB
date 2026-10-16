@@ -287,6 +287,12 @@ impl ContainerFile for SimFile {
         inner.pending.push(Pending::SetLen(len));
         Self::finish(ok)
     }
+
+    /// Always granted: a `SimFile` models one process's view of a file, and its clones stand for the same file
+    /// after a restart, so there is no other holder to exclude.
+    fn try_lock(&self) -> io::Result<bool> {
+        Ok(true)
+    }
 }
 
 #[cfg(test)]

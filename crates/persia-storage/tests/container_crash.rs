@@ -26,6 +26,8 @@ const SEEDS: u64 = 512;
 struct Run {
     segment: Option<FrameRef>,
     wal: Option<FrameRef>,
+    /// Step 1's sync of the Segment and WAL frames returned.
+    step1_synced: bool,
     committed: bool,
     /// The WAL frame appended and synced after the commit.
     acked_tail: Option<FrameRef>,
@@ -56,6 +58,7 @@ fn commit_two(c: &mut Container<SimFile>, run: &mut Run) -> Result<(), Error> {
     let wal = c.append(FrameKind::WalChunk, b"w2", NONE)?;
     run.wal = Some(wal);
     c.sync()?; // step 1
+    run.step1_synced = true;
     let m = c.append(FrameKind::Manifest, b"m2", NONE)?;
     c.commit(Commit {
         manifest: m,
@@ -97,6 +100,12 @@ fn check_recovered(c: &Container<SimFile>, run: &Run, ctx: &str) -> bool {
             "{ctx}"
         );
         assert_eq!(payload(c, sb.wal_start), b"w1", "{ctx}");
+        if run.step1_synced {
+            let uncommitted = c.uncommitted_frames();
+            for f in [run.segment.unwrap(), run.wal.unwrap()] {
+                assert!(uncommitted.contains(&f), "{ctx}: step 1 was acknowledged");
+            }
+        }
     } else {
         assert_eq!(manifest, b"m2", "{ctx}");
         // The new commit, whole: the Segment it names and its WAL are readable.
@@ -171,6 +180,7 @@ fn crash_at_every_write_of_a_commit_recovers_old_or_new() {
                     "{ctx}: the fault fired"
                 );
                 let image = c.file().crash(loss);
+                let before = image.bytes();
                 match Container::open_on(image.clone(), Mode::ReadWrite) {
                     Ok(rw) => {
                         let new = check_recovered(&rw, &run, &ctx);
@@ -181,11 +191,7 @@ fn crash_at_every_write_of_a_commit_recovers_old_or_new() {
                     // crash that loses part of the unsynced writes can produce that, and the bytes stay intact.
                     Err(Error::CorruptTail { .. }) => {
                         assert!(matches!(loss, CrashLoss::Seeded(_)), "{ctx}");
-                        assert_eq!(
-                            image.bytes(),
-                            image.durable_bytes(),
-                            "{ctx}: nothing truncated"
-                        );
+                        assert_eq!(image.bytes(), before, "{ctx}: nothing truncated");
                         let ro = Container::open_on(image, Mode::ReadOnly).unwrap();
                         check_recovered(&ro, &run, &ctx);
                         outcomes[2] += 1;
@@ -199,28 +205,93 @@ fn crash_at_every_write_of_a_commit_recovers_old_or_new() {
     assert!(outcomes[0] > 0 && outcomes[1] > 0, "{outcomes:?}");
 }
 
-/// A crash with no fault at all, at any point, also recovers old or new: the sticky crash is not what makes it work.
+/// Every crash loss the tests try after a fault.
+fn losses() -> impl Iterator<Item = CrashLoss> {
+    [CrashLoss::All, CrashLoss::Nothing]
+        .into_iter()
+        .chain((0..SEEDS).map(CrashLoss::Seeded))
+}
+
+/// The first commit (seq 0 to 1) falls back to the new-container state of SPEC §4.3.
 #[test]
-fn crash_between_calls_recovers_old_or_new() {
-    for stop in 0..9_u64 {
-        for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(stop)] {
-            let mut c = committed_once();
-            let base = c.file().mutations();
-            // `FailAt(stop)` models a death right before call `stop`: everything before it completed.
-            c.file().set_fault(Some(SimFault::FailAt(base + stop)));
-            let mut run = Run::default();
-            let _ = commit_two(&mut c, &mut run);
-            let image = c.file().crash(loss);
-            let ctx = format!("stop {stop} {loss:?}");
-            match Container::open_on(image.clone(), Mode::ReadWrite) {
-                Ok(rw) => {
-                    check_recovered(&rw, &run, &ctx);
+fn crash_during_the_first_commit_recovers_empty_or_committed() {
+    let fresh = || Container::create_on(SimFile::new(), [2; 16]).unwrap();
+    let base = fresh().file().mutations();
+    for n in base..base + 6 {
+        for fault in [SimFault::FailAt(n), SimFault::ApplyThenFail(n)] {
+            for loss in losses() {
+                let ctx = format!("{fault:?} {loss:?}");
+                let mut c = fresh();
+                c.file().set_fault(Some(fault));
+                let mut committed = false;
+                let result = (|| {
+                    let w = c.append(FrameKind::WalChunk, b"w1", NONE)?;
+                    c.sync()?;
+                    let m = c.append(FrameKind::Manifest, b"m1", NONE)?;
+                    c.commit(Commit {
+                        manifest: m,
+                        wal_start: w.offset,
+                        fence_token: 0,
+                    })?;
+                    committed = true;
+                    Ok::<(), Error>(())
+                })();
+                assert!(result.is_err(), "{ctx}: the fault fired");
+                let image = c.file().crash(loss);
+                let c = match Container::open_on(image.clone(), Mode::ReadWrite) {
+                    Ok(c) => c,
+                    Err(Error::CorruptTail { .. }) => {
+                        Container::open_on(image, Mode::ReadOnly).unwrap()
+                    }
+                    Err(err) => panic!("{ctx}: {err}"),
+                };
+                let sb = *c.superblock();
+                match sb.seq {
+                    0 => {
+                        assert!(!committed, "{ctx}: an acknowledged commit was lost");
+                        assert_eq!((sb.log_end, sb.next_frame_seq), (12288, 1), "{ctx}");
+                    }
+                    1 => assert_eq!(payload(&c, sb.manifest_off), b"m1", "{ctx}"),
+                    seq => panic!("{ctx}: seq {seq}"),
                 }
-                Err(Error::CorruptTail { .. }) => {
-                    let ro = Container::open_on(image, Mode::ReadOnly).unwrap();
-                    check_recovered(&ro, &run, &ctx);
-                }
-                Err(err) => panic!("{ctx}: {err}"),
+            }
+        }
+    }
+}
+
+/// Recovery is idempotent (SPEC §8.6): a crash during a read-write open's own truncation or sync leaves a file
+/// that recovers to the same state as an uninterrupted open.
+#[test]
+fn crash_during_recovery_recovers_the_same_state() {
+    let mut c = committed_once();
+    let tail = c.append(FrameKind::WalChunk, b"acked", NONE).unwrap();
+    c.sync().unwrap();
+    c.append(FrameKind::WalChunk, &[7; 2000], NONE).unwrap();
+    // A torn second append: its header and the start of its payload reached the disk.
+    let torn = c.file().bytes()[..usize::try_from(tail.end()).unwrap() + 700].to_vec();
+
+    let clean = Container::open_on(SimFile::from_bytes(torn.clone()), Mode::ReadWrite).unwrap();
+    assert!(clean.recovery().truncated_from.is_some());
+    let expect = (*clean.superblock(), clean.frames().to_vec(), clean.end());
+
+    // The open makes two mutating calls: the truncation, then the sync.
+    for n in 0..2 {
+        for fault in [SimFault::FailAt(n), SimFault::ApplyThenFail(n)] {
+            for loss in losses() {
+                let ctx = format!("{fault:?} {loss:?}");
+                let file = SimFile::from_bytes(torn.clone());
+                file.set_fault(Some(fault));
+                assert!(
+                    Container::open_on(file.clone(), Mode::ReadWrite).is_err(),
+                    "{ctx}"
+                );
+                let r = Container::open_on(file.crash(loss), Mode::ReadWrite).unwrap();
+                assert_eq!(
+                    (*r.superblock(), r.frames().to_vec(), r.end()),
+                    expect,
+                    "{ctx}"
+                );
+                assert_eq!(r.file().bytes().len() as u64, r.end(), "{ctx}");
             }
         }
     }

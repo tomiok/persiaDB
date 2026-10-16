@@ -260,19 +260,24 @@ nothing. The container is reopened, and recovery decides what survived.
   synced; the file is hard-linked to the container name, which fails if the name exists; then the temporary name is
   removed and the directory synced. A crash leaves no container or a complete one, and possibly a stale temporary
   file. The file system must support hard links.
-- **Writer lock.** A read-write open holds an exclusive advisory lock on the container file (`flock` on Unix,
-  `LockFileEx` on Windows) while it is open, and fails at once if another handle holds it, in this process or
-  another (§8.4). Read-only opens take no lock.
+- **Writer lock.** A read-write open holds an exclusive lock on the container file (`flock` on Unix, `LockFileEx`
+  on Windows) while it is open, and fails at once if another handle holds it, in this process or another (§8.4).
+  Read-only opens take no lock. Limits: on Windows the lock is mandatory, so while a writer is open no other handle
+  can read the file (ROADMAP 2.4.16); on NFS, Linux emulates `flock` with per-process POSIX locks, so two handles of
+  one process are not excluded from each other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
   logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
   the flags.
 - **Recovery** (§8.6), in this order, for both modes: validate the header (§4.2); pick the active slot (§4.3) and
   check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
   bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:
-  clean, the next frame goes at the end of the file; torn tail, a read-write open truncates the file there and
-  syncs it before anything else; corruption, a read-write open fails (ROADMAP 2.4.10) and a read-only open reads
-  up to it; unsupported, the open fails. Valid frames after `log_end` are durable but not committed (synced WAL
-  frames, §8.2, or the frames of a commit that did not complete); the next commit's `log_end` covers them.
+  clean, the next frame goes at the end of the file; torn tail, a read-write open truncates the file there;
+  corruption, a read-write open fails (ROADMAP 2.4.10) and a read-only open reads up to it; unsupported, the open
+  fails. A read-write open then syncs the file before anything else: what it read may still be only in the page
+  cache of a writer that died without syncing, and a commit must never reach the disk before the frames it covers
+  (§4.5). Valid frames after `log_end` are then durable but not committed (synced WAL frames, §8.2, or the frames
+  of a commit that did not complete); the next commit's `log_end` covers them. Recovery currently reads
+  `wal_start..log_end` and the tail into memory (ROADMAP 2.4.12 bounds this).
 
 ### 4.6 Compaction of the container
 Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by **rewriting live segments into a new file**

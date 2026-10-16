@@ -40,6 +40,13 @@ pub trait ContainerFile: Send + Sync {
     /// # Errors
     /// The OS error.
     fn set_len(&self, len: u64) -> io::Result<()>;
+
+    /// Takes the exclusive writer lock without waiting: `Ok(false)` if another handle holds it, in this process or
+    /// another. The lock lasts until the file is closed.
+    ///
+    /// # Errors
+    /// The OS error.
+    fn try_lock(&self) -> io::Result<bool>;
 }
 
 impl ContainerFile for File {
@@ -61,5 +68,15 @@ impl ContainerFile for File {
 
     fn set_len(&self, len: u64) -> io::Result<()> {
         File::set_len(self, len)
+    }
+
+    fn try_lock(&self) -> io::Result<bool> {
+        // An advisory `flock` on Unix. On Windows `LockFileEx` locks are mandatory, so other handles cannot read the
+        // file while a writer holds it (SPEC §4.5.1, ROADMAP 2.4.16).
+        match File::try_lock(self) {
+            Ok(()) => Ok(true),
+            Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+            Err(std::fs::TryLockError::Error(err)) => Err(err),
+        }
     }
 }
