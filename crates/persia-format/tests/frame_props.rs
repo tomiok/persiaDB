@@ -1029,3 +1029,24 @@ proptest! {
         check_seq_run(&specs, first, base)?;
     }
 }
+
+proptest! {
+    /// `reframe` changes only `frame_seq` and the CRC: the copy decodes to the same kind, flags and stored payload,
+    /// and has the original's length.
+    #[test]
+    fn reframe_keeps_everything_but_frame_seq(s in spec(300), seq in any::<u64>(), base in aligned_base()) {
+        let (log, _) = encode_log(std::slice::from_ref(&s));
+        let original = Frame::decode(&mut Reader::with_base_offset(&log, base)).unwrap();
+        let mut w = Writer::new();
+        original.reframe(&mut w, seq);
+        let copy_bytes = w.into_inner();
+        prop_assert_eq!(copy_bytes.len(), log.len());
+        let copy = Frame::decode(&mut Reader::with_base_offset(&copy_bytes, base)).unwrap();
+        prop_assert_eq!(copy.frame_seq(), seq);
+        prop_assert_eq!(copy.kind(), original.kind());
+        prop_assert_eq!(copy.is_compressed(), original.is_compressed());
+        prop_assert_eq!(copy.stored_payload(), original.stored_payload());
+        prop_assert_eq!(&copy_bytes[..16], &log[..16]);
+        prop_assert_eq!(&copy_bytes[24..copy_bytes.len() - 8], &log[24..log.len() - 8]);
+    }
+}

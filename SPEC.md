@@ -280,8 +280,33 @@ nothing. The container is reopened, and recovery decides what survived.
   `wal_start..log_end` and the tail into memory (ROADMAP 2.4.12 bounds this).
 
 ### 4.6 Compaction of the container
-Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by **rewriting live segments into a new file**
-and atomically `rename`-ing it over the old one (fsync file, then directory). Triggered by dead-space ratio (default 40%).
+Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by
+**rewriting the live frames into a new file** and atomically `rename`-ing it over the old one. The container does
+not interpret payloads, so the writer (the engine, from its manifest) names the live frames below `wal_start`;
+every frame from `wal_start` on is kept, since the WAL range and the frames after `log_end` (acknowledged WAL
+frames, §8.2) are needed by recovery.
+
+**Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
+from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
+reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
+live; they are few and small.
+
+**The new file**, written by the single writer while it holds the lock:
+1. The live frames below `wal_start`, in their old order, then the frames of `wal_start..log_end`, each copied with
+   its stored payload unchanged and a new `frame_seq`, numbered on from the old file's next value (§4.4).
+2. A new Manifest frame, which the writer builds from where the frames moved (the offsets it references change).
+3. Both slots hold the same commit: `seq` one above the old one, `log_end` the end of the new Manifest, `wal_start`
+   the new offset of the old `wal_start` frame (the end of the Manifest if the old WAL range was empty), the old
+   `fence_token`, and `next_frame_seq` one above the Manifest's.
+4. The old frames after `log_end`, copied the same way after the new `log_end`, so they stay uncommitted.
+5. The header is the old one with `format_minor = max(old, own)` (§4.2).
+
+The new file is written under a temporary name `<name>.compact.<nonce>.<n>` in the same directory and locked,
+synced, renamed over the container, and the directory synced. The old file is never written, so a crash before
+the rename leaves the old container (and a stale temporary file); the rename replaces the name atomically, so the
+path names a complete old or new container at every instant. Readers that opened the old file keep reading it
+(§4.7). If the directory sync fails after the rename, the writer continues on the new file but stops writing until
+reopened, since the rename may not be durable.
 
 ### 4.7 Memory-mapped reads
 A local reader may memory-map byte ranges of the container instead of reading them (ADR-0010). Only bytes that are

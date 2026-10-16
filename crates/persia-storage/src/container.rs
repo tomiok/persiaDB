@@ -16,7 +16,8 @@ pub mod sim;
 use std::fs::{File, OpenOptions};
 use std::hash::{BuildHasher, Hasher};
 use std::io;
-use std::path::Path;
+use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use persia_format::block::Compression;
@@ -144,6 +145,8 @@ pub struct Container<F = File> {
     dirty: bool,
     poisoned: bool,
     recovery: Recovery,
+    /// Where [`Container::create`] or [`Container::open`] found the file; compaction renames over it.
+    path: Option<PathBuf>,
 }
 
 impl Container<File> {
@@ -176,7 +179,10 @@ impl Container<File> {
             .map_err(Error::io("create"))?;
         let result = Self::create_on(file, new_db_uuid()).and_then(|container| {
             match std::fs::hard_link(&temp, path) {
-                Ok(()) => Ok(container),
+                Ok(()) => Ok(Container {
+                    path: Some(path.to_owned()),
+                    ..container
+                }),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                     Err(Error::AlreadyExists {
                         path: path.to_owned(),
@@ -200,12 +206,77 @@ impl Container<File> {
     /// # Errors
     /// [`Error::Locked`] if another handle holds the writer lock, and the errors of [`Container::open_on`].
     pub fn open(path: impl AsRef<Path>, mode: Mode) -> Result<Self> {
+        let path = path.as_ref();
         let file = OpenOptions::new()
             .read(true)
             .write(mode == Mode::ReadWrite)
             .open(path)
             .map_err(Error::io("open"))?;
-        Self::open_on(file, mode)
+        let mut container = Self::open_on(file, mode)?;
+        container.path = Some(path.to_owned());
+        Ok(container)
+    }
+
+    /// Compacts the container in place (SPEC §4.6): [`Container::compact_into`] a temporary file
+    /// `<name>.compact.<nonce>.<n>` next to it, then renames that over the container and syncs the directory. This
+    /// handle then works on the new file; frame offsets the caller held are replaced by the returned
+    /// [`Relocation`]. Handles that opened the old file keep reading it.
+    ///
+    /// The path names a complete old or new container at every instant. On an error before the rename, the
+    /// temporary file is removed and this handle is unchanged. If the directory sync fails after the rename, this
+    /// handle moves to the new file but is poisoned: the rename may not be durable, so reopen.
+    ///
+    /// # Errors
+    /// [`Error::InvalidInput`] if the container was not opened from a path, and the errors of
+    /// [`Container::compact_into`].
+    pub fn compact(
+        &mut self,
+        live: &[Range<u64>],
+        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        compression: Compression,
+    ) -> Result<Relocation> {
+        let path = self.path.clone().ok_or_else(|| {
+            Error::InvalidInput("the container was not opened from a path".into())
+        })?;
+        self.writable()?;
+        let dir = parent_or_cwd(&path).to_owned();
+        let mut temp_name = path.file_name().unwrap_or_default().to_owned();
+        let n = CREATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        temp_name.push(format!(".compact.{:016x}.{n}", temp_nonce()));
+        let temp = dir.join(temp_name);
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(&temp)
+            .map_err(Error::io("create compaction file"))?;
+        let (mut new, relocation) = match self.compact_into(file, live, manifest, compression) {
+            Ok(done) => done,
+            Err(err) => return Err(discard(&temp, err)),
+        };
+        if let Err(err) = std::fs::rename(&temp, &path) {
+            drop(new);
+            return Err(discard(&temp, Error::io("rename")(err)));
+        }
+        new.path = Some(path);
+        let synced = sync_dir(&dir).map_err(Error::io("sync directory"));
+        new.poisoned = synced.is_err();
+        *self = new;
+        synced.map(|()| relocation)
+    }
+}
+
+/// Removes an unused compaction file after `err`; a failed removal is added to the error rather than lost.
+fn discard(temp: &Path, err: Error) -> Error {
+    match std::fs::remove_file(temp) {
+        Ok(()) => err,
+        Err(cleanup) => Error::Io {
+            op: "compact",
+            source: io::Error::other(format!(
+                "{err}; removing {} also failed: {cleanup}",
+                temp.display()
+            )),
+        },
     }
 }
 
@@ -277,6 +348,7 @@ impl<F: ContainerFile> Container<F> {
                 },
                 truncated_from: None,
             },
+            path: None,
         })
     }
 
@@ -334,6 +406,7 @@ impl<F: ContainerFile> Container<F> {
                 scan_end: ScanEnd::Clean { offset: sb.log_end },
                 truncated_from: None,
             },
+            path: None,
         };
         container.recover_tail(file_len, &mut frames)?;
         container.frames = frames;
@@ -587,6 +660,17 @@ impl<F: ContainerFile> Container<F> {
     /// [`Error::InvalidInput`] if `offset` is outside the frames, [`Error::Format`] if the frame there is invalid
     /// or its payload exceeds `max_payload`, or [`Error::Io`].
     pub fn read_frame(&self, offset: u64, max_payload: usize) -> Result<FramePayload> {
+        let bytes = self.frame_bytes(offset)?;
+        let frame = Frame::decode(&mut Reader::with_base_offset(&bytes, offset))?;
+        let payload = frame.payload(max_payload)?.into_owned();
+        Ok(FramePayload {
+            frame: FrameRef::of(&frame),
+            payload,
+        })
+    }
+
+    /// The bytes of the frame at `offset`, sized from its header and bounded by [`Container::end`].
+    fn frame_bytes(&self, offset: u64) -> Result<Vec<u8>> {
         let header_len = FRAME_HEADER_LEN as u64;
         if offset < FIRST_FRAME_OFFSET
             || offset.checked_add(header_len).is_none_or(|e| e > self.end)
@@ -599,13 +683,163 @@ impl<F: ContainerFile> Container<F> {
         let head = read_at(&self.file, offset, header_len)?;
         let header = FrameHeader::decode(&mut Reader::with_base_offset(&head, offset))?;
         header.check_fits(self.end)?;
-        let bytes = read_at(&self.file, offset, header.total_len())?;
-        let frame = Frame::decode(&mut Reader::with_base_offset(&bytes, offset))?;
-        let payload = frame.payload(max_payload)?.into_owned();
-        Ok(FramePayload {
-            frame: FrameRef::of(&frame),
-            payload,
+        read_at(&self.file, offset, header.total_len())
+    }
+
+    /// Sorts the live frames below `wal_start` named by the writer and checks that they can be frames there: inside
+    /// `12288..wal_start`, not overlapping. Exact duplicates are merged.
+    fn live_below_wal(&self, live: &[Range<u64>]) -> Result<Vec<Range<u64>>> {
+        let wal_start = self.active.superblock.wal_start;
+        let mut sorted = live.to_vec();
+        sorted.sort_by_key(|r| (r.start, r.end));
+        sorted.dedup();
+        let mut prev_end = FIRST_FRAME_OFFSET;
+        for r in &sorted {
+            if r.start < prev_end || r.end <= r.start || r.end > wal_start {
+                return Err(Error::InvalidInput(format!(
+                    "live frame {}..{} is not a separate frame in {FIRST_FRAME_OFFSET}..{wal_start}",
+                    r.start, r.end
+                )));
+            }
+            prev_end = r.end;
+        }
+        Ok(sorted)
+    }
+
+    /// How much of the container is live, given the live frames below `wal_start` that the writer's manifest
+    /// references (SPEC §4.6). Every frame from `wal_start` on counts as live.
+    ///
+    /// # Errors
+    /// [`Error::InvalidInput`] if a range is outside `12288..wal_start` or overlaps another.
+    pub fn space_usage(&self, live: &[Range<u64>]) -> Result<SpaceUsage> {
+        let below: u64 = self
+            .live_below_wal(live)?
+            .iter()
+            .map(|r| r.end.saturating_sub(r.start))
+            .fold(0, u64::saturating_add);
+        let from_wal = self.end.saturating_sub(self.active.superblock.wal_start);
+        Ok(SpaceUsage {
+            total: self.end,
+            live: FIRST_FRAME_OFFSET
+                .saturating_add(below)
+                .saturating_add(from_wal),
         })
+    }
+
+    /// Writes the compacted container into `target`, an empty file, and returns it open read-write together with
+    /// where every frame moved (SPEC §4.6). `live` names the live frames below `wal_start` (byte ranges, as the
+    /// manifest records them); every frame from `wal_start` on is copied too. `manifest` builds the new Manifest
+    /// payload from the [`Relocation`]; it is stored with `compression`.
+    ///
+    /// This container's file is only read, so on error it is unchanged and still writable; `target` is then
+    /// garbage. Unsynced appends are synced first. [`Container::compact`] wraps this with the temporary file and
+    /// the rename.
+    ///
+    /// # Errors
+    /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::Locked`] (on `target`), [`Error::InvalidInput`] for bad
+    /// `live` ranges (also a range that is not exactly one frame) or a non-empty `target`, [`Error::Format`] if a
+    /// frame to copy is corrupt, [`Error::Encode`], or [`Error::Io`].
+    pub fn compact_into<G: ContainerFile>(
+        &mut self,
+        target: G,
+        live: &[Range<u64>],
+        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        compression: Compression,
+    ) -> Result<(Container<G>, Relocation)> {
+        self.writable()?;
+        self.sync()?;
+        take_lock(&target)?;
+        let target_len = target.file_len().map_err(Error::io("stat"))?;
+        if target_len != 0 {
+            return Err(Error::InvalidInput(format!(
+                "compaction writes into an empty file, not one of {target_len} bytes"
+            )));
+        }
+        let old = self.active.superblock;
+        let live = self.live_below_wal(live)?;
+        let mut out = Rewriter {
+            target: &target,
+            end: FIRST_FRAME_OFFSET,
+            next_frame_seq: self.next_frame_seq,
+            moved: Vec::new(),
+        };
+        for r in &live {
+            out.copy(self, r.start, Some(r.end.saturating_sub(r.start)))?;
+        }
+        let (committed, tail): (Vec<FrameRef>, Vec<FrameRef>) =
+            self.frames.iter().partition(|f| f.offset < old.log_end);
+        let wal_first = out.moved.len();
+        for f in &committed {
+            out.copy(self, f.offset, Some(f.len))?;
+        }
+        let relocation = Relocation {
+            moved: out.moved.clone(),
+        };
+        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation), compression)?;
+        let wal_start = out
+            .moved
+            .get(wal_first)
+            .filter(|_| !committed.is_empty())
+            .map_or(manifest.end(), |(_, new)| new.offset);
+        let superblock = Superblock {
+            seq: old
+                .seq
+                .checked_add(1)
+                .ok_or_else(|| Error::InvalidInput("commit seq exhausted".into()))?,
+            manifest_off: manifest.offset,
+            manifest_len: manifest.len,
+            log_end: manifest.end(),
+            wal_start,
+            fence_token: old.fence_token,
+            next_frame_seq: out.next_frame_seq,
+        };
+        for f in &tail {
+            out.copy(self, f.offset, Some(f.len))?;
+        }
+        let header = self.header.for_write();
+        let mut w = Writer::new();
+        header.encode(&mut w)?;
+        superblock.encode(&mut w)?;
+        superblock.encode(&mut w)?;
+        target
+            .write_all_at(w.as_slice(), 0)
+            .map_err(Error::io("write header"))?;
+        target.sync_data().map_err(Error::io("sync"))?;
+
+        let (end, next_frame_seq) = (out.end, out.next_frame_seq);
+        let mut frames: Vec<FrameRef> = out
+            .moved
+            .get(wal_first..)
+            .unwrap_or_default()
+            .iter()
+            .map(|(_, new)| *new)
+            .filter(|f| f.offset >= wal_start)
+            .collect();
+        if manifest.offset >= wal_start {
+            frames.push(manifest);
+        }
+        frames.sort_by_key(|f| f.offset);
+        let relocation = Relocation { moved: out.moved };
+        let container = Container {
+            file: target,
+            header,
+            mode: Mode::ReadWrite,
+            active: ActiveSuperblock {
+                slot: Slot::A,
+                superblock,
+            },
+            end,
+            next_frame_seq,
+            frames,
+            dirty: false,
+            poisoned: false,
+            recovery: Recovery {
+                scan_end: ScanEnd::Clean { offset: end },
+                truncated_from: None,
+            },
+            path: None,
+        };
+        Ok((container, relocation))
     }
 }
 
@@ -681,5 +915,141 @@ impl Container<sim::SimFile> {
     /// directly would bypass poisoning and the `frame_seq` run.
     pub fn file(&self) -> &sim::SimFile {
         &self.file
+    }
+}
+
+/// How much of a container is live (SPEC §4.6), from [`Container::space_usage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SpaceUsage {
+    /// The end of the valid frames.
+    pub total: u64,
+    /// The prefix, the live frames below `wal_start`, and everything from `wal_start` on.
+    pub live: u64,
+}
+
+/// The dead-space ratio at which compaction is due by default (SPEC §4.6).
+pub const DEFAULT_DEAD_SPACE_PERCENT: u8 = 40;
+
+impl SpaceUsage {
+    /// Bytes compaction would reclaim.
+    pub fn dead(&self) -> u64 {
+        self.total.saturating_sub(self.live)
+    }
+
+    /// Whether dead bytes reach `percent` of the total; never when nothing is dead.
+    ///
+    /// ```
+    /// use persia_storage::container::SpaceUsage;
+    ///
+    /// let usage = SpaceUsage { total: 1000, live: 600 };
+    /// assert!(usage.is_due(40));
+    /// assert!(!usage.is_due(41));
+    /// ```
+    pub fn is_due(&self, percent: u8) -> bool {
+        self.dead() > 0
+            && u128::from(self.dead()).saturating_mul(100)
+                >= u128::from(self.total).saturating_mul(u128::from(percent))
+    }
+}
+
+/// Where compaction moved each frame: old frame to new frame, in old-offset order (SPEC §4.6).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Relocation {
+    moved: Vec<(FrameRef, FrameRef)>,
+}
+
+impl Relocation {
+    /// The new frame of the old frame at `old_offset`, if it was copied.
+    pub fn get(&self, old_offset: u64) -> Option<FrameRef> {
+        let i = self
+            .moved
+            .binary_search_by_key(&old_offset, |(old, _)| old.offset)
+            .ok()?;
+        self.moved.get(i).map(|(_, new)| *new)
+    }
+
+    /// Every `(old, new)` pair, in old-offset order.
+    pub fn iter(&self) -> impl Iterator<Item = (FrameRef, FrameRef)> + '_ {
+        self.moved.iter().copied()
+    }
+
+    /// How many frames were copied.
+    pub fn len(&self) -> usize {
+        self.moved.len()
+    }
+
+    /// Whether no frame was copied.
+    pub fn is_empty(&self) -> bool {
+        self.moved.is_empty()
+    }
+}
+
+/// Appends renumbered copies of frames to a compaction target.
+struct Rewriter<'a, G> {
+    target: &'a G,
+    end: u64,
+    next_frame_seq: u64,
+    moved: Vec<(FrameRef, FrameRef)>,
+}
+
+impl<G: ContainerFile> Rewriter<'_, G> {
+    fn take_seq(&mut self) -> Result<u64> {
+        let seq = self.next_frame_seq;
+        self.next_frame_seq = seq
+            .checked_add(1)
+            .ok_or_else(|| Error::InvalidInput("frame_seq exhausted (ADR-0013)".into()))?;
+        Ok(seq)
+    }
+
+    fn write(&mut self, w: &Writer, kind: FrameKind, frame_seq: u64) -> Result<FrameRef> {
+        let len = w.len() as u64;
+        let offset = self.end;
+        self.end = offset
+            .checked_add(len)
+            .ok_or_else(|| Error::InvalidInput("container offset exhausted".into()))?;
+        self.target
+            .write_all_at(w.as_slice(), offset)
+            .map_err(Error::io("write compacted frame"))?;
+        Ok(FrameRef {
+            offset,
+            len,
+            kind,
+            frame_seq,
+        })
+    }
+
+    /// Copies the frame at `offset` of `from`, checking it is `len` bytes long.
+    fn copy<F: ContainerFile>(
+        &mut self,
+        from: &Container<F>,
+        offset: u64,
+        len: Option<u64>,
+    ) -> Result<()> {
+        let bytes = from.frame_bytes(offset)?;
+        let frame = Frame::decode(&mut Reader::with_base_offset(&bytes, offset))?;
+        if len.is_some_and(|len| len != frame.total_len()) {
+            return Err(Error::InvalidInput(format!(
+                "live range at {offset} is not one frame: the frame there is {} bytes",
+                frame.total_len()
+            )));
+        }
+        let seq = self.take_seq()?;
+        let mut w = Writer::with_base_offset(self.end);
+        frame.reframe(&mut w, seq);
+        let new = self.write(&w, frame.kind(), seq)?;
+        self.moved.push((FrameRef::of(&frame), new));
+        Ok(())
+    }
+
+    fn append(
+        &mut self,
+        kind: FrameKind,
+        payload: &[u8],
+        compression: Compression,
+    ) -> Result<FrameRef> {
+        let seq = self.take_seq()?;
+        let mut w = Writer::with_base_offset(self.end);
+        encode_frame(&mut w, kind, seq, payload, compression)?;
+        self.write(&w, kind, seq)
     }
 }

@@ -36,6 +36,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   superblock slot, and recovery on open (superblock checks, validation of the committed WAL frames, torn-tail
   truncation; a corrupt tail keeps its bytes and opens read-only only). A failed write or sync poisons the handle.
   `SimFile` simulates crashes (lost, kept or sector-torn unsynced writes) for crash tests.
+- `persia-storage`: container compaction (SPEC §4.6): `space_usage` reports live and dead bytes against the default
+  40% dead-space ratio, and `compact` rewrites the live frames, the WAL range and the uncommitted tail into a new
+  file (renumbered, payloads copied as stored, a new Manifest built from the returned `Relocation`) that is synced
+  and renamed over the container; the old file is never written. `persia-format`: `Frame::reframe`.
 
 ### Fixed
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.

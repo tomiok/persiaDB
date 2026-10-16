@@ -2,7 +2,7 @@
 //! fails only as corruption, an unsupported format, a corrupt tail, or (read-write) unknown `rocompat_flags`; a
 //! read-only open never changes the file; a successful open yields frames contiguous from `wal_start` to `end`, in
 //! one `frame_seq` run ending at `next_frame_seq`, each readable; a read-write open leaves the file exactly `end`
-//! bytes long and accepts the next commit, which a reopen finds.
+//! bytes long and accepts the next commit, which a reopen finds, and a compaction into a new file that reopens.
 //!
 //! Input: `mode u8, base u8, offset u16 LE, patch..`. `base` picks a valid container (new, committed, committed
 //! with uncommitted frames after `log_end`), `patch` overwrites it from `offset` (growing it if needed). Mode bits:
@@ -202,6 +202,24 @@ fuzz_target!(|input: &[u8]| {
                         .payload,
                     b"next"
                 );
+                // Compacting what recovery accepted (no live frames below wal_start) yields a container that
+                // reopens with the same uncommitted frames, and leaves the old file untouched.
+                let before = rw_file.bytes();
+                let target = SimFile::new();
+                let tail = c.uncommitted_frames().len();
+                let (new, _) = c
+                    .compact_into(target.clone(), &[], |_| b"compacted".to_vec(), NONE)
+                    .unwrap();
+                assert_eq!(
+                    rw_file.bytes(),
+                    before,
+                    "compaction never writes the old file"
+                );
+                let r = Container::open_on(SimFile::from_bytes(target.bytes()), Mode::ReadWrite)
+                    .unwrap();
+                assert_eq!(r.superblock().seq, seq + 2);
+                assert_eq!(r.uncommitted_frames().len(), tail);
+                assert_eq!(r.frames(), new.frames());
             }
         }
         Err(err) => {

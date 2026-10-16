@@ -161,6 +161,12 @@ pub fn encode_frame(
     } else {
         (0, payload)
     };
+    write_stored(w, kind, flags, frame_seq, stored);
+    Ok(())
+}
+
+/// Appends one frame around an already encoded (possibly compressed) payload.
+fn write_stored(w: &mut Writer, kind: FrameKind, flags: u32, frame_seq: u64, stored: &[u8]) {
     let start = w.len();
     w.write_bytes(&FRAME_MAGIC);
     w.write_u8(kind.to_u8());
@@ -176,7 +182,6 @@ pub fn encode_frame(
     );
     w.write_u32(crc);
     w.write_u32(0);
-    Ok(())
 }
 
 /// The first [`FRAME_HEADER_LEN`] bytes of a frame, read on their own (SPEC §4.4).
@@ -580,6 +585,32 @@ impl<'a> Frame<'a> {
     /// Whether the payload is stored zstd-compressed (flags bit 0).
     pub const fn is_compressed(&self) -> bool {
         self.compressed
+    }
+
+    /// Appends this frame again with a new `frame_seq`: same kind, flags and stored payload (a compressed payload is
+    /// copied as is, not recompressed). A container rewrite renumbers the frames it copies this way (SPEC §4.4,
+    /// §4.6). Only the `frame_seq` field and the CRC differ from the original bytes.
+    ///
+    /// ```
+    /// use persia_format::block::Compression;
+    /// use persia_format::frame::{Frame, FrameKind, encode_frame};
+    /// use persia_format::{Reader, Writer};
+    ///
+    /// let mut w = Writer::new();
+    /// encode_frame(&mut w, FrameKind::Segment, 5, &[7; 500], Compression::Zstd { level: 3 })?;
+    /// let bytes = w.into_inner();
+    /// let frame = Frame::decode(&mut Reader::new(&bytes))?;
+    ///
+    /// let mut w = Writer::new();
+    /// frame.reframe(&mut w, 40);
+    /// let copy = Frame::decode(&mut Reader::new(w.as_slice()))?;
+    /// assert_eq!((copy.frame_seq(), copy.stored_payload()), (40, frame.stored_payload()));
+    /// assert!(copy.is_compressed());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn reframe(&self, w: &mut Writer, frame_seq: u64) {
+        let flags = if self.compressed { FLAG_ZSTD } else { 0 };
+        write_stored(w, self.kind, flags, frame_seq, self.stored);
     }
 
     /// The payload as stored, without padding: compressed if [`Frame::is_compressed`].
