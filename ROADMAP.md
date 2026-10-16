@@ -197,8 +197,8 @@ Deps: M1.
   - [x] 2.4.4.1 Choose superblock, scan from `log_end`, truncate torn tail (memory bounded only by the file size until 2.4.12)
   - [x] 2.4.4.2 [T] an invalid frame in `wal_start..log_end` is `Corrupt` and never truncated; creating a container never truncates an existing file (SPEC §4.7, §8.6)
 - 2.4.5 Container compaction: rewrite live frames into new file + atomic rename (SPEC §4.6)
-  - [~] 2.4.5.1 Dead-space accounting
-  - [~] 2.4.5.2 [T] crash during compaction leaves a valid old or new file (crashes while writing the new file; the rename and directory-sync windows are tested in 2.4.11.2)
+  - [x] 2.4.5.1 Dead-space accounting
+  - [x] 2.4.5.2 [T] crash during compaction leaves a valid old or new file (crashes while writing the new file; the rename and directory-sync windows are tested in 2.4.11.2)
   - [ ] 2.4.5.3 Windows: test whether an open mapping blocks `rename` over the container; if so, close mappings or defer the swap until readers drain (ADR-0010)
 - [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
 - [x] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
