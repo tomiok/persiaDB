@@ -49,6 +49,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-storage`: `vfs::Vfs`, the file-system operations of `LocalStorage` and the container's path API, with
   `RealFs` and `SimFs`, a simulated file system that loses unsynced data and directory entries in a crash;
   `LocalStorage::open_in` and `Container::create_in` / `open_in` run on any of them.
+- `persia-storage`: `Container::sweep_stale_files` removes the temporary files a crashed create or compaction left next
+  to the container.
 
 ### Fixed
 - `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers

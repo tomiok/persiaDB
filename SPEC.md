@@ -264,7 +264,10 @@ nothing. The container is reopened, and recovery decides what survived.
   §4.3, with a random `db_uuid`) are written to a temporary file `<name>.tmp.<nonce>.<n>` in the same directory and
   synced; the file is hard-linked to the container name, which fails if the name exists; then the temporary name is
   removed and the directory synced. A crash leaves no container or a complete one, and possibly a stale temporary
-  file. The file system must support hard links.
+  file. The file system must support hard links. A writer removes the stale temporary files of creates and compactions
+  of its container (`<name>.tmp.*`, `<name>.compact.*`) on request (`sweep_stale_files`, ROADMAP 2.4.15): holding the
+  writer lock, no compaction can be in flight, and a temporary file whose own lock is held belongs to a live create,
+  which is skipped. Quarantine files (§4.4) are never removed.
 - **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
   holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
   locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may

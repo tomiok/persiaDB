@@ -16,7 +16,7 @@ use super::{
 };
 use crate::local::fs::parent_or_cwd;
 use crate::local::temp_nonce;
-use crate::vfs::{RealFs, Vfs};
+use crate::vfs::{EntryKind, RealFs, Vfs};
 
 /// Distinguishes the temporary files of one process's creates and compactions.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -271,6 +271,114 @@ impl<F: ContainerFile + 'static> Container<F> {
         match synced {
             Ok(()) => Ok(relocation),
             Err(source) => Err(Error::CompactedNotDurable { relocation, source }),
+        }
+    }
+}
+
+/// Whether `name` is a temporary file of a create or compaction of the container named `container`:
+/// `<container>.tmp.<16 hex digits>.<n>` or `<container>.compact.<16 hex digits>.<n>` (SPEC §4.5.1, §4.6).
+fn is_stale_candidate(name: &str, container: &str) -> bool {
+    let Some(rest) = name.strip_prefix(container) else {
+        return false;
+    };
+    let Some(rest) = rest
+        .strip_prefix(".tmp.")
+        .or_else(|| rest.strip_prefix(".compact."))
+    else {
+        return false;
+    };
+    let Some((nonce, n)) = rest.split_once('.') else {
+        return false;
+    };
+    nonce.len() == 16
+        && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+        && !n.is_empty()
+        && n.bytes().all(|b| b.is_ascii_digit())
+}
+
+impl<F: ContainerFile + 'static> Container<F> {
+    /// Removes the temporary files that a crashed [`Container::create_in`] or [`Container::compact`] of this container
+    /// left next to it (`<name>.tmp.*`, `<name>.compact.*`; SPEC §4.5.1, ROADMAP 2.4.15), and returns their paths.
+    /// They never hold acknowledged data. Quarantine files (ADR-0014) are kept: they are for an operator.
+    ///
+    /// Needs a read-write handle opened by path: holding the writer lock, no compaction of this container can be in
+    /// flight, and a file whose own writer lock is still held (a create racing with this open, which will fail with
+    /// [`Error::AlreadyExists`]) is skipped. A create that has made its temporary file but not yet locked it may lose
+    /// it here and then fail with an I/O error instead.
+    ///
+    /// # Errors
+    /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::InvalidInput`] without a path, or [`Error::Io`] listing the
+    /// directory, removing a file or syncing the directory (files removed before the error stay removed).
+    pub fn sweep_stale_files(&self) -> Result<Vec<PathBuf>> {
+        self.writable()?;
+        let location = self.location.as_ref().ok_or_else(|| {
+            Error::InvalidInput("the container was not opened from a path".into())
+        })?;
+        let vfs = &*location.vfs;
+        let dir = parent_or_cwd(&location.path);
+        let Some(container) = location.path.file_name().and_then(|n| n.to_str()) else {
+            // A name that is not UTF-8 never got temporary files from this code.
+            return Ok(Vec::new());
+        };
+        let mut removed = Vec::new();
+        for entry in vfs.read_dir(dir).map_err(Error::io("list directory"))? {
+            let Some(name) = entry.name.to_str() else {
+                continue;
+            };
+            if !matches!(entry.kind, EntryKind::File { .. }) || !is_stale_candidate(name, container)
+            {
+                continue;
+            }
+            let path = dir.join(name);
+            let file = match vfs.open(&path, false) {
+                Ok(file) => file,
+                // Gone meanwhile: its creator removed it.
+                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                Err(err) => return Err(Error::io("open temporary file")(err)),
+            };
+            // Held by a live create (Unix; on Windows the lock is beside the container, so this always succeeds).
+            if !file.try_lock().map_err(Error::io("lock"))? {
+                continue;
+            }
+            drop(file);
+            match vfs.remove_file(&path) {
+                Ok(()) => removed.push(path),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+                Err(err) => return Err(Error::io("remove temporary file")(err)),
+            }
+        }
+        if !removed.is_empty() {
+            vfs.sync_dir(dir).map_err(Error::io("sync directory"))?;
+        }
+        Ok(removed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_stale_candidate;
+
+    #[test]
+    fn only_this_containers_temporary_names_are_candidates() {
+        let c = "app.persia";
+        assert!(is_stale_candidate("app.persia.tmp.0123456789abcdef.0", c));
+        assert!(is_stale_candidate(
+            "app.persia.compact.0123456789ABCDEF.42",
+            c
+        ));
+        for name in [
+            "app.persia",
+            "app.persia.lock",
+            "app.persia.quarantine.0000000000003028.0123456789abcdef.1",
+            "app.persia.tmp.0123456789abcdef",
+            "app.persia.tmp.0123456789abcde.1",
+            "app.persia.tmp.0123456789abcdeg.1",
+            "app.persia.tmp.0123456789abcdef.1x",
+            "app.persia.tmp.0123456789abcdef.",
+            "other.persia.tmp.0123456789abcdef.1",
+            "app.persia.blobs.tmp.0123456789abcdef.1",
+        ] {
+            assert!(!is_stale_candidate(name, c), "{name}");
         }
     }
 }
