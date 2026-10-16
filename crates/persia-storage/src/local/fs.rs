@@ -1,4 +1,4 @@
-//! Platform file operations the standard library spells differently per OS (ROADMAP 2.4.8 documents them), shared
+//! Platform file operations the standard library spells differently per OS (SPEC §4.5.2 documents them), shared
 //! by the local backend and the container adapter.
 
 use std::fs::File;
@@ -14,10 +14,23 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
     File::open(dir)?.sync_all()
 }
 
-/// Windows cannot open a directory through the standard library; NTFS journals the metadata of a rename
-/// (ROADMAP 2.4.8 documents and tests this).
-#[cfg(not(unix))]
-#[allow(clippy::unnecessary_wraps)] // same signature as the Unix version
+/// Windows: `FlushFileBuffers` on a directory handle, which needs `FILE_FLAG_BACKUP_SEMANTICS` to open a directory and
+/// write access to flush it (SPEC §4.5.2, ROADMAP 2.4.8).
+#[cfg(windows)]
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)?
+        .sync_all()
+}
+
+/// Neither Unix nor Windows: no directory sync is known.
+#[cfg(not(any(unix, windows)))]
+#[allow(clippy::unnecessary_wraps)] // same signature as the other versions
 pub(crate) fn sync_dir(_dir: &Path) -> io::Result<()> {
     Ok(())
 }
@@ -93,5 +106,43 @@ pub(crate) fn parent_or_cwd(path: &Path) -> &Path {
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// SPEC §4.5.2: a directory sync works on every platform CI runs (Linux, macOS, Windows), after creating,
+    /// renaming and removing entries; a missing directory is an error, never a silent success.
+    #[test]
+    fn directories_can_be_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), b"x").unwrap();
+        sync_dir(dir.path()).unwrap();
+        std::fs::rename(dir.path().join("a"), dir.path().join("b")).unwrap();
+        sync_dir(dir.path()).unwrap();
+        std::fs::remove_file(dir.path().join("b")).unwrap();
+        sync_dir(dir.path()).unwrap();
+        assert!(sync_dir(&dir.path().join("missing")).is_err());
+    }
+
+    /// SPEC §4.5.2: `sync_data` and `sync_all` succeed on a regular file (`F_FULLFSYNC` on macOS, `FlushFileBuffers`
+    /// on Windows, `fdatasync` / `fsync` elsewhere).
+    #[test]
+    fn files_can_be_synced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dir.path().join("f"))
+            .unwrap();
+        write_all_at(&file, b"data", 0).unwrap();
+        file.sync_data().unwrap();
+        file.sync_all().unwrap();
+        let mut buf = [0; 4];
+        read_exact_at(&file, &mut buf, 0).unwrap();
+        assert_eq!(&buf, b"data");
     }
 }

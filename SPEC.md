@@ -292,6 +292,30 @@ nothing. The container is reopened, and recovery decides what survived.
   (64 KiB), never a whole frame or tail at once, so its memory does not grow with the size of a frame or of the file
   (ROADMAP 2.4.12).
 
+### 4.5.2 Platform durability notes
+"Sync" in this document means the following calls (Rust's standard library, checked against the pinned toolchain's
+sources; ROADMAP 2.4.8). Each must reach stable storage, including the drive's volatile write cache, before the
+call returns:
+
+| Platform | File data (`sync_data`) | File data and metadata (`sync_all`) | Directory entries |
+|----------|-------------------------|-------------------------------------|-------------------|
+| Linux, other Unix | `fdatasync` (`fsync` where unavailable) | `fsync` | `open` the directory, `fsync` |
+| macOS, iOS | `fcntl(F_FULLFSYNC)` | `fcntl(F_FULLFSYNC)` | `open` the directory, `fcntl(F_FULLFSYNC)` |
+| Windows | `FlushFileBuffers` | `FlushFileBuffers` | open with `FILE_FLAG_BACKUP_SEMANTICS` and write access, `FlushFileBuffers` |
+
+- macOS `fsync` only hands data to the drive, which may keep it in its cache across a power loss; `F_FULLFSYNC` also
+  flushes the drive cache. It is much slower (milliseconds), which is why commits group their syncs (§4.5).
+- Linux `fdatasync` flushes the file's data and the metadata needed to read it back (its size), not timestamps;
+  ext4, XFS and btrfs also flush the drive cache unless mounted with barriers off (`nobarrier`), which voids these
+  guarantees.
+- A new or renamed name is durable only after its directory is synced (on Linux a file's `fsync` does not cover its
+  entry). Windows directory entries are flushed the same way; NTFS also journals metadata, but only lazily.
+- A failed sync leaves what reached the disk unknown, and repeating it proves nothing (§4.5): writers stop and
+  recovery decides. Network file systems (NFS, SMB) may report success before the server has the data; they are
+  outside these guarantees.
+- Tests (CI on Linux, macOS and Windows) check that each call succeeds on files and directories; whether a drive
+  honors a flush cannot be observed from software, so crash behavior is tested on simulated files (ROADMAP 2.4.11).
+
 ### 4.6 Compaction of the container
 Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by
 **rewriting the live frames into a new file** and atomically `rename`-ing it over the old one. The container does
@@ -830,8 +854,7 @@ above.
   directory (an object behind a symbolic link or a file on the path does not exist, so `delete` succeeds without
   touching it); directories are never removed by Persia, so a concurrent `put` never finds its directory gone. A
   directory removed by someone else is created again by the next write into it.
-  **Windows:** directories are not synced yet (ROADMAP 2.4.8), so a machine crash may lose an acknowledged write
-  there; the guarantee above holds on Unix.
+  Directory syncs work on Unix and Windows alike (§4.5.2).
 - **Reads** open the file (a rename never changes an open file, so a read sees one version) and read with positioned
   reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
   `ShortRead` without reading it, as is a file found shorter while reading. An entry `list` would skip (a symbolic

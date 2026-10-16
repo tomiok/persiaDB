@@ -53,6 +53,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   to the container.
 
 ### Fixed
+- `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged
+  local-backend write or container create survives a machine crash there (SPEC §4.5.2).
 - `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers
   are no longer locked out while a writer is open (SPEC §4.5.1).
 - `persia-storage`: a local-backend object whose path exceeds `PATH_MAX` (1024 bytes on macOS) is `InvalidInput`
