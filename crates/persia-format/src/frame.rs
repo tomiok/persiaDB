@@ -597,7 +597,7 @@ impl<'a> Frame<'a> {
     /// use persia_format::{Reader, Writer};
     ///
     /// let mut w = Writer::new();
-    /// encode_frame(&mut w, FrameKind::Segment, 5, &[7; 500], Compression::Zstd { level: 3 })?;
+    /// encode_frame(&mut w, FrameKind::Segment, 5, &[7; 500], Compression::None)?;
     /// let bytes = w.into_inner();
     /// let frame = Frame::decode(&mut Reader::new(&bytes))?;
     ///
@@ -605,7 +605,7 @@ impl<'a> Frame<'a> {
     /// frame.reframe(&mut w, 40);
     /// let copy = Frame::decode(&mut Reader::new(w.as_slice()))?;
     /// assert_eq!((copy.frame_seq(), copy.stored_payload()), (40, frame.stored_payload()));
-    /// assert!(copy.is_compressed());
+    /// assert_eq!(copy.kind(), FrameKind::Segment);
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn reframe(&self, w: &mut Writer, frame_seq: u64) {

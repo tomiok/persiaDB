@@ -124,6 +124,7 @@ impl LocalStorage {
         while let Some(segment) = segments.next() {
             if segments.peek().is_none() {
                 let file = dir.join(name::file_name(segment).map_err(invalid)?);
+                check_path_len(&dir, &file).map_err(invalid)?;
                 return Ok((dir, file));
             }
             dir.push(name::dir_name(segment).map_err(invalid)?);
@@ -531,6 +532,23 @@ impl Storage for LocalStorage {
             append: false,
         }
     }
+}
+
+/// Rejects an object whose file, or its temporary file in `dir`, would have a path over the platform limit.
+fn check_path_len(dir: &Path, file: &Path) -> core::result::Result<(), crate::key::KeyDefect> {
+    let Some(max) = name::MAX_PATH_LEN else {
+        return Ok(());
+    };
+    let temp = dir
+        .as_os_str()
+        .len()
+        .saturating_add(1)
+        .saturating_add(name::MAX_TEMP_NAME_LEN);
+    let len = file.as_os_str().len().max(temp);
+    if len > max {
+        return Err(crate::key::KeyDefect::PathTooLong { len, max });
+    }
+    Ok(())
 }
 
 fn io_error(op: Op, key: &Key, source: io::Error) -> Error {

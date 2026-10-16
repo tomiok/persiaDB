@@ -801,7 +801,9 @@ above.
 - **Limits.** A file name `f(s)` or `d(s)` over 255 bytes is `InvalidInput` (the common filesystem limit), so a
   segment of plain characters is at most 255 bytes as the last segment and 254 bytes before a `/`. On Windows a name
   that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
-  or that ends in `.` is `InvalidInput` too.
+  or that ends in `.` is `InvalidInput` too. On Unix, so is an object whose file path, or the path of its temporary
+  file (below), is longer than `PATH_MAX` allows (1023 bytes on macOS, 4095 on Linux): it depends on the root's path,
+  and on macOS even the longest key (§10.1) exceeds it under any root.
 - **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
   leave one behind; it holds no acknowledged data.

@@ -12,6 +12,18 @@ pub(super) const DIR_MARKER: char = '@';
 /// Longest file name, in bytes, that the common local filesystems (ext4, XFS, APFS, NTFS) accept.
 pub(super) const MAX_NAME_LEN: usize = 255;
 
+/// Longest path, in bytes, `open` and friends accept: `PATH_MAX` minus the terminating NUL. Windows has no such limit
+/// for the absolute paths the backend uses (the standard library passes them as `\\?\` paths).
+#[cfg(target_vendor = "apple")]
+pub(super) const MAX_PATH_LEN: Option<usize> = Some(1023);
+#[cfg(all(unix, not(target_vendor = "apple")))]
+pub(super) const MAX_PATH_LEN: Option<usize> = Some(4095);
+#[cfg(not(unix))]
+pub(super) const MAX_PATH_LEN: Option<usize> = None;
+
+/// Longest temporary file name (`@tmp.<16 hex digits>.<u64>`, SPEC §10.1.1): it lives next to the object.
+pub(super) const MAX_TEMP_NAME_LEN: usize = 5 + 16 + 1 + 20;
+
 // Kept as is: lowercase only, so a case-insensitive filesystem never folds two names together.
 fn is_plain(byte: u8) -> bool {
     matches!(byte, b'a'..=b'z' | b'0'..=b'9' | b'.' | b'_' | b'-')

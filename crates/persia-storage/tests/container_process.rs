@@ -29,6 +29,7 @@ use persia_format::block::Compression;
 use persia_format::frame::{FrameKind, ScanEnd};
 use persia_storage::container::{Commit, Container, Error, Mode};
 
+#[cfg(unix)]
 const MAX: usize = 1 << 20;
 const NONE: Compression = Compression::None;
 
@@ -43,6 +44,7 @@ const TAG: &str = "@@persia ";
 /// A writer child stops on its own after this long, so a broken parent never leaves it running.
 const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
+#[cfg(unix)]
 fn base_seed() -> u64 {
     let seed = std::env::var("PERSIA_TEST_SEED")
         .ok()

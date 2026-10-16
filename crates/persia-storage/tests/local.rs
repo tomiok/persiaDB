@@ -349,3 +349,43 @@ fn listing_a_missing_root_is_an_error() {
     let err = s.list(&KeyPrefix::default()).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Io, "{err}");
 }
+
+/// An object whose path, or its temporary file's, would exceed `PATH_MAX` is `InvalidInput` (`PathTooLong`) before
+/// anything is written; a path of exactly the limit works (SPEC §10.1.1).
+#[cfg(unix)]
+#[test]
+fn paths_over_the_platform_limit_are_invalid_input() {
+    let max = if cfg!(target_vendor = "apple") {
+        1023
+    } else {
+        4095
+    };
+    let dir = tempfile::tempdir().unwrap();
+    // A root of exactly `max - 256` bytes, so `<root>/<255-byte name>` is exactly `max` bytes.
+    let target = max - 256;
+    let mut root = dir.path().to_path_buf();
+    while root.as_os_str().len() < target {
+        let left = target - root.as_os_str().len() - 1;
+        root.push("d".repeat(left.clamp(1, 200)));
+    }
+    assert_eq!(root.as_os_str().len(), target);
+    let s = LocalStorage::open(&root).unwrap();
+    let fits = key(&"x".repeat(255));
+    s.put(&fits, Bytes::from_static(b"ok")).unwrap();
+    assert_eq!(&s.get(&fits).unwrap()[..], b"ok");
+    // `<root>/a@/<255 bytes>`: four bytes over.
+    let long = key(&format!("a/{}", "x".repeat(255)));
+    let err = s.put(&long, Bytes::new()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    assert!(
+        matches!(&err, persia_storage::Error::InvalidKey(e)
+            if e.defect == (KeyDefect::PathTooLong { len: max + 3, max })),
+        "{err}"
+    );
+    assert_eq!(s.get(&long).unwrap_err().kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        tree(&root),
+        ["x".repeat(255)],
+        "nothing was written for the long key"
+    );
+}
