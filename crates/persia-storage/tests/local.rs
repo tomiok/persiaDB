@@ -185,14 +185,22 @@ fn traversal_attempts_are_invalid_input() {
         );
     }
     let (dir, s) = store();
-    // Segments that look like paths are encoded into one file name each.
-    for k in ["...", "..x/y", ".hidden", "%2E%2E/x"] {
+    // Segments that look like paths are encoded into one file name each. On Windows a name ending in `.` is
+    // rejected instead (SPEC §10.1.1).
+    if cfg!(windows) {
+        let err = s.put(&key("..."), Bytes::from_static(b"in")).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    } else {
+        s.put(&key("..."), Bytes::from_static(b"in")).unwrap();
+    }
+    for k in ["..x/y", ".hidden", "%2E%2E/x"] {
         s.put(&key(k), Bytes::from_static(b"in")).unwrap();
     }
-    assert_eq!(
-        tree(s.root()),
-        ["%252%45%252%45@/x", "...", "..x@/y", ".hidden"]
-    );
+    let mut want = vec!["%252%45%252%45@/x", "...", "..x@/y", ".hidden"];
+    if cfg!(windows) {
+        want.retain(|n| *n != "...");
+    }
+    assert_eq!(tree(s.root()), want);
     // Nothing was written beside the root.
     let mut outside: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
