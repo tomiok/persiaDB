@@ -27,9 +27,9 @@ use std::sync::{Arc, Barrier};
 
 use persia_format::block::Compression;
 use persia_format::frame::{FrameKind, ScanEnd};
-use persia_storage::container::{Commit, Container, Error, Mode};
+use persia_format::superblock::FIRST_FRAME_OFFSET;
+use persia_storage::container::{Commit, Container, Error, FrameRef, Mode};
 
-#[cfg(unix)]
 const MAX: usize = 1 << 20;
 const NONE: Compression = Compression::None;
 
@@ -150,6 +150,10 @@ fn child_role() {
         "hold-lock" => child_hold_lock(&path),
         "writer" => child_writer(&path, seed),
         "create" => child_create(&path),
+        "mapped-reader" => child_mapped_reader(&path, seed, false),
+        "mapped-reader-reopen" => child_mapped_reader(&path, seed, true),
+        "torn-writer-kill" => child_torn_writer(&path, false),
+        "torn-writer-exit" => child_torn_writer(&path, true),
         other => panic!("unknown child role {other}"),
     }
 }
@@ -242,6 +246,205 @@ fn child_create(path: &Path) {
     }
 }
 
+/// Opens `path` read-only with mapped reads and re-reads every committed frame of it until stdin closes (SPEC §4.7,
+/// ADR-0017). With `reopen`, it also opens further mapped handles at seeded passes and keeps re-reading the last
+/// [`MAPPED_VIEWS`] of them, so it holds mappings of files that writers in other processes later extend, recover,
+/// truncate the tail of, or compact away.
+///
+/// Reports `ready <seq> <log_end> <frames>` for its first handle, `ok <passes> <opens> <reads>` after a full pass
+/// that started after each line on stdin, `done <passes> <opens> <reads>` at EOF, and `fail <why>` before exiting
+/// with status 1 on the first wrong byte or failed read.
+fn child_mapped_reader(path: &Path, seed: u64, reopen: bool) {
+    let mut rng = Rng(seed);
+    let first = MappedView::open(path).unwrap_or_else(|e| fail(&format!("first open: {e}")));
+    report(&format!(
+        "ready {} {} {}",
+        first.container.superblock().seq,
+        first.log_end,
+        first.seen.len()
+    ));
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lines() {
+            if line.is_err() || tx.send(()).is_err() {
+                break;
+            }
+        }
+    });
+    let mut views = vec![first];
+    let (mut passes, mut opens, mut reads) = (0_u64, 1_u64, 0_u64);
+    let pass = |views: &[MappedView], passes: &mut u64, reads: &mut u64| {
+        for (i, v) in views.iter().enumerate() {
+            *reads += v
+                .verify()
+                .unwrap_or_else(|e| fail(&format!("pass {passes}, view {i}: {e}")));
+        }
+        *passes += 1;
+    };
+    loop {
+        pass(&views, &mut passes, &mut reads);
+        if reopen && rng.next_u64().is_multiple_of(8) {
+            let v = MappedView::open(path).unwrap_or_else(|e| fail(&format!("open {opens}: {e}")));
+            views.push(v);
+            opens += 1;
+            if views.len() > MAPPED_VIEWS {
+                views.remove(0);
+            }
+        }
+        match rx.try_recv() {
+            Ok(()) => {
+                pass(&views, &mut passes, &mut reads);
+                report(&format!("ok {passes} {opens} {reads}"));
+            }
+            // Re-reading while the writer works is the point of this reader, so it does not wait for the parent; it
+            // only yields, since tests do not sleep on the wall clock (CLAUDE.md).
+            Err(std::sync::mpsc::TryRecvError::Empty) => std::thread::yield_now(),
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+        }
+    }
+    report(&format!("done {passes} {opens} {reads}"));
+}
+
+/// How many mapped handles a reopening reader re-reads at once.
+const MAPPED_VIEWS: usize = 4;
+
+/// Reports `fail <why>` and exits with status 1, so the parent sees the reason, not just a status.
+fn fail(why: &str) -> ! {
+    report(&format!("fail {why}"));
+    std::process::exit(1)
+}
+
+/// The original `frame_seq` that [`payload`] embedded in `bytes`, if `bytes` is exactly the payload it builds for
+/// a frame of `kind` and that seq. Compaction renumbers frames but keeps payloads, so this checks a frame whatever
+/// file it was copied into.
+fn payload_origin(kind: FrameKind, bytes: &[u8]) -> Result<u64, String> {
+    let Some((&flag, rest)) = bytes.split_first() else {
+        return Err("empty payload".into());
+    };
+    if flag != u8::from(kind == FrameKind::Manifest) {
+        return Err(format!("{kind:?} frame with kind flag {flag}"));
+    }
+    let seq = u64::from_le_bytes(
+        rest.get(..8)
+            .ok_or_else(|| format!("payload of {} bytes", bytes.len()))?
+            .try_into()
+            .unwrap(),
+    );
+    if bytes != payload(kind, seq) {
+        return Err(format!(
+            "payload of {} bytes is not that of frame_seq {seq}",
+            bytes.len()
+        ));
+    }
+    Ok(seq)
+}
+
+/// A read-only handle with mapped reads, and every committed frame it saw when opened with the original
+/// `frame_seq` its payload carries.
+struct MappedView {
+    container: Container,
+    log_end: u64,
+    seen: Vec<(FrameRef, u64)>,
+}
+
+impl MappedView {
+    /// Opens `path` read-only, maps it, and reads every frame of `12288..log_end`, checking each one comes from the
+    /// mapping (two reads share their bytes) and carries its [`payload`].
+    fn open(path: &Path) -> Result<Self, String> {
+        let mut container =
+            Container::open(path, Mode::ReadOnly).map_err(|e| format!("open: {e}"))?;
+        container
+            .enable_mapped_reads()
+            .map_err(|e| format!("map: {e}"))?;
+        let log_end = container.superblock().log_end;
+        let mut seen = Vec::new();
+        let mut at = FIRST_FRAME_OFFSET;
+        while at < log_end {
+            let a = container
+                .read_frame_source(at, MAX)
+                .map_err(|e| format!("frame at {at}: {e}"))?;
+            let b = container.read_frame_source(at, MAX).unwrap();
+            if a.payload.as_ptr() != b.payload.as_ptr() {
+                return Err(format!(
+                    "frame at {at} below log_end {log_end} is not mapped"
+                ));
+            }
+            let origin = payload_origin(a.frame.kind, &a.payload)
+                .map_err(|e| format!("frame at {at}: {e}"))?;
+            seen.push((a.frame, origin));
+            at = a.frame.end();
+        }
+        if at != log_end {
+            return Err(format!("frames end at {at}, past log_end {log_end}"));
+        }
+        let view = Self {
+            container,
+            log_end,
+            seen,
+        };
+        view.verify()?;
+        Ok(view)
+    }
+
+    /// Re-reads every frame seen at open; returns how many.
+    fn verify(&self) -> Result<u64, String> {
+        let range = self.container.mapped_range();
+        if range != Some(FIRST_FRAME_OFFSET..self.log_end) {
+            return Err(format!("mapped range is now {range:?}"));
+        }
+        for (f, origin) in &self.seen {
+            let got = self
+                .container
+                .read_frame_source(f.offset, MAX)
+                .map_err(|e| format!("{f:?}: {e}"))?;
+            if got.frame != *f {
+                return Err(format!("{f:?} now reads as {:?}", got.frame));
+            }
+            let now = payload_origin(f.kind, &got.payload).map_err(|e| format!("{f:?}: {e}"))?;
+            if now != *origin {
+                return Err(format!(
+                    "{f:?} carried frame_seq {origin}, now carries {now}"
+                ));
+            }
+        }
+        Ok(self.seen.len() as u64)
+    }
+}
+
+/// Opens `path` read-write, appends and syncs two WAL frames without committing them, then starts a Segment frame
+/// and writes half its payload: a writer that dies mid-append (SPEC §4.4). Reports
+/// `torn <wal1_offset> <wal1_len> <wal2_offset> <wal2_len> <torn_offset> <end>`, where `end` is the file length
+/// the half frame leaves, then waits to be killed or, with `exit`, exits at once without finishing or syncing.
+fn child_torn_writer(path: &Path, exit: bool) {
+    let mut c = Container::open(path, Mode::ReadWrite).unwrap();
+    let mut wal = Vec::new();
+    for _ in 0..2 {
+        let seq = c.next_frame_seq();
+        wal.push(
+            c.append(
+                FrameKind::WalChunk,
+                &payload(FrameKind::WalChunk, seq),
+                NONE,
+            )
+            .unwrap(),
+        );
+    }
+    c.sync().unwrap();
+    let torn_offset = c.end();
+    let mut w = c.append_stream(FrameKind::Segment, 200_000).unwrap();
+    w.write(&vec![0xab; 100_000]).unwrap();
+    let end = std::fs::metadata(path).unwrap().len();
+    report(&format!(
+        "torn {} {} {} {} {torn_offset} {end}",
+        wal[0].offset, wal[0].len, wal[1].offset, wal[1].len
+    ));
+    if exit {
+        std::process::exit(0);
+    }
+    let mut sink = Vec::new();
+    std::io::stdin().read_to_end(&mut sink).unwrap();
+    panic!("the torn writer was not killed");
+}
 // ---------------------------------------------------------------------------------------------------------------
 // 1. Writer lock across processes (SPEC §8.4)
 // ---------------------------------------------------------------------------------------------------------------
@@ -631,4 +834,324 @@ fn concurrent_creates_in_processes_yield_one_container() {
         "{outcomes:?}"
     );
     assert_single_valid_container(dir.path(), &path);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// 4. Mapped readers across processes (SPEC §4.6, §4.7, §8.6; ADR-0017)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A mapped-reader child ([`child_mapped_reader`]) and its stdout.
+struct MappedReader {
+    child: Child,
+    out: BufReader<ChildStdout>,
+    /// `seq`, `log_end` and frame count of its first handle.
+    ready: (u64, u64, usize),
+}
+
+impl MappedReader {
+    fn spawn(role: &str, path: &Path, seed: u64) -> Self {
+        let mut child = spawn_child(role, path, seed);
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let ready = next_tagged(&mut out).unwrap_or_else(|| "<eof>".into());
+        let nums: Vec<&str> = ready.split(' ').collect();
+        assert_eq!(nums[0], "ready", "mapped reader: {ready}");
+        let ready = (
+            nums[1].parse().unwrap(),
+            nums[2].parse().unwrap(),
+            nums[3].parse().unwrap(),
+        );
+        Self { child, out, ready }
+    }
+
+    /// Asks for a full pass over every mapped frame and returns its `ok` line.
+    fn check(&mut self, ctx: &str) -> String {
+        let stdin = self.child.stdin.as_mut().unwrap();
+        stdin.write_all(b"check\n").unwrap();
+        stdin.flush().unwrap();
+        let reply = next_tagged(&mut self.out);
+        match reply {
+            Some(r) if r.starts_with("ok ") => r,
+            other => {
+                let status = self.child.wait().unwrap();
+                panic!(
+                    "{ctx}: mapped reader replied {other:?}, {}",
+                    describe(status)
+                )
+            }
+        }
+    }
+
+    /// Closes its stdin and returns its `done` line once it exited cleanly.
+    fn finish(mut self, ctx: &str) -> String {
+        drop(self.child.stdin.take());
+        let last = next_tagged(&mut self.out);
+        let status = self.child.wait().unwrap();
+        assert!(
+            status.success() && last.as_deref().is_some_and(|l| l.starts_with("done ")),
+            "{ctx}: mapped reader ended with {last:?}, {}",
+            describe(status)
+        );
+        last.unwrap()
+    }
+}
+
+/// An exit status, naming the signal that ended the process if one did: a SIGBUS (7) on a mapped page is the
+/// failure these tests look for.
+fn describe(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(signal) = status.signal() {
+            return format!("killed by signal {signal} (SIGBUS is 7)");
+        }
+    }
+    format!("exited with {status}")
+}
+
+/// Appends 0-2 Segment frames, 1-3 WAL frames and a Manifest, all carrying their [`payload`], and commits them
+/// with `wal_start` at the first WAL frame, so the earlier frames fall below it; returns the Segment frames.
+fn commit_round(c: &mut Container, rng: &mut Rng) -> Vec<FrameRef> {
+    let append = |c: &mut Container, kind| {
+        let seq = c.next_frame_seq();
+        c.append(kind, &payload(kind, seq), NONE).unwrap()
+    };
+    let segments: Vec<_> = (0..rng.range(0, 3))
+        .map(|_| append(c, FrameKind::Segment))
+        .collect();
+    let wal = append(c, FrameKind::WalChunk);
+    for _ in 1..rng.range(1, 4) {
+        append(c, FrameKind::WalChunk);
+    }
+    c.sync().unwrap();
+    let manifest = append(c, FrameKind::Manifest);
+    c.commit(Commit {
+        manifest,
+        wal_start: wal.offset,
+        fence_token: 0,
+    })
+    .unwrap();
+    segments
+}
+
+/// The Manifest payload a parent's compaction writes: a [`payload`] whose seq no writer reaches.
+fn compaction_manifest(n: u64) -> Vec<u8> {
+    payload(FrameKind::Manifest, (1 << 40) + n)
+}
+
+/// A reader process holds one mapped read-only handle while this process appends and commits many batches and
+/// then compacts in place: every frame it mapped keeps its bytes (the rename leaves it the old file, SPEC §4.6), and
+/// a fresh reader process maps the compacted file.
+#[test]
+fn a_mapped_reader_process_keeps_its_bytes_across_commits_and_compaction() {
+    const SEED: u64 = 0x0517_0001;
+    eprintln!("seed {SEED}");
+    let mut rng = Rng(SEED);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut w = Container::create(&path).unwrap();
+    let mut segments = Vec::new();
+    for _ in 0..10 {
+        segments.extend(commit_round(&mut w, &mut rng));
+    }
+
+    let mut old = MappedReader::spawn("mapped-reader", &path, 0);
+    assert_eq!(old.ready.0, 10);
+    assert_eq!(old.ready.1, w.superblock().log_end);
+    for round in 0..40 {
+        segments.extend(commit_round(&mut w, &mut rng));
+        if round % 10 == 9 {
+            old.check(&format!("after round {round}"));
+        }
+    }
+
+    // Every Segment lies below the last `wal_start`; keep those with an even `frame_seq`.
+    let live: Vec<_> = segments
+        .iter()
+        .filter(|s| s.frame_seq.is_multiple_of(2))
+        .map(|s| s.offset..s.end())
+        .collect();
+    assert!(!live.is_empty() && live.len() < segments.len());
+    let len_before = std::fs::metadata(&path).unwrap().len();
+    let relocation = w.compact(&live, |_| compaction_manifest(0), NONE).unwrap();
+    assert!(std::fs::metadata(&path).unwrap().len() < len_before);
+    old.check("after compaction");
+    let mut new_segments = Vec::new();
+    for _ in 0..5 {
+        new_segments.extend(commit_round(&mut w, &mut rng));
+    }
+    old.check("after commits on the compacted file");
+    let old_ready = old.ready;
+    let done = old.finish("old reader");
+
+    let mut fresh = MappedReader::spawn("mapped-reader", &path, 0);
+    assert_eq!(fresh.ready.0, w.superblock().seq);
+    assert_eq!(fresh.ready.1, w.superblock().log_end);
+    fresh.check("fresh reader");
+    fresh.finish("fresh reader");
+
+    // The compacted file holds exactly the live Segments, with their payloads, and the later ones.
+    let r = Container::open(&path, Mode::ReadOnly).unwrap();
+    for s in &segments {
+        let moved = relocation.get(s.offset);
+        assert_eq!(moved.is_some(), s.frame_seq.is_multiple_of(2), "{s:?}");
+        if let Some(m) = moved {
+            let p = r.read_frame(m.offset, MAX).unwrap();
+            assert_eq!(payload_origin(m.kind, &p.payload), Ok(s.frame_seq));
+        }
+    }
+    let (mut at, mut found) = (FIRST_FRAME_OFFSET, 0);
+    while at < r.superblock().log_end {
+        let f = r.read_frame(at, MAX).unwrap();
+        found += usize::from(f.frame.kind == FrameKind::Segment);
+        at = f.frame.end();
+    }
+    assert_eq!(found, live.len() + new_segments.len());
+    eprintln!(
+        "mapped reader across compaction: {} frames mapped, {} segments ({} live), {done}",
+        old_ready.2,
+        segments.len(),
+        live.len()
+    );
+}
+
+/// Runs a torn writer child (`role`) on `path`: kills it unless it exits by itself; returns its report.
+fn run_torn_writer(role: &str, path: &Path) -> (Vec<u64>, std::process::ExitStatus) {
+    let mut child = spawn_child(role, path, 0);
+    let mut out = BufReader::new(child.stdout.take().unwrap());
+    let torn = next_tagged(&mut out).unwrap_or_else(|| "<eof>".into());
+    let mut words = torn.split(' ');
+    assert_eq!(words.next(), Some("torn"), "torn writer: {torn}");
+    let nums = words.map(|w| w.parse().unwrap()).collect();
+    if role == "torn-writer-kill" {
+        child.kill().unwrap();
+    }
+    (nums, child.wait().unwrap())
+}
+
+/// A writer process dies mid-append, leaving half a frame after two synced but uncommitted WAL frames. A mapped
+/// reader process opened before keeps reading its frames; a read-write open in this process truncates the torn
+/// tail, which lies past every mapping, on Unix. On Windows a live mapping keeps the file from shrinking, so that
+/// open may fail with `Error::Io` and leave the file unchanged (ADR-0017); it succeeds once the reader is gone.
+fn a_torn_tail_left_beside_a_mapped_reader_process(role: &str) {
+    let mut rng = Rng(0x0517_0002);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut w = Container::create(&path).unwrap();
+    for _ in 0..5 {
+        commit_round(&mut w, &mut rng);
+    }
+    let sb = *w.superblock();
+    drop(w);
+    let mut reader = MappedReader::spawn("mapped-reader", &path, 0);
+    assert_eq!((reader.ready.0, reader.ready.1), (sb.seq, sb.log_end));
+
+    let (nums, status) = run_torn_writer(role, &path);
+    let [wal1_off, wal1_len, wal2_off, wal2_len, torn_offset, end] = nums[..] else {
+        panic!("{role}: {nums:?}");
+    };
+    assert_eq!(
+        status.success(),
+        role == "torn-writer-exit",
+        "{role}: {status}"
+    );
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), end, "{role}");
+    assert_eq!(torn_offset, wal2_off + wal2_len, "{role}");
+    reader.check(&format!("{role}: after the torn append"));
+
+    let opened = Container::open(&path, Mode::ReadWrite);
+    let c = if cfg!(windows) && matches!(opened, Err(Error::Io { .. })) {
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), end, "{role}");
+        reader.check(&format!("{role}: after the refused truncation"));
+        reader.finish(role);
+        Container::open(&path, Mode::ReadWrite).unwrap()
+    } else {
+        let c = opened.unwrap_or_else(|e| panic!("{role}: read-write open failed: {e}"));
+        reader.check(&format!("{role}: after the truncation"));
+        reader.finish(role);
+        c
+    };
+    assert!(
+        matches!(c.recovery().scan_end, ScanEnd::TornTail { offset, .. } if offset == torn_offset),
+        "{role}: {:?}",
+        c.recovery()
+    );
+    assert_eq!(c.recovery().truncated_from, Some(end), "{role}");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        torn_offset,
+        "{role}"
+    );
+    assert_eq!(*c.superblock(), sb, "{role}");
+    // The synced WAL frames survive the truncation (SPEC §8.2).
+    let tail: Vec<_> = c
+        .uncommitted_frames()
+        .iter()
+        .map(|f| (f.offset, f.len))
+        .collect();
+    assert_eq!(tail, [(wal1_off, wal1_len), (wal2_off, wal2_len)], "{role}");
+    for f in c.uncommitted_frames() {
+        let p = c.read_frame(f.offset, MAX).unwrap();
+        assert_eq!(
+            payload_origin(f.kind, &p.payload),
+            Ok(f.frame_seq),
+            "{role}"
+        );
+    }
+}
+
+#[test]
+fn a_killed_writer_leaves_a_torn_tail_beside_a_mapped_reader_process() {
+    a_torn_tail_left_beside_a_mapped_reader_process("torn-writer-kill");
+}
+
+#[test]
+fn an_exited_writer_leaves_a_torn_tail_beside_a_mapped_reader_process() {
+    a_torn_tail_left_beside_a_mapped_reader_process("torn-writer-exit");
+}
+
+#[cfg(all(unix, not(feature = "slow")))]
+const MAPPED_KILLS: u64 = 10;
+#[cfg(all(unix, feature = "slow"))]
+const MAPPED_KILLS: u64 = 200;
+
+/// Writer children are killed with SIGKILL at seeded points ([`run_and_kill_writer`]) and recovered read-write here, and
+/// every third recovery compacts in place (a quarter of the writers die mid-way through a streamed frame, so
+/// recoveries truncate torn tails too), while one reader process keeps re-reading every committed frame of
+/// the mapped handles it opens along the way: no mismatched payload, no failed read, no SIGBUS.
+#[cfg(unix)]
+#[test]
+fn kill_9_writers_never_disturb_a_mapped_reader_process() {
+    let seed = base_seed();
+    let mut rng = Rng(seed ^ 0x0517_0003);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut w = Container::create(&path).unwrap();
+    commit_round(&mut w, &mut rng);
+    drop(w);
+    let mut reader = MappedReader::spawn("mapped-reader-reopen", &path, rng.next_u64());
+    let (mut torn, mut compactions, mut last_ok) = (0, 0, String::new());
+    for iter in 0..MAPPED_KILLS {
+        let ctx = format!("seed {seed}, kill {iter}");
+        // A SIGKILL almost never tears an `append` (one `pwrite`), so some writers die mid-way through a streamed frame.
+        if rng.next_u64().is_multiple_of(4) {
+            run_torn_writer("torn-writer-kill", &path);
+        } else {
+            run_and_kill_writer(&path, &mut rng, &ctx);
+        }
+        let mut c = Container::open(&path, Mode::ReadWrite)
+            .unwrap_or_else(|e| panic!("{ctx}: recovery failed: {e}"));
+        torn += usize::from(matches!(c.recovery().scan_end, ScanEnd::TornTail { .. }));
+        if iter % 3 == 2 {
+            c.compact(&[], |_| compaction_manifest(iter), NONE)
+                .unwrap_or_else(|e| panic!("{ctx}: compaction failed: {e}"));
+            compactions += 1;
+        }
+        drop(c);
+        last_ok = reader.check(&ctx);
+    }
+    let done = reader.finish(&format!("seed {seed}"));
+    eprintln!(
+        "kill-9 beside a mapped reader: {MAPPED_KILLS} kills, {torn} torn tails, {compactions} compactions, \
+         last {last_ok}, {done} (passes opens reads)"
+    );
 }

@@ -228,6 +228,52 @@ mod tests {
         }
     }
 
+    // --- Safety (CLAUDE.md "Safety & errors") ---
+
+    /// Files that may `allow(unsafe_code)`, each justified by an ADR. Adding one means amending ADR-0010 (or writing
+    /// a new ADR) first.
+    const UNSAFE_ALLOWED: &[&str] = &[
+        "crates/persia-format/src/mmap.rs",              // ADR-0010
+        "crates/persia-format/tests/mmap_rename.rs",     // ADR-0010: maps its own temporary files
+        "crates/persia-format/tests/source_props.rs",    // ADR-0010: maps its own temporary files
+        "crates/persia-storage/src/container/mapped.rs", // ADR-0017
+    ];
+
+    #[test]
+    fn unsafe_code_is_relaxed_only_where_an_adr_allows_it() {
+        // This file names the lint in its own checks.
+        let out = git(&[
+            "grep",
+            "-n",
+            "unsafe_code",
+            "--",
+            "*.rs",
+            ":(exclude)xtask/src/repo_checks.rs",
+        ]);
+        // `git grep` exits 1 when nothing matches; anything else means the listing cannot be trusted.
+        assert!(
+            matches!(out.status.code(), Some(0 | 1)),
+            "git grep failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let listing = String::from_utf8(out.stdout).unwrap();
+        let offenders: Vec<&str> = listing
+            .lines()
+            .filter(|line| {
+                let (file, rest) = line.split_once(':').unwrap();
+                let text = rest.split_once(':').unwrap().1.trim();
+                // A crate root may forbid the lint, or (ADR-0017) deny it so one module can allow it: neither
+                // relaxes it by itself.
+                !matches!(text, "#![forbid(unsafe_code)]" | "#![deny(unsafe_code)]")
+                    && !UNSAFE_ALLOWED.contains(&file)
+            })
+            .collect();
+        assert!(
+            offenders.is_empty(),
+            "unsafe_code relaxed outside UNSAFE_ALLOWED: {offenders:#?}"
+        );
+    }
+
     #[test]
     fn source_is_lf_text() {
         assert_eq!(attr("crates/persia/src/lib.rs", "eol"), "lf");

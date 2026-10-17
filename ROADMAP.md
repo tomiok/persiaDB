@@ -181,10 +181,11 @@ Deps: M1.
 - [x] 2.3.3 `get_range` using pread; `list` with prefix; `delete`
 - [x] 2.3.4 Path-safety: reject `..`, absolute keys, invalid UTF-8; segments over 255 bytes and (Windows) reserved names and trailing `.`/space as `InvalidInput`; `list` never resolves a prefix as a path (SPEC §10.1); [T] traversal attempts
 - [x] 2.3.5 Run conformance suite
-- [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010; needs 2.4.4: the mappable `log_end` comes from the container superblock, so it lands with 2.4): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
+- [x] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010, ADR-0017): opt-in (`Container::enable_mapped_reads`), `pread` the default and the fallback; one window over `12288..log_end`, remapped after each commit and compaction (a failed remap keeps the previous window; after a compaction, none); zero-copy `read_frame_source`; `container::mapped` is the only `unsafe` call site outside `persia-format`. Automatic choice on local disks is 2.3.10
 - [x] 2.3.7 Store keys that are segment-prefixes of each other (`a` and `a/b`, SPEC §10.1): name encoding so an object never collides with a directory; round-trip names byte-exactly on case-insensitive and normalizing filesystems (APFS NFD, NTFS); [T] the conformance model already generates such pairs
 - [ ] 2.3.8 Sweep stale `@tmp.*` files a crashed writer left (ADR-0012): which process may delete them (pid no longer running, or age), and when (open, or a `persia` CLI command)
 - [x] 2.3.9 `windows-latest` CI job for `persia-storage` (found in the 2.3 review): the `cfg(windows)` code (positioned reads, reserved names) is otherwise never compiled; directory fsync on Windows is 2.4.8
+- [ ] 2.3.10 Choose mapped reads (2.3.6) automatically on local disk file systems only (ADR-0017): detect the file system type portably (`statfs` `f_type` / `MNT_LOCAL` / `GetDriveTypeW`; std exposes none, so FFI needs an ADR or an allowed crate); network and FUSE mounts keep `pread`
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots
@@ -215,6 +216,7 @@ Deps: M1.
 - [ ] 2.4.17 Compaction copies each frame in bounded memory (found in 2.4.12: `Rewriter` reads a whole frame, so a large Segment needs its size in RAM; stream it with a running CRC, compressed frames included)
 - [ ] 2.4.18 Windows file identity for `compact`'s "the path still names this file" check (found in 2.4.16: the standard library exposes none; `GetFileInformationByHandle` needs FFI and an ADR)
 - [ ] 2.4.19 `persia` CLI: list and remove a container's quarantine files (ADR-0014) and stale temporary files (2.4.15)
+- [ ] 2.4.20 Make the kill -9 loop tear appends (found in 2.3.6): each frame is one `pwrite`, so `kill_9_loop_never_loses_an_acknowledged_commit_or_sync` almost never leaves a torn tail; stream large frames (as the mapped-reader loop does) so torn-tail recovery is exercised
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
