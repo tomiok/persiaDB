@@ -195,8 +195,9 @@ impl StreamScanner {
             Ok(header) => header,
             Err(error) => return Ok(Err(error)),
         };
-        // `check` gave the sink the header of the frame it validated, so the encoder exists and was fed exactly
-        // the stored payload.
+        // `check` gives the sink the header of every frame it validates, so the encoder exists and was fed exactly
+        // the stored payload. Callers that need the whole copy count what `write` received (compaction does).
+        debug_assert!(copy.encoder.is_some());
         if let Some(encoder) = copy.encoder.take() {
             (copy.write)(&encoder.trailer())?;
         }
@@ -475,12 +476,9 @@ struct Reframer<'w, W> {
 
 impl<E, W: FnMut(&[u8]) -> Result<(), E>> Sink<E> for Reframer<'_, W> {
     fn header(&mut self, header: &FrameHeader) -> Result<(), E> {
-        // The copy is as long as the source, whose length fits.
         let encoder = FrameEncoder::reframing(header, self.frame_seq);
-        if let Some(encoder) = &encoder {
-            (self.write)(encoder.header())?;
-        }
-        self.encoder = encoder;
+        (self.write)(encoder.header())?;
+        self.encoder = Some(encoder);
         Ok(())
     }
 

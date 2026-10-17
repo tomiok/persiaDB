@@ -1110,6 +1110,8 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         let start = self.end;
         let mut at = start;
         let target = self.target;
+        // Through `pread`, not the mapped window: compaction reads each byte once, so a mapping would only add page
+        // faults, and frames past `log_end` are not mapped anyway.
         let mut read =
             |o, buf: &mut [u8]| from.file.read_exact_at(buf, o).map_err(Error::io("read"));
         let mut write = |bytes: &[u8]| {
@@ -1131,7 +1133,12 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         self.end = start
             .checked_add(total)
             .ok_or_else(|| Error::InvalidInput("container offset exhausted".into()))?;
-        debug_assert_eq!(at, self.end);
+        if at != self.end {
+            return Err(Error::InvalidInput(format!(
+                "compaction wrote {} bytes of the {total}-byte copy of the frame at {offset}",
+                at.saturating_sub(start)
+            )));
+        }
         let new = FrameRef {
             offset: start,
             len: total,

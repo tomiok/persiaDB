@@ -413,23 +413,30 @@ impl FrameEncoder {
     }
 
     /// The frame of `source` (kind, flags, stored payload length) renumbered to `frame_seq`: the copy
-    /// [`StreamScanner::reframe`] writes. Never `None` for a header that decoded.
-    fn reframing(source: &FrameHeader, frame_seq: u64) -> Option<Self> {
-        Self::with_flags(source.kind, source.flags, frame_seq, source.payload_len)
+    /// [`StreamScanner::reframe`] writes. Infallible: the copy is exactly as long as the source.
+    fn reframing(source: &FrameHeader, frame_seq: u64) -> Self {
+        Self::of(FrameHeader {
+            offset: 0,
+            frame_seq,
+            ..*source
+        })
     }
 
     /// `None` if the frame's total length overflows `u64`.
     fn with_flags(kind: FrameKind, flags: u32, frame_seq: u64, payload_len: u64) -> Option<Self> {
-        let header = FrameHeader::new(0, kind, flags, payload_len, frame_seq)?;
+        FrameHeader::new(0, kind, flags, payload_len, frame_seq).map(Self::of)
+    }
+
+    fn of(header: FrameHeader) -> Self {
         let bytes = header.encode();
         let mut crc = Crc32c::new();
         crc.update(bytes.get(KIND_OFFSET..).unwrap_or_default());
-        Some(Self {
+        Self {
             header,
             bytes,
             crc,
             written: 0,
-        })
+        }
     }
 
     /// The [`FRAME_HEADER_LEN`] header bytes, written before the payload.

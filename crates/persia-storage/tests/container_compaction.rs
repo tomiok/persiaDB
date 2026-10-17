@@ -1014,3 +1014,47 @@ fn a_live_range_not_matching_a_large_frame_is_invalid_input() {
         .unwrap();
     c.sync().unwrap();
 }
+
+/// A target write that fails part-way through a large frame's copy is `Error::Io`, and leaves the source
+/// untouched and still writable: the streamed copy makes many writes per frame, each one a point of failure.
+#[test]
+fn a_failed_write_inside_a_large_frame_copy_leaves_the_source() {
+    let calls = {
+        let Large { mut c, live, .. } = large(2);
+        let target = SimFile::new();
+        c.compact_into(
+            target.clone(),
+            &[range(live[0]), range(live[1])],
+            |_| Vec::new(),
+            NONE,
+        )
+        .unwrap();
+        target.mutations()
+    };
+    assert!(calls > 64, "a 2 MiB frame takes many writes: {calls}");
+    for n in [1, 2, calls / 4, calls / 2, calls - 3] {
+        for fault in [SimFault::FailAt(n), SimFault::ApplyThenFail(n)] {
+            let Large {
+                mut c, file, live, ..
+            } = large(2);
+            let old_bytes = file.file.bytes();
+            let old_mutations = file.file.mutations();
+            let target = SimFile::new();
+            target.set_fault(Some(fault));
+            let err = c
+                .compact_into(
+                    target,
+                    &[range(live[0]), range(live[1])],
+                    |_| Vec::new(),
+                    NONE,
+                )
+                .unwrap_err();
+            assert!(matches!(err, Error::Io { .. }), "{fault:?}: {err:?}");
+            assert_eq!(file.file.bytes(), old_bytes, "{fault:?}");
+            assert_eq!(file.file.mutations(), old_mutations, "{fault:?}");
+            c.append(FrameKind::WalChunk, b"still writable", NONE)
+                .unwrap();
+            c.sync().unwrap();
+        }
+    }
+}

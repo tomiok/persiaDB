@@ -217,6 +217,7 @@ Deps: M1.
 - [ ] 2.4.18 Windows file identity for `compact`'s "the path still names this file" check (found in 2.4.16: the standard library exposes none; `GetFileInformationByHandle` needs FFI and an ADR)
 - [ ] 2.4.19 `persia` CLI: list and remove a container's quarantine files (ADR-0014) and stale temporary files (2.4.15)
 - [~] 2.4.20 Make the kill -9 loop tear appends (found in 2.3.6): each frame is one `pwrite`, so `kill_9_loop_never_loses_an_acknowledged_commit_or_sync` almost never leaves a torn tail; stream large frames (as the mapped-reader loop does) so torn-tail recovery is exercised
+- [ ] 2.4.21 Compaction coalesces the writes of small frames (found in 2.4.17 review: a streamed copy writes header, payload pieces and trailer separately, about three `pwrite`s per WAL frame where one used to do), with a compaction benchmark to justify it
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests

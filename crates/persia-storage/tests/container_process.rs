@@ -39,6 +39,8 @@ const ROLE_ENV: &str = "PERSIA_CONTAINER_CHILD_ROLE";
 const PATH_ENV: &str = "PERSIA_CONTAINER_CHILD_PATH";
 /// The seed of a child's randomness.
 const SEED_ENV: &str = "PERSIA_CONTAINER_CHILD_SEED";
+/// If set, the writer child stalls half-way through its first large frame after this many acknowledgements.
+const STALL_ENV: &str = "PERSIA_CONTAINER_CHILD_STALL_AFTER";
 /// Prefix of the lines children report; anything else on their stdout is libtest's.
 const TAG: &str = "@@persia ";
 /// A writer child stops on its own after this long, so a broken parent never leaves it running.
@@ -97,11 +99,17 @@ fn payload(kind: FrameKind, frame_seq: u64) -> Vec<u8> {
 
 /// Re-executes this test binary as the child `role`.
 fn spawn_child(role: &str, path: &Path, seed: u64) -> Child {
+    spawn_child_with(role, path, seed, &[])
+}
+
+/// [`spawn_child`] with extra environment variables.
+fn spawn_child_with(role: &str, path: &Path, seed: u64, env: &[(&str, String)]) -> Child {
     Command::new(std::env::current_exe().unwrap())
         .args(["child_role", "--exact", "--nocapture", "--test-threads=1"])
         .env(ROLE_ENV, role)
         .env(PATH_ENV, path)
         .env(SEED_ENV, seed.to_string())
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::inherit())
@@ -175,27 +183,39 @@ const STREAM_CHUNK: usize = 64;
 /// Appends the [`payload`] of the next frame of `kind`. A large one goes through [`Container::append_stream`] in
 /// [`STREAM_CHUNK`]-byte writes: [`Container::append`] writes a frame with one `pwrite`, which a SIGKILL almost never
 /// interrupts, so without this a killed writer would hardly ever leave a torn tail (ROADMAP 2.4.20).
-fn append_payload(c: &mut Container, kind: FrameKind) -> FrameRef {
+///
+/// With `stall`, a large frame stops half-way instead: this reports `stalled <frame_offset>` and waits to be killed,
+/// so the kill tears it for certain.
+fn append_payload(c: &mut Container, kind: FrameKind, stall: bool) -> FrameRef {
     let bytes = payload(kind, c.next_frame_seq());
     if bytes.len() <= STREAM_ABOVE {
         return c.append(kind, &bytes, NONE).unwrap();
     }
-    report(&format!("streaming {}", c.end()));
+    let offset = c.end();
     let mut w = c.append_stream(kind, bytes.len() as u64).unwrap();
-    for chunk in bytes.chunks(STREAM_CHUNK) {
+    for (i, chunk) in bytes.chunks(STREAM_CHUNK).enumerate() {
+        if stall && i == bytes.len() / STREAM_CHUNK / 2 {
+            report(&format!("stalled {offset}"));
+            let mut sink = Vec::new();
+            std::io::stdin().read_to_end(&mut sink).unwrap();
+            panic!("the stalled writer was not killed");
+        }
         w.write(chunk).unwrap();
     }
     w.finish().unwrap()
 }
 
 /// Opens `path` read-write and appends and commits until killed (or [`CHILD_DEADLINE`]). Large frames are streamed
-/// in pieces ([`append_payload`]), so kills tear them.
+/// in pieces ([`append_payload`]), so kills tear them. With [`STALL_ENV`] set to `n`, the first large frame after
+/// `n` acknowledgements stalls half-way.
 ///
 /// Reports `opened <seq>` after recovery, `synced <offset> <len> <frame_seq>` for each WAL frame once `sync`
 /// returned, and `commit <seq> <manifest_offset> <manifest_len> <frame_seq>` once `commit` returned.
 fn child_writer(path: &Path, seed: u64) {
     let start = std::time::Instant::now();
     let mut rng = Rng(seed);
+    let stall_after: Option<usize> = std::env::var(STALL_ENV).ok().map(|n| n.parse().unwrap());
+    let mut acks = 0;
     // A process another test forks keeps copies of the parent's file descriptions until it execs, so the lock of
     // the parent's last check can outlive it for a moment. Retry `Locked` briefly.
     let mut attempts = 0;
@@ -212,15 +232,18 @@ fn child_writer(path: &Path, seed: u64) {
     while start.elapsed() < CHILD_DEADLINE {
         let mut batch = Vec::new();
         for _ in 0..rng.range(1, 5) {
-            batch.push(append_payload(&mut c, FrameKind::WalChunk));
+            let stall = stall_after.is_some_and(|n| acks >= n);
+            batch.push(append_payload(&mut c, FrameKind::WalChunk, stall));
         }
         c.sync().unwrap();
         for f in &batch {
             report(&format!("synced {} {} {}", f.offset, f.len, f.frame_seq));
+            acks += 1;
         }
         // Some batches stay uncommitted: synced WAL frames after `log_end` must survive too (SPEC §8.2).
         if !rng.next_u64().is_multiple_of(4) {
-            let m = append_payload(&mut c, FrameKind::Manifest);
+            let stall = stall_after.is_some_and(|n| acks >= n);
+            let m = append_payload(&mut c, FrameKind::Manifest, stall);
             c.commit(Commit {
                 manifest: m,
                 wal_start: batch[0].offset,
@@ -234,6 +257,7 @@ fn child_writer(path: &Path, seed: u64) {
                 m.len,
                 m.frame_seq
             ));
+            acks += 1;
         }
     }
 }
@@ -601,23 +625,44 @@ fn kill_9_loop_never_loses_an_acknowledged_commit_or_sync() {
         "kill-9 loop: {} kills on {KILL_FILES} files, {acks} acknowledgements, {torn} torn tails, {bytes} B written",
         KILL_FILES * KILLS_PER_FILE
     );
-    // About half the kills land mid-way through a streamed frame (ROADMAP 2.4.20), so torn-tail recovery ran.
-    assert!(torn > 0, "seed {seed}: no kill tore a frame");
+    // Every other kill tears a stalled frame (ROADMAP 2.4.20), and timed kills tear some streamed frames too.
+    assert!(
+        torn as u64 >= KILL_FILES * KILLS_PER_FILE / 2,
+        "seed {seed}: only {torn} torn tails"
+    );
 }
 
-/// Runs one writer child on `path` and SIGKILLs it at a seeded point; returns its acknowledgements.
+/// How [`run_and_kill_writer`] picks the moment of the kill.
 #[cfg(unix)]
-fn run_and_kill_writer(path: &Path, rng: &mut Rng, ctx: &str) -> Vec<String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Kill {
+    /// After a seeded number of acknowledgements and a seeded delay: anywhere in the loop.
+    Timed,
+    /// Once the writer stalls half-way through a large frame, so the kill certainly tears it (ROADMAP 2.4.20).
+    MidFrame,
+}
+
+/// Runs one writer child on `path` and SIGKILLs it at a seeded point; returns its acknowledgements and, for
+/// [`Kill::MidFrame`], the offset of the frame it tore.
+#[cfg(unix)]
+fn run_and_kill_writer(
+    path: &Path,
+    rng: &mut Rng,
+    kill: Kill,
+    ctx: &str,
+) -> (Vec<String>, Option<u64>) {
     let child_seed = rng.next_u64();
     // Kill after a seeded number of acknowledgements, then a seeded delay of up to 3 ms, so kills land at
-    // every step of the loop: mid-append, mid-sync, between the Manifest and its slot, mid-slot-write.
+    // every step of the loop: mid-append (streamed frames take many writes), mid-sync, between the Manifest and
+    // its slot, mid-slot-write.
     let kill_after = rng.range(1, 120) as usize;
     let delay = std::time::Duration::from_micros(rng.range(0, 3000));
-    // Or, for half the writers, as soon as the next streamed frame starts: its many writes take long enough for
-    // the kill to land among them, so these writers mostly leave a torn tail (ROADMAP 2.4.20).
-    let mid_stream = rng.next_u64().is_multiple_of(2);
 
-    let mut child = spawn_child("writer", path, child_seed);
+    let env = match kill {
+        Kill::Timed => vec![],
+        Kill::MidFrame => vec![(STALL_ENV, kill_after.to_string())],
+    };
+    let mut child = spawn_child_with("writer", path, child_seed, &env);
     let mut out = BufReader::new(child.stdout.take().unwrap());
     let opened = next_tagged(&mut out).unwrap_or_else(|| panic!("{ctx}: writer died"));
     assert!(opened.starts_with("opened "), "{ctx}: {opened}");
@@ -631,21 +676,19 @@ fn run_and_kill_writer(path: &Path, rng: &mut Rng, ctx: &str) -> Vec<String> {
             }
         }
     });
-    let is_ack = |msg: &String| !msg.starts_with("streaming ");
     let mut iter_acks = Vec::new();
+    let mut torn = None;
     loop {
         let Ok(msg) = rx.recv() else {
             panic!("{ctx}: writer exited before the kill");
         };
-        let enough = iter_acks.len() >= kill_after;
-        if !is_ack(&msg) {
-            if mid_stream && enough {
-                break;
-            }
-            continue;
+        if let Some(offset) = msg.strip_prefix("stalled ") {
+            assert_eq!(kill, Kill::MidFrame, "{ctx}: {msg}");
+            torn = Some(offset.parse().unwrap());
+            break;
         }
         iter_acks.push(msg);
-        if !mid_stream && iter_acks.len() >= kill_after {
+        if kill == Kill::Timed && iter_acks.len() >= kill_after {
             std::thread::sleep(delay);
             break;
         }
@@ -653,12 +696,12 @@ fn run_and_kill_writer(path: &Path, rng: &mut Rng, ctx: &str) -> Vec<String> {
     child.kill().unwrap();
     let status = child.wait().unwrap();
     reader.join().unwrap();
-    iter_acks.extend(rx.try_iter().filter(is_ack));
+    iter_acks.extend(rx.try_iter());
     assert!(
         !status.success(),
         "{ctx}: writer exited by itself: {status}"
     );
-    iter_acks
+    (iter_acks, torn)
 }
 
 /// [`KILLS_PER_FILE`] kills of writers on one new file; returns the acknowledgements, the torn tails recovered and
@@ -674,7 +717,13 @@ fn kill_loop_on_one_file(rng: &mut Rng, ctx: &str) -> (usize, usize, u64) {
     let mut torn = 0;
     for iter in 0..KILLS_PER_FILE {
         let ctx = format!("{ctx}, kill {iter}");
-        let iter_acks = run_and_kill_writer(&path, rng, &ctx);
+        // Every other writer is killed half-way through a large frame, so every file sees torn tails.
+        let kill = if iter % 2 == 0 {
+            Kill::Timed
+        } else {
+            Kill::MidFrame
+        };
+        let (iter_acks, stalled) = run_and_kill_writer(&path, rng, kill, &ctx);
         for msg in &iter_acks {
             acks.record(msg);
         }
@@ -685,11 +734,16 @@ fn kill_loop_on_one_file(rng: &mut Rng, ctx: &str) -> (usize, usize, u64) {
             .unwrap_or_else(|e| panic!("{ctx}: recovery failed: {e}"));
         match &c.recovery().scan_end {
             ScanEnd::Clean { offset } => {
+                assert_eq!(stalled, None, "{ctx}: the frame stalled at is not torn");
                 assert_eq!(*offset, len_before, "{ctx}");
                 assert_eq!(c.recovery().truncated_from, None, "{ctx}");
             }
             ScanEnd::TornTail { offset, .. } => {
                 torn += 1;
+                assert!(
+                    stalled.is_none_or(|s| s == *offset),
+                    "{ctx}: stalled at {stalled:?}"
+                );
                 assert_eq!(c.recovery().truncated_from, Some(len_before), "{ctx}");
                 assert_eq!(std::fs::metadata(&path).unwrap().len(), *offset, "{ctx}");
             }
@@ -1159,7 +1213,7 @@ fn kill_9_writers_never_disturb_a_mapped_reader_process() {
         if rng.next_u64().is_multiple_of(4) {
             run_torn_writer("torn-writer-kill", &path);
         } else {
-            run_and_kill_writer(&path, &mut rng, &ctx);
+            run_and_kill_writer(&path, &mut rng, Kill::Timed, &ctx);
         }
         let mut c = Container::open(&path, Mode::ReadWrite)
             .unwrap_or_else(|e| panic!("{ctx}: recovery failed: {e}"));
