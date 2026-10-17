@@ -15,11 +15,11 @@ Arrows point from a dependency to the milestone that needs it (implied edges omi
 flowchart LR
   M0["✅ done<br/><b>M0</b> Project bootstrap<br/>26/26 · 100%"]:::done
   M1["✅ done<br/><b>M1</b> Format primitives<br/>53/53 · 100%"]:::done
-  M2["🔨 in progress<br/><b>M2</b> Storage abstraction & local backends<br/>37/44 · 84%"]:::doing
+  M2["🔨 in progress<br/><b>M2</b> Storage abstraction & local backends<br/>37/43 · 86%"]:::doing
   M3["▶️ ready<br/><b>M3</b> Schema, documents, collections<br/>0/15 · 0%"]:::ready
   M4["▶️ ready<br/><b>M4</b> Text analysis<br/>0/22 · 0%"]:::ready
   M5["⏳ blocked<br/><b>M5</b> Segment writer & reader<br/>0/36 · 0%"]:::blocked
-  M6["⏳ blocked<br/><b>M6</b> Write path, durability, merging<br/>0/29 · 0%"]:::blocked
+  M6["⏳ blocked<br/><b>M6</b> Write path, durability, merging<br/>0/30 · 0%"]:::blocked
   M7["⏳ blocked<br/><b>M7</b> Query engine & ranking<br/>0/29 · 0%"]:::blocked
   M8["⏳ blocked<br/><b>M8</b> Zero-results avoidance<br/>0/23 · 0%"]:::blocked
   M9["⏳ blocked<br/><b>M9</b> Blob store<br/>0/20 · 0%"]:::blocked
@@ -60,11 +60,11 @@ flowchart LR
 |---|---|---|--:|--:|--:|---|
 | **M0** Project bootstrap | ✅ done | `████████████████████` 100% | 26 | 0 | 26 | — |
 | **M1** Format primitives | ✅ done | `████████████████████` 100% | 53 | 0 | 53 | M0 |
-| **M2** Storage abstraction & local backends | 🔨 in progress | `█████████████████░░░` 84% | 37 | 0 | 44 | M1 |
+| **M2** Storage abstraction & local backends | 🔨 in progress | `█████████████████░░░` 86% | 37 | 0 | 43 | M1 |
 | **M3** Schema, documents, collections | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 15 | M1 |
 | **M4** Text analysis | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 22 | M0 |
 | **M5** Segment writer & reader | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 36 | M1, M3, M4 |
-| **M6** Write path, durability, merging | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M2, M5 |
+| **M6** Write path, durability, merging | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 30 | M2, M5 |
 | **M7** Query engine & ranking | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M5 |
 | **M8** Zero-results avoidance | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 23 | M7 |
 | **M9** Blob store | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 20 | M1, M2 |
@@ -83,7 +83,6 @@ _Nothing in progress._
 
 - `2.3.6` Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010; needs 2.4.4: the mappable `log_end` comes from the container superblock, so it lands with 2.4): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format` (M2)
 - `2.3.8` Sweep stale `@tmp.*` files a crashed writer left (ADR-0012): which process may delete them (pid no longer running, or age), and when (open, or a `persia` CLI command) (M2)
-- `2.4.6` Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine (deferred to M6: the container stores no object names, so the key → frame mapping is designed with the engine's manifest and write path, 6.x) (M2)
 - `2.4.17` Compaction copies each frame in bounded memory (found in 2.4.12: `Rewriter` reads a whole frame, so a large Segment needs its size in RAM; stream it with a running CRC, compressed frames included) (M2)
 - `2.4.18` Windows file identity for `compact`'s "the path still names this file" check (found in 2.4.16: the standard library exposes none; `GetFileInformationByHandle` needs FFI and an ADR) (M2)
 - `2.4.19` `persia` CLI: list and remove a container's quarantine files (ADR-0014) and stale temporary files (2.4.15) (M2)
@@ -96,7 +95,8 @@ _Nothing in progress._
 - `3.2.1` `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1) (M3)
 - `3.2.2` Validation against schema (types, multi-valued fields, limits: doc size, field count, id length) (M3)
 - `3.2.6` `f64` field values: decide and spec whether `-0.0`/NaN are canonicalized (or rejected) on write, so range filters on order-preserving keys (SPEC §5.2.1) never silently exclude values (M3)
-- … and 29 more
+- `3.2.3` CBOR encode/decode for DocStore; deterministic field order (M3)
+- … and 28 more
 
 ## Burn-up
 
