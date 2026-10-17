@@ -172,3 +172,57 @@ fn store_sweep_removes_stale_temporaries() {
     }
     assert!(root.join("segments@/1.seg").exists());
 }
+
+/// A quarantine copy the sweep's own open makes (of a corrupt tail) is never removed by that sweep: nobody has seen
+/// it yet (ADR-0014). The copies that existed before are.
+#[test]
+fn container_sweep_keeps_a_quarantine_copy_its_own_open_made() {
+    let (_dir, path) = container();
+    // Bytes after the last frame that are neither zeros nor frames: a read-write open quarantines them.
+    let mut bytes = std::fs::read(&path).unwrap();
+    bytes.extend_from_slice(&[0xab; 100]);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let out = persia(&["container", "sweep", "--quarantine", path_arg(&path)]);
+    let got = lines(&out);
+    assert!(
+        got.contains(&row("removed", "quarantine", "free", QUARANTINE)),
+        "{got:?}"
+    );
+    let new: Vec<_> = got
+        .iter()
+        .filter(|(a, k, _, n)| a == "kept" && k == "quarantine" && n != QUARANTINE)
+        .collect();
+    assert_eq!(new.len(), 1, "{got:?}");
+    assert!(path.with_file_name(&new[0].3).exists());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("kept for inspection"), "{err}");
+    // A second sweep removes it: by now it was listed.
+    let again = lines(&persia(&[
+        "container",
+        "sweep",
+        "--quarantine",
+        path_arg(&path),
+    ]));
+    assert_eq!(again, [row("removed", "quarantine", "free", &new[0].3)]);
+}
+
+/// A relative path works like the absolute one: the removed files are matched against the listing whichever way
+/// the container was named.
+#[test]
+fn container_sweep_with_a_relative_path() {
+    let (dir, path) = container();
+    let out = Command::new(env!("CARGO_BIN_EXE_persia"))
+        .args(["container", "sweep", "--quarantine", "app.persia"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(
+        lines(&out),
+        [
+            row("removed", "quarantine", "free", QUARANTINE),
+            row("removed", "temporary", "free", TMP),
+        ]
+    );
+    assert!(!path.with_file_name(TMP).exists());
+}

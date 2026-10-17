@@ -201,17 +201,39 @@ fn side_files_lists_temporaries_and_quarantines_and_removes_nothing() {
 #[test]
 fn quarantine_files_are_removed_durably_by_a_writer_only() {
     let fs = with_stale_files();
+    let q = [PathBuf::from(QUARANTINE)];
     let ro = Container::open_in(vfs(&fs), DB, Mode::ReadOnly).unwrap();
     assert!(matches!(
-        ro.remove_quarantine_files(),
+        ro.remove_quarantine_files(&q),
         Err(Error::ReadOnly { .. })
     ));
     drop(ro);
     let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    // Only this container's quarantine files: a temporary file, another container's file or another directory's
+    // are refused, and nothing is removed.
+    let before = names(&fs);
+    for bad in [
+        "/db/app.persia.tmp.00000000000000ff.7",
+        "/db/other.persia.quarantine.0000000000003028.0123456789abcdef.1",
+        "/elsewhere/app.persia.quarantine.0000000000003028.0123456789abcdef.1",
+        "/db/app.persia",
+    ] {
+        let paths = [q[0].clone(), PathBuf::from(bad)];
+        assert!(
+            matches!(
+                c.remove_quarantine_files(&paths),
+                Err(Error::InvalidInput(_))
+            ),
+            "{bad}"
+        );
+        assert_eq!(names(&fs), before, "{bad}");
+    }
     assert_eq!(
-        c.remove_quarantine_files().unwrap(),
-        [PathBuf::from(QUARANTINE)]
+        c.remove_quarantine_files(&[]).unwrap(),
+        Vec::<PathBuf>::new()
     );
+    assert_eq!(names(&fs), before, "an empty list removes nothing");
+    assert_eq!(c.remove_quarantine_files(&q).unwrap(), q);
     let kept = names(&fs.crash(CrashLoss::All));
     assert!(!kept.iter().any(|n| n.contains(".quarantine.")), "{kept:?}");
     assert_eq!(
@@ -220,7 +242,7 @@ fn quarantine_files_are_removed_durably_by_a_writer_only() {
         "the stale temporaries are a separate sweep: {kept:?}"
     );
     assert_eq!(
-        c.remove_quarantine_files().unwrap(),
+        c.remove_quarantine_files(&q).unwrap(),
         Vec::<PathBuf>::new(),
         "idempotent"
     );

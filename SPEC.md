@@ -271,7 +271,8 @@ nothing. The container is reopened, and recovery decides what survived.
   of its container (`<name>.tmp.*`, `<name>.compact.*`) on request (`sweep_stale_files`, ROADMAP 2.4.15): holding the
   writer lock, no compaction can be in flight, and a temporary file whose own lock is held belongs to a live create,
   which is skipped. Quarantine files (§4.4) are never removed by that sweep: they may hold acknowledged writes, and a
-  writer removes them only on an operator's explicit request (`remove_quarantine_files`). Both kinds can be listed
+  writer removes them only on an operator's explicit request, naming them (`remove_quarantine_files`; the CLI names
+  those listed before its own open). Both kinds can be listed
   by path without opening the container (`side_files`), each temporary file with whether its lock is held
   (ADR-0018, ROADMAP 2.4.19; `persia container sweep`).
 - **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
@@ -867,9 +868,11 @@ above.
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
   leave one behind; it holds no acknowledged data. A `put` holds an exclusive lock on its temporary file (Unix
   `flock`) from just after creating it until the name is gone, and after locking checks that the name still names
-  its file, taking another name if not. `sweep_temporaries` removes, only on request (never at `open`), every
-  temporary file whose lock it can take, while holding it; on Windows, where files are not locked, it removes none
-  unless forced (ADR-0018, ROADMAP 2.3.8; `persia store sweep`).
+  its file, taking another name if not (removing its file first if another handle holds the lock: a listing).
+  `sweep_temporaries` removes, only on request (never at `open`), every temporary file whose lock it can take, while
+  holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0018, ROADMAP 2.3.8;
+  `persia store sweep`). This relies on `flock` locking per open file description; where it is emulated with
+  per-process locks (Linux NFS, some FUSE mounts), sweep only an idle store.
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

@@ -263,6 +263,9 @@ enum Race {
     Removed,
     /// It holds the lock and removed the file, and has not released the lock yet: the writer's lock fails.
     Holding,
+    /// A listing holds the lock for an instant and removes nothing: the writer's lock fails, and the file would stay
+    /// behind unless the writer removes it.
+    Listed,
 }
 
 /// A `SimFs` whose next `create_new` of a temporary file is interfered with as in [`Race`].
@@ -286,6 +289,11 @@ impl Vfs for Racing {
             .starts_with("@tmp.");
         match self.race.lock().unwrap().take_if(|_| temp) {
             Some(Race::Removed) => self.fs.remove_file(path)?,
+            Some(Race::Listed) => {
+                let listing = self.fs.open(path, false)?;
+                assert!(listing.try_lock()?);
+                self.held.lock().unwrap().push(listing);
+            }
             Some(Race::Holding) => {
                 let sweep = self.fs.open(path, false)?;
                 assert!(sweep.try_lock()?);
@@ -335,11 +343,11 @@ impl Vfs for Racing {
     }
 }
 
-/// The two ways a sweep can take a temporary file before its writer locks it: either way the writer notices, takes
+/// The ways a sweep or a listing can take a temporary file before its writer locks it: each time the writer notices, takes
 /// another name, and its `put` or `put_if_absent` succeeds with nothing left behind.
 #[test]
 fn a_put_whose_temporary_a_sweep_took_retries_under_another_name() {
-    for race in [Race::Removed, Race::Holding] {
+    for race in [Race::Removed, Race::Holding, Race::Listed] {
         for if_absent in [false, true] {
             let ctx = format!("{race:?}, put_if_absent: {if_absent}");
             let fs = SimFs::new();
@@ -368,9 +376,34 @@ fn a_put_whose_temporary_a_sweep_took_retries_under_another_name() {
             assert_eq!(*vfs.race.lock().unwrap(), None, "{ctx}: the race happened");
             // The sweep that held a lock releases it; nothing is left.
             drop(std::mem::take(&mut *vfs.held.lock().unwrap()));
+            assert_eq!(
+                store.temporaries().unwrap(),
+                [],
+                "{ctx}: nothing left behind"
+            );
             let left: Vec<_> = store.sweep_temporaries(false).unwrap();
             assert!(left.iter().all(|f| f.removed), "{ctx}: {left:?}");
             assert_eq!(store.temporaries().unwrap(), [], "{ctx}");
         }
     }
+}
+
+/// Windows locks no files, so whether a temporary file is in use is unknown: a sweep keeps every one unless forced.
+#[cfg(windows)]
+#[test]
+fn on_windows_only_a_forced_sweep_removes_temporaries() {
+    let (dir, store) = littered();
+    let kept = store.sweep_temporaries(false).unwrap();
+    assert_eq!(kept.len(), STALE.len());
+    assert!(
+        kept.iter()
+            .all(|f| f.in_use == InUse::Unknown && !f.removed),
+        "{kept:?}"
+    );
+    for s in STALE {
+        assert!(dir.path().join(s).exists(), "{s}");
+    }
+    let forced = store.sweep_temporaries(true).unwrap();
+    assert!(forced.iter().all(|f| f.removed), "{forced:?}");
+    assert_eq!(store.temporaries().unwrap(), []);
 }

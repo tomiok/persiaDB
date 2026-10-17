@@ -101,7 +101,12 @@ impl<F: ContainerFile + 'static> Container<F> {
     pub fn side_files_in(vfs: &dyn Vfs<File = F>, path: impl AsRef<Path>) -> Result<Vec<SideFile>> {
         let path = path.as_ref();
         // A container behind a symbolic link has its side files next to its target, as `open_in` finds it.
-        let path = vfs.canonicalize(path).unwrap_or_else(|_| path.to_owned());
+        let path = match vfs.canonicalize(path) {
+            Ok(path) => path,
+            // No container there (yet): its side files would still be next to the path.
+            Err(err) if err.kind() == io::ErrorKind::NotFound => path.to_owned(),
+            Err(err) => return Err(Error::io("canonicalize")(err)),
+        };
         let (_, found) = scan(vfs, &path)?;
         let mut files = Vec::new();
         for (path, kind) in found {
@@ -137,24 +142,49 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::InvalidInput`] without a path, or [`Error::Io`] listing the
     /// directory, removing a file or syncing the directory (files removed before the error stay removed).
     pub fn sweep_stale_files(&self) -> Result<Vec<PathBuf>> {
-        self.remove_side_files(SideFileKind::Temporary)
+        self.remove_side_files(SideFileKind::Temporary, None)
     }
 
-    /// Removes the quarantine copies that recoveries of this container made of corrupt tails (ADR-0014), and returns
-    /// their paths. **A quarantine copy may hold acknowledged writes** that recovery could not prove stale: remove
-    /// them only once an operator has inspected or saved them (`persia container sweep --quarantine`, ROADMAP 2.4.19).
+    /// Removes the given quarantine copies of this container (ADR-0014), as [`Container::side_files`] listed them,
+    /// and returns the paths it removed; those already gone are skipped. **A quarantine copy may hold acknowledged
+    /// writes** that recovery could not prove stale: pass only copies an operator has inspected or saved (`persia
+    /// container sweep --quarantine` passes those listed before it opened the container, never one its own open
+    /// made; ROADMAP 2.4.19).
     ///
     /// Needs a read-write handle opened by path: holding the writer lock, no recovery of this container can be adding
     /// one meanwhile.
     ///
     /// # Errors
-    /// As [`Container::sweep_stale_files`].
-    pub fn remove_quarantine_files(&self) -> Result<Vec<PathBuf>> {
-        self.remove_side_files(SideFileKind::Quarantine)
+    /// [`Error::InvalidInput`] if a path is not a quarantine file next to this container (nothing is removed then),
+    /// otherwise as [`Container::sweep_stale_files`].
+    pub fn remove_quarantine_files(&self, paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
+        let location = self.location.as_ref().ok_or_else(|| {
+            Error::InvalidInput("the container was not opened from a path".into())
+        })?;
+        let dir = parent_or_cwd(&location.path);
+        let container = location.path.file_name().and_then(|n| n.to_str());
+        for path in paths {
+            let name = path.file_name().and_then(|n| n.to_str());
+            let ours = path.parent() == Some(dir)
+                && name.zip(container).and_then(|(n, c)| kind_of(n, c))
+                    == Some(SideFileKind::Quarantine);
+            if !ours {
+                return Err(Error::InvalidInput(format!(
+                    "{} is not a quarantine file of {}",
+                    path.display(),
+                    location.path.display()
+                )));
+            }
+        }
+        self.remove_side_files(SideFileKind::Quarantine, Some(paths))
     }
 
-    /// Removes the side files of `kind` that no writer holds.
-    fn remove_side_files(&self, kind: SideFileKind) -> Result<Vec<PathBuf>> {
+    /// Removes the side files of `kind` (only those in `only`, if given) that no writer holds.
+    fn remove_side_files(
+        &self,
+        kind: SideFileKind,
+        only: Option<&[PathBuf]>,
+    ) -> Result<Vec<PathBuf>> {
         self.writable()?;
         let location = self.location.as_ref().ok_or_else(|| {
             Error::InvalidInput("the container was not opened from a path".into())
@@ -162,30 +192,49 @@ impl<F: ContainerFile + 'static> Container<F> {
         let vfs = &*location.vfs;
         let (dir, found) = scan(vfs, &location.path)?;
         let mut removed = Vec::new();
-        for (path, _) in found.into_iter().filter(|(_, k)| *k == kind) {
-            let file = match vfs.open(&path, false) {
-                Ok(file) => file,
-                // Gone meanwhile: its creator removed it.
-                Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                Err(err) => return Err(Error::io("open side file")(err)),
-            };
-            // A temporary file held by a live create. On Windows files are not locked (the lock is beside the
-            // container): no check, and the writer lock this handle holds excludes compactions.
-            if side::try_lock(&file).map_err(Error::io("lock"))? == Some(false) {
-                continue;
-            }
-            drop(file);
-            match vfs.remove_file(&path) {
-                Ok(()) => removed.push(path),
-                Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(Error::io("remove side file")(err)),
+        let wanted = found
+            .into_iter()
+            .filter(|(path, k)| *k == kind && only.is_none_or(|only| only.contains(path)));
+        let mut result = Ok(());
+        for (path, _) in wanted {
+            match remove_unless_held(vfs, &path) {
+                Ok(true) => removed.push(path),
+                Ok(false) => {}
+                Err(err) => {
+                    result = Err(err);
+                    break;
+                }
             }
         }
+        // Even after an error: what was removed stays removed across a crash.
         if !removed.is_empty() {
             vfs.sync_dir(&dir).map_err(Error::io("sync directory"))?;
         }
-        Ok(removed)
+        result.map(|()| removed)
     }
+}
+
+/// Removes the side file at `path` unless a live writer holds its lock, holding the lock across the removal (ADR-0018):
+/// whether it removed it.
+fn remove_unless_held<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) -> Result<bool> {
+    let file = match vfs.open(path, false) {
+        Ok(file) => file,
+        // Gone meanwhile: its creator removed it.
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(err) => return Err(Error::io("open side file")(err)),
+    };
+    // A temporary file held by a live create. On Windows files are not locked (the lock is beside the container): no
+    // check, and the writer lock this handle holds excludes compactions.
+    if side::try_lock(&file).map_err(Error::io("lock"))? == Some(false) {
+        return Ok(false);
+    }
+    let removed = match vfs.remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(err) => Err(Error::io("remove side file")(err)),
+    };
+    drop(file);
+    removed
 }
 
 #[cfg(test)]

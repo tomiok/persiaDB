@@ -131,7 +131,9 @@ impl<V: Vfs> LocalStorage<V> {
     }
 
     /// The temporary files of `put`s under the root (`@tmp.*`, SPEC §10.1.1), each with whether a live `put` is
-    /// writing it. Removes none: see [`LocalStorage::sweep_temporaries`].
+    /// writing it. Removes none: see [`LocalStorage::sweep_temporaries`]. It finds out by taking each file's lock for
+    /// an instant; a `put` that meets the lock then removes its file and takes another name, so a listing never
+    /// leaves a file behind or makes a `put` fail.
     ///
     /// # Errors
     /// The OS error listing a directory or opening or locking a file.
@@ -177,37 +179,59 @@ impl<V: Vfs> LocalStorage<V> {
         let mut dirs = vec![self.root.clone()];
         while let Some(dir) = dirs.pop() {
             let mut removed_here = false;
-            for entry in self.vfs.read_dir(&dir)? {
-                let path = dir.join(&entry.name);
-                match entry.kind {
-                    // Listed without following links: a directory here is a real one.
-                    FileType::Dir => dirs.push(path),
-                    FileType::File if entry.name.to_str().is_some_and(is_temp_name) => {
-                        if let Some(file) = self.check_temp(path, remove)? {
-                            removed_here |= file.removed;
-                            found.push(file);
-                        }
-                    }
-                    FileType::File | FileType::Other => {}
-                }
-            }
-            if removed_here {
-                self.vfs.sync_dir(&dir)?;
-            }
+            let walked = self.walk_dir(&dir, remove, &mut dirs, &mut found, &mut removed_here);
+            // Even after an error: what was removed stays removed across a crash.
+            let synced = if removed_here {
+                self.vfs.sync_dir(&dir).map_err(|err| with_path(err, &dir))
+            } else {
+                Ok(())
+            };
+            walked.and(synced)?;
         }
         found.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(found)
+    }
+
+    /// One directory of [`LocalStorage::walk_temporaries`]: queues its subdirectories, checks its temporary files.
+    fn walk_dir(
+        &self,
+        dir: &Path,
+        remove: Option<bool>,
+        dirs: &mut Vec<PathBuf>,
+        found: &mut Vec<SideFile>,
+        removed_here: &mut bool,
+    ) -> io::Result<()> {
+        for entry in self.vfs.read_dir(dir).map_err(|err| with_path(err, dir))? {
+            let path = dir.join(&entry.name);
+            match entry.kind {
+                // Listed without following links: a directory here is a real one.
+                FileType::Dir => dirs.push(path),
+                FileType::File if entry.name.to_str().is_some_and(is_temp_name) => {
+                    if let Some(file) = self.check_temp(path, remove)? {
+                        *removed_here |= file.removed;
+                        found.push(file);
+                    }
+                }
+                FileType::File | FileType::Other => {}
+            }
+        }
+        Ok(())
     }
 
     /// Whether the temporary file at `path` is in use, removing it if `remove` allows; `None` if it is gone.
     fn check_temp(&self, path: PathBuf, remove: Option<bool>) -> io::Result<Option<SideFile>> {
         let file = match self.vfs.open(&path, false) {
             Ok(file) => file,
-            // Renamed or removed by its `put` meanwhile.
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(err) => return Err(err),
+            // Renamed or removed by its `put` meanwhile; on Windows, being removed (pending deletion refuses opens).
+            Err(err)
+                if err.kind() == io::ErrorKind::NotFound
+                    || (cfg!(windows) && err.kind() == io::ErrorKind::PermissionDenied) =>
+            {
+                return Ok(None);
+            }
+            Err(err) => return Err(with_path(err, &path)),
         };
-        let in_use = InUse::of(side::try_lock(&file)?);
+        let in_use = InUse::of(side::try_lock(&file).map_err(|err| with_path(err, &path))?);
         let removable = match in_use {
             InUse::No => remove.is_some(),
             InUse::Unknown => remove == Some(true),
@@ -220,7 +244,7 @@ impl<V: Vfs> LocalStorage<V> {
             match self.vfs.remove_file(&path) {
                 Ok(()) => removed = true,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(err) => return Err(err),
+                Err(err) => return Err(with_path(err, &path)),
             }
         }
         drop(file);
@@ -383,14 +407,20 @@ impl<V: Vfs> LocalStorage<V> {
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(err) => return Err(err),
             };
-            // A sweep removes a temporary file only while holding its lock. One that locked this file between its
-            // creation and here holds it now, or has removed it: either way the name is lost, so take another.
+            // A sweep removes a temporary file only while holding its lock, and a listing takes it for an instant.
+            // One that locked this file between its creation and here has removed it (the name is no longer this
+            // file), or holds it now: then this `put` removes it itself, as a listing would leave it, and either way
+            // takes another name.
             let claimed = side::try_lock(&file).and_then(|locked| match locked {
                 Some(true) => self
                     .vfs
                     .same_file(&file, &path)
                     .map(|ours| ours.then_some(true)),
-                Some(false) => Ok(None),
+                // Only where files lock (Unix), where removing an open file is fine.
+                Some(false) => match self.vfs.remove_file(&path) {
+                    Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
+                    _ => Ok(None),
+                },
                 None => Ok(Some(false)),
             });
             let locked = match claimed {
@@ -813,6 +843,12 @@ fn is_temp_name(name: &str) -> bool {
         && nonce.bytes().all(|b| b.is_ascii_hexdigit())
         && !n.is_empty()
         && n.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// `err` with `path` in its message, keeping its kind.
+#[allow(clippy::needless_pass_by_value)] // Used as `map_err(|err| with_path(err, ..))`: the error is replaced.
+fn with_path(err: io::Error, path: &Path) -> io::Error {
+    io::Error::new(err.kind(), format!("{}: {err}", path.display()))
 }
 
 #[cfg(test)]

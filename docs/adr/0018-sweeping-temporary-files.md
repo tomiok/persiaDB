@@ -29,7 +29,9 @@ takes.
 2. **The handshake closes the race.** Between creating its file and locking it, a `put` can lose it to a sweep. After
    taking the lock it checks that the name still names its file (`Vfs::same_file`); if the lock was held by a sweep,
    or the name is gone, it takes another name. Every `put` that reaches its rename therefore holds the lock on the
-   file the name designates, and no sweep can remove it.
+   file the name designates, and no sweep can remove it. A listing (`temporaries`, `Container::side_files`) also
+   takes each lock for an instant; a `put` that meets a held lock removes its own just-created file before taking
+   another name, so neither a listing nor a sweep leaves a file behind or makes a `put` fail.
 3. **On request only.** Sweeping walks the whole store, so `LocalStorage::open` never does it.
    `LocalStorage::sweep_temporaries` and `temporaries` (list only) are called by an operator or a maintenance job,
    e.g. `persia store sweep` (ADR-0019). The container's `sweep_stale_files` stays as it is (2.4.15), and
@@ -40,7 +42,8 @@ takes.
    it holds the container's writer lock, which excludes the creates and compactions that make those files.
 5. **Quarantine copies are never swept as stale.** They may hold acknowledged writes (ADR-0014). They are listed with
    the temporary files and removed only by `Container::remove_quarantine_files`, through a read-write handle, at an
-   operator's explicit request.
+   operator's explicit request, and only the copies named: `persia container sweep --quarantine` names those listed
+   before its own open, never one that open's recovery just made.
 
 ## Consequences
 
@@ -51,6 +54,10 @@ takes.
 - A sweep that takes a file in the instant before its writer locks it costs that writer one more temporary name,
   never an error.
 - On Windows a local store's temporary files accumulate unless an operator forces a sweep while the store is idle.
+- **The handshake assumes `flock` locks per open file description**, as on local Linux and macOS file systems. Where
+  `flock` is emulated with per-process POSIX locks (Linux NFS, some FUSE and CIFS mounts), a sweep in the same
+  process as a `put` can take that `put`'s file and the `put` fails at its rename. No data is lost (it was never
+  acknowledged), but such stores should be swept only while idle, until 2.3.10's file-system detection can tell.
 
 ## Alternatives considered
 

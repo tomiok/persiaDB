@@ -15,7 +15,7 @@ pub mod local;
 pub mod memory;
 pub mod meta;
 pub mod retry;
-pub mod side;
+mod side;
 pub mod storage;
 pub mod vfs;
 

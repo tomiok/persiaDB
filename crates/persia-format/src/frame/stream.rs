@@ -481,8 +481,9 @@ struct Reframer<'w, W> {
     /// Set by the header.
     encoder: Option<FrameEncoder>,
     write: &'w mut W,
-    /// Bytes not yet passed to `write`, at most `cap`: a small frame's header, payload and trailer go out as one
-    /// write (ROADMAP 2.4.21), and a large one's payload in chunks of the scan's length.
+    /// Bytes not yet passed to `write`, at most `cap`: a frame no longer than `cap` goes out as one write (ROADMAP
+    /// 2.4.21). A longer one goes out as its header, then its payload in the scan's chunks (each written as read), then
+    /// its trailer, possibly with the last payload bytes.
     pending: Vec<u8>,
     cap: usize,
 }
@@ -517,6 +518,9 @@ impl<W> Reframer<'_, W> {
 
 impl<E, W: FnMut(&[u8]) -> Result<(), E>> Sink<E> for Reframer<'_, W> {
     fn header(&mut self, header: &FrameHeader) -> Result<(), E> {
+        // One allocation per frame, of what it can queue.
+        let queued = usize::try_from(header.total_len()).map_or(self.cap, |len| len.min(self.cap));
+        self.pending.reserve(queued);
         let encoder = FrameEncoder::reframing(header, self.frame_seq);
         self.emit(encoder.header())?;
         self.encoder = Some(encoder);

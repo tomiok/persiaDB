@@ -33,7 +33,8 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum ContainerCommand {
-    /// Lists the temporary and quarantine files next to a container. Opens nothing.
+    /// Lists the temporary and quarantine files next to a container. Takes no writer lock: it only probes each
+    /// temporary file's lock for an instant (a create racing with it may then fail with "locked" and be retried).
     Files {
         /// The container file.
         path: PathBuf,
@@ -43,7 +44,8 @@ enum ContainerCommand {
     Sweep {
         /// The container file.
         path: PathBuf,
-        /// Also remove the quarantine copies of corrupt tails. They may hold acknowledged writes: save or inspect
+        /// Also remove the quarantine copies of corrupt tails that existed before this command (those its own open
+        /// makes are kept, for you to see first). They may hold acknowledged writes: save or inspect
         /// them first.
         #[arg(long)]
         quarantine: bool,
@@ -114,6 +116,12 @@ fn container_sweep(path: &Path, quarantine: bool) -> Result<()> {
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
     }
+    // Only quarantine copies that existed before this open, which an operator could have inspected (ADR-0014).
+    let seen: Vec<PathBuf> = container_files(path)?
+        .into_iter()
+        .filter(|f| f.kind == SideFileKind::Quarantine)
+        .map(|f| f.path)
+        .collect();
     let c = match Container::open(path, Mode::ReadWrite) {
         Ok(c) => c,
         Err(ContainerError::Locked) => {
@@ -124,14 +132,14 @@ fn container_sweep(path: &Path, quarantine: bool) -> Result<()> {
         }
         Err(err) => return Err(err).with_context(|| format!("opening {}", path.display())),
     };
-    // Listed after the open, so a quarantine copy its recovery made is included.
+    // Listed after the open, so a quarantine copy its recovery made is reported (as kept).
     let mut files = container_files(path)?;
     let mut removed = c
         .sweep_stale_files()
         .context("removing stale temporary files")?;
     if quarantine {
         removed.extend(
-            c.remove_quarantine_files()
+            c.remove_quarantine_files(&seen)
                 .context("removing quarantine files")?,
         );
     }
@@ -141,6 +149,15 @@ fn container_sweep(path: &Path, quarantine: bool) -> Result<()> {
     let (removed, kept): (Vec<_>, Vec<_>) = files.into_iter().partition(|f| f.removed);
     print_files("removed", &removed);
     print_files("kept", &kept);
+    let made = kept
+        .iter()
+        .filter(|f| f.kind == SideFileKind::Quarantine && !seen.contains(&f.path))
+        .count();
+    if made > 0 {
+        eprintln!(
+            "persia: opening the container quarantined a corrupt tail into {made} new file(s), kept for inspection"
+        );
+    }
     Ok(())
 }
 
