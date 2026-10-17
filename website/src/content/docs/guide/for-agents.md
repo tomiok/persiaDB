@@ -35,14 +35,16 @@ The following names appear in the SPEC and the README. They are **not** Rust ite
 
 A search result's `relaxation` object (`level`, `applied`, `original`, `effective`, `corrected`) is specified in SPEC §7.6 and returned by nothing today.
 
-Code that only needs the byte codecs can use `persia-format` (`Header`, `Reader`, `Writer`, and the modules listed in [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L33)). Quote those from the source. The [code](/guide/code/) page links the line ranges.
+There is no Go module and no npm package. `sdk/go` in the SPEC is a future gRPC client. The embedded Go and TypeScript design ([Embedded SDKs](/guide/sdks/), [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md)) is a document, not a library. Do not emit `import "github.com/tomiok/persiaDB/sdk/persia"` or `import { open } from "@persiadb/node"` as working code.
+
+Code that only needs the byte codecs can use `persia-format` (`Header`, `Reader`, `Writer`, `BlobId`, `BlobRef`, and the modules listed in [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L40)). Quote those from the source. The [code](/guide/code/) page links the line ranges.
 
 ## Constraints on patches
 
 [CLAUDE.md](https://github.com/tomiok/persiaDB/blob/main/CLAUDE.md) is the engineering ruleset. The short list:
 
 - The engine is written here. Do not add Tantivy, Lucene, SQLite, RocksDB, or another search or storage engine.
-- `unsafe` is forbidden except `persia-format`'s mmap, and each block needs a `SAFETY` comment and an ADR.
+- `unsafe` is allowed only in files listed in `xtask/src/repo_checks.rs` (`UNSAFE_ALLOWED`): `persia-format`'s mmap and the container's mapped-read module. Each block needs a `SAFETY` comment and an ADR. ADR-0018 reserves one future module, the C exports of `persia-ffi`, which is not in the tree.
 - Bytes from disk, network, or callers return `Err`, never a panic. Corruption is `Error::Corrupt`.
 - A change to on-disk layout updates SPEC.md, bumps a version or feature flag, adds an ADR, and adds a golden test.
 - Segments are immutable once written. Data is written first, the commit record last, then fsync.

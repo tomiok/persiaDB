@@ -18,7 +18,8 @@ Everything in this section is **planned** unless a paragraph says a primitive is
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
-| Rust and Go SDKs | Planned (M14) | SPEC §13 |
+| Embedded Go and TypeScript bindings | Planned (after M10). Design only. | SPEC §13.1, [Embedded SDKs](/guide/sdks/) |
+| Rust and Go network SDKs | Planned (M14) | SPEC §13.2 |
 | Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1, except 1.4.4) | SPEC §4.1, §5.2 |
 
 ## Search and ranking

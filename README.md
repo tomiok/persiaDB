@@ -52,6 +52,7 @@ let results = products.search("runing")?;
 | [`CLAUDE.md`](./CLAUDE.md) | Engineering rules for contributors (human or AI) |
 | [`docs/architecture.md`](./docs/architecture.md) | Map of the code: layers, crates, write and query paths |
 | [`docs/adr/`](./docs/adr/) | Architecture decision records |
+| [`docs/sdk/`](./docs/sdk/README.md) | Design for the embedded Go and TypeScript SDKs (ADR-0018). Not implemented. |
 
 ## License
 

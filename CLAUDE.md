@@ -31,13 +31,16 @@ crates/
   persia-engine/    # segments, indexing, WAL, compaction, query, scoring, relaxation
   persia-blob/      # content-addressed blob store (chunks, dedup, GC)
   persia/           # public embedded API (Db, Collection) — the facade users import
+  persia-ffi/       # planned C ABI for embedded Go and TypeScript (ADR-0018). Not created yet.
   persia-proto/     # .proto definitions + generated code
   persia-server/    # gRPC + HTTP server binary (Docker image)
   persia-cli/       # `persia` CLI: inspect, dump, verify, compact, bench
   persia-testutil/  # dev-only: shared proptest strategies, synthetic generators, test helpers (never a normal dependency)
 sdk/
-  rust/             # persia-client (network client)
-  go/               # persia-go (network client)
+  rust/             # persia-client, network client (SPEC §13.2). Not created yet.
+  go/               # persia-go, network client (SPEC §13.2). Not created yet.
+  persia/           # planned embedded Go binding, package persia, cgo (ADR-0018). Not created yet.
+  node/             # planned TypeScript N-API package (ADR-0018). Outside the Cargo workspace. Not created yet.
 tests/
   fixtures/         # golden files opened by CI forever (SPEC §15); format/v<major>.<minor>/ per format version
   integration/      # cross-crate + docker-compose based tests
@@ -106,7 +109,8 @@ Always run fmt, clippy and tests before declaring a task done.
 - `persia-engine` is **synchronous** and storage-agnostic; it talks to I/O only through the `Storage` trait.
   `async` lives in `persia-storage` cloud backends and `persia-server`.
 - Dependencies point downward. No cycles, no upward edges (enforced by `cargo xtask check-deps`; `ALLOWED` in `xtask/src/check_deps.rs` is the source of truth):
-  - `persia-format` ← `persia-storage` ← `persia-engine` ← `persia` ← `persia-server` ← SDKs (`persia-proto` sits beside `persia-server`).
+  - `persia-format` ← `persia-storage` ← `persia-engine` ← `persia` ← `persia-server` ← network SDKs (`persia-proto` sits beside `persia-server`).
+  - A future `persia-ffi` (ADR-0018) may depend only on `persia`. It is not in the workspace. Adding it updates `ALLOWED` in `xtask/src/check_deps.rs` and `UNSAFE_ALLOWED` in `xtask/src/repo_checks.rs` in the same change. The TypeScript package lives outside the workspace so its build script does not violate the no-`build.rs` rule.
   - `persia-analysis` has no internal dependencies; it is used by `persia-engine`.
   - `persia-blob` depends on `persia-format` + `persia-storage`; it is used by `persia` (not by the engine).
     Shared value types (`BlobRef`, `BlobId`) live in `persia-format` so the engine can store them.
