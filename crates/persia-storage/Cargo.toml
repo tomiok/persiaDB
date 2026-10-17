@@ -12,6 +12,7 @@ thiserror.workspace = true
 bytes.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
 
@@ -21,3 +22,7 @@ slow = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "container_read"
+harness = false
