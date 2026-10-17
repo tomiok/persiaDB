@@ -878,6 +878,57 @@ fn reframe_copies_a_large_frame_exactly() {
     }
 }
 
+/// A frame no larger than the chunk is copied with one write, and a larger one with one write per chunk of its bytes
+/// (rounded up, plus one where the header and trailer spill over): header, payload and trailer are coalesced
+/// (ROADMAP 2.4.21).
+#[test]
+fn reframe_coalesces_its_writes() {
+    for (payload_len, chunk) in [
+        (0, 64),
+        (1, 64),
+        (100, 65536),
+        (4000, 4096),
+        (100_000, 4096),
+        (300_000, 65536),
+    ] {
+        let mut w = Writer::new();
+        encode_frame(
+            &mut w,
+            FrameKind::WalChunk,
+            1,
+            &vec![3; payload_len],
+            Compression::None,
+        )
+        .unwrap();
+        let bytes = w.into_inner();
+        let got = reframe_at(&bytes, 12288, 12288, chunk, 2, None);
+        assert!(got.result.as_ref().is_ok_and(Result::is_ok));
+        assert_eq!(got.written.len(), bytes.len());
+        let writes: Vec<usize> = got
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Write { len } => Some(*len),
+                Op::Read { .. } => None,
+            })
+            .collect();
+        let most = bytes.len().div_ceil(chunk) + 1;
+        if bytes.len() <= chunk {
+            assert_eq!(
+                writes,
+                [bytes.len()],
+                "payload {payload_len}, chunk {chunk}"
+            );
+        } else {
+            assert!(
+                writes.len() <= most,
+                "payload {payload_len}, chunk {chunk}: {writes:?}"
+            );
+        }
+        assert!(writes.iter().all(|&n| n <= chunk), "{writes:?}");
+    }
+}
+
 #[cfg(feature = "slow")]
 proptest! {
     #![proptest_config(config(1000))]

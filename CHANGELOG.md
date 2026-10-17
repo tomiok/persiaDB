@@ -51,7 +51,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia` CLI: `persia container files|sweep [--quarantine] <path>` and `persia store files|sweep [--force] <dir>`
   list and remove those files, one tab-separated line per file.
 - `persia-storage`: compaction copies each frame in bounded 64 KiB chunks, validating it on the way, so compacting a
-  container with a large Segment frame no longer needs that much memory. `persia-format`: `StreamScanner::reframe`.
+  container with a large Segment frame no longer needs that much memory, and a small frame is copied with one write
+  (`benches/compaction.rs`). `persia-format`: `StreamScanner::reframe`.
 - `persia-storage`: `Container::append_stream` appends a frame whose payload is written in chunks (`FrameWriter`).
 - `persia-storage`: a read-write open whose frames after the last commit end in corruption no longer always fails
   (ADR-0014): zeros and stale frames are truncated, other bytes are copied to a `<name>.quarantine.*` file first, and

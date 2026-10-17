@@ -26,3 +26,7 @@ workspace = true
 [[bench]]
 name = "container_read"
 harness = false
+
+[[bench]]
+name = "compaction"
+harness = false
