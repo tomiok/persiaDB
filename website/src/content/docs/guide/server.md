@@ -80,8 +80,11 @@ GCP, and Azure are part of that milestone (ROADMAP 13.5).
 
 ## SDKs
 
+These are the **network** clients. Embedded Go and TypeScript, which open a file in-process, are a
+different design: [Embedded SDKs](/guide/sdks/) (ADR-0018). Neither family is implemented.
+
 Rust (`sdk/rust`, crate `persia-client`) and Go (`sdk/go`, module `persia-go`) sit on the same
-protocol (SPEC §13). Each adds connection pooling, retries with backoff on idempotent calls,
+protocol (SPEC §13.2). Each adds connection pooling, retries with backoff on idempotent calls,
 deadlines, batching, blob streaming, and shard-aware writes. A shared, language-neutral conformance
 suite runs against both SDKs and the server (ROADMAP 14.1). A compatibility matrix is part of the
 SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after the protocol exists.

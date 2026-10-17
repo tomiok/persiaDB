@@ -28,7 +28,7 @@ while a dependency is unfinished.
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/22 |
 | **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/28 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go clients | M11; M13 for shard routing | Blocked, 0/17 |
+| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/17 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
 
 Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan (1.7.1–1.7.4) are done.
@@ -144,7 +144,8 @@ behind a flag.
 
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation.
+automation. These are network clients. In-process Go and TypeScript bindings are a separate design
+([Embedded SDKs](/guide/sdks/)), blocked on M10, with no roadmap leaves yet.
 
 ## M15 — Benchmarks, hardening, v1.0
 

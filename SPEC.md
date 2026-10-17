@@ -14,7 +14,8 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 - Storable in the local filesystem **or** object storage (S3, GCS, Azure Blob) using the same segment bytes.
 - Horizontal scalability: stateless query nodes, immutable segments, shard-per-writer.
 - Content-addressed blob storage for client files (pdf, jpg, mp4...) referenced from documents.
-- First-class SDKs: Rust and Go.
+- First-class SDKs: the embedded Rust API; embedded Go and TypeScript bindings (§13.1, ADR-0018); network
+  clients in Rust and Go (§13.2).
 - Crash-safe: a power loss at any instruction never corrupts committed data.
 
 ### 1.2 Non-goals (v1)
@@ -61,7 +62,8 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
  ├─────────────────────────────────────────────────────────────┤
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
-      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
+      ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (§13.2)
+      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (§13.1, ADR-0018)
 ```
 
 Principles:
@@ -986,11 +988,29 @@ replica lag, blob throughput). Structured JSON logs.
 
 ## 13. SDKs
 
+Two client families are planned. They are not interchangeable, and neither is implemented. The embedded
+Rust facade they would sit beside is still a stub (`crates/persia`).
+
+### 13.1 Embedded bindings (Go, TypeScript)
+
+A Go or TypeScript program opens a `.persia` file in-process, the way the Rust `Db` API will (ROADMAP M10,
+SPEC §8, §9.6, §14). The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C ABI
+that Go links with cgo and a safe Rust API that the TypeScript N-API package calls. A later WASM build for
+browsers and edge isolates is a separate package and is not the first release. The design is `docs/sdk/`.
+
+These bindings add no on-disk bytes. A file written by Rust, Go, or TypeScript is the same file (§15).
+They are blocked on the embedded API (M10). They do not replace the `persia` crate.
+
+### 13.2 Network clients (Rust, Go)
+
 - **Rust** (`sdk/rust`, crate `persia-client`) and **Go** (`sdk/go`, module `persia-go`).
 - Generated stubs from `persia-proto` + thin idiomatic layer: connection pooling, client-side load balancing
   (shard-aware for writes), retries with backoff on idempotent ops, deadlines, batching, blob streaming helpers.
 - A **shared conformance suite** (language-neutral scenarios in YAML/JSON) runs against both SDKs and the server in CI.
-- Semantic versioning; SDK ↔ server compatibility matrix documented.
+  The embedded bindings (§13.1) reuse that scenario format with a `transport` field once it exists (ROADMAP 14.1);
+  they do not wait on the server to test a local file.
+- Semantic versioning; SDK ↔ server compatibility matrix documented. The embedded packages version
+  separately (ABI, file format, language module); see ADR-0018.
 
 ---
 

@@ -96,6 +96,12 @@ export default defineConfig({
                             description: 'Status, constraints, and the calls that are not in the crate',
                         },
                         {
+                            label: 'Embedded SDKs',
+                            url: 'https://tomiok.github.io/persiaDB/guide/sdks/',
+                            description:
+                                'Planned in-process Go and TypeScript bindings. Not implemented. The network clients are a different milestone.',
+                        },
+                        {
                             label: 'SPEC.md',
                             url: 'https://github.com/tomiok/persiaDB/blob/main/SPEC.md',
                             description: 'Design contract. It wins if the site disagrees',
@@ -133,6 +139,7 @@ export default defineConfig({
                         { label: 'File format and storage', slug: 'guide/file-format' },
                         { label: 'Code', slug: 'guide/code' },
                         { label: 'Embedded API', slug: 'guide/embedded-api' },
+                        { label: 'Embedded SDKs', slug: 'guide/sdks' },
                         { label: 'Server, cloud, and Kubernetes', slug: 'guide/server' },
                         { label: 'Roadmap', slug: 'guide/roadmap' },
                         { label: 'Contributing', slug: 'guide/contributing' },
