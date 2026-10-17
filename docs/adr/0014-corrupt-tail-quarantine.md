@@ -1,6 +1,6 @@
 # ADR-0014: A read-write open quarantines a corrupt tail unless it may hold acknowledged writes
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-16
 - Related: SPEC §4.4, §4.5.1, §8.2; ADR-0009, ADR-0013; ROADMAP 2.4.10
 

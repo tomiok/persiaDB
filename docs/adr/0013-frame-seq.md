@@ -1,6 +1,6 @@
 # ADR-0013: `frame_seq` numbers a container's frames contiguously; the superblock anchors it
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-15
 - Related: SPEC §4.3, §4.4, §4.6, §8.6, §15; ADR-0008, ADR-0009; ROADMAP 2.4.4, 2.4.9, 2.4.10
 

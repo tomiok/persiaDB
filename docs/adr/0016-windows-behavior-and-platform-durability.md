@@ -1,6 +1,6 @@
 # ADR-0016: Windows behavior and platform durability
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-10-17
 - Related: SPEC §4.5.1, §4.5.2, §4.6, §4.7, §10.1.1; amends ADR-0010 and ADR-0012; ROADMAP 2.3.9, 2.4.5.3, 2.4.8,
   2.4.16, 2.4.18
