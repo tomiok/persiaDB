@@ -504,6 +504,7 @@ name = "persia-storage"
 version = "0.0.0"
 dependencies = [
  "bytes",
+ "criterion",
  "persia-format",
  "proptest",
  "tempfile",

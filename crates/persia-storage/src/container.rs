@@ -11,11 +11,13 @@
 
 mod error;
 pub mod file;
+mod mapped;
 mod path;
 pub mod sim;
 mod stream;
 mod tail;
 
+use std::borrow::Cow;
 use std::fs::File;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
@@ -27,6 +29,7 @@ use persia_format::frame::{
     FRAME_HEADER_LEN, Frame, FrameHeader, FrameKind, ScanEnd, StreamScanner, encode_frame,
 };
 use persia_format::header::{Access, HEADER_LEN, Header, KNOWN_ROCOMPAT_FLAGS};
+use persia_format::source::ByteSource;
 use persia_format::superblock::{
     ActiveSuperblock, FIRST_FRAME_OFFSET, SLOTS_LEN, Slot, Superblock,
 };
@@ -96,6 +99,16 @@ pub struct FramePayload {
     pub payload: Vec<u8>,
 }
 
+/// A frame read back by [`Container::read_frame_source`], sharing the mapping when it can.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameSource {
+    /// Where the frame is.
+    pub frame: FrameRef,
+    /// The payload. Stored uncompressed: a slice of the mapping or of the read, at its absolute offset in the file.
+    /// Compressed: the decompressed bytes, at offset 0, since they lie nowhere in the file.
+    pub payload: ByteSource,
+}
+
 /// What a commit publishes (SPEC §4.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Commit {
@@ -158,6 +171,36 @@ pub struct Container<F = File> {
     recovery: Recovery,
     /// Where [`Container::create_in`] or [`Container::open_in`] found the file.
     location: Option<path::Location<F>>,
+    /// Set by [`Container::enable_mapped_reads`].
+    mapped: Option<Mapped<F>>,
+}
+
+/// Mapped reads of the committed frames (SPEC §4.7, ADR-0017).
+#[derive(Debug)]
+struct Mapped<F> {
+    /// Maps `12288..log_end` of a superblock the container read or committed on its file. A function pointer, so
+    /// only `Container<File>` can set it while generic code (commit, compaction) can remap.
+    map: fn(&F, &Superblock) -> io::Result<ByteSource>,
+    /// The latest mapping of the current file, if mapping it succeeded. Frames it does not cover are read.
+    window: Option<ByteSource>,
+}
+
+impl<F> Mapped<F> {
+    /// Remaps after a commit moved `log_end`. If that fails, the previous window stays: it is still valid for the
+    /// frames it covers, and the newer ones are read.
+    fn remap(&mut self, file: &F, sb: &Superblock) {
+        if self.window.as_ref().map(ByteSource::end_offset) != Some(sb.log_end)
+            && let Ok(window) = (self.map)(file, sb)
+        {
+            self.window = Some(window);
+        }
+    }
+
+    /// Maps the file a compaction moved the container to. The old window is dropped even if this fails: its
+    /// offsets are those of the old file.
+    fn moved_to(&mut self, file: &F, sb: &Superblock) {
+        self.window = (self.map)(file, sb).ok();
+    }
 }
 
 /// A random database id: 128 bits from the standard library's per-process hash keys, the time and the pid. Ids
@@ -237,6 +280,7 @@ impl<F: ContainerFile> Container<F> {
                 quarantined: None,
             },
             location: None,
+            mapped: None,
         })
     }
 
@@ -300,6 +344,7 @@ impl<F: ContainerFile> Container<F> {
                 quarantined: None,
             },
             location: None,
+            mapped: None,
         };
         container.recover_tail(file_len, &mut frames, &policy)?;
         container.frames = frames;
@@ -577,6 +622,9 @@ impl<F: ContainerFile> Container<F> {
         self.write_op("sync superblock", F::sync_data)?;
         self.active = ActiveSuperblock { slot, superblock };
         self.frames.retain(|f| f.offset >= commit.wal_start);
+        if let Some(mapped) = &mut self.mapped {
+            mapped.remap(&self.file, &superblock);
+        }
         Ok(())
     }
 
@@ -589,7 +637,7 @@ impl<F: ContainerFile> Container<F> {
     /// or its payload exceeds `max_payload`, or [`Error::Io`].
     pub fn read_frame(&self, offset: u64, max_payload: usize) -> Result<FramePayload> {
         let bytes = self.frame_bytes(offset)?;
-        let frame = Frame::decode(&mut Reader::with_base_offset(&bytes, offset))?;
+        let frame = Frame::decode(&mut bytes.reader())?;
         let payload = frame.payload(max_payload)?.into_owned();
         Ok(FramePayload {
             frame: FrameRef::of(&frame),
@@ -597,8 +645,51 @@ impl<F: ContainerFile> Container<F> {
         })
     }
 
-    /// The bytes of the frame at `offset`, sized from its header and bounded by [`Container::end`].
-    fn frame_bytes(&self, offset: u64) -> Result<Vec<u8>> {
+    /// [`Container::read_frame`] without copying an uncompressed payload: with
+    /// [`enable_mapped_reads`](Container::enable_mapped_reads), a committed frame's payload is a slice of the mapping
+    /// (SPEC §4.7); otherwise of the buffer it was read into.
+    ///
+    /// ```
+    /// use persia_format::block::Compression;
+    /// use persia_format::frame::FrameKind;
+    /// use persia_storage::container::{Commit, Container, Mode};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// # let mut c = Container::create(&path)?;
+    /// # let manifest = c.append(FrameKind::Manifest, b"manifest 1", Compression::None)?;
+    /// # c.commit(Commit { manifest, wal_start: c.end(), fence_token: 0 })?;
+    /// # drop(c);
+    /// let mut c = Container::open(&path, Mode::ReadOnly)?;
+    /// c.enable_mapped_reads()?;
+    /// let m = c.read_frame_source(c.superblock().manifest_off, 1 << 20)?;
+    /// assert_eq!(&*m.payload, b"manifest 1");
+    /// assert_eq!(m.payload.base_offset(), m.frame.offset + 24); // just after the frame header
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Container::read_frame`].
+    pub fn read_frame_source(&self, offset: u64, max_payload: usize) -> Result<FrameSource> {
+        let bytes = self.frame_bytes(offset)?;
+        let frame = Frame::decode(&mut bytes.reader())?;
+        let payload = match frame.payload(max_payload)? {
+            Cow::Borrowed(stored) => {
+                // Fits: the payload lies inside `bytes`.
+                let start = offset.saturating_add(FRAME_HEADER_LEN as u64);
+                bytes.slice(start..start.saturating_add(stored.len() as u64))?
+            }
+            Cow::Owned(decompressed) => ByteSource::new(decompressed.into()),
+        };
+        Ok(FrameSource {
+            frame: FrameRef::of(&frame),
+            payload,
+        })
+    }
+
+    /// The bytes of the frame at `offset`, sized from its header and bounded by [`Container::end`]: a slice of the
+    /// mapping if it covers the frame, else read.
+    fn frame_bytes(&self, offset: u64) -> Result<ByteSource> {
         let header_len = FRAME_HEADER_LEN as u64;
         if offset < FIRST_FRAME_OFFSET
             || offset.checked_add(header_len).is_none_or(|e| e > self.end)
@@ -608,10 +699,25 @@ impl<F: ContainerFile> Container<F> {
                 self.end
             )));
         }
-        let head = read_at(&self.file, offset, header_len)?;
-        let header = FrameHeader::decode(&mut Reader::with_base_offset(&head, offset))?;
+        let window = self.mapped.as_ref().and_then(|m| m.window.as_ref());
+        // Both ends fit: `offset + header_len` was checked above, and `check_fits` bounds the frame by `end`.
+        let head_end = offset.saturating_add(header_len);
+        let head = match window {
+            Some(w) if head_end <= w.end_offset() => w.slice(offset..head_end)?,
+            _ => self.read(offset, header_len)?,
+        };
+        let header = FrameHeader::decode(&mut head.reader())?;
         header.check_fits(self.end)?;
-        read_at(&self.file, offset, header.total_len())
+        let frame_end = offset.saturating_add(header.total_len());
+        match window {
+            Some(w) if frame_end <= w.end_offset() => Ok(w.slice(offset..frame_end)?),
+            _ => self.read(offset, header.total_len()),
+        }
+    }
+
+    fn read(&self, offset: u64, len: u64) -> Result<ByteSource> {
+        let bytes = read_at(&self.file, offset, len)?;
+        Ok(ByteSource::with_base_offset(bytes.into(), offset))
     }
 
     /// Sorts the live frames below `wal_start` named by the writer and checks that they can be frames there: inside
@@ -786,6 +892,7 @@ impl<F: ContainerFile> Container<F> {
                 quarantined: None,
             },
             location: None,
+            mapped: None,
         };
         Ok((container, relocation))
     }

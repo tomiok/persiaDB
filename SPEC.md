@@ -374,6 +374,12 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
+Mapping is opt-in; ordinary reads are the default (ADR-0017). A container with mapped reads holds one mapping of
+`12288..log_end`, made again after each commit and on the new file after a compaction. A frame the mapping covers is
+read from it; any other (after `log_end`, or after a failed remap) is read with ordinary reads. Either way the frame
+is validated on every read (§4.4). On Windows a live mapping keeps the file from being shrunk, so a read-write open
+that must truncate a tail (§4.5.1) fails with an I/O error, harmlessly, until the mapping is gone.
+
 ---
 
 ## 5. Segment format

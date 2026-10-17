@@ -281,6 +281,10 @@ impl<F: ContainerFile + 'static> Container<F> {
             lock: self.location.as_mut().and_then(|l| l.lock.take()),
         });
         new.poisoned = synced.is_err();
+        new.mapped = self.mapped.take().map(|mut mapped| {
+            mapped.moved_to(&new.file, &new.active.superblock);
+            mapped
+        });
         *self = new;
         match synced {
             Ok(()) => Ok(relocation),

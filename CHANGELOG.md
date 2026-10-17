@@ -52,6 +52,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `LocalStorage::open_in` and `Container::create_in` / `open_in` run on any of them.
 - `persia-storage`: `Container::sweep_stale_files` removes the temporary files a crashed create or compaction left next
   to the container.
+- `persia-storage`: opt-in mapped reads of a container's committed frames (`Container::enable_mapped_reads`, one
+  window over `12288..log_end` remapped after each commit and compaction, `pread` for everything else), and
+  `Container::read_frame_source`, which returns a payload without copying it (SPEC §4.7; ADR-0017).
 
 ### Fixed
 - `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged
