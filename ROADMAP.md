@@ -213,10 +213,10 @@ Deps: M1.
 - [x] 2.4.14 Decide when `format_minor = max(stored, own)` is recorded (SPEC §4.2): the header page has no second copy, so it is never rewritten in place; create and compaction write the merged minor into a new file, and a read-write open by a newer build leaves it until then (ADR-0015)
 - [x] 2.4.15 Sweep stale `<name>.tmp.*` and `<name>.compact.*` files left by a `Container::create` or `compact` that crashed (same policy question as 2.3.8)
 - [x] 2.4.16 Windows writer lock (found in the 2.4 review): `LockFileEx` is mandatory, so a writer blocks every reader of the container (SPEC §4.5.1); lock a sidecar `<name>.lock` file or a byte range past any data instead, and test it in the 2.3.9 Windows CI job
-- [ ] 2.4.17 Compaction copies each frame in bounded memory (found in 2.4.12: `Rewriter` reads a whole frame, so a large Segment needs its size in RAM; stream it with a running CRC, compressed frames included)
+- [~] 2.4.17 Compaction copies each frame in bounded memory (found in 2.4.12: `Rewriter` reads a whole frame, so a large Segment needs its size in RAM; stream it with a running CRC, compressed frames included)
 - [ ] 2.4.18 Windows file identity for `compact`'s "the path still names this file" check (found in 2.4.16: the standard library exposes none; `GetFileInformationByHandle` needs FFI and an ADR)
 - [ ] 2.4.19 `persia` CLI: list and remove a container's quarantine files (ADR-0014) and stale temporary files (2.4.15)
-- [ ] 2.4.20 Make the kill -9 loop tear appends (found in 2.3.6): each frame is one `pwrite`, so `kill_9_loop_never_loses_an_acknowledged_commit_or_sync` almost never leaves a torn tail; stream large frames (as the mapped-reader loop does) so torn-tail recovery is exercised
+- [~] 2.4.20 Make the kill -9 loop tear appends (found in 2.3.6): each frame is one `pwrite`, so `kill_9_loop_never_loses_an_acknowledged_commit_or_sync` almost never leaves a torn tail; stream large frames (as the mapped-reader loop does) so torn-tail recovery is exercised
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests

@@ -408,12 +408,23 @@ impl FrameEncoder {
     /// # Errors
     /// [`EncodeError::FrameTooLarge`] if the frame's total length would overflow `u64`.
     pub fn new(kind: FrameKind, frame_seq: u64, payload_len: u64) -> Result<Self, EncodeError> {
-        let header = FrameHeader::new(0, kind, 0, payload_len, frame_seq)
-            .ok_or(EncodeError::FrameTooLarge { payload_len })?;
+        Self::with_flags(kind, 0, frame_seq, payload_len)
+            .ok_or(EncodeError::FrameTooLarge { payload_len })
+    }
+
+    /// The frame of `source` (kind, flags, stored payload length) renumbered to `frame_seq`: the copy
+    /// [`StreamScanner::reframe`] writes. Never `None` for a header that decoded.
+    fn reframing(source: &FrameHeader, frame_seq: u64) -> Option<Self> {
+        Self::with_flags(source.kind, source.flags, frame_seq, source.payload_len)
+    }
+
+    /// `None` if the frame's total length overflows `u64`.
+    fn with_flags(kind: FrameKind, flags: u32, frame_seq: u64, payload_len: u64) -> Option<Self> {
+        let header = FrameHeader::new(0, kind, flags, payload_len, frame_seq)?;
         let bytes = header.encode();
         let mut crc = Crc32c::new();
         crc.update(bytes.get(KIND_OFFSET..).unwrap_or_default());
-        Ok(Self {
+        Some(Self {
             header,
             bytes,
             crc,
@@ -446,8 +457,7 @@ impl FrameEncoder {
         let total = self.written.checked_add(to_u64(chunk.len()));
         match total {
             Some(total) if total <= declared => {
-                self.crc.update(chunk);
-                self.written = total;
+                self.feed(chunk);
                 Ok(())
             }
             _ => Err(EncodeError::PayloadLenMismatch {
@@ -461,7 +471,7 @@ impl FrameEncoder {
     ///
     /// # Errors
     /// [`EncodeError::PayloadLenMismatch`] if fewer payload bytes were given than declared.
-    pub fn finish(mut self) -> Result<Vec<u8>, EncodeError> {
+    pub fn finish(self) -> Result<Vec<u8>, EncodeError> {
         let declared = self.header.payload_len;
         if self.written != declared {
             return Err(EncodeError::PayloadLenMismatch {
@@ -469,12 +479,24 @@ impl FrameEncoder {
                 actual: self.written,
             });
         }
+        Ok(self.trailer())
+    }
+
+    /// [`FrameEncoder::update`] for a caller that bounds the payload itself.
+    fn feed(&mut self, chunk: &[u8]) {
+        self.crc.update(chunk);
+        self.written = self.written.saturating_add(to_u64(chunk.len()));
+    }
+
+    /// [`FrameEncoder::finish`] for a caller that wrote exactly the declared payload.
+    fn trailer(mut self) -> Vec<u8> {
+        debug_assert_eq!(self.written, self.header.payload_len);
         let mut w = Writer::new();
-        w.write_zeros(padding_for(declared, ALIGNMENT));
+        w.write_zeros(padding_for(self.header.payload_len, ALIGNMENT));
         self.crc.update(w.as_slice());
         w.write_u32(self.crc.finish());
         w.write_u32(0);
-        Ok(w.into_inner())
+        w.into_inner()
     }
 }
 

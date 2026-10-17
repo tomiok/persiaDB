@@ -821,13 +821,13 @@ impl<F: ContainerFile> Container<F> {
             moved: Vec::new(),
         };
         for r in &live {
-            out.copy(self, r.start, Some(r.end.saturating_sub(r.start)))?;
+            out.copy(self, r.start, r.end.saturating_sub(r.start))?;
         }
         let (committed, tail): (Vec<FrameRef>, Vec<FrameRef>) =
             self.frames.iter().partition(|f| f.offset < old.log_end);
         let wal_first = out.moved.len();
         for f in &committed {
-            out.copy(self, f.offset, Some(f.len))?;
+            out.copy(self, f.offset, f.len)?;
         }
         let relocation = Relocation {
             moved: out.moved.clone(),
@@ -851,7 +851,7 @@ impl<F: ContainerFile> Container<F> {
             next_frame_seq: out.next_frame_seq,
         };
         for f in &tail {
-            out.copy(self, f.offset, Some(f.len))?;
+            out.copy(self, f.offset, f.len)?;
         }
         let header = self.header.for_write();
         let mut w = Writer::new();
@@ -1102,26 +1102,43 @@ impl<G: ContainerFile> Rewriter<'_, G> {
         })
     }
 
-    /// Copies the frame at `offset` of `from`, checking it is `len` bytes long.
-    fn copy<F: ContainerFile>(
-        &mut self,
-        from: &Container<F>,
-        offset: u64,
-        len: Option<u64>,
-    ) -> Result<()> {
-        let bytes = from.frame_bytes(offset)?;
-        let frame = Frame::decode(&mut Reader::with_base_offset(&bytes, offset))?;
-        if len.is_some_and(|len| len != frame.total_len()) {
+    /// Copies the frame at `offset` of `from`, checking it is `len` bytes long. Streams it, validating it on the way,
+    /// so memory stays bounded whatever its size (ROADMAP 2.4.17): a corrupt frame is only detected at its end, by
+    /// which time most of its copy is in the target, which an error leaves as garbage anyway.
+    fn copy<F: ContainerFile>(&mut self, from: &Container<F>, offset: u64, len: u64) -> Result<()> {
+        let seq = self.take_seq()?;
+        let start = self.end;
+        let mut at = start;
+        let target = self.target;
+        let mut read =
+            |o, buf: &mut [u8]| from.file.read_exact_at(buf, o).map_err(Error::io("read"));
+        let mut write = |bytes: &[u8]| {
+            target
+                .write_all_at(bytes, at)
+                .map_err(Error::io("write compacted frame"))?;
+            // Bounded by the frame's total length, checked below to fit after `start`.
+            at = at.saturating_add(bytes.len() as u64);
+            Ok(())
+        };
+        // Frames are read up to `end`, so a range running past a frame is caught by the length check below.
+        let header = StreamScanner::new(offset, from.end).reframe(seq, &mut read, &mut write)??;
+        let total = header.total_len();
+        if total != len {
             return Err(Error::InvalidInput(format!(
-                "live range at {offset} is not one frame: the frame there is {} bytes",
-                frame.total_len()
+                "live range at {offset} is not one frame: the frame there is {total} bytes"
             )));
         }
-        let seq = self.take_seq()?;
-        let mut w = Writer::with_base_offset(self.end);
-        frame.reframe(&mut w, seq);
-        let new = self.write(&w, frame.kind(), seq)?;
-        self.moved.push((FrameRef::of(&frame), new));
+        self.end = start
+            .checked_add(total)
+            .ok_or_else(|| Error::InvalidInput("container offset exhausted".into()))?;
+        debug_assert_eq!(at, self.end);
+        let new = FrameRef {
+            offset: start,
+            len: total,
+            kind: header.kind(),
+            frame_seq: seq,
+        };
+        self.moved.push((FrameRef::of_header(&header), new));
         Ok(())
     }
 
