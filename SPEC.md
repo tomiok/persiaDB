@@ -277,7 +277,7 @@ nothing. The container is reopened, and recovery decides what survived.
   have renamed a new file over it, and the old one's lock is released when its writer moves on. On Windows,
   `LockFileEx` locks are mandatory, so a lock on the container would keep every reader out: the lock is on a file
   `<name>.lock` next to the container instead, created if missing and never removed (removing it would race with a
-  writer taking it); since it is never renamed, no recheck is needed. Read-only opens take no lock. Limit: on NFS,
+  writer taking it); since it is never renamed, no recheck is needed (ADR-0016). Read-only opens take no lock. Limit: on NFS,
   Linux emulates `flock` with per-process POSIX locks, so two handles of one process are not excluded from each
   other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
@@ -297,7 +297,7 @@ nothing. The container is reopened, and recovery decides what survived.
 
 ### 4.5.2 Platform durability notes
 "Sync" in this document means the following calls (Rust's standard library, checked against the pinned toolchain's
-sources; ROADMAP 2.4.8). Each must reach stable storage, including the drive's volatile write cache, before the
+sources; ROADMAP 2.4.8, ADR-0016). Each must reach stable storage, including the drive's volatile write cache, before the
 call returns:
 
 | Platform | File data (`sync_data`) | File data and metadata (`sync_all`) | Directory entries |
@@ -364,7 +364,7 @@ with or has since committed:
   `log_end` is corruption and is never truncated;
 - compaction (§4.6) writes a new file instead of shrinking the old one, so existing mappings keep the old file's
   contents; a live mapping does not block the rename over the container on Unix, nor on Windows where the standard
-  library renames with POSIX semantics (Windows 10 1607 and later, NTFS; ROADMAP 2.4.5.3). Elsewhere (FAT, exFAT)
+  library renames with POSIX semantics (Windows 10 1607 and later, NTFS; ADR-0016). Elsewhere (FAT, exFAT)
   `MoveFileExW` may refuse to replace a mapped file, and compaction then fails without harm;
 - creating a container never truncates an existing file (create-new, or write elsewhere and rename).
 
@@ -863,7 +863,7 @@ above.
   directory (an object behind a symbolic link or a file on the path does not exist, so `delete` succeeds without
   touching it); directories are never removed by Persia, so a concurrent `put` never finds its directory gone. A
   directory removed by someone else is created again by the next write into it.
-  Directory syncs work on Unix and Windows alike (§4.5.2).
+  Directory syncs work on Unix and Windows alike (§4.5.2, ADR-0016).
 - **Reads** open the file (a rename never changes an open file, so a read sees one version); on Windows an open
   that a concurrent `put` is replacing can briefly fail with `ERROR_ACCESS_DENIED` (the replaced file is pending
   deletion), and is retried. Reads use positioned reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is

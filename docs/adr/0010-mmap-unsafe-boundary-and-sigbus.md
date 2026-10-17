@@ -74,9 +74,8 @@ the fact. ROADMAP 1.8 asks where the unsafe boundary is, what contract keeps it 
 - Tests that create a file mapping do not run under Miri, which has no file-backed `mmap`. They are skipped with
   `#[cfg_attr(miri, ignore = ...)]`, like the zstd tests. Heap-backed `ByteSource` tests still run under Miri.
 - A `ByteSource` slice keeps its whole mapping alive. A block cache that holds small slices of a large mapping
-  pins the mapping too. This matters on Windows, where an open mapping prevents truncating the file. It does not
-  prevent replacing it by `rename` (verified by test in 2.4.5.3: the standard library falls back to POSIX rename
-  semantics, available on Windows 10 1607 and later on NTFS), so compaction needs no workaround there.
+  pins the mapping too. This matters on Windows, where an open mapping prevents truncating the file, and may
+  prevent replacing it by `rename`. 2.4.5.3 verifies the second point by test and makes compaction work around it.
 - A mapping is a snapshot of `start..end`. To see newer frames, a reader maps the new range again; mappings never
   grow in place.
 

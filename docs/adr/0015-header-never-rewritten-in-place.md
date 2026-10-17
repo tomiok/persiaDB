@@ -1,6 +1,6 @@
 # ADR-0015: The header page is never rewritten in place; `format_minor` is recorded by rewrites
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-16
 - Related: SPEC §4.2, §4.6; ADR-0007, ADR-0008; ROADMAP 2.4.14
 

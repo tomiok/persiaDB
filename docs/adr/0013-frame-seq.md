@@ -1,6 +1,6 @@
 # ADR-0013: `frame_seq` numbers a container's frames contiguously; the superblock anchors it
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-15
 - Related: SPEC §4.3, §4.4, §4.6, §8.6, §15; ADR-0008, ADR-0009; ROADMAP 2.4.4, 2.4.9, 2.4.10
 
@@ -24,7 +24,7 @@ No format version has been released, so the v1.0 layout is amended in place (SPE
 2. **Rewrites continue the count.** A rewrite (§4.6) numbers the frames of the new file on from one more than the
    `frame_seq` of the last valid frame of the old file. That is not the old superblock's `next_frame_seq` when
    acknowledged WAL frames follow `log_end` (§8.2): they already hold those numbers. The new file's slots are both
-   commits (`seq ≥ 1`), never the `seq = 0` state of a new container, whose `next_frame_seq` is 1. So, so within one database a `frame_seq` is never given to two different frames, even across rewrites.
+   commits (`seq ≥ 1`), never the `seq = 0` state of a new container, whose `next_frame_seq` is 1. So within one database a `frame_seq` is never given to two different frames, even across rewrites.
    A frame copied by a rewrite gets a new number. `frame_seq` therefore stays monotonic over the database's life,
    which later WAL or replication bookkeeping may rely on; nothing does yet.
 3. **The superblock anchors the run.** The superblock gains `next_frame_seq u64` at offset 48 (taken from the
@@ -33,8 +33,9 @@ No format version has been released, so the v1.0 layout is amended in place (SPE
    whose last commit has no Manifest frame at `log_end` (a new one) would need a special case.
 4. **Recovery checks it** (§4.4, §8.6):
    - the scan from `log_end` expects `next_frame_seq` at `log_end` and one more for each later frame. A valid frame
-     with any other value ends the scan as *corruption* at that frame: it is whole, so it is not a torn tail, and
-     like any corruption it is never truncated (ADR-0009, ROADMAP 2.4.10);
+     with any other value ends the scan as *corruption* at that frame: it is whole, so it is not a torn tail and is
+     never truncated as one (ADR-0009). What a read-write open then does with it is ADR-0014's: a frame below the
+     expected value is a leftover and may be truncated; one at or above it may be acknowledged and is kept;
    - frames in `wal_start..log_end` were committed: they must be contiguous and the last one must have
      `next_frame_seq - 1`, else the container is corrupt. Frames below `wal_start` are checked when read, by kind.
 5. **Range.** Values are in `1..u64::MAX`. A writer never appends a frame with `frame_seq = u64::MAX`, so

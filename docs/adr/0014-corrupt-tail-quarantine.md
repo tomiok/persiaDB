@@ -1,6 +1,6 @@
 # ADR-0014: A read-write open quarantines a corrupt tail unless it may hold acknowledged writes
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-10-16
 - Related: SPEC §4.4, §4.5.1, §8.2; ADR-0009, ADR-0013; ROADMAP 2.4.10
 
@@ -41,8 +41,8 @@ copy: case 3 fails like case 1, without an offset. A read-only open never change
   simulated file system, ROADMAP 2.4.11).
 - Quarantine files accumulate if corruption recurs; they are never removed by Persia (a `persia` CLI command may list
   them, together with the stale temporary files of ROADMAP 2.4.15).
-- After a `Repair::Quarantine` open, new frames take the `frame_seq` values the quarantined frames had: the quarantine
-  file is evidence, not a WAL to re-apply as is.
+- After a truncation at `o`, new frames are numbered on from the `frame_seq` expected at `o`, so they reuse values that
+  frames in the quarantine file may carry: the quarantine file is evidence, not a WAL to re-apply as is.
 - A frame inside the garbage that happens to look valid with a high `frame_seq` (e.g. a container stored as a
   payload) makes the open refuse: a false alarm, never a loss.
 
