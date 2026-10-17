@@ -32,7 +32,10 @@ fn segment() -> impl Strategy<Value = String> {
         Just('~'),
         Just('-'),
     ];
-    prop::collection::vec(ch, 1..4).prop_map(|cs| cs.into_iter().collect())
+    prop::collection::vec(ch, 1..4)
+        .prop_map(|cs| cs.into_iter().collect::<String>())
+        // Windows rejects a file name ending in `.` (SPEC §10.1.1); `local.rs` tests that error.
+        .prop_filter("a name ending in . on Windows", |s| !(cfg!(windows) && s.ends_with('.')))
 }
 
 fn key_text() -> impl Strategy<Value = String> {
