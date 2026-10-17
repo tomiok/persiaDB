@@ -17,6 +17,20 @@
 //!    `max(chunk, FRAME_HEADER_LEN)` bytes.
 //! 4. Retry: a read error at any read is returned as is, leaves the scanner unchanged, and retrying with a good
 //!    reader yields exactly the frames and end of an undisturbed scan.
+//!
+//! `StreamScanner::reframe` (ROADMAP 2.4.17; SPEC §4.4, §4.6), on the same damaged logs, at every original frame
+//! start, the end of the log, past it and arbitrary (unaligned) offsets, under every chunk length above:
+//! 5. Equivalence: it returns exactly what `check_frame` returns (header, or error kind and offset), and that is
+//!    what `Frame::decode` over the bytes from the offset to the end gives.
+//! 6. Copy: on `Ok`, the bytes written are exactly `Frame::reframe(.., frame_seq)` of the decoded frame,
+//!    `total_len` of them (compressed frames copied as stored). On a frame whose header fits but that is invalid
+//!    or unsupported, exactly the copy's header and stored payload are written (never the trailer). Nothing is
+//!    written for fewer than 32 bytes, a bad magic or a frame that runs past the end.
+//! 7. Read discipline: reads are non-empty, at most `max(chunk, 24)` bytes, contiguous from the offset, and cover
+//!    exactly the frame's extent once (only its 24-byte header for a bad magic or a frame that does not fit,
+//!    nothing for fewer than 32 bytes). Writes are non-empty and at most `max(chunk, 24)` bytes.
+//! 8. Errors of `read` or `write` at any call are returned as is, and nothing is called after them.
+//! 9. Bases near `u64::MAX` (and an offset saturated at `u64::MAX`): the same, without overflow.
 
 #![allow(
     clippy::indexing_slicing,
@@ -24,12 +38,15 @@
     clippy::cast_possible_truncation
 )]
 
-use persia_format::Writer;
+use std::cell::RefCell;
+
 use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
-    FRAME_HEADER_LEN, FrameKind, FrameScanner, ScanEnd, StreamScanner, encode_frame,
+    FLAG_ZSTD, FRAME_HEADER_LEN, FRAME_MAGIC, Frame, FrameHeader, FrameKind, FrameScanner,
+    MIN_FRAME_LEN, ScanEnd, StreamScanner, encode_frame,
 };
+use persia_format::{Error, Reader, Writer};
 use proptest::prelude::*;
 use proptest::sample::Index;
 
@@ -347,6 +364,12 @@ fn first_seq() -> impl Strategy<Value = u64> {
 
 /// A log of frames, damaged, plus the `frame_seq` its run starts at.
 fn damaged_log(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64)> {
+    damaged_log_with_starts(max_frames).prop_map(|(bytes, first, _)| (bytes, first))
+}
+
+/// [`damaged_log`] plus where each frame started before the damage (relative to the log), which are still the
+/// offsets a caller would check a frame at; a truncation may put some past the end.
+fn damaged_log_with_starts(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64, Vec<u64>)> {
     (
         proptest::collection::vec(frame_spec(), 0..max_frames),
         first_seq(),
@@ -357,7 +380,8 @@ fn damaged_log(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64)> {
             for d in &damages {
                 apply(&mut bytes, &bounds, d);
             }
-            (bytes, first)
+            let starts = bounds.iter().map(|&(s, _)| s as u64).collect();
+            (bytes, first, starts)
         })
 }
 
@@ -496,5 +520,376 @@ proptest! {
     #[test]
     fn slow_stream_scan_matches_slice_scan_under_every_chunking((bytes, base, _first, mode) in case(10)) {
         check_all_chunkings(&bytes, base, mode)?;
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// `StreamScanner::reframe` (ROADMAP 2.4.17): invariants 5-9
+// ---------------------------------------------------------------------------------------------------------
+
+/// A call `reframe` made to one of its closures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Read { offset: u64, len: usize },
+    Write { len: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct Reframed {
+    result: Result<Result<FrameHeader, Error>, String>,
+    written: Vec<u8>,
+    ops: Vec<Op>,
+}
+
+/// `reframe` of the frame at absolute offset `o` of the log `bytes` at `base`, with closures that record every
+/// call; call number `fail_at` (reads and writes counted together) fails with an injected error.
+fn reframe_at(
+    bytes: &[u8],
+    base: u64,
+    o: u64,
+    chunk: usize,
+    seq: u64,
+    fail_at: Option<usize>,
+) -> Reframed {
+    let end = base + bytes.len() as u64;
+    let ops = RefCell::new(Vec::new());
+    let mut written = Vec::new();
+    let injected = |ops: &Vec<Op>| {
+        let n = ops.len() - 1;
+        (fail_at == Some(n)).then(|| format!("injected failure at call {n}"))
+    };
+    let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), String> {
+        let mut ops = ops.borrow_mut();
+        ops.push(Op::Read {
+            offset,
+            len: buf.len(),
+        });
+        if let Some(e) = injected(&ops) {
+            return Err(e);
+        }
+        let start = offset
+            .checked_sub(base)
+            .ok_or_else(|| format!("read at {offset} below base {base}"))?;
+        let start = usize::try_from(start).map_err(|e| e.to_string())?;
+        let src = bytes
+            .get(start..start + buf.len())
+            .ok_or_else(|| format!("read {start}+{} past the range", buf.len()))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    };
+    let mut write = |chunk: &[u8]| -> Result<(), String> {
+        let mut ops = ops.borrow_mut();
+        ops.push(Op::Write { len: chunk.len() });
+        if let Some(e) = injected(&ops) {
+            return Err(e);
+        }
+        written.extend_from_slice(chunk);
+        Ok(())
+    };
+    let result = StreamScanner::new(o, end)
+        .with_chunk_len(chunk)
+        .reframe(seq, &mut read, &mut write);
+    Reframed {
+        result,
+        written,
+        ops: ops.into_inner(),
+    }
+}
+
+/// `check_frame` at `o` with the same reads.
+fn check_frame_at(bytes: &[u8], base: u64, o: u64, chunk: usize) -> Result<FrameHeader, Error> {
+    let end = base + bytes.len() as u64;
+    let mut reads = 0;
+    let mut read = reader(bytes, base, chunk, &mut reads, None);
+    StreamScanner::new(o, end)
+        .with_chunk_len(chunk)
+        .check_frame(&mut read)
+        .unwrap()
+}
+
+/// What `reframe` at `o` must do, computed from the raw bytes and `Frame::decode` alone.
+struct Want {
+    /// `Frame::decode` over the bytes from `o` to the end, as `Seen`.
+    decoded: Result<Seen, Error>,
+    /// On success, `Frame::reframe(.., seq)` of the decoded frame.
+    copy: Option<Vec<u8>>,
+    /// What is written when the frame turns out invalid: its header with the new `frame_seq` and its stored
+    /// payload if the header fits, nothing otherwise.
+    partial: Vec<u8>,
+    /// How many bytes from `o` are read.
+    extent: u64,
+}
+
+fn want(bytes: &[u8], base: u64, o: u64, seq: u64) -> Want {
+    let rest = o
+        .checked_sub(base)
+        .and_then(|rel| bytes.get(usize::try_from(rel).ok()?..))
+        .unwrap_or_default();
+    let (decoded, copy) = match Frame::decode(&mut Reader::with_base_offset(rest, o)) {
+        Ok(f) => {
+            let mut w = Writer::new();
+            f.reframe(&mut w, seq);
+            let flags = u32::from(f.is_compressed()) * FLAG_ZSTD;
+            let seen = (f.offset(), f.total_len(), f.kind(), flags, f.frame_seq());
+            (Ok(seen), Some(w.into_inner()))
+        }
+        Err(e) => (Err(e), None),
+    };
+    let (extent, partial) = if rest.len() < MIN_FRAME_LEN {
+        (0, Vec::new())
+    } else if rest[..4] != FRAME_MAGIC {
+        (FRAME_HEADER_LEN as u64, Vec::new())
+    } else {
+        let payload_len = u64::from_le_bytes(rest[8..16].try_into().unwrap());
+        let total = 24 + u128::from(payload_len).div_ceil(8) * 8 + 8;
+        if total > rest.len() as u128 {
+            (FRAME_HEADER_LEN as u64, Vec::new())
+        } else {
+            let mut partial = rest[..16].to_vec();
+            partial.extend_from_slice(&seq.to_le_bytes());
+            partial.extend_from_slice(&rest[24..24 + payload_len as usize]);
+            (total as u64, partial)
+        }
+    };
+    Want {
+        decoded,
+        copy,
+        partial,
+        extent,
+    }
+}
+
+/// Invariants 5-7 for the frame at `o`, under one chunk length.
+fn check_reframe(
+    bytes: &[u8],
+    base: u64,
+    o: u64,
+    chunk: usize,
+    seq: u64,
+) -> Result<(), TestCaseError> {
+    let ctx = format!("offset {o} (base {base}), chunk {chunk}, seq {seq}");
+    let want = want(bytes, base, o, seq);
+    let got = reframe_at(bytes, base, o, chunk, seq, None);
+    let result = match &got.result {
+        Ok(result) => result,
+        Err(e) => return Err(TestCaseError::fail(format!("{ctx}: closure error {e}"))),
+    };
+    // 5: the same as `check_frame`, and as `Frame::decode`.
+    prop_assert_eq!(result, &check_frame_at(bytes, base, o, chunk), "{}", &ctx);
+    let seen = result
+        .as_ref()
+        .map(|h| {
+            (
+                h.offset(),
+                h.total_len(),
+                h.kind(),
+                h.flags(),
+                h.frame_seq(),
+            )
+        })
+        .map_err(Clone::clone);
+    prop_assert_eq!(&seen, &want.decoded, "{}", &ctx);
+
+    // 6: the copy.
+    match (result, &want.copy) {
+        (Ok(header), Some(copy)) => {
+            prop_assert_eq!(&got.written, copy, "{}: the copy", &ctx);
+            prop_assert_eq!(got.written.len() as u64, header.total_len(), "{}", &ctx);
+            prop_assert_eq!(
+                &got.written[..want.partial.len()],
+                &want.partial[..],
+                "{}",
+                &ctx
+            );
+        }
+        (Err(_), None) => {
+            prop_assert_eq!(
+                &got.written,
+                &want.partial,
+                "{}: an invalid frame's prefix",
+                &ctx
+            );
+        }
+        (result, copy) => {
+            return Err(TestCaseError::fail(format!(
+                "{ctx}: Ok-ness differs from Frame::decode: {result:?} vs {copy:?}"
+            )));
+        }
+    }
+
+    // 7: reads cover the extent once, in order, bounded; writes are bounded.
+    let bound = chunk.max(FRAME_HEADER_LEN);
+    let mut at = o;
+    for op in &got.ops {
+        match *op {
+            Op::Read { offset, len } => {
+                prop_assert!(len > 0 && len <= bound, "{}: read of {} bytes", &ctx, len);
+                prop_assert_eq!(offset, at, "{}: reads are contiguous from the offset", &ctx);
+                at += len as u64;
+            }
+            Op::Write { len } => {
+                prop_assert!(len > 0 && len <= bound, "{}: write of {} bytes", &ctx, len);
+            }
+        }
+    }
+    prop_assert_eq!(at - o, want.extent, "{}: bytes read", &ctx);
+    Ok(())
+}
+
+/// Invariant 8: a failure at every call of an undisturbed `reframe` is returned as is and is the last call.
+fn check_reframe_failures(
+    bytes: &[u8],
+    base: u64,
+    o: u64,
+    chunk: usize,
+    seq: u64,
+) -> Result<(), TestCaseError> {
+    let clean = reframe_at(bytes, base, o, chunk, seq, None);
+    prop_assert!(clean.result.is_ok(), "{:?}", clean.result);
+    for n in 0..=clean.ops.len() {
+        let got = reframe_at(bytes, base, o, chunk, seq, Some(n));
+        if n == clean.ops.len() {
+            prop_assert_eq!(&got, &clean, "no call {} to fail", n);
+            continue;
+        }
+        let expect = format!("injected failure at call {n}");
+        prop_assert_eq!(&got.result, &Err(expect), "call {} of {:?}", n, clean.ops);
+        prop_assert_eq!(
+            &got.ops[..],
+            &clean.ops[..=n],
+            "nothing is called after a failure"
+        );
+        prop_assert!(clean.written.starts_with(&got.written));
+    }
+    Ok(())
+}
+
+/// A new `frame_seq` for the copy.
+fn new_seq() -> impl Strategy<Value = u64> {
+    prop_oneof![1_u64..10, Just(0), Just(u64::MAX), any::<u64>()]
+}
+
+/// A damaged log at a base, the absolute offsets to reframe at, and the copy's `frame_seq`.
+fn reframe_case(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64, Vec<u64>, u64)> {
+    (
+        damaged_log_with_starts(max_frames),
+        proptest::collection::vec(any::<Index>(), 0..3),
+        new_seq(),
+    )
+        .prop_flat_map(|((bytes, _first, starts), extra, seq)| {
+            let len = bytes.len();
+            let mut rel = starts;
+            rel.extend([len as u64, len as u64 + 8]);
+            rel.extend(extra.iter().map(|i| i.index(len + 1) as u64));
+            (Just(bytes), base_for(len), Just(rel), Just(seq))
+        })
+        .prop_map(|(bytes, base, rel, seq)| {
+            let offsets = rel.iter().map(|&r| base.saturating_add(r)).collect();
+            (bytes, base, offsets, seq)
+        })
+}
+
+proptest! {
+    #![proptest_config(config(128))]
+
+    #[test]
+    fn reframe_matches_check_frame_and_frame_reframe_under_every_chunking(
+        (bytes, base, offsets, seq) in reframe_case(5),
+    ) {
+        for &o in &offsets {
+            for chunk in chunk_lens() {
+                check_reframe(&bytes, base, o, chunk, seq)?;
+            }
+        }
+    }
+
+    #[test]
+    fn reframe_returns_a_failed_read_or_write_as_is(
+        (bytes, base, offsets, seq) in reframe_case(4),
+        chunk in prop_oneof![8_usize..41, Just(64), Just(4096)],
+    ) {
+        for &o in &offsets {
+            check_reframe_failures(&bytes, base, o, chunk, seq)?;
+        }
+    }
+}
+
+/// Invariant 9, deterministic: every frame of a log ending at `u64::MAX - slack`, compressed ones included, and
+/// a copy renumbered to `u64::MAX`.
+#[test]
+fn reframe_near_u64_max() {
+    let specs: Vec<FrameSpec> = [
+        (0_usize, false),
+        (7, false),
+        (41, true),
+        (300, true),
+        (300, false),
+    ]
+    .iter()
+    .map(|&(payload_len, zstd)| FrameSpec {
+        kind: 3,
+        payload_len,
+        fill: 9,
+        zstd,
+        seq_jump: None,
+    })
+    .collect();
+    let (bytes, bounds) = encode_log(&specs, u64::MAX - 2);
+    for tail in [0_usize, 5, 8, 40] {
+        let mut bytes = bytes.clone();
+        bytes.resize(bytes.len() + tail, 0);
+        let top = (u64::MAX - bytes.len() as u64) & !7;
+        for base in [top, top - 8] {
+            let mut offsets: Vec<u64> = bounds.iter().map(|&(s, _)| base + s as u64).collect();
+            offsets.extend([base + bytes.len() as u64, u64::MAX]);
+            for o in offsets {
+                for chunk in chunk_lens() {
+                    for seq in [0, u64::MAX] {
+                        check_reframe(&bytes, base, o, chunk, seq).unwrap();
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A large frame (well past any chunk) copied piece by piece: the doc example's shape, compressed and not, at a
+/// chunk that does not divide the payload.
+#[test]
+fn reframe_copies_a_large_frame_exactly() {
+    let payload: Vec<u8> = (0..300_000_u32)
+        .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
+        .collect();
+    for compression in [Compression::None, Compression::Zstd { level: 1 }] {
+        let mut w = Writer::new();
+        encode_frame(&mut w, FrameKind::Segment, 5, &payload, compression).unwrap();
+        let bytes = w.into_inner();
+        let frame = Frame::decode(&mut Reader::new(&bytes)).unwrap();
+        assert_eq!(frame.is_compressed(), compression != Compression::None);
+        for chunk in [4093, 65536] {
+            check_reframe(&bytes, 12288, 12288, chunk, 77).unwrap();
+        }
+        let got = reframe_at(&bytes, 12288, 12288, 4093, 77, None);
+        let copy = Frame::decode(&mut Reader::new(&got.written)).unwrap();
+        assert_eq!(copy.frame_seq(), 77);
+        assert_eq!(copy.stored_payload(), frame.stored_payload());
+        assert_eq!(copy.is_compressed(), frame.is_compressed());
+        assert_eq!(&*copy.payload(payload.len()).unwrap(), &payload[..]);
+    }
+}
+
+#[cfg(feature = "slow")]
+proptest! {
+    #![proptest_config(config(1000))]
+
+    #[test]
+    fn slow_reframe_matches_check_frame_and_frame_reframe_under_every_chunking(
+        (bytes, base, offsets, seq) in reframe_case(10),
+    ) {
+        for &o in &offsets {
+            for chunk in chunk_lens() {
+                check_reframe(&bytes, base, o, chunk, seq)?;
+            }
+        }
     }
 }

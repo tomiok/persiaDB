@@ -11,11 +11,12 @@
 
 use std::ops::Range;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
-use persia_format::Reader;
 use persia_format::block::Compression;
-use persia_format::frame::{Frame, FrameKind};
+use persia_format::frame::{DEFAULT_SCAN_CHUNK, Frame, FrameKind};
 use persia_format::superblock::FIRST_FRAME_OFFSET;
+use persia_format::{Corruption, Reader};
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{
     Commit, Container, ContainerFile, Error, FrameRef, Mode, Relocation, SpaceUsage,
@@ -678,4 +679,338 @@ fn a_failed_pre_sync_poisons_and_writes_no_target() {
     assert!(matches!(err, Error::Io { .. }), "{err}");
     assert_eq!(target.mutations(), 0);
     assert!(matches!(b.c.sync(), Err(Error::Poisoned)));
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Large frames in bounded memory (ROADMAP 2.4.17; SPEC §4.4, §4.6)
+// ---------------------------------------------------------------------------------------------------------------
+
+/// The reads and writes a [`Metered`] file saw while armed.
+#[derive(Debug, Default)]
+struct Meter {
+    armed: bool,
+    reads: Vec<usize>,
+    writes: Vec<usize>,
+}
+
+/// A [`SimFile`] that records the size of every read and write while its meter is armed. Clones share both.
+#[derive(Debug, Clone, Default)]
+struct Metered {
+    file: SimFile,
+    meter: Arc<Mutex<Meter>>,
+}
+
+impl Metered {
+    fn arm(&self) {
+        *self.meter.lock().unwrap() = Meter {
+            armed: true,
+            ..Meter::default()
+        };
+    }
+
+    /// The sizes of the reads and writes since [`Metered::arm`], disarming.
+    fn take(&self) -> (Vec<usize>, Vec<usize>) {
+        let mut m = self.meter.lock().unwrap();
+        m.armed = false;
+        (std::mem::take(&mut m.reads), std::mem::take(&mut m.writes))
+    }
+}
+
+impl ContainerFile for Metered {
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.file.file_len()
+    }
+
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        let mut m = self.meter.lock().unwrap();
+        if m.armed {
+            m.reads.push(buf.len());
+        }
+        drop(m);
+        self.file.read_exact_at(buf, offset)
+    }
+
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        let mut m = self.meter.lock().unwrap();
+        if m.armed {
+            m.writes.push(buf.len());
+        }
+        drop(m);
+        self.file.write_all_at(buf, offset)
+    }
+
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+
+    fn try_lock(&self) -> std::io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+/// `len` deterministic bytes that zstd shrinks to roughly half (4 bits of entropy each), so a compressed frame of
+/// them still spans many scan chunks.
+fn half_compressible(len: usize, seed: u64) -> Vec<u8> {
+    let mut x = seed | 1;
+    (0..len)
+        .map(|_| {
+            x = x
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (x >> 60) as u8
+        })
+        .collect()
+}
+
+/// `len` bytes that do not repeat within a scan chunk, so a misplaced chunk shows.
+fn counting(len: usize) -> Vec<u8> {
+    (0..len)
+        .map(|i| (i % 251) as u8 ^ (i >> 16) as u8)
+        .collect()
+}
+
+/// The decoded frame at `f` in `bytes`.
+fn frame_at(bytes: &[u8], f: FrameRef) -> Frame<'_> {
+    Frame::decode(&mut Reader::with_base_offset(
+        &bytes[f.offset as usize..f.end() as usize],
+        f.offset,
+    ))
+    .unwrap()
+}
+
+/// A container whose live segments are large: one uncompressed, one zstd-compressed, plus a large committed WAL
+/// frame and a large acknowledged tail frame. Returns it, its file, the live segments and their payloads.
+struct Large {
+    c: Container<Metered>,
+    file: Metered,
+    live: Vec<FrameRef>,
+    payloads: Vec<(FrameRef, Vec<u8>)>,
+}
+
+fn large(mib: usize) -> Large {
+    let file = Metered::default();
+    let mut c = Container::create_on(file.clone(), [6; 16]).unwrap();
+    let mut payloads = Vec::new();
+    let mut add = |c: &mut Container<Metered>, kind, payload: Vec<u8>, compression| {
+        let f = c.append(kind, &payload, compression).unwrap();
+        payloads.push((f, payload));
+        f
+    };
+    let consumed = add(&mut c, FrameKind::WalChunk, b"consumed".to_vec(), NONE);
+    let plain = add(&mut c, FrameKind::Segment, counting(mib << 20), NONE);
+    let packed = add(
+        &mut c,
+        FrameKind::Segment,
+        half_compressible(mib << 20, 7),
+        ZSTD,
+    );
+    let wal = add(
+        &mut c,
+        FrameKind::WalChunk,
+        counting((mib << 20) / 2 + 13),
+        NONE,
+    );
+    c.sync().unwrap();
+    let m = c
+        .append(FrameKind::Manifest, &manifest_for(plain.offset), NONE)
+        .unwrap();
+    c.commit(Commit {
+        manifest: m,
+        wal_start: wal.offset,
+        fence_token: 3,
+    })
+    .unwrap();
+    add(
+        &mut c,
+        FrameKind::WalChunk,
+        half_compressible((mib << 20) / 2 + 5, 9),
+        ZSTD,
+    );
+    c.sync().unwrap();
+    payloads.retain(|(f, _)| f.offset != consumed.offset);
+
+    let bytes = file.file.bytes();
+    let stored = frame_at(&bytes, packed);
+    assert!(
+        stored.is_compressed(),
+        "the packed segment is stored compressed"
+    );
+    assert!(
+        stored.stored_payload().len() > 16 * DEFAULT_SCAN_CHUNK,
+        "and still spans many chunks: {}",
+        stored.stored_payload().len()
+    );
+    Large {
+        c,
+        file,
+        live: vec![plain, packed],
+        payloads,
+    }
+}
+
+/// Compaction copies frames of several MiB, compressed or not, with every read and write bounded by the scan
+/// chunk, each source byte read once, and the result byte-for-byte what `Frame::reframe` gives (the copy before
+/// ROADMAP 2.4.17).
+fn check_large_compaction(mib: usize) {
+    let Large {
+        mut c,
+        file,
+        live,
+        payloads,
+    } = large(mib);
+    let old_bytes = file.file.bytes();
+    let target = Metered::default();
+    file.arm();
+    target.arm();
+    let live_ranges: Vec<Range<u64>> = live.iter().map(|&f| range(f)).collect();
+    let (new, relocation) = c
+        .compact_into(
+            target.clone(),
+            &live_ranges,
+            |r| manifest_for(r.get(live[0].offset).unwrap().offset),
+            NONE,
+        )
+        .unwrap();
+    let (reads, _) = file.take();
+    let (_, writes) = target.take();
+    assert_eq!(file.file.bytes(), old_bytes, "the source is only read");
+
+    // Bounded: no read or write holds a whole frame (the 12288-byte header page is the largest fixed write).
+    let max_read = reads.iter().copied().max().unwrap();
+    let max_write = writes.iter().copied().max().unwrap();
+    assert!(max_read <= DEFAULT_SCAN_CHUNK, "a read of {max_read} bytes");
+    assert!(
+        max_write <= DEFAULT_SCAN_CHUNK,
+        "a write of {max_write} bytes"
+    );
+    // Read once: exactly the copied frames' bytes.
+    let copied: u64 = relocation.iter().map(|(old, _)| old.len).sum();
+    assert_eq!(reads.iter().map(|&n| n as u64).sum::<u64>(), copied);
+    assert_eq!(
+        relocation.len(),
+        payloads.len() + 1,
+        "the live frames, the WAL range with its Manifest, the tail"
+    );
+
+    // The same file as the whole-frame copy: each moved frame is `Frame::reframe` of the old one.
+    let new_bytes = target.file.bytes();
+    for (old, moved) in relocation.iter() {
+        let source = frame_at(&old_bytes, old);
+        let mut w = persia_format::Writer::new();
+        source.reframe(&mut w, moved.frame_seq);
+        assert_eq!(moved.len, old.len);
+        assert_eq!(moved.kind, old.kind);
+        assert_eq!(
+            &new_bytes[moved.offset as usize..moved.end() as usize],
+            w.as_slice(),
+            "{old:?} -> {moved:?}"
+        );
+        let copy = frame_at(&new_bytes, moved);
+        assert_eq!(copy.is_compressed(), source.is_compressed(), "{old:?}");
+    }
+    // Read back from a reopened file: every payload, decompressed.
+    let r = Container::open_on(SimFile::from_bytes(new_bytes), Mode::ReadOnly).unwrap();
+    for (old, payload) in &payloads {
+        let moved = relocation.get(old.offset).unwrap();
+        assert_eq!(
+            &r.read_frame(moved.offset, 64 << 20).unwrap().payload,
+            payload
+        );
+    }
+    assert_eq!(
+        r.read_frame(r.superblock().manifest_off, MAX)
+            .unwrap()
+            .payload,
+        manifest_for(relocation.get(live[0].offset).unwrap().offset)
+    );
+    assert_eq!(r.frames(), new.frames());
+}
+
+#[test]
+fn large_frames_are_copied_in_bounded_reads_and_writes() {
+    check_large_compaction(3);
+}
+
+#[cfg(feature = "slow")]
+#[test]
+fn slow_very_large_frames_are_copied_in_bounded_reads_and_writes() {
+    check_large_compaction(40);
+}
+
+/// A flipped byte in the middle of a large live frame, compressed or not, is found at its CRC: `Error::Format`
+/// with the checksum mismatch, the source untouched and still writable.
+#[test]
+fn a_corrupt_byte_inside_a_large_live_frame_fails_compaction_cleanly() {
+    for which in 0..2 {
+        let Large {
+            mut c, file, live, ..
+        } = large(2);
+        let f = live[which];
+        let mid = f.offset + f.len / 2;
+        let mut byte = [0];
+        file.file.read_exact_at(&mut byte, mid).unwrap();
+        file.file.write_all_at(&[byte[0] ^ 0x10], mid).unwrap();
+        let old_bytes = file.file.bytes();
+        let old_mutations = file.file.mutations();
+        let err = c
+            .compact_into(
+                SimFile::new(),
+                &[range(live[0]), range(live[1])],
+                |_| Vec::new(),
+                NONE,
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::Format(persia_format::Error::Corrupt {
+                    offset,
+                    reason: Corruption::ChecksumMismatch { .. },
+                }) if offset == f.end() - 8
+            ),
+            "frame {which}: {err:?}"
+        );
+        assert_eq!(file.file.bytes(), old_bytes, "frame {which}");
+        assert_eq!(file.file.mutations(), old_mutations, "frame {which}");
+        c.append(FrameKind::WalChunk, b"still writable", NONE)
+            .unwrap();
+        c.sync().unwrap();
+    }
+}
+
+/// A live range starting at a large frame but of another length is a bad request, whichever way it is off, even
+/// though the frame there is valid and was copied before its length could be compared.
+#[test]
+fn a_live_range_not_matching_a_large_frame_is_invalid_input() {
+    let Large {
+        mut c, file, live, ..
+    } = large(2);
+    let old_bytes = file.file.bytes();
+    let (plain, packed) = (live[0], live[1]);
+    let bad: Vec<Vec<Range<u64>>> = vec![
+        vec![plain.offset..plain.end() - 8],
+        vec![plain.offset..plain.offset + 32],
+        vec![plain.offset..plain.end() + 8],
+        vec![plain.offset..packed.end()], // two frames
+        vec![range(plain), packed.offset..packed.end() - 8],
+        vec![range(plain), packed.offset..packed.end() + 8],
+    ];
+    for live in bad {
+        let err = c
+            .compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidInput(_)), "{live:?}: {err:?}");
+        assert_eq!(file.file.bytes(), old_bytes);
+    }
+    c.append(FrameKind::WalChunk, b"still writable", NONE)
+        .unwrap();
+    c.sync().unwrap();
 }
