@@ -552,18 +552,13 @@ fn a_stale_compaction_file_is_ignored() {
 
 #[test]
 fn compact_needs_a_path() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("app.persia");
-    drop(Container::create(&path).unwrap());
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
-    let mut c = Container::open_on(file, Mode::ReadWrite).unwrap();
+    // A container opened on a bare file (not by path) has nothing to rename over.
+    let file = SimFile::new();
+    let mut c = Container::create_on(file.clone(), [5; 16]).unwrap();
+    let before = file.bytes();
     let err = c.compact(&[], |_| Vec::new(), NONE).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
-    assert_eq!(names(dir.path()), ["app.persia"]);
+    assert_eq!(file.bytes(), before);
 }
 
 /// After a compaction, the path names the new file; a writer opening it later gets the new file, never the old
