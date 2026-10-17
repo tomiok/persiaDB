@@ -211,8 +211,8 @@ fuzz_target!(|input: &[u8]| {
     check_stream(&data, base, &seen);
 });
 
-/// `StreamScanner` (ROADMAP 2.4.12) yields the frames and the end of `FrameScanner` over the same bytes, for every
-/// `frame_seq` check and a chunk length picked from the input.
+/// `StreamScanner` (ROADMAP 2.4.12) yields the frames (every header field) and the end of `FrameScanner` over the
+/// same bytes, for every `frame_seq` check and a chunk length picked from the input.
 fn check_stream(data: &[u8], base: u64, seen: &[(u64, u64)]) {
     let chunk = 1 + data.len() % 61;
     let end = base + data.len() as u64;
@@ -239,13 +239,23 @@ fn check_stream(data: &[u8], base: u64, seen: &[(u64, u64)]) {
             buf.copy_from_slice(&data[start..start + buf.len()]);
             Ok(())
         };
-        let want: Vec<(u64, u64)> = slice
+        // Every header field: offset, total length, kind, `frame_seq` and flags (a valid frame has only known ones).
+        let want: Vec<_> = slice
             .by_ref()
-            .map(|f| (f.offset(), f.frame_seq()))
+            .map(|f| {
+                let flags = u32::from(f.is_compressed()) * FLAG_ZSTD;
+                (f.offset(), f.total_len(), f.kind(), f.frame_seq(), flags)
+            })
             .collect();
         let mut got = Vec::new();
         while let Some(h) = stream.next_frame(&mut read).unwrap() {
-            got.push((h.offset(), h.frame_seq()));
+            got.push((
+                h.offset(),
+                h.total_len(),
+                h.kind(),
+                h.frame_seq(),
+                h.flags(),
+            ));
         }
         assert_eq!(got, want, "the stream scanner yields the same frames");
         assert_eq!(stream.end(), slice.end(), "and ends the same way");

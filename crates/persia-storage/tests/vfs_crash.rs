@@ -53,10 +53,16 @@ fn at_every_call<R: std::fmt::Debug>(
     let calls = fs.mutations() - start;
     assert!(calls > 0, "the scenario mutates something");
     for k in 0..=calls {
-        for fault in [
-            SimFault::FailAt(start + k),
-            SimFault::ApplyThenFail(start + k),
-        ] {
+        // At `k == calls` no call fails: one clean run, then the crash.
+        let faults = if k == calls {
+            vec![SimFault::FailAt(start + k)]
+        } else {
+            vec![
+                SimFault::FailAt(start + k),
+                SimFault::ApplyThenFail(start + k),
+            ]
+        };
+        for fault in faults {
             let fs = setup();
             assert_eq!(fs.mutations(), start, "setup is deterministic");
             fs.set_fault(Some(fault));

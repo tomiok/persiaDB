@@ -463,7 +463,7 @@ fn commit_rejects_bad_arguments() {
 
 #[test]
 fn a_failed_write_poisons_the_handle() {
-    for call in 0..4 {
+    for call in 0..6 {
         for fault in [SimFault::FailAt(call), SimFault::ApplyThenFail(call)] {
             let mut c = new_sim();
             let base = c.file().mutations();

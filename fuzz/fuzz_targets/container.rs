@@ -6,7 +6,7 @@
 //!
 //! Input: `mode u8, base u8, offset u16 LE, patch..`. `base` picks a valid container (new, committed, committed
 //! with uncommitted frames after `log_end`), `patch` overwrites it from `offset` (growing it if needed). Mode bits:
-//! 0 = truncate the file to `offset` first; 1 = fix `header_crc`; 2 and 3 = fix the CRC of slot A and B; 4 = fix the
+//! 0 = truncate the file to `offset` instead of patching it; 1 = fix `header_crc`; 2 and 3 = fix the CRC of slot A and B; 4 = fix the
 //! CRC of every frame along the chain from the first. Random bytes almost never carry a valid CRC, so without these
 //! the checks behind them would only see the seed corpus.
 #![no_main]
@@ -185,7 +185,9 @@ fuzz_target!(|input: &[u8]| {
             assert_eq!(rw_file.durable_bytes(), rw_file.bytes());
             let seq = c.superblock().seq;
             let wal_start = c.superblock().wal_start;
-            if c.next_frame_seq() < u64::MAX - 1 && seq < u64::MAX {
+            // Room for two commits (the one below and compaction's, `seq + 2`) and for compaction to renumber every frame
+            // (at most `len / 32` of them) without exhausting `frame_seq`.
+            if c.next_frame_seq() < u64::MAX - (1 << 20) && seq < u64::MAX - 1 {
                 let m = c.append(FrameKind::Manifest, b"next", NONE).unwrap();
                 c.commit(Commit {
                     manifest: m,
@@ -204,7 +206,10 @@ fuzz_target!(|input: &[u8]| {
                 );
                 // Compacting what recovery accepted, keeping an input-chosen subset of the valid frames below
                 // wal_start, yields a container that reopens with the same uncommitted frames and the same live
-                // payloads where the Relocation says, and leaves the old file untouched.
+                // payloads where the Relocation says, and leaves the old file untouched. An uncommitted, synced frame
+                // after the commit makes compaction's tail path run too.
+                c.append(FrameKind::WalChunk, b"tail", NONE).unwrap();
+                c.sync().unwrap();
                 let before = rw_file.bytes();
                 let wal_start = c.superblock().wal_start;
                 let below = &before[FIRST_FRAME_OFFSET as usize..wal_start as usize];
@@ -215,6 +220,7 @@ fuzz_target!(|input: &[u8]| {
                     .collect();
                 let target = SimFile::new();
                 let tail = c.uncommitted_frames().len();
+                assert_eq!(tail, 1);
                 let (new, relocation) = c
                     .compact_into(target.clone(), &live, |_| b"compacted".to_vec(), NONE)
                     .unwrap();

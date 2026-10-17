@@ -342,20 +342,26 @@ fn unsynced_appends_are_synced_and_copied() {
 fn bad_compaction_requests_change_nothing() {
     let mut b = sim();
     let old_bytes = b.c.file().bytes();
-    let cases: Vec<Vec<Range<u64>>> = vec![
+    // Bad requests: `InvalidInput` only, never reported as corruption.
+    let bad_requests: Vec<Vec<Range<u64>>> = vec![
         vec![b.live.offset..b.live.end() - 8], // not the whole frame
-        vec![b.live.offset + 8..b.live.end()], // not a frame start
-        vec![range(b.dead), b.dead.offset..b.live.end()],
+        vec![range(b.dead), b.dead.offset..b.live.end()], // overlapping
     ];
-    for live in cases {
+    for live in bad_requests {
         let err =
             b.c.compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
                 .unwrap_err();
-        assert!(
-            matches!(err, Error::InvalidInput(_)) || err.is_corruption(),
-            "{live:?}: {err}"
-        );
+        assert!(matches!(err, Error::InvalidInput(_)), "{live:?}: {err}");
     }
+    // Not a frame start: the bytes there do not decode as a frame, which may be either.
+    let live = vec![b.live.offset + 8..b.live.end()];
+    let err =
+        b.c.compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
+            .unwrap_err();
+    assert!(
+        matches!(err, Error::InvalidInput(_)) || err.is_corruption(),
+        "{live:?}: {err}"
+    );
     let err =
         b.c.compact_into(SimFile::from_bytes(vec![0]), &[], |_| Vec::new(), NONE)
             .unwrap_err();

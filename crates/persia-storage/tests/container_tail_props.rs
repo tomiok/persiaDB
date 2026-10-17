@@ -618,6 +618,8 @@ fn layout(len: usize, pieces: &[(usize, Piece)]) -> (Vec<u8>, usize) {
     });
     assert_eq!(built.next_seq, 2);
     let o = built.log_end as usize;
+    // The hand-written cases below state their offsets for this layout.
+    assert_eq!(o, 12288 + 40, "the container layout changed");
     let mut bytes = built.bytes[..o].to_vec();
     bytes.resize(o + len, 0);
     for (rel, piece) in pieces {
@@ -643,7 +645,7 @@ fn encoded(seq: u64, payload: &[u8]) -> Vec<u8> {
 
 /// Runs every open of `check_case` on `bytes` and checks the reference agrees with `want` (relative offsets).
 fn check_layout(name: &str, bytes: &[u8], o: usize, want: &Expected) {
-    let (end, expected) = reference(bytes, 12288 + 40, 2);
+    let (end, expected) = reference(bytes, o as u64, 2);
     assert_eq!(&expected, want, "{name}: the reference itself");
     let run = || -> Result<(), TestCaseError> {
         check_ro(bytes, &end)?;
