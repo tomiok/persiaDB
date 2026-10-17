@@ -41,7 +41,13 @@ fn key_text() -> impl Strategy<Value = String> {
 
 fn model_key() -> impl Strategy<Value = Key> {
     // Dot segments (`.`, `..`) are not keys; everything else here is.
-    key_text().prop_filter_map("dot segment", |s| Key::new(s).ok())
+    key_text()
+        // Windows rejects an object file name ending in `.` (SPEC §10.1.1; `local.rs` tests that error). Directory
+        // names end in `@`, so only the last segment matters.
+        .prop_filter("a last segment ending in . on Windows", |s| {
+            !(cfg!(windows) && s.ends_with('.'))
+        })
+        .prop_filter_map("dot segment", |s| Key::new(s).ok())
 }
 
 /// A byte-level prefix of some key, cut on a character boundary: prefixes ending mid-segment, at `/`, or empty.

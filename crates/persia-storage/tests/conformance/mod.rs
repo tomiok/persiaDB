@@ -168,7 +168,19 @@ pub fn longest_keys_round_trip<S: Storage>(make: Make<'_, S>) {
     let segs = [254, 254, 254, 3, 255].map(|n| "x".repeat(n));
     let k = key(&segs.join("/"));
     assert_eq!(k.as_str().len(), Key::MAX_LEN);
-    s.put(&k, Bytes::from_static(b"long")).unwrap();
+    match s.put(&k, Bytes::from_static(b"long")) {
+        // The local backend on macOS and the BSDs cannot hold a path this long under any root (`PATH_MAX` is 1024,
+        // SPEC §10.1.1); `tests/local.rs` checks that limit. Everywhere else the round trip must work.
+        Err(Error::InvalidKey(e))
+            if cfg!(all(
+                unix,
+                not(any(target_os = "linux", target_os = "android"))
+            )) && matches!(e.defect, persia_storage::KeyDefect::PathTooLong { .. }) =>
+        {
+            return;
+        }
+        other => other.unwrap(),
+    }
     assert_eq!(&s.get(&k).unwrap()[..], b"long");
     assert_eq!(&*s.get_range(&k, 1..3).unwrap(), b"on");
     if s.capabilities().strong_list {

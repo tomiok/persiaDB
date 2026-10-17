@@ -221,6 +221,15 @@ fn check(name: &str, e: &Expected, bytes: &[u8], o: &Opened<'_>) {
         e.after_log_end,
         "{name}: frames after log_end"
     );
+    // Frames are numbered 1, 2, ... in append order; the slot names the next one (SPEC §4.4; ADR-0013).
+    let seqs: Vec<u64> = o.frames.iter().map(Frame::frame_seq).collect();
+    let expected: Vec<u64> = (1..).take(o.frames.len()).collect();
+    assert_eq!(seqs, expected, "{name}: frame_seq run");
+    assert_eq!(
+        sb.next_frame_seq,
+        u64::try_from(committed.len()).unwrap() + 1,
+        "{name}: next_frame_seq"
+    );
     let log_end = committed.last().map_or(FIRST_FRAME_OFFSET, Frame::end);
     assert_eq!(
         sb.log_end, log_end,
@@ -239,9 +248,36 @@ fn check(name: &str, e: &Expected, bytes: &[u8], o: &Opened<'_>) {
     assert_eq!(end, e.end, "{name}: {:?}", o.end);
     assert_eq!(end == End::Clean, valid_end == file_end, "{name}");
 
-    // Recovery scans from `log_end` (SPEC §4.4) and must find the same frames and stop at the same place.
-    let from_log_end = usize::try_from(sb.log_end).unwrap();
-    let mut tail = FrameScanner::new(&bytes[from_log_end..], sb.log_end);
+    // The checks recovery runs (SPEC §4.3, §8.6; ADR-0013): the slot fits the file, the committed WAL range is one
+    // `frame_seq` run ending at `next_frame_seq - 1` exactly at `log_end`.
+    assert_eq!(
+        o.active.check_bounds(file_end),
+        Ok(()),
+        "{name}: check_bounds"
+    );
+    let (wal_start, log_end) = (
+        usize::try_from(sb.wal_start).unwrap(),
+        usize::try_from(sb.log_end).unwrap(),
+    );
+    let mut wal = FrameScanner::new(&bytes[wal_start..log_end], sb.wal_start).contiguous();
+    let wal_frames = wal.by_ref().count();
+    assert_eq!(
+        wal.end(),
+        Some(&ScanEnd::Clean { offset: sb.log_end }),
+        "{name}: committed WAL range"
+    );
+    if wal_frames > 0 {
+        assert_eq!(
+            wal.next_frame_seq(),
+            Some(sb.next_frame_seq),
+            "{name}: WAL run ends at next_frame_seq - 1"
+        );
+    }
+
+    // Recovery scans from `log_end` (SPEC §4.4), checking the run from `next_frame_seq`, and must find the same frames
+    // and stop at the same place as the unchecked scan from the first frame.
+    let mut tail =
+        FrameScanner::new(&bytes[log_end..], sb.log_end).expect_frame_seq(sb.next_frame_seq);
     let tail_frames: Vec<Frame<'_>> = tail.by_ref().collect();
     assert_eq!(tail_frames, after, "{name}: recovery scan from log_end");
     assert_eq!(tail.end(), Some(&o.end), "{name}");
@@ -288,6 +324,7 @@ fn created() -> Superblock {
     Superblock {
         log_end: FIRST_FRAME_OFFSET,
         wal_start: FIRST_FRAME_OFFSET,
+        next_frame_seq: 1,
         ..Superblock::default()
     }
 }
@@ -343,8 +380,9 @@ fn golden_prefix_of_a_new_container() {
         assert_eq!(u64_at(s, 24), 12288, "{slot:?} log_end");
         assert_eq!(u64_at(s, 32), 12288, "{slot:?} wal_start");
         assert_eq!(u64_at(s, 40), 0, "{slot:?} fence_token");
-        assert!(s[48..4092].iter().all(|&x| x == 0), "{slot:?} reserved");
-        assert_eq!(u32_at(s, 4092), 0x7329_F26E, "{slot:?} crc");
+        assert_eq!(u64_at(s, 48), 1, "{slot:?} next_frame_seq");
+        assert!(s[56..4092].iter().all(|&x| x == 0), "{slot:?} reserved");
+        assert_eq!(u32_at(s, 4092), 0x57F6_CFF5, "{slot:?} crc");
     }
 }
 

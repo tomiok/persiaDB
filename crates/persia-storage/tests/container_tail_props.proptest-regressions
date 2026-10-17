@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 8de4e78dbdd446dcf8802052245e08179672f097838110981a04a84cecf41441 # shrinks to b = Build { committed: [], tail: [113, 41], zstd_last: false }, damages = [PlantUnknownFlags(Index(1266729206778338309), 0)]

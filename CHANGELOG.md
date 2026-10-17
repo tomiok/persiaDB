@@ -31,8 +31,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-storage`: `LocalStorage`, the local filesystem backend (one file per object): atomic, durable `put` (temp file,
   fsync, rename, directory fsync) and `put_if_absent` (hard link), positioned reads, and file names encoded so every key
   round-trips on case-insensitive and normalizing filesystems and `a` and `a/b` can coexist (SPEC §10.1.1; ADR-0012).
+- `persia-storage`: `Container`, the single-file container (SPEC §4): creation that never replaces a file, an
+  exclusive writer lock, read-only opens, frame appends with group `fdatasync`, commits that write the inactive
+  superblock slot, and recovery on open (superblock checks, validation of the committed WAL frames, torn-tail
+  truncation; a corrupt tail is truncated, quarantined first, or refused, per ADR-0014 below). A failed write or sync poisons the handle.
+  `SimFile` simulates crashes (lost, kept or sector-torn unsynced writes) for crash tests.
+- `persia-storage`: container compaction (SPEC §4.6): `space_usage` reports live and dead bytes against the default
+  40% dead-space ratio, and `compact` rewrites the live frames, the WAL range and the uncommitted tail into a new
+  file (renumbered, payloads copied as stored, a new Manifest built from where the committed frames moved; the returned
+  `Relocation` also covers the uncommitted tail) that is synced
+  and renamed over the container; the old file is never written. `persia-format`: `Frame::reframe`.
+- `persia-storage`: recovery reads the container in bounded 64 KiB chunks (`persia-format`: `StreamScanner`), so
+  opening a container with a large uncommitted Segment frame or a long torn tail no longer needs that much memory.
+- `persia-storage`: `Container::append_stream` appends a frame whose payload is written in chunks (`FrameWriter`).
+- `persia-storage`: a read-write open whose frames after the last commit end in corruption no longer always fails
+  (ADR-0014): zeros and stale frames are truncated, other bytes are copied to a `<name>.quarantine.*` file first, and
+  only frames that may hold acknowledged writes still fail the open, unless `Container::open_with(.., Repair::Quarantine)`.
+- `persia-storage`: `vfs::Vfs`, the file-system operations of `LocalStorage` and the container's path API, with
+  `RealFs` and `SimFs`, a simulated file system that loses unsynced data and directory entries in a crash;
+  `LocalStorage::open_in` and `Container::create_in` / `open_in` run on any of them.
+- `persia-storage`: `Container::sweep_stale_files` removes the temporary files a crashed create or compaction left next
+  to the container.
 
 ### Fixed
+- `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged
+  local-backend write or container create survives a machine crash there (SPEC §4.5.2).
+- `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers
+  are no longer locked out while a writer is open (SPEC §4.5.1).
+- `persia-storage`: a local-backend object whose path is longer than `PATH_MAX` allows (1023 bytes on macOS and the BSDs, 4095 on Linux) is `InvalidInput`
+  (`KeyDefect::PathTooLong`) instead of an I/O error.
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
@@ -62,6 +89,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   length and decode under a caller-supplied bomb limit. A frame scanner stops at the first invalid frame and reports a
   clean end, a torn tail (only zeros or nothing follow), corruption (non-zero bytes follow) or a frame with unknown
   flags, which is `Unsupported` and never truncated.
+- `frame_seq` (SPEC §4.4; ADR-0013): numbers a container's frames contiguously from 1, continuing across rewrites;
+  the superblock gains `next_frame_seq` at offset 48, and recovery treats a frame that breaks the run as corruption.
+  The container reader checks the superblock's offsets against the file (SPEC §4.3).
 
 <!--
 Sections per release, in this order, only when non-empty:

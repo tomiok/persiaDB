@@ -116,6 +116,7 @@ pub(crate) fn generate() -> Result<Vec<Fixture>> {
     let created = encode_slot(&Superblock {
         log_end: FIRST_FRAME_OFFSET,
         wal_start: FIRST_FRAME_OFFSET,
+        next_frame_seq: 1,
         ..Superblock::default()
     })?;
     let log = committed_log()?;
@@ -200,6 +201,7 @@ fn torn_slot(header: &Header, created: &[u8], commit_1: &[u8], log: &Log) -> Res
         manifest_off,
         manifest_len: log_end - manifest_off,
         log_end,
+        next_frame_seq: 10,
         ..log.superblock
     };
     let half = SLOT_LEN / 2;
@@ -323,6 +325,7 @@ fn committed_log() -> Result<Log> {
             log_end,
             wal_start,
             fence_token: 0,
+            next_frame_seq: 8,
         },
     })
 }

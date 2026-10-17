@@ -184,30 +184,37 @@ Deps: M1.
 - [ ] 2.3.6 Mapped reads of committed container ranges via `MmapFile` (SPEC §4.7, ADR-0010; needs 2.4.4: the mappable `log_end` comes from the container superblock, so it lands with 2.4): opt-in, or automatic only on local disk filesystems; `pread` fallback otherwise; mapping granularity (per frame vs `log_end` window); the only `unsafe` call site outside `persia-format`
 - [x] 2.3.7 Store keys that are segment-prefixes of each other (`a` and `a/b`, SPEC §10.1): name encoding so an object never collides with a directory; round-trip names byte-exactly on case-insensitive and normalizing filesystems (APFS NFD, NTFS); [T] the conformance model already generates such pairs
 - [ ] 2.3.8 Sweep stale `@tmp.*` files a crashed writer left (ADR-0012): which process may delete them (pid no longer running, or age), and when (open, or a `persia` CLI command)
-- [ ] 2.3.9 `windows-latest` CI job for `persia-storage` (found in the 2.3 review): the `cfg(windows)` code (positioned reads, reserved names) is otherwise never compiled; directory fsync on Windows is 2.4.8
+- [x] 2.3.9 `windows-latest` CI job for `persia-storage` (found in the 2.3 review): the `cfg(windows)` code (positioned reads, reserved names) is otherwise never compiled; directory fsync on Windows is 2.4.8
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots
-  - [ ] 2.4.1.1 Exclusive writer lock (`flock`) with clear error when held
-  - [ ] 2.4.1.2 Read-only open mode (also when rocompat flags unknown)
-- [ ] 2.4.2 Append frames with group-fsync API (`append`, `sync`)
+  - [x] 2.4.1.1 Exclusive writer lock (`flock`) with clear error when held
+  - [x] 2.4.1.2 Read-only open mode (also when rocompat flags unknown)
+- [x] 2.4.2 Append frames with group-fsync API (`append`, `sync`)
 - 2.4.3 Commit: write inactive superblock slot, alternate (SPEC §4.5)
-  - [ ] 2.4.3.1 [T] crash simulation: fail after each step 1/2/3, reopen, assert previous or new commit visible, never partial
+  - [x] 2.4.3.1 [T] crash simulation: fail after each step 1/2/3, reopen, assert previous or new commit visible, never partial
 - 2.4.4 Recovery on open (SPEC §4.4, §8.6)
-  - [ ] 2.4.4.1 Choose superblock, scan from `log_end`, truncate torn tail
-  - [ ] 2.4.4.2 [T] an invalid frame in `wal_start..log_end` is `Corrupt` and never truncated; creating a container never truncates an existing file (SPEC §4.7, §8.6)
+  - [x] 2.4.4.1 Choose superblock, scan from `log_end`, truncate torn tail (memory bounded only by the file size until 2.4.12)
+  - [x] 2.4.4.2 [T] an invalid frame in `wal_start..log_end` is `Corrupt` and never truncated; creating a container never truncates an existing file (SPEC §4.7, §8.6)
 - 2.4.5 Container compaction: rewrite live frames into new file + atomic rename (SPEC §4.6)
-  - [ ] 2.4.5.1 Dead-space accounting
-  - [ ] 2.4.5.2 [T] crash during compaction leaves a valid old or new file
-  - [ ] 2.4.5.3 Windows: test whether an open mapping blocks `rename` over the container; if so, close mappings or defer the swap until readers drain (ADR-0010)
-- [ ] 2.4.6 Expose logical objects (Segment/Manifest/WalChunk) via the `Storage` trait view for the engine
-- [ ] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
-- [ ] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
-- [ ] 2.4.9 Define `frame_seq` (SPEC §4.4): what it numbers, its first value after a rewrite, and whether recovery stops at a non-increasing one
-- [ ] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9
+  - [x] 2.4.5.1 Dead-space accounting
+  - [x] 2.4.5.2 [T] crash during compaction leaves a valid old or new file (crashes while writing the new file; the rename and directory-sync windows are tested in 2.4.11.2)
+  - [x] 2.4.5.3 Windows: test whether an open mapping blocks `rename` over the container; if so, close mappings or defer the swap until readers drain (ADR-0010)
+- [x] 2.4.7 Fuzz target: arbitrary bytes as container → open must return `Err` or valid, never panic
+- [x] 2.4.8 Platform notes: fsync semantics on macOS (`F_FULLFSYNC`), Windows (`FlushFileBuffers`), documented + tested where possible
+- [x] 2.4.9 Define `frame_seq` (SPEC §4.4): what it numbers, its first value after a rewrite, and whether recovery stops at a non-increasing one
+- [x] 2.4.10 Read-write open after a scan ends in corruption (SPEC §4.4): keep the bytes after the stop offset (quarantine copy or explicit repair flag) instead of truncating them; distinguish acknowledged WAL frames via 2.4.9 (ADR-0013: a valid frame past the stop whose `frame_seq` is not above the last valid one can never be acknowledged data, e.g. stale blocks exposed by a crash during a file extension; decide whether "only such frames and zeros" may be truncated)
 - 2.4.11 File-level fault injection for the local backend and the container (found in the 2.2.4 review: `FaultyStorage` sits above the fsync points)
-  - [ ] 2.4.11.1 A file-system shim under the 2.3 backend and the container adapter that can fail or drop `fsync`, lose a `rename` or directory entry while the data survives (or the reverse), and tear the tail of an append
-  - [ ] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix
+  - [x] 2.4.11.1 A file-system shim under the 2.3 backend and the container adapter that can fail or drop `fsync`, lose a `rename` or directory entry while the data survives (or the reverse), and tear the tail of an append
+  - [x] 2.4.11.2 [T] crash at every fsync point of 2.3.1 (temp → fsync → rename → fsync dir), of `Container::create` (temp → sync → link → remove → sync dir), of `Container::compact` (temp → sync → rename → sync dir, incl. `CompactedNotDurable`) and of the commit sequence (SPEC §4.5, §8): recovery yields the old or the new state, never a mix
+- [x] 2.4.12 Bound recovery memory (found in 2.4): open reads `wal_start..log_end` and the tail after `log_end` into memory; scan frame by frame (header, bound, frame) with a streaming zero check for the torn-tail rule, so a large uncommitted Segment frame does not need its size in RAM
+- [x] 2.4.13 Streaming append of large frames through `FrameEncoder` (a Segment written in chunks), with the same poisoning and `frame_seq` rules as `append`
+- [x] 2.4.14 Decide when `format_minor = max(stored, own)` is recorded (SPEC §4.2): the header page has no second copy, so it is never rewritten in place; create and compaction write the merged minor into a new file, and a read-write open by a newer build leaves it until then (ADR-0015)
+- [x] 2.4.15 Sweep stale `<name>.tmp.*` and `<name>.compact.*` files left by a `Container::create` or `compact` that crashed (same policy question as 2.3.8)
+- [x] 2.4.16 Windows writer lock (found in the 2.4 review): `LockFileEx` is mandatory, so a writer blocks every reader of the container (SPEC §4.5.1); lock a sidecar `<name>.lock` file or a byte range past any data instead, and test it in the 2.3.9 Windows CI job
+- [ ] 2.4.17 Compaction copies each frame in bounded memory (found in 2.4.12: `Rewriter` reads a whole frame, so a large Segment needs its size in RAM; stream it with a running CRC, compressed frames included)
+- [ ] 2.4.18 Windows file identity for `compact`'s "the path still names this file" check (found in 2.4.16: the standard library exposes none; `GetFileInformationByHandle` needs FFI and an ADR)
+- [ ] 2.4.19 `persia` CLI: list and remove a container's quarantine files (ADR-0014) and stale temporary files (2.4.15)
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
 - [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
@@ -355,6 +362,7 @@ Deps: M2, M5.
 - [ ] 6.3.3 Atomic snapshot publication to readers (`ArcSwap`-style) with `seq`
 - [ ] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`)
 - [ ] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
+- [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)

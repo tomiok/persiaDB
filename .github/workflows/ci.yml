@@ -63,6 +63,23 @@ jobs:
       # Feature-gated code still compiles in the lint job's `clippy --all-features`.
       - run: cargo test --workspace
 
+  test-windows:
+    # ROADMAP 2.3.9: the `cfg(windows)` code of persia-storage (positioned I/O, reserved names, the writer lock,
+    # directory sync) is compiled and tested nowhere else. Only the crates below it, to keep the job short.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install pinned toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo clippy -p persia-format -p persia-storage --all-targets --all-features -- -D warnings
+      - run: cargo test -p persia-format -p persia-storage --no-fail-fast
+
   repo-checks:
     runs-on: ubuntu-latest
     timeout-minutes: 10

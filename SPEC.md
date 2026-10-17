@@ -119,9 +119,11 @@ Validation (ADR-0007), in this order, so a newer format is never misreported as 
 5. `page_size` not a power of two in `4096..=65536`, or non-zero `reserved` bytes ⇒ corruption.
 6. Any `rocompat_flags` bit this reader does not know ⇒ the container opens **read-only**. No bits are assigned yet.
 
-A writer sets only bits it knows, and records `format_minor = max(the container's minor, its own minor)`, also
-when it rewrites the container (SPEC §4.6): minors are additive (SPEC §15), so the field names the newest minor that
-has written the container and never decreases (ADR-0008).
+A writer sets only bits it knows, and records `format_minor = max(the container's minor, its own minor)` when it
+creates or rewrites the container (SPEC §4.6): minors are additive (SPEC §15), so the field names the newest minor
+that has created or rewritten the container and never decreases (ADR-0008). The header page is never written in
+place, since it has no second copy (ADR-0015): a read-write open by a newer build leaves `format_minor` as it is
+until the next rewrite, so the field is a lower bound on the minors that have written the container.
 
 `page_size` is advisory (ADR-0008): the alignment a writer may give Segment frame payloads, using Padding frames
 (SPEC §4.4), so a mapped segment starts on a page boundary. No offset a reader computes depends on it, and a
@@ -136,13 +138,21 @@ Each slot is one 4096-byte page (slot A at 4096, slot B at 8192; ADR-0008):
 24  8  log_end        u64  (end of last durable frame)
 32  8  wal_start      u64  (first WAL frame still needed)
 40  8  fence_token    u64  (writer fencing, SPEC §11.3)
-48  ..  reserved      MUST be zero
+48  8  next_frame_seq u64  (frame_seq of the frame at log_end, SPEC §4.4)
+56  ..  reserved      MUST be zero
 4092 4 crc            u32  (CRC32C over bytes 0..4092 of the slot)
 ```
 A slot is *valid* when its CRC matches and its reserved bytes are zero; a never-written (all-zero) slot is invalid.
 A new container has no frames yet: both slots hold `seq = 0`, `log_end = wal_start = 12288` (the first frame
-offset) and zero manifest fields, so recovery (SPEC §4.4) scans from 12288 (ADR-0008).
-The offsets are checked against the container by its reader (ROADMAP 2.4.4), not by slot decoding.
+offset), `next_frame_seq = 1` and zero manifest fields, so recovery (SPEC §4.4) scans from 12288 (ADR-0008).
+Slot decoding does not check the offsets; the container reader checks the active slot against the file before
+using any of them, and any violation is corruption:
+- `wal_start` and `log_end` are multiples of 8 with `12288 ≤ wal_start ≤ log_end ≤` file length;
+- `next_frame_seq ≥ 1`, and `≥ 2` after a commit (a commit has at least its Manifest frame);
+- `seq = 0` (never committed) holds exactly the new-container values above for `log_end`, `next_frame_seq` and the
+  manifest fields;
+- otherwise the Manifest frame lies in `12288..log_end` (`manifest_off` and `manifest_len` multiples of 8,
+  `manifest_len ≥ 32`), and the frame there is a valid Manifest frame of exactly `manifest_len` bytes.
 
 Open: read both slots, discard invalid ones, use the one with the highest `seq` (ADR-0007):
 
@@ -170,8 +180,15 @@ From byte 12288 (after slot B) the file is an append-only sequence of frames:
 ..  4  reserved      u32  MUST be zero
 ```
 Total frame length is `24 + pad8(payload_len) + 8`, so every frame starts 8-byte aligned (SPEC §4.1).
-`flags` is a 24-bit little-endian integer. `frame_seq` is stored and covered by the CRC, but its meaning (and
-whether recovery checks it) is not defined yet (ROADMAP 2.4.9); frame decoding does not interpret it.
+`flags` is a 24-bit little-endian integer.
+
+`frame_seq` numbers the frames of a container file in append order (ADR-0013): each frame's is one more than the
+previous frame's, Padding and unknown kinds included, so a file's frames form one contiguous run. Values are in
+`1..u64::MAX`: 0 and `u64::MAX` are never written. The first frame of a new container has `frame_seq = 1`; a
+rewrite (§4.6) numbers the frames of the new file on from one more than the `frame_seq` of the last valid frame of
+the old file (committed or not, so acknowledged WAL frames after `log_end` keep their numbers unique), and writes
+both of its slots as commits (`seq ≥ 1`), so a database never gives one `frame_seq` to two different frames. Frame
+decoding does not interpret the field; the container reader checks it (below).
 
 Validation (ADR-0009), in this order. A frame at offset `o` in input that ends at `E` is *invalid* when:
 1. fewer than 32 bytes (the smallest frame) remain, or `frame_magic` differs;
@@ -214,12 +231,20 @@ input. It ends in one of four ways, at the offset `o` where it stopped:
 - *unsupported*: the frame at `o` is unsupported. Nothing is truncated; the container cannot be opened by this
   build.
 
-Recovery: starting at `log_end` from the chosen superblock, scan forward; a torn tail or corruption terminates
-the scan, and the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
+Recovery: starting at `log_end` from the chosen superblock, scan forward, expecting `frame_seq = next_frame_seq`
+at `log_end` and one more for each later frame; a valid frame with any other `frame_seq` (a leftover or misplaced
+frame) ends the scan as *corruption* at that frame (ADR-0013). A torn tail or corruption terminates the scan, and
+the file is logically truncated at `o`. On a torn tail, before appending again the writer truncates
 the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new ones (ROADMAP 2.4.4).
 On corruption the bytes after `o` may hold acknowledged writes (WAL frames synced after `log_end`, SPEC §8.2), so
-they are not destroyed silently: what a read-write open does then is decided with `frame_seq` (ROADMAP 2.4.9,
-2.4.10).
+they are not destroyed silently (ADR-0014): a read-write open searches them for valid frames (at 8-aligned offsets
+holding the magic). If one has a `frame_seq` at or above the one expected at `o`, or flags this build does not know
+(a newer writer's frame), it may be acknowledged: the open fails, naming it, unless the caller asks for quarantine.
+Zeros and stale frames (lower `frame_seq`, ADR-0013) are truncated like a torn tail. Anything else is first copied
+to `<name>.quarantine.<o as 16 hex digits>.<nonce>.<n>` next to the container (file and directory synced), then
+truncated. Without a path there is nowhere to copy to, and the open fails. The search reads at most four times the
+tail's length; past that budget (many bogus frame candidates) nothing is known and the open fails as in the first
+case.
 
 ### 4.5 Commit protocol (local)
 1. Append Segment / WalChunk frames. `fdatasync`.
@@ -229,9 +254,106 @@ they are not destroyed silently: what a read-write open does then is decided wit
 
 A crash before step 3 completes leaves the previous superblock valid ⇒ the prior commit.
 
+The new slot holds `log_end` = the end of the last appended frame (frames appended after the Manifest are committed
+with it), `next_frame_seq` = the next frame's `frame_seq`, and a `wal_start` that is a frame start (or `log_end`)
+no lower than the previous one: the WAL only advances (§8.2). Appends between commits are made durable in groups,
+with one `fdatasync` for every frame appended since the last (group commit); a synced frame survives a crash before
+the next commit, and recovery finds it after `log_end` (§4.4). If any write, truncation or `fdatasync` fails, the
+writer stops writing: after a failed `fdatasync` the OS may have dropped the unwritten pages, so repeating it proves
+nothing. The container is reopened, and recovery decides what survived.
+
+### 4.5.1 Opening a container
+- **Create** never truncates or replaces a file (§4.7): the header and both slots (the new-container state of
+  §4.3, with a random `db_uuid`) are written to a temporary file `<name>.tmp.<nonce>.<n>` in the same directory and
+  synced; the file is hard-linked to the container name, which fails if the name exists; then the temporary name is
+  removed and the directory synced. A crash leaves no container or a complete one, and possibly a stale temporary
+  file. The file system must support hard links. A writer removes the stale temporary files of creates and compactions
+  of its container (`<name>.tmp.*`, `<name>.compact.*`) on request (`sweep_stale_files`, ROADMAP 2.4.15): holding the
+  writer lock, no compaction can be in flight, and a temporary file whose own lock is held belongs to a live create,
+  which is skipped. Quarantine files (§4.4) are never removed.
+- **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
+  holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
+  locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
+  have renamed a new file over it, and the old one's lock is released when its writer moves on. On Windows,
+  `LockFileEx` locks are mandatory, so a lock on the container would keep every reader out: the lock is on a file
+  `<name>.lock` next to the container instead, created if missing and never removed (removing it would race with a
+  writer taking it); since it is never renamed, no recheck is needed (ADR-0016). Read-only opens take no lock. Limit: on NFS,
+  Linux emulates `flock` with per-process POSIX locks, so two handles of one process are not excluded from each
+  other.
+- **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
+  logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
+  the flags.
+- **Recovery** (§8.6), in this order, for both modes: validate the header (§4.2); pick the active slot (§4.3) and
+  check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
+  bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:
+  clean, the next frame goes at the end of the file; torn tail, a read-write open truncates the file there;
+  corruption, a read-write open truncates or quarantines as in §4.4 (or fails) and a read-only open reads up to it;
+  unsupported, the open fails. A read-write open then syncs the file before anything else: what it read may still be only in the page
+  cache of a writer that died without syncing, and a commit must never reach the disk before the frames it covers
+  (§4.5). Valid frames after `log_end` are then durable but not committed (synced WAL frames, §8.2, or the frames
+  of a commit that did not complete); the next commit's `log_end` covers them. Recovery reads frames in bounded chunks
+  (64 KiB), never a whole frame or tail at once, so its memory does not grow with the size of a frame or of a torn tail
+  (only its list of frames from `wal_start` grows with their number; ROADMAP 2.4.12).
+
+### 4.5.2 Platform durability notes
+"Sync" in this document means the following calls (Rust's standard library, checked against the pinned toolchain's
+sources; ROADMAP 2.4.8, ADR-0016). Each must reach stable storage, including the drive's volatile write cache, before the
+call returns:
+
+| Platform | File data (`sync_data`) | File data and metadata (`sync_all`) | Directory entries |
+|----------|-------------------------|-------------------------------------|-------------------|
+| Linux, other Unix | `fdatasync` (`fsync` where unavailable) | `fsync` | `open` the directory, `fsync` |
+| macOS, iOS | `fcntl(F_FULLFSYNC)` | `fcntl(F_FULLFSYNC)` | `open` the directory, `fcntl(F_FULLFSYNC)` |
+| Windows | `FlushFileBuffers` | `FlushFileBuffers` | open with `FILE_FLAG_BACKUP_SEMANTICS` and write access, `FlushFileBuffers` |
+
+- macOS `fsync` only hands data to the drive, which may keep it in its cache across a power loss; `F_FULLFSYNC` also
+  flushes the drive cache. It is much slower (milliseconds), which is why commits group their syncs (§4.5).
+- Linux `fdatasync` flushes the file's data and the metadata needed to read it back (its size), not timestamps;
+  ext4, XFS and btrfs also flush the drive cache unless mounted with barriers off (`nobarrier`), which voids these
+  guarantees.
+- A new or renamed name is durable only after its directory is synced (on Linux a file's `fsync` does not cover its
+  entry). Windows directory entries are flushed the same way; NTFS also journals metadata, but only lazily. A volume
+  whose directories cannot be flushed (FAT, some network redirectors on Windows) fails every operation that needs
+  it with an I/O error, rather than acknowledging a write it cannot make durable.
+- A failed sync leaves what reached the disk unknown, and repeating it proves nothing (§4.5): writers stop and
+  recovery decides. Network file systems (NFS, SMB) may report success before the server has the data; they are
+  outside these guarantees.
+- Tests (CI on Linux, macOS and Windows) check that each call succeeds on files and directories; whether a drive
+  honors a flush cannot be observed from software, so crash behavior is tested on simulated files (ROADMAP 2.4.11).
+
 ### 4.6 Compaction of the container
-Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by **rewriting live segments into a new file**
-and atomically `rename`-ing it over the old one (fsync file, then directory). Triggered by dead-space ratio (default 40%).
+Dead frames (replaced segments, superseded tombstone sidecars, old manifests, consumed WAL chunks) are reclaimed by
+**rewriting the live frames into a new file** and atomically `rename`-ing it over the old one. The container does
+not interpret payloads, so the writer (the engine, from its manifest) names the live frames below `wal_start`;
+every frame from `wal_start` on is kept, since the WAL range and the frames after `log_end` (acknowledged WAL
+frames, §8.2) are needed by recovery.
+
+**Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
+from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
+reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
+live; they are few and small.
+
+**The new file**, written by the single writer while it holds the lock:
+1. The live frames below `wal_start`, in their old order, then the frames of `wal_start..log_end`, each copied with
+   its stored payload unchanged and a new `frame_seq`, numbered on from one more than the `frame_seq` of the last
+   valid frame of the old file (§4.4).
+2. A new Manifest frame, which the writer builds from where the frames moved (the offsets it references change).
+3. Both slots hold the same commit: `seq` one above the old one, `log_end` the end of the new Manifest, `wal_start`
+   the new offset of the old `wal_start` frame (the end of the Manifest if the old WAL range was empty), the old
+   `fence_token`, and `next_frame_seq` one above the Manifest's.
+4. The old frames after `log_end`, copied the same way after the new `log_end`, so they stay uncommitted.
+5. The header is the old one with `format_minor = max(old, own)` (§4.2).
+
+The new file is written under a temporary name `<name>.compact.<nonce>.<n>` in the same directory and locked,
+synced, renamed over the container, and the directory synced. The old file is never written, so a crash before
+the rename leaves the old container (and a stale temporary file); the rename replaces the name atomically, so the
+path names a complete old or new container at every instant. Readers that opened the old file keep reading it
+(§4.7). If the directory sync fails after the rename, the writer continues on the new file but stops writing until
+reopened, since the rename may not be durable; it still learns where the frames moved. The rename goes to the
+canonical path resolved at open, so a symbolic link to the container keeps pointing at it; other hard links to the
+file are not supported (they keep the old contents). The writer refuses to rename if that path no longer names its
+file. Because a compaction changes which file the path names, a read-write open checks after taking the lock that
+the path still names the file it locked, and opens again if not (§4.5.1).
 
 ### 4.7 Memory-mapped reads
 A local reader may memory-map byte ranges of the container instead of reading them (ADR-0010). Only bytes that are
@@ -242,7 +364,9 @@ with or has since committed:
 - recovery (§8.6) truncates only at the end of the §4.4 scan, which starts at `log_end`; an invalid frame below
   `log_end` is corruption and is never truncated;
 - compaction (§4.6) writes a new file instead of shrinking the old one, so existing mappings keep the old file's
-  contents;
+  contents; a live mapping does not block the rename over the container on Unix, nor on Windows where the standard
+  library renames with POSIX semantics (Windows 10 1607 and later, NTFS; ADR-0016). Elsewhere (FAT, exFAT)
+  `MoveFileExW` may refuse to replace a mapped file, and compaction then fails without harm;
 - creating a container never truncates an existing file (create-new, or write elsewhere and rename).
 
 A slot damaged after another process read it is outside this contract: recovery may then pick the older slot and
@@ -574,7 +698,8 @@ Obsolete segments are deleted only after no snapshot references them (reference 
 
 ### 8.6 Recovery
 On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs)
-→ ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated. Only
+→ ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated, and
+so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
 
@@ -719,7 +844,11 @@ above.
 - **Limits.** A file name `f(s)` or `d(s)` over 255 bytes is `InvalidInput` (the common filesystem limit), so a
   segment of plain characters is at most 255 bytes as the last segment and 254 bytes before a `/`. On Windows a name
   that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
-  or that ends in `.` is `InvalidInput` too.
+  or that ends in `.` is `InvalidInput` too. On Unix, so is an object whose file path, or the path of its temporary
+  file (below), is longer than `PATH_MAX` allows (4095 bytes on Linux, 1023 on macOS and the BSDs): it depends on the
+  root's path, and on macOS and the BSDs even the longest key (§10.1) exceeds it under any root. The root's path is
+  measured as given (made absolute, symbolic links not resolved); a root behind a symbolic link whose target path is
+  longer can still fail with an I/O error instead.
 - **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
   leave one behind; it holds no acknowledged data.
@@ -735,10 +864,10 @@ above.
   directory (an object behind a symbolic link or a file on the path does not exist, so `delete` succeeds without
   touching it); directories are never removed by Persia, so a concurrent `put` never finds its directory gone. A
   directory removed by someone else is created again by the next write into it.
-  **Windows:** directories are not synced yet (ROADMAP 2.4.8), so a machine crash may lose an acknowledged write
-  there; the guarantee above holds on Unix.
-- **Reads** open the file (a rename never changes an open file, so a read sees one version) and read with positioned
-  reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
+  Directory syncs work on Unix and Windows alike (§4.5.2, ADR-0016).
+- **Reads** open the file (a rename never changes an open file, so a read sees one version); on Windows an open
+  that a concurrent `put` is replacing can briefly fail with `ERROR_ACCESS_DENIED` (the replaced file is pending
+  deletion), and is retried. Reads use positioned reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
   `ShortRead` without reading it, as is a file found shorter while reading. An entry `list` would skip (a symbolic
   link, also one on the path, a FIFO, a file where a directory of the path should be) reads as `NotFound`. `list` lists the directory named
   by the prefix's directory part (missing, a file or a symbolic link: nothing matches; a missing root is `Io`, so an

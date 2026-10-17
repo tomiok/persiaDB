@@ -65,7 +65,7 @@ fn reference_header(b: &[u8]) -> Result<Header, (u64, bool)> {
 /// What SPEC §4.3 says about one slot: valid iff the CRC matches and the reserved bytes are zero.
 fn reference_slot(b: &[u8]) -> Option<Superblock> {
     let valid = u32_at(b, SLOT_LEN - 4) == crc32c(&b[..SLOT_LEN - 4])
-        && b[48..SLOT_LEN - 4].iter().all(|&x| x == 0);
+        && b[56..SLOT_LEN - 4].iter().all(|&x| x == 0);
     valid.then(|| Superblock {
         seq: u64_at(b, 0),
         manifest_off: u64_at(b, 8),
@@ -73,6 +73,7 @@ fn reference_slot(b: &[u8]) -> Option<Superblock> {
         log_end: u64_at(b, 24),
         wal_start: u64_at(b, 32),
         fence_token: u64_at(b, 40),
+        next_frame_seq: u64_at(b, 48),
     })
 }
 
@@ -115,13 +116,14 @@ fn encode_header(h: &Header) -> Vec<u8> {
 }
 
 fn superblock(seq: impl Strategy<Value = u64>) -> impl Strategy<Value = Superblock> {
-    (seq, any::<[u64; 5]>()).prop_map(|(seq, f)| Superblock {
+    (seq, any::<[u64; 6]>()).prop_map(|(seq, f)| Superblock {
         seq,
         manifest_off: f[0],
         manifest_len: f[1],
         log_end: f[2],
         wal_start: f[3],
         fence_token: f[4],
+        next_frame_seq: f[5],
     })
 }
 

@@ -185,14 +185,22 @@ fn traversal_attempts_are_invalid_input() {
         );
     }
     let (dir, s) = store();
-    // Segments that look like paths are encoded into one file name each.
-    for k in ["...", "..x/y", ".hidden", "%2E%2E/x"] {
+    // Segments that look like paths are encoded into one file name each. On Windows a name ending in `.` is
+    // rejected instead (SPEC §10.1.1).
+    if cfg!(windows) {
+        let err = s.put(&key("..."), Bytes::from_static(b"in")).unwrap_err();
+        assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    } else {
+        s.put(&key("..."), Bytes::from_static(b"in")).unwrap();
+    }
+    for k in ["..x/y", ".hidden", "%2E%2E/x"] {
         s.put(&key(k), Bytes::from_static(b"in")).unwrap();
     }
-    assert_eq!(
-        tree(s.root()),
-        ["%252%45%252%45@/x", "...", "..x@/y", ".hidden"]
-    );
+    let mut want = vec!["%252%45%252%45@/x", "...", "..x@/y", ".hidden"];
+    if cfg!(windows) {
+        want.retain(|n| *n != "...");
+    }
+    assert_eq!(tree(s.root()), want);
     // Nothing was written beside the root.
     let mut outside: Vec<_> = std::fs::read_dir(dir.path())
         .unwrap()
@@ -348,4 +356,52 @@ fn listing_a_missing_root_is_an_error() {
     std::fs::remove_dir(s.root()).unwrap();
     let err = s.list(&KeyPrefix::default()).unwrap_err();
     assert_eq!(err.kind(), ErrorKind::Io, "{err}");
+}
+
+/// An object whose path, or its temporary file's, would exceed `PATH_MAX` is `InvalidInput` (`PathTooLong`) before
+/// anything is written; a path of exactly the limit works (SPEC §10.1.1).
+#[cfg(unix)]
+#[test]
+fn paths_over_the_platform_limit_are_invalid_input() {
+    let max = if cfg!(any(target_os = "linux", target_os = "android")) {
+        4095
+    } else {
+        1023
+    };
+    // Canonical: on macOS `/var` is a symbolic link, and the kernel counts the expanded path against `PATH_MAX`.
+    let dir = tempfile::tempdir().unwrap();
+    let base = std::fs::canonicalize(dir.path()).unwrap();
+    // A root of exactly `max - 256` bytes, so `<root>/<255-byte name>` is exactly `max` bytes.
+    let target = max - 256;
+    let mut root = base;
+    while root.as_os_str().len() < target {
+        // A push adds a separator and the name. Never leave exactly one byte to fill, which no push can.
+        let left = target - root.as_os_str().len() - 1;
+        let n = if left > 201 { 200 } else { left };
+        assert!(
+            n > 0,
+            "the temporary directory's path is one byte short of the target"
+        );
+        root.push("d".repeat(n));
+    }
+    assert_eq!(root.as_os_str().len(), target);
+    let s = LocalStorage::open(&root).unwrap();
+    let fits = key(&"x".repeat(255));
+    s.put(&fits, Bytes::from_static(b"ok")).unwrap();
+    assert_eq!(&s.get(&fits).unwrap()[..], b"ok");
+    // `<root>/a@/<255 bytes>`: four bytes over.
+    let long = key(&format!("a/{}", "x".repeat(255)));
+    let err = s.put(&long, Bytes::new()).unwrap_err();
+    assert_eq!(err.kind(), ErrorKind::InvalidInput, "{err}");
+    assert!(
+        matches!(&err, persia_storage::Error::InvalidKey(e)
+            if e.defect == (KeyDefect::PathTooLong { len: max + 3, max })),
+        "{err}"
+    );
+    assert_eq!(s.get(&long).unwrap_err().kind(), ErrorKind::InvalidInput);
+    assert_eq!(
+        tree(&root),
+        ["x".repeat(255)],
+        "nothing was written for the long key"
+    );
 }

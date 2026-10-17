@@ -253,6 +253,16 @@ pub enum KeyDefect {
     /// (SPEC §10.1.1). Only the local backend on Windows reports it.
     #[error("a segment's file name is reserved on Windows")]
     WindowsName,
+    /// The file path of the object in the local backend, or of its temporary file, is longer than the platform's
+    /// limit (`PATH_MAX`: 4096 bytes on Linux, 1024 on macOS and the BSDs, the terminating NUL included; SPEC §10.1.1). Only the
+    /// local backend on Unix reports it; it depends on the root's path too.
+    #[error("the object's file path is {len} bytes, longer than {max}")]
+    PathTooLong {
+        /// Length of the longest path the object needs, in bytes.
+        len: usize,
+        /// The platform's limit.
+        max: usize,
+    },
 }
 
 #[cfg(test)]

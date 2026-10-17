@@ -33,7 +33,7 @@ pub mod zigzag;
 
 pub use align::ALIGNMENT;
 pub use blob::{BlobId, BlobRef};
-pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
+pub use error::{Corruption, EncodeError, Error, Result, SuperblockField, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
 pub use source::ByteSource;

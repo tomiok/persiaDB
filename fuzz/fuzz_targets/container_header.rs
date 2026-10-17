@@ -1,7 +1,8 @@
 //! Fuzz the container header and superblock slots (ROADMAP 1.6.1.2, 1.6.3; SPEC §4.2, §4.3; ADR-0007): arbitrary
 //! bytes never panic; the header fails only as corruption or unsupported, slots only as corruption; a failed
 //! decode moves nothing; an accepted header or slot re-encodes to the same bytes; the active slot is the one the
-//! SPEC §4.3 table picks from the two slots decoded on their own.
+//! SPEC §4.3 table picks from the two slots decoded on their own; `check_bounds` on it never panics and fails only as
+//! `InvalidSuperblock`.
 //!
 //! Input: `mode u8, data..`, `data` laid out as a container prefix (header at 0, slots at 4096 and 8192). Mode
 //! bits, applied in this order: 3 = write the magic and `format_major` 1; 0 = fix `header_crc`; 1 and 2 = fix the
@@ -12,8 +13,8 @@
 use libfuzzer_sys::fuzz_target;
 use persia_format::checksum::{Crc32c, crc32c};
 use persia_format::header::{Access, FORMAT_MAJOR, HEADER_LEN, Header, MAGIC};
-use persia_format::superblock::{SLOT_LEN, SLOTS_LEN, Slot, Superblock};
-use persia_format::{EncodeError, Error, Reader, Writer};
+use persia_format::superblock::{ActiveSuperblock, SLOT_LEN, SLOTS_LEN, Slot, Superblock};
+use persia_format::{Corruption, EncodeError, Error, Reader, Writer};
 
 fn fix_slot_crc(slot: &mut [u8]) {
     if slot.len() == SLOT_LEN {
@@ -89,6 +90,7 @@ fn check_slots(slots: &[u8]) {
         Ok(active) => {
             assert_eq!(Some((active.slot, active.superblock)), expected);
             assert_eq!(r.position(), SLOTS_LEN);
+            check_bounds(&active, slots);
         }
         Err(err) => {
             assert_eq!(expected, None, "valid selection rejected: {err:?}");
@@ -128,3 +130,33 @@ fuzz_target!(|input: &[u8]| {
     check_header(&data);
     check_slots(data.get(HEADER_LEN..).unwrap_or_default());
 });
+
+/// `check_bounds` (SPEC §4.3) never panics and fails only as `InvalidSuperblock`; an accepted length is at least
+/// `log_end`, and every longer one is accepted too (only `log_end <= len` depends on the length).
+fn check_bounds(active: &ActiveSuperblock, slots: &[u8]) {
+    let len_hint = slots
+        .get(SLOTS_LEN..SLOTS_LEN + 8)
+        .map_or(0, |b| u64::from_le_bytes(b.try_into().unwrap()));
+    let sb = active.superblock;
+    for len in [
+        0,
+        len_hint,
+        sb.log_end,
+        sb.log_end.saturating_sub(1),
+        u64::MAX,
+    ] {
+        match active.check_bounds(len) {
+            Ok(()) => {
+                assert!(sb.log_end <= len && sb.wal_start <= sb.log_end);
+                assert!(active.check_bounds(u64::MAX).is_ok());
+            }
+            Err(err) => assert!(
+                matches!(
+                    err.corruption(),
+                    Some((_, Corruption::InvalidSuperblock { .. }))
+                ),
+                "{err:?}"
+            ),
+        }
+    }
+}

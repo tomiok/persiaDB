@@ -34,6 +34,10 @@
 //!      `available`, needing 24 and 32; with 24..32 bytes `Frame::decode` fails that way and the header is
 //!      judged on magic and length alone;
 //!    - on error neither reader moves; a header advances exactly `FRAME_HEADER_LEN` bytes.
+//! 7. Streaming (ROADMAP 2.4.12): on the mutated logs of invariant 4, with any chunk length and any `frame_seq`
+//!    check, `StreamScanner` yields the headers of exactly the frames `FrameScanner` yields and ends with the same
+//!    `ScanEnd`, reading only inside the range and never more than the chunk length at once, except the 24-byte frame header,
+//!    which is read whole.
 
 // Test-only helpers index, cast and unwrap on purpose (see reader_writer_props.rs).
 #![allow(
@@ -46,7 +50,7 @@ use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
     FLAG_ZSTD, FRAME_HEADER_LEN, FRAME_MAGIC, Frame, FrameHeader, FrameKind, FrameScanner,
-    KNOWN_FRAME_FLAGS, MIN_FRAME_LEN, ScanEnd, encode_frame, frame_len,
+    KNOWN_FRAME_FLAGS, MIN_FRAME_LEN, ScanEnd, StreamScanner, encode_frame, frame_len,
 };
 use persia_format::{Corruption, Error, Reader, Unsupported, Writer};
 use proptest::prelude::*;
@@ -956,4 +960,186 @@ fn fuzz_seeds_match_their_names() {
     assert!(matches!(end, ScanEnd::Clean { .. }), "{end:?}");
     assert!(frames.len() == 1 && frames[0].is_compressed());
     assert!(frames[0].payload(1024).unwrap_err().is_corruption());
+}
+
+/// A checked scan (ADR-0013) accepts the longest prefix of the unchecked scan's frames whose `frame_seq` values are
+/// in `1..u64::MAX`, start at `first` (if given) and step by one (a mismatch is reported before a value out of range);
+/// where it stops early it reports corruption at the
+/// breaking frame, and otherwise it ends exactly like the unchecked scan.
+fn check_seq_run(specs: &[Spec], first: Option<u64>, base: u64) -> Result<(), TestCaseError> {
+    let (log, _) = encode_log(specs);
+    let (frames, unchecked_end) = scan(&log, base);
+    let scanner = FrameScanner::new(&log, base);
+    let mut scanner = match first {
+        Some(first) => scanner.expect_frame_seq(first),
+        None => scanner.contiguous(),
+    };
+    let checked: Vec<Frame<'_>> = scanner.by_ref().collect();
+    let end = scanner.end().unwrap().clone();
+    prop_assert_eq!(scanner.offset(), end.offset());
+
+    let mut expected = first;
+    let mut accepted = 0;
+    let mut stop = None;
+    for f in &frames {
+        let seq = f.frame_seq();
+        if let Some(e) = expected.filter(|&e| e != seq) {
+            stop = Some((
+                f.offset(),
+                Corruption::FrameSeqMismatch {
+                    expected: e,
+                    found: seq,
+                },
+            ));
+            break;
+        }
+        if seq == 0 || seq == u64::MAX {
+            stop = Some((f.offset(), Corruption::FrameSeqOutOfRange { found: seq }));
+            break;
+        }
+        expected = Some(seq + 1);
+        accepted += 1;
+    }
+    prop_assert_eq!(&checked[..], &frames[..accepted]);
+    if let Some((offset, reason)) = stop {
+        let error = corrupt(offset + 16, reason);
+        prop_assert_eq!(end, ScanEnd::Corrupt { offset, error });
+    } else {
+        prop_assert_eq!(end, unchecked_end);
+        prop_assert_eq!(scanner.next_frame_seq(), expected);
+    }
+    Ok(())
+}
+
+proptest! {
+    #[test]
+    fn checked_scan_accepts_the_longest_valid_run(
+        mut specs in specs(6, 60),
+        start in prop_oneof![0_u64..3, (u64::MAX - 3)..=u64::MAX, any::<u64>()],
+        jumps in proptest::collection::vec(prop_oneof![6 => Just(None), 1 => any::<u64>().prop_map(Some)], 6),
+        first in prop_oneof![Just(None), Just(Some(0)), any::<u64>().prop_map(Some), Just(Some(u64::MAX))],
+        use_start in any::<bool>(),
+        base in aligned_base(),
+    ) {
+        let mut seq = start;
+        for (i, (s, jump)) in specs.iter_mut().zip(&jumps).enumerate() {
+            if i > 0 {
+                seq = seq.wrapping_add(1);
+            }
+            seq = jump.unwrap_or(seq);
+            s.seq = seq;
+        }
+        let first = if use_start { Some(start) } else { first };
+        check_seq_run(&specs, first, base)?;
+    }
+}
+
+proptest! {
+    /// `reframe` changes only `frame_seq` and the CRC: the copy decodes to the same kind, flags and stored payload,
+    /// and has the original's length.
+    #[test]
+    fn reframe_keeps_everything_but_frame_seq(s in spec(300), seq in any::<u64>(), base in aligned_base()) {
+        let (log, _) = encode_log(std::slice::from_ref(&s));
+        let original = Frame::decode(&mut Reader::with_base_offset(&log, base)).unwrap();
+        let mut w = Writer::new();
+        original.reframe(&mut w, seq);
+        let copy_bytes = w.into_inner();
+        prop_assert_eq!(copy_bytes.len(), log.len());
+        let copy = Frame::decode(&mut Reader::with_base_offset(&copy_bytes, base)).unwrap();
+        prop_assert_eq!(copy.frame_seq(), seq);
+        prop_assert_eq!(copy.kind(), original.kind());
+        prop_assert_eq!(copy.is_compressed(), original.is_compressed());
+        prop_assert_eq!(copy.stored_payload(), original.stored_payload());
+        prop_assert_eq!(&copy_bytes[..16], &log[..16]);
+        prop_assert_eq!(&copy_bytes[24..copy_bytes.len() - 8], &log[24..log.len() - 8]);
+    }
+}
+
+/// Which `frame_seq` check both scanners run (invariant 7).
+#[derive(Debug, Clone, Copy)]
+enum SeqMode {
+    Off,
+    Contiguous,
+    Expect(u64),
+}
+
+/// Invariant 7.
+fn check_stream_matches_slice_scan(
+    bytes: &[u8],
+    base: u64,
+    chunk: usize,
+    mode: SeqMode,
+) -> Result<(), TestCaseError> {
+    let (slice, mut stream) = match mode {
+        SeqMode::Off => (
+            FrameScanner::new(bytes, base),
+            StreamScanner::new(base, base + bytes.len() as u64),
+        ),
+        SeqMode::Contiguous => (
+            FrameScanner::new(bytes, base).contiguous(),
+            StreamScanner::new(base, base + bytes.len() as u64).contiguous(),
+        ),
+        SeqMode::Expect(first) => (
+            FrameScanner::new(bytes, base).expect_frame_seq(first),
+            StreamScanner::new(base, base + bytes.len() as u64).expect_frame_seq(first),
+        ),
+    };
+    stream = stream.with_chunk_len(chunk);
+    let mut slice = slice;
+    let expected: Vec<(u64, u64, FrameKind, u64)> = slice
+        .by_ref()
+        .map(|f| (f.offset(), f.total_len(), f.kind(), f.frame_seq()))
+        .collect();
+    let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), String> {
+        if buf.is_empty() || buf.len() > chunk.max(FRAME_HEADER_LEN) {
+            return Err(format!("read of {} bytes, chunk {chunk}", buf.len()));
+        }
+        let start = usize::try_from(offset.checked_sub(base).ok_or("below the range")?).unwrap();
+        let src = bytes
+            .get(start..start + buf.len())
+            .ok_or("past the range")?;
+        buf.copy_from_slice(src);
+        Ok(())
+    };
+    let mut got = Vec::new();
+    while let Some(h) = stream.next_frame(&mut read).map_err(TestCaseError::fail)? {
+        got.push((h.offset(), h.total_len(), h.kind(), h.frame_seq()));
+    }
+    prop_assert!(stream.next_frame(&mut read).unwrap().is_none(), "fused");
+    prop_assert_eq!(got, expected);
+    prop_assert_eq!(stream.end(), slice.end());
+    prop_assert_eq!(stream.offset(), slice.offset());
+    prop_assert_eq!(stream.next_frame_seq(), slice.next_frame_seq());
+    Ok(())
+}
+
+fn seq_mode() -> impl Strategy<Value = SeqMode> {
+    prop_oneof![
+        Just(SeqMode::Off),
+        Just(SeqMode::Contiguous),
+        prop_oneof![Just(0_u64), Just(1), 0_u64..8, any::<u64>()].prop_map(SeqMode::Expect),
+    ]
+}
+
+proptest! {
+    #[test]
+    fn stream_scan_matches_slice_scan(
+        specs in specs(6, 160),
+        edits in proptest::collection::vec(edit(), 0..4),
+        fix_crcs in any::<bool>(),
+        grow in prop_oneof![Just(0_usize), 1_usize..80],
+        chunk in prop_oneof![1_usize..40, Just(4096)],
+        mode in seq_mode(),
+        base in aligned_base(),
+    ) {
+        let (mut bytes, bounds) = encode_log(&specs);
+        for e in &edits {
+            apply_edit(&mut bytes, &bounds, e);
+        }
+        if fix_crcs {
+            fix_crcs_along_chain(&mut bytes);
+        }
+        bytes.resize(bytes.len() + grow, 0);
+        check_stream_matches_slice_scan(&bytes, base, chunk, mode)?;
+    }
 }

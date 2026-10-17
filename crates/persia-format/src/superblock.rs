@@ -2,11 +2,12 @@
 //! (SPEC §4.3; ADR-0007).
 //!
 //! [`Superblock::decode`] checks a slot structurally (CRC, reserved bytes). [`Superblock::read_active`] decodes
-//! both slots and applies the selection table of SPEC §4.3. Offsets such as `manifest_off` and `log_end` are
-//! validated against the container by its reader (ROADMAP 2.4.4), which knows the file length.
+//! both slots and applies the selection table of SPEC §4.3. [`ActiveSuperblock::check_bounds`] checks the offsets
+//! against the file length, which slot decoding does not know.
 
 use crate::checksummed::{Checksummed, ChecksummedLayout};
-use crate::error::{Corruption, EncodeError, Error, Result};
+use crate::error::{Corruption, EncodeError, Error, Result, SuperblockField};
+use crate::frame::MIN_FRAME_LEN;
 use crate::header::HEADER_LEN;
 use crate::reader::Reader;
 use crate::writer::Writer;
@@ -18,8 +19,8 @@ pub const SLOTS_LEN: usize = 2 * SLOT_LEN;
 /// Where the first frame starts: right after slot B (SPEC §4.2).
 pub const FIRST_FRAME_OFFSET: u64 = (HEADER_LEN + SLOTS_LEN) as u64;
 
-/// Bytes 48..4092.
-const RESERVED_LEN: usize = SLOT_LEN - 48 - 4;
+/// Bytes 56..4092.
+const RESERVED_LEN: usize = SLOT_LEN - 56 - 4;
 
 /// One of the two superblock slots.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +77,8 @@ pub struct Superblock {
     pub wal_start: u64,
     /// Writer fencing token (SPEC §11.3).
     pub fence_token: u64,
+    /// `frame_seq` of the frame at `log_end`: one more than the last committed frame's (SPEC §4.4; ADR-0013).
+    pub next_frame_seq: u64,
 }
 
 /// The slot a container opens with, and what it holds.
@@ -170,6 +173,92 @@ impl Superblock {
     }
 }
 
+impl ActiveSuperblock {
+    /// Checks the offsets against a container of `file_len` bytes (SPEC §4.3), before any of them is used:
+    /// - `wal_start` and `log_end` are multiples of 8 with `12288 <= wal_start <= log_end <= file_len`;
+    /// - `next_frame_seq >= 2` after a commit (it has at least its Manifest frame);
+    /// - `seq = 0` (never committed): the state of a new container, `log_end = 12288`, `next_frame_seq = 1` and
+    ///   zero manifest fields;
+    /// - otherwise the Manifest frame lies in `12288..log_end`: `manifest_off` a multiple of 8, `manifest_len` a
+    ///   multiple of 8 and at least [`MIN_FRAME_LEN`].
+    ///
+    /// Whether a Manifest frame is really there is for the reader of the frame to check.
+    ///
+    /// ```
+    /// use persia_format::superblock::{ActiveSuperblock, FIRST_FRAME_OFFSET, Slot, Superblock};
+    ///
+    /// let new = Superblock {
+    ///     log_end: FIRST_FRAME_OFFSET,
+    ///     wal_start: FIRST_FRAME_OFFSET,
+    ///     next_frame_seq: 1,
+    ///     ..Superblock::default()
+    /// };
+    /// let active = ActiveSuperblock { slot: Slot::A, superblock: new };
+    /// assert!(active.check_bounds(FIRST_FRAME_OFFSET).is_ok());
+    /// assert!(active.check_bounds(FIRST_FRAME_OFFSET - 1).is_err()); // log_end past the end of the file
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] with [`Corruption::InvalidSuperblock`] naming the first offending field, in the order
+    /// `log_end`, `wal_start`, `manifest_off`, `manifest_len`, `next_frame_seq`, at its offset in the slot.
+    pub fn check_bounds(&self, file_len: u64) -> Result<()> {
+        let sb = &self.superblock;
+        let aligned = |v: u64| v.is_multiple_of(8);
+        let committed = sb.seq != 0;
+        let manifest_end = sb.manifest_off.checked_add(sb.manifest_len);
+        let checks = [
+            (
+                SuperblockField::LogEnd,
+                sb.log_end,
+                aligned(sb.log_end)
+                    && (FIRST_FRAME_OFFSET..=file_len).contains(&sb.log_end)
+                    && (committed || sb.log_end == FIRST_FRAME_OFFSET),
+            ),
+            (
+                SuperblockField::WalStart,
+                sb.wal_start,
+                aligned(sb.wal_start) && (FIRST_FRAME_OFFSET..=sb.log_end).contains(&sb.wal_start),
+            ),
+            (
+                SuperblockField::ManifestOff,
+                sb.manifest_off,
+                if committed {
+                    aligned(sb.manifest_off) && sb.manifest_off >= FIRST_FRAME_OFFSET
+                } else {
+                    sb.manifest_off == 0
+                },
+            ),
+            (
+                SuperblockField::ManifestLen,
+                sb.manifest_len,
+                if committed {
+                    aligned(sb.manifest_len)
+                        && sb.manifest_len >= MIN_FRAME_LEN as u64
+                        && manifest_end.is_some_and(|end| end <= sb.log_end)
+                } else {
+                    sb.manifest_len == 0
+                },
+            ),
+            (
+                SuperblockField::NextFrameSeq,
+                sb.next_frame_seq,
+                if committed {
+                    sb.next_frame_seq >= 2
+                } else {
+                    sb.next_frame_seq == 1
+                },
+            ),
+        ];
+        match checks.into_iter().find(|&(_, _, ok)| !ok) {
+            None => Ok(()),
+            Some((field, value, _)) => Err(Error::Corrupt {
+                offset: self.slot.offset().saturating_add(field.offset()),
+                reason: Corruption::InvalidSuperblock { field, value },
+            }),
+        }
+    }
+}
+
 impl ChecksummedLayout for Superblock {
     const LEN: usize = SLOT_LEN;
     const CRC_OFFSET: usize = SLOT_LEN - 4;
@@ -181,6 +270,7 @@ impl ChecksummedLayout for Superblock {
         w.write_u64(self.log_end);
         w.write_u64(self.wal_start);
         w.write_u64(self.fence_token);
+        w.write_u64(self.next_frame_seq);
         w.write_zeros(RESERVED_LEN);
         w.write_u32(0); // CRC placeholder
     }
@@ -193,6 +283,7 @@ impl ChecksummedLayout for Superblock {
             log_end: r.read_u64()?,
             wal_start: r.read_u64()?,
             fence_token: r.read_u64()?,
+            next_frame_seq: r.read_u64()?,
         };
         r.expect_zeros(RESERVED_LEN)?;
         r.skip(4)?; // CRC
@@ -215,6 +306,7 @@ mod tests {
             log_end: 0x2_0000,
             wal_start: 0x8000,
             fence_token: 9,
+            next_frame_seq: 0x31,
         }
     }
 
@@ -263,7 +355,7 @@ mod tests {
     #[test]
     fn golden_slot() {
         let mut expected = Vec::new();
-        for v in [7_u64, 0x1_0007, 0x200, 0x2_0000, 0x8000, 9] {
+        for v in [7_u64, 0x1_0007, 0x200, 0x2_0000, 0x8000, 9, 0x31] {
             expected.extend_from_slice(&v.to_le_bytes());
         }
         expected.resize(SLOT_LEN - 4, 0);
@@ -271,7 +363,7 @@ mod tests {
         expected.extend_from_slice(&crc.to_le_bytes());
         assert_eq!(encode(&sb(7)), expected);
         // Pins the CRC32C itself, independently of the computation above.
-        assert_eq!(crc, 0x5c53_1d71);
+        assert_eq!(crc, 0xb2f1_7c1c);
         assert_eq!(Superblock::decode(&mut Reader::new(&expected)), Ok(sb(7)));
     }
 
@@ -377,6 +469,269 @@ mod tests {
                 err.corruption(),
                 Some((_, Corruption::UnexpectedEof { .. }))
             ));
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------------------------
+    // check_bounds (SPEC §4.3)
+    // ---------------------------------------------------------------------------------------------------------
+
+    const F: u64 = FIRST_FRAME_OFFSET;
+
+    fn new_container() -> Superblock {
+        Superblock {
+            log_end: F,
+            wal_start: F,
+            next_frame_seq: 1,
+            ..Superblock::default()
+        }
+    }
+
+    fn committed() -> Superblock {
+        Superblock {
+            seq: 3,
+            manifest_off: F + 64,
+            manifest_len: 40,
+            log_end: F + 104,
+            wal_start: F + 32,
+            fence_token: 0,
+            next_frame_seq: 6,
+        }
+    }
+
+    fn bounds(slot: Slot, superblock: Superblock, file_len: u64) -> Result<()> {
+        ActiveSuperblock { slot, superblock }.check_bounds(file_len)
+    }
+
+    #[test]
+    fn valid_superblocks_fit() {
+        assert_eq!(bounds(Slot::A, new_container(), F), Ok(()));
+        assert_eq!(bounds(Slot::B, new_container(), F + 1000), Ok(()));
+        assert_eq!(bounds(Slot::A, committed(), F + 104), Ok(()));
+        // The manifest may sit below wal_start, and the WAL range may be empty.
+        let sb = Superblock {
+            wal_start: F + 104,
+            manifest_off: F,
+            ..committed()
+        };
+        assert_eq!(bounds(Slot::A, sb, F + 104), Ok(()));
+        assert_eq!(
+            bounds(
+                Slot::A,
+                Superblock {
+                    next_frame_seq: u64::MAX,
+                    ..committed()
+                },
+                F + 104
+            ),
+            Ok(())
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // one table, formatted one field per line
+    fn each_field_is_checked_and_named_at_its_offset() {
+        use SuperblockField::{LogEnd, ManifestLen, ManifestOff, NextFrameSeq, WalStart};
+        let c = committed();
+        let n = new_container();
+        let cases = [
+            (
+                Superblock {
+                    log_end: F + 112,
+                    ..c
+                },
+                LogEnd,
+            ), // past the end of the file
+            (
+                Superblock {
+                    log_end: F + 100,
+                    ..c
+                },
+                LogEnd,
+            ), // misaligned
+            (
+                Superblock {
+                    log_end: F - 8,
+                    wal_start: F - 8,
+                    ..c
+                },
+                LogEnd,
+            ), // inside the header
+            (
+                Superblock {
+                    log_end: F + 8,
+                    ..n
+                },
+                LogEnd,
+            ), // a never-committed slot with frames
+            (
+                Superblock {
+                    wal_start: F + 112,
+                    ..c
+                },
+                WalStart,
+            ), // past log_end
+            (
+                Superblock {
+                    wal_start: F - 8,
+                    ..c
+                },
+                WalStart,
+            ),
+            (
+                Superblock {
+                    wal_start: F + 4,
+                    ..c
+                },
+                WalStart,
+            ),
+            (
+                Superblock {
+                    manifest_off: F - 8,
+                    ..c
+                },
+                ManifestOff,
+            ),
+            (
+                Superblock {
+                    manifest_off: F + 60,
+                    ..c
+                },
+                ManifestOff,
+            ),
+            (
+                Superblock {
+                    manifest_off: 8,
+                    ..n
+                },
+                ManifestOff,
+            ),
+            (
+                Superblock {
+                    manifest_len: 48,
+                    ..c
+                },
+                ManifestLen,
+            ), // ends past log_end
+            (
+                Superblock {
+                    manifest_len: 36,
+                    ..c
+                },
+                ManifestLen,
+            ),
+            (
+                Superblock {
+                    manifest_len: 24,
+                    manifest_off: F + 80,
+                    ..c
+                },
+                ManifestLen,
+            ), // shorter than a frame
+            (
+                Superblock {
+                    manifest_len: u64::MAX - 7,
+                    ..c
+                },
+                ManifestLen,
+            ), // end overflows
+            (
+                Superblock {
+                    manifest_len: 32,
+                    ..n
+                },
+                ManifestLen,
+            ),
+            (
+                Superblock {
+                    next_frame_seq: 0,
+                    ..c
+                },
+                NextFrameSeq,
+            ),
+            (
+                Superblock {
+                    next_frame_seq: 1,
+                    ..c
+                },
+                NextFrameSeq,
+            ),
+            (
+                Superblock {
+                    next_frame_seq: 2,
+                    ..n
+                },
+                NextFrameSeq,
+            ),
+        ];
+        for (sb, field) in cases {
+            for slot in [Slot::A, Slot::B] {
+                let value = match field {
+                    LogEnd => sb.log_end,
+                    WalStart => sb.wal_start,
+                    ManifestOff => sb.manifest_off,
+                    ManifestLen => sb.manifest_len,
+                    NextFrameSeq => sb.next_frame_seq,
+                };
+                assert_eq!(
+                    bounds(slot, sb, F + 104),
+                    Err(Error::Corrupt {
+                        offset: slot.offset() + field.offset(),
+                        reason: Corruption::InvalidSuperblock { field, value },
+                    }),
+                    "{sb:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn field_offsets_match_the_encoding() {
+        let sb = Superblock {
+            seq: 1,
+            manifest_off: 2,
+            manifest_len: 3,
+            log_end: 4,
+            wal_start: 5,
+            fence_token: 6,
+            next_frame_seq: 7,
+        };
+        let bytes = encode(&sb);
+        for (field, v) in [
+            (SuperblockField::ManifestOff, 2),
+            (SuperblockField::ManifestLen, 3),
+            (SuperblockField::LogEnd, 4),
+            (SuperblockField::WalStart, 5),
+            (SuperblockField::NextFrameSeq, 7),
+        ] {
+            let at = usize::try_from(field.offset()).unwrap();
+            assert_eq!(
+                u64::from_le_bytes(bytes[at..at + 8].try_into().unwrap()),
+                v,
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_file_shorter_than_the_prefix_fits_nothing() {
+        for len in [0, 8, F - 8] {
+            for sb in [new_container(), committed()] {
+                let err = bounds(Slot::A, sb, len).unwrap_err();
+                assert!(
+                    matches!(
+                        err.corruption(),
+                        Some((
+                            _,
+                            Corruption::InvalidSuperblock {
+                                field: SuperblockField::LogEnd,
+                                ..
+                            }
+                        ))
+                    ),
+                    "{len}: {err}"
+                );
+            }
         }
     }
 }

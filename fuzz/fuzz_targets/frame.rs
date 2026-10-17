@@ -2,7 +2,8 @@
 //! frames are contiguous from the base, 8-aligned, and re-encode to their exact bytes; the scanner stops where
 //! its `ScanEnd` says, and the `ScanEnd` (variant, offset and error) is what SPEC §4.4 and ADR-0009 give when
 //! recomputed from the raw bytes; `Frame::decode` at that offset fails with the same error and moves nothing;
-//! `Frame::payload` on a yielded frame returns at most its limit or fails as corruption or out of memory.
+//! `Frame::payload` on a yielded frame returns at most its limit or fails as corruption or out of memory; a scan
+//! that checks the `frame_seq` run (ADR-0013) yields a prefix of those frames and stops at a run break as corruption.
 //!
 //! Input: `mode u8, data..`. Mode bit 0: fix the CRC of every frame along the chain from the start; bit 1: fix the
 //! CRC of every frame found at an 8-aligned offset (in order). Random bytes almost never carry a valid CRC, so
@@ -14,7 +15,8 @@ use libfuzzer_sys::fuzz_target;
 use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
 use persia_format::frame::{
-    FLAG_ZSTD, FRAME_MAGIC, Frame, FrameScanner, MIN_FRAME_LEN, ScanEnd, encode_frame,
+    FLAG_ZSTD, FRAME_MAGIC, Frame, FrameScanner, MIN_FRAME_LEN, ScanEnd, StreamScanner,
+    encode_frame,
 };
 use persia_format::{Corruption, Error, Reader, Unsupported, Writer};
 
@@ -158,7 +160,9 @@ fuzz_target!(|input: &[u8]| {
 
     let mut scanner = FrameScanner::new(&data, base);
     let mut next = base;
+    let mut seen = Vec::new();
     for f in scanner.by_ref() {
+        seen.push((f.offset(), f.frame_seq()));
         assert_eq!(f.offset(), next, "frames are contiguous from the base");
         assert_eq!(f.offset() % 8, 0, "frames start 8-aligned");
         let start = (f.offset() - base) as usize;
@@ -203,4 +207,97 @@ fuzz_target!(|input: &[u8]| {
         assert_eq!(Frame::decode(&mut r).as_ref().err(), Some(error));
         assert_eq!(r.position(), 0, "a failed decode moves nothing");
     }
+    check_seq_runs(&data, base, &seen, &end);
+    check_stream(&data, base, &seen);
 });
+
+/// `StreamScanner` (ROADMAP 2.4.12) yields the frames (every header field) and the end of `FrameScanner` over the
+/// same bytes, for every `frame_seq` check and a chunk length picked from the input.
+fn check_stream(data: &[u8], base: u64, seen: &[(u64, u64)]) {
+    let chunk = 1 + data.len() % 61;
+    let end = base + data.len() as u64;
+    let first = seen.first().map_or(1, |&(_, s)| s);
+    let pairs = [
+        (FrameScanner::new(data, base), StreamScanner::new(base, end)),
+        (
+            FrameScanner::new(data, base).contiguous(),
+            StreamScanner::new(base, end).contiguous(),
+        ),
+        (
+            FrameScanner::new(data, base).expect_frame_seq(first),
+            StreamScanner::new(base, end).expect_frame_seq(first),
+        ),
+    ];
+    for (mut slice, stream) in pairs {
+        let mut stream = stream.with_chunk_len(chunk);
+        let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), ()> {
+            assert!(
+                !buf.is_empty() && buf.len() <= chunk.max(24),
+                "bounded reads"
+            );
+            let start = (offset - base) as usize;
+            buf.copy_from_slice(&data[start..start + buf.len()]);
+            Ok(())
+        };
+        // Every header field: offset, total length, kind, `frame_seq` and flags (a valid frame has only known ones).
+        let want: Vec<_> = slice
+            .by_ref()
+            .map(|f| {
+                let flags = u32::from(f.is_compressed()) * FLAG_ZSTD;
+                (f.offset(), f.total_len(), f.kind(), f.frame_seq(), flags)
+            })
+            .collect();
+        let mut got = Vec::new();
+        while let Some(h) = stream.next_frame(&mut read).unwrap() {
+            got.push((
+                h.offset(),
+                h.total_len(),
+                h.kind(),
+                h.frame_seq(),
+                h.flags(),
+            ));
+        }
+        assert_eq!(got, want, "the stream scanner yields the same frames");
+        assert_eq!(stream.end(), slice.end(), "and ends the same way");
+    }
+}
+
+/// A checked scan (ADR-0013) yields a prefix of the unchecked frames and stops either where the unchecked scan did,
+/// with the same end, or before the first frame whose `frame_seq` breaks the run, as corruption there.
+fn check_seq_runs(data: &[u8], base: u64, seen: &[(u64, u64)], unchecked: &ScanEnd) {
+    let first = seen.first().map_or(1, |&(_, s)| s);
+    for checked in [
+        FrameScanner::new(data, base).contiguous(),
+        FrameScanner::new(data, base).expect_frame_seq(1),
+        FrameScanner::new(data, base).expect_frame_seq(first),
+    ] {
+        let mut checked = checked;
+        let got: Vec<(u64, u64)> = checked
+            .by_ref()
+            .map(|f| (f.offset(), f.frame_seq()))
+            .collect();
+        let end = checked.end().expect("a stopped scanner has an end").clone();
+        assert_eq!(checked.offset(), end.offset());
+        assert_eq!(&seen[..got.len()], &got[..], "checked frames are a prefix");
+        if got.len() == seen.len() {
+            assert_eq!(
+                &end, unchecked,
+                "a run that never breaks ends like the unchecked scan"
+            );
+        } else {
+            let (offset, _) = seen[got.len()];
+            assert!(
+                matches!(
+                    &end,
+                    ScanEnd::Corrupt { offset: o, error: Error::Corrupt { offset: e, reason } }
+                        if *o == offset && *e == offset + 16 && matches!(
+                            reason,
+                            persia_format::Corruption::FrameSeqMismatch { .. }
+                                | persia_format::Corruption::FrameSeqOutOfRange { .. }
+                        )
+                ),
+                "a run break is corruption at the frame: {end:?}"
+            );
+        }
+    }
+}
