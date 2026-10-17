@@ -34,7 +34,8 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("persia", &["persia-engine", "persia-blob"]),
     ("persia-proto", &[]),
     ("persia-server", &["persia", "persia-proto"]),
-    ("persia-cli", &["persia"]),
+    // ADR-0019: the operator tool calls storage maintenance directly.
+    ("persia-cli", &["persia", "persia-storage"]),
     (TESTUTIL, &[]),
     (XTASK, &["persia-format"]),
 ];
