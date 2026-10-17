@@ -675,9 +675,12 @@ impl<F: ContainerFile> Container<F> {
         let frame = Frame::decode(&mut bytes.reader())?;
         let payload = match frame.payload(max_payload)? {
             Cow::Borrowed(stored) => {
-                // Fits: the payload lies inside `bytes`.
+                // The stored payload follows the frame header (SPEC §4.4) and lies inside `bytes`, so this slice
+                // cannot fail; the assertion catches a layout change that would make it the wrong bytes.
                 let start = offset.saturating_add(FRAME_HEADER_LEN as u64);
-                bytes.slice(start..start.saturating_add(stored.len() as u64))?
+                let payload = bytes.slice(start..start.saturating_add(stored.len() as u64))?;
+                debug_assert!(stored.is_empty() || payload.as_ptr() == stored.as_ptr());
+                payload
             }
             Cow::Owned(decompressed) => ByteSource::new(decompressed.into()),
         };
@@ -700,7 +703,8 @@ impl<F: ContainerFile> Container<F> {
             )));
         }
         let window = self.mapped.as_ref().and_then(|m| m.window.as_ref());
-        // Both ends fit: `offset + header_len` was checked above, and `check_fits` bounds the frame by `end`.
+        // Both ends fit: `offset + header_len` was checked above, and `check_fits` bounds the frame by `end`. The
+        // window starts at 12288, so a slice of it within its end cannot fail.
         let head_end = offset.saturating_add(header_len);
         let head = match window {
             Some(w) if head_end <= w.end_offset() => w.slice(offset..head_end)?,

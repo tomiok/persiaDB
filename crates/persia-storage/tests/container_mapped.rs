@@ -338,3 +338,68 @@ proptest! {
         }
     }
 }
+
+#[test]
+fn a_corrupt_segment_below_wal_start_is_an_error_not_a_panic() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path(&dir);
+    let mut w = Container::create(&path).unwrap();
+    let seg = w.append(FrameKind::Segment, &[5; 4000], NONE).unwrap();
+    w.sync().unwrap();
+    let m = w.append(FrameKind::Manifest, b"m", NONE).unwrap();
+    w.commit(Commit {
+        manifest: m,
+        wal_start: m.end(),
+        fence_token: 0,
+    })
+    .unwrap();
+    drop(w);
+    // Opens do not validate frames below `wal_start`; a mapped read must, like a read does.
+    let f = OpenOptions::new().write(true).open(&path).unwrap();
+    persia_storage::container::ContainerFile::write_all_at(&f, &[6], seg.offset + 1000).unwrap();
+    drop(f);
+    let mut c = Container::open(&path, Mode::ReadOnly).unwrap();
+    c.enable_mapped_reads().unwrap();
+    assert_eq!(c.mapped_range(), Some(F..m.end()));
+    assert!(matches!(
+        c.read_frame_source(seg.offset, MAX),
+        Err(Error::Format(_))
+    ));
+    assert!(matches!(
+        c.read_frame(seg.offset, MAX),
+        Err(Error::Format(_))
+    ));
+    assert_eq!(payload(&c, m.offset), b"m");
+}
+
+#[test]
+fn a_compaction_that_fails_keeps_the_window() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut w = Container::create(path(&dir)).unwrap();
+    let frames = commit_batch(&mut w, &[b"wal"], b"manifest 1");
+    w.enable_mapped_reads().unwrap();
+    let range = w.mapped_range();
+    // Not a frame below `wal_start`: refused before anything is written.
+    let err = w
+        .compact(&[F + 1..F + 2], |_| b"manifest 2".to_vec(), NONE)
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+    assert_eq!(w.mapped_range(), range);
+    assert!(is_mapped(&w, frames[0].offset));
+    assert_eq!(payload(&w, frames[0].offset), b"wal");
+}
+
+#[test]
+fn enabling_twice_maps_anew() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = path(&dir);
+    let (mut r, frames) = committed(&path);
+    r.enable_mapped_reads().unwrap();
+    let first = r.read_frame_source(frames[0].offset, MAX).unwrap().payload;
+    r.enable_mapped_reads().unwrap();
+    assert_eq!(r.mapped_range(), Some(F..r.superblock().log_end));
+    let second = r.read_frame_source(frames[0].offset, MAX).unwrap().payload;
+    // A payload from the old mapping stays valid after it was replaced.
+    assert_eq!(first, second);
+    assert!(is_mapped(&r, frames[0].offset));
+}

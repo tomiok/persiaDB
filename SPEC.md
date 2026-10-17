@@ -378,7 +378,8 @@ Mapping is opt-in; ordinary reads are the default (ADR-0017). A container with m
 `12288..log_end`, made again after each commit and on the new file after a compaction. A frame the mapping covers is
 read from it; any other (after `log_end`, or after a failed remap) is read with ordinary reads. Either way the frame
 is validated on every read (§4.4). On Windows a live mapping keeps the file from being shrunk, so a read-write open
-that must truncate a tail (§4.5.1) fails with an I/O error, harmlessly, until the mapping is gone.
+that must truncate a torn or corrupt tail (§4.4, §8.6) fails with an I/O error and leaves the container unchanged
+until the mapping is gone; a corrupt tail's quarantine copy (§4.4) may be left behind by each such attempt.
 
 ---
 

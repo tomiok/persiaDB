@@ -14,9 +14,13 @@ site lives, how much to map at once (one mapping per frame, or one window over `
 ## Decision
 
 1. **Call site.** `persia_storage::container::mapped` is the only module outside `persia-format` with `unsafe`. The
-   crate root is `#![deny(unsafe_code)]` instead of `forbid` so that module can `allow` it; every other module of the
-   crate still rejects it. The mapping function is private to the container and only ever gets the container's own
-   file and a superblock the container read or committed on it, so no safe caller can map an arbitrary range.
+   crate root is `#![deny(unsafe_code)]` instead of `forbid` so that module can `allow` it; a repository check
+   (`xtask/src/repo_checks.rs`, `UNSAFE_ALLOWED`) fails if any other file relaxes the lint. The mapping function is
+   private to the container and only ever gets the container's own file and a superblock the container read or
+   committed on it, so the API offers no way to map an arbitrary range. That does not make the file exclusively the
+   container's: as for any mmap-based database, the embedder must not write or truncate it through another handle
+   (including a `try_clone` of a `File` passed to `open_on`) while a mapping lives. That is the "other programs"
+   exclusion of ADR-0010 decision 3, extended to other handles in the same process.
 2. **One window over `12288..log_end`.** A container with mapped reads holds a single read-only mapping of its
    committed frames. A frame read takes the frame's bytes from the window if the window covers them and reads them
    with `pread` otherwise (frames after `log_end`, which recovery may still truncate). After a commit the window is
@@ -36,16 +40,22 @@ site lives, how much to map at once (one mapping per frame, or one window over `
 
 - One `mmap` per commit, not per frame: few mappings (one VMA), and the cost of mapping does not grow with the
   number of frames. A reader that holds any slice keeps its whole window alive (ADR-0010); remapping after a commit
-  briefly keeps two windows over the same pages.
+  briefly keeps two windows over the same pages. A writer with mapped reads pays one `mmap`, and one `munmap` of the
+  previous window once nothing holds it, per commit: microseconds next to the commit's two syncs (typically
+  milliseconds), so the commit path is not benchmarked separately.
 - The window needs address space for all committed frames. A 32-bit process may fail to map a large container;
   `enable_mapped_reads` then returns the error, and a failed remap silently falls back to `pread` for newer frames.
-- On Windows a mapping covers the whole file at the time it was made (memmap2 creates the file mapping object
-  with size 0), and Windows refuses to shrink a file below a live mapping object. While a reader holds a window, a
-  read-write open elsewhere that needs to truncate a torn or corrupt tail fails with an I/O error and changes
-  nothing; it succeeds once the mapping is gone. This costs availability, not safety. Unix is unaffected: the tail
-  lies past the window.
-- Measured with `cargo bench -p persia-storage --bench container_read` (warm page cache, Linux): a 4 KiB frame
-  2.2 µs with `pread`, 0.78 µs mapped; a 1 MiB frame 252 µs and 164 µs (the CRC dominates large frames).
+- On Windows the file mapping object behind a window covers the whole file as it was when mapped (memmap2 creates
+  it with maximum size 0; the view itself is only `12288..log_end`, rounded to the 64 KiB allocation granularity),
+  and Windows refuses to shrink a file below a live mapping object. While a reader holds a window, a read-write
+  open elsewhere that needs to truncate a torn or corrupt tail fails with an I/O error, the container unchanged; it
+  succeeds once the mapping is gone. A corrupt tail is copied to a quarantine file before the truncation (ADR-0014),
+  so each such failed open may leave one quarantine copy behind. The copy is not removed on failure: a truncation
+  that reports an error may still have happened, and the copy would then be the only one of the tail. This costs
+  availability and disk space, not safety. Unix is unaffected: the tail lies past the window.
+- Measured with `cargo bench -p persia-storage --bench container_read` (warm page cache, Linux), each read including
+  the frame's full validation: a 4 KiB frame 2.2 µs with `pread`, 0.78 µs mapped; a 1 MiB frame 252 µs and 164 µs
+  (the CRC dominates large frames, so the gain there is mostly the copy saved).
 
 ## Alternatives considered
 
