@@ -95,7 +95,8 @@ impl<F: ContainerFile + 'static> Container<F> {
         let path = path.as_ref();
         let dir = parent_or_cwd(path);
         let lock = match lock_beside(&*vfs, path) {
-            Err(Error::Locked) if vfs.entry_kind(path).is_ok() => {
+            // A writer holds the lock beside the path: a container is open there, or being created.
+            Err(Error::Locked) => {
                 return Err(Error::AlreadyExists {
                     path: path.to_owned(),
                 });

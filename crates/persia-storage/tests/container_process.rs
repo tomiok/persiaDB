@@ -170,7 +170,18 @@ fn child_hold_lock(path: &Path) {
 fn child_writer(path: &Path, seed: u64) {
     let start = std::time::Instant::now();
     let mut rng = Rng(seed);
-    let mut c = Container::open(path, Mode::ReadWrite).unwrap();
+    // A process another test forks keeps copies of the parent's file descriptions until it execs, so the lock of
+    // the parent's last check can outlive it for a moment. Retry `Locked` briefly.
+    let mut attempts = 0;
+    let mut c = loop {
+        match Container::open(path, Mode::ReadWrite) {
+            Err(Error::Locked) if attempts < 100_000 => {
+                attempts += 1;
+                std::thread::yield_now();
+            }
+            other => break other.unwrap(),
+        }
+    };
     report(&format!("opened {}", c.superblock().seq));
     while start.elapsed() < CHILD_DEADLINE {
         let mut batch = Vec::new();
