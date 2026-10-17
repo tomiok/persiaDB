@@ -296,7 +296,9 @@ fn child_mapped_reader(path: &Path, seed: u64, reopen: bool) {
                 pass(&views, &mut passes, &mut reads);
                 report(&format!("ok {passes} {opens} {reads}"));
             }
-            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            // Re-reading while the writer works is the point of this reader, so it does not wait for the parent; it
+            // only yields, since tests do not sleep on the wall clock (CLAUDE.md).
+            Err(std::sync::mpsc::TryRecvError::Empty) => std::thread::yield_now(),
             Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
         }
     }

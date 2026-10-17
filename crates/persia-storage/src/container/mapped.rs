@@ -49,7 +49,10 @@ impl Container<File> {
     /// it) lives, nothing but Persia containers may write or truncate the file: not even other handles to it in this
     /// process. On Windows a live mapping also keeps another handle's read-write open from truncating a torn or
     /// corrupt tail: that open fails with [`Error::Io`] until the mapping is gone (possibly leaving a quarantine copy
-    /// of the tail behind each time, ADR-0017).
+    /// of the tail behind each time, ADR-0017). A live mapping does not block [`compact`](Container::compact)'s
+    /// rename over the container on Windows 10 1607 and later on NTFS, where the rename has POSIX semantics (tested in
+    /// CI, ADR-0016); on other Windows file systems (FAT, exFAT) the rename may be refused, and the compaction then
+    /// fails without harm (SPEC §4.7).
     ///
     /// # Errors
     /// [`Error::Io`] if the mapping fails (e.g. no address space for a large container on a 32-bit target); reads

@@ -54,7 +54,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   to the container.
 - `persia-storage`: opt-in mapped reads of a container's committed frames (`Container::enable_mapped_reads`, one
   window over `12288..log_end` remapped after each commit and compaction, `pread` for everything else), and
-  `Container::read_frame_source`, which returns a payload without copying it (SPEC §4.7; ADR-0017).
+  `Container::read_frame_source`, which returns a payload as a `ByteSource`: without copying it for an uncompressed
+  frame the mapping covers; read into a buffer for other uncompressed frames, decompressed into one for compressed
+  frames (SPEC §4.7; ADR-0017).
 
 ### Fixed
 - `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged

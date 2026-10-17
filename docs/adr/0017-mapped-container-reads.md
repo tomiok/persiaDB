@@ -24,8 +24,9 @@ site lives, how much to map at once (one mapping per frame, or one window over `
 2. **One window over `12288..log_end`.** A container with mapped reads holds a single read-only mapping of its
    committed frames. A frame read takes the frame's bytes from the window if the window covers them and reads them
    with `pread` otherwise (frames after `log_end`, which recovery may still truncate). After a commit the window is
-   mapped again up to the new `log_end` (mappings never grow in place, ADR-0010); after an in-place compaction it is
-   mapped on the new file. A failed remap after a commit keeps the old window, which stays valid for the frames it
+   mapped again up to the new `log_end` (mappings never grow in place, ADR-0010); after a compaction
+   (`Container::compact`, which writes a new file and renames it over the container, SPEC §4.6) it is mapped on the
+   new file. A failed remap after a commit keeps the old window, which stays valid for the frames it
    covers; after a compaction the old window is dropped, since its offsets belong to the old file.
 3. **Opt-in only, for now.** `Container::<File>::enable_mapped_reads` turns it on; the default stays `pread`.
    Choosing automatically needs the file system type (`statfs`/`f_type` on Linux, `MNT_LOCAL` on the BSDs and macOS,
@@ -44,7 +45,12 @@ site lives, how much to map at once (one mapping per frame, or one window over `
   previous window once nothing holds it, per commit: microseconds next to the commit's two syncs (typically
   milliseconds), so the commit path is not benchmarked separately.
 - The window needs address space for all committed frames. A 32-bit process may fail to map a large container;
-  `enable_mapped_reads` then returns the error, and a failed remap silently falls back to `pread` for newer frames.
+  `enable_mapped_reads` then returns the error. A failed remap after a commit or compaction is not an error: the
+  commit or compaction has already succeeded, and returning an error from it would read as if it had not. The
+  remap is an optimization with a complete fallback (`pread`, which reports its own I/O errors on every read), so
+  no I/O error that affects data is dropped (CLAUDE.md forbids swallowing those). The fallback is observable:
+  `mapped_range()` then still ends at the old `log_end`, or is `None` after a compaction. `persia-storage` has no
+  `tracing` dependency; the layers above that log (the engine, the server) can check `mapped_range()`.
 - On Windows the file mapping object behind a window covers the whole file as it was when mapped (memmap2 creates
   it with maximum size 0; the view itself is only `12288..log_end`, rounded to the 64 KiB allocation granularity),
   and Windows refuses to shrink a file below a live mapping object. While a reader holds a window, a read-write
