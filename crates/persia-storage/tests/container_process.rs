@@ -167,7 +167,29 @@ fn child_hold_lock(path: &Path) {
     drop(c);
 }
 
-/// Opens `path` read-write and appends and commits until killed (or [`CHILD_DEADLINE`]).
+/// Payloads above this many bytes are appended in pieces by [`append_payload`].
+const STREAM_ABOVE: usize = 4 << 10;
+/// The piece [`append_payload`] writes at once: one `pwrite` each.
+const STREAM_CHUNK: usize = 64;
+
+/// Appends the [`payload`] of the next frame of `kind`. A large one goes through [`Container::append_stream`] in
+/// [`STREAM_CHUNK`]-byte writes: [`Container::append`] writes a frame with one `pwrite`, which a SIGKILL almost never
+/// interrupts, so without this a killed writer would hardly ever leave a torn tail (ROADMAP 2.4.20).
+fn append_payload(c: &mut Container, kind: FrameKind) -> FrameRef {
+    let bytes = payload(kind, c.next_frame_seq());
+    if bytes.len() <= STREAM_ABOVE {
+        return c.append(kind, &bytes, NONE).unwrap();
+    }
+    report(&format!("streaming {}", c.end()));
+    let mut w = c.append_stream(kind, bytes.len() as u64).unwrap();
+    for chunk in bytes.chunks(STREAM_CHUNK) {
+        w.write(chunk).unwrap();
+    }
+    w.finish().unwrap()
+}
+
+/// Opens `path` read-write and appends and commits until killed (or [`CHILD_DEADLINE`]). Large frames are streamed
+/// in pieces ([`append_payload`]), so kills tear them.
 ///
 /// Reports `opened <seq>` after recovery, `synced <offset> <len> <frame_seq>` for each WAL frame once `sync`
 /// returned, and `commit <seq> <manifest_offset> <manifest_len> <frame_seq>` once `commit` returned.
@@ -190,15 +212,7 @@ fn child_writer(path: &Path, seed: u64) {
     while start.elapsed() < CHILD_DEADLINE {
         let mut batch = Vec::new();
         for _ in 0..rng.range(1, 5) {
-            let seq = c.next_frame_seq();
-            batch.push(
-                c.append(
-                    FrameKind::WalChunk,
-                    &payload(FrameKind::WalChunk, seq),
-                    NONE,
-                )
-                .unwrap(),
-            );
+            batch.push(append_payload(&mut c, FrameKind::WalChunk));
         }
         c.sync().unwrap();
         for f in &batch {
@@ -206,14 +220,7 @@ fn child_writer(path: &Path, seed: u64) {
         }
         // Some batches stay uncommitted: synced WAL frames after `log_end` must survive too (SPEC §8.2).
         if !rng.next_u64().is_multiple_of(4) {
-            let seq = c.next_frame_seq();
-            let m = c
-                .append(
-                    FrameKind::Manifest,
-                    &payload(FrameKind::Manifest, seq),
-                    NONE,
-                )
-                .unwrap();
+            let m = append_payload(&mut c, FrameKind::Manifest);
             c.commit(Commit {
                 manifest: m,
                 wal_start: batch[0].offset,
@@ -594,6 +601,8 @@ fn kill_9_loop_never_loses_an_acknowledged_commit_or_sync() {
         "kill-9 loop: {} kills on {KILL_FILES} files, {acks} acknowledgements, {torn} torn tails, {bytes} B written",
         KILL_FILES * KILLS_PER_FILE
     );
+    // About half the kills land mid-way through a streamed frame (ROADMAP 2.4.20), so torn-tail recovery ran.
+    assert!(torn > 0, "seed {seed}: no kill tore a frame");
 }
 
 /// Runs one writer child on `path` and SIGKILLs it at a seeded point; returns its acknowledgements.
@@ -604,6 +613,9 @@ fn run_and_kill_writer(path: &Path, rng: &mut Rng, ctx: &str) -> Vec<String> {
     // every step of the loop: mid-append, mid-sync, between the Manifest and its slot, mid-slot-write.
     let kill_after = rng.range(1, 120) as usize;
     let delay = std::time::Duration::from_micros(rng.range(0, 3000));
+    // Or, for half the writers, as soon as the next streamed frame starts: its many writes take long enough for
+    // the kill to land among them, so these writers mostly leave a torn tail (ROADMAP 2.4.20).
+    let mid_stream = rng.next_u64().is_multiple_of(2);
 
     let mut child = spawn_child("writer", path, child_seed);
     let mut out = BufReader::new(child.stdout.take().unwrap());
@@ -619,18 +631,29 @@ fn run_and_kill_writer(path: &Path, rng: &mut Rng, ctx: &str) -> Vec<String> {
             }
         }
     });
+    let is_ack = |msg: &String| !msg.starts_with("streaming ");
     let mut iter_acks = Vec::new();
-    while iter_acks.len() < kill_after {
+    loop {
         let Ok(msg) = rx.recv() else {
             panic!("{ctx}: writer exited before the kill");
         };
+        let enough = iter_acks.len() >= kill_after;
+        if !is_ack(&msg) {
+            if mid_stream && enough {
+                break;
+            }
+            continue;
+        }
         iter_acks.push(msg);
+        if !mid_stream && iter_acks.len() >= kill_after {
+            std::thread::sleep(delay);
+            break;
+        }
     }
-    std::thread::sleep(delay);
     child.kill().unwrap();
     let status = child.wait().unwrap();
     reader.join().unwrap();
-    iter_acks.extend(rx.try_iter());
+    iter_acks.extend(rx.try_iter().filter(is_ack));
     assert!(
         !status.success(),
         "{ctx}: writer exited by itself: {status}"
@@ -1132,7 +1155,7 @@ fn kill_9_writers_never_disturb_a_mapped_reader_process() {
     let (mut torn, mut compactions, mut last_ok) = (0, 0, String::new());
     for iter in 0..MAPPED_KILLS {
         let ctx = format!("seed {seed}, kill {iter}");
-        // A SIGKILL almost never tears an `append` (one `pwrite`), so some writers die mid-way through a streamed frame.
+        // Killed writers tear streamed frames at random points; these always die half-way through one.
         if rng.next_u64().is_multiple_of(4) {
             run_torn_writer("torn-writer-kill", &path);
         } else {
