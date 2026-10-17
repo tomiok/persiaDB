@@ -321,7 +321,8 @@ pub enum Corruption {
     /// frame, or a frame missing before it.
     #[error("frame_seq {found}, expected {expected}")]
     FrameSeqMismatch {
-        /// The `frame_seq` the run continues with.
+        /// The `frame_seq` the frame should have: the one the run continues with, or for the last committed frame of a
+        /// container, the superblock's `next_frame_seq - 1`.
         expected: u64,
         /// The frame's `frame_seq`.
         found: u64,

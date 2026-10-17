@@ -5,9 +5,9 @@
 //! newline-terminated lines (libtest's own output is ignored), so the parent synchronizes on readiness lines, not
 //! on sleeps. The only sleep is the seeded delay before a SIGKILL, which is the point of that scenario.
 //!
-//! Seeds: every scenario derives its randomness from [`base_seed`] (`PERSIA_TEST_SEED`, default fixed) and prints
-//! it, so a failure is replayed with `PERSIA_TEST_SEED=<seed> cargo test -p persia-storage --test
-//! container_process`.
+//! Seeds: the kill-9 scenario derives its randomness from [`base_seed`] (`PERSIA_TEST_SEED`, default fixed) and prints
+//! it (the lock and concurrent-create scenarios are deterministic), so a failure is replayed with
+//! `PERSIA_TEST_SEED=<seed> cargo test -p persia-storage --test container_process`.
 
 // Test-only code: unwraps, indexing and casts are the point.
 #![allow(

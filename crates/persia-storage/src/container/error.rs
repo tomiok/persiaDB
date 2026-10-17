@@ -41,8 +41,10 @@ pub enum Error {
         /// The OS error.
         source: io::Error,
     },
-    /// The container's bytes violate the format, or use a format or feature this build does not support
-    /// ([`persia_format::Error::Corrupt`] or [`persia_format::Error::Unsupported`]).
+    /// A `persia_format` decode error: mostly the container's bytes violate the format, or use a format or feature this
+    /// build does not support ([`persia_format::Error::Corrupt`] or [`persia_format::Error::Unsupported`]), but also
+    /// an allocation that failed while decompressing a payload ([`persia_format::Error::OutOfMemory`], from
+    /// [`Container::read_frame`](super::Container::read_frame)); [`Error::is_corruption`] tells them apart.
     #[error(transparent)]
     Format(#[from] persia_format::Error),
     /// The frames after the committed `log_end` end in corruption (SPEC §4.4), and a read-write open may not

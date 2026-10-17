@@ -36,7 +36,8 @@
 //!    - on error neither reader moves; a header advances exactly `FRAME_HEADER_LEN` bytes.
 //! 7. Streaming (ROADMAP 2.4.12): on the mutated logs of invariant 4, with any chunk length and any `frame_seq`
 //!    check, `StreamScanner` yields the headers of exactly the frames `FrameScanner` yields and ends with the same
-//!    `ScanEnd`, reading only inside the range and never more than the chunk length at once.
+//!    `ScanEnd`, reading only inside the range and never more than the chunk length at once, except the 24-byte frame header,
+//!    which is read whole.
 
 // Test-only helpers index, cast and unwrap on purpose (see reader_writer_props.rs).
 #![allow(

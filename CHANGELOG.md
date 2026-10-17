@@ -34,11 +34,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-storage`: `Container`, the single-file container (SPEC §4): creation that never replaces a file, an
   exclusive writer lock, read-only opens, frame appends with group `fdatasync`, commits that write the inactive
   superblock slot, and recovery on open (superblock checks, validation of the committed WAL frames, torn-tail
-  truncation; a corrupt tail keeps its bytes and opens read-only only). A failed write or sync poisons the handle.
+  truncation; a corrupt tail is truncated, quarantined first, or refused, per ADR-0014 below). A failed write or sync poisons the handle.
   `SimFile` simulates crashes (lost, kept or sector-torn unsynced writes) for crash tests.
 - `persia-storage`: container compaction (SPEC §4.6): `space_usage` reports live and dead bytes against the default
   40% dead-space ratio, and `compact` rewrites the live frames, the WAL range and the uncommitted tail into a new
-  file (renumbered, payloads copied as stored, a new Manifest built from the returned `Relocation`) that is synced
+  file (renumbered, payloads copied as stored, a new Manifest built from where the committed frames moved; the returned
+  `Relocation` also covers the uncommitted tail) that is synced
   and renamed over the container; the old file is never written. `persia-format`: `Frame::reframe`.
 - `persia-storage`: recovery reads the container in bounded 64 KiB chunks (`persia-format`: `StreamScanner`), so
   opening a container with a large uncommitted Segment frame or a long torn tail no longer needs that much memory.
@@ -57,7 +58,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   local-backend write or container create survives a machine crash there (SPEC §4.5.2).
 - `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers
   are no longer locked out while a writer is open (SPEC §4.5.1).
-- `persia-storage`: a local-backend object whose path exceeds `PATH_MAX` (1024 bytes on macOS) is `InvalidInput`
+- `persia-storage`: a local-backend object whose path is longer than `PATH_MAX` allows (1023 bytes on macOS and the BSDs, 4095 on Linux) is `InvalidInput`
   (`KeyDefect::PathTooLong`) instead of an I/O error.
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.

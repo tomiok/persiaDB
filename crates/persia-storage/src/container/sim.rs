@@ -332,8 +332,8 @@ impl ContainerFile for SimFile {
         Faults::finish(ok)
     }
 
-    /// Always granted: a `SimFile` models one process's view of a file, and its clones stand for the same file
-    /// after a restart, so there is no other holder to exclude.
+    /// Always granted: a `SimFile` has no other holder to exclude (its clones are the same handle, and a restart is a
+    /// new file from [`SimFile::crash`]). [`SimFs`](crate::vfs::sim::SimFs) handles do exclude each other.
     fn try_lock(&self) -> io::Result<bool> {
         Ok(true)
     }

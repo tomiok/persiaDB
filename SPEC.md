@@ -335,7 +335,8 @@ live; they are few and small.
 
 **The new file**, written by the single writer while it holds the lock:
 1. The live frames below `wal_start`, in their old order, then the frames of `wal_start..log_end`, each copied with
-   its stored payload unchanged and a new `frame_seq`, numbered on from the old file's next value (§4.4).
+   its stored payload unchanged and a new `frame_seq`, numbered on from one more than the `frame_seq` of the last
+   valid frame of the old file (§4.4).
 2. A new Manifest frame, which the writer builds from where the frames moved (the offsets it references change).
 3. Both slots hold the same commit: `seq` one above the old one, `log_end` the end of the new Manifest, `wal_start`
    the new offset of the old `wal_start` frame (the end of the Manifest if the old WAL range was empty), the old

@@ -88,9 +88,9 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// stale temporary file, `<name>.tmp.<nonce>.<n>`). The file system must support hard links.
     ///
     /// # Errors
-    /// [`Error::AlreadyExists`] if `path` exists, or [`Error::Io`]. An `Io` error from removing the temporary name
-    /// or syncing the directory comes after the link: the container then exists at `path`, unlocked, and a retry
-    /// gets `AlreadyExists`.
+    /// [`Error::AlreadyExists`] if `path` exists, or [`Error::Io`]. An `Io` error from removing the temporary name,
+    /// syncing the directory or canonicalizing `path` comes after the link: the container then exists at `path`,
+    /// unlocked, and a retry gets `AlreadyExists`.
     pub fn create_in(vfs: Arc<dyn Vfs<File = F>>, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let dir = parent_or_cwd(path);
@@ -215,8 +215,9 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// temporary file is removed and this handle is as [`Container::compact_into`] left it. The rename goes to the
     /// canonical path found at open (a symbolic link to the container keeps pointing at it; other hard links to the
     /// file are not supported: they keep the old contents), and is refused if that path no longer names this file
-    /// (not checked on Windows, which exposes no file identity). If the directory sync fails after the rename,
-    /// [`Error::CompactedNotDurable`] carries the [`Relocation`] and this handle moves to the new file, poisoned.
+    /// (on Windows, which exposes no file identity, only that it still names something; ADR-0016). If the directory
+    /// sync fails after the rename, [`Error::CompactedNotDurable`] carries the [`Relocation`] and this handle moves
+    /// to the new file, poisoned.
     ///
     /// # Errors
     /// [`Error::InvalidInput`] if the container was not opened from a path or the path names another file,
@@ -330,7 +331,8 @@ impl<F: ContainerFile + 'static> Container<F> {
         let vfs = &*location.vfs;
         let dir = parent_or_cwd(&location.path);
         let Some(container) = location.path.file_name().and_then(|n| n.to_str()) else {
-            // A name that is not UTF-8 never got temporary files from this code.
+            // Limitation: temporary names are matched as UTF-8, so the temporary files of a container whose name is
+            // not UTF-8 are not swept.
             return Ok(Vec::new());
         };
         let mut removed = Vec::new();
