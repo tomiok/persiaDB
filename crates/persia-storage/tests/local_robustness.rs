@@ -474,8 +474,8 @@ fn list_through_a_file_in_place_of_a_directory_matches_the_full_listing() {
 // ---------------------------------------------------------------------------------------------------------------
 
 // `a@/a@/…` far deeper than any key: only the keys within `Key::MAX_LEN` are listed, and the walk stops.
-// Not on macOS: its `PATH_MAX` (1024 bytes) cannot hold such a tree, nor the longest key (SPEC §10.1.1).
-#[cfg(not(target_vendor = "apple"))]
+// Not on macOS or the BSDs: their `PATH_MAX` (1024 bytes) cannot hold such a tree, nor the longest key (SPEC §10.1.1).
+#[cfg(any(target_os = "linux", target_os = "android", windows))]
 #[test]
 fn list_over_a_tree_deeper_than_any_key_returns_the_valid_keys() {
     let (_dir, s) = store();

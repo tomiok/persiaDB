@@ -25,7 +25,7 @@ use crate::error::{Error, Op, Result};
 use crate::key::{InvalidKey, Key, KeyPrefix};
 use crate::meta::{Capabilities, ObjectMeta, PutOutcome};
 use crate::storage::{Storage, check_range, range_source};
-use crate::vfs::{EntryKind, RealFs, Vfs};
+use crate::vfs::{EntryKind, FileType, RealFs, Vfs};
 use fs::parent_or_cwd;
 
 /// Distinguishes the temporary files of one process; [`temp_nonce`] distinguishes processes.
@@ -37,6 +37,9 @@ const TEMP_ATTEMPTS: u32 = 64;
 
 /// How often `put_if_absent` retries when the object it collided with is deleted before it can be read.
 const LINK_ATTEMPTS: u32 = 8;
+
+/// How often a read retries opening an object that a concurrent `put` is replacing on Windows (SPEC §10.1.1).
+const WINDOWS_OPEN_ATTEMPTS: u32 = 10_000;
 
 /// Objects stored as files under a root directory (SPEC §10.1.1, ADR-0012).
 ///
@@ -370,24 +373,31 @@ impl<V: Vfs> LocalStorage<V> {
                 continue;
             }
             // Symbolic links and other entries Persia never creates are skipped, never followed.
-            let size = match (is_dir, entry.kind) {
-                (true, EntryKind::Dir) => None,
-                (false, EntryKind::File { len }) => Some(len),
-                _ => continue,
-            };
-            let Some(size) = size else {
-                self.collect(
-                    &dir.join(&entry.name),
-                    &format!("{base}{segment}/"),
-                    None,
-                    out,
-                )?;
-                continue;
-            };
-            let Ok(key) = Key::new(format!("{base}{segment}")) else {
-                continue;
-            };
-            out.push(ObjectMeta { key, size });
+            match (is_dir, entry.kind) {
+                (true, FileType::Dir) => {
+                    self.collect(
+                        &dir.join(&entry.name),
+                        &format!("{base}{segment}/"),
+                        None,
+                        out,
+                    )?;
+                }
+                (false, FileType::File) => {
+                    let Ok(key) = Key::new(format!("{base}{segment}")) else {
+                        continue;
+                    };
+                    // Only matching names reach a `stat`: temporary files and other prefixes never do.
+                    let size = match self.vfs.entry_kind(&dir.join(&entry.name)) {
+                        Ok(EntryKind::File { len }) => len,
+                        // Deleted, or replaced by something else, since the directory was read.
+                        Ok(_) => continue,
+                        Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
+                        Err(err) => return Err(err),
+                    };
+                    out.push(ObjectMeta { key, size });
+                }
+                _ => {}
+            }
         }
         Ok(())
     }
@@ -596,6 +606,28 @@ impl<V: Vfs> LocalStorage<V> {
     /// Opens `path` if it is a regular file. Symbolic links and FIFOs are neither followed nor opened (a FIFO would
     /// block): Persia never creates them, and `list` skips them (SPEC §10.1.1).
     fn open_regular(&self, path: &Path) -> io::Result<V::File> {
+        // On Windows, a name that a concurrent `put` is replacing can briefly refuse to open (`ERROR_ACCESS_DENIED`
+        // while the replaced file is pending deletion); the replace completes in microseconds, so retry a little.
+        // Elsewhere a refusal is a real permission error.
+        let attempts = if cfg!(windows) {
+            WINDOWS_OPEN_ATTEMPTS
+        } else {
+            1
+        };
+        let mut result = self.try_open_regular(path);
+        for _ in 1..attempts {
+            match &result {
+                Err(err) if err.kind() == io::ErrorKind::PermissionDenied => {
+                    std::thread::yield_now();
+                    result = self.try_open_regular(path);
+                }
+                _ => break,
+            }
+        }
+        result
+    }
+
+    fn try_open_regular(&self, path: &Path) -> io::Result<V::File> {
         if !matches!(self.vfs.entry_kind(path)?, EntryKind::File { .. }) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,

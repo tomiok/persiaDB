@@ -318,6 +318,11 @@ impl ContainerFile for SimFile {
         Faults::finish(ok)
     }
 
+    /// The same as `sync_data`: a `SimFile` models contents and length only, which `sync_data` already makes durable.
+    fn sync_all(&self) -> io::Result<()> {
+        self.sync_data()
+    }
+
     fn set_len(&self, len: u64) -> io::Result<()> {
         let mut inner = self.lock();
         let ok = self.begin()?;

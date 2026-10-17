@@ -14,10 +14,11 @@ pub(super) const MAX_NAME_LEN: usize = 255;
 
 /// Longest path, in bytes, `open` and friends accept: `PATH_MAX` minus the terminating NUL. Windows has no such limit
 /// for the absolute paths the backend uses (the standard library passes them as `\\?\` paths).
-#[cfg(target_vendor = "apple")]
-pub(super) const MAX_PATH_LEN: Option<usize> = Some(1023);
-#[cfg(all(unix, not(target_vendor = "apple")))]
+/// Linux and Android define `PATH_MAX` as 4096; macOS, the BSDs and illumos as 1024.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub(super) const MAX_PATH_LEN: Option<usize> = Some(4095);
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+pub(super) const MAX_PATH_LEN: Option<usize> = Some(1023);
 #[cfg(not(unix))]
 pub(super) const MAX_PATH_LEN: Option<usize> = None;
 

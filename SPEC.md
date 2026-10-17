@@ -844,10 +844,10 @@ above.
   segment of plain characters is at most 255 bytes as the last segment and 254 bytes before a `/`. On Windows a name
   that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
   or that ends in `.` is `InvalidInput` too. On Unix, so is an object whose file path, or the path of its temporary
-  file (below), is longer than `PATH_MAX` allows (1023 bytes on macOS, 4095 on Linux): it depends on the root's path,
-  and on macOS even the longest key (§10.1) exceeds it under any root. The root's path is measured as given (made
-  absolute, symbolic links not resolved); a root behind a symbolic link whose target path is longer can still fail
-  with an I/O error instead.
+  file (below), is longer than `PATH_MAX` allows (4095 bytes on Linux, 1023 on macOS and the BSDs): it depends on the
+  root's path, and on macOS and the BSDs even the longest key (§10.1) exceeds it under any root. The root's path is
+  measured as given (made absolute, symbolic links not resolved); a root behind a symbolic link whose target path is
+  longer can still fail with an I/O error instead.
 - **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
   leave one behind; it holds no acknowledged data.
@@ -864,8 +864,9 @@ above.
   touching it); directories are never removed by Persia, so a concurrent `put` never finds its directory gone. A
   directory removed by someone else is created again by the next write into it.
   Directory syncs work on Unix and Windows alike (§4.5.2).
-- **Reads** open the file (a rename never changes an open file, so a read sees one version) and read with positioned
-  reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
+- **Reads** open the file (a rename never changes an open file, so a read sees one version); on Windows an open
+  that a concurrent `put` is replacing can briefly fail with `ERROR_ACCESS_DENIED` (the replaced file is pending
+  deletion), and is retried. Reads use positioned reads (`pread`); `get_range` checks the range against the file length first, so a range past the end is
   `ShortRead` without reading it, as is a file found shorter while reading. An entry `list` would skip (a symbolic
   link, also one on the path, a FIFO, a file where a directory of the path should be) reads as `NotFound`. `list` lists the directory named
   by the prefix's directory part (missing, a file or a symbolic link: nothing matches; a missing root is `Io`, so an

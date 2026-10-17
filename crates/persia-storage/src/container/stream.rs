@@ -29,8 +29,8 @@ impl<F: ContainerFile> Container<F> {
     /// ```
     ///
     /// # Errors
-    /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::InvalidInput`] once `frame_seq` or the file offset would
-    /// be exhausted, or [`Error::Io`] writing the header (which poisons the handle).
+    /// [`Error::ReadOnly`], [`Error::Poisoned`], [`Error::Encode`] if `payload_len` is too large for a frame,
+    /// [`Error::InvalidInput`] once `frame_seq` or the file offset would be exhausted, or [`Error::Io`] writing the header (which poisons the handle).
     pub fn append_stream(
         &mut self,
         kind: FrameKind,
@@ -42,8 +42,8 @@ impl<F: ContainerFile> Container<F> {
         if frame_seq.checked_add(1).is_none() {
             return Err(Error::InvalidInput("frame_seq exhausted (ADR-0013)".into()));
         }
-        let encoder = FrameEncoder::new(kind, frame_seq, payload_len)
-            .map_err(|_| Error::InvalidInput("container offset exhausted".into()))?;
+        // `FrameTooLarge`: the payload length alone overflows a frame.
+        let encoder = FrameEncoder::new(kind, frame_seq, payload_len)?;
         let offset = self.end;
         if offset.checked_add(encoder.total_len()).is_none() {
             return Err(Error::InvalidInput("container offset exhausted".into()));

@@ -2,11 +2,11 @@
 //! (ROADMAP 2.4.11).
 //!
 //! Each directory keeps its entries as readers see them and as its last [`Vfs::sync_dir`] made them durable, plus
-//! the changes since, in order (a rename is one change: old name gone and new name set, or neither). Files are
-//! [`SimFile`]s. A crash ([`SimFs::crash`]) keeps the durable entries plus some, all or none of the later changes of
-//! each directory (a prefix: directory updates reach the disk in order), and, independently, each file's crash
-//! image. So a name can survive while its data does not (a file synced only through its directory), or the data
-//! while its name does not (a rename or link whose directory was never synced).
+//! the changes since, in order (a rename, always within one directory, is one change: old name gone and new name
+//! set, or neither). Files are [`SimFile`]s. A crash ([`SimFs::crash`]) keeps the durable entries plus some, all
+//! or none of the later changes of each directory (a prefix: directory updates reach the disk in order), and,
+//! independently, each file's crash image. So a name can survive while its data does not (a file synced only
+//! through its directory), or the data while its name does not (a rename or link whose directory was never synced).
 //!
 //! One fault schedule ([`SimFault`]) counts every mutating call, of the file system and of its files: after the
 //! fault fires, every later mutating call fails, as if the process had died.
@@ -17,7 +17,7 @@ use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::{DirEntry, EntryKind, Vfs};
+use super::{DirEntry, EntryKind, FileType, Vfs};
 use crate::container::ContainerFile;
 use crate::container::sim::{CrashLoss, Faults, SimFault, SimFile, lock};
 use crate::retry::Jitter;
@@ -378,17 +378,18 @@ impl Vfs for SimFs {
             }
             let (from_dir, from_name) = State::split(from)?;
             let (to_dir, to_name) = State::split(to)?;
-            if from_dir == to_dir {
-                // One change: on a crash the rename happened or did not.
-                state
-                    .dir_mut(&from_dir)?
-                    .apply(vec![(from_name, None), (to_name, Some(Node::File(ino)))]);
-            } else {
-                state
-                    .dir_mut(&to_dir)?
-                    .apply(vec![(to_name, Some(Node::File(ino)))]);
-                state.dir_mut(&from_dir)?.apply(vec![(from_name, None)]);
+            if from_dir != to_dir {
+                // Persia renames only within a directory (temporary file next to its target). Modeling a crash-atomic
+                // rename across two directories' pending changes is not worth it until something needs it.
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    "SimFs renames within one directory only",
+                ));
             }
+            // One change: on a crash the rename happened or did not.
+            state
+                .dir_mut(&from_dir)?
+                .apply(vec![(from_name, None), (to_name, Some(Node::File(ino)))]);
             Ok(())
         })
     }
@@ -453,15 +454,12 @@ impl Vfs for SimFs {
         d.current
             .iter()
             .map(|(name, node)| {
-                let kind = match node {
-                    Node::Dir => EntryKind::Dir,
-                    Node::File(ino) => EntryKind::File {
-                        len: state.file(*ino)?.file_len()?,
-                    },
-                };
                 Ok(DirEntry {
                     name: name.clone(),
-                    kind,
+                    kind: match node {
+                        Node::Dir => FileType::Dir,
+                        Node::File(_) => FileType::File,
+                    },
                 })
             })
             .collect()
@@ -534,6 +532,10 @@ impl ContainerFile for SimFsFile {
 
     fn sync_data(&self) -> io::Result<()> {
         self.file.sync_data()
+    }
+
+    fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
@@ -611,6 +613,11 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "both outcomes occur");
         assert!(fs.rename(p("/missing"), p("/x")).is_err());
+        fs.create_dir(p("/d")).unwrap();
+        assert_eq!(
+            fs.rename(p("/old"), p("/d/old")).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
     }
 
     #[test]

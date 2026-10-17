@@ -363,10 +363,10 @@ fn listing_a_missing_root_is_an_error() {
 #[cfg(unix)]
 #[test]
 fn paths_over_the_platform_limit_are_invalid_input() {
-    let max = if cfg!(target_vendor = "apple") {
-        1023
-    } else {
+    let max = if cfg!(any(target_os = "linux", target_os = "android")) {
         4095
+    } else {
+        1023
     };
     // Canonical: on macOS `/var` is a symbolic link, and the kernel counts the expanded path against `PATH_MAX`.
     let dir = tempfile::tempdir().unwrap();

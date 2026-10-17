@@ -35,14 +35,12 @@ pub trait ContainerFile: Send + Sync + std::fmt::Debug {
     /// dropped the unwritten data.
     fn sync_data(&self) -> io::Result<()>;
 
-    /// Like [`sync_data`](Self::sync_data), and also makes the file's metadata (timestamps) durable (`fsync`). The
-    /// local backend uses it for new objects; the default is `sync_data`.
+    /// Like [`sync_data`](Self::sync_data), and also makes the file's metadata (timestamps) durable (`fsync`, SPEC
+    /// §4.5.2). The local backend uses it for new objects. Required, so each implementation states what it guarantees.
     ///
     /// # Errors
     /// As [`sync_data`](Self::sync_data).
-    fn sync_all(&self) -> io::Result<()> {
-        self.sync_data()
-    }
+    fn sync_all(&self) -> io::Result<()>;
 
     /// Truncates or extends the file to `len` bytes. Not durable until [`sync_data`](Self::sync_data).
     ///

@@ -30,13 +30,25 @@ pub enum EntryKind {
     Other,
 }
 
+/// What a directory entry is, as the listing reports it (no `stat` where the file system records entry types), without
+/// following a symbolic link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileType {
+    /// A regular file.
+    File,
+    /// A directory.
+    Dir,
+    /// Anything else: a symbolic link, a FIFO, a device.
+    Other,
+}
+
 /// One entry of a directory listing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DirEntry {
     /// The entry's name.
     pub name: OsString,
-    /// What it is.
-    pub kind: EntryKind,
+    /// What it is. Its length takes a [`Vfs::entry_kind`].
+    pub kind: FileType,
 }
 
 /// File-system operations, by path. Paths are absolute.
@@ -116,7 +128,7 @@ pub trait Vfs: Send + Sync + std::fmt::Debug {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 
     /// Whether `path` names the file open as `file` (on Windows, where the standard library exposes no file identity,
-    /// always `true`).
+    /// whether `path` names anything).
     ///
     /// # Errors
     /// The OS error; a missing `path` is `Ok(false)`.
@@ -139,7 +151,15 @@ impl Vfs for RealFs {
     type File = File;
 
     fn open(&self, path: &Path, write: bool) -> io::Result<File> {
-        OpenOptions::new().read(true).write(write).open(path)
+        let file = OpenOptions::new().read(true).write(write).open(path)?;
+        // Unix opens a directory read-only without complaint; the contract is a regular file.
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("{} is not a regular file", path.display()),
+            ));
+        }
+        Ok(file)
     }
 
     fn create_new(&self, path: &Path) -> io::Result<File> {
@@ -189,23 +209,19 @@ impl Vfs for RealFs {
         let mut out = Vec::new();
         for entry in std::fs::read_dir(dir)? {
             let entry = entry?;
-            // Does not follow symbolic links. May `lstat` (filesystems without `d_type`); an entry removed meanwhile
-            // is left out.
+            // Does not follow symbolic links. Uses the listing's `d_type`, and `lstat` only on file systems without it;
+            // an entry removed meanwhile is left out.
             let file_type = match entry.file_type() {
                 Ok(file_type) => file_type,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(err),
             };
             let kind = if file_type.is_dir() {
-                EntryKind::Dir
+                FileType::Dir
             } else if file_type.is_file() {
-                match entry.metadata() {
-                    Ok(meta) => EntryKind::File { len: meta.len() },
-                    Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
-                    Err(err) => return Err(err),
-                }
+                FileType::File
             } else {
-                EntryKind::Other
+                FileType::Other
             };
             out.push(DirEntry {
                 name: entry.file_name(),
@@ -230,9 +246,15 @@ impl Vfs for RealFs {
         }
     }
 
+    /// Windows exposes no stable file identity through the standard library (ROADMAP 2.4.18): only whether `path`
+    /// still names something is checked.
     #[cfg(not(unix))]
-    fn same_file(&self, _file: &File, _path: &Path) -> io::Result<bool> {
-        Ok(true)
+    fn same_file(&self, _file: &File, path: &Path) -> io::Result<bool> {
+        match std::fs::metadata(path) {
+            Ok(_) => Ok(true),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(err) => Err(err),
+        }
     }
 
     #[cfg(windows)]
@@ -296,9 +318,10 @@ mod tests {
         let mut entries = RealFs.read_dir(dir.path()).unwrap();
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let kinds: Vec<_> = entries.iter().map(|e| e.kind).collect();
+        assert_eq!(kinds, [FileType::Dir, FileType::File, FileType::Other]);
         assert_eq!(
-            kinds,
-            [EntryKind::Dir, EntryKind::File { len: 3 }, EntryKind::Other]
+            RealFs.entry_kind(&dir.path().join("f")).unwrap(),
+            EntryKind::File { len: 3 }
         );
         assert_eq!(
             RealFs.entry_kind(&dir.path().join("l")).unwrap(),

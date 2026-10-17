@@ -931,6 +931,9 @@ impl ContainerFile for ReadMeter {
     fn sync_data(&self) -> std::io::Result<()> {
         self.file.sync_data()
     }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
     fn set_len(&self, len: u64) -> std::io::Result<()> {
         self.file.set_len(len)
     }

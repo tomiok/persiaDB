@@ -173,6 +173,13 @@ fn read_only_and_poisoned_handles_refuse_to_stream() {
     ));
     assert!(matches!(
         new_sim().append_stream(FrameKind::Segment, u64::MAX),
+        Err(Error::Encode(
+            persia_format::EncodeError::FrameTooLarge { .. }
+        ))
+    ));
+    // A payload that fits a frame but not the rest of the address space after the container's end.
+    assert!(matches!(
+        new_sim().append_stream(FrameKind::Segment, u64::MAX - 64),
         Err(Error::InvalidInput(_))
     ));
     assert_eq!(new_sim().file().file_len().unwrap(), 12288);

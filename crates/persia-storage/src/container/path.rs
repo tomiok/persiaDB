@@ -16,7 +16,7 @@ use super::{
 };
 use crate::local::fs::parent_or_cwd;
 use crate::local::temp_nonce;
-use crate::vfs::{EntryKind, RealFs, Vfs};
+use crate::vfs::{FileType, RealFs, Vfs};
 
 /// Distinguishes the temporary files of one process's creates and compactions.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -338,8 +338,7 @@ impl<F: ContainerFile + 'static> Container<F> {
             let Some(name) = entry.name.to_str() else {
                 continue;
             };
-            if !matches!(entry.kind, EntryKind::File { .. }) || !is_stale_candidate(name, container)
-            {
+            if entry.kind != FileType::File || !is_stale_candidate(name, container) {
                 continue;
             }
             let path = dir.join(name);
