@@ -2,7 +2,9 @@
 //!
 //! Invariants: `sweep_stale_files` removes exactly this container's `<name>.tmp.*` and `<name>.compact.*` files whose
 //! writer lock is free, durably; it keeps everything else (the container, other containers' files, quarantine files,
-//! a temporary file a live create still locks), and needs a read-write handle opened by path.
+//! a temporary file a live create still locks), and needs a read-write handle opened by path. `side_files_in` lists
+//! this container's temporary and quarantine files without removing any, with whether a writer holds each, and
+//! `remove_quarantine_files` removes the quarantine copies durably (ROADMAP 2.4.19).
 
 #![allow(clippy::unwrap_used)]
 
@@ -15,6 +17,7 @@ use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Commit, Container, ContainerFile, Error, Mode};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
+use persia_storage::{InUse, SideFileKind};
 
 const DB: &str = "/db/app.persia";
 
@@ -147,4 +150,78 @@ fn sweeping_on_disk() {
     let c = Container::open(&path, Mode::ReadWrite).unwrap();
     assert_eq!(c.sweep_stale_files().unwrap(), std::slice::from_ref(&stale));
     assert!(!stale.exists());
+}
+
+const QUARANTINE: &str = "/db/app.persia.quarantine.0000000000003028.0123456789abcdef.1";
+
+#[test]
+fn side_files_lists_temporaries_and_quarantines_and_removes_nothing() {
+    let fs = with_stale_files();
+    let live = Path::new("/db/app.persia.tmp.00000000000000ff.7");
+    let held = fs.create_new(live).unwrap();
+    assert!(held.try_lock().unwrap());
+    let before = names(&fs);
+
+    let files = Container::side_files_in(&fs, DB).unwrap();
+    let got: Vec<(String, SideFileKind, InUse, bool)> = files
+        .iter()
+        .map(|f| {
+            let name = f.path.file_name().unwrap().to_string_lossy().into_owned();
+            (name, f.kind, f.in_use, f.removed)
+        })
+        .collect();
+    let mut want: Vec<(String, SideFileKind, InUse, bool)> = before
+        .iter()
+        .filter(|n| n.starts_with("app.persia.") && *n != "app.persia")
+        .map(|n| {
+            let kind = if n.contains(".quarantine.") {
+                SideFileKind::Quarantine
+            } else {
+                SideFileKind::Temporary
+            };
+            let in_use = if n.ends_with(".7") {
+                InUse::Yes
+            } else {
+                InUse::No
+            };
+            (n.clone(), kind, in_use, false)
+        })
+        .collect();
+    want.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(got, want);
+    assert_eq!(got.len(), 4, "two stale, one live, one quarantine: {got:?}");
+    assert_eq!(names(&fs), before, "listing removes nothing");
+    // A missing container has no side files, and its directory still lists.
+    assert_eq!(
+        Container::side_files_in(&fs, "/db/missing.persia").unwrap(),
+        []
+    );
+}
+
+#[test]
+fn quarantine_files_are_removed_durably_by_a_writer_only() {
+    let fs = with_stale_files();
+    let ro = Container::open_in(vfs(&fs), DB, Mode::ReadOnly).unwrap();
+    assert!(matches!(
+        ro.remove_quarantine_files(),
+        Err(Error::ReadOnly { .. })
+    ));
+    drop(ro);
+    let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(
+        c.remove_quarantine_files().unwrap(),
+        [PathBuf::from(QUARANTINE)]
+    );
+    let kept = names(&fs.crash(CrashLoss::All));
+    assert!(!kept.iter().any(|n| n.contains(".quarantine.")), "{kept:?}");
+    assert_eq!(
+        kept.iter().filter(|n| n.starts_with("app.persia.")).count(),
+        2,
+        "the stale temporaries are a separate sweep: {kept:?}"
+    );
+    assert_eq!(
+        c.remove_quarantine_files().unwrap(),
+        Vec::<PathBuf>::new(),
+        "idempotent"
+    );
 }

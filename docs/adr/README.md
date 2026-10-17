@@ -34,9 +34,11 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0009](./0009-frame-validation-and-scan-end.md) | Frame validation, scan end classes and compressed frame payloads | accepted |
 | [0010](./0010-mmap-unsafe-boundary-and-sigbus.md) | The memory-mapping unsafe boundary and the SIGBUS strategy | accepted (amended by 0016, 0017) |
 | [0011](./0011-blob-ref-encoding.md) | `BlobRef` value limits and binary encoding | accepted |
-| [0012](./0012-local-backend-layout.md) | Local backend layout: encoded file names, directory marker, link-based `put_if_absent` | accepted (amended by 0016) |
+| [0012](./0012-local-backend-layout.md) | Local backend layout: encoded file names, directory marker, link-based `put_if_absent` | accepted (amended by 0016, 0018) |
 | [0013](./0013-frame-seq.md) | `frame_seq` numbers a container's frames contiguously; the superblock anchors it | accepted |
 | [0014](./0014-corrupt-tail-quarantine.md) | A read-write open quarantines a corrupt tail unless it may hold acknowledged writes | accepted |
 | [0015](./0015-header-never-rewritten-in-place.md) | The header page is never rewritten in place; `format_minor` is recorded by rewrites | accepted |
 | [0016](./0016-windows-behavior-and-platform-durability.md) | Windows behavior and platform durability | accepted |
 | [0017](./0017-mapped-container-reads.md) | Mapped container reads: an opt-in window over the committed frames | proposed |
+| [0018](./0018-sweeping-temporary-files.md) | Stale temporary files are swept under their lock, on request only | proposed |
+| [0019](./0019-cli-depends-on-storage.md) | The `persia` CLI may depend on `persia-storage` directly | proposed |
