@@ -89,9 +89,11 @@ impl<F: ContainerFile> FrameWriter<'_, F> {
     /// Writes the next payload bytes. Not durable until [`Container::sync`] after [`FrameWriter::finish`].
     ///
     /// # Errors
-    /// [`Error::Encode`] if `chunk` would take the payload past its declared length (nothing is written, and the
+    /// [`Error::Poisoned`] after an earlier failure, [`Error::Encode`] if `chunk` would take the payload past its declared length (nothing is written, and the
     /// writer stays usable), or [`Error::Io`], which poisons the container.
     pub fn write(&mut self, chunk: &[u8]) -> Result<()> {
+        // After a failed write the handle is poisoned: nothing more goes to the file.
+        self.container.writable()?;
         let Some(encoder) = self.encoder.as_mut() else {
             return Err(Error::Poisoned);
         };
@@ -106,6 +108,7 @@ impl<F: ContainerFile> FrameWriter<'_, F> {
     /// [`Error::Encode`] if fewer payload bytes were written than declared, or [`Error::Io`]; both poison the
     /// container, since a partial frame is on the file.
     pub fn finish(mut self) -> Result<FrameRef> {
+        self.container.writable()?;
         let encoder = self.encoder.take().ok_or(Error::Poisoned)?;
         let total = encoder.total_len();
         let trailer = match encoder.finish() {

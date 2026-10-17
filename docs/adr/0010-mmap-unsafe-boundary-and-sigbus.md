@@ -76,7 +76,7 @@ the fact. ROADMAP 1.8 asks where the unsafe boundary is, what contract keeps it 
 - A `ByteSource` slice keeps its whole mapping alive. A block cache that holds small slices of a large mapping
   pins the mapping too. This matters on Windows, where an open mapping prevents truncating the file. It does not
   prevent replacing it by `rename` (verified by test in 2.4.5.3: the standard library falls back to POSIX rename
-  semantics), so compaction needs no workaround.
+  semantics, available on Windows 10 1607 and later on NTFS), so compaction needs no workaround there.
 - A mapping is a snapshot of `start..end`. To see newer frames, a reader maps the new range again; mappings never
   grow in place.
 

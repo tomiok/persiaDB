@@ -177,3 +177,21 @@ fn read_only_and_poisoned_handles_refuse_to_stream() {
     ));
     assert_eq!(new_sim().file().file_len().unwrap(), 12288);
 }
+
+#[test]
+fn nothing_is_written_through_a_writer_after_a_failure() {
+    let mut c = with_one_frame();
+    let file = c.file().clone();
+    let next = file.mutations() + 1; // the header write is call `mutations()`; the first chunk fails
+    file.set_fault(Some(SimFault::FailAt(next)));
+    let mut w = c.append_stream(FrameKind::Segment, 8).unwrap();
+    assert!(matches!(w.write(&[1; 4]), Err(Error::Io { .. })));
+    file.set_fault(None);
+    assert!(matches!(w.write(&[1; 4]), Err(Error::Poisoned)));
+    assert!(matches!(w.finish(), Err(Error::Poisoned)));
+    assert_eq!(
+        c.frames().len(),
+        1,
+        "the failed frame never joins the container"
+    );
+}

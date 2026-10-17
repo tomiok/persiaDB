@@ -138,9 +138,11 @@ fn sweeping_needs_a_writer_opened_by_path() {
 #[test]
 fn sweeping_on_disk() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("app.persia");
+    // Canonical, as the container reports it (macOS `/var` is a symbolic link to `/private/var`).
+    let dir_path = std::fs::canonicalize(dir.path()).unwrap();
+    let path = dir_path.join("app.persia");
     drop(Container::create(&path).unwrap());
-    let stale = dir.path().join("app.persia.compact.0123456789abcdef.3");
+    let stale = dir_path.join("app.persia.compact.0123456789abcdef.3");
     std::fs::write(&stale, b"half a container").unwrap();
     let c = Container::open(&path, Mode::ReadWrite).unwrap();
     assert_eq!(c.sweep_stale_files().unwrap(), std::slice::from_ref(&stale));

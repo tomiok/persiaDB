@@ -238,10 +238,13 @@ the file is logically truncated at `o`. On a torn tail, before appending again t
 the file at `o` and syncs it, so frames that once followed `o` cannot reappear behind new ones (ROADMAP 2.4.4).
 On corruption the bytes after `o` may hold acknowledged writes (WAL frames synced after `log_end`, SPEC §8.2), so
 they are not destroyed silently (ADR-0014): a read-write open searches them for valid frames (at 8-aligned offsets
-holding the magic). If one has a `frame_seq` at or above the one expected at `o`, it may be acknowledged: the open
-fails, naming it, unless the caller asks for quarantine. Zeros and stale frames (lower `frame_seq`, ADR-0013) are
-truncated like a torn tail. Anything else is first copied to `<name>.quarantine.<o>.<nonce>.<n>` next to the
-container (file and directory synced), then truncated. Without a path there is nowhere to copy to, and the open fails.
+holding the magic). If one has a `frame_seq` at or above the one expected at `o`, or flags this build does not know
+(a newer writer's frame), it may be acknowledged: the open fails, naming it, unless the caller asks for quarantine.
+Zeros and stale frames (lower `frame_seq`, ADR-0013) are truncated like a torn tail. Anything else is first copied
+to `<name>.quarantine.<o as 16 hex digits>.<nonce>.<n>` next to the container (file and directory synced), then
+truncated. Without a path there is nowhere to copy to, and the open fails. The search reads at most four times the
+tail's length; past that budget (many bogus frame candidates) nothing is known and the open fails as in the first
+case.
 
 ### 4.5 Commit protocol (local)
 1. Append Segment / WalChunk frames. `fdatasync`.
@@ -289,8 +292,8 @@ nothing. The container is reopened, and recovery decides what survived.
   cache of a writer that died without syncing, and a commit must never reach the disk before the frames it covers
   (§4.5). Valid frames after `log_end` are then durable but not committed (synced WAL frames, §8.2, or the frames
   of a commit that did not complete); the next commit's `log_end` covers them. Recovery reads frames in bounded chunks
-  (64 KiB), never a whole frame or tail at once, so its memory does not grow with the size of a frame or of the file
-  (ROADMAP 2.4.12).
+  (64 KiB), never a whole frame or tail at once, so its memory does not grow with the size of a frame or of a torn tail
+  (only its list of frames from `wal_start` grows with their number; ROADMAP 2.4.12).
 
 ### 4.5.2 Platform durability notes
 "Sync" in this document means the following calls (Rust's standard library, checked against the pinned toolchain's
@@ -309,7 +312,9 @@ call returns:
   ext4, XFS and btrfs also flush the drive cache unless mounted with barriers off (`nobarrier`), which voids these
   guarantees.
 - A new or renamed name is durable only after its directory is synced (on Linux a file's `fsync` does not cover its
-  entry). Windows directory entries are flushed the same way; NTFS also journals metadata, but only lazily.
+  entry). Windows directory entries are flushed the same way; NTFS also journals metadata, but only lazily. A volume
+  whose directories cannot be flushed (FAT, some network redirectors on Windows) fails every operation that needs
+  it with an I/O error, rather than acknowledging a write it cannot make durable.
 - A failed sync leaves what reached the disk unknown, and repeating it proves nothing (§4.5): writers stop and
   recovery decides. Network file systems (NFS, SMB) may report success before the server has the data; they are
   outside these guarantees.
@@ -358,7 +363,9 @@ with or has since committed:
 - recovery (§8.6) truncates only at the end of the §4.4 scan, which starts at `log_end`; an invalid frame below
   `log_end` is corruption and is never truncated;
 - compaction (§4.6) writes a new file instead of shrinking the old one, so existing mappings keep the old file's
-  contents; a live mapping does not block the rename over the container, on Unix nor on Windows (ROADMAP 2.4.5.3);
+  contents; a live mapping does not block the rename over the container on Unix, nor on Windows where the standard
+  library renames with POSIX semantics (Windows 10 1607 and later, NTFS; ROADMAP 2.4.5.3). Elsewhere (FAT, exFAT)
+  `MoveFileExW` may refuse to replace a mapped file, and compaction then fails without harm;
 - creating a container never truncates an existing file (create-new, or write elsewhere and rename).
 
 A slot damaged after another process read it is outside this contract: recovery may then pick the older slot and
@@ -838,7 +845,9 @@ above.
   that is reserved (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, alone or before a `.`, ignoring case)
   or that ends in `.` is `InvalidInput` too. On Unix, so is an object whose file path, or the path of its temporary
   file (below), is longer than `PATH_MAX` allows (1023 bytes on macOS, 4095 on Linux): it depends on the root's path,
-  and on macOS even the longest key (§10.1) exceeds it under any root.
+  and on macOS even the longest key (§10.1) exceeds it under any root. The root's path is measured as given (made
+  absolute, symbolic links not resolved); a root behind a symbolic link whose target path is longer can still fail
+  with an I/O error instead.
 - **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
   leave one behind; it holds no acknowledged data.

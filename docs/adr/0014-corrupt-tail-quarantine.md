@@ -19,7 +19,8 @@ be acknowledged data of this file's run.
 On a scan that ends in corruption at `o`, a read-write open searches `o..end` for valid frames, trying every
 8-aligned offset that holds the frame magic (frames are 8-aligned) and skipping valid frames whole. Then:
 
-1. A valid frame with `frame_seq` ≥ the one expected at `o` may be an acknowledged write (a synced WAL frame behind a
+1. A valid frame with `frame_seq` ≥ the one expected at `o`, or a frame valid but for flags this build does not know
+   (a newer writer's, which nothing may truncate, SPEC §4.4), may be an acknowledged write (a synced WAL frame behind a
    damaged one): the open fails with `CorruptTail`, naming that frame's offset, and changes nothing. A caller may ask
    for `Repair::Quarantine`, which treats it like case 3.
 2. Only zeros and stale frames (`frame_seq` below the expected one): truncated at `o` like a torn tail.
@@ -27,7 +28,9 @@ On a scan that ends in corruption at `o`, a read-write open searches `o..end` fo
    container, the copy is synced and its directory synced; only then is the container truncated at `o` and synced.
    The open reports the copy's path (`Recovery::quarantined`).
 
-The search and the copy read in 64 KiB chunks. A container opened without a path (`open_on`) has nowhere to put a
+The search and the copy read in 64 KiB chunks. Every 8-aligned word holding the magic is checked as a frame, which
+reads the extent its header claims, so a hostile tail could make the search quadratic: it may read at most four times
+the tail's length, and past that budget nothing is known and the open fails as in case 1 (without an offset). A container opened without a path (`open_on`) has nowhere to put a
 copy: case 3 fails like case 1, without an offset. A read-only open never changes anything (unchanged).
 
 ## Consequences
@@ -38,6 +41,8 @@ copy: case 3 fails like case 1, without an offset. A read-only open never change
   simulated file system, ROADMAP 2.4.11).
 - Quarantine files accumulate if corruption recurs; they are never removed by Persia (a `persia` CLI command may list
   them, together with the stale temporary files of ROADMAP 2.4.15).
+- After a `Repair::Quarantine` open, new frames take the `frame_seq` values the quarantined frames had: the quarantine
+  file is evidence, not a WAL to re-apply as is.
 - A frame inside the garbage that happens to look valid with a high `frame_seq` (e.g. a container stored as a
   payload) makes the open refuse: a false alarm, never a loss.
 

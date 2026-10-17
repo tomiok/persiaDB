@@ -214,3 +214,25 @@ fn a_crash_while_quarantining_never_loses_the_tail() {
         }
     }
 }
+
+#[test]
+fn a_failed_quarantine_copy_leaves_no_partial_file_and_the_container_unchanged() {
+    let (fs, a, _) = with_tail(false);
+    damage(&fs, a, &[0; 512]);
+    let before = fs.read(Path::new(DB)).unwrap();
+    // The open's calls: lock-free recovery reads nothing mutating until the quarantine file is created (call 0 from
+    // here), then its first write (call 1) fails like a full disk would.
+    let start = fs.mutations();
+    fs.set_fault(Some(SimFault::FailAt(start + 1)));
+    let err = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap_err();
+    assert!(matches!(err, Error::Io { .. }), "{err}");
+    fs.set_fault(None);
+    let after = fs.crash(CrashLoss::Nothing);
+    assert_eq!(after.read(Path::new(DB)).unwrap(), before);
+    // The removal of the partial copy failed too (the process is "dead" after a fault), so a restart may still find
+    // it; a later open must not be blocked by it and creates its own copy.
+    let c = Container::open_in(vfs(&after), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(c.end(), a);
+    let q = c.recovery().quarantined.clone().unwrap();
+    assert_eq!(after.read(&q).unwrap(), &before[a as usize..]);
+}

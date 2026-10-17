@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use persia_format::block::Compression;
 
 use super::{
-    Container, ContainerFile, Error, Mode, Relocation, Repair, Result, TailPolicy, new_db_uuid,
-    take_lock,
+    Container, ContainerFile, Error, LockedBy, Mode, Relocation, Repair, Result, TailPolicy,
+    new_db_uuid, take_lock,
 };
 use crate::local::fs::parent_or_cwd;
 use crate::local::temp_nonce;
@@ -104,8 +104,15 @@ impl<F: ContainerFile + 'static> Container<F> {
         };
         let temp = temp_path(path, ".tmp")?;
         let file = vfs.create_new(&temp).map_err(Error::io("create"))?;
-        let result = Self::create_on(file, new_db_uuid()).and_then(|container| {
-            match vfs.hard_link(&temp, path) {
+        let locked_by = if lock.is_some() {
+            LockedBy::Beside
+        } else {
+            LockedBy::File
+        };
+        let result =
+            Self::create_locked_by(file, new_db_uuid(), locked_by).and_then(|container| match vfs
+                .hard_link(&temp, path)
+            {
                 Ok(()) => Ok(container),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {
                     Err(Error::AlreadyExists {
@@ -113,8 +120,7 @@ impl<F: ContainerFile + 'static> Container<F> {
                     })
                 }
                 Err(err) => Err(Error::io("link")(err)),
-            }
-        });
+            });
         // The temporary name goes whatever happened. One directory sync then covers the link and the removal, and
         // runs even if the removal failed, so a container reported or not is durable either way.
         let removed = vfs
@@ -169,7 +175,8 @@ impl<F: ContainerFile + 'static> Container<F> {
             let file = vfs
                 .open(&path, mode == Mode::ReadWrite)
                 .map_err(Error::io("open"))?;
-            if mode == Mode::ReadWrite {
+            // With a lock beside the container (Windows), the path cannot change under it: it is never renamed.
+            if mode == Mode::ReadWrite && lock.is_none() {
                 take_lock(&file)?;
                 // A compaction may have renamed a new file over the path between our open and our lock; the lock
                 // we got is then on the old, unlinked file, which its writer has just released. Open again.
@@ -243,10 +250,15 @@ impl<F: ContainerFile + 'static> Container<F> {
                 )),
             },
         };
-        let (mut new, relocation) = match self.compact_into(file, live, manifest, compression) {
-            Ok(done) => done,
-            Err(err) => return Err(discard(err)),
+        let locked_by = match self.location.as_ref().and_then(|l| l.lock.as_ref()) {
+            Some(_) => LockedBy::Beside,
+            None => LockedBy::File,
         };
+        let (mut new, relocation) =
+            match self.compact_locked_by(file, live, manifest, compression, locked_by) {
+                Ok(done) => done,
+                Err(err) => return Err(discard(err)),
+            };
         // Never rename over a path that no longer names this file (replaced from outside): that file is not ours.
         let renamed = match vfs.same_file(&self.file, &path) {
             Ok(true) => vfs.rename(&temp, &path).map_err(Error::io("rename")),
@@ -336,9 +348,12 @@ impl<F: ContainerFile + 'static> Container<F> {
                 Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                 Err(err) => return Err(Error::io("open temporary file")(err)),
             };
-            // Held by a live create (Unix; on Windows the lock is beside the container, so this always succeeds).
-            if !file.try_lock().map_err(Error::io("lock"))? {
-                continue;
+            // Held by a live create. On Windows files are not locked (the lock is beside the container): no check.
+            match file.try_lock() {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(err) if err.kind() == io::ErrorKind::Unsupported => {}
+                Err(err) => return Err(Error::io("lock")(err)),
             }
             drop(file);
             match vfs.remove_file(&path) {

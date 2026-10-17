@@ -1,0 +1,500 @@
+//! `StreamScanner` against `FrameScanner` on logs built to stress chunking (ROADMAP 2.4.12; SPEC §4.4).
+//! `frame_props.rs` (invariant 7) compares the two on randomly mutated logs with one random chunk length per case and
+//! bases below 2^40; this suite complements it.
+//!
+//! Invariants:
+//! 1. Equivalence under every chunking: for one log, *every* chunk length in `1..=40` and around the header/trailer
+//!    widths and powers of two (63, 64, 65, 4096) gives the same frames (offset, length, kind, flags, `frame_seq`),
+//!    the same `ScanEnd` (error kind and offset included), the same final `offset()` and the same `next_frame_seq()`
+//!    as a `FrameScanner` over the same bytes, under each `frame_seq` check (off, contiguous, expect `first`).
+//!    Logs hold frames much larger than the chunk whose damage is targeted where a chunk boundary matters: a
+//!    non-zero padding byte or `frame_seq` or unknown flag with the CRC fixed up (so the error is past the CRC
+//!    check), a flipped CRC bit, a non-zero `reserved` byte, a payload bit, a lost sector, a truncation, and zero or
+//!    non-zero bytes after the last frame.
+//! 2. Bases near `u64::MAX`: the same holds when the log ends just below `u64::MAX` (no overflow, no saturation
+//!    divergence), with `frame_seq` runs that reach `u64::MAX` (out of range under a check).
+//! 3. Read discipline: every read lies inside `base..base + len`, is non-empty and at most
+//!    `max(chunk, FRAME_HEADER_LEN)` bytes.
+//! 4. Retry: a read error at any read is returned as is, leaves the scanner unchanged, and retrying with a good
+//!    reader yields exactly the frames and end of an undisturbed scan.
+
+#![allow(
+    clippy::indexing_slicing,
+    clippy::unwrap_used,
+    clippy::cast_possible_truncation
+)]
+
+use persia_format::Writer;
+use persia_format::block::Compression;
+use persia_format::checksum::crc32c;
+use persia_format::frame::{
+    FRAME_HEADER_LEN, FrameKind, FrameScanner, ScanEnd, StreamScanner, encode_frame,
+};
+use proptest::prelude::*;
+use proptest::sample::Index;
+
+/// `cases` unless `PROPTEST_CASES` says otherwise.
+fn config(cases: u32) -> ProptestConfig {
+    let env = ProptestConfig::default();
+    if std::env::var_os("PROPTEST_CASES").is_some() {
+        env
+    } else {
+        ProptestConfig { cases, ..env }
+    }
+}
+
+/// Chunk lengths every case is scanned with.
+fn chunk_lens() -> impl Iterator<Item = usize> {
+    (1..=40).chain([63, 64, 65, 4096])
+}
+
+#[derive(Debug, Clone, Copy)]
+enum SeqMode {
+    Off,
+    Contiguous,
+    Expect(u64),
+}
+
+/// `(offset, total_len, kind, flags, frame_seq)` of a frame either scanner yields.
+type Seen = (u64, u64, FrameKind, u32, u64);
+
+#[derive(Debug, Clone, PartialEq)]
+struct Outcome {
+    frames: Vec<Seen>,
+    end: ScanEnd,
+    offset: u64,
+    next_frame_seq: Option<u64>,
+}
+
+fn slice_scan(bytes: &[u8], base: u64, mode: SeqMode) -> Outcome {
+    let s = FrameScanner::new(bytes, base);
+    let mut s = match mode {
+        SeqMode::Off => s,
+        SeqMode::Contiguous => s.contiguous(),
+        SeqMode::Expect(first) => s.expect_frame_seq(first),
+    };
+    let frames = s
+        .by_ref()
+        .map(|f| {
+            let flags = u32::from(f.is_compressed());
+            (f.offset(), f.total_len(), f.kind(), flags, f.frame_seq())
+        })
+        .collect();
+    Outcome {
+        frames,
+        end: s.end().unwrap().clone(),
+        offset: s.offset(),
+        next_frame_seq: s.next_frame_seq(),
+    }
+}
+
+fn stream_scanner(base: u64, len: usize, mode: SeqMode, chunk: usize) -> StreamScanner {
+    let s = StreamScanner::new(base, base + len as u64);
+    let s = match mode {
+        SeqMode::Off => s,
+        SeqMode::Contiguous => s.contiguous(),
+        SeqMode::Expect(first) => s.expect_frame_seq(first),
+    };
+    s.with_chunk_len(chunk)
+}
+
+/// A reader over `bytes` at `base` that enforces invariant 3 and fails (once) at read number `fail_at`.
+fn reader<'a>(
+    bytes: &'a [u8],
+    base: u64,
+    chunk: usize,
+    reads: &'a mut u64,
+    fail_at: Option<u64>,
+) -> impl FnMut(u64, &mut [u8]) -> Result<(), String> + 'a {
+    move |offset: u64, buf: &mut [u8]| {
+        let n = *reads;
+        *reads += 1;
+        if fail_at == Some(n) {
+            return Err(format!("injected failure at read {n}"));
+        }
+        if buf.is_empty() || buf.len() > chunk.max(FRAME_HEADER_LEN) {
+            return Err(format!("read of {} bytes, chunk {chunk}", buf.len()));
+        }
+        let start = offset
+            .checked_sub(base)
+            .ok_or_else(|| format!("read at {offset} below base {base}"))?;
+        let start = usize::try_from(start).map_err(|e| e.to_string())?;
+        let src = bytes
+            .get(start..start + buf.len())
+            .ok_or_else(|| format!("read {start}+{} past the range", buf.len()))?;
+        buf.copy_from_slice(src);
+        Ok(())
+    }
+}
+
+fn stream_scan(
+    bytes: &[u8],
+    base: u64,
+    mode: SeqMode,
+    chunk: usize,
+) -> Result<Outcome, TestCaseError> {
+    let mut s = stream_scanner(base, bytes.len(), mode, chunk);
+    let mut reads = 0;
+    let mut read = reader(bytes, base, chunk, &mut reads, None);
+    let mut frames = Vec::new();
+    while let Some(h) = s.next_frame(&mut read).map_err(TestCaseError::fail)? {
+        frames.push((
+            h.offset(),
+            h.total_len(),
+            h.kind(),
+            h.flags(),
+            h.frame_seq(),
+        ));
+    }
+    prop_assert!(s.next_frame(&mut read).unwrap().is_none(), "fused");
+    Ok(Outcome {
+        frames,
+        end: s.end().unwrap().clone(),
+        offset: s.offset(),
+        next_frame_seq: s.next_frame_seq(),
+    })
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Logs
+// ---------------------------------------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct FrameSpec {
+    kind: u8,
+    payload_len: usize,
+    fill: u8,
+    zstd: bool,
+    /// `frame_seq` deviates from the run (a stale or skipped value).
+    seq_jump: Option<u64>,
+}
+
+fn frame_spec() -> impl Strategy<Value = FrameSpec> {
+    (
+        prop_oneof![4 => 1_u8..=5, 1 => any::<u8>()],
+        // Mostly larger than every chunk of `1..=40`, with every padding width.
+        prop_oneof![1 => 0_usize..16, 4 => 40_usize..400, 1 => 1000_usize..3000],
+        any::<u8>(),
+        prop::bool::weighted(0.15),
+        prop::option::weighted(0.1, prop_oneof![0_u64..4, Just(u64::MAX), any::<u64>()]),
+    )
+        .prop_map(|(kind, payload_len, fill, zstd, seq_jump)| FrameSpec {
+            kind,
+            payload_len,
+            fill,
+            zstd,
+            seq_jump,
+        })
+}
+
+/// A payload that is not all one byte, so damage to it is visible and zstd still shrinks it sometimes.
+fn payload_of(spec: &FrameSpec) -> Vec<u8> {
+    (0..spec.payload_len)
+        .map(|i| spec.fill.wrapping_add((i % 7) as u8))
+        .collect()
+}
+
+/// Encodes the frames with `frame_seq` = `first`, `first + 1`, ... (wrapping), returns the log and frame bounds.
+fn encode_log(specs: &[FrameSpec], first: u64) -> (Vec<u8>, Vec<(usize, usize)>) {
+    let mut w = Writer::new();
+    let mut bounds = Vec::new();
+    for (i, s) in specs.iter().enumerate() {
+        let start = w.len();
+        let seq = s.seq_jump.unwrap_or_else(|| first.wrapping_add(i as u64));
+        let compression = if s.zstd {
+            Compression::Zstd { level: 1 }
+        } else {
+            Compression::None
+        };
+        encode_frame(
+            &mut w,
+            FrameKind::from_u8(s.kind),
+            seq,
+            &payload_of(s),
+            compression,
+        )
+        .unwrap();
+        bounds.push((start, w.len()));
+    }
+    (w.into_inner(), bounds)
+}
+
+/// Damage targeted at the parts of a frame whose bytes `StreamScanner` checks across chunk boundaries.
+#[derive(Debug, Clone)]
+enum Damage {
+    /// A non-zero padding byte (or, with no padding, payload byte), CRC fixed up when the flag is set.
+    Padding(Index, Index, u8, bool),
+    /// A non-zero `reserved` byte (not covered by the CRC).
+    Reserved(Index, Index, u8),
+    CrcBit(Index, u8),
+    PayloadBit(Index, Index, u8),
+    /// Unknown `flags` bits with the CRC fixed up: an unsupported frame.
+    UnknownFlags(Index, u32),
+    /// A new `frame_seq` with the CRC fixed up: a valid frame that may break the run.
+    Seq(Index, u64),
+    /// A 512-byte sector lost (zeroed) anywhere.
+    LostSector(Index),
+    Truncate(Index),
+    AppendZeros(usize),
+    AppendBytes(Vec<u8>),
+}
+
+fn damage() -> impl Strategy<Value = Damage> {
+    let i = any::<Index>;
+    prop_oneof![
+        3 => (i(), i(), 1_u8.., any::<bool>()).prop_map(|(f, a, v, fix)| Damage::Padding(f, a, v, fix)),
+        2 => (i(), i(), 1_u8..).prop_map(|(f, a, v)| Damage::Reserved(f, a, v)),
+        2 => (i(), 0_u8..32).prop_map(|(f, b)| Damage::CrcBit(f, b)),
+        2 => (i(), i(), 0_u8..8).prop_map(|(f, a, b)| Damage::PayloadBit(f, a, b)),
+        1 => (i(), 2_u32..1 << 24).prop_map(|(f, v)| Damage::UnknownFlags(f, v)),
+        2 => (i(), prop_oneof![0_u64..8, Just(u64::MAX), any::<u64>()]).prop_map(|(f, v)| Damage::Seq(f, v)),
+        1 => i().prop_map(Damage::LostSector),
+        2 => i().prop_map(Damage::Truncate),
+        1 => (1_usize..100).prop_map(Damage::AppendZeros),
+        1 => proptest::collection::vec(any::<u8>(), 1..100).prop_map(Damage::AppendBytes),
+    ]
+}
+
+fn fix_crc(b: &mut [u8], start: usize, end: usize) {
+    let crc = crc32c(&b[start + 4..end - 8]);
+    b[end - 8..end - 4].copy_from_slice(&crc.to_le_bytes());
+}
+
+fn apply(b: &mut Vec<u8>, bounds: &[(usize, usize)], d: &Damage) {
+    let frame = |f: Index| -> Option<(usize, usize)> {
+        let (s, e) = *bounds.get(f.index(bounds.len().max(1)))?;
+        (e <= b.len()).then_some((s, e))
+    };
+    match *d {
+        Damage::Padding(f, at, v, fix) => {
+            if let Some((s, e)) = frame(f) {
+                let payload_len = u64::from_le_bytes(b[s + 8..s + 16].try_into().unwrap()) as usize;
+                let lo = (s + 24 + payload_len).min(e - 8);
+                let pos = if e - 8 > lo {
+                    lo + at.index(e - 8 - lo)
+                } else if e - 8 > s + 24 {
+                    s + 24 + at.index(e - 8 - s - 24)
+                } else {
+                    return;
+                };
+                b[pos] = v;
+                if fix {
+                    fix_crc(b, s, e);
+                }
+            }
+        }
+        Damage::Reserved(f, at, v) => {
+            if let Some((_, e)) = frame(f) {
+                b[e - 4 + at.index(4)] = v;
+            }
+        }
+        Damage::CrcBit(f, bit) => {
+            if let Some((_, e)) = frame(f) {
+                b[e - 8 + usize::from(bit / 8)] ^= 1 << (bit % 8);
+            }
+        }
+        Damage::PayloadBit(f, at, bit) => {
+            if let Some((s, e)) = frame(f)
+                && e - 8 > s + 24
+            {
+                b[s + 24 + at.index(e - 8 - s - 24)] ^= 1 << bit;
+            }
+        }
+        Damage::UnknownFlags(f, flags) => {
+            if let Some((s, e)) = frame(f) {
+                let old = u32::from_le_bytes([b[s + 5], b[s + 6], b[s + 7], 0]);
+                let new = (old & 1) | (flags & !1);
+                b[s + 5..s + 8].copy_from_slice(&new.to_le_bytes()[..3]);
+                fix_crc(b, s, e);
+            }
+        }
+        Damage::Seq(f, seq) => {
+            if let Some((s, e)) = frame(f) {
+                b[s + 16..s + 24].copy_from_slice(&seq.to_le_bytes());
+                fix_crc(b, s, e);
+            }
+        }
+        Damage::LostSector(at) => {
+            let from = at.index(b.len() + 1);
+            let to = (from + 512).min(b.len());
+            b[from..to].fill(0);
+        }
+        Damage::Truncate(at) => b.truncate(at.index(b.len() + 1)),
+        Damage::AppendZeros(n) => b.resize(b.len() + n, 0),
+        Damage::AppendBytes(ref tail) => b.extend_from_slice(tail),
+    }
+}
+
+fn seq_mode(first: u64) -> impl Strategy<Value = SeqMode> {
+    prop_oneof![
+        1 => Just(SeqMode::Off),
+        1 => Just(SeqMode::Contiguous),
+        // Mostly the run's real start, so long runs pass and the damage decides where the scan stops.
+        3 => Just(SeqMode::Expect(first)),
+        1 => prop_oneof![Just(first.wrapping_add(1)), Just(first.wrapping_sub(1)), any::<u64>()]
+            .prop_map(SeqMode::Expect),
+    ]
+}
+
+fn first_seq() -> impl Strategy<Value = u64> {
+    prop_oneof![
+        3 => 1_u64..4,
+        1 => Just(0_u64),
+        // Runs that reach and pass `u64::MAX`.
+        2 => (0_u64..6).prop_map(|k| u64::MAX - k),
+    ]
+}
+
+/// A log of frames, damaged, plus the `frame_seq` its run starts at.
+fn damaged_log(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64)> {
+    (
+        proptest::collection::vec(frame_spec(), 0..max_frames),
+        first_seq(),
+        proptest::collection::vec(damage(), 0..3),
+    )
+        .prop_map(|(specs, first, damages)| {
+            let (mut bytes, bounds) = encode_log(&specs, first);
+            for d in &damages {
+                apply(&mut bytes, &bounds, d);
+            }
+            (bytes, first)
+        })
+}
+
+/// An 8-aligned base, small or such that the log ends within a few bytes of `u64::MAX`.
+fn base_for(len: usize) -> impl Strategy<Value = u64> {
+    let top = u64::MAX - len as u64;
+    prop_oneof![
+        Just(12288_u64),
+        (0_u64..1 << 37).prop_map(|b| b * 8),
+        // The end of the range is `u64::MAX - slack`, slack in 0..8 once aligned down.
+        (0_u64..16).prop_map(move |slack| (top - slack) & !7),
+    ]
+}
+
+fn case(max_frames: usize) -> impl Strategy<Value = (Vec<u8>, u64, u64, SeqMode)> {
+    damaged_log(max_frames).prop_flat_map(|(bytes, first)| {
+        let len = bytes.len();
+        (Just(bytes), base_for(len), Just(first), seq_mode(first))
+    })
+}
+
+/// Invariants 1-3.
+fn check_all_chunkings(bytes: &[u8], base: u64, mode: SeqMode) -> Result<(), TestCaseError> {
+    let want = slice_scan(bytes, base, mode);
+    for chunk in chunk_lens() {
+        let got = stream_scan(bytes, base, mode, chunk)?;
+        prop_assert_eq!(&got, &want, "chunk {}", chunk);
+    }
+    Ok(())
+}
+
+/// Invariant 4: a read failure at read `fail_at`, then a retry with a good reader.
+fn check_retry(
+    bytes: &[u8],
+    base: u64,
+    mode: SeqMode,
+    chunk: usize,
+    fail_at: u64,
+) -> Result<(), TestCaseError> {
+    let want = stream_scan(bytes, base, mode, chunk)?;
+    let mut s = stream_scanner(base, bytes.len(), mode, chunk);
+    let mut frames = Vec::new();
+    let mut reads = 0;
+    let mut failed = false;
+    loop {
+        let before = (s.offset(), s.end().cloned(), s.next_frame_seq());
+        let mut read = reader(bytes, base, chunk, &mut reads, (!failed).then_some(fail_at));
+        match s.next_frame(&mut read) {
+            Ok(Some(h)) => {
+                frames.push((
+                    h.offset(),
+                    h.total_len(),
+                    h.kind(),
+                    h.flags(),
+                    h.frame_seq(),
+                ));
+            }
+            Ok(None) => break,
+            Err(e) => {
+                prop_assert!(!failed, "a second failure: {}", e);
+                prop_assert!(e.starts_with("injected"), "{}", e);
+                failed = true;
+                prop_assert_eq!(
+                    (s.offset(), s.end().cloned(), s.next_frame_seq()),
+                    before,
+                    "a failed read changed the scanner"
+                );
+            }
+        }
+    }
+    let got = Outcome {
+        frames,
+        end: s.end().unwrap().clone(),
+        offset: s.offset(),
+        next_frame_seq: s.next_frame_seq(),
+    };
+    prop_assert_eq!(got, want);
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(config(128))]
+
+    #[test]
+    fn stream_scan_matches_slice_scan_under_every_chunking((bytes, base, _first, mode) in case(5)) {
+        check_all_chunkings(&bytes, base, mode)?;
+    }
+
+    #[test]
+    fn a_failed_read_is_retried_without_effect(
+        (bytes, base, _first, mode) in case(4),
+        chunk in prop_oneof![1_usize..41, Just(4096)],
+        fail_at in prop_oneof![0_u64..4, 0_u64..400],
+    ) {
+        check_retry(&bytes, base, mode, chunk, fail_at)?;
+    }
+}
+
+/// Bases at the very top of the address space, with a run that reaches `u64::MAX`, each check mode.
+#[test]
+fn frames_ending_at_u64_max_scan_alike() {
+    let specs: Vec<FrameSpec> = [0_usize, 7, 40, 41, 300]
+        .iter()
+        .map(|&payload_len| FrameSpec {
+            kind: 3,
+            payload_len,
+            fill: 9,
+            zstd: false,
+            seq_jump: None,
+        })
+        .collect();
+    for first in [1, u64::MAX - 5, u64::MAX - 3, u64::MAX - 1] {
+        let (bytes, _) = encode_log(&specs, first);
+        for tail in [0_usize, 5, 8, 40] {
+            let mut bytes = bytes.clone();
+            bytes.resize(bytes.len() + tail, 0);
+            let top = (u64::MAX - bytes.len() as u64) & !7;
+            for base in [top, top - 8] {
+                for mode in [
+                    SeqMode::Off,
+                    SeqMode::Contiguous,
+                    SeqMode::Expect(first),
+                    SeqMode::Expect(u64::MAX),
+                ] {
+                    check_all_chunkings(&bytes, base, mode).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "slow")]
+proptest! {
+    #![proptest_config(config(2000))]
+
+    #[test]
+    fn slow_stream_scan_matches_slice_scan_under_every_chunking((bytes, base, _first, mode) in case(10)) {
+        check_all_chunkings(&bytes, base, mode)?;
+    }
+}

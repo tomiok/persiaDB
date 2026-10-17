@@ -578,13 +578,16 @@ fn io_error(op: Op, key: &Key, source: io::Error) -> Error {
 /// The whole of an object's file. Objects are never rewritten in place (`put` renames a new file over the name), so
 /// the length read first is the length of the file.
 fn read_all<F: ContainerFile>(file: &F) -> io::Result<Vec<u8>> {
-    let len = usize::try_from(file.file_len()?).map_err(|_| {
+    let oom = || {
         io::Error::new(
             io::ErrorKind::OutOfMemory,
-            "file larger than the address space",
+            "cannot allocate a buffer for the whole file",
         )
-    })?;
-    let mut buf = vec![0; len];
+    };
+    let len = usize::try_from(file.file_len()?).map_err(|_| oom())?;
+    let mut buf = Vec::new();
+    buf.try_reserve_exact(len).map_err(|_| oom())?;
+    buf.resize(len, 0);
     file.read_exact_at(&mut buf, 0)?;
     Ok(buf)
 }

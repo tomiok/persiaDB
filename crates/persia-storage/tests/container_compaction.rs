@@ -617,6 +617,8 @@ fn compacting_through_a_symlink_replaces_the_target() {
     assert_eq!(names(dir.path()), ["link.persia", "real.persia"]);
 }
 
+// Unix only: Windows exposes no file identity, so the check is skipped there (ROADMAP 2.4.18).
+#[cfg(unix)]
 #[test]
 fn compact_refuses_a_path_replaced_from_outside() {
     let dir = tempfile::tempdir().unwrap();

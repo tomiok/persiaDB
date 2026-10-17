@@ -367,8 +367,14 @@ fn paths_over_the_platform_limit_are_invalid_input() {
     let target = max - 256;
     let mut root = base;
     while root.as_os_str().len() < target {
+        // A push adds a separator and the name. Never leave exactly one byte to fill, which no push can.
         let left = target - root.as_os_str().len() - 1;
-        root.push("d".repeat(left.clamp(1, 200)));
+        let n = if left > 201 { 200 } else { left };
+        assert!(
+            n > 0,
+            "the temporary directory's path is one byte short of the target"
+        );
+        root.push("d".repeat(n));
     }
     assert_eq!(root.as_os_str().len(), target);
     let s = LocalStorage::open(&root).unwrap();

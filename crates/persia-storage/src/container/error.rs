@@ -46,8 +46,9 @@ pub enum Error {
     #[error(transparent)]
     Format(#[from] persia_format::Error),
     /// The frames after the committed `log_end` end in corruption (SPEC §4.4), and a read-write open may not
-    /// discard what follows (ADR-0014): a valid frame there may hold an acknowledged write (`acknowledged`), or the
-    /// bytes cannot be quarantined because the container was not opened by path (`acknowledged` is `None`). A
+    /// discard what follows (ADR-0014): a valid frame there may hold an acknowledged write (`acknowledged`), or (with
+    /// `acknowledged` `None`) the bytes cannot be quarantined because the container was not opened by path, or the
+    /// search for such frames exceeded its read budget. A
     /// read-only open can still read the committed state; [`Repair::Quarantine`](super::Repair::Quarantine) moves the
     /// bytes into a quarantine file and opens with what precedes them.
     #[error(

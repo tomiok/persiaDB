@@ -1009,3 +1009,27 @@ fn the_header_page_is_never_written_in_place() {
         .unwrap();
     assert_eq!(new.header().format_minor, FORMAT_MINOR + 1);
 }
+
+/// SPEC §4.5.1, ROADMAP 2.4.16: on Windows the writer lock lives beside the container, so a read-write open of a bare
+/// `File` refuses to run unlocked, while the path API locks `<name>.lock` and leaves readers free.
+#[cfg(windows)]
+#[test]
+fn windows_bare_files_cannot_be_opened_for_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(Container::create(&path).unwrap());
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&path)
+        .unwrap();
+    let err = Container::open_on(file, Mode::ReadWrite).unwrap_err();
+    assert!(
+        matches!(&err, Error::Io { op: "lock", source } if source.kind() == std::io::ErrorKind::Unsupported),
+        "{err}"
+    );
+    let writer = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert!(dir.path().join("app.persia.lock").exists());
+    let reader = Container::open_on(std::fs::File::open(&path).unwrap(), Mode::ReadOnly).unwrap();
+    assert_eq!(reader.superblock().seq, writer.superblock().seq);
+}

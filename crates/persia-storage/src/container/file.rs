@@ -93,12 +93,15 @@ impl ContainerFile for File {
         }
     }
 
-    /// Always granted on Windows: `LockFileEx` locks are mandatory, so a lock on the container would keep readers
-    /// out. [`Container::create`](super::Container::create) and [`Container::open`](super::Container::open) lock
-    /// a `<name>.lock` file next to it instead (SPEC §4.5.1); `create_on` and `open_on` with a bare [`File`]
-    /// exclude no other writer there.
+    /// Unsupported on Windows: `LockFileEx` locks are mandatory, so a lock on the container would keep readers out.
+    /// [`Container::create`](super::Container::create) and [`Container::open`](super::Container::open) lock a
+    /// `<name>.lock` file next to it instead (SPEC §4.5.1); `create_on`, `open_on` (read-write) and `compact_into`
+    /// with a bare [`File`] fail rather than run unlocked.
     #[cfg(windows)]
     fn try_lock(&self) -> io::Result<bool> {
-        Ok(true)
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "on Windows a container's writer lock is the <name>.lock file beside it: use Container::create or open",
+        ))
     }
 }

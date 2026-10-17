@@ -105,7 +105,7 @@ impl StreamScanner {
 
     /// The next valid frame, or `None` once the scan has stopped ([`StreamScanner::end`] says why). `read` fills a
     /// buffer from the absolute offset it is given; it is only asked for bytes inside `start..end`, at most the
-    /// chunk length at a time.
+    /// chunk length at a time (but the 24-byte frame header is read whole).
     ///
     /// # Errors
     /// An error of `read`, returned as is. The scanner is then unchanged and may be retried.
@@ -129,27 +129,77 @@ impl StreamScanner {
         }
     }
 
-    /// Validates the frame at `self.offset`: `Ok(Ok((header, seq)))`, with the check for the next frame, if it is valid and continues the run, `Ok(Err(end))`
-    /// if the scan stops there.
+    /// Validates the frame at [`StreamScanner::offset`] alone, as [`Frame::decode`](super::Frame::decode) would over
+    /// the bytes up to the end: no `frame_seq` check, and no look at the bytes after an invalid frame. Reads at most
+    /// the frame's extent (bounded by the end). The scanner does not move.
+    ///
+    /// # Errors
+    /// An error of `read`, returned as is. `Ok(Err(..))` is the frame's own [`Error`]: corruption, or
+    /// [`Error::Unsupported`] for a valid frame with unknown flags.
+    pub fn check_frame<E>(
+        &self,
+        read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+    ) -> Result<Result<FrameHeader, Error>, E> {
+        Ok(match self.check(read)? {
+            Checked::Valid(header) => Ok(header),
+            Checked::Clean => Err(Error::Corrupt {
+                offset: self.offset,
+                reason: Corruption::UnexpectedEof {
+                    needed: to_u64(MIN_FRAME_LEN),
+                    available: 0,
+                },
+            }),
+            Checked::Torn(error) | Checked::Invalid { error, .. } | Checked::Unsupported(error) => {
+                Err(error)
+            }
+        })
+    }
+
+    /// Validates the frame at `self.offset`: `Ok(Ok((header, seq)))`, with the check for the next frame, if it is
+    /// valid and continues the run; `Ok(Err(end))` if the scan stops there.
     fn step<E>(
         &self,
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
     ) -> Result<Result<(FrameHeader, SeqCheck), ScanEnd>, E> {
         let o = self.offset;
+        let header = match self.check(read)? {
+            Checked::Valid(header) => header,
+            Checked::Clean => return Ok(Err(ScanEnd::Clean { offset: o })),
+            Checked::Torn(error) => return Ok(Err(ScanEnd::TornTail { offset: o, error })),
+            Checked::Unsupported(error) => {
+                return Ok(Err(ScanEnd::Unsupported { offset: o, error }));
+            }
+            Checked::Invalid { error, zeros_from } => {
+                return Ok(Err(self.after(read, o, zeros_from, error)?));
+            }
+        };
+        Ok(match self.seq.advance(header.frame_seq()) {
+            Ok(seq) => Ok((header, seq)),
+            // The frame is whole, so this is never a torn tail; stop before it.
+            Err(reason) => Err(ScanEnd::Corrupt {
+                offset: o,
+                error: frame_seq_error(o, reason),
+            }),
+        })
+    }
+
+    /// The validation part of [`StreamScanner::step`], without the zero check that classifies an invalid frame.
+    fn check<E>(
+        &self,
+        read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+    ) -> Result<Checked, E> {
+        let o = self.offset;
         let available = self.limit.saturating_sub(o);
         if available == 0 {
-            return Ok(Err(ScanEnd::Clean { offset: o }));
+            return Ok(Checked::Clean);
         }
         if available < to_u64(MIN_FRAME_LEN) {
             // Fewer bytes than the smallest frame: always a torn tail, whatever they hold.
-            return Ok(Err(ScanEnd::TornTail {
+            return Ok(Checked::Torn(Error::Corrupt {
                 offset: o,
-                error: Error::Corrupt {
-                    offset: o,
-                    reason: Corruption::UnexpectedEof {
-                        needed: to_u64(MIN_FRAME_LEN),
-                        available,
-                    },
+                reason: Corruption::UnexpectedEof {
+                    needed: to_u64(MIN_FRAME_LEN),
+                    available,
                 },
             }));
         }
@@ -162,44 +212,35 @@ impl StreamScanner {
                 ..
             }) => {
                 // No known end: everything from the frame's start must be zero.
-                let error = Error::Corrupt {
-                    offset: o,
-                    reason: Corruption::BadFrameMagic,
-                };
-                return Ok(Err(self.after(read, o, o, error)?));
+                return Ok(Checked::Invalid {
+                    error: Error::Corrupt {
+                        offset: o,
+                        reason: Corruption::BadFrameMagic,
+                    },
+                    zeros_from: o,
+                });
             }
             Err(_) => {
                 // The total length overflows `u64`, so the frame runs past any end: a torn tail.
-                return Ok(Err(ScanEnd::TornTail {
-                    offset: o,
-                    error: Error::Corrupt {
-                        offset: o.saturating_add(to_u64(PAYLOAD_LEN_OFFSET)),
-                        reason: Corruption::UnexpectedEof {
-                            needed: u64::MAX,
-                            available,
-                        },
+                return Ok(Checked::Torn(Error::Corrupt {
+                    offset: o.saturating_add(to_u64(PAYLOAD_LEN_OFFSET)),
+                    reason: Corruption::UnexpectedEof {
+                        needed: u64::MAX,
+                        available,
                     },
                 }));
             }
         };
         if let Err(error) = header.check_fits(self.limit) {
-            return Ok(Err(ScanEnd::TornTail { offset: o, error }));
+            return Ok(Checked::Torn(error));
         }
-        let frame_end = o.saturating_add(header.total_len());
-        match self.check_body(read, &head, &header)? {
-            Ok(()) => {}
-            Err(error @ Error::Unsupported { .. }) => {
-                return Ok(Err(ScanEnd::Unsupported { offset: o, error }));
-            }
-            Err(error) => return Ok(Err(self.after(read, o, frame_end, error)?)),
-        }
-        Ok(match self.seq.advance(header.frame_seq()) {
-            Ok(seq) => Ok((header, seq)),
-            // The frame is whole, so this is never a torn tail; stop before it.
-            Err(reason) => Err(ScanEnd::Corrupt {
-                offset: o,
-                error: frame_seq_error(o, reason),
-            }),
+        Ok(match self.check_body(read, &head, &header)? {
+            Ok(()) => Checked::Valid(header),
+            Err(error @ Error::Unsupported { .. }) => Checked::Unsupported(error),
+            Err(error) => Checked::Invalid {
+                error,
+                zeros_from: o.saturating_add(header.total_len()),
+            },
         })
     }
 
@@ -327,4 +368,20 @@ fn slice_of(chunk: &[u8], chunk_start: u64, range: std::ops::Range<u64>) -> Opti
     let from = usize::try_from(range.start.checked_sub(chunk_start)?).ok()?;
     let to = usize::try_from(range.end.checked_sub(chunk_start)?).ok()?;
     chunk.get(from..to)
+}
+
+/// What [`StreamScanner::check`] found at the scan offset.
+enum Checked {
+    /// No bytes left.
+    Clean,
+    Valid(FrameHeader),
+    /// Invalid, and a torn tail whatever follows (short, or running past the end).
+    Torn(Error),
+    /// Invalid: a torn tail if only zeros follow `zeros_from`, corruption otherwise.
+    Invalid {
+        error: Error,
+        zeros_from: u64,
+    },
+    /// Valid, with unknown flags.
+    Unsupported(Error),
 }

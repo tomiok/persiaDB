@@ -160,13 +160,19 @@ impl State {
         lock(&self.faults).begin()
     }
 
-    fn handle(&mut self, ino: u64, state: &Arc<Mutex<State>>) -> io::Result<SimFsFile> {
+    fn handle(
+        &mut self,
+        ino: u64,
+        writable: bool,
+        state: &Arc<Mutex<State>>,
+    ) -> io::Result<SimFsFile> {
         let handle = self.next_handle;
         self.next_handle = handle.saturating_add(1);
         Ok(SimFsFile {
             file: self.file(ino)?,
             ino,
             handle,
+            writable,
             state: Arc::clone(state),
         })
     }
@@ -318,10 +324,10 @@ impl SimFs {
 impl Vfs for SimFs {
     type File = SimFsFile;
 
-    fn open(&self, path: &Path, _write: bool) -> io::Result<SimFsFile> {
+    fn open(&self, path: &Path, write: bool) -> io::Result<SimFsFile> {
         let mut state = lock(&self.state);
         match state.lookup(path)? {
-            Node::File(ino) => state.handle(ino, &self.state),
+            Node::File(ino) => state.handle(ino, write, &self.state),
             Node::Dir => Err(io::ErrorKind::IsADirectory.into()),
         }
     }
@@ -340,7 +346,7 @@ impl Vfs for SimFs {
             state
                 .files
                 .insert(ino, SimFile::with_faults(Vec::new(), faults));
-            state.handle(ino, &self.state)
+            state.handle(ino, true, &self.state)
         })
     }
 
@@ -487,7 +493,22 @@ pub struct SimFsFile {
     file: SimFile,
     ino: u64,
     handle: u64,
+    /// Opened for writing: writes through a read-only handle fail, as on a real file.
+    writable: bool,
     state: Arc<Mutex<State>>,
+}
+
+impl SimFsFile {
+    fn check_writable(&self) -> io::Result<()> {
+        if self.writable {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "the file was opened read-only",
+            ))
+        }
+    }
 }
 
 impl SimFsFile {
@@ -507,6 +528,7 @@ impl ContainerFile for SimFsFile {
     }
 
     fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.check_writable()?;
         self.file.write_all_at(buf, offset)
     }
 
@@ -515,6 +537,7 @@ impl ContainerFile for SimFsFile {
     }
 
     fn set_len(&self, len: u64) -> io::Result<()> {
+        self.check_writable()?;
         self.file.set_len(len)
     }
 

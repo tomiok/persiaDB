@@ -281,17 +281,23 @@ fn commit_through_the_path_api_is_the_previous_or_the_next() {
     at_every_call(
         db_with_commits,
         |fs| {
-            let mut c = Container::open_in(vfs(fs), DB, Mode::ReadWrite)?;
-            let wal = c.append(FrameKind::WalChunk, &[9; 900], NONE)?;
-            c.sync()?;
-            let m = c.append(FrameKind::Manifest, b"manifest 3", NONE)?;
-            c.commit(Commit {
-                manifest: m,
-                wal_start: wal.offset,
-                fence_token: 0,
-            })
+            // Whether the WAL frame's sync was acknowledged, and how the whole sequence ended.
+            let mut synced = false;
+            let result = (|| {
+                let mut c = Container::open_in(vfs(fs), DB, Mode::ReadWrite)?;
+                let wal = c.append(FrameKind::WalChunk, &[9; 900], NONE)?;
+                c.sync()?;
+                synced = true;
+                let m = c.append(FrameKind::Manifest, b"manifest 3", NONE)?;
+                c.commit(Commit {
+                    manifest: m,
+                    wal_start: wal.offset,
+                    fence_token: 0,
+                })
+            })();
+            (synced, result)
         },
-        |crashed, result, ctx| {
+        |crashed, (synced, result), ctx| {
             // A seeded loss can tear the unsynced Manifest out of order: the read-write open quarantines it (ADR-0014).
             let c = Container::open_in(vfs(crashed), DB, Mode::ReadWrite)
                 .unwrap_or_else(|e| panic!("{ctx}: {e}"));
@@ -299,6 +305,15 @@ fn commit_through_the_path_api_is_the_previous_or_the_next() {
             let manifest = c.read_frame(sb.manifest_off, MAX).unwrap().payload;
             match result {
                 Ok(()) => assert_eq!((sb.seq, &manifest[..]), (3, &b"manifest 3"[..]), "{ctx}"),
+                Err(_) if sb.seq == old.0 && *synced => {
+                    // An acknowledged sync: the WAL frame survives as an uncommitted frame (SPEC §4.5, §8.2).
+                    let found = c.uncommitted_frames().iter().any(|f| {
+                        c.read_frame(f.offset, MAX)
+                            .is_ok_and(|p| p.payload == [9; 900])
+                    });
+                    assert!(found, "{ctx}: an acknowledged WAL frame was lost");
+                    assert_eq!(manifest, old.1, "{ctx}");
+                }
                 Err(_) => assert!(
                     (sb.seq, &manifest) == (old.0, &old.1)
                         || (sb.seq, &manifest[..]) == (3, &b"manifest 3"[..]),

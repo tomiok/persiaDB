@@ -188,7 +188,14 @@ impl<F: ContainerFile> Container<F> {
     /// # Errors
     /// [`Error::Locked`], [`Error::InvalidInput`] if `file` is not empty, or [`Error::Io`].
     pub fn create_on(file: F, db_uuid: [u8; 16]) -> Result<Self> {
-        take_lock(&file)?;
+        Self::create_locked_by(file, db_uuid, LockedBy::File)
+    }
+
+    /// [`Container::create_on`], taking the lock on `file` unless the caller holds one beside it.
+    fn create_locked_by(file: F, db_uuid: [u8; 16], lock: LockedBy) -> Result<Self> {
+        if lock == LockedBy::File {
+            take_lock(&file)?;
+        }
         let len = file.file_len().map_err(Error::io("stat"))?;
         if len != 0 {
             return Err(Error::InvalidInput(format!(
@@ -359,11 +366,15 @@ impl<F: ContainerFile> Container<F> {
         match (contents, policy.quarantine, policy.repair) {
             (TailContents::Discardable, ..) => {}
             (TailContents::Garbage, Some((vfs, path)), _)
-            | (TailContents::MayBeAcknowledged(_), Some((vfs, path)), Repair::Quarantine) => {
+            | (
+                TailContents::MayBeAcknowledged(_) | TailContents::Undecided,
+                Some((vfs, path)),
+                Repair::Quarantine,
+            ) => {
                 let copy = tail::quarantine(vfs, path, &self.file, offset, file_len)?;
                 self.recovery.quarantined = Some(copy);
             }
-            (TailContents::Garbage, None, _) => return Err(refuse(None)),
+            (TailContents::Garbage | TailContents::Undecided, ..) => return Err(refuse(None)),
             (TailContents::MayBeAcknowledged(at), ..) => return Err(refuse(Some(at))),
         }
         // As for a torn tail; the sync that follows recovery makes it durable after the quarantine copy.
@@ -668,9 +679,23 @@ impl<F: ContainerFile> Container<F> {
         manifest: impl FnOnce(&Relocation) -> Vec<u8>,
         compression: Compression,
     ) -> Result<(Container<G>, Relocation)> {
+        self.compact_locked_by(target, live, manifest, compression, LockedBy::File)
+    }
+
+    /// [`Container::compact_into`], taking the lock on `target` unless the caller holds one beside the container.
+    fn compact_locked_by<G: ContainerFile>(
+        &mut self,
+        target: G,
+        live: &[Range<u64>],
+        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        compression: Compression,
+        lock: LockedBy,
+    ) -> Result<(Container<G>, Relocation)> {
         self.writable()?;
         self.sync()?;
-        take_lock(&target)?;
+        if lock == LockedBy::File {
+            take_lock(&target)?;
+        }
         let target_len = target.file_len().map_err(Error::io("stat"))?;
         if target_len != 0 {
             return Err(Error::InvalidInput(format!(
@@ -1024,4 +1049,12 @@ impl<F> Default for TailPolicy<'_, F> {
             repair: Repair::Safe,
         }
     }
+}
+
+/// Where a writer's lock is: on the container file itself ([`ContainerFile::try_lock`]), or beside it
+/// ([`Vfs::lock_beside`], Windows), held by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LockedBy {
+    File,
+    Beside,
 }
