@@ -592,10 +592,12 @@ version = "0.0.0"
 dependencies = [
  "bytes",
  "criterion",
+ "libc",
  "persia-format",
  "proptest",
  "tempfile",
  "thiserror",
+ "windows-sys",
 ]
 
 [[package]]

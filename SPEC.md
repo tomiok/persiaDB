@@ -358,7 +358,8 @@ path names a complete old or new container at every instant. Readers that opened
 reopened, since the rename may not be durable; it still learns where the frames moved. The rename goes to the
 canonical path resolved at open, so a symbolic link to the container keeps pointing at it; other hard links to the
 file are not supported (they keep the old contents). The writer refuses to rename if that path no longer names its
-file. Because a compaction changes which file the path names, a read-write open checks after taking the lock that
+file: same device and inode on Unix, same volume serial number and file id on Windows (ADR-0020).
+Because a compaction changes which file the path names, a read-write open checks after taking the lock that
 the path still names the file it locked, and opens again if not (§4.5.1).
 
 ### 4.7 Memory-mapped reads
@@ -380,7 +381,10 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). A container with mapped reads holds one mapping of
+Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
+disk file system (`enable_mapped_reads_if_local`; Linux ext2-4, XFS, Btrfs and other local types, macOS local
+volumes other than FUSE, Windows fixed and RAM disks); network, FUSE and removable file systems keep ordinary reads,
+since a failed page read there ends the process (ADR-0020, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the
 previous mapping stays (after a compaction: none), so the mapping covers `12288..` the `log_end` of the last mapping
 that succeeded. A frame the mapping covers is read from it; any other (after that end) is read with ordinary reads.

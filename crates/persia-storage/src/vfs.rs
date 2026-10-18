@@ -246,9 +246,19 @@ impl Vfs for RealFs {
         }
     }
 
-    /// Windows exposes no stable file identity through the standard library (ROADMAP 2.4.18): only whether `path`
-    /// still names something is checked.
-    #[cfg(not(unix))]
+    /// Volume serial number and file id (ROADMAP 2.4.18, ADR-0020): the standard library exposes neither on stable.
+    #[cfg(windows)]
+    fn same_file(&self, file: &File, path: &Path) -> io::Result<bool> {
+        let named = match File::open(path) {
+            Ok(named) => named,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(err) => return Err(err),
+        };
+        Ok(crate::sys::file_id(file)? == crate::sys::file_id(&named)?)
+    }
+
+    /// No file identity on other platforms: only whether `path` still names something is checked.
+    #[cfg(not(any(unix, windows)))]
     fn same_file(&self, _file: &File, path: &Path) -> io::Result<bool> {
         match std::fs::metadata(path) {
             Ok(_) => Ok(true),
@@ -284,8 +294,9 @@ impl Vfs for RealFs {
     }
 }
 
-#[cfg(all(test, unix))]
-mod tests {
+/// File identity on every platform with a real one: Unix (device, inode) and Windows (volume, file id; ROADMAP 2.4.18).
+#[cfg(all(test, any(unix, windows)))]
+mod identity_tests {
     use super::*;
 
     #[test]
@@ -297,10 +308,17 @@ mod tests {
         assert!(RealFs.same_file(&old, &path).unwrap());
         let other = dir.path().join("b");
         std::fs::write(&other, b"new").unwrap();
+        let other_handle = File::open(&other).unwrap();
+        assert!(!RealFs.same_file(&old, &other).unwrap(), "two files");
+        assert!(
+            RealFs.same_file(&other_handle, &other).unwrap(),
+            "another handle, same file"
+        );
+        drop(other_handle);
         RealFs.rename(&other, &path).unwrap();
         assert!(
             !RealFs.same_file(&old, &path).unwrap(),
-            "the path names another inode now"
+            "the path names another file now"
         );
         RealFs.remove_file(&path).unwrap();
         assert!(
@@ -308,6 +326,11 @@ mod tests {
             "the path names nothing"
         );
     }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
 
     #[test]
     fn entries_are_classified_without_following_links() {

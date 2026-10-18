@@ -17,6 +17,7 @@ pub mod meta;
 pub mod retry;
 mod side;
 pub mod storage;
+mod sys;
 pub mod vfs;
 
 pub use error::{BoxError, Error, ErrorKind, Op, Result};
