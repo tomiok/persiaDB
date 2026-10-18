@@ -661,8 +661,12 @@ fn kill_writer(
             break;
         }
     }
+    // Held until the child is reaped: `wait` closes stdin, and a killed child may still run long enough to see EOF
+    // (macOS), where a stalled writer reports that it was not killed.
+    let stdin = child.stdin.take();
     child.kill().unwrap(); // SIGKILL
     let status = child.wait().unwrap();
+    drop(stdin);
     reader.join().unwrap();
     for msg in rx.try_iter() {
         if msg.starts_with("stalled ") {
@@ -819,11 +823,20 @@ fn a_temporary_a_live_process_holds_is_kept_until_the_process_is_gone() {
         // Writes go on beside the held file.
         store.put(&key("a/y"), Bytes::from(payload("a/y"))).unwrap();
 
-        match end {
-            End::Kill => child.kill().unwrap(),
-            End::Exit => drop(child.stdin.take()),
-        }
+        // For a kill, stdin stays open until the child is reaped, so it never sees EOF first.
+        let stdin = child.stdin.take();
+        let held = match end {
+            End::Kill => {
+                child.kill().unwrap();
+                stdin
+            }
+            End::Exit => {
+                drop(stdin);
+                None
+            }
+        };
         let status = child.wait().unwrap();
+        drop(held);
         assert_eq!(status.success(), end == End::Exit, "{ctx}: {status}");
         assert!(held.exists(), "{ctx}: the holder removed its file");
 
@@ -892,8 +905,10 @@ fn a_stalled_put_of_a_live_process_keeps_its_temporary_until_killed() {
             "{ctx}: the stalled write is visible"
         );
 
+        let stdin = child.stdin.take();
         child.kill().unwrap();
         assert!(!child.wait().unwrap().success(), "{ctx}");
+        drop(stdin);
         let swept = store.sweep_temporaries(false).unwrap();
         assert_eq!(
             swept

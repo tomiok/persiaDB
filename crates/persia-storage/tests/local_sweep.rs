@@ -9,6 +9,8 @@
 //! 4. Removals are durable: the directory is synced (checked on `SimFs` by crashing after the sweep).
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+// Most cases need file locks, which Windows does not take (ADR-0018): their helpers are unused there.
+#![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
