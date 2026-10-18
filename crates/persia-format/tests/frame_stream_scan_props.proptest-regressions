@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cd60ba7ec047932ad9a92c1d00548eb78245b891fa5ec8c860a5689068e1d9a0 # shrinks to (bytes, base, offsets, seq) = ([80, 70, 82, 49, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 33, 0, 0, 0, 0, 0, 0, 0, 158, 246, 87, 184, 0, 0, 0, 0], 12288, [12288, 12328, 12336], 18446744073709551615), chunk = 64
+cc 969c9c7c19fba3202428d141d79b21948f74e06433f0ecba3cad6504d9a85379 # shrinks to (bytes, base, offsets, seq) = ([80, 70, 82, 49, 1, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 255, 255, 255, 255, 194, 195, 196, 197, 198, 199, 200, 194, 195, 196, 197, 198, 199, 200, 194, 195, 196, 197, 198, 199, 200, 194, 195, 196, 197, 198, 199, 200, 194, 195, 197, 197, 198, 199, 200, 194, 195, 196, 197, 198, 51, 27, 255, 114, 0, 0, 0, 0], 1284328, [1284328, 1284400, 1284408, 1284357, 1284353], 0)
+cc c6a48ea84efeca61044feed66f8df27c57435fc820d7b635e99170376c03cb28 # shrinks to (bytes, base, offsets, seq) = ([80, 70, 82, 49, 1, 0, 0, 0, 40, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 126, 127, 128, 129, 130, 131, 132, 126, 127, 128, 129, 130, 131, 132, 126, 127, 128, 129], 70566088, [70566088, 70566130, 70566138], 8657091435981140679)

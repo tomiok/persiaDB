@@ -1,7 +1,7 @@
 //! Scanning frames through positioned reads with bounded memory (SPEC §4.4; ROADMAP 2.4.12).
 
 use super::{
-    FRAME_HEADER_LEN, FRAME_TRAILER_LEN, FrameHeader, KIND_OFFSET, KNOWN_FRAME_FLAGS,
+    FRAME_HEADER_LEN, FRAME_TRAILER_LEN, FrameEncoder, FrameHeader, KIND_OFFSET, KNOWN_FRAME_FLAGS,
     MIN_FRAME_LEN, PAYLOAD_LEN_OFFSET, ScanEnd, SeqCheck, frame_seq_error,
 };
 use crate::checksum::Crc32c;
@@ -140,7 +140,77 @@ impl StreamScanner {
         &self,
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
     ) -> Result<Result<FrameHeader, Error>, E> {
-        Ok(match self.check(read)? {
+        self.check_frame_into(read, &mut Discard)
+    }
+
+    /// Copies the frame at [`StreamScanner::offset`] renumbered to `frame_seq`, reading it once, piece by piece:
+    /// compaction's copy in bounded memory (SPEC §4.6). It is validated as [`StreamScanner::check_frame`] does, and
+    /// copied as [`Frame::reframe`](super::Frame::reframe) does: same kind, flags and stored payload (a compressed
+    /// one is not decompressed), new `frame_seq` and CRC. The scanner does not move.
+    ///
+    /// `write` receives the new frame's bytes in order, [`FrameHeader::total_len`] of them in all. Only the end of
+    /// the frame shows whether it is valid: on `Ok(Err(..))`, and on an error of `read` or `write`, a prefix of the
+    /// copy may have been written already and must be discarded. Nothing is written for a frame whose header is
+    /// invalid or runs past the end.
+    ///
+    /// ```
+    /// use persia_format::block::Compression;
+    /// use persia_format::frame::{Frame, FrameKind, StreamScanner, encode_frame};
+    /// use persia_format::{Reader, Writer};
+    ///
+    /// let mut w = Writer::with_base_offset(12288);
+    /// encode_frame(&mut w, FrameKind::Segment, 5, &[7; 100_000], Compression::None).map_err(|_| "encode")?;
+    /// let file = w.into_inner();
+    /// let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), &str> {
+    ///     let start = usize::try_from(offset - 12288).map_err(|_| "offset")?;
+    ///     buf.copy_from_slice(file.get(start..start + buf.len()).ok_or("past the end")?);
+    ///     Ok(())
+    /// };
+    /// let mut copy = Vec::new();
+    /// let mut write = |bytes: &[u8]| -> Result<(), &str> { Ok(copy.extend_from_slice(bytes)) };
+    /// let scanner = StreamScanner::new(12288, 12288 + file.len() as u64).with_chunk_len(4096);
+    /// let source = scanner.reframe(40, &mut read, &mut write)?.map_err(|_| "corrupt")?;
+    /// assert_eq!(source.frame_seq(), 5);
+    ///
+    /// let frame = Frame::decode(&mut Reader::new(&copy)).map_err(|_| "copy")?;
+    /// assert_eq!((frame.frame_seq(), frame.stored_payload()), (40, &[7; 100_000][..]));
+    /// # Ok::<(), &str>(())
+    /// ```
+    ///
+    /// # Errors
+    /// An error of `read` or `write`, returned as is. `Ok(Err(..))` is the source frame's own [`Error`], as
+    /// [`StreamScanner::check_frame`] returns it.
+    pub fn reframe<E>(
+        &self,
+        frame_seq: u64,
+        read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+        write: &mut impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<Result<FrameHeader, Error>, E> {
+        let mut copy = Reframer {
+            frame_seq,
+            encoder: None,
+            write,
+        };
+        let header = match self.check_frame_into(read, &mut copy)? {
+            Ok(header) => header,
+            Err(error) => return Ok(Err(error)),
+        };
+        // `check` gives the sink the header of every frame it validates, so the encoder exists and was fed exactly
+        // the stored payload. Callers that need the whole copy count what `write` received (compaction does).
+        debug_assert!(copy.encoder.is_some());
+        if let Some(encoder) = copy.encoder.take() {
+            (copy.write)(&encoder.trailer())?;
+        }
+        Ok(Ok(header))
+    }
+
+    /// [`StreamScanner::check_frame`], passing the frame's header and stored payload to `sink`.
+    fn check_frame_into<E>(
+        &self,
+        read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+        sink: &mut impl Sink<E>,
+    ) -> Result<Result<FrameHeader, Error>, E> {
+        Ok(match self.check(read, sink)? {
             Checked::Valid(header) => Ok(header),
             Checked::Clean => Err(Error::Corrupt {
                 offset: self.offset,
@@ -162,7 +232,7 @@ impl StreamScanner {
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
     ) -> Result<Result<(FrameHeader, SeqCheck), ScanEnd>, E> {
         let o = self.offset;
-        let header = match self.check(read)? {
+        let header = match self.check(read, &mut Discard)? {
             Checked::Valid(header) => header,
             Checked::Clean => return Ok(Err(ScanEnd::Clean { offset: o })),
             Checked::Torn(error) => return Ok(Err(ScanEnd::TornTail { offset: o, error })),
@@ -187,6 +257,7 @@ impl StreamScanner {
     fn check<E>(
         &self,
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
+        sink: &mut impl Sink<E>,
     ) -> Result<Checked, E> {
         let o = self.offset;
         let available = self.limit.saturating_sub(o);
@@ -234,7 +305,8 @@ impl StreamScanner {
         if let Err(error) = header.check_fits(self.limit) {
             return Ok(Checked::Torn(error));
         }
-        Ok(match self.check_body(read, &head, &header)? {
+        sink.header(&header)?;
+        Ok(match self.check_body(read, &head, &header, sink)? {
             Ok(()) => Checked::Valid(header),
             Err(error @ Error::Unsupported { .. }) => Checked::Unsupported(error),
             Err(error) => Checked::Invalid {
@@ -251,6 +323,7 @@ impl StreamScanner {
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
         head: &[u8; FRAME_HEADER_LEN],
         header: &FrameHeader,
+        sink: &mut impl Sink<E>,
     ) -> Result<Result<(), Error>, E> {
         let o = header.offset();
         let total = header.total_len();
@@ -270,6 +343,9 @@ impl StreamScanner {
             let chunk_end = rel.saturating_add(to_u64(len));
             if let Some(covered) = slice_of(chunk, rel, rel..crc_at.min(chunk_end)) {
                 crc.update(covered);
+            }
+            if let Some(payload) = slice_of(chunk, rel, rel..pad_at.min(chunk_end)) {
+                sink.payload(payload)?;
             }
             let pad_start = pad_at.max(rel);
             if first_nonzero_pad.is_none()
@@ -368,6 +444,51 @@ fn slice_of(chunk: &[u8], chunk_start: u64, range: std::ops::Range<u64>) -> Opti
     let from = usize::try_from(range.start.checked_sub(chunk_start)?).ok()?;
     let to = usize::try_from(range.end.checked_sub(chunk_start)?).ok()?;
     chunk.get(from..to)
+}
+
+/// Receives what [`StreamScanner::check`] reads of a frame: its header once it fits, then its stored payload in
+/// order, before the frame is known valid.
+trait Sink<E> {
+    fn header(&mut self, header: &FrameHeader) -> Result<(), E>;
+    fn payload(&mut self, bytes: &[u8]) -> Result<(), E>;
+}
+
+/// Validation only.
+struct Discard;
+
+impl<E> Sink<E> for Discard {
+    fn header(&mut self, _: &FrameHeader) -> Result<(), E> {
+        Ok(())
+    }
+
+    fn payload(&mut self, _: &[u8]) -> Result<(), E> {
+        Ok(())
+    }
+}
+
+/// Writes the renumbered copy of [`StreamScanner::reframe`], all but the trailer.
+struct Reframer<'w, W> {
+    frame_seq: u64,
+    /// Set by the header.
+    encoder: Option<FrameEncoder>,
+    write: &'w mut W,
+}
+
+impl<E, W: FnMut(&[u8]) -> Result<(), E>> Sink<E> for Reframer<'_, W> {
+    fn header(&mut self, header: &FrameHeader) -> Result<(), E> {
+        let encoder = FrameEncoder::reframing(header, self.frame_seq);
+        (self.write)(encoder.header())?;
+        self.encoder = Some(encoder);
+        Ok(())
+    }
+
+    fn payload(&mut self, bytes: &[u8]) -> Result<(), E> {
+        // `check` passes exactly `payload_len` bytes, so the encoder's declared length bounds them.
+        if let Some(encoder) = &mut self.encoder {
+            encoder.feed(bytes);
+        }
+        (self.write)(bytes)
+    }
 }
 
 /// What [`StreamScanner::check`] found at the scan offset.

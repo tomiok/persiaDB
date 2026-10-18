@@ -4,6 +4,9 @@
 //! recomputed from the raw bytes; `Frame::decode` at that offset fails with the same error and moves nothing;
 //! `Frame::payload` on a yielded frame returns at most its limit or fails as corruption or out of memory; a scan
 //! that checks the `frame_seq` run (ADR-0013) yields a prefix of those frames and stops at a run break as corruption.
+//! `StreamScanner` yields the same frames and end; its `reframe` (ROADMAP 2.4.17) copies every yielded frame exactly
+//! as `Frame::reframe` does and fails at the stop offset with `check_frame`'s error, writing nothing or exactly the
+//! renumbered header and stored payload.
 //!
 //! Input: `mode u8, data..`. Mode bit 0: fix the CRC of every frame along the chain from the start; bit 1: fix the
 //! CRC of every frame found at an 8-aligned offset (in order). Random bytes almost never carry a valid CRC, so
@@ -209,6 +212,7 @@ fuzz_target!(|input: &[u8]| {
     }
     check_seq_runs(&data, base, &seen, &end);
     check_stream(&data, base, &seen);
+    check_reframe(&data, base, &seen, &end);
 });
 
 /// `StreamScanner` (ROADMAP 2.4.12) yields the frames (every header field) and the end of `FrameScanner` over the
@@ -299,5 +303,84 @@ fn check_seq_runs(data: &[u8], base: u64, seen: &[(u64, u64)], unchecked: &ScanE
                 "a run break is corruption at the frame: {end:?}"
             );
         }
+    }
+}
+
+/// A positioned read, as `StreamScanner` takes it.
+type ReadFn<'a> = dyn FnMut(u64, &mut [u8]) -> Result<(), ()> + 'a;
+
+/// `StreamScanner::reframe` (ROADMAP 2.4.17) at every yielded frame writes exactly `Frame::reframe` of it and
+/// returns its header; at the stop offset it returns `check_frame`'s error (the scan end's, for a frame that is
+/// there) and writes nothing or exactly the copy's header and stored payload. Reads stay bounded.
+fn check_reframe(data: &[u8], base: u64, seen: &[(u64, u64)], end: &ScanEnd) {
+    let chunk = 1 + data.len() % 53;
+    let limit = base + data.len() as u64;
+    let mut read = |offset: u64, buf: &mut [u8]| -> Result<(), ()> {
+        assert!(
+            !buf.is_empty() && buf.len() <= chunk.max(24),
+            "bounded reads"
+        );
+        let start = (offset - base) as usize;
+        buf.copy_from_slice(&data[start..start + buf.len()]);
+        Ok(())
+    };
+    let reframe = |read: &mut ReadFn<'_>, o: u64, seq: u64| {
+        let mut written = Vec::new();
+        let mut write = |bytes: &[u8]| -> Result<(), ()> {
+            assert!(
+                !bytes.is_empty() && bytes.len() <= chunk.max(24),
+                "bounded writes"
+            );
+            written.extend_from_slice(bytes);
+            Ok(())
+        };
+        let mut read = |o: u64, buf: &mut [u8]| read(o, buf);
+        let result = StreamScanner::new(o, limit)
+            .with_chunk_len(chunk)
+            .reframe(seq, &mut read, &mut write)
+            .unwrap();
+        (result, written)
+    };
+    for &(offset, frame_seq) in seen {
+        let start = (offset - base) as usize;
+        let frame = Frame::decode(&mut Reader::with_base_offset(&data[start..], offset))
+            .expect("a yielded frame decodes");
+        let new_seq = !frame_seq;
+        let (result, written) = reframe(&mut read, offset, new_seq);
+        let header = result.expect("a yielded frame reframes");
+        assert_eq!(
+            (header.offset(), header.total_len(), header.frame_seq()),
+            (offset, frame.total_len(), frame_seq)
+        );
+        let mut w = Writer::new();
+        frame.reframe(&mut w, new_seq);
+        assert_eq!(
+            written,
+            w.as_slice(),
+            "the streamed copy is Frame::reframe's"
+        );
+    }
+    let o = end.offset();
+    let (result, written) = reframe(&mut read, o, 7);
+    let checked = StreamScanner::new(o, limit)
+        .with_chunk_len(chunk)
+        .check_frame(&mut read)
+        .unwrap();
+    assert_eq!(result, checked, "reframe fails as check_frame does");
+    let error = result.expect_err("the scan stopped at an invalid frame");
+    if let Some(end_error) = end.error() {
+        assert_eq!(&error, end_error, "the frame's own error");
+    }
+    if !written.is_empty() {
+        let rest = &data[(o - base) as usize..];
+        let payload_end = 24 + u64_at(rest, 8) as usize;
+        assert_eq!(
+            written.len(),
+            payload_end,
+            "header and stored payload, no trailer"
+        );
+        assert_eq!(written[..16], rest[..16]);
+        assert_eq!(written[16..24], 7_u64.to_le_bytes());
+        assert_eq!(written[24..], rest[24..payload_end]);
     }
 }
