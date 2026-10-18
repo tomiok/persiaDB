@@ -825,7 +825,7 @@ fn a_temporary_a_live_process_holds_is_kept_until_the_process_is_gone() {
 
         // For a kill, stdin stays open until the child is reaped, so it never sees EOF first.
         let stdin = child.stdin.take();
-        let held = match end {
+        let open_stdin = match end {
             End::Kill => {
                 child.kill().unwrap();
                 stdin
@@ -836,7 +836,7 @@ fn a_temporary_a_live_process_holds_is_kept_until_the_process_is_gone() {
             }
         };
         let status = child.wait().unwrap();
-        drop(held);
+        drop(open_stdin);
         assert_eq!(status.success(), end == End::Exit, "{ctx}: {status}");
         assert!(held.exists(), "{ctx}: the holder removed its file");
 
