@@ -97,9 +97,11 @@ impl Container<File> {
     /// ```
     ///
     /// # Errors
-    /// [`Error::Io`] if the file system cannot be queried or the mapping fails; reads then go on as before the call.
+    /// [`Error::Io`] if the mapping fails; reads then go on as before the call. A file system that cannot be queried
+    /// (e.g. a Windows volume with no drive letter) counts as not local: `Ok(false)`, as ADR-0020 decides for every
+    /// unknown answer.
     pub fn enable_mapped_reads_if_local(&mut self) -> Result<bool> {
-        if !self.is_on_local_disk()? {
+        if !self.is_on_local_disk().unwrap_or(false) {
             return Ok(false);
         }
         self.enable_mapped_reads()?;

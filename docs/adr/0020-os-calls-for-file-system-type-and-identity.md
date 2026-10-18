@@ -27,7 +27,8 @@ in the build graph (`libc` through `memmap2`, `windows-sys` through `clap`).
 
 1. **Dependencies.** `persia-storage` depends on `libc` (`cfg(unix)`) and `windows-sys` (`cfg(windows)`, features
    `Win32_Foundation`, `Win32_Storage_FileSystem`, `Win32_System_WindowsProgramming`), declared in the workspace
-   allowed list. They are raw bindings only: no behavior comes with them.
+   allowed list, and `cargo xtask check-deps` rejects them in any other crate. They are raw bindings only: no behavior
+   comes with them.
 2. **One `unsafe` module.** Every new foreign call is in `persia_storage::sys` (`crates/persia-storage/src/sys.rs`),
    listed in `UNSAFE_ALLOWED`; each `unsafe` block states the invariant it relies on (valid buffers of the right
    size, the handle or descriptor open for the call, the result initialized only on success).
@@ -35,20 +36,25 @@ in the build graph (`libc` through `memmap2`, `windows-sys` through `clap`).
    - Linux and Android: `fstatfs`, then an allow-list of `f_type` magic numbers: ext2-4, XFS, Btrfs, F2FS, ZFS,
      bcachefs, JFS, ReiserFS, NILFS, overlayfs, tmpfs, ramfs. FAT and exFAT are left out (mostly removable media,
      which Linux cannot tell from `fstatfs`), and every network and FUSE type is left out.
-   - macOS: `fstatfs`, local if `MNT_LOCAL` is set and the type is not macFUSE/osxfuse.
+   - macOS: `fstatfs`, local if `MNT_LOCAL` is set and the type is not macFUSE/osxfuse, nor FAT or exFAT (mostly
+     removable media, which `MNT_LOCAL` does not exclude).
    - Windows: the handle's final path (`GetFinalPathNameByHandleW`), its volume (`GetVolumePathNameW`), and
      `GetDriveTypeW`: local for `DRIVE_FIXED` and `DRIVE_RAMDISK` only (so not removable, remote or optical drives).
    - Any other OS: never local.
 
-   An unknown answer is "not local": the cost of a wrong "no" is `pread`, of a wrong "yes" a crash.
+   An unknown answer is "not local": the cost of a wrong "no" is `pread`, of a wrong "yes" a crash. A probe that
+   fails (a Windows volume mounted without a drive letter, where `GetFinalPathNameByHandleW` has no DOS path) is an
+   error from `is_on_local_disk`, and "not local" for the automatic choice.
 4. **The automatic choice** (amends ADR-0017 decision 3). `Container::enable_mapped_reads_if_local` maps when the
    file is on a local disk and returns whether it did; `Container::is_on_local_disk` exposes the answer. `open` does
    not map by itself: on Windows a live mapping keeps another handle's read-write open from truncating a torn tail
    (ADR-0017), so the caller decides which handles map (read-only ones suit best). The embedded API (M10) calls it.
 5. **Windows file identity** (amends ADR-0016 decision 5). `sys::file_id` returns the volume serial number and the
    128-bit file id (`GetFileInformationByHandleEx(FileIdInfo)`, unique on NTFS and ReFS), falling back to the 64-bit
-   file index of `GetFileInformationByHandle` where the 128-bit form is unsupported (FAT, exFAT). `RealFs::same_file`
-   opens the path and compares the two identities, as Unix compares `(st_dev, st_ino)`.
+   file index of `GetFileInformationByHandle` only where the 128-bit form is unsupported (FAT, exFAT; any other
+   failure is an error, so the two forms are never compared). An all-zero identity, which some SMB servers report,
+   is an error rather than a match. `RealFs::same_file` opens the path for attribute access only (which no sharing
+   mode refuses) and compares the two identities, as Unix compares `(st_dev, st_ino)`.
 
 ## Consequences
 
@@ -58,6 +64,11 @@ in the build graph (`libc` through `memmap2`, `windows-sys` through `clap`).
   grow; two direct dependencies are added.
 - Detection reads the file system once per call; it is not cached, so a remount between calls is seen.
 - File systems missing from the Linux allow-list (a new local one) read with `pread` until they are added.
+- Known approximations: overlayfs counts as local, true of container images (overlay2) but not of a layer on NFS;
+  a fixed disk or an ext4/XFS file system may sit on a network block device (iSCSI, NBD, a VHD on a share), where a
+  failed page read ends the process as on a network file system.
+- Nothing maps by default yet: the embedded API wires the automatic choice up for its read handles (ROADMAP
+  10.2.4).
 
 ## Alternatives considered
 

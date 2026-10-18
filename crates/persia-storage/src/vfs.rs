@@ -127,8 +127,8 @@ pub trait Vfs: Send + Sync + std::fmt::Debug {
     /// [`io::ErrorKind::NotFound`] if it does not exist, or the OS error.
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 
-    /// Whether `path` names the file open as `file` (on Windows, where the standard library exposes no file identity,
-    /// whether `path` names anything).
+    /// Whether `path` names the file open as `file`: same device and inode on Unix, same volume serial number and file
+    /// id on Windows (ADR-0020).
     ///
     /// # Errors
     /// The OS error; a missing `path` is `Ok(false)`.
@@ -249,7 +249,16 @@ impl Vfs for RealFs {
     /// Volume serial number and file id (ROADMAP 2.4.18, ADR-0020): the standard library exposes neither on stable.
     #[cfg(windows)]
     fn same_file(&self, file: &File, path: &Path) -> io::Result<bool> {
-        let named = match File::open(path) {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x80;
+        // Attribute access only, which sharing modes do not restrict, as `std::fs::metadata` opens: no other handle, read
+        // permission or directory can refuse it, and it is what the identity query needs.
+        let named = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path);
+        let named = match named {
             Ok(named) => named,
             Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
             Err(err) => return Err(err),
@@ -324,6 +333,29 @@ mod identity_tests {
         assert!(
             !RealFs.same_file(&old, &path).unwrap(),
             "the path names nothing"
+        );
+    }
+
+    /// Windows: a directory, and a file another handle holds without sharing, still get an answer, not an error.
+    #[cfg(windows)]
+    #[test]
+    fn same_file_answers_for_directories_and_unshared_files() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a");
+        std::fs::write(&path, b"x").unwrap();
+        let file = File::open(&path).unwrap();
+        assert!(!RealFs.same_file(&file, dir.path()).unwrap(), "a directory");
+        drop(file);
+        let exclusive = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        assert!(
+            RealFs.same_file(&exclusive, &path).unwrap(),
+            "held without sharing"
         );
     }
 }

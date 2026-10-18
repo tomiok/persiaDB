@@ -7,7 +7,7 @@
 //! External crates: every direct dependency must be declared in the root `[workspace.dependencies]`
 //! (the allowed list) and inherited with `.workspace = true`, so versions live in one place. Tiers:
 //! [`BINARY_ONLY`] crates only in [`BINARIES`] (or as dev-dependencies), [`DEV_ONLY`] crates only as
-//! dev-dependencies, [`TOOLING_ONLY`] crates only in `xtask`. Build scripts are not allowed.
+//! dev-dependencies, [`TOOLING_ONLY`] crates only in `xtask`, [`SYS_ONLY`] crates only in `persia-storage`. Build scripts are not allowed.
 //! Licenses, advisories and banned crates in the full graph are cargo-deny's job (`deny.toml`).
 
 use std::collections::BTreeSet;
@@ -51,6 +51,9 @@ const DEV_ONLY: &[&str] = &[
     "hdrhistogram",
 ];
 const TOOLING_ONLY: &[&str] = &["toml"];
+/// Raw OS bindings (ADR-0020): only `persia-storage`, whose `sys` module wraps them, may depend on them directly.
+const SYS_ONLY: &[&str] = &["libc", "windows-sys"];
+const SYS_CRATE: &str = "persia-storage";
 
 const DEP_TABLES: [&str; 3] = ["dependencies", "dev-dependencies", "build-dependencies"];
 
@@ -106,6 +109,8 @@ fn external_violation(
         Some("binary-only crate used by a library")
     } else if TOOLING_ONLY.contains(&target) && krate != XTASK {
         Some("tooling-only crate used outside xtask")
+    } else if SYS_ONLY.contains(&target) && kind != "dev" && krate != SYS_CRATE {
+        Some("OS bindings used outside persia-storage (ADR-0020)")
     } else {
         None
     }
@@ -482,10 +487,33 @@ mod tests {
     }
 
     #[test]
+    fn os_bindings_stay_in_persia_storage() {
+        let ext = ext(&["libc", "windows-sys"]);
+        assert_eq!(
+            violations(&metadata(&[("persia-storage", "libc", None)], &[]), &ext),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            violations(
+                &metadata(&[("persia-engine", "windows-sys", None)], &[]),
+                &ext
+            ),
+            [
+                "persia-engine -> windows-sys (normal): OS bindings used outside persia-storage (ADR-0020)"
+            ]
+        );
+    }
+
+    #[test]
     fn tiers_are_on_the_real_allowed_list() {
         let root: toml::Table = include_str!("../../Cargo.toml").parse().unwrap();
         let external = workspace_dependencies(&root).unwrap();
-        for name in BINARY_ONLY.iter().chain(DEV_ONLY).chain(TOOLING_ONLY) {
+        for name in BINARY_ONLY
+            .iter()
+            .chain(DEV_ONLY)
+            .chain(TOOLING_ONLY)
+            .chain(SYS_ONLY)
+        {
             assert!(
                 external.contains(*name),
                 "{name} missing from [workspace.dependencies]"

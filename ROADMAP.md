@@ -531,6 +531,7 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.2.1 `Send + Sync` handles; reader snapshots; single-writer errors
 - [ ] 10.2.2 Read-your-writes guarantees documented and tested
 - [ ] 10.2.3 Background threads lifecycle (flush, merge) and clean shutdown
+- [ ] 10.2.4 Read handles use mapped reads where the container is on a local disk (`Container::enable_mapped_reads_if_local`, ADR-0020; found in 2.3.10): on by default, `OpenOptions` can force `pread`; never on the writer's handle (a live mapping blocks tail truncation on Windows, ADR-0017)
 
 ## 10.3 Docs & examples
 - [ ] 10.3.1 Rustdoc with doctests for every public item

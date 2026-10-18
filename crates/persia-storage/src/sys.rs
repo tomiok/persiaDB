@@ -23,6 +23,20 @@ pub(crate) fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
     imp::file_id(file)
 }
 
+/// Removes the `\\?\` prefix of a path when a drive letter follows (`\\?\C:\x` → `C:\x`), as `GetDriveTypeW` wants a
+/// plain root; any other form (`\\?\UNC\…`, a volume GUID path) is left as is.
+#[cfg(any(windows, test))]
+fn strip_dos_prefix(path: &mut Vec<u16>) {
+    let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
+    let drive_colon = path.get(prefix.len().saturating_add(1)) == Some(&u16::from(b':'));
+    let letter = path
+        .get(prefix.len())
+        .is_some_and(|&c| u8::try_from(c).is_ok_and(|c| c.is_ascii_alphabetic()));
+    if path.starts_with(&prefix) && letter && drive_colon {
+        path.drain(..prefix.len());
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod imp {
     use std::fs::File;
@@ -59,7 +73,12 @@ mod imp {
         // `f_type`'s integer type depends on the architecture; the magic numbers are its low 32 bits.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let magic = st.f_type as u32;
-        Ok(LOCAL.contains(&magic))
+        Ok(is_local_type(magic))
+    }
+
+    /// Whether `f_type` names a local disk file system.
+    fn is_local_type(magic: u32) -> bool {
+        LOCAL.contains(&magic)
     }
 
     #[cfg(test)]
@@ -101,17 +120,18 @@ mod imp {
         // SAFETY: `fstatfs` returned 0, so it filled the whole struct.
         let st = unsafe { st.assume_init() };
         let local = u32::try_from(libc::MNT_LOCAL).is_ok_and(|flag| st.f_flags & flag != 0);
-        // macFUSE volumes may claim to be local; their pages come from a user-space process.
+        // macFUSE volumes may claim to be local; their pages come from a user-space process. FAT and exFAT are mostly
+        // removable media (SD cards, USB sticks), which `MNT_LOCAL` does not exclude, as on Linux.
         let name: Vec<u8> = st
             .f_fstypename
             .iter()
             .take_while(|&&c| c != 0)
             .map(|c| c.to_ne_bytes()[0])
             .collect();
-        let fuse = [&b"macfuse"[..], b"osxfuse", b"fuse"]
+        let excluded = [&b"macfuse"[..], b"osxfuse", b"fuse", b"msdos", b"exfat"]
             .iter()
             .any(|prefix| name.starts_with(prefix));
-        Ok(local && !fuse)
+        Ok(local && !excluded)
     }
 }
 
@@ -139,8 +159,9 @@ mod imp {
 
     /// The file's final path, NUL-terminated, without a `\\?\` prefix before a drive letter.
     fn final_path(file: &File) -> io::Result<Vec<u16>> {
+        // Windows paths are at most 32767 units; a few doublings reach that from 512.
         let mut buf = vec![0_u16; 512];
-        loop {
+        for _ in 0..8 {
             let cap = len_u32(buf.len())?;
             // SAFETY: the handle stays open for the call (`file` is borrowed), and `buf` is valid for writes of `cap`
             // UTF-16 units; the call writes at most that many, NUL included.
@@ -159,17 +180,17 @@ mod imp {
             if n < buf.len() {
                 // Success: `n` units, without the NUL that follows them.
                 buf.truncate(n);
-                let prefix: Vec<u16> = r"\\?\".encode_utf16().collect();
-                let drive = buf.get(prefix.len().saturating_add(1)) == Some(&u16::from(b':'));
-                if buf.starts_with(&prefix) && drive {
-                    buf.drain(..prefix.len());
-                }
+                super::strip_dos_prefix(&mut buf);
                 buf.push(0);
                 return Ok(buf);
             }
-            // Too small: `n` is the length needed, NUL included.
-            buf.resize(n, 0);
+            // Too small: `n` is the length needed, NUL included. Grow at least twofold, so the loop ends even if a
+            // call ever reported exactly the buffer's length.
+            buf.resize(n.max(buf.len().saturating_mul(2)), 0);
         }
+        Err(io::Error::other(
+            "the file's path is longer than Windows allows",
+        ))
     }
 
     pub(super) fn is_local_disk(file: &File) -> io::Result<bool> {
@@ -188,6 +209,19 @@ mod imp {
     }
 
     pub(super) fn file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
+        let (volume, id) = raw_file_id(file)?;
+        // Some SMB servers report zeros: every file would then look like every other.
+        if volume == 0 && id == [0; 16] {
+            return Err(io::Error::other("the file system reports no file identity"));
+        }
+        Ok((volume, id))
+    }
+
+    /// Errors of `FileIdInfo` on a file system without 128-bit ids: `ERROR_INVALID_FUNCTION`, `ERROR_NOT_SUPPORTED`,
+    /// `ERROR_INVALID_PARAMETER`.
+    const UNSUPPORTED: [i32; 3] = [1, 50, 87];
+
+    fn raw_file_id(file: &File) -> io::Result<(u64, [u8; 16])> {
         let mut info = FILE_ID_INFO::default();
         let size = len_u32(size_of::<FILE_ID_INFO>())?;
         // SAFETY: the handle stays open for the call, and `info` is a `FILE_ID_INFO`, the type `FileIdInfo` writes,
@@ -198,7 +232,15 @@ mod imp {
         if ok != 0 {
             return Ok((info.VolumeSerialNumber, info.FileId.Identifier));
         }
-        // File systems without 128-bit ids (FAT, exFAT): the 64-bit file index, unique on them.
+        // Only where the file system has no 128-bit ids (FAT, exFAT): any other failure is an error, never a switch to
+        // the 64-bit form, which would compare unequal to the other handle's 128-bit id.
+        let err = io::Error::last_os_error();
+        if !err
+            .raw_os_error()
+            .is_some_and(|code| UNSUPPORTED.contains(&code))
+        {
+            return Err(err);
+        }
         let mut info = BY_HANDLE_FILE_INFORMATION::default();
         // SAFETY: the handle stays open for the call, and `info` is valid for writes of the struct the call fills.
         let ok = unsafe { GetFileInformationByHandle(handle(file), &raw mut info) };
@@ -250,6 +292,34 @@ mod tests {
         assert!(!is_local_disk(&proc).unwrap());
         if let Ok(shm) = tempfile::tempfile_in("/dev/shm") {
             assert!(is_local_disk(&shm).unwrap());
+        }
+    }
+}
+
+#[cfg(test)]
+mod prefix_tests {
+    use super::strip_dos_prefix;
+
+    fn stripped(s: &str) -> String {
+        let mut v: Vec<u16> = s.encode_utf16().collect();
+        strip_dos_prefix(&mut v);
+        String::from_utf16(&v).unwrap()
+    }
+
+    #[test]
+    fn only_a_drive_letter_path_loses_its_prefix() {
+        assert_eq!(stripped(r"\\?\C:\db\app.persia"), r"C:\db\app.persia");
+        assert_eq!(stripped(r"\\?\z:\"), r"z:\");
+        for kept in [
+            r"\\?\UNC\server\share\app.persia",
+            r"\\?\Volume{0123}\app.persia",
+            r"\\?\",
+            r"\\?\C",
+            r"\\?\1:\x",
+            r"C:\db",
+            "",
+        ] {
+            assert_eq!(stripped(kept), kept);
         }
     }
 }

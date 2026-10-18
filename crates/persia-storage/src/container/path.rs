@@ -215,7 +215,7 @@ impl<F: ContainerFile + 'static> Container<F> {
     /// temporary file is removed and this handle is as [`Container::compact_into`] left it. The rename goes to the
     /// canonical path found at open (a symbolic link to the container keeps pointing at it; other hard links to the
     /// file are not supported: they keep the old contents), and is refused if that path no longer names this file
-    /// (on Windows, which exposes no file identity, only that it still names something; ADR-0016). If the directory
+    /// (same device and inode on Unix, same volume and file id on Windows; ADR-0020). If the directory
     /// sync fails after the rename, [`Error::CompactedNotDurable`] carries the [`Relocation`] and this handle moves
     /// to the new file, poisoned.
     ///
