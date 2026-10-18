@@ -8,10 +8,10 @@ use std::fs::File;
 use std::io;
 
 /// Whether `file` is on a local disk file system, where a mapping's page faults read a local device: Linux ext2-4,
-/// XFS, Btrfs, F2FS, ZFS, bcachefs, JFS, `ReiserFS`, NILFS, overlayfs, tmpfs and ramfs; macOS volumes flagged
-/// `MNT_LOCAL` that are not FUSE; Windows fixed and RAM disks. Everything else is not: network and FUSE file
-/// systems, removable media (Windows; Linux cannot tell, so FAT and exFAT, mostly removable, are excluded), and every
-/// file system of an operating system not listed here.
+/// XFS, Btrfs, F2FS, ZFS, bcachefs, JFS, `ReiserFS`, NILFS, tmpfs and ramfs; macOS volumes flagged `MNT_LOCAL` that
+/// are not FUSE, FAT or exFAT; Windows fixed and RAM disks. Everything else is not: network and FUSE file systems,
+/// overlayfs (its layers may be remote), removable media (Windows; Linux cannot tell, so FAT and exFAT, mostly
+/// removable, are excluded), and every file system of an operating system not listed here.
 pub(crate) fn is_local_disk(file: &File) -> io::Result<bool> {
     imp::is_local_disk(file)
 }
@@ -45,7 +45,7 @@ mod imp {
     use std::os::fd::AsRawFd;
 
     /// `f_type` magic numbers of local disk file systems (`linux/magic.h`).
-    const LOCAL: [u32; 12] = [
+    const LOCAL: [u32; 11] = [
         0xEF53,      // ext2, ext3, ext4
         0x5846_5342, // XFS
         0x9123_683E, // Btrfs
@@ -55,7 +55,6 @@ mod imp {
         0x3153_464A, // JFS
         0x5265_4973, // ReiserFS
         0x3434,      // NILFS
-        0x794C_7630, // overlayfs (container images; its layers are local)
         0x0102_1994, // tmpfs
         0x8584_58F6, // ramfs
     ];
@@ -96,6 +95,7 @@ mod imp {
                 0x00C3_6400,
                 0x4D44,
                 0x2011_BAB0,
+                0x794C_7630, // overlayfs: its layers may sit on NFS or FUSE
             ] {
                 assert!(!super::LOCAL.contains(&other), "{other:#x}");
             }

@@ -80,7 +80,8 @@ impl Container<File> {
     /// The automatic choice of mapped reads (SPEC §4.7, ROADMAP 2.3.10): [`enable_mapped_reads`](Container::enable_mapped_reads)
     /// if the container is [on a local disk](Container::is_on_local_disk), where a read error behind a page is as rare
     /// as one behind `pread`; `pread` otherwise, where a server or a FUSE process that fails would end this process
-    /// with `SIGBUS`. Returns whether mapped reads are now on. The same contract as `enable_mapped_reads` applies:
+    /// with `SIGBUS`. Returns whether this call mapped: `false` leaves an earlier `enable_mapped_reads` in place (see
+    /// [`mapped_range`](Container::mapped_range)). The same contract as `enable_mapped_reads` applies:
     /// while a mapping lives, nothing but Persia containers may write or truncate the file, and on Windows a live
     /// mapping keeps another handle's read-write open from truncating a torn tail, so it suits read-only handles best.
     ///

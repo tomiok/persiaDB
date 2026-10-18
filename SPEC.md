@@ -382,9 +382,10 @@ program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends
 accept that reads with ordinary reads instead.
 
 Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
-disk file system (`enable_mapped_reads_if_local`; Linux ext2-4, XFS, Btrfs and other local types, macOS local
-volumes other than FUSE, Windows fixed and RAM disks); network, FUSE and removable file systems keep ordinary reads,
-since a failed page read there ends the process (ADR-0020, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
+disk file system (`enable_mapped_reads_if_local`): on Linux, those in an allow-list of `f_type`s (ext2-4, XFS, Btrfs
+and other allow-listed local types; ADR-0020), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
+and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
+there can end the process (ADR-0020, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the
 previous mapping stays (after a compaction: none), so the mapping covers `12288..` the `log_end` of the last mapping
 that succeeded. A frame the mapping covers is read from it; any other (after that end) is read with ordinary reads.

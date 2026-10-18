@@ -109,7 +109,7 @@ fn external_violation(
         Some("binary-only crate used by a library")
     } else if TOOLING_ONLY.contains(&target) && krate != XTASK {
         Some("tooling-only crate used outside xtask")
-    } else if SYS_ONLY.contains(&target) && kind != "dev" && krate != SYS_CRATE {
+    } else if SYS_ONLY.contains(&target) && krate != SYS_CRATE {
         Some("OS bindings used outside persia-storage (ADR-0020)")
     } else {
         None
@@ -501,6 +501,14 @@ mod tests {
             [
                 "persia-engine -> windows-sys (normal): OS bindings used outside persia-storage (ADR-0020)"
             ]
+        );
+        // Not even as a dev-dependency (ADR-0020).
+        assert_eq!(
+            violations(
+                &metadata(&[("persia-engine", "libc", Some("dev"))], &[]),
+                &ext
+            ),
+            ["persia-engine -> libc (dev): OS bindings used outside persia-storage (ADR-0020)"]
         );
     }
 

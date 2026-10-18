@@ -278,6 +278,14 @@ fn a_failed_store_sweep_still_reports_what_it_removed() {
             "{stdout}"
         );
         assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
+    } else {
+        // Root removes files in a read-only directory: the sweep succeeds and removes both.
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 2);
     }
     assert!(!first.exists());
 }

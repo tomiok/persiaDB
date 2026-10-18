@@ -34,8 +34,9 @@ in the build graph (`libc` through `memmap2`, `windows-sys` through `clap`).
    size, the handle or descriptor open for the call, the result initialized only on success).
 3. **Local disk.** `sys::is_local_disk(&File)`:
    - Linux and Android: `fstatfs`, then an allow-list of `f_type` magic numbers: ext2-4, XFS, Btrfs, F2FS, ZFS,
-     bcachefs, JFS, ReiserFS, NILFS, overlayfs, tmpfs, ramfs. FAT and exFAT are left out (mostly removable media,
-     which Linux cannot tell from `fstatfs`), and every network and FUSE type is left out.
+     bcachefs, JFS, ReiserFS, NILFS, tmpfs, ramfs. FAT and exFAT are left out (mostly removable media, which Linux
+     cannot tell from `fstatfs`), and so are every network and FUSE type and overlayfs, whose layers may be on NFS
+     or FUSE (`fstatfs` reports the overlay, not its layers).
    - macOS: `fstatfs`, local if `MNT_LOCAL` is set and the type is not macFUSE/osxfuse, nor FAT or exFAT (mostly
      removable media, which `MNT_LOCAL` does not exclude).
    - Windows: the handle's final path (`GetFinalPathNameByHandleW`), its volume (`GetVolumePathNameW`), and
@@ -64,9 +65,9 @@ in the build graph (`libc` through `memmap2`, `windows-sys` through `clap`).
   grow; two direct dependencies are added.
 - Detection reads the file system once per call; it is not cached, so a remount between calls is seen.
 - File systems missing from the Linux allow-list (a new local one) read with `pread` until they are added.
-- Known approximations: overlayfs counts as local, true of container images (overlay2) but not of a layer on NFS;
-  a fixed disk or an ext4/XFS file system may sit on a network block device (iSCSI, NBD, a VHD on a share), where a
-  failed page read ends the process as on a network file system.
+- A database in a container image's overlay file system reads with `pread`: data belongs on a mounted volume.
+- Known approximation: a fixed disk or an ext4/XFS file system may sit on a network block device (iSCSI, NBD, a
+  VHD on a share), where a failed page read ends the process as on a network file system.
 - Nothing maps by default yet: the embedded API wires the automatic choice up for its read handles (ROADMAP
   10.2.4).
 
