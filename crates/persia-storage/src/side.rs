@@ -34,7 +34,8 @@ pub enum SideFileKind {
 /// Whether a live writer is using a [`SideFile`]: each one holds the file's lock while it does (on Unix).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InUse {
-    /// No writer holds it: a temporary file is stale.
+    /// No writer holds it. A temporary file is then stale; a quarantine copy is not in use, but may hold acknowledged
+    /// writes (ADR-0014), so `No` alone never means "safe to delete".
     No,
     /// A live writer holds its lock.
     Yes,

@@ -116,6 +116,7 @@ fn missing_paths_are_errors_and_create_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing");
     for args in [
+        vec!["container", "files", path_arg(&missing)],
         vec!["container", "sweep", path_arg(&missing)],
         vec!["store", "files", path_arg(&missing)],
         vec!["store", "sweep", path_arg(&missing)],
@@ -168,7 +169,11 @@ fn store_sweep_removes_stale_temporaries() {
                 .all(|(a, _, s, _)| a == "kept" && s == "unknown")
         );
         let forced = lines(&persia(&["store", "sweep", "--force", path_arg(&root)]));
+        assert_eq!(forced.len(), stale.len(), "{forced:?}");
         assert!(forced.iter().all(|(a, ..)| a == "removed"), "{forced:?}");
+        for s in stale {
+            assert!(!root.join(s).exists(), "{s}");
+        }
     }
     assert!(root.join("segments@/1.seg").exists());
 }
@@ -225,4 +230,54 @@ fn container_sweep_with_a_relative_path() {
         ]
     );
     assert!(!path.with_file_name(TMP).exists());
+}
+
+/// A path with control characters stays one line of four fields: they are escaped.
+#[cfg(unix)]
+#[test]
+fn control_characters_in_paths_are_escaped() {
+    let dir = tempfile::tempdir().unwrap();
+    let odd = std::fs::canonicalize(dir.path()).unwrap().join("a\tb\nc");
+    std::fs::create_dir(&odd).unwrap();
+    let path = odd.join("app.persia");
+    drop(Container::create(&path).unwrap());
+    std::fs::write(odd.join(TMP), b"half a container").unwrap();
+    let out = persia(&["container", "files", path_arg(&path)]);
+    assert!(out.status.success());
+    let text = String::from_utf8(out.stdout).unwrap();
+    let rows: Vec<&str> = text.lines().collect();
+    assert_eq!(rows.len(), 1, "{text:?}");
+    let fields: Vec<&str> = rows[0].split('\t').collect();
+    assert_eq!(fields.len(), 4, "{text:?}");
+    assert!(fields[3].contains(r"a\tb\nc"), "{text:?}");
+}
+
+/// A sweep that fails part-way prints what it removed before failing, then the error: here the root's stale file
+/// goes first, and a read-only directory then makes the sweep fail.
+#[cfg(unix)]
+#[test]
+fn a_failed_store_sweep_still_reports_what_it_removed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let first = root.join("@tmp.0123456789abcdef.0");
+    std::fs::write(&first, b"crashed put").unwrap();
+    let locked = root.join("b@");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("@tmp.0123456789abcdef.1"), b"crashed put").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let out = persia(&["store", "sweep", path_arg(&root)]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if locked.join("@tmp.0123456789abcdef.1").exists() {
+        // Not running as root, which could remove it anyway.
+        assert!(!out.status.success());
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert_eq!(
+            stdout.lines().collect::<Vec<_>>(),
+            [format!("removed\ttemporary\tfree\t{}", first.display())],
+            "{stdout}"
+        );
+        assert!(!String::from_utf8_lossy(&out.stderr).is_empty());
+    }
+    assert!(!first.exists());
 }

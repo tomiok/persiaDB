@@ -3,7 +3,8 @@
 //! Maintenance commands (ROADMAP 2.3.8, 2.4.19; ADR-0018) list and remove the files a crash or a recovery leaves next
 //! to a container or inside a local store. Each found file is printed as one tab-separated line, so the output can be
 //! piped: `<action>\t<kind>\t<state>\t<path>`, with `action` `found`, `removed` or `kept`, `kind` `temporary` or
-//! `quarantine`, and `state` `free`, `in-use` or `unknown` (whether a live writer holds the file's lock).
+//! `quarantine`, and `state` `free`, `in-use` or `unknown` (whether a live writer holds the file's lock). Control
+//! characters in a path are escaped (`\t`, `\n`, `\u{1b}`). A sweep that fails part-way still prints what it removed.
 #![forbid(unsafe_code)]
 
 use std::path::{Path, PathBuf};
@@ -83,6 +84,9 @@ fn main() -> ExitCode {
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Container(ContainerCommand::Files { path }) => {
+            if !path.is_file() {
+                bail!("{} is not a container file", path.display());
+            }
             print_files("found", &container_files(&path)?);
         }
         Command::Container(ContainerCommand::Sweep { path, quarantine }) => {
@@ -92,7 +96,12 @@ fn run(cli: Cli) -> Result<()> {
             print_files("found", &open_store(&root)?.temporaries()?);
         }
         Command::Store(StoreCommand::Sweep { root, force }) => {
-            let swept = open_store(&root)?.sweep_temporaries(force)?;
+            let store = open_store(&root)?;
+            let before = store.temporaries()?;
+            let swept = match store.sweep_temporaries(force) {
+                Ok(swept) => swept,
+                Err(err) => return Err(partial(&before, err.into())),
+            };
             let (removed, kept): (Vec<_>, Vec<_>) = swept.into_iter().partition(|f| f.removed);
             print_files("removed", &removed);
             print_files("kept", &kept);
@@ -134,15 +143,22 @@ fn container_sweep(path: &Path, quarantine: bool) -> Result<()> {
     };
     // Listed after the open, so a quarantine copy its recovery made is reported (as kept).
     let mut files = container_files(path)?;
-    let mut removed = c
+    let swept = c
         .sweep_stale_files()
-        .context("removing stale temporary files")?;
-    if quarantine {
-        removed.extend(
-            c.remove_quarantine_files(&seen)
-                .context("removing quarantine files")?,
-        );
-    }
+        .context("removing stale temporary files")
+        .and_then(|mut removed| {
+            if quarantine {
+                removed.extend(
+                    c.remove_quarantine_files(&seen)
+                        .context("removing quarantine files")?,
+                );
+            }
+            Ok(removed)
+        });
+    let removed = match swept {
+        Ok(removed) => removed,
+        Err(err) => return Err(partial(&files, err)),
+    };
     for f in &mut files {
         f.removed = removed.contains(&f.path);
     }
@@ -180,6 +196,34 @@ fn print_files(action: &str, files: &[SideFile]) {
             InUse::Yes => "in-use",
             InUse::Unknown => "unknown",
         };
-        println!("{action}\t{kind}\t{state}\t{}", f.path.display());
+        println!("{action}\t{kind}\t{state}\t{}", escaped(&f.path));
     }
+}
+
+/// A sweep failed with `err` part-way: prints the files of `listed` it removed before failing (those gone now),
+/// since they stay removed, and returns the error.
+fn partial(listed: &[SideFile], err: anyhow::Error) -> anyhow::Error {
+    let gone: Vec<SideFile> = listed
+        .iter()
+        .filter(|f| !f.path.exists())
+        .map(|f| SideFile {
+            removed: true,
+            ..f.clone()
+        })
+        .collect();
+    print_files("removed", &gone);
+    err
+}
+
+/// `path` with its control characters escaped (`\t`, `\n`, `\u{..}`), so each file stays one line of four fields.
+fn escaped(path: &Path) -> String {
+    let mut out = String::new();
+    for c in path.display().to_string().chars() {
+        if c.is_control() {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }

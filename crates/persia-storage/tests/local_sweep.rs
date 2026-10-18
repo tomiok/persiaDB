@@ -272,7 +272,8 @@ enum Race {
     Removed,
     /// It holds the lock and removed the file, and has not released the lock yet: the writer's lock fails.
     Holding,
-    /// A listing holds the lock for an instant and removes nothing: the writer's lock fails, and the file would stay
+    /// A listing holds the lock and removes nothing (here until after the `put`, standing in for the instant a real
+    /// listing holds it at the wrong moment): the writer's lock fails, and the file would stay
     /// behind unless the writer removes it.
     Listed,
 }

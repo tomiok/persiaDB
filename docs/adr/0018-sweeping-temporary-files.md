@@ -49,15 +49,18 @@ takes.
 
 - A crash's leftovers are bounded by how often an operator sweeps; nothing grows without limit once sweeping is
   scheduled, and nothing is removed behind anyone's back.
-- Each `put` makes two more system calls (lock and an identity check by path); the lock is released when its handle
+- Each `put` makes three more system calls (a lock, then `fstat` and `stat` for the identity check by path); the lock is released when its handle
   is closed.
 - A sweep that takes a file in the instant before its writer locks it costs that writer one more temporary name,
   never an error.
 - On Windows a local store's temporary files accumulate unless an operator forces a sweep while the store is idle.
 - **The handshake assumes `flock` locks per open file description**, as on local Linux and macOS file systems. Where
-  `flock` is emulated with per-process POSIX locks (Linux NFS, some FUSE and CIFS mounts), a sweep in the same
-  process as a `put` can take that `put`'s file and the `put` fails at its rename. No data is lost (it was never
-  acknowledged), but such stores should be swept only while idle, until 2.3.10's file-system detection can tell.
+  `flock` is emulated with per-process POSIX locks (Linux NFS, some FUSE and CIFS mounts), a lock belongs to the
+  process, and closing any descriptor of the file releases it: a listing or sweep in the `put`'s own process (which
+  opens and closes the file) drops the `put`'s lock, and a sweep in any process can then remove the file, so the
+  `put` fails at its rename. The same holds for a container's create and compaction temporaries. No data is lost
+  (nothing was acknowledged), but such stores and containers should be listed and swept only while idle. 2.3.10's
+  `is_local_disk` tells these file systems apart; a sweep does not consult it yet.
 
 ## Alternatives considered
 

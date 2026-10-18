@@ -49,7 +49,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-storage`: `Container::side_files` lists a container's temporary and quarantine files by path, and
   `remove_quarantine_files` removes the quarantine copies through a read-write handle.
 - `persia` CLI: `persia container files|sweep [--quarantine] <path>` and `persia store files|sweep [--force] <dir>`
-  list and remove those files, one tab-separated line per file.
+  list and remove those files, one tab-separated line per file. `--quarantine` removes copies that may hold acknowledged
+  writes, and `--force` (where locks cannot be checked, Windows) can make a racing `put` fail: inspect the listing first.
 - `persia-storage`: compaction copies each frame in bounded 64 KiB chunks, validating it on the way, so compacting a
   container with a large Segment frame no longer needs that much memory, and a small frame is copied with one write
   (`benches/compaction.rs`). `persia-format`: `StreamScanner::reframe`.
