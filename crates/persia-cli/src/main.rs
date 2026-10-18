@@ -64,8 +64,9 @@ enum StoreCommand {
     Sweep {
         /// The store's root directory.
         root: PathBuf,
-        /// Where files cannot be locked (Windows), remove them anyway. Only while no other process writes to the
-        /// store: a racing `put` would fail.
+        /// Where whether a file is in use cannot be checked (Windows, or a network or FUSE file system where locks
+        /// belong to the process), remove it anyway. Only while no other writer uses the store: a racing `put` would
+        /// fail.
         #[arg(long)]
         force: bool,
     },
@@ -107,8 +108,8 @@ fn run(cli: Cli) -> Result<()> {
             print_files("kept", &kept);
             if !force && kept.iter().any(|f| f.in_use == InUse::Unknown) {
                 eprintln!(
-                    "persia: files cannot be locked here, so whether they are in use is unknown; \
-                     rerun with --force while no other process writes to the store"
+                    "persia: whether some files are in use cannot be checked here (no file locks, or locks that \
+                     belong to the process, as on NFS); rerun with --force while no other process writes to the store"
                 );
             }
         }

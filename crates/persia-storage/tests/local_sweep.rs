@@ -417,3 +417,39 @@ fn on_windows_only_a_forced_sweep_removes_temporaries() {
     assert!(forced.iter().all(|f| f.removed), "{forced:?}");
     assert_eq!(store.temporaries().unwrap(), []);
 }
+
+/// Where locks belong to the process (`flock` emulated on NFS, ADR-0018), a lock this process takes proves nothing: a
+/// `put` in this process may hold the file. Every temporary file is then `Unknown`, and only a forced sweep removes
+/// them.
+#[test]
+fn with_per_process_locks_only_a_forced_sweep_removes_temporaries() {
+    let fs = SimFs::new();
+    fs.set_per_process_locks(true);
+    let store = LocalStorage::open_in(fs.clone(), Path::new("/store")).unwrap();
+    let root = store.root().to_owned();
+    store.put(&key("a/b"), Bytes::from_static(b"x")).unwrap();
+    let stale = root.join("a@").join("@tmp.0123456789abcdef.0");
+    let live = root.join("a@").join("@tmp.0123456789abcdef.1");
+    for p in [&stale, &live] {
+        fs.create_new(p).unwrap().sync_all().unwrap();
+    }
+    // A `put` of this process writing `live`.
+    let writer = fs.open(&live, false).unwrap();
+    assert!(writer.try_lock().unwrap());
+
+    let listed = store.temporaries().unwrap();
+    assert_eq!(listed.len(), 2);
+    assert!(
+        listed
+            .iter()
+            .all(|f| f.in_use == InUse::Unknown && !f.removed),
+        "{listed:?}"
+    );
+    let swept = store.sweep_temporaries(false).unwrap();
+    assert!(swept.iter().all(|f| !f.removed), "{swept:?}");
+    assert!(fs.read(&live).is_some() && fs.read(&stale).is_some());
+    let forced = store.sweep_temporaries(true).unwrap();
+    assert!(forced.iter().all(|f| f.removed), "{forced:?}");
+    drop(writer);
+    assert_eq!(store.temporaries().unwrap(), []);
+}

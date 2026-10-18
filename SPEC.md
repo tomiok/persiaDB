@@ -875,8 +875,9 @@ above.
   its file, taking another name if not (removing its file first if another handle holds the lock: a listing).
   `sweep_temporaries` removes, only on request (never at `open`), every temporary file whose lock it can take, while
   holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0018, ROADMAP 2.3.8;
-  `persia store sweep`). This relies on `flock` locking per open file description; where it is emulated with
-  per-process locks (Linux NFS, some FUSE mounts), sweep only an idle store.
+  `persia store sweep`). A lock counts only on a local disk file system: where `flock` is emulated with per-process
+  locks (Linux NFS, some FUSE mounts), a lock taken may be a writer's of the same process, so the file's use is
+  unknown and only a forced sweep removes it (ADR-0018 decision 6).
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

@@ -39,7 +39,8 @@ pub enum InUse {
     No,
     /// A live writer holds its lock.
     Yes,
-    /// Files cannot be locked here (Windows, SPEC §4.5.1), so whether a writer uses it is unknown.
+    /// Whether a writer uses it cannot be told: files cannot be locked here (Windows, SPEC §4.5.1), or a lock belongs to
+    /// the process rather than the handle (a network or FUSE file system, ADR-0018).
     Unknown,
 }
 
@@ -53,13 +54,38 @@ pub(crate) fn try_lock<F: ContainerFile>(file: &F) -> io::Result<Option<bool>> {
     }
 }
 
+/// Whether a writer uses `file`, found by taking its lock for a moment ([`try_lock`]); the lock, if taken, is held until
+/// `file` is dropped. A lock taken where locks belong to the process ([`ContainerFile::locks_per_handle`]) proves
+/// nothing: [`InUse::Unknown`].
+pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<InUse> {
+    let locked = try_lock(file)?;
+    let per_handle = locked != Some(true) || file.locks_per_handle();
+    Ok(InUse::of(locked, per_handle))
+}
+
 impl InUse {
-    /// The state [`try_lock`] found.
-    pub(crate) fn of(locked: Option<bool>) -> Self {
+    /// The state [`try_lock`] found, given whether locks are per handle on the file's file system.
+    pub(crate) fn of(locked: Option<bool>, per_handle: bool) -> Self {
         match locked {
-            Some(true) => Self::No,
+            Some(true) if per_handle => Self::No,
             Some(false) => Self::Yes,
-            None => Self::Unknown,
+            Some(true) | None => Self::Unknown,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InUse;
+
+    #[test]
+    fn a_lock_proves_a_file_free_only_where_locks_are_per_handle() {
+        assert_eq!(InUse::of(Some(true), true), InUse::No);
+        // NFS, FUSE: the lock may be this process's own writer's.
+        assert_eq!(InUse::of(Some(true), false), InUse::Unknown);
+        assert_eq!(InUse::of(Some(false), true), InUse::Yes);
+        assert_eq!(InUse::of(Some(false), false), InUse::Yes);
+        // Windows: no lock at all.
+        assert_eq!(InUse::of(None, true), InUse::Unknown);
     }
 }

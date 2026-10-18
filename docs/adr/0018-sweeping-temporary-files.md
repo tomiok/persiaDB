@@ -44,6 +44,12 @@ takes.
    the temporary files and removed only by `Container::remove_quarantine_files`, through a read-write handle, at an
    operator's explicit request, and only the copies named: `persia container sweep --quarantine` names those listed
    before its own open, never one that open's recovery just made.
+6. **A lock is trusted only where it is per handle.** Where `flock` is emulated with per-process POSIX locks (Linux
+   NFS, some FUSE and CIFS mounts), a lock belongs to the process, and closing any descriptor of the file releases it:
+   a sweep in a writer's own process takes the lock the writer holds, and a listing there drops it. So a lock taken
+   counts only on a local disk file system (`ContainerFile::locks_per_handle`, through ADR-0020's `is_local_disk`);
+   elsewhere a temporary file's use is `Unknown`, as on Windows. A local store's sweep then removes it only when
+   forced; a container's sweep never does (an operator removes those by hand, with the container closed).
 
 ## Consequences
 
@@ -54,13 +60,11 @@ takes.
 - A sweep that takes a file in the instant before its writer locks it costs that writer one more temporary name,
   never an error.
 - On Windows a local store's temporary files accumulate unless an operator forces a sweep while the store is idle.
-- **The handshake assumes `flock` locks per open file description**, as on local Linux and macOS file systems. Where
-  `flock` is emulated with per-process POSIX locks (Linux NFS, some FUSE and CIFS mounts), a lock belongs to the
-  process, and closing any descriptor of the file releases it: a listing or sweep in the `put`'s own process (which
-  opens and closes the file) drops the `put`'s lock, and a sweep in any process can then remove the file, so the
-  `put` fails at its rename. The same holds for a container's create and compaction temporaries. No data is lost
-  (nothing was acknowledged), but such stores and containers should be listed and swept only while idle. 2.3.10's
-  `is_local_disk` tells these file systems apart; a sweep does not consult it yet.
+- On network and FUSE file systems (decision 6) nothing is swept unless forced, and a container's leftovers there
+  are removed by hand. A local disk file system missing from ADR-0020's list (FAT on Linux) is treated the same way:
+  the cost of a wrong "not local" is a file left behind, of a wrong "local" a failed write.
+- A listing in a writer's own process on such a file system still drops the writer's per-process lock when it closes
+  its descriptor; with decision 6 no sweep acts on that, so it costs nothing.
 
 ## Alternatives considered
 

@@ -113,7 +113,7 @@ impl<F: ContainerFile + 'static> Container<F> {
             let in_use = match kind {
                 SideFileKind::Quarantine => InUse::No,
                 SideFileKind::Temporary => match vfs.open(&path, false) {
-                    Ok(file) => InUse::of(side::try_lock(&file).map_err(Error::io("lock"))?),
+                    Ok(file) => side::in_use(&file).map_err(Error::io("lock"))?,
                     // Finished meanwhile: renamed or removed by its writer.
                     Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                     Err(err) => return Err(Error::io("open temporary file")(err)),
@@ -225,8 +225,12 @@ fn remove_unless_held<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) ->
     };
     // A temporary file held by a live create. On Windows files are not locked (the lock is beside the container): no
     // check, and the writer lock this handle holds excludes compactions.
-    if side::try_lock(&file).map_err(Error::io("lock"))? == Some(false) {
-        return Ok(false);
+    // Where locks belong to the process (NFS, FUSE; ADR-0018) a lock taken proves nothing: a create in this process
+    // may hold it, so the file is kept.
+    match side::try_lock(&file).map_err(Error::io("lock"))? {
+        Some(false) => return Ok(false),
+        Some(true) if !file.locks_per_handle() => return Ok(false),
+        Some(true) | None => {}
     }
     let removed = match vfs.remove_file(path) {
         Ok(()) => Ok(true),

@@ -247,3 +247,25 @@ fn quarantine_files_are_removed_durably_by_a_writer_only() {
         "idempotent"
     );
 }
+
+/// Where locks belong to the process (`flock` emulated on NFS, ADR-0018), the lock a sweep takes may be a live create's
+/// of this same process: no temporary file is removed, and the listing says their use is unknown.
+#[test]
+fn with_per_process_locks_no_temporary_file_is_swept() {
+    let fs = with_stale_files();
+    fs.set_per_process_locks(true);
+    let before = names(&fs);
+    let files = Container::side_files_in(&fs, DB).unwrap();
+    let temporaries: Vec<_> = files
+        .iter()
+        .filter(|f| f.kind == SideFileKind::Temporary)
+        .collect();
+    assert_eq!(temporaries.len(), 2, "{files:?}");
+    assert!(
+        temporaries.iter().all(|f| f.in_use == InUse::Unknown),
+        "{files:?}"
+    );
+    let c = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert_eq!(c.sweep_stale_files().unwrap(), Vec::<PathBuf>::new());
+    assert_eq!(names(&fs), before);
+}
