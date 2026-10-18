@@ -8,6 +8,17 @@ use std::process::{Command, Output};
 
 use persia_storage::container::{Container, Mode};
 
+/// Serializes the tests of this binary. A test that spawns `persia` forks, and a forked child holds copies of every
+/// descriptor the parent had open until it execs, flock included: a container another test had open at that moment
+/// would then look locked, to that test and to the `persia` it runs.
+static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    SERIAL
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn persia(args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_persia"))
         .args(args)
@@ -61,6 +72,7 @@ fn container() -> (tempfile::TempDir, PathBuf) {
 
 #[test]
 fn container_files_lists_and_removes_nothing() {
+    let _serial = serial();
     let (_dir, path) = container();
     let out = persia(&["container", "files", path_arg(&path)]);
     assert_eq!(
@@ -75,6 +87,7 @@ fn container_files_lists_and_removes_nothing() {
 
 #[test]
 fn container_sweep_keeps_quarantine_unless_asked() {
+    let _serial = serial();
     let (_dir, path) = container();
     let out = persia(&["container", "sweep", path_arg(&path)]);
     assert_eq!(
@@ -101,6 +114,7 @@ fn container_sweep_keeps_quarantine_unless_asked() {
 #[cfg(unix)]
 #[test]
 fn container_sweep_fails_while_a_writer_holds_the_container() {
+    let _serial = serial();
     let (_dir, path) = container();
     let writer = Container::open(&path, Mode::ReadWrite).unwrap();
     let out = persia(&["container", "sweep", path_arg(&path)]);
@@ -113,6 +127,7 @@ fn container_sweep_fails_while_a_writer_holds_the_container() {
 
 #[test]
 fn missing_paths_are_errors_and_create_nothing() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing");
     for args in [
@@ -130,6 +145,7 @@ fn missing_paths_are_errors_and_create_nothing() {
 
 #[test]
 fn store_sweep_removes_stale_temporaries() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     std::fs::create_dir(root.join("segments@")).unwrap();
@@ -182,6 +198,7 @@ fn store_sweep_removes_stale_temporaries() {
 /// it yet (ADR-0014). The copies that existed before are.
 #[test]
 fn container_sweep_keeps_a_quarantine_copy_its_own_open_made() {
+    let _serial = serial();
     let (_dir, path) = container();
     // Bytes after the last frame that are neither zeros nor frames: a read-write open quarantines them.
     let mut bytes = std::fs::read(&path).unwrap();
@@ -216,6 +233,7 @@ fn container_sweep_keeps_a_quarantine_copy_its_own_open_made() {
 /// the container was named.
 #[test]
 fn container_sweep_with_a_relative_path() {
+    let _serial = serial();
     let (dir, path) = container();
     let out = Command::new(env!("CARGO_BIN_EXE_persia"))
         .args(["container", "sweep", "--quarantine", "app.persia"])
@@ -236,6 +254,7 @@ fn container_sweep_with_a_relative_path() {
 #[cfg(unix)]
 #[test]
 fn control_characters_in_paths_are_escaped() {
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let odd = std::fs::canonicalize(dir.path()).unwrap().join("a\tb\nc");
     std::fs::create_dir(&odd).unwrap();
@@ -258,6 +277,7 @@ fn control_characters_in_paths_are_escaped() {
 #[test]
 fn a_failed_store_sweep_still_reports_what_it_removed() {
     use std::os::unix::fs::PermissionsExt;
+    let _serial = serial();
     let dir = tempfile::tempdir().unwrap();
     let root = std::fs::canonicalize(dir.path()).unwrap();
     let first = root.join("@tmp.0123456789abcdef.0");
