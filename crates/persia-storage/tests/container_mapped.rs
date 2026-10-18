@@ -423,12 +423,13 @@ fn a_container_on_a_local_disk_is_mapped_automatically() {
         let m = writer
             .append(FrameKind::Manifest, b"m", Compression::None)
             .unwrap();
-        writer.commit(Commit {
-            manifest: m,
-            wal_start: m.end(),
-            fence_token: 0,
-        })
-        .unwrap();
+        writer
+            .commit(Commit {
+                manifest: m,
+                wal_start: m.end(),
+                fence_token: 0,
+            })
+            .unwrap();
         drop(writer);
         let mut c = Container::open(&path, Mode::ReadOnly).unwrap();
         assert!(c.is_on_local_disk().unwrap(), "{}", dir.display());
@@ -440,6 +441,10 @@ fn a_container_on_a_local_disk_is_mapped_automatically() {
         assert_eq!(c.mapped_range(), Some(FIRST_FRAME_OFFSET..m.end()));
         let first = c.read_frame_source(m.offset, 1 << 10).unwrap();
         let again = c.read_frame_source(m.offset, 1 << 10).unwrap();
-        assert_eq!(first.payload.as_ptr(), again.payload.as_ptr(), "from the mapping");
+        assert_eq!(
+            first.payload.as_ptr(),
+            again.payload.as_ptr(),
+            "from the mapping"
+        );
     }
 }
