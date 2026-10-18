@@ -249,12 +249,18 @@ fn a_sweep_is_durable_on_a_simulated_file_system() {
         ]
     );
     let after = fs.crash(CrashLoss::All);
-    let names: Vec<PathBuf> = after.files().into_iter().map(|(p, _)| p).collect();
+    // By name: `SimFs::files` reports its own normalized paths, which differ in form on Windows.
+    let names: Vec<std::ffi::OsString> = after
+        .files()
+        .into_iter()
+        .filter_map(|(p, _)| p.file_name().map(ToOwned::to_owned))
+        .collect();
+    let name = |p: &Path| p.file_name().unwrap().to_owned();
     assert!(
-        !names.contains(&stale),
+        !names.contains(&name(&stale)),
         "the removal survived the crash: {names:?}"
     );
-    assert!(names.contains(&held));
+    assert!(names.contains(&name(&held)), "{names:?}");
     let reopened = LocalStorage::open_in(after, &root).unwrap();
     assert_eq!(&*reopened.get(&key("a/b")).unwrap(), b"x");
 }
