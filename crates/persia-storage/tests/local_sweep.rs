@@ -224,11 +224,12 @@ fn sweeps_racing_with_puts_never_fail_or_lose_a_write() {
 #[test]
 fn a_sweep_is_durable_on_a_simulated_file_system() {
     let fs = SimFs::new();
-    let root = Path::new("/store");
-    let store = LocalStorage::open_in(fs.clone(), root).unwrap();
+    let store = LocalStorage::open_in(fs.clone(), Path::new("/store")).unwrap();
+    // As the store made it absolute (`D:\store` on Windows), so the paths it reports compare equal.
+    let root = store.root().to_owned();
     store.put(&key("a/b"), Bytes::from_static(b"x")).unwrap();
-    let stale = root.join("a@/@tmp.0123456789abcdef.0");
-    let held = root.join("a@/@tmp.0123456789abcdef.1");
+    let stale = root.join("a@").join("@tmp.0123456789abcdef.0");
+    let held = root.join("a@").join("@tmp.0123456789abcdef.1");
     for p in [&stale, &held] {
         fs.create_new(p).unwrap().sync_all().unwrap();
     }
@@ -254,7 +255,7 @@ fn a_sweep_is_durable_on_a_simulated_file_system() {
         "the removal survived the crash: {names:?}"
     );
     assert!(names.contains(&held));
-    let reopened = LocalStorage::open_in(after, root).unwrap();
+    let reopened = LocalStorage::open_in(after, &root).unwrap();
     assert_eq!(&*reopened.get(&key("a/b")).unwrap(), b"x");
 }
 
