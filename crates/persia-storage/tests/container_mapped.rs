@@ -403,3 +403,48 @@ fn enabling_twice_maps_anew() {
     assert_eq!(first, second);
     assert!(is_mapped(&r, frames[0].offset));
 }
+
+/// The automatic choice (ROADMAP 2.3.10, ADR-0021): a container in the temporary directory, a local disk on every
+/// CI platform, and on Linux one on tmpfs, are mapped; reads then come from the mapping.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[test]
+fn a_container_on_a_local_disk_is_mapped_automatically() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut dirs = vec![tmp.path().to_owned()];
+    let shm = if cfg!(target_os = "linux") {
+        tempfile::tempdir_in("/dev/shm").ok()
+    } else {
+        None
+    };
+    dirs.extend(shm.iter().map(|d| d.path().to_owned()));
+    for dir in dirs {
+        let path = dir.join("app.persia");
+        let mut writer = Container::create(&path).unwrap();
+        let m = writer
+            .append(FrameKind::Manifest, b"m", Compression::None)
+            .unwrap();
+        writer
+            .commit(Commit {
+                manifest: m,
+                wal_start: m.end(),
+                fence_token: 0,
+            })
+            .unwrap();
+        drop(writer);
+        let mut c = Container::open(&path, Mode::ReadOnly).unwrap();
+        assert!(c.is_on_local_disk().unwrap(), "{}", dir.display());
+        assert!(
+            c.enable_mapped_reads_if_local().unwrap(),
+            "{}",
+            dir.display()
+        );
+        assert_eq!(c.mapped_range(), Some(FIRST_FRAME_OFFSET..m.end()));
+        let first = c.read_frame_source(m.offset, 1 << 10).unwrap();
+        let again = c.read_frame_source(m.offset, 1 << 10).unwrap();
+        assert_eq!(
+            first.payload.as_ptr(),
+            again.payload.as_ptr(),
+            "from the mapping"
+        );
+    }
+}

@@ -186,21 +186,30 @@ impl StreamScanner {
         read: &mut impl FnMut(u64, &mut [u8]) -> Result<(), E>,
         write: &mut impl FnMut(&[u8]) -> Result<(), E>,
     ) -> Result<Result<FrameHeader, Error>, E> {
+        let cap = self.chunk.max(FRAME_HEADER_LEN);
         let mut copy = Reframer {
             frame_seq,
             encoder: None,
             write,
+            pending: Vec::new(),
+            cap,
         };
         let header = match self.check_frame_into(read, &mut copy)? {
             Ok(header) => header,
-            Err(error) => return Ok(Err(error)),
+            Err(error) => {
+                // What was queued is written anyway, so an invalid frame's copy is its header and stored payload,
+                // as without the queue.
+                copy.flush()?;
+                return Ok(Err(error));
+            }
         };
         // `check` gives the sink the header of every frame it validates, so the encoder exists and was fed exactly
         // the stored payload. Callers that need the whole copy count what `write` received (compaction does).
         debug_assert!(copy.encoder.is_some());
         if let Some(encoder) = copy.encoder.take() {
-            (copy.write)(&encoder.trailer())?;
+            copy.emit(&encoder.trailer())?;
         }
+        copy.flush()?;
         Ok(Ok(header))
     }
 
@@ -472,12 +481,48 @@ struct Reframer<'w, W> {
     /// Set by the header.
     encoder: Option<FrameEncoder>,
     write: &'w mut W,
+    /// Bytes not yet passed to `write`, at most `cap`: a frame no longer than `cap` goes out as one write (ROADMAP
+    /// 2.4.21). A longer one goes out as its header, then its payload in the scan's chunks (each written as read), then
+    /// its trailer, possibly with the last payload bytes.
+    pending: Vec<u8>,
+    cap: usize,
+}
+
+impl<W> Reframer<'_, W> {
+    /// Queues `bytes`, writing out first what no longer fits.
+    fn emit<E>(&mut self, bytes: &[u8]) -> Result<(), E>
+    where
+        W: FnMut(&[u8]) -> Result<(), E>,
+    {
+        if self.pending.len().saturating_add(bytes.len()) > self.cap {
+            self.flush()?;
+        }
+        if bytes.len() >= self.cap {
+            return (self.write)(bytes);
+        }
+        self.pending.extend_from_slice(bytes);
+        Ok(())
+    }
+
+    fn flush<E>(&mut self) -> Result<(), E>
+    where
+        W: FnMut(&[u8]) -> Result<(), E>,
+    {
+        if !self.pending.is_empty() {
+            (self.write)(&self.pending)?;
+            self.pending.clear();
+        }
+        Ok(())
+    }
 }
 
 impl<E, W: FnMut(&[u8]) -> Result<(), E>> Sink<E> for Reframer<'_, W> {
     fn header(&mut self, header: &FrameHeader) -> Result<(), E> {
+        // One allocation per frame, of what it can queue.
+        let queued = usize::try_from(header.total_len()).map_or(self.cap, |len| len.min(self.cap));
+        self.pending.reserve(queued);
         let encoder = FrameEncoder::reframing(header, self.frame_seq);
-        (self.write)(encoder.header())?;
+        self.emit(encoder.header())?;
         self.encoder = Some(encoder);
         Ok(())
     }
@@ -487,7 +532,7 @@ impl<E, W: FnMut(&[u8]) -> Result<(), E>> Sink<E> for Reframer<'_, W> {
         if let Some(encoder) = &mut self.encoder {
             encoder.feed(bytes);
         }
-        (self.write)(bytes)
+        self.emit(bytes)
     }
 }
 

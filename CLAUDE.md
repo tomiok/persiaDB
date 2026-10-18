@@ -122,7 +122,8 @@ Always run fmt, clippy and tests before declaring a task done.
 **Dependencies**
 - Allowed building blocks (libraries): `fst`, `roaring`, `zstd`, `crc32c`, `xxhash-rust`, `memmap2`, `ciborium`, `sha2` (blob ids, ADR-0002),
   `serde`, `serde_json`, `thiserror`, `tracing`, `bytes`, `arc-swap`, `rayon`, `object_store`, `tokio`, `tonic`, `prost`, `axum`,
-  `unicode-segmentation` (UAX#29), `unicode-normalization` (NFKC) — Unicode data tables are not worth hand-maintaining.
+  `unicode-segmentation` (UAX#29), `unicode-normalization` (NFKC) — Unicode data tables are not worth hand-maintaining;
+  `libc` and `windows-sys` in `persia-storage` only (its `sys` module wraps them; ADR-0021: OS calls std lacks).
 - Binaries (`persia-server`, `persia-cli`) may additionally use: `clap`, `anyhow`, `rustls`, `tracing-subscriber`,
   `opentelemetry*`, a Prometheus exporter.
 - Dev/bench only: `proptest`, `criterion`, `insta`, `tempfile`, `testcontainers`, `hdrhistogram`; `libfuzzer-sys` in `fuzz/` only.

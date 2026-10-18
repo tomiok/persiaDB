@@ -63,6 +63,9 @@ struct State {
     next_ino: u64,
     /// Which handle holds each file's writer lock.
     locks: HashMap<u64, u64>,
+    /// Locks belong to the process, as `flock` emulated on NFS: every handle of this file system shares them, and closing
+    /// any handle of a file releases its lock ([`SimFs::set_per_process_locks`]).
+    per_process_locks: bool,
     next_handle: u64,
     faults: Arc<Mutex<Faults>>,
 }
@@ -189,6 +192,7 @@ impl SimFs {
                 files: HashMap::new(),
                 next_ino: 1,
                 locks: HashMap::new(),
+                per_process_locks: false,
                 next_handle: 1,
                 faults: Arc::default(),
             })),
@@ -199,6 +203,13 @@ impl SimFs {
     /// was created (or crashed into existence).
     pub fn set_fault(&self, fault: Option<SimFault>) {
         lock(&lock(&self.state).faults).set(fault);
+    }
+
+    /// Makes locks belong to the process rather than the handle, as `flock` emulated with POSIX locks on Linux NFS and
+    /// some FUSE mounts: every handle's [`ContainerFile::try_lock`] succeeds, closing any handle of a file releases its
+    /// lock, and [`ContainerFile::locks_per_handle`] is `false` (ADR-0019).
+    pub fn set_per_process_locks(&self, on: bool) {
+        lock(&self.state).per_process_locks = on;
     }
 
     /// How many mutating calls have been made: the `n` of the next one.
@@ -545,15 +556,20 @@ impl ContainerFile for SimFsFile {
 
     fn try_lock(&self) -> io::Result<bool> {
         let mut state = lock(&self.state);
+        let per_process = state.per_process_locks;
         let holder = state.locks.entry(self.ino).or_insert(self.handle);
-        Ok(*holder == self.handle)
+        Ok(per_process || *holder == self.handle)
+    }
+
+    fn locks_per_handle(&self) -> bool {
+        !lock(&self.state).per_process_locks
     }
 }
 
 impl Drop for SimFsFile {
     fn drop(&mut self) {
         let mut state = lock(&self.state);
-        if state.locks.get(&self.ino) == Some(&self.handle) {
+        if state.per_process_locks || state.locks.get(&self.ino) == Some(&self.handle) {
             state.locks.remove(&self.ino);
         }
     }

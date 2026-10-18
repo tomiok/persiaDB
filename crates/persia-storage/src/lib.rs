@@ -15,7 +15,9 @@ pub mod local;
 pub mod memory;
 pub mod meta;
 pub mod retry;
+mod side;
 pub mod storage;
+mod sys;
 pub mod vfs;
 
 pub use error::{BoxError, Error, ErrorKind, Op, Result};
@@ -23,4 +25,5 @@ pub use key::{InvalidKey, Key, KeyDefect, KeyPrefix};
 pub use local::LocalStorage;
 pub use memory::MemoryStorage;
 pub use meta::{Capabilities, ObjectMeta, PutOutcome};
+pub use side::{InUse, SideFile, SideFileKind};
 pub use storage::{Storage, check_range, range_source};

@@ -67,6 +67,48 @@ impl Container<File> {
         Ok(())
     }
 
+    /// Whether the container file is on a local disk file system (ADR-0021): Linux ext4, XFS, Btrfs and the other
+    /// local types, macOS local volumes other than FUSE, Windows fixed and RAM disks. Network, FUSE and removable
+    /// file systems, and those of other operating systems, are not.
+    ///
+    /// # Errors
+    /// [`Error::Io`] if the file system cannot be queried.
+    pub fn is_on_local_disk(&self) -> Result<bool> {
+        crate::sys::is_local_disk(&self.file).map_err(Error::io("query file system"))
+    }
+
+    /// The automatic choice of mapped reads (SPEC §4.7, ROADMAP 2.3.10): [`enable_mapped_reads`](Container::enable_mapped_reads)
+    /// if the container is [on a local disk](Container::is_on_local_disk), where a read error behind a page is as rare
+    /// as one behind `pread`; `pread` otherwise, where a server or a FUSE process that fails would end this process
+    /// with `SIGBUS`. Returns whether this call mapped: `false` leaves an earlier `enable_mapped_reads` in place (see
+    /// [`mapped_range`](Container::mapped_range)). The same contract as `enable_mapped_reads` applies:
+    /// while a mapping lives, nothing but Persia containers may write or truncate the file, and on Windows a live
+    /// mapping keeps another handle's read-write open from truncating a torn tail, so it suits read-only handles best.
+    ///
+    /// ```
+    /// use persia_storage::container::{Container, Mode};
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// # let path = dir.path().join("app.persia");
+    /// # drop(Container::create(&path)?);
+    /// let mut c = Container::open(&path, Mode::ReadOnly)?;
+    /// let mapped = c.enable_mapped_reads_if_local()?;
+    /// assert_eq!(mapped, c.mapped_range().is_some());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::Io`] if the mapping fails; reads then go on as before the call. A file system that cannot be queried
+    /// (e.g. a Windows volume with no drive letter) counts as not local: `Ok(false)`, as ADR-0021 decides for every
+    /// unknown answer.
+    pub fn enable_mapped_reads_if_local(&mut self) -> Result<bool> {
+        if !self.is_on_local_disk().unwrap_or(false) {
+            return Ok(false);
+        }
+        self.enable_mapped_reads()?;
+        Ok(true)
+    }
+
     /// The absolute range of the file that frames are read from the mapping, if one is live.
     pub fn mapped_range(&self) -> Option<Range<u64>> {
         let window = self.mapped.as_ref()?.window.as_ref()?;

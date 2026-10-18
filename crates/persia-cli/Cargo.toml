@@ -12,6 +12,13 @@ path = "src/main.rs"
 
 [dependencies]
 persia.workspace = true
+# ADR-0020: maintenance commands call the storage layer directly.
+persia-storage.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.

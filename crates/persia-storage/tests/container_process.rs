@@ -534,8 +534,10 @@ fn a_killed_holder_releases_the_writer_lock() {
         Container::open(&path, Mode::ReadWrite),
         Err(Error::Locked)
     ));
+    let stdin = child.stdin.take();
     child.kill().unwrap(); // SIGKILL on Unix
     child.wait().unwrap();
+    drop(stdin);
     // The kernel drops the lock with the process's last descriptor.
     Container::open(&path, Mode::ReadWrite).unwrap();
 }
@@ -693,8 +695,12 @@ fn run_and_kill_writer(
             break;
         }
     }
+    // Held until the child is reaped: `wait` closes stdin, and a killed child may still run long enough to see EOF
+    // (macOS), where a stalled writer would report that it was not killed.
+    let stdin = child.stdin.take();
     child.kill().unwrap();
     let status = child.wait().unwrap();
+    drop(stdin);
     reader.join().unwrap();
     iter_acks.extend(rx.try_iter());
     assert!(
@@ -1099,10 +1105,14 @@ fn run_torn_writer(role: &str, path: &Path) -> (Vec<u64>, std::process::ExitStat
     let mut words = torn.split(' ');
     assert_eq!(words.next(), Some("torn"), "torn writer: {torn}");
     let nums = words.map(|w| w.parse().unwrap()).collect();
+    // Held until the child is reaped: `wait` closes stdin, and a killed child may still run long enough to see EOF.
+    let stdin = child.stdin.take();
     if role == "torn-writer-kill" {
         child.kill().unwrap();
     }
-    (nums, child.wait().unwrap())
+    let status = child.wait().unwrap();
+    drop(stdin);
+    (nums, status)
 }
 
 /// A writer process dies mid-append, leaving half a frame after two synced but uncommitted WAL frames. A mapped

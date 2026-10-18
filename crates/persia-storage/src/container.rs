@@ -13,6 +13,7 @@ mod error;
 pub mod file;
 mod mapped;
 mod path;
+mod side;
 pub mod sim;
 mod stream;
 mod tail;

@@ -272,7 +272,11 @@ nothing. The container is reopened, and recovery decides what survived.
   file. The file system must support hard links. A writer removes the stale temporary files of creates and compactions
   of its container (`<name>.tmp.*`, `<name>.compact.*`) on request (`sweep_stale_files`, ROADMAP 2.4.15): holding the
   writer lock, no compaction can be in flight, and a temporary file whose own lock is held belongs to a live create,
-  which is skipped. Quarantine files (§4.4) are never removed.
+  which is skipped. Quarantine files (§4.4) are never removed by that sweep: they may hold acknowledged writes, and a
+  writer removes them only on an operator's explicit request, naming them (`remove_quarantine_files`; the CLI names
+  those listed before its own open). Both kinds can be listed
+  by path without opening the container (`side_files`), each temporary file with whether its lock is held
+  (ADR-0019, ROADMAP 2.4.19; `persia container sweep`).
 - **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
   holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
   locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
@@ -356,7 +360,8 @@ path names a complete old or new container at every instant. Readers that opened
 reopened, since the rename may not be durable; it still learns where the frames moved. The rename goes to the
 canonical path resolved at open, so a symbolic link to the container keeps pointing at it; other hard links to the
 file are not supported (they keep the old contents). The writer refuses to rename if that path no longer names its
-file. Because a compaction changes which file the path names, a read-write open checks after taking the lock that
+file: same device and inode on Unix, same volume serial number and file id on Windows (ADR-0021).
+Because a compaction changes which file the path names, a read-write open checks after taking the lock that
 the path still names the file it locked, and opens again if not (§4.5.1).
 
 ### 4.7 Memory-mapped reads
@@ -378,7 +383,11 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). A container with mapped reads holds one mapping of
+Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
+disk file system (`enable_mapped_reads_if_local`): on Linux, those in an allow-list of `f_type`s (ext2-4, XFS, Btrfs
+and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
+and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
+there can end the process (ADR-0021, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the
 previous mapping stays (after a compaction: none), so the mapping covers `12288..` the `log_end` of the last mapping
 that succeeded. A frame the mapping covers is read from it; any other (after that end) is read with ordinary reads.
@@ -864,7 +873,14 @@ above.
   longer can still fail with an I/O error instead.
 - **Temporary files** are named `@tmp.<nonce>.<n>` (a random per-process nonce in hex and a counter); they start with
   `@`, so they never decode, live in the directory of the object they become, and are skipped by `list`. A crash may
-  leave one behind; it holds no acknowledged data.
+  leave one behind; it holds no acknowledged data. A `put` holds an exclusive lock on its temporary file (Unix
+  `flock`) from just after creating it until the name is gone, and after locking checks that the name still names
+  its file, taking another name if not (removing its file first if another handle holds the lock: a listing).
+  `sweep_temporaries` removes, only on request (never at `open`), every temporary file whose lock it can take, while
+  holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0019, ROADMAP 2.3.8;
+  `persia store sweep`). A lock counts only on a local disk file system: where `flock` is emulated with per-process
+  locks (Linux NFS, some FUSE mounts), a lock taken may be a writer's of the same process, so the file's use is
+  unknown and only a forced sweep removes it (ADR-0019 decision 6).
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

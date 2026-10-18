@@ -33,6 +33,7 @@ flowchart TD
   server[persia-server] --> persia
   server --> proto[persia-proto]
   cli[persia-cli] --> persia
+  cli --> storage
   persia --> engine[persia-engine]
   persia --> blob[persia-blob]
   engine --> analysis[persia-analysis]

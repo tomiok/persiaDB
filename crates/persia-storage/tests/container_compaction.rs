@@ -619,8 +619,7 @@ fn compacting_through_a_symlink_replaces_the_target() {
     assert_eq!(names(dir.path()), ["link.persia", "real.persia"]);
 }
 
-// Unix only: Windows exposes no file identity, so the check is skipped there (ROADMAP 2.4.18).
-#[cfg(unix)]
+// On Windows the check compares volume and file ids (ROADMAP 2.4.18, ADR-0021).
 #[test]
 fn compact_refuses_a_path_replaced_from_outside() {
     let dir = tempfile::tempdir().unwrap();
@@ -633,11 +632,9 @@ fn compact_refuses_a_path_replaced_from_outside() {
     let err = c
         .compact(&[range(b.live)], new_manifest(b.live), NONE)
         .unwrap_err();
-    if cfg!(unix) {
-        assert!(matches!(err, Error::InvalidInput(_)), "{err}");
-        assert_eq!(std::fs::read(&path).unwrap(), b"someone else's file");
-        assert_eq!(names(dir.path()), ["app.persia"]);
-    }
+    assert!(matches!(err, Error::InvalidInput(_)), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"someone else's file");
+    assert_eq!(names(dir.path()), ["app.persia"]);
 }
 
 #[test]
