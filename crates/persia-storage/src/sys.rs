@@ -1,4 +1,4 @@
-//! Operating-system calls the standard library does not expose (ADR-0020): whether an open file lives on a local disk
+//! Operating-system calls the standard library does not expose (ADR-0021): whether an open file lives on a local disk
 //! file system (ROADMAP 2.3.10, for the automatic choice of mapped reads, ADR-0017), and on Windows a file's identity
 //! (2.4.18, for "the path still names this file", SPEC §4.5.1). Besides `container::mapped`, the only module of this
 //! crate with `unsafe` code; every call states why it is sound.

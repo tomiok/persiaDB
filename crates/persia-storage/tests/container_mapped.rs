@@ -404,7 +404,7 @@ fn enabling_twice_maps_anew() {
     assert!(is_mapped(&r, frames[0].offset));
 }
 
-/// The automatic choice (ROADMAP 2.3.10, ADR-0020): a container in the temporary directory, a local disk on every
+/// The automatic choice (ROADMAP 2.3.10, ADR-0021): a container in the temporary directory, a local disk on every
 /// CI platform, and on Linux one on tmpfs, are mapped; reads then come from the mapping.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[test]

@@ -19,7 +19,8 @@ SPEC disagree, the SPEC wins and this page is a bug.
  ├─────────────────────────────────────────────────────────────┤
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
-      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
+      ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (SPEC §13.2)
+      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
 ```
 
 ## Crate dependency graph
@@ -54,6 +55,7 @@ flowchart TD
 | `persia-proto` | `persia.proto` and generated code | §12 | n/a |
 | `persia-server` | gRPC + HTTP server, roles (writer/reader/router) | §11, §12 | async |
 | `persia-cli` | `persia` binary: inspect, dump, verify, compact, bench | — | sync |
+| `persia-ffi` (planned, ADR-0018) | C ABI and the safe Rust API the embedded Go and TypeScript bindings share. Not in the workspace. | §13.1 | sync, same as `persia` |
 
 ## Life of a write (SPEC §8.2)
 

@@ -14,7 +14,8 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 - Storable in the local filesystem **or** object storage (S3, GCS, Azure Blob) using the same segment bytes.
 - Horizontal scalability: stateless query nodes, immutable segments, shard-per-writer.
 - Content-addressed blob storage for client files (pdf, jpg, mp4...) referenced from documents.
-- First-class SDKs: Rust and Go.
+- First-class SDKs: the embedded Rust API; embedded Go and TypeScript bindings (§13.1, ADR-0018); network
+  clients in Rust and Go (§13.2).
 - Crash-safe: a power loss at any instruction never corrupts committed data.
 
 ### 1.2 Non-goals (v1)
@@ -61,7 +62,8 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
  ├─────────────────────────────────────────────────────────────┤
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
-      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
+      ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (§13.2)
+      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (§13.1, ADR-0018)
 ```
 
 Principles:
@@ -274,7 +276,7 @@ nothing. The container is reopened, and recovery decides what survived.
   writer removes them only on an operator's explicit request, naming them (`remove_quarantine_files`; the CLI names
   those listed before its own open). Both kinds can be listed
   by path without opening the container (`side_files`), each temporary file with whether its lock is held
-  (ADR-0018, ROADMAP 2.4.19; `persia container sweep`).
+  (ADR-0019, ROADMAP 2.4.19; `persia container sweep`).
 - **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
   holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
   locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
@@ -358,7 +360,7 @@ path names a complete old or new container at every instant. Readers that opened
 reopened, since the rename may not be durable; it still learns where the frames moved. The rename goes to the
 canonical path resolved at open, so a symbolic link to the container keeps pointing at it; other hard links to the
 file are not supported (they keep the old contents). The writer refuses to rename if that path no longer names its
-file: same device and inode on Unix, same volume serial number and file id on Windows (ADR-0020).
+file: same device and inode on Unix, same volume serial number and file id on Windows (ADR-0021).
 Because a compaction changes which file the path names, a read-write open checks after taking the lock that
 the path still names the file it locked, and opens again if not (§4.5.1).
 
@@ -383,9 +385,9 @@ accept that reads with ordinary reads instead.
 
 Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
 disk file system (`enable_mapped_reads_if_local`): on Linux, those in an allow-list of `f_type`s (ext2-4, XFS, Btrfs
-and other allow-listed local types; ADR-0020), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
+and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
 and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
-there can end the process (ADR-0020, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
+there can end the process (ADR-0021, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the
 previous mapping stays (after a compaction: none), so the mapping covers `12288..` the `log_end` of the last mapping
 that succeeded. A frame the mapping covers is read from it; any other (after that end) is read with ordinary reads.
@@ -875,10 +877,10 @@ above.
   `flock`) from just after creating it until the name is gone, and after locking checks that the name still names
   its file, taking another name if not (removing its file first if another handle holds the lock: a listing).
   `sweep_temporaries` removes, only on request (never at `open`), every temporary file whose lock it can take, while
-  holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0018, ROADMAP 2.3.8;
+  holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0019, ROADMAP 2.3.8;
   `persia store sweep`). A lock counts only on a local disk file system: where `flock` is emulated with per-process
   locks (Linux NFS, some FUSE mounts), a lock taken may be a writer's of the same process, so the file's use is
-  unknown and only a forced sweep removes it (ADR-0018 decision 6).
+  unknown and only a forced sweep removes it (ADR-0019 decision 6).
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome
@@ -1004,11 +1006,29 @@ replica lag, blob throughput). Structured JSON logs.
 
 ## 13. SDKs
 
+Two client families are planned. They are not interchangeable, and neither is implemented. The embedded
+Rust facade they would sit beside is still a stub (`crates/persia`).
+
+### 13.1 Embedded bindings (Go, TypeScript)
+
+A Go or TypeScript program opens a `.persia` file in-process, the way the Rust `Db` API will (ROADMAP M10,
+SPEC §8, §9.6, §14). The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C ABI
+that Go links with cgo and a safe Rust API that the TypeScript N-API package calls. A later WASM build for
+browsers and edge isolates is a separate package and is not the first release. The design is `docs/sdk/`.
+
+These bindings add no on-disk bytes. A file written by Rust, Go, or TypeScript is the same file (§15).
+They are blocked on the embedded API (M10). They do not replace the `persia` crate.
+
+### 13.2 Network clients (Rust, Go)
+
 - **Rust** (`sdk/rust`, crate `persia-client`) and **Go** (`sdk/go`, module `persia-go`).
 - Generated stubs from `persia-proto` + thin idiomatic layer: connection pooling, client-side load balancing
   (shard-aware for writes), retries with backoff on idempotent ops, deadlines, batching, blob streaming helpers.
 - A **shared conformance suite** (language-neutral scenarios in YAML/JSON) runs against both SDKs and the server in CI.
-- Semantic versioning; SDK ↔ server compatibility matrix documented.
+  The embedded bindings (§13.1) reuse that scenario format with a `transport` field once it exists (ROADMAP 14.1);
+  they do not wait on the server to test a local file.
+- Semantic versioning; SDK ↔ server compatibility matrix documented. The embedded packages version
+  separately (ABI, file format, language module); see ADR-0018.
 
 ---
 

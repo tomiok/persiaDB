@@ -248,7 +248,7 @@ fn quarantine_files_are_removed_durably_by_a_writer_only() {
     );
 }
 
-/// Where locks belong to the process (`flock` emulated on NFS, ADR-0018), the lock a sweep takes may be a live create's
+/// Where locks belong to the process (`flock` emulated on NFS, ADR-0019), the lock a sweep takes may be a live create's
 /// of this same process: no temporary file is removed, and the listing says their use is unknown.
 #[test]
 fn with_per_process_locks_no_temporary_file_is_swept() {

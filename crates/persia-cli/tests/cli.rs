@@ -1,4 +1,4 @@
-//! The `persia` binary's maintenance commands, end to end (ROADMAP 2.3.8, 2.4.19; ADR-0018): output lines, what is
+//! The `persia` binary's maintenance commands, end to end (ROADMAP 2.3.8, 2.4.19; ADR-0019): output lines, what is
 //! removed and kept, and the errors for a missing path or a container a writer holds.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]

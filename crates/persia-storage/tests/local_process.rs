@@ -1,5 +1,5 @@
 //! Real-file, multi-process tests of the temporary files of a local store's `put`s and their sweep (ROADMAP 2.3.8;
-//! SPEC §10.1.1, ADR-0012, ADR-0018).
+//! SPEC §10.1.1, ADR-0012, ADR-0019).
 //!
 //! Invariants, across processes:
 //! 1. Writer processes `put` and `put_if_absent` while sweeper processes sweep in a loop: no write fails, and every
@@ -496,7 +496,7 @@ fn child_hold_temp(root: &Path, seed: u64) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// 1. Writer and sweeper processes race (ADR-0018)
+// 1. Writer and sweeper processes race (ADR-0019)
 // ---------------------------------------------------------------------------------------------------------------
 
 #[cfg(not(feature = "slow"))]
@@ -598,7 +598,7 @@ fn sweeper_processes_never_fail_or_lose_a_put_of_writer_processes() {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// 2. kill -9 loop, then sweep (ADR-0012, ADR-0018)
+// 2. kill -9 loop, then sweep (ADR-0012, ADR-0019)
 // ---------------------------------------------------------------------------------------------------------------
 
 #[cfg(not(feature = "slow"))]
@@ -754,7 +754,7 @@ fn a_sweep_after_kill_9_removes_every_leftover_temporary_and_keeps_every_acknowl
 }
 
 // ---------------------------------------------------------------------------------------------------------------
-// 3. A temporary held by a live process is kept (ADR-0018)
+// 3. A temporary held by a live process is kept (ADR-0019)
 // ---------------------------------------------------------------------------------------------------------------
 
 /// How a holder child ends.

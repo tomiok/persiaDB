@@ -136,7 +136,7 @@ No. Format version 1.0 is a draft until the v1.0 release (SPEC §15). There is n
 
 ### Is there a server, a cloud backend, or a client SDK?
 
-Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are M14. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
+Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are M14. Embedded Go and TypeScript bindings, which would open a file in-process, are a separate design ([Embedded SDKs](/guide/sdks/)); they are not implemented either. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
 
 ### Why is a query supposed to avoid empty results?
 

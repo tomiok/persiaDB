@@ -9,7 +9,7 @@
 //! 4. Removals are durable: the directory is synced (checked on `SimFs` by crashing after the sweep).
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
-// Most cases need file locks, which Windows does not take (ADR-0018): their helpers are unused there.
+// Most cases need file locks, which Windows does not take (ADR-0019): their helpers are unused there.
 #![cfg_attr(windows, allow(dead_code, unused_imports))]
 
 use std::path::{Path, PathBuf};
@@ -418,7 +418,7 @@ fn on_windows_only_a_forced_sweep_removes_temporaries() {
     assert_eq!(store.temporaries().unwrap(), []);
 }
 
-/// Where locks belong to the process (`flock` emulated on NFS, ADR-0018), a lock this process takes proves nothing: a
+/// Where locks belong to the process (`flock` emulated on NFS, ADR-0019), a lock this process takes proves nothing: a
 /// `put` in this process may hold the file. Every temporary file is then `Unknown`, and only a forced sweep removes
 /// them.
 #[test]

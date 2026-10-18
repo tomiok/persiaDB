@@ -207,7 +207,7 @@ impl SimFs {
 
     /// Makes locks belong to the process rather than the handle, as `flock` emulated with POSIX locks on Linux NFS and
     /// some FUSE mounts: every handle's [`ContainerFile::try_lock`] succeeds, closing any handle of a file releases its
-    /// lock, and [`ContainerFile::locks_per_handle`] is `false` (ADR-0018).
+    /// lock, and [`ContainerFile::locks_per_handle`] is `false` (ADR-0019).
     pub fn set_per_process_locks(&self, on: bool) {
         lock(&self.state).per_process_locks = on;
     }

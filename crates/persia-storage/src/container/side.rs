@@ -214,7 +214,7 @@ impl<F: ContainerFile + 'static> Container<F> {
     }
 }
 
-/// Removes the side file at `path` unless a live writer holds its lock, holding the lock across the removal (ADR-0018):
+/// Removes the side file at `path` unless a live writer holds its lock, holding the lock across the removal (ADR-0019):
 /// whether it removed it.
 fn remove_unless_held<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) -> Result<bool> {
     let file = match vfs.open(path, false) {
@@ -225,7 +225,7 @@ fn remove_unless_held<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) ->
     };
     // A temporary file held by a live create. On Windows files are not locked (the lock is beside the container): no
     // check, and the writer lock this handle holds excludes compactions.
-    // Where locks belong to the process (NFS, FUSE; ADR-0018) a lock taken proves nothing: a create in this process
+    // Where locks belong to the process (NFS, FUSE; ADR-0019) a lock taken proves nothing: a create in this process
     // may hold it, so the file is kept.
     match side::try_lock(&file).map_err(Error::io("lock"))? {
         Some(false) => return Ok(false),

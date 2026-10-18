@@ -128,7 +128,7 @@ pub trait Vfs: Send + Sync + std::fmt::Debug {
     fn canonicalize(&self, path: &Path) -> io::Result<PathBuf>;
 
     /// Whether `path` names the file open as `file`: same device and inode on Unix, same volume serial number and file
-    /// id on Windows (ADR-0020).
+    /// id on Windows (ADR-0021).
     ///
     /// # Errors
     /// The OS error; a missing `path` is `Ok(false)`.
@@ -246,7 +246,7 @@ impl Vfs for RealFs {
         }
     }
 
-    /// Volume serial number and file id (ROADMAP 2.4.18, ADR-0020): the standard library exposes neither on stable.
+    /// Volume serial number and file id (ROADMAP 2.4.18, ADR-0021): the standard library exposes neither on stable.
     #[cfg(windows)]
     fn same_file(&self, file: &File, path: &Path) -> io::Result<bool> {
         use std::os::windows::fs::OpenOptionsExt;

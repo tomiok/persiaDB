@@ -1,6 +1,6 @@
 //! The `persia` command-line tool: inspect, dump, verify, compact, bench.
 //!
-//! Maintenance commands (ROADMAP 2.3.8, 2.4.19; ADR-0018) list and remove the files a crash or a recovery leaves next
+//! Maintenance commands (ROADMAP 2.3.8, 2.4.19; ADR-0019) list and remove the files a crash or a recovery leaves next
 //! to a container or inside a local store. Each found file is printed as one tab-separated line, so the output can be
 //! piped: `<action>\t<kind>\t<state>\t<path>`, with `action` `found`, `removed` or `kept`, `kind` `temporary` or
 //! `quarantine`, and `state` `free`, `in-use` or `unknown` (whether a live writer holds the file's lock). Control

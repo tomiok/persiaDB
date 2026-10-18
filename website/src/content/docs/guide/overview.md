@@ -70,7 +70,7 @@ Five properties the design does not trade away:
 
 Goals (SPEC §1.1): embedded search with an optional server; BM25F plus filters, facets, and
 zero-results avoidance; the same segment bytes locally or in object storage; horizontal scale by
-shard; content-addressed blobs; Rust and Go SDKs; a power loss at any point leaves committed data intact.
+shard; content-addressed blobs; the embedded Rust API, embedded Go and TypeScript bindings, and Rust and Go network clients; a power loss at any point leaves committed data intact.
 
 Out of scope for v1 (SPEC §1.2):
 

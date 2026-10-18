@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Design for embedded Go and TypeScript SDKs (ADR-0018, `docs/sdk/`). Nothing is implemented. Go links a future C ABI with cgo; TypeScript's first package is an N-API addon, with WASM for the browser and edge deferred. The network clients in SPEC §13.2 are unchanged.
 - Workspace skeleton (stub crates).
 - Apache-2.0 license.
 - Project website under `website/` (Astro Starlight), for GitHub Pages at `https://tomiok.github.io/persiaDB/`.
@@ -45,7 +46,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   opening a container with a large uncommitted Segment frame or a long torn tail no longer needs that much memory.
 - `persia-storage`: `LocalStorage::sweep_temporaries` removes the `@tmp.*` files that crashed `put`s left, skipping
   those a live `put` holds (each `put` now locks its temporary file); `temporaries` lists them. Never automatic
-  (ADR-0018).
+  (ADR-0019).
 - `persia-storage`: `Container::side_files` lists a container's temporary and quarantine files by path, and
   `remove_quarantine_files` removes the quarantine copies through a read-write handle.
 - `persia` CLI: `persia container files|sweep [--quarantine] <path>` and `persia store files|sweep [--force] <dir>`

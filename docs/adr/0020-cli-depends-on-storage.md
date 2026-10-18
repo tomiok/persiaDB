@@ -1,15 +1,15 @@
-# ADR-0019: The `persia` CLI may depend on `persia-storage` directly
+# ADR-0020: The `persia` CLI may depend on `persia-storage` directly
 
 - Status: proposed
 - Date: 2026-10-17
-- Related: CLAUDE.md "Architecture"; `xtask/src/check_deps.rs` (`ALLOWED`); ADR-0018; ROADMAP 2.3.8, 2.4.19
+- Related: CLAUDE.md "Architecture"; `xtask/src/check_deps.rs` (`ALLOWED`); ADR-0019; ROADMAP 2.3.8, 2.4.19
 
 ## Context
 
 `cargo xtask check-deps` lets each crate depend only on the crates listed for it, and layers may not be skipped:
 `persia-cli` could depend on the `persia` facade alone. The CLI is an operator tool ("inspect, dump, verify, compact,
 bench"): its first commands list and remove the temporary and quarantine files of a container or local store
-(ADR-0018), which are `persia-storage` maintenance calls with no place in the embedded `Db` API. Routing them through
+(ADR-0019), which are `persia-storage` maintenance calls with no place in the embedded `Db` API. Routing them through
 the facade would mean `persia-engine` and `persia` re-exporting storage internals as public API.
 
 ## Decision

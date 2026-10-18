@@ -619,7 +619,7 @@ fn compacting_through_a_symlink_replaces_the_target() {
     assert_eq!(names(dir.path()), ["link.persia", "real.persia"]);
 }
 
-// On Windows the check compares volume and file ids (ROADMAP 2.4.18, ADR-0020).
+// On Windows the check compares volume and file ids (ROADMAP 2.4.18, ADR-0021).
 #[test]
 fn compact_refuses_a_path_replaced_from_outside() {
     let dir = tempfile::tempdir().unwrap();

@@ -58,7 +58,7 @@ pub trait ContainerFile: Send + Sync + std::fmt::Debug {
     /// Whether [`try_lock`](Self::try_lock) excludes other handles of this process too. Where a lock belongs to the
     /// process instead (`flock` emulated with POSIX locks: Linux NFS, some FUSE and CIFS mounts), a listing or sweep in
     /// the writer's process takes a lock the writer holds, and closing any descriptor of the file drops it, so a
-    /// held lock proves nothing (ADR-0018). Defaults to `true`, as for simulated files.
+    /// held lock proves nothing (ADR-0019). Defaults to `true`, as for simulated files.
     fn locks_per_handle(&self) -> bool {
         true
     }
@@ -99,7 +99,7 @@ impl ContainerFile for File {
         }
     }
 
-    /// Only known on a local disk file system (ADR-0020): anywhere else, or if the file system cannot be queried,
+    /// Only known on a local disk file system (ADR-0021): anywhere else, or if the file system cannot be queried,
     /// `false`, so a sweep does not trust the lock.
     #[cfg(not(windows))]
     fn locks_per_handle(&self) -> bool {

@@ -1,4 +1,4 @@
-# ADR-0020: `libc` and `windows-sys` for the file system type and the Windows file identity
+# ADR-0021: `libc` and `windows-sys` for the file system type and the Windows file identity
 
 - Status: proposed
 - Date: 2026-10-18
@@ -14,7 +14,7 @@ Two questions about an open file need the operating system, and the standard lib
   `EXCEPTION_IN_PAGE_ERROR` (Windows), which ends the process, where `pread` would return an error. Answering needs
   `fstatfs` (`f_type` on Linux, `MNT_LOCAL` on macOS) or `GetDriveTypeW` on Windows (ROADMAP 2.3.10).
 - **Does a path still name the file a handle has open?** Compaction checks it before renaming over the container
-  (SPEC §4.5.1, §4.6), and the local store checks it after locking a temporary file (ADR-0018). Unix has
+  (SPEC §4.5.1, §4.6), and the local store checks it after locking a temporary file (ADR-0019). Unix has
   `(st_dev, st_ino)` in std; on Windows the volume serial number and file id are behind the unstable
   `windows_by_handle` feature (still unstable in Rust 1.99), so the check was reduced to "the path names something"
   (ADR-0016 decision 5, ROADMAP 2.4.18).

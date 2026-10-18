@@ -71,7 +71,8 @@ Five properties the design does not trade away:
 
 Goals (SPEC §1.1): embedded search with an optional server; BM25F plus filters, facets, and
 zero-results avoidance; the same segment bytes locally or in object storage; horizontal scale by
-shard; content-addressed blobs; Rust and Go SDKs; a power loss at any point leaves committed data intact.
+shard; content-addressed blobs; the embedded Rust API, embedded Go and TypeScript bindings (ADR-0018), and
+Rust and Go network clients; a power loss at any point leaves committed data intact.
 
 Out of scope for v1 (SPEC §1.2):
 
@@ -132,7 +133,8 @@ Everything in this section is **planned** unless a paragraph says a primitive is
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
-| Rust and Go SDKs | Planned (M14) | SPEC §13 |
+| Embedded Go and TypeScript bindings | Planned (after M10). Design: ADR-0018, `docs/sdk/`. | SPEC §13.1 |
+| Rust and Go network SDKs | Planned (M14) | SPEC §13.2 |
 | Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1, except 1.4.4) | SPEC §4.1, §5.2 |
 
 ### Search and ranking
@@ -293,7 +295,8 @@ path) and stays the place for that detail.
  ├─────────────────────────────────────────────────────────────┤
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
-      ▲ same engine embedded in:  persia-server (gRPC/HTTP) ◀── SDKs (Rust, Go)
+      ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (SPEC §13.2)
+      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
 ```
 
 Three rules shape the rest of the design:
@@ -471,7 +474,9 @@ the format is still unstable (ROADMAP 10.5.2).
 ## Server, cloud, and Kubernetes
 
 **Planned.** Nothing here is running. The server milestone (M11) starts after the embedded API.
-Cloud backends (M12) and distribution (M13) come after the server. SDKs (M14) follow the protocol.
+Cloud backends (M12) and distribution (M13) come after the server. Network SDKs (M14) follow the protocol.
+Embedded Go and TypeScript bindings are a separate design (ADR-0018, [`docs/sdk/`](./sdk/README.md)) and
+wait on the embedded API (M10), not on the server.
 
 ### Server
 
@@ -547,11 +552,17 @@ GCP, and Azure are part of that milestone (ROADMAP 13.5).
 
 ### SDKs
 
-Rust (`sdk/rust`, crate `persia-client`) and Go (`sdk/go`, module `persia-go`) sit on the same
-protocol (SPEC §13). Each adds connection pooling, retries with backoff on idempotent calls,
-deadlines, batching, blob streaming, and shard-aware writes. A shared, language-neutral conformance
-suite runs against both SDKs and the server (ROADMAP 14.1). A compatibility matrix is part of the
-SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after the protocol exists.
+Two families, neither implemented (SPEC §13).
+
+**Embedded bindings** sit in-process beside the Rust `Db` API: Go via cgo and TypeScript via N-API, both
+through a C ABI crate `persia-ffi` (ADR-0018, [`docs/sdk/`](./sdk/README.md)). They are blocked on the
+embedded API (M10). A browser/edge WASM build is a later package, not the first one.
+
+**Network clients** are Rust (`sdk/rust`, crate `persia-client`) and Go (`sdk/go`, module `persia-go`).
+They sit on the gRPC protocol (SPEC §13.2). Each adds connection pooling, retries with backoff on
+idempotent calls, deadlines, batching, blob streaming, and shard-aware writes. A shared, language-neutral
+conformance suite runs against both SDKs and the server (ROADMAP 14.1). A compatibility matrix is part of
+the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after the protocol exists.
 
 ## Roadmap
 
@@ -580,7 +591,7 @@ while a dependency is unfinished.
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/22 |
 | **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/28 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go clients | M11; M13 for shard routing | Blocked, 0/17 |
+| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/17 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
 
 Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan
@@ -695,7 +706,8 @@ behind a flag.
 
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation.
+automation. These are network clients. In-process Go and TypeScript bindings are ADR-0018 and
+[`docs/sdk/`](./sdk/README.md), blocked on M10, with no roadmap leaves yet.
 
 ### M15 — Benchmarks, hardening, v1.0
 

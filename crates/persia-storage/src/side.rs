@@ -40,7 +40,7 @@ pub enum InUse {
     /// A live writer holds its lock.
     Yes,
     /// Whether a writer uses it cannot be told: files cannot be locked here (Windows, SPEC §4.5.1), or a lock belongs to
-    /// the process rather than the handle (a network or FUSE file system, ADR-0018).
+    /// the process rather than the handle (a network or FUSE file system, ADR-0019).
     Unknown,
 }
 

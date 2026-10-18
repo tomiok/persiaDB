@@ -67,7 +67,7 @@ impl Container<File> {
         Ok(())
     }
 
-    /// Whether the container file is on a local disk file system (ADR-0020): Linux ext4, XFS, Btrfs and the other
+    /// Whether the container file is on a local disk file system (ADR-0021): Linux ext4, XFS, Btrfs and the other
     /// local types, macOS local volumes other than FUSE, Windows fixed and RAM disks. Network, FUSE and removable
     /// file systems, and those of other operating systems, are not.
     ///
@@ -99,7 +99,7 @@ impl Container<File> {
     ///
     /// # Errors
     /// [`Error::Io`] if the mapping fails; reads then go on as before the call. A file system that cannot be queried
-    /// (e.g. a Windows volume with no drive letter) counts as not local: `Ok(false)`, as ADR-0020 decides for every
+    /// (e.g. a Windows volume with no drive letter) counts as not local: `Ok(false)`, as ADR-0021 decides for every
     /// unknown answer.
     pub fn enable_mapped_reads_if_local(&mut self) -> Result<bool> {
         if !self.is_on_local_disk().unwrap_or(false) {

@@ -34,7 +34,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     ("persia", &["persia-engine", "persia-blob"]),
     ("persia-proto", &[]),
     ("persia-server", &["persia", "persia-proto"]),
-    // ADR-0019: the operator tool calls storage maintenance directly.
+    // ADR-0020: the operator tool calls storage maintenance directly.
     ("persia-cli", &["persia", "persia-storage"]),
     (TESTUTIL, &[]),
     (XTASK, &["persia-format"]),
@@ -51,7 +51,7 @@ const DEV_ONLY: &[&str] = &[
     "hdrhistogram",
 ];
 const TOOLING_ONLY: &[&str] = &["toml"];
-/// Raw OS bindings (ADR-0020): only `persia-storage`, whose `sys` module wraps them, may depend on them directly.
+/// Raw OS bindings (ADR-0021): only `persia-storage`, whose `sys` module wraps them, may depend on them directly.
 const SYS_ONLY: &[&str] = &["libc", "windows-sys"];
 const SYS_CRATE: &str = "persia-storage";
 
@@ -110,7 +110,7 @@ fn external_violation(
     } else if TOOLING_ONLY.contains(&target) && krate != XTASK {
         Some("tooling-only crate used outside xtask")
     } else if SYS_ONLY.contains(&target) && krate != SYS_CRATE {
-        Some("OS bindings used outside persia-storage (ADR-0020)")
+        Some("OS bindings used outside persia-storage (ADR-0021)")
     } else {
         None
     }
@@ -499,16 +499,16 @@ mod tests {
                 &ext
             ),
             [
-                "persia-engine -> windows-sys (normal): OS bindings used outside persia-storage (ADR-0020)"
+                "persia-engine -> windows-sys (normal): OS bindings used outside persia-storage (ADR-0021)"
             ]
         );
-        // Not even as a dev-dependency (ADR-0020).
+        // Not even as a dev-dependency (ADR-0021).
         assert_eq!(
             violations(
                 &metadata(&[("persia-engine", "libc", Some("dev"))], &[]),
                 &ext
             ),
-            ["persia-engine -> libc (dev): OS bindings used outside persia-storage (ADR-0020)"]
+            ["persia-engine -> libc (dev): OS bindings used outside persia-storage (ADR-0021)"]
         );
     }
 
