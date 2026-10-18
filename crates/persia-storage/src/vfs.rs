@@ -254,7 +254,7 @@ impl Vfs for RealFs {
         const FILE_READ_ATTRIBUTES: u32 = 0x80;
         // Attribute access only, which sharing modes do not restrict, as `std::fs::metadata` opens: no other handle, read
         // permission or directory can refuse it, and it is what the identity query needs.
-        let named = std::fs::OpenOptions::new()
+        let named = OpenOptions::new()
             .access_mode(FILE_READ_ATTRIBUTES)
             .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
             .open(path);
@@ -347,7 +347,7 @@ mod identity_tests {
         let file = File::open(&path).unwrap();
         assert!(!RealFs.same_file(&file, dir.path()).unwrap(), "a directory");
         drop(file);
-        let exclusive = std::fs::OpenOptions::new()
+        let exclusive = OpenOptions::new()
             .read(true)
             .write(true)
             .share_mode(0)
