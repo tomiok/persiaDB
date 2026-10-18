@@ -18,6 +18,9 @@ git clone https://github.com/tomiok/persiaDB.git && cd persiaDB
 cargo test --workspace
 ```
 
+Cloud-storage work needs Docker: `just dev-up` starts MinIO, fake-gcs-server and Azurite on localhost
+(`docker-compose.dev.yml`, images pinned by digest), and `just dev-down` stops them. Nothing else needs Docker.
+
 ## Before opening a PR
 
 ```bash

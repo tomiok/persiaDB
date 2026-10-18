@@ -1,5 +1,6 @@
-//! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming and
-//! `.gitignore`/`.gitattributes` behavior, verified through git itself rather than by parsing the files.
+//! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming,
+//! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files) and
+//! digest-pinned docker-compose images.
 
 #[cfg(test)]
 mod tests {
@@ -273,6 +274,67 @@ mod tests {
             offenders.is_empty(),
             "unsafe_code relaxed outside UNSAFE_ALLOWED: {offenders:#?}"
         );
+    }
+
+    // --- Dev environment (ROADMAP 2.5.1) ---
+
+    /// `name[:tag]@sha256:<64 lowercase hex>`: a tag alone can be moved or deleted upstream.
+    fn is_pinned(image: &str) -> bool {
+        image.split_once("@sha256:").is_some_and(|(name, digest)| {
+            !name.is_empty()
+                && digest.len() == 64
+                && digest
+                    .bytes()
+                    .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        })
+    }
+
+    #[test]
+    fn pin_check_rejects_tags_and_bad_digests() {
+        let digest = "0123456789abcdef".repeat(4);
+        assert!(is_pinned(&format!("a/b:1@sha256:{digest}")));
+        assert!(is_pinned(&format!("a/b@sha256:{digest}")));
+        assert!(!is_pinned("a/b:1"));
+        assert!(!is_pinned("a/b:latest"));
+        assert!(!is_pinned(&format!("@sha256:{digest}")));
+        assert!(!is_pinned(&format!("a/b:1@sha256:{}", "0".repeat(63))));
+        assert!(!is_pinned(&format!(
+            "a/b:1@sha256:{}",
+            digest.to_uppercase()
+        )));
+    }
+
+    #[test]
+    fn compose_images_are_pinned_by_digest() {
+        let listing = git(&["ls-files", "--cached", "--others", "--exclude-standard"]);
+        let files: Vec<String> = String::from_utf8(listing.stdout)
+            .unwrap()
+            .lines()
+            .filter(|f| {
+                let path = Path::new(f);
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+                stem.starts_with("docker-compose")
+                    && (ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
+            })
+            .map(str::to_owned)
+            .collect();
+        assert!(
+            files.iter().any(|f| f == "docker-compose.dev.yml"),
+            "{files:?}"
+        );
+        for file in files {
+            let text = std::fs::read_to_string(root().join(&file)).unwrap();
+            let images: Vec<&str> = text
+                .lines()
+                .filter_map(|l| l.trim().strip_prefix("image:"))
+                .map(|i| i.trim().trim_matches(['"', '\'']))
+                .collect();
+            assert_ne!(images.len(), 0, "{file}: no images");
+            for image in images {
+                assert!(is_pinned(image), "{file}: {image} is not pinned by digest");
+            }
+        }
     }
 
     #[test]

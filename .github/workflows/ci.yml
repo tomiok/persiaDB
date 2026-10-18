@@ -95,6 +95,13 @@ jobs:
         run: cargo xtask progress --check
       - name: Golden fixtures are up to date
         run: cargo xtask fixtures --check
+      - name: Dev compose file is valid and its pinned images resolve
+        # Manifests only, no layers: catches an image that was deleted upstream (as minio/minio was).
+        run: |
+          docker compose -f docker-compose.dev.yml config --quiet
+          for image in $(docker compose -f docker-compose.dev.yml config --images); do
+            docker buildx imagetools inspect "$image" > /dev/null
+          done
 
   miri:
     # ROADMAP 0.2.5: UB detection for persia-format, the only crate allowed to contain `unsafe`.

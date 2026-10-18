@@ -1,0 +1,40 @@
+# Cloud-storage emulators for local development and the M12 integration tests (ROADMAP 2.5.1, 12.2.4; SPEC §10, §15).
+# This is a skeleton: buckets, containers and the test harness that uses them land in M12.
+#
+#   just dev-up     # start the emulators in the background
+#   just dev-down   # stop them and drop their data (no volumes)
+#
+# Every image is pinned by the digest of its multi-arch index, so a pull is reproducible; the tag is only a readable
+# label. The `repo_checks` tests in xtask reject an unpinned image. To bump one, look up the new index digest
+# (`docker buildx imagetools inspect <image>:<tag>`) and change tag and digest together.
+#
+# Ports bind to 127.0.0.1 only. The credentials below are fixed, well-known development values, not secrets.
+
+name: persia-dev
+
+services:
+  # S3 API on :9000, web console on :9001. MinIO stopped publishing community images (minio/minio left Docker Hub
+  # in September 2026); pgsty/minio is a community-maintained build of the same server.
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z@sha256:b6bfe7239bfc83fb90d31612d9704d86039dd714f7904b3f1ad68f211e602372
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: persia
+      MINIO_ROOT_PASSWORD: persia-dev-password
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+
+  # GCS JSON API over plain HTTP on :4443; data lives in memory.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef
+    command: ["-scheme", "http", "-port", "4443", "-public-host", "localhost:4443", "-backend", "memory"]
+    ports:
+      - "127.0.0.1:4443:4443"
+
+  # Azure Blob API on :10000 with the built-in `devstoreaccount1` account; Persia uses no queues or tables.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.37.0@sha256:830430c1da1a2d537e08f3e6764dd1f5ae00cf0346bcaf625b968ec3f0971fd5
+    command: ["azurite-blob", "--blobHost", "0.0.0.0", "--blobPort", "10000", "--inMemoryPersistence"]
+    ports:
+      - "127.0.0.1:10000:10000"

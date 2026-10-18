@@ -220,7 +220,7 @@ Deps: M1.
 - [x] 2.4.21 Compaction coalesces the writes of small frames (found in 2.4.17 review: a streamed copy writes header, payload pieces and trailer separately, about three `pwrite`s per WAL frame where one used to do), with a compaction benchmark to justify it
 
 ## 2.5 Dev environment (moved from M0 0.3.2; needs Docker)
-- [ ] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
+- [x] 2.5.1 `docker-compose.dev.yml` skeleton (MinIO, fake-gcs-server, Azurite — filled in M12), pinned image digests
 
 ---
 
