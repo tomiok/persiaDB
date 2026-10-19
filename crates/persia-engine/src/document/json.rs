@@ -107,12 +107,18 @@ fn field_value(field: &Field, value: J) -> Result<Option<Value>, DocumentError> 
     Ok(Some(value))
 }
 
-/// An integer JSON number as an `i64`.
+/// An integer JSON number as an `i64`. `serde_json` reads `-0` and integers beyond `u64` or below `i64::MIN` as
+/// floats, so those are told apart from numbers written with a fraction or exponent by their value.
 fn integer(field: &str, n: &Number) -> Result<i64, DocumentError> {
     if let Some(v) = n.as_i64() {
         return Ok(v);
     }
-    if n.is_u64() {
+    let x = n.as_f64().unwrap_or(f64::NAN);
+    if x == 0.0 && x.is_sign_negative() {
+        return Ok(0);
+    }
+    // 2^63: an integral float this large is beyond i64 whichever way it was written.
+    if n.is_u64() || (x.fract() == 0.0 && x.abs() >= 9_223_372_036_854_775_808.0) {
         return Err(out_of_range(field, n, "-2^63..2^63"));
     }
     Err(DocumentError::WrongType {

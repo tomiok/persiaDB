@@ -710,7 +710,7 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
 | Field type | Value | JSON form |
 |---|---|---|
 | `text`, `keyword` | a string, or a list of strings (multi-valued) | a string, or an array of strings |
-| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent) |
+| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent; `-0` is 0) |
 | `f64` | a finite `f64`; `-0.0` is stored as `0.0` | any number (integers are converted to the nearest `f64`) |
 | `bool` | `true` or `false` | `true` or `false` |
 | `datetime` | microseconds since the Unix epoch, UTC, from `0000-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z` | an integer (microseconds) or an RFC 3339 string with a `Z` or `±hh:mm` offset and at most 6 fractional digits; written as RFC 3339 in UTC, `YYYY-MM-DDTHH:MM:SSZ` with `.ffffff` when the microseconds are not zero |

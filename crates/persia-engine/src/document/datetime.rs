@@ -54,7 +54,8 @@ const fn days_in_month(year: i64, month: i64) -> i64 {
     }
 }
 
-/// `YYYY-MM-DDTHH:MM:SS[.f{1,6}](Z|±hh:mm)` (RFC 3339 §5.6; `t` and `z` accepted too), in range.
+/// `YYYY-MM-DDTHH:MM:SS[.f{1,6}](Z|±hh:mm)` (RFC 3339 §5.6; `t` and `z` accepted too). The result may be outside
+/// the `datetime` range: validation reports that, as for the integer form.
 pub(super) fn parse(text: &str) -> Option<i64> {
     let mut p = Parser(text.as_bytes());
     let year = p.digits(4)?;
@@ -114,7 +115,7 @@ pub(super) fn parse(text: &str) -> Option<i64> {
         days_from_civil(year, month, day) * SECONDS_PER_DAY + hour * 3600 + minute * 60 + second
             - offset_minutes * 60;
     let micros = seconds * MICROS_PER_SECOND + micros;
-    in_range(micros).then_some(micros)
+    Some(micros)
 }
 
 /// The RFC 3339 UTC form SPEC §6.4.1 writes, or `None` outside the range.
@@ -188,8 +189,14 @@ mod tests {
         assert_eq!(format(MAX_DATETIME + 1), None);
         assert_eq!(parse("0000-01-01T00:00:00Z"), Some(MIN_DATETIME));
         assert_eq!(parse("9999-12-31T23:59:59.999999Z"), Some(MAX_DATETIME));
-        assert_eq!(parse("0000-01-01T00:00:00+00:01"), None);
-        assert_eq!(parse("9999-12-31T23:59:59-00:01"), None);
+        assert_eq!(
+            parse("0000-01-01T00:00:00+00:01"),
+            Some(MIN_DATETIME - 60_000_000)
+        );
+        assert_eq!(
+            parse("9999-12-31T23:59:59-00:01"),
+            Some(MAX_DATETIME + 1 + 59_000_000)
+        );
     }
 
     #[test]
