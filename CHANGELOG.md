@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: documents (`document::Document`, SPEC §6.4; ADR-0023). Values per field type (strings or lists of
+  strings for `text`/`keyword`, one value for numerics, `bool` and `datetime`, any JSON for `stored`), validation
+  against a schema with precise errors (field and list index), and limits (id, keyword length, field count, nesting,
+  size). JSON input rejects duplicate keys; `datetime` takes integer microseconds or RFC 3339 and is written as RFC
+  3339 UTC. Non-strict collections keep unknown keys as extra stored fields. `f64` values are finite and `-0.0` is
+  stored as `0.0`, so range filters never miss zero.
 - `persia-engine`: collection schemas (`schema::CollectionSchema`, SPEC §6.2; ADR-0022). Field types and per-type options
   (analyzer, boost, positions, `k1`, `b`, facet, stored), ranking (`static_rank`) and relaxation defaults, and synonyms.
   The JSON definition is parsed strictly: unknown or duplicate keys and options foreign to a field's type are errors.
@@ -90,6 +96,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
 ### Format
+- Document encoding for `DocStore` rows (SPEC §6.4.2; ADR-0023): a deterministic CBOR subset (definite lengths,
+  shortest arguments, 64-bit floats, sorted keys), `array(5)[version 1, id, blob reference, fields by id, extra
+  fields]`. Decoders reject anything non-canonical. Pinned by golden vectors.
 - Integer codecs for segment sections (SPEC §4.1, §5.2.1; ADR-0004): zigzag signed varints, delta coding of
   sorted docids, 128-value bit-packed blocks (SIMD-BP128 layout), postings full and tail blocks, and
   frame-of-reference blocks with order-preserving keys for numeric columns.

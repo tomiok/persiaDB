@@ -65,7 +65,17 @@ fn check_collection_name(name: &str) -> Result<(), SchemaError> {
 }
 
 fn check_field_name(name: &str) -> Result<(), SchemaError> {
-    let problem = name_problem(name).or_else(|| {
+    field_name_problem(name).map_or(Ok(()), |problem| {
+        Err(SchemaError::FieldName {
+            name: name.to_owned(),
+            problem,
+        })
+    })
+}
+
+/// What is wrong with field name `name`, if anything; documents' extra fields follow the same rule (SPEC §6.4.1).
+pub(crate) fn field_name_problem(name: &str) -> Option<NameProblem> {
+    name_problem(name).or_else(|| {
         if name.starts_with('_') || RESERVED_FIELDS.iter().any(|r| r.eq_ignore_ascii_case(name)) {
             return Some(NameProblem::Reserved);
         }
@@ -74,12 +84,6 @@ fn check_field_name(name: &str) -> Result<(), SchemaError> {
             && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_');
         (!ok).then_some(NameProblem::InvalidChars {
             pattern: FIELD_PATTERN,
-        })
-    });
-    problem.map_or(Ok(()), |problem| {
-        Err(SchemaError::FieldName {
-            name: name.to_owned(),
-            problem,
         })
     })
 }
