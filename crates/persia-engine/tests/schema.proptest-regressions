@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc bd80a5cf24f7823fb29788dc77c3a03028c7c68329d7f7faacc3ffdfd7003cb8 # shrinks to (_, builder) = ([("A", Datetime { stored: false })], SchemaBuilder { parts: Parts { name: "a", ranking: RankingConfig { static_rank: Some(StaticRank { field: "A", weight: 918.7852920452863, function: Log1p }) }, relaxation: RelaxationConfig { enabled: false, min_results: 1, levels: Default, fallback: StaticRank, fill: false, filters: Never, budget_ms: 1 }, synonyms: [], strict: false }, fields: [("A", Datetime { stored: false })] })

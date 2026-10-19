@@ -228,12 +228,12 @@ Deps: M1.
 Deps: M1. (Parallel with M2.)
 
 ## 3.1 Schema model (SPEC §6)
-- [ ] 3.1.1 Field types enum + per-field options (analyzer, boost, positions, k1, b, facet, stored)
+- [x] 3.1.1 Field types enum + per-field options (analyzer, boost, positions, k1, b, facet, stored)
 - 3.1.2 `CollectionSchema` with validation (names, reserved words, limits, boost ranges)
-  - [ ] 3.1.2.1 Schema JSON (de)serialization with strict unknown-key rejection
-  - [ ] 3.1.2.2 Canonical encoding + schema hash (stable across versions)
-- [ ] 3.1.3 Schema evolution rules: allow add field; reject type change/analyzer change; [T] table-driven tests
-- [ ] 3.1.4 Ranking config (`static_rank`) and relaxation config structs with defaults
+  - [x] 3.1.2.1 Schema JSON (de)serialization with strict unknown-key rejection
+  - [x] 3.1.2.2 Canonical encoding + schema hash (stable across versions)
+- [x] 3.1.3 Schema evolution rules: allow add field; reject type change/analyzer change; [T] table-driven tests
+- [x] 3.1.4 Ranking config (`static_rank`) and relaxation config structs with defaults
 
 ## 3.2 Document model
 - [ ] 3.2.1 `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1)
@@ -282,7 +282,7 @@ Deps: M0. (Parallel with M2/M3.)
 ## 4.4 Analyzer pipelines
 - [ ] 4.4.1 `Analyzer` = char filters → tokenizer → token filters; builder + registry by name+version
 - [ ] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`
-- [ ] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3)
+- [ ] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3); the schema remembers whether a definition named a version, so evolution binds an unversioned `analyzer` to the current field's version (SPEC §6.2.4)
 - [ ] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
 - [ ] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
 
@@ -309,12 +309,12 @@ Deps: M1, M3, M4. The heart of the index format.
 - [ ] 5.2.4 Norms writer (1-byte quantization table; document quantization error bounds)
 - [ ] 5.2.5 Columns writer (dictionary-encoded keyword, FOR numeric, roaring sparse)
 - [ ] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden container fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011)
-- [ ] 5.2.7 Segment footer writer: stats, section table, schema hash, CRC; trailing locator (SPEC §5.1)
+- [ ] 5.2.7 Segment footer writer: stats, section table, schema hash (with its `encoding_version` and field count, SPEC §6.2.5), CRC; trailing locator (SPEC §5.1)
 - [ ] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
 - [ ] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
 
 ## 5.3 Segment reader
-- [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash and version
+- [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version
 - [ ] 5.3.2 Term lookup: FST get + term-info decode
 - 5.3.3 Postings iterator
   - [ ] 5.3.3.1 Sequential `next()` over blocks

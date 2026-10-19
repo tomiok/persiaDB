@@ -179,7 +179,8 @@ fn side_files_lists_temporaries_and_quarantines_and_removes_nothing() {
             } else {
                 SideFileKind::Temporary
             };
-            let in_use = if n.ends_with(".7") {
+            // By name, not by the `.7` suffix: the counter is per process, so a stale file can end in `.7` too.
+            let in_use = if live.file_name().is_some_and(|l| l == n.as_str()) {
                 InUse::Yes
             } else {
                 InUse::No

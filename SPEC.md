@@ -409,7 +409,8 @@ or as an independent object (remote). Segments belong to exactly one collection 
 ```
 Sections are block-oriented (SPEC §5.2). The footer (last 4096 bytes max, located by a trailing
 `footer_len u32 + magic`) contains:
-- segment_id (u128), collection schema hash, format version, doc count
+- segment_id (u128), collection schema hash with its `encoding_version` and the field count it covers (§6.2.5),
+  format version, doc count
   (no deleted count: deletions live outside the segment, SPEC §8.3)
 - per-field statistics: `sum_field_len`, `docs_with_field`
 - section table: `{section_kind, field_id, offset, len}` (no codec: each block names its own, SPEC §5.2)
@@ -597,14 +598,109 @@ Every document additionally has: `id` (string, ≤ 512 bytes, unique per collect
   "synonyms": [["tv","television"]]
 }
 ```
-- Schema is **declared at creation**. Adding fields is allowed (existing docs read as missing); changing a field type is NOT.
-- Schema hash is recorded in every segment; the manifest holds the current schema.
+- Schema is **declared at creation**. Adding fields is allowed (existing docs read as missing); changing a field type is NOT
+  (§6.2.4).
+- Schema hash is recorded in every segment; the manifest holds the current schema (§6.2.5).
+
+#### 6.2.1 Keys, names and limits
+The definition is parsed **strictly**: an unknown key at any level, a duplicate key, or an option that does not apply to
+the field's type is an error, never ignored (ADR-0022). Every level is a JSON object: the positional array form serde would
+otherwise accept is rejected. A definition is at most 4 MiB of JSON.
+
+| Key | Required | Default | Rule |
+|---|---|---|---|
+| `name` | yes | | 1–64 bytes, `[a-z][a-z0-9_-]*` (it appears in storage keys, §10.1) |
+| `fields` | yes | | object, at most **1024** fields |
+| `ranking` | no | no static rank | §6.2.3 |
+| `relaxation` | no | all defaults | §6.2.3 |
+| `synonyms` | no | `[]` | at most 10 000 groups; a group has 2–64 distinct terms; a term is 1–256 bytes, not only Unicode `White_Space`, without control characters; at most 1 MiB of terms in total. Stored as given; analyzed by the L1 level (§7.6) |
+| `strict` | no | `true` | unknown document fields rejected (`true`) or kept as `stored` (`false`), §6.4 |
+
+Field names are 1–64 bytes, `[A-Za-z][A-Za-z0-9_]*`. Names starting with `_` are reserved for the engine, and so are `id`
+and `blob` in any letter case (every document has them, §6.1).
+
+Every field has a **field id** (`u32`), the number segments use for it. A definition gives either no `id` (the engine
+assigns `0..n` in ascending byte order of the names, so the order of keys in the JSON never matters) or an `id` on every
+field, which must then be exactly `0..n`. The engine writes the ids when it serializes a schema.
+
+#### 6.2.2 Field options
+| Type | Options (default; valid range) |
+|---|---|
+| `text` | `analyzer` (`"standard"`), `boost` (`1.0`; `0 < boost ≤ 1000`), `positions` (`false`), `k1` (`1.2`; `0 ≤ k1 ≤ 10`), `b` (`0.75`; `0 ≤ b ≤ 1`), `stored` (`true`) |
+| `keyword` | `facet` (`false`), `stored` (`true`) |
+| `i64`, `f64`, `bool`, `datetime` | `stored` (`true`) |
+| `stored` | none (always stored, never indexed) |
+
+`stored: false` keeps the value out of the `DocStore` (it is indexed but `get` does not return it). Floats must be finite;
+`-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3) as `"name"` (its current version) or `"name@version"`;
+the engine writes `"name@version"`, so a stored schema pins the version it was indexed with.
+
+#### 6.2.3 Ranking and relaxation
+`ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
+`0 ≤ weight ≤ 1000`), `fn` (`"log1p"` or `"linear"`, default `"log1p"`). The scorer adds `weight · fn(v)` (§7.2), where `v` is the field's value as
+a float (`datetime`: microseconds since the epoch, as stored). Both functions see only `max(v, 0)`: `log1p(v)` is
+`ln(1 + max(v, 0))` and `linear(v)` is `max(v, 0)`. A document without the field, or whose value is not finite,
+contributes 0, and a product above `f64::MAX` saturates at `f64::MAX`, so the contribution is always finite and never
+negative.
+
+`relaxation` holds the collection defaults of the cascade (§7.6); a query's `relax` overrides them:
+
+| Key | Default | Rule |
+|---|---|---|
+| `enabled` | `true` | `false` runs L0 only |
+| `min_results` | `1` | `1–10 000` |
+| `levels` | `"default"` | `"default"` (every level after L0, as the engine defines them) or an array of `"synonyms"`, `"drop_terms"`, `"prefix"`, `"fuzzy"`: distinct, in cascade order. L0 always runs and is not listed; L5 is `fallback`. `[]` runs L0, then the fallback |
+| `fallback` | `"static_rank"` | `"static_rank"` or `"none"`; without `ranking.static_rank`, `static_rank` returns the most recently indexed documents |
+| `fill` | `false` | §7.6 |
+| `filters` | `"never"` | `"never"` or `"last_resort"` |
+| `budget_ms` | `50` | `1–60 000` |
+
+#### 6.2.4 Evolution
+A new definition replaces the current schema when, matching fields **by name**:
+- the collection `name` is the same;
+- every current field is still present (fields are never removed in v1) with the same `type`, `analyzer` (name and
+  version), `positions`, `facet` and `stored`: these shape what is indexed, so changing them needs a reindex into a new
+  collection (§6.3);
+- added fields are allowed: they get the next ids in ascending byte order of their names, and documents indexed earlier
+  read as missing them. Ids in the new definition are ignored (they are internal): existing fields keep theirs.
+- *Planned, not yet in effect (ROADMAP 4.4.3):* an `analyzer` given without a version will bind to the current field's
+  version, so re-applying an unchanged definition after a release adds a newer analyzer version is not a change; an
+  explicit different version still is. Until then every built-in analyzer has only version 1, so an unversioned
+  `analyzer` and the field's version always agree.
+
+`boost`, `k1`, `b`, `ranking`, `relaxation`, `synonyms` and `strict` may change freely: they act at query or write time.
+
+#### 6.2.5 Canonical encoding and schema hash
+The **schema hash** identifies what a segment was indexed with: XXH3-128 (§4.1's fixed variant) of the canonical
+encoding of the collection's *index definition*: its name and, per field, everything §6.2.4 forbids changing. Query-time
+settings (`boost`, `k1`, `b`, `ranking`, `relaxation`, `synonyms`, `strict`) are not covered, so tuning them keeps the hash.
+```
+u8      encoding_version = 1
+str     collection name                  (str = varint u32 byte length + UTF-8 bytes)
+varint  field_count
+per field, in ascending field id (ids are 0..n, so the id is the position):
+  str     name
+  u8      type        1 text · 2 keyword · 3 i64 · 4 f64 · 5 bool · 6 datetime · 7 stored
+  varint  option_count
+  per option, in ascending tag:  u8 tag, value
+          1 analyzer   str name, varint u32 version    (text)
+          2 positions  u8 0|1                          (text)
+          3 facet      u8 0|1                          (keyword)
+          4 stored     u8 0|1                          (every type but stored)
+```
+Varints are §4.1's LEB128. Every encoding-version-1 option of the field's type is written, defaults included. The encoding is frozen: a
+later option gets a new tag and is written only when its value differs from the behavior before the option existed, so an
+older schema keeps its hash; anything else is a new `encoding_version`. Golden vectors pin the hash (ADR-0022).
+A segment records the hash, its `encoding_version` and the number of fields it was indexed with (§5.1). Evolution only
+appends fields and never changes what the hash covers (§6.2.4), so the hash of any earlier version is the current
+schema's hash over its first `field_count` fields: a reader verifies an old segment against the current schema alone.
+Readers keep the encoder of every `encoding_version` they accept.
 
 ### 6.3 Analyzers
 Pipeline: `char_filter* → tokenizer → token_filter*`.
 Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding).
-Analyzer name+version is recorded in the schema; changing an analyzer requires reindex (new collection version).
+Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
 
 ### 6.4 Document encoding
 Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore`.
