@@ -2,8 +2,11 @@
 
 [![CI](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml/badge.svg)](https://github.com/tomiok/persiaDB/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
+[![Documentation](https://img.shields.io/badge/docs-persiaDB-0c5c6b)](https://tomiok.github.io/persiaDB/)
 
 **An embedded, single-file, cloud-native search database, written in Rust. Think "SQLite for search".**
+
+**Documentation:** https://tomiok.github.io/persiaDB/
 
 Open a file, index documents, and get ranked results that, by default, never come back empty.
 The same on-disk format can be served from object storage (S3 / GCS / Azure) and scaled out on Kubernetes.
@@ -42,6 +45,7 @@ let results = products.search("runing")?;
 
 | Document | What it is |
 |---|---|
+| [Documentation](https://tomiok.github.io/persiaDB/) | Project site: guides, status, and the intended API |
 | [`docs/guide.md`](./docs/guide.md) | User-facing guide (source for the project website): concepts, planned features, milestone status |
 | [`website/`](./website/) | Project website (Astro Starlight), deployed to GitHub Pages |
 | [Getting started](https://tomiok.github.io/persiaDB/guide/getting-started/) | What you can call today, and the intended API (illustrative where it is not implemented) |

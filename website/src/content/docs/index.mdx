@@ -1,6 +1,15 @@
 ---
 title: Persia DB
 description: An embedded, single-file, cloud-native search database, written in Rust. Pre-alpha. Think SQLite for search.
+# The visible heading stays "Persia DB". This replaces Starlight's "<title> | Persia DB",
+# which would otherwise render as "Persia DB | Persia DB".
+head:
+  - tag: title
+    content: Persia DB – embedded search database for Rust
+  - tag: meta
+    attrs:
+      property: og:title
+      content: Persia DB – embedded search database for Rust
 ---
 
 import ArchitectureDiagram from '../../components/ArchitectureDiagram.astro';

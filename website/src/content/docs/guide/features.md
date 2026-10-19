@@ -1,6 +1,6 @@
 ---
-title: "Features"
-description: "Search, zero-results relaxation, schema, durability, and blobs. Each one is marked planned or done."
+title: "Feature reference"
+description: "Reference for Persia DB search, BM25F ranking, the zero-results cascade, schema, durability, and blobs. Each item is planned or done."
 ---
 
 Everything in this section is **planned** unless a paragraph says a primitive is already in

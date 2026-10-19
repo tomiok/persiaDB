@@ -1,6 +1,6 @@
 ---
 title: "Server, cloud, and Kubernetes"
-description: "The planned gRPC and HTTP server, object storage, sharding, and SDKs."
+description: "The planned Persia DB gRPC and HTTP server, S3, GCS, and Azure Blob storage, Kubernetes sharding, and the Rust and Go network SDKs."
 ---
 
 **Planned.** Nothing here is running. The server milestone (M11) starts after the embedded API.
