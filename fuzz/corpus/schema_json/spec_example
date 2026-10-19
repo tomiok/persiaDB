@@ -1,0 +1,13 @@
+{
+  "name": "products",
+  "fields": {
+    "title": { "type": "text", "analyzer": "es", "boost": 3.0, "positions": true, "k1": 1.2, "b": 0.75 },
+    "body":  { "type": "text", "analyzer": "es", "boost": 1.0 },
+    "brand": { "type": "keyword", "facet": true },
+    "price": { "type": "f64" },
+    "sales": { "type": "i64" }
+  },
+  "ranking": { "static_rank": { "field": "sales", "weight": 0.1, "fn": "log1p" } },
+  "relaxation": { "enabled": true, "min_results": 1, "levels": "default", "fallback": "static_rank" },
+  "synonyms": [["tv","television"]]
+}

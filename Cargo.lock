@@ -557,6 +557,10 @@ dependencies = [
  "persia-analysis",
  "persia-format",
  "persia-storage",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror",
 ]
 
 [[package]]

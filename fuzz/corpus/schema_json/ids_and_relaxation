@@ -1,0 +1,1 @@
+{"name":"a","fields":{"t":{"type":"text","id":0,"analyzer":"en@1"},"k":{"type":"keyword","id":1,"facet":true}},"relaxation":{"levels":["prefix","fuzzy"],"filters":"last_resort"},"strict":false}

@@ -228,12 +228,12 @@ Deps: M1.
 Deps: M1. (Parallel with M2.)
 
 ## 3.1 Schema model (SPEC §6)
-- [ ] 3.1.1 Field types enum + per-field options (analyzer, boost, positions, k1, b, facet, stored)
+- [~] 3.1.1 Field types enum + per-field options (analyzer, boost, positions, k1, b, facet, stored)
 - 3.1.2 `CollectionSchema` with validation (names, reserved words, limits, boost ranges)
-  - [ ] 3.1.2.1 Schema JSON (de)serialization with strict unknown-key rejection
-  - [ ] 3.1.2.2 Canonical encoding + schema hash (stable across versions)
-- [ ] 3.1.3 Schema evolution rules: allow add field; reject type change/analyzer change; [T] table-driven tests
-- [ ] 3.1.4 Ranking config (`static_rank`) and relaxation config structs with defaults
+  - [~] 3.1.2.1 Schema JSON (de)serialization with strict unknown-key rejection
+  - [~] 3.1.2.2 Canonical encoding + schema hash (stable across versions)
+- [~] 3.1.3 Schema evolution rules: allow add field; reject type change/analyzer change; [T] table-driven tests
+- [~] 3.1.4 Ranking config (`static_rank`) and relaxation config structs with defaults
 
 ## 3.2 Document model
 - [ ] 3.2.1 `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1)
@@ -248,6 +248,7 @@ Deps: M1. (Parallel with M2.)
 - [ ] 3.3.2 Manifest encode/decode (versioned) + hash
 - [ ] 3.3.3 Manifest diff/apply helpers for commit planning
 - [ ] 3.3.4 [T] golden manifest fixtures; fuzz decode
+- [ ] 3.3.5 Keep the hashes of earlier schema versions that live segments still carry, so a segment indexed before a field was added still verifies (SPEC §6.2.5)
 
 ---
 
