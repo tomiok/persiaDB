@@ -37,10 +37,10 @@ impl StaticRank {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum RankFn {
-    /// `ln(1 + value)`: diminishing returns, the default.
+    /// `ln(1 + max(value, 0))`: diminishing returns, the default (SPEC §6.2.3).
     #[default]
     Log1p,
-    /// The value itself.
+    /// `max(value, 0)`.
     Linear,
 }
 

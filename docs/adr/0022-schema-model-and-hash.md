@@ -19,8 +19,9 @@ is persisted in every segment, so it must not drift across releases, dependency 
    silently create a field without positions. Every level must be a JSON object: derived serde visitors also accept
    an array read by position, which would bypass key names, so an object-only adapter wraps each struct. Ranges and
    limits are in SPEC §6.2.1–§6.2.3; the whole definition is at most 4 MiB and synonyms at most 1 MiB, which bounds
-   what parsing allocates. Duplicate keys are caught while reading text (`from_json`); a `serde_json::Value` has
-   already merged them, so callers parse from text.
+   what parsing allocates. Both checks need the text: `from_json` is the entry point for untrusted input, and the serde
+   `Deserialize` impl (no size bound; a `serde_json::Value` has already merged duplicate keys) is for trusted,
+   already-bounded sources such as the manifest.
 2. **Two layers in code.** serde types mirror the JSON (`deny_unknown_fields`); `CollectionSchema` is built from them by
    validation and has private fields, so every value of the type is valid. Serializing writes every option explicitly
    (`"analyzer": "es@1"`, defaults included), so a stored schema means the same thing to a later release whose
@@ -28,11 +29,12 @@ is persisted in every segment, so it must not drift across releases, dependency 
    schema read back would differ from the one written (the hash covers no floats; equality does).
 3. **Field ids** are assigned from the names (ascending byte order) when the definition has none, so the same
    definition always gets the same ids. Evolution matches fields by name: existing fields keep their ids, added
-   fields take the next ones. Fields are never removed in v1, so ids stay dense (`0..n`), and the id is the position.
+   fields take the next ones in ascending byte order of their names. Fields are never removed in v1, so ids stay dense (`0..n`), and the id is the position.
 4. **Evolution** accepts adding fields and changing query-time settings; it rejects anything that changes what is
    indexed (type, analyzer name or version, positions, facet, stored) or the collection name (SPEC §6.2.4).
 5. **Hash = XXH3-128 over a hand-written canonical encoding** of the index definition only (SPEC §6.2.5): version
-   byte, name, then per field its name, type tag and tagged options in ascending tag order. Query-time settings are
+   byte, name, the `field_count` varint, then per field in ascending field id its name, type tag and tagged options
+   in ascending tag order. Query-time settings are
    left out, so tuning boosts or relaxation does not make old segments look foreign. The encoding is encode-only
    (nothing parses it), and golden vectors in the tests pin both bytes and hash.
 6. **Extending without changing old hashes.** A new option gets a new tag and is written only when its value differs

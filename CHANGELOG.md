@@ -12,7 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: collection schemas (`schema::CollectionSchema`, SPEC §6.2; ADR-0022). Field types and per-type options
   (analyzer, boost, positions, `k1`, `b`, facet, stored), ranking (`static_rank`) and relaxation defaults, and synonyms.
   The JSON definition is parsed strictly: unknown or duplicate keys and options foreign to a field's type are errors.
-  Names, limits and ranges are validated. Field ids are assigned from the names. A schema hash (XXH3-128 of a canonical
+  Names, limits and ranges are validated. A definition may give explicit field ids; missing ones are assigned in byte
+  order of the field names, and evolution keeps existing ids and gives added fields the next ones. A schema hash (XXH3-128 of a canonical
   encoding of what is indexed) ignores query-time settings. Evolution accepts added fields and rejects changes to a
   field's type, analyzer, positions, facet or stored flag.
 - Website: homepage title no longer repeats the site name; share image, JSON-LD, edit links, and last-updated dates; distinct titles for the feature, roadmap, and architecture pairs; longer meta descriptions.

@@ -638,8 +638,10 @@ the engine writes `"name@version"`, so a stored schema pins the version it was i
 #### 6.2.3 Ranking and relaxation
 `ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
 `0 ≤ weight ≤ 1000`), `fn` (`"log1p"` or `"linear"`, default `"log1p"`). The scorer adds `weight · fn(v)` (§7.2), where `v` is the field's value as
-a float (`datetime`: microseconds since the epoch, as stored); `log1p(v)` is `ln(1 + max(v, 0))`. A document without the
-field, or whose value is not finite, contributes 0, so the contribution is always finite and never negative.
+a float (`datetime`: microseconds since the epoch, as stored). Both functions see only `max(v, 0)`: `log1p(v)` is
+`ln(1 + max(v, 0))` and `linear(v)` is `max(v, 0)`. A document without the field, or whose value is not finite,
+contributes 0, and a product above `f64::MAX` saturates at `f64::MAX`, so the contribution is always finite and never
+negative.
 
 `relaxation` holds the collection defaults of the cascade (§7.6); a query's `relax` overrides them:
 
@@ -661,8 +663,10 @@ A new definition replaces the current schema when, matching fields **by name**:
   collection (§6.3);
 - added fields are allowed: they get the next ids in ascending byte order of their names, and documents indexed earlier
   read as missing them. Ids in the new definition are ignored (they are internal): existing fields keep theirs.
-- an `analyzer` given without a version binds to the current field's version, so re-applying an unchanged definition
-  after a release adds a newer analyzer version is not a change (ROADMAP 4.4.3); an explicit different version is.
+- *Planned, not yet in effect (ROADMAP 4.4.3):* an `analyzer` given without a version will bind to the current field's
+  version, so re-applying an unchanged definition after a release adds a newer analyzer version is not a change; an
+  explicit different version still is. Until then every built-in analyzer has only version 1, so an unversioned
+  `analyzer` and the field's version always agree.
 
 `boost`, `k1`, `b`, `ranking`, `relaxation`, `synonyms` and `strict` may change freely: they act at query or write time.
 

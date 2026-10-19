@@ -118,7 +118,9 @@ pub struct CollectionSchema {
 impl CollectionSchema {
     /// Parses and validates a JSON collection definition (SPEC §6.2), rejecting unknown and duplicate keys.
     ///
-    /// Prefer this to `serde_json::from_value`: a `serde_json::Value` has already merged duplicate keys.
+    /// The entry point for untrusted input: it rejects text over [`MAX_SCHEMA_JSON_LEN`] before parsing. The serde
+    /// `Deserialize` impl is for trusted, already-bounded sources: it cannot see the input size, and a
+    /// `serde_json::Value` has already merged duplicate keys.
     ///
     /// # Errors
     /// [`SchemaError::Json`] for malformed or non-conforming JSON, another variant for a rule of SPEC §6.2.1–§6.2.3.

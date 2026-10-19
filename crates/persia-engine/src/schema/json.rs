@@ -39,6 +39,9 @@ impl Serialize for CollectionSchema {
     }
 }
 
+/// For trusted, already-bounded input such as a checksummed manifest (ROADMAP 3.3). A `Deserializer` cannot see the
+/// input's size, so this path does not apply [`MAX_SCHEMA_JSON_LEN`], and a `serde_json::Value`
+/// has already merged duplicate keys: untrusted text goes through [`CollectionSchema::from_json`].
 impl<'de> Deserialize<'de> for CollectionSchema {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         from_raw(Object::<RawSchema>::deserialize(deserializer)?.0).map_err(de::Error::custom)
