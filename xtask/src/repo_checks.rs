@@ -314,7 +314,7 @@ mod tests {
                 let path = Path::new(f);
                 let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                stem.starts_with("docker-compose")
+                (stem.starts_with("docker-compose") || stem.starts_with("compose"))
                     && (ext.eq_ignore_ascii_case("yml") || ext.eq_ignore_ascii_case("yaml"))
             })
             .map(str::to_owned)
@@ -328,7 +328,10 @@ mod tests {
             let images: Vec<&str> = text
                 .lines()
                 .filter_map(|l| l.trim().strip_prefix("image:"))
-                .map(|i| i.trim().trim_matches(['"', '\'']))
+                .map(|i| {
+                    let value = i.split_once(" #").map_or(i, |(v, _)| v);
+                    value.trim().trim_matches(['"', '\''])
+                })
                 .collect();
             assert_ne!(images.len(), 0, "{file}: no images");
             for image in images {

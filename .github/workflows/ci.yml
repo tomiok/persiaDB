@@ -99,7 +99,10 @@ jobs:
         # Manifests only, no layers: catches an image that was deleted upstream (as minio/minio was).
         run: |
           docker compose -f docker-compose.dev.yml config --quiet
-          for image in $(docker compose -f docker-compose.dev.yml config --images); do
+          # A failing substitution in a `for` list would not trip `-e`, so the loop could check nothing.
+          images=$(docker compose -f docker-compose.dev.yml config --images)
+          test -n "$images"
+          for image in $images; do
             docker buildx imagetools inspect "$image" > /dev/null
           done
 

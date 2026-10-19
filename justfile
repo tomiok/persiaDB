@@ -80,4 +80,4 @@ dev-up:
 
 # Stop the emulators and drop their data
 dev-down:
-    docker compose -f docker-compose.dev.yml down
+    docker compose -f docker-compose.dev.yml down --volumes
