@@ -42,6 +42,8 @@ pub const MAX_KEYWORD_LEN: usize = 32 << 10;
 pub const MAX_DOCUMENT_FIELDS: usize = 1024;
 /// Deepest nesting of arrays and objects in a `stored` value (SPEC §6.4.1).
 pub const MAX_STORED_DEPTH: usize = 64;
+/// Most values a document holds: field values, list elements and the values inside stored values (SPEC §6.4.1).
+pub const MAX_DOCUMENT_VALUES: usize = 1 << 20;
 /// Longest JSON text [`Document::from_json`] reads, in bytes (SPEC §6.4.1).
 pub const MAX_DOCUMENT_JSON_LEN: usize = 16 << 20;
 /// Longest binary encoding of a whole document, in bytes (SPEC §6.4.1).
@@ -197,11 +199,8 @@ impl Document {
         schema: &CollectionSchema,
         fields: FieldSet,
     ) -> Result<Vec<u8>, DocumentError> {
-        let all = validate::validate_and_encode(self, schema)?;
-        Ok(match fields {
-            FieldSet::All => all,
-            FieldSet::Stored => codec::encode(self, schema, fields),
-        })
+        self.validate(schema)?;
+        Ok(codec::encode(self, schema, fields))
     }
 
     /// Decodes a document encoded by [`Self::encode`] for `schema` or an earlier version of it (SPEC §6.4.2).
@@ -227,7 +226,8 @@ impl Document {
     ///
     /// # Errors
     /// [`DocumentError::UnknownFieldId`] if a field is not in `schema`, [`DocumentError::WrongType`] if a value
-    /// does not have its field's type.
+    /// does not have its field's type, [`DocumentError::OutOfRange`] for a non-finite float or a datetime out of range,
+    /// [`DocumentError::TooDeep`] for a stored value nested too deep.
     pub fn to_json(&self, schema: &CollectionSchema) -> Result<String, DocumentError> {
         json::to_json(self, schema)
     }
@@ -324,6 +324,12 @@ pub enum DocumentError {
         /// The field.
         field: String,
     },
+    /// More than [`MAX_DOCUMENT_VALUES`] values.
+    #[error("{count} values, at most {MAX_DOCUMENT_VALUES}")]
+    TooManyValues {
+        /// How many the document has, or a lower bound of it.
+        count: usize,
+    },
     /// More than [`MAX_DOCUMENT_FIELDS`] fields.
     #[error("{count} fields, at most {MAX_DOCUMENT_FIELDS}")]
     TooManyFields {
@@ -333,7 +339,7 @@ pub enum DocumentError {
     /// An encoding longer than [`MAX_DOCUMENT_LEN`] bytes.
     #[error("document encodes to {len} bytes, at most {MAX_DOCUMENT_LEN}")]
     TooLarge {
-        /// The encoded length, or a lower bound of it.
+        /// The encoded length.
         len: usize,
     },
     /// An invalid `blob` reference in JSON.

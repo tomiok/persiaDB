@@ -416,8 +416,7 @@ fn i64_fields_take_exactly_the_integers_in_range() {
 fn i64_fields_take_json_negative_zero() {
     let schema = all_types(true);
     let c = id(&schema, "c");
-    // BUG: `-0` reaches the visitor as the float -0.0 (serde_json without `arbitrary_precision`), so it is
-    // rejected as "a number with a fraction or exponent".
+    // serde_json reads `-0` as the float -0.0; the parser still takes it as the integer 0.
     let doc = parse(&schema, r#"{"id": "1", "c": -0, "f": -0}"#);
     assert_eq!(
         doc.as_ref().ok().and_then(|d| d.get(c)),
@@ -430,8 +429,7 @@ fn i64_fields_take_json_negative_zero() {
 #[test]
 fn i64_fields_reject_huge_integers_as_out_of_range() {
     let schema = all_types(true);
-    // BUG: integers below -2^63 or above 2^64-1 reach the visitor as floats and get WrongType with a misleading
-    // "fraction or exponent" instead of OutOfRange.
+    // serde_json reads integers beyond u64 and below i64 as floats; they are still out of range, not fractions.
     for text in [
         "9223372036854775808",
         "-9223372036854775809",

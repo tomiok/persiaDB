@@ -236,12 +236,12 @@ Deps: M1. (Parallel with M2.)
 - [x] 3.1.4 Ranking config (`static_rank`) and relaxation config structs with defaults
 
 ## 3.2 Document model
-- [~] 3.2.1 `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1)
-- [~] 3.2.2 Validation against schema (types, multi-valued fields, limits: doc size, field count, id length)
-- [~] 3.2.6 `f64` field values: decide and spec whether `-0.0`/NaN are canonicalized (or rejected) on write, so range filters on order-preserving keys (SPEC §5.2.1) never silently exclude values
-- [~] 3.2.3 CBOR encode/decode for DocStore; deterministic field order
-- [~] 3.2.4 JSON ↔ Document conversion (strict/non-strict mode, SPEC §6.4)
-- [~] 3.2.5 [T] property: random schema + random valid docs round-trip; invalid docs rejected with precise errors
+- [x] 3.2.1 `Document { id, fields: Map<FieldId, Value>, blob_ref? }` and `Value` enum (`blob_ref` uses `persia_format::BlobRef`, 1.10.1)
+- [x] 3.2.2 Validation against schema (types, multi-valued fields, limits: doc size, field count, id length)
+- [x] 3.2.6 `f64` field values: decide and spec whether `-0.0`/NaN are canonicalized (or rejected) on write, so range filters on order-preserving keys (SPEC §5.2.1) never silently exclude values
+- [x] 3.2.3 CBOR encode/decode for DocStore; deterministic field order
+- [x] 3.2.4 JSON ↔ Document conversion (strict/non-strict mode, SPEC §6.4)
+- [x] 3.2.5 [T] property: random schema + random valid docs round-trip; invalid docs rejected with precise errors
 
 ## 3.3 Manifest model
 - [ ] 3.3.1 `Manifest { seq, fence_token, collections: {name → {schema, segments[], tombstone_versions}}, wal_start }`

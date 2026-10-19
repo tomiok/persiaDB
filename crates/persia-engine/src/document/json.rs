@@ -8,7 +8,7 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Number, Value as J};
 
-use super::validate::{expected, out_of_range};
+use super::validate::{expected, json_values, out_of_range};
 use super::{Document, DocumentError, MAX_DOCUMENT_JSON_LEN, Value, datetime};
 use crate::schema::{CollectionSchema, Field, FieldType, field_name_problem};
 
@@ -204,7 +204,7 @@ pub(super) fn to_json(doc: &Document, schema: &CollectionSchema) -> Result<Strin
         if schema.field(name).and_then(|f| doc.get(f.id())).is_some() {
             return Err(DocumentError::ExtraIsSchemaField { name: name.clone() });
         }
-        entries.push((name, value.clone()));
+        entries.push((name, shallow(name, value)?.clone()));
     }
     entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
     // Written by hand: the order (id, blob, then names) must not depend on serde_json's map type.
@@ -240,7 +240,7 @@ fn value_to_json(field: &Field, value: &Value) -> Result<J, DocumentError> {
         (FieldType::Datetime, Value::Datetime(v)) => {
             J::String(datetime::format(*v).ok_or_else(|| out_of_range(name, v, datetime::RANGE))?)
         }
-        (FieldType::Stored, Value::Json(v)) => v.clone(),
+        (FieldType::Stored, Value::Json(v)) => shallow(name, v)?.clone(),
         _ => {
             return Err(DocumentError::WrongType {
                 field: name.to_owned(),
@@ -322,4 +322,13 @@ impl<'de> Visitor<'de> for StrictVisitor {
         }
         Ok(J::Object(map))
     }
+}
+
+/// `value` if it nests at most [`super::MAX_STORED_DEPTH`] levels: writing deeper JSON would recurse without bound.
+fn shallow<'a>(field: &str, value: &'a J) -> Result<&'a J, DocumentError> {
+    json_values(value, 0)
+        .map(|_| value)
+        .ok_or_else(|| DocumentError::TooDeep {
+            field: field.to_owned(),
+        })
 }

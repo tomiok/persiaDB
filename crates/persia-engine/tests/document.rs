@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 
 use persia_engine::document::{
     DecodeError, Document, DocumentCorruption, DocumentError, FieldSet, MAX_DATETIME,
-    MAX_DOCUMENT_FIELDS, MAX_DOCUMENT_JSON_LEN, MAX_ID_LEN, MAX_KEYWORD_LEN, MAX_STORED_DEPTH,
-    MIN_DATETIME, Value,
+    MAX_DOCUMENT_FIELDS, MAX_DOCUMENT_JSON_LEN, MAX_DOCUMENT_VALUES, MAX_ID_LEN, MAX_KEYWORD_LEN,
+    MAX_STORED_DEPTH, MIN_DATETIME, Value,
 };
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, FieldType, KeywordOptions, NameProblem, SchemaBuilder,
@@ -603,7 +603,7 @@ fn corrupt_encodings() {
     );
     assert_eq!(
         corrupt(&patched(0, &[0x84])).1,
-        unexpected("an array of 5 items", "another item")
+        unexpected("an array of 5 items", "an array of another length")
     );
     assert_eq!(
         corrupt(&patched(1, &[0x00])),
@@ -748,6 +748,144 @@ fn stored_depth_limit_on_decode() {
             offset: at as u64 + 64,
             reason: DocumentCorruption::TooDeep
         })
+    );
+}
+
+/// The version is read before the arity, so a later version that changes the array length is unsupported, not
+/// corrupt (SPEC §6.4.2).
+#[test]
+fn version_comes_before_arity() {
+    let schema = all_types(true);
+    assert_eq!(
+        Document::decode(&[0x86, 0x02, 0, 0, 0, 0, 0], &schema),
+        Err(DecodeError::UnsupportedVersion { version: 2 })
+    );
+    assert_eq!(
+        Document::decode(&[0x81, 0x03], &schema),
+        Err(DecodeError::UnsupportedVersion { version: 3 })
+    );
+    let v1 = [0x86, 0x01, 0x61, b'x', 0xf6, 0xa0, 0xa0, 0xa0];
+    assert_eq!(
+        Document::decode(&v1, &schema),
+        Err(DecodeError::Corrupt {
+            offset: 0,
+            reason: DocumentCorruption::Unexpected {
+                expected: "an array of 5 items",
+                found: "an array of another length"
+            }
+        })
+    );
+    assert_eq!(
+        Document::decode(&[0x80], &schema),
+        Err(DecodeError::Corrupt {
+            offset: 0,
+            reason: DocumentCorruption::Unexpected {
+                expected: "a non-empty array",
+                found: "an array"
+            }
+        })
+    );
+}
+
+/// SPEC §6.4.1: at most `MAX_DOCUMENT_VALUES` values, so a row of one-byte items cannot make the decoder allocate
+/// 30 times its size.
+#[test]
+fn value_count_limit() {
+    let schema = all_types(true);
+    let row = |elements: usize| {
+        let mut b = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa1, 0x06, 0x9a];
+        b.extend(u32::try_from(elements).unwrap().to_be_bytes());
+        b.extend(std::iter::repeat_n(0xf6, elements));
+        b.push(0xa0);
+        b
+    };
+    // The array is one value, its elements the others.
+    assert!(Document::decode(&row(MAX_DOCUMENT_VALUES - 1), &schema).is_ok());
+    assert_eq!(
+        Document::decode(&row(MAX_DOCUMENT_VALUES), &schema),
+        Err(DecodeError::Corrupt {
+            offset: 12 + MAX_DOCUMENT_VALUES as u64 - 1,
+            reason: DocumentCorruption::Invalid {
+                what: "value count"
+            }
+        })
+    );
+    let nulls = |n| serde_json::Value::Array(vec![serde_json::Value::Null; n]);
+    let g = id(&schema, "g");
+    let fits = Document::new("1").with(g, Value::Json(nulls(MAX_DOCUMENT_VALUES - 1)));
+    assert_eq!(fits.validate(&schema), Ok(()));
+    let over = Document::new("1").with(g, Value::Json(nulls(MAX_DOCUMENT_VALUES)));
+    assert_eq!(
+        over.validate(&schema),
+        Err(DocumentError::TooManyValues {
+            count: MAX_DOCUMENT_VALUES + 1
+        })
+    );
+    let list = Document::new("1").with(
+        id(&schema, "b"),
+        Value::Strings(vec![String::new(); MAX_DOCUMENT_VALUES]),
+    );
+    assert_eq!(
+        list.validate(&schema),
+        Err(DocumentError::TooManyValues {
+            count: MAX_DOCUMENT_VALUES + 1
+        })
+    );
+}
+
+/// A `DocStore` row keeps `stored`-type fields and leaves out `stored: false` ones of every type (golden).
+#[test]
+fn stored_row_with_a_stored_field_golden() {
+    let schema = SchemaBuilder::new("r")
+        .field(
+            "k",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                stored: false,
+            }),
+        )
+        .field("s", FieldKind::Stored)
+        .field(
+            "t",
+            FieldKind::Text(TextOptions {
+                stored: false,
+                ..TextOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let doc = Document::new("1")
+        .with(id(&schema, "k"), Value::String("kw".into()))
+        .with(id(&schema, "s"), Value::Json(json!({"a": 1})))
+        .with(id(&schema, "t"), Value::String("text".into()));
+    let row = doc.encode(&schema, FieldSet::Stored).unwrap();
+    assert_eq!(
+        row,
+        [
+            0x85, 0x01, 0x61, b'1', 0xf6, 0xa1, 0x01, 0xa1, 0x61, b'a', 0x01, 0xa0
+        ]
+    );
+    let mut expected = doc;
+    expected.remove(id(&schema, "k"));
+    expected.remove(id(&schema, "t"));
+    assert_eq!(Document::decode(&row, &schema).unwrap(), expected);
+}
+
+/// `to_json` of a typed document never recurses past the nesting limit.
+#[test]
+fn to_json_refuses_values_nested_too_deep() {
+    let schema = all_types(false);
+    let deep = (0..1000).fold(json!(1), |v, _| json!([v]));
+    let doc = Document::new("1").with(id(&schema, "g"), Value::Json(deep.clone()));
+    assert_eq!(
+        doc.to_json(&schema),
+        Err(DocumentError::TooDeep { field: "g".into() })
+    );
+    let mut doc = Document::new("1");
+    doc.insert_extra("X", deep);
+    assert_eq!(
+        doc.to_json(&schema),
+        Err(DocumentError::TooDeep { field: "X".into() })
     );
 }
 

@@ -30,10 +30,13 @@ discipline and must have one encoding per document.
    stays an extra field after that; an extra field next to the schema field of the same name is corruption.
 5. **Limits**: id 1–512 bytes (§6.1), keyword value 32 KiB (below what term dictionaries handle comfortably),
    1024 fields per document (as per schema), 64 levels of nesting in stored values (bounds decoder recursion),
-   16 MiB of JSON and 16 MiB of encoding. JSON parsing rejects duplicate keys at every level.
+   1 048 576 values (field values, list elements, values inside stored values: caps what decoding a hostile row of
+   one-byte items allocates at about 32 MiB), 16 MiB of JSON and 16 MiB of encoding. JSON parsing rejects duplicate
+   keys at every level.
 6. **Encoding**: a hand-written, deterministic subset of CBOR (RFC 8949): definite lengths, shortest arguments,
    no tags, floats always 64-bit, map keys strictly increasing; a document is `array(5)[version, id, blob, fields,
-   extra]`, fields keyed by field id, the blob reference as its ADR-0011 bytes. Decoding is schema-driven: the field
+   extra]`, fields keyed by field id, the blob reference as its ADR-0011 bytes. The version is read before the
+   array length is checked, so a later version may change the arity. Decoding is schema-driven: the field
    type decides how an integer is read (`i64` vs `datetime`). The decoder enforces every structural and value rule,
    so anything it accepts re-encodes to the same bytes, except that a row may hold what a new document could not
    (decision 4, or extras of a collection that became `strict`). Such rows are returned as they are; merges copy rows

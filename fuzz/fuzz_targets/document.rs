@@ -4,7 +4,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use persia_engine::document::{Document, DocumentError, FieldSet};
-use persia_engine::schema::{CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+use persia_engine::schema::{
+    CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+};
 
 fn schema() -> CollectionSchema {
     SchemaBuilder::new("fuzz")
@@ -25,13 +27,21 @@ fuzz_target!(|data: &[u8]| {
     let Ok(doc) = Document::decode(data, &schema) else {
         return;
     };
-    let json = doc.to_json(&schema).expect("a decoded document converts to JSON");
+    let json = doc
+        .to_json(&schema)
+        .expect("a decoded document converts to JSON");
     match doc.encode(&schema, FieldSet::All) {
         Ok(bytes) => {
             assert_eq!(bytes, data, "decoding accepted a non-canonical encoding");
-            assert_eq!(Document::from_json(&json, &schema).expect("its JSON parses"), doc);
+            assert_eq!(
+                Document::from_json(&json, &schema).expect("its JSON parses"),
+                doc
+            );
         }
         // A row may hold an extra field named like a field added later (SPEC §6.4.2), which a new document cannot.
-        Err(e) => assert!(matches!(e, DocumentError::ExtraIsSchemaField { .. }), "{e:?}"),
+        Err(e) => assert!(
+            matches!(e, DocumentError::ExtraIsSchemaField { .. }),
+            "{e:?}"
+        ),
     }
 });

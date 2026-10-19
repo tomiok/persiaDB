@@ -1,7 +1,7 @@
 //! The CBOR subset of SPEC §6.4.2 (RFC 8949): definite lengths, shortest arguments, no tags, 64-bit floats, and
 //! only the simple values `false`, `true` and `null`. Map key order is checked by the caller.
 
-use super::DocumentCorruption;
+use super::{DocumentCorruption, MAX_DOCUMENT_VALUES};
 
 const UINT: u8 = 0;
 const NINT: u8 = 1;
@@ -17,29 +17,58 @@ const TRUE: u8 = 0xf5;
 const NULL: u8 = 0xf6;
 const FLOAT64: u8 = 0xfb;
 
-/// Appends CBOR items to a buffer.
+/// Appends CBOR items to a buffer, or only counts their bytes.
 #[derive(Debug, Default)]
-pub(super) struct Encoder(pub(super) Vec<u8>);
+pub(super) struct Encoder {
+    buf: Vec<u8>,
+    len: usize,
+    count_only: bool,
+}
 
 impl Encoder {
+    /// An encoder that keeps no bytes, for the size of an encoding.
+    pub(super) fn counting() -> Self {
+        Self {
+            count_only: true,
+            ..Self::default()
+        }
+    }
+
+    /// The bytes written; empty for [`Self::counting`].
+    pub(super) fn into_bytes(self) -> Vec<u8> {
+        self.buf
+    }
+
+    /// How many bytes were written (saturating).
+    pub(super) fn len(&self) -> usize {
+        self.len
+    }
+
+    fn put(&mut self, bytes: &[u8]) {
+        self.len = self.len.saturating_add(bytes.len());
+        if !self.count_only {
+            self.buf.extend_from_slice(bytes);
+        }
+    }
+
     // Each arm's range makes the narrowing exact.
     #[allow(clippy::cast_possible_truncation)]
     fn head(&mut self, major: u8, arg: u64) {
         let major = major << 5;
         match arg {
-            0..24 => self.0.push(major | arg as u8),
-            24..0x100 => self.0.extend([major | 0x18, arg as u8]),
+            0..24 => self.put(&[major | arg as u8]),
+            24..0x100 => self.put(&[major | 0x18, arg as u8]),
             0x100..0x1_0000 => {
-                self.0.push(major | 0x19);
-                self.0.extend((arg as u16).to_be_bytes());
+                self.put(&[major | 0x19]);
+                self.put(&(arg as u16).to_be_bytes());
             }
             0x1_0000..0x1_0000_0000 => {
-                self.0.push(major | 0x1a);
-                self.0.extend((arg as u32).to_be_bytes());
+                self.put(&[major | 0x1a]);
+                self.put(&(arg as u32).to_be_bytes());
             }
             _ => {
-                self.0.push(major | 0x1b);
-                self.0.extend(arg.to_be_bytes());
+                self.put(&[major | 0x1b]);
+                self.put(&arg.to_be_bytes());
             }
         }
     }
@@ -58,12 +87,12 @@ impl Encoder {
 
     pub(super) fn bytes(&mut self, b: &[u8]) {
         self.head(BYTES, len_u64(b.len()));
-        self.0.extend_from_slice(b);
+        self.put(b);
     }
 
     pub(super) fn text(&mut self, s: &str) {
         self.head(TEXT, len_u64(s.len()));
-        self.0.extend_from_slice(s.as_bytes());
+        self.put(s.as_bytes());
     }
 
     pub(super) fn array(&mut self, len: usize) {
@@ -75,16 +104,16 @@ impl Encoder {
     }
 
     pub(super) fn f64(&mut self, v: f64) {
-        self.0.push(FLOAT64);
-        self.0.extend(v.to_bits().to_be_bytes());
+        self.put(&[FLOAT64]);
+        self.put(&v.to_bits().to_be_bytes());
     }
 
     pub(super) fn bool(&mut self, v: bool) {
-        self.0.push(if v { TRUE } else { FALSE });
+        self.put(&[if v { TRUE } else { FALSE }]);
     }
 
     pub(super) fn null(&mut self) {
-        self.0.push(NULL);
+        self.put(&[NULL]);
     }
 }
 
@@ -134,11 +163,31 @@ pub(super) type Failure = (u64, DocumentCorruption);
 pub(super) struct Decoder<'a> {
     buf: &'a [u8],
     pos: usize,
+    values: usize,
 }
 
 impl<'a> Decoder<'a> {
     pub(super) fn new(buf: &'a [u8]) -> Self {
-        Self { buf, pos: 0 }
+        Self {
+            buf,
+            pos: 0,
+            values: 0,
+        }
+    }
+
+    /// Counts one document value against [`MAX_DOCUMENT_VALUES`] (SPEC §6.4.1); `at` is its offset. Bounds what a
+    /// hostile row of one-byte items allocates.
+    pub(super) fn count_value(&mut self, at: u64) -> Result<(), Failure> {
+        self.values = self.values.saturating_add(1);
+        if self.values > MAX_DOCUMENT_VALUES {
+            return Err((
+                at,
+                DocumentCorruption::Invalid {
+                    what: "value count",
+                },
+            ));
+        }
+        Ok(())
     }
 
     /// The offset of the next byte.
@@ -267,14 +316,17 @@ mod tests {
         for (v, bytes) in cases {
             let mut e = Encoder::default();
             e.int(v);
-            assert_eq!(e.0, bytes, "{v}");
+            assert_eq!(e.buf, bytes, "{v}");
             let expected =
                 u64::try_from(v).map_or_else(|_| Item::Nint(v.unsigned_abs() - 1), Item::Uint);
             assert_eq!(decode_one(bytes), Ok(expected), "{v}");
         }
         let mut e = Encoder::default();
         e.uint(u64::MAX);
-        assert_eq!(e.0, [0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            e.buf,
+            [0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
     }
 
     #[test]
@@ -349,7 +401,7 @@ mod tests {
         e.null();
         e.f64(-0.0);
         e.f64(1.5);
-        let mut d = Decoder::new(&e.0);
+        let mut d = Decoder::new(&e.buf);
         assert_eq!(d.next(), Ok(Item::Bool(false)));
         assert_eq!(d.next(), Ok(Item::Bool(true)));
         assert_eq!(d.next(), Ok(Item::Null));
@@ -357,7 +409,7 @@ mod tests {
         assert_eq!(d.next(), Ok(Item::F64(1.5)));
         assert!(d.is_at_end());
         assert_eq!(
-            e.0[3..],
+            e.buf[3..],
             [
                 0xfb, 0x80, 0, 0, 0, 0, 0, 0, 0, 0xfb, 0x3f, 0xf8, 0, 0, 0, 0, 0, 0
             ]

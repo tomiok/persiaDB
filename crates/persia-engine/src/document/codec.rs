@@ -113,6 +113,18 @@ pub enum DocumentCorruption {
 
 pub(super) fn encode(doc: &Document, schema: &CollectionSchema, set: FieldSet) -> Vec<u8> {
     let mut e = Encoder::default();
+    write(&mut e, doc, schema, set);
+    e.into_bytes()
+}
+
+/// The length of [`encode`] with every field, without building it.
+pub(super) fn encoded_len(doc: &Document, schema: &CollectionSchema) -> usize {
+    let mut e = Encoder::counting();
+    write(&mut e, doc, schema, FieldSet::All);
+    e.len()
+}
+
+fn write(e: &mut Encoder, doc: &Document, schema: &CollectionSchema, set: FieldSet) {
     e.array(5);
     e.uint(VERSION);
     e.text(&doc.id);
@@ -130,14 +142,13 @@ pub(super) fn encode(doc: &Document, schema: &CollectionSchema, set: FieldSet) -
     e.map(doc.fields.keys().filter(|id| included(id)).count());
     for (id, value) in doc.fields.iter().filter(|(id, _)| included(id)) {
         e.uint(u64::from(id.get()));
-        encode_value(&mut e, value);
+        encode_value(e, value);
     }
     e.map(doc.extra.len());
     for (name, value) in &doc.extra {
         e.text(name);
-        encode_json(&mut e, value);
+        encode_json(e, value);
     }
-    e.0
 }
 
 fn encode_value(e: &mut Encoder, value: &Value) {
@@ -201,13 +212,17 @@ pub(super) fn decode(bytes: &[u8], schema: &CollectionSchema) -> Result<Document
     }
     let mut d = Decoder::new(bytes);
     let start = d.offset();
-    if d.next().map_err(corrupt)? != Item::Array(5) {
-        return Err(corrupt(unexpected(
-            start,
-            "an array of 5 items",
-            "another item",
-        )));
-    }
+    // The version comes first, so a later version may change the arity and still be reported as unsupported.
+    let items = match d.next().map_err(corrupt)? {
+        Item::Array(n) if n >= 1 => n,
+        other => {
+            return Err(corrupt(unexpected(
+                start,
+                "a non-empty array",
+                other.kind(),
+            )));
+        }
+    };
     let at = d.offset();
     match d.next().map_err(corrupt)? {
         Item::Uint(VERSION) => {}
@@ -219,6 +234,13 @@ pub(super) fn decode(bytes: &[u8], schema: &CollectionSchema) -> Result<Document
         }
         Item::Uint(version) => return Err(DecodeError::UnsupportedVersion { version }),
         other => return Err(corrupt(unexpected(at, "the version", other.kind()))),
+    }
+    if items != 5 {
+        return Err(corrupt(unexpected(
+            start,
+            "an array of 5 items",
+            "an array of another length",
+        )));
     }
     let mut doc = Document::new(decode_id(&mut d).map_err(corrupt)?);
     doc.blob_ref = decode_blob_ref(&mut d)?;
@@ -307,6 +329,7 @@ fn decode_fields(
 fn decode_value(d: &mut Decoder<'_>, field_type: FieldType) -> Result<Value, Failure> {
     let at = d.offset();
     let item = d.next()?;
+    d.count_value(at)?;
     let wrong = |expected| unexpected(at, expected, item.kind());
     match field_type {
         FieldType::Text | FieldType::Keyword => {
@@ -317,7 +340,9 @@ fn decode_value(d: &mut Decoder<'_>, field_type: FieldType) -> Result<Value, Fai
                     let mut list = Vec::new();
                     for _ in 0..n {
                         let at = d.offset();
-                        match d.next()? {
+                        let item = d.next()?;
+                        d.count_value(at)?;
+                        match item {
                             Item::Text(s) => list.push(checked_str(at, s, keyword)?),
                             other => return Err(unexpected(at, "a text string", other.kind())),
                         }
@@ -382,6 +407,7 @@ fn json(
     let nested = |d: &mut Decoder<'_>| -> Result<_, Failure> {
         let at = d.offset();
         let item = d.next()?;
+        d.count_value(at)?;
         json(d, at, item, depth + 1)
     };
     match item {
@@ -463,7 +489,9 @@ fn decode_extra(
             return Err(invalid(at, "extra field named like a field it has"));
         }
         let value_at = d.offset();
-        let value = match d.next()? {
+        let item = d.next()?;
+        d.count_value(value_at)?;
+        let value = match item {
             Item::Null => return Err(invalid(value_at, "null stored value")),
             item => json(d, value_at, item, 0)?,
         };

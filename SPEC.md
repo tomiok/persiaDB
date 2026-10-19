@@ -550,7 +550,7 @@ bit pattern round-trips exactly. Writers never key `-0.0` or NaN: a document hol
 | `Positions` | field (opt-in) | token positions | delta + bit-packed; only if field has `positions: true` |
 | `Norms` | text field | quantized field length per doc (1 byte, Lucene-style) | array |
 | `Columns` | numeric/keyword/date/bool field | doc values for filter/sort/facet | columnar; low-card keyword = dictionary + bit-packed ords; numerics = FOR/bit-pack; roaring for bool/sparse |
-| `DocStore` | segment | original documents (CBOR) | row blocks, zstd |
+| `DocStore` | segment | stored fields of documents (CBOR, §6.4.2) | row blocks, zstd |
 | `IdMap` | segment | external id ↔ internal `docid` | FST (id→docid) + array (docid→id offset) |
 | `BlobRefs` | segment | docid → blob_ref | column |
 
@@ -710,26 +710,29 @@ A document is an `id`, an optional `blob` reference (§9.1) and a value per fiel
 | Field type | Value | JSON form |
 |---|---|---|
 | `text`, `keyword` | a string, or a list of strings (multi-valued) | a string, or an array of strings |
-| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent; `-0` is 0) |
+| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent; `-0` is 0, and so is a negative zero written with a fraction or exponent, which JSON parsers cannot tell apart) |
 | `f64` | a finite `f64`; `-0.0` is stored as `0.0` | any number (integers are converted to the nearest `f64`) |
 | `bool` | `true` or `false` | `true` or `false` |
-| `datetime` | microseconds since the Unix epoch, UTC, from `0000-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z` | an integer (microseconds) or an RFC 3339 string with a `Z` or `±hh:mm` offset and at most 6 fractional digits; written as RFC 3339 in UTC, `YYYY-MM-DDTHH:MM:SSZ` with `.ffffff` when the microseconds are not zero |
+| `datetime` | microseconds since the Unix epoch, UTC, from `0000-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z` | an integer (microseconds) or an RFC 3339 string with a `Z` or `±hh:mm` offset, at most 6 fractional digits and seconds `00`–`59` (no leap seconds); written as RFC 3339 in UTC, `YYYY-MM-DDTHH:MM:SSZ` with `.ffffff` when the microseconds are not zero |
 | `stored` | any JSON value | any JSON value |
 
 - Only `text` and `keyword` fields are multi-valued: numeric, `bool` and `datetime` doc values hold one value per
   document (§5.2.1). A list keeps its order; an empty list is a value (it indexes nothing).
 - `null` as a field's JSON value means the field is absent, as does `"blob": null`; `null` inside a `stored` value
-  is kept. A `null` inside a list of strings is an error.
+  is kept. A `null` inside a list of strings is an error, and so is a `null` stored value in a typed API.
 - **Floats (`f64` fields).** NaN and the infinities are rejected (JSON cannot express them; typed APIs reject them).
   `-0.0` becomes `0.0` when the value enters a document, so the order-preserving key of §5.2.1 never sees `-0.0` or
-  NaN and a range filter on either side of zero includes zero. Numbers inside a `stored` value are kept as given.
+  NaN and a range filter on either side of zero includes zero. Numbers inside a `stored` value are kept as parsed:
+  an integer in `-2^63..2^64` exactly, any other number as the nearest `f64` (so `-0` reads as `-0.0`).
 - **Keys.** `id` and `blob` are the document's id and blob reference. Any other key is a field name. A key the
   schema does not have is an error when the collection is `strict` (the default, §6.2.1). Otherwise it is kept as an
   extra `stored` value under that name, which must satisfy the field name rules of §6.2.1. Duplicate keys at any level
   are errors.
 - **Limits.** `id` is 1–512 bytes of UTF-8. A `keyword` value is at most 32 KiB. A document has at most 1024
   fields, schema fields and extra fields together. A `stored` value nests arrays and objects at most 64 levels
-  deep. The JSON text is at most 16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
+  deep. A document holds at most 1 048 576 values: each field value, each element of a list, and each value inside
+  a `stored` or extra value (array elements and object members, at any depth) counts once. The JSON text is at most
+  16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
 - **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
   ascending byte order of their names; values in the forms above.
 
@@ -743,7 +746,8 @@ that each document has exactly one encoding (ADR-0023):
 Anything else is corruption, and so is a value the rules of §6.4.1 reject.
 ```
 array(5) [
-  version   uint    1 (0 is corruption; above 1 is unsupported)
+  version   uint    1 (0 is corruption; above 1 is unsupported, read before the array length is checked,
+                    so a later version may change it)
   id        text
   blob      bytes (exactly one BlobRef encoding, §9.1) or null
   fields    map: uint field id -> value, ids of the collection's schema

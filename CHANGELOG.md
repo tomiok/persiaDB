@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 - `persia-engine`: documents (`document::Document`, SPEC §6.4; ADR-0023). Values per field type (strings or lists of
   strings for `text`/`keyword`, one value for numerics, `bool` and `datetime`, any JSON for `stored`), validation
-  against a schema with precise errors (field and list index), and limits (id, keyword length, field count, nesting,
+  against a schema with precise errors (field and list index), and limits (id, keyword length, field and value counts, nesting,
   size). JSON input rejects duplicate keys; `datetime` takes integer microseconds or RFC 3339 and is written as RFC
   3339 UTC. Non-strict collections keep unknown keys as extra stored fields. `f64` values are finite and `-0.0` is
   stored as `0.0`, so range filters never miss zero.

@@ -4,7 +4,9 @@
 
 use libfuzzer_sys::fuzz_target;
 use persia_engine::document::{Document, FieldSet};
-use persia_engine::schema::{CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+use persia_engine::schema::{
+    CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+};
 
 fn schema() -> CollectionSchema {
     SchemaBuilder::new("fuzz")
@@ -28,8 +30,18 @@ fuzz_target!(|data: &[u8]| {
     let Ok(doc) = Document::from_json(text, &schema) else {
         return;
     };
-    let json = doc.to_json(&schema).expect("a valid document converts to JSON");
-    assert_eq!(Document::from_json(&json, &schema).expect("its JSON parses"), doc);
-    let bytes = doc.encode(&schema, FieldSet::All).expect("a valid document encodes");
-    assert_eq!(Document::decode(&bytes, &schema).expect("its encoding decodes"), doc);
+    let json = doc
+        .to_json(&schema)
+        .expect("a valid document converts to JSON");
+    assert_eq!(
+        Document::from_json(&json, &schema).expect("its JSON parses"),
+        doc
+    );
+    let bytes = doc
+        .encode(&schema, FieldSet::All)
+        .expect("a valid document encodes");
+    assert_eq!(
+        Document::decode(&bytes, &schema).expect("its encoding decodes"),
+        doc
+    );
 });
