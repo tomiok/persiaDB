@@ -537,8 +537,7 @@ Writers use the true minimum and the minimal width.
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
 the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;
 otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
-bit pattern round-trips exactly. Whether writers canonicalize `-0.0` and NaN before keying is decided with
-the document model (ROADMAP 3.2.6).
+bit pattern round-trips exactly. Writers never key `-0.0` or NaN: a document holds neither in an `f64` field (§6.4.1).
 
 ### 5.3 Sections (per segment)
 | Section | Per | Content | Encoding |
@@ -702,9 +701,64 @@ Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `white
 (`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding).
 Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
 
-### 6.4 Document encoding
-Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore`.
-Unknown fields (not in schema): rejected by default (`strict: true`), or kept as `stored` if `strict: false`.
+### 6.4 Documents
+Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).
+
+#### 6.4.1 Values and limits
+A document is an `id`, an optional `blob` reference (§9.1) and a value per field it has; every field is optional.
+
+| Field type | Value | JSON form |
+|---|---|---|
+| `text`, `keyword` | a string, or a list of strings (multi-valued) | a string, or an array of strings |
+| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent) |
+| `f64` | a finite `f64`; `-0.0` is stored as `0.0` | any number (integers are converted to the nearest `f64`) |
+| `bool` | `true` or `false` | `true` or `false` |
+| `datetime` | microseconds since the Unix epoch, UTC, from `0000-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z` | an integer (microseconds) or an RFC 3339 string with a `Z` or `±hh:mm` offset and at most 6 fractional digits; written as RFC 3339 in UTC, `YYYY-MM-DDTHH:MM:SSZ` with `.ffffff` when the microseconds are not zero |
+| `stored` | any JSON value | any JSON value |
+
+- Only `text` and `keyword` fields are multi-valued: numeric, `bool` and `datetime` doc values hold one value per
+  document (§5.2.1). A list keeps its order; an empty list is a value (it indexes nothing).
+- `null` as a field's JSON value means the field is absent, as does `"blob": null`; `null` inside a `stored` value
+  is kept. A `null` inside a list of strings is an error.
+- **Floats (`f64` fields).** NaN and the infinities are rejected (JSON cannot express them; typed APIs reject them).
+  `-0.0` becomes `0.0` when the value enters a document, so the order-preserving key of §5.2.1 never sees `-0.0` or
+  NaN and a range filter on either side of zero includes zero. Numbers inside a `stored` value are kept as given.
+- **Keys.** `id` and `blob` are the document's id and blob reference. Any other key is a field name. A key the
+  schema does not have is an error when the collection is `strict` (the default, §6.2.1). Otherwise it is kept as an
+  extra `stored` value under that name, which must satisfy the field name rules of §6.2.1. Duplicate keys at any level
+  are errors.
+- **Limits.** `id` is 1–512 bytes of UTF-8. A `keyword` value is at most 32 KiB. A document has at most 1024
+  fields, schema fields and extra fields together. A `stored` value nests arrays and objects at most 64 levels
+  deep. The JSON text is at most 16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
+- **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
+  ascending byte order of their names; values in the forms above.
+
+#### 6.4.2 Binary encoding
+The encoding of a document in `DocStore` (and anywhere else a document is persisted) is CBOR (RFC 8949) restricted so
+that each document has exactly one encoding (ADR-0023):
+- definite lengths only; every argument in its shortest form; no tags; text strings are valid UTF-8;
+- the only simple values are `false`, `true` and `null`; floats are always 64-bit (`0xfb`), never 16- or 32-bit;
+- map keys are strictly increasing: unsigned integers by value, text strings by their UTF-8 bytes.
+
+Anything else is corruption, and so is a value the rules of §6.4.1 reject.
+```
+array(5) [
+  version   uint    1 (0 is corruption; above 1 is unsupported)
+  id        text
+  blob      bytes (exactly one BlobRef encoding, §9.1) or null
+  fields    map: uint field id -> value, ids of the collection's schema
+  extra     map: text name -> JSON value (non-strict collections, §6.4.1)
+]
+```
+Values by field type: `text`/`keyword` a text string, or an array of text strings for a list; `i64` and `datetime` an
+integer; `f64` a float that is neither NaN, an infinity nor `-0.0`; `bool` a simple value; `stored` and `extra` a
+JSON value: `null`, `false`, `true`, an integer in `-2^63..2^64`, a finite float, a text string, an array, or a map
+with text keys. `DocStore` rows encode the stored fields only (`stored: true`, §6.2.2); the id, the blob reference and
+the extra fields are always included. A reader decodes a row with the collection's current schema: evolution keeps
+field ids and types (§6.2.4). An extra field named like a field added to the schema later stays an extra field
+(but an extra field next to a value of the schema field of that name is corruption). So a row may hold what a new
+document could not (such an extra field, or extra fields of a collection that has since become `strict`): it is
+returned as it is, and copied as bytes, never re-validated.
 
 ---
 
