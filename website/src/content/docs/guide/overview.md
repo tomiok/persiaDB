@@ -1,10 +1,10 @@
 ---
 title: "Overview"
-description: "What Persia DB is, what already works, and why it is built this way."
+description: "What Persia DB is: an embedded, single-file search database written in Rust, what already works in pre-alpha, and why it is built this way."
 ---
 
 > **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.
-> There is no compatibility promise. Counts on the [roadmap page](/guide/roadmap/) are the 2026-10-10 snapshot
+> There is no compatibility promise. Counts on the [milestones page](/guide/roadmap/) are the 2026-10-10 snapshot
 > in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves done (17%)** on 2026-10-11.
 
 [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) is the design contract (draft v0.1, format version 1.0, unstable).
@@ -45,7 +45,7 @@ layers will build on (ROADMAP M0, and most of M1):
   (SPEC §4.4, [ADR-0009](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0009-frame-validation-and-scan-end.md), ROADMAP 1.7.1–1.7.4).
 
 Those pieces are library code. They do not open a database, index a document, or answer a query.
-The streaming frame encoder (1.7.5), segments, storage, the write path, and search are still ahead (see [Roadmap](/guide/roadmap/)).
+The streaming frame encoder (1.7.5), segments, storage, the write path, and search are still ahead (see [Milestones](/guide/roadmap/)).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 
@@ -59,7 +59,7 @@ Five properties the design does not trade away:
 2. **Own engine.** Index format, analysis, BM25F scoring, and query execution live in this repository,
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
-   response says exactly what changed (SPEC §7.6). Planned: M8. See [Features](/guide/features/).
+   response says exactly what changed (SPEC §7.6). Planned: M8. See [Feature reference](/guide/features/).
 4. **Cloud-native.** Segments are immutable. A local commit and an object-storage commit publish the
    same segment bytes. Query nodes are stateless. Planned: M12, M13.
 5. **Correctness, then speed.** Checksums, crash-safe commits, and fuzzed parsers come before

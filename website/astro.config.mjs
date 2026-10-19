@@ -6,7 +6,22 @@ import starlightLlmsTxt from 'starlight-llms-txt';
 
 // GitHub Pages project site: https://tomiok.github.io/persiaDB/
 // `site` is the origin; `base` is the repository path (Astro's GitHub Pages guide).
+const origin = 'https://tomiok.github.io';
 const base = '/persiaDB';
+
+// Crawlers ignore relative og:image URLs. Keep these absolute and under `base`.
+const ogImage = `${origin}${base}/og.png`;
+const ogAlt = 'Persia DB. Think SQLite for search.';
+const jsonLd = JSON.stringify({
+    '@context': 'https://schema.org',
+    '@type': 'SoftwareSourceCode',
+    name: 'Persia DB',
+    description: 'An embedded, single-file, cloud-native search database, written in Rust.',
+    codeRepository: 'https://github.com/tomiok/persiaDB',
+    programmingLanguage: 'Rust',
+    license: 'https://www.apache.org/licenses/LICENSE-2.0',
+    url: `${origin}${base}/`,
+});
 
 // Starlight leaves markdown links that start with `/` untouched, so they miss `base`
 // and 404 on GitHub Pages. JSX (`WinButton`) prefixes `BASE_URL` itself.
@@ -47,7 +62,7 @@ const prefixBaseLinks = [
 ];
 
 export default defineConfig({
-    site: 'https://tomiok.github.io',
+    site: origin,
     base,
     // Starlight serves docs/404.md from its own 404 route, and the docs
     // collection also emits that path. The dedicated route wins; ignore the
@@ -58,6 +73,22 @@ export default defineConfig({
             title: 'Persia DB',
             description:
                 'An embedded, single-file, cloud-native search database, written in Rust. Pre-alpha.',
+            // File paths are relative to this package, so the repo prefix is `website/`.
+            editLink: {
+                baseUrl: 'https://github.com/tomiok/persiaDB/edit/main/website/',
+            },
+            // Dates come from git log. The Pages workflow checks out the full history.
+            lastUpdated: true,
+            head: [
+                { tag: 'meta', attrs: { property: 'og:image', content: ogImage } },
+                { tag: 'meta', attrs: { property: 'og:image:alt', content: ogAlt } },
+                { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
+                { tag: 'meta', attrs: { property: 'og:image:height', content: '630' } },
+                { tag: 'meta', attrs: { property: 'og:image:type', content: 'image/png' } },
+                { tag: 'meta', attrs: { name: 'twitter:image', content: ogImage } },
+                { tag: 'meta', attrs: { name: 'twitter:image:alt', content: ogAlt } },
+                { tag: 'script', attrs: { type: 'application/ld+json' }, content: jsonLd },
+            ],
             customCss: [
                 '@fontsource/jetbrains-mono/latin-400.css',
                 '@fontsource/jetbrains-mono/latin-500.css',
@@ -134,14 +165,14 @@ export default defineConfig({
                         { label: 'Getting started', slug: 'guide/getting-started' },
                         { label: 'For AI agents', slug: 'guide/for-agents' },
                         { label: 'Key concepts', slug: 'guide/concepts' },
-                        { label: 'Features', slug: 'guide/features' },
-                        { label: 'Architecture', slug: 'guide/architecture' },
+                        { label: 'Feature reference', slug: 'guide/features' },
+                        { label: 'Crate architecture', slug: 'guide/architecture' },
                         { label: 'File format and storage', slug: 'guide/file-format' },
                         { label: 'Code', slug: 'guide/code' },
                         { label: 'Embedded API', slug: 'guide/embedded-api' },
                         { label: 'Embedded SDKs', slug: 'guide/sdks' },
                         { label: 'Server, cloud, and Kubernetes', slug: 'guide/server' },
-                        { label: 'Roadmap', slug: 'guide/roadmap' },
+                        { label: 'Milestones', slug: 'guide/roadmap' },
                         { label: 'Contributing', slug: 'guide/contributing' },
                         { label: 'License', slug: 'guide/license' },
                     ],

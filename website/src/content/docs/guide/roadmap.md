@@ -1,6 +1,6 @@
 ---
-title: "Roadmap"
-description: "What each milestone delivers, what it depends on, and where to read the live status."
+title: "Milestones and dependencies"
+description: "What each Persia DB milestone from M0 to v1.0 delivers, which milestones it depends on, and where the live status lives."
 ---
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
@@ -103,7 +103,7 @@ the v1 performance work early (M15).
 
 ## M8 — Zero-results avoidance
 
-Blocked on M7. The cascade in [Features](/guide/features/): orchestration, per-level score offsets, the
+Blocked on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level score offsets, the
 time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
 dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
 gate on the zero-result rate. The embedded `v0.1` release depends on this milestone (M10 depends on M8).
