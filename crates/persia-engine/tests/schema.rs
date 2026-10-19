@@ -973,9 +973,9 @@ proptest! {
         let s = builder.clone().build().unwrap();
         prop_assert_eq!(&s.evolve(&s).unwrap(), &s);
         prop_assume!(fields.len() < 12);
-        let grown = builder.field("Zz_added", kind).build().unwrap();
+        let grown = builder.field("Zz_added_field", kind).build().unwrap();
         let next = s.evolve(&grown).unwrap();
-        prop_assert_eq!(next.field("Zz_added").unwrap().id().get(), u32::try_from(fields.len()).unwrap());
+        prop_assert_eq!(next.field("Zz_added_field").unwrap().id().get(), u32::try_from(fields.len()).unwrap());
         for f in s.fields() {
             prop_assert_eq!(next.field(f.name()).unwrap().id(), f.id());
         }
@@ -1919,5 +1919,50 @@ proptest! {
     #[test]
     fn arbitrary_json_never_panics(value in json_value()) {
         check_accepted_or_rejected(&value.to_string())?;
+    }
+}
+
+#[test]
+fn synonym_total_size_and_control_characters() {
+    let at = |s: Value| parse(&patched("/synonyms", Some(s)));
+    // 4100 groups of two 128-byte terms: within every per-group limit, over 1 MiB in total.
+    let groups: Vec<Value> = (0..4100)
+        .map(|i| json!([format!("{i:0>128}"), format!("{i:x>128}")]))
+        .collect();
+    let err = at(Value::Array(groups)).unwrap_err();
+    assert!(
+        matches!(&err, SchemaError::Synonyms { problem, .. } if problem.contains("in total")),
+        "{err}"
+    );
+    for bad in ["a\u{0}b", "tab\there", "\u{7f}"] {
+        assert!(
+            matches!(
+                at(json!([["tv", bad]])),
+                Err(SchemaError::Synonyms { group: 0, .. })
+            ),
+            "{bad:?}"
+        );
+    }
+}
+
+#[test]
+fn oversized_json_is_rejected_before_parsing() {
+    let padding = " ".repeat(persia_engine::schema::MAX_SCHEMA_JSON_LEN);
+    let text = format!(r#"{{"name":"a","fields":{{}}}}{padding}"#);
+    assert!(
+        matches!(CollectionSchema::from_json(&text), Err(SchemaError::Json(m)) if m.contains("at most"))
+    );
+}
+
+proptest! {
+    /// SPEC §6.2.5: an earlier version's hash is the current schema's hash over its first fields.
+    #[test]
+    fn hash_at_reproduces_every_earlier_version((fields, builder) in schema(), extra in field_kind()) {
+        let v1 = builder.clone().build().unwrap();
+        prop_assert_eq!(v1.hash_at(fields.len()), Some(v1.hash()));
+        prop_assert_eq!(v1.hash_at(fields.len() + 1), None);
+        let v2 = v1.evolve(&builder.field("Zz_added_field", extra).build().unwrap()).unwrap();
+        prop_assert_eq!(v2.hash_at(fields.len()), Some(v1.hash()));
+        prop_assert_eq!(v2.hash_at(fields.len() + 1), Some(v2.hash()));
     }
 }

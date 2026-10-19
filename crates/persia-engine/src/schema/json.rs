@@ -13,14 +13,20 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::{
     AnalyzerRef, CollectionSchema, Fallback, FieldKind, FilterRelaxation, KeywordOptions, Level,
-    Levels, Parts, RankFn, RankingConfig, RelaxationConfig, SchemaError, StaticRank, TextOptions,
-    validate,
+    Levels, MAX_SCHEMA_JSON_LEN, Parts, RankFn, RankingConfig, RelaxationConfig, SchemaError,
+    StaticRank, TextOptions, validate,
 };
 
 pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
-    let raw: RawSchema =
+    if json.len() > MAX_SCHEMA_JSON_LEN {
+        return Err(SchemaError::Json(format!(
+            "{} bytes, at most {MAX_SCHEMA_JSON_LEN}",
+            json.len()
+        )));
+    }
+    let raw: Object<RawSchema> =
         serde_json::from_str(json).map_err(|e| SchemaError::Json(e.to_string()))?;
-    from_raw(raw)
+    from_raw(raw.0)
 }
 
 pub(super) fn to_json(schema: &CollectionSchema) -> Result<String, SchemaError> {
@@ -35,13 +41,46 @@ impl Serialize for CollectionSchema {
 
 impl<'de> Deserialize<'de> for CollectionSchema {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        from_raw(RawSchema::deserialize(deserializer)?).map_err(de::Error::custom)
+        from_raw(Object::<RawSchema>::deserialize(deserializer)?.0).map_err(de::Error::custom)
     }
 }
 
 /// An optional key that, when present, must hold a `T` (not `null`).
 fn present<'de, D: Deserializer<'de>, T: Deserialize<'de>>(d: D) -> Result<Option<T>, D::Error> {
     T::deserialize(d).map(Some)
+}
+
+/// [`present`] for a struct: an object, never the positional array form.
+fn present_object<'de, D: Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<T>, D::Error> {
+    Object::deserialize(d).map(|o| Some(o.0))
+}
+
+/// A `T` read from an object only. Derived struct and internally tagged enum visitors also accept an array,
+/// taking values by position: that would bypass key names, and so strict parsing (ADR-0022).
+struct Object<T>(T);
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Object<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ObjectVisitor<T>(PhantomData<T>);
+
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for ObjectVisitor<T> {
+            type Value = T;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("an object")
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<T, A::Error> {
+                T::deserialize(de::value::MapAccessDeserializer::new(map))
+            }
+        }
+
+        deserializer
+            .deserialize_map(ObjectVisitor(PhantomData))
+            .map(Object)
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -51,13 +90,13 @@ struct RawSchema {
     fields: UniqueMap<RawField>,
     #[serde(
         default,
-        deserialize_with = "present",
+        deserialize_with = "present_object",
         skip_serializing_if = "Option::is_none"
     )]
     ranking: Option<RawRanking>,
     #[serde(
         default,
-        deserialize_with = "present",
+        deserialize_with = "present_object",
         skip_serializing_if = "Option::is_none"
     )]
     relaxation: Option<RawRelaxation>,
@@ -180,7 +219,7 @@ struct RawScalar {
 struct RawRanking {
     #[serde(
         default,
-        deserialize_with = "present",
+        deserialize_with = "present_object",
         skip_serializing_if = "Option::is_none"
     )]
     static_rank: Option<RawStaticRank>,
@@ -457,7 +496,7 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for UniqueMap<T> {
                     if !seen.insert(key.clone()) {
                         return Err(de::Error::custom(format!("duplicate field {key:?}")));
                     }
-                    entries.push((key, map.next_value()?));
+                    entries.push((key, map.next_value::<Object<T>>()?.0));
                 }
                 Ok(UniqueMap(entries))
             }

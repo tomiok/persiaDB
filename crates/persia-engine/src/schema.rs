@@ -50,6 +50,10 @@ pub const MAX_SYNONYM_GROUPS: usize = 10_000;
 pub const MAX_SYNONYM_GROUP_LEN: usize = 64;
 /// Longest synonym term, in bytes (SPEC §6.2.1).
 pub const MAX_SYNONYM_TERM_LEN: usize = 256;
+/// Most bytes of synonym terms per collection, all groups together (SPEC §6.2.1).
+pub const MAX_SYNONYM_BYTES: usize = 1 << 20;
+/// Longest JSON definition [`CollectionSchema::from_json`] reads, in bytes (SPEC §6.2.1).
+pub const MAX_SCHEMA_JSON_LEN: usize = 4 << 20;
 
 /// The number segments use for a field (SPEC §6.2.1). Ids of a schema are exactly `0..field_count`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -114,6 +118,8 @@ pub struct CollectionSchema {
 impl CollectionSchema {
     /// Parses and validates a JSON collection definition (SPEC §6.2), rejecting unknown and duplicate keys.
     ///
+    /// Prefer this to `serde_json::from_value`: a `serde_json::Value` has already merged duplicate keys.
+    ///
     /// # Errors
     /// [`SchemaError::Json`] for malformed or non-conforming JSON, another variant for a rule of SPEC §6.2.1–§6.2.3.
     pub fn from_json(json: &str) -> Result<Self, SchemaError> {
@@ -170,12 +176,21 @@ impl CollectionSchema {
 
     /// The schema hash segments record (SPEC §6.2.5).
     pub fn hash(&self) -> SchemaHash {
-        canonical::hash(self)
+        canonical::hash(&self.name, &self.fields)
+    }
+
+    /// The hash of this schema as it was when it had its first `field_count` fields, or `None` if it has fewer.
+    ///
+    /// Evolution only appends fields and never changes what the hash covers (SPEC §6.2.4), so this is the hash
+    /// of every earlier version: a segment indexed before fields were added verifies against the current schema
+    /// and the field count it records (SPEC §6.2.5).
+    pub fn hash_at(&self, field_count: usize) -> Option<SchemaHash> {
+        Some(canonical::hash(&self.name, self.fields.get(..field_count)?))
     }
 
     /// The canonical encoding of the index definition that [`Self::hash`] covers (SPEC §6.2.5).
     pub fn canonical_index_definition(&self) -> Vec<u8> {
-        canonical::encode(self)
+        canonical::encode(&self.name, &self.fields)
     }
 
     /// Assembles a schema from parts that already satisfy every rule; ids must be the positions.

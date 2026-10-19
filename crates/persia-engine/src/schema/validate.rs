@@ -4,8 +4,8 @@ use std::collections::BTreeSet;
 
 use super::{
     CollectionSchema, Field, FieldId, FieldKind, FieldType, Levels, MAX_FIELDS, MAX_NAME_LEN,
-    MAX_SYNONYM_GROUP_LEN, MAX_SYNONYM_GROUPS, MAX_SYNONYM_TERM_LEN, NameProblem, Parts,
-    SchemaError,
+    MAX_SYNONYM_BYTES, MAX_SYNONYM_GROUP_LEN, MAX_SYNONYM_GROUPS, MAX_SYNONYM_TERM_LEN,
+    NameProblem, Parts, SchemaError,
 };
 
 const COLLECTION_PATTERN: &str = "[a-z][a-z0-9_-]*";
@@ -132,7 +132,7 @@ fn check_f64(
     } else {
         Err(SchemaError::OutOfRange {
             option: option.to_owned(),
-            value: value.to_string(),
+            value: format!("{value:?}"),
             allowed,
         })
     }
@@ -261,6 +261,7 @@ fn check_synonyms(groups: &[Vec<String>]) -> Result<(), SchemaError> {
             problem: format!("{} groups, at most {MAX_SYNONYM_GROUPS}", groups.len()),
         });
     }
+    let mut total = 0usize;
     for (group, terms) in groups.iter().enumerate() {
         let error = |problem: String| SchemaError::Synonyms { group, problem };
         if !(2..=MAX_SYNONYM_GROUP_LEN).contains(&terms.len()) {
@@ -271,13 +272,22 @@ fn check_synonyms(groups: &[Vec<String>]) -> Result<(), SchemaError> {
         }
         let mut seen = BTreeSet::new();
         for term in terms {
-            if term.trim().is_empty() || term.len() > MAX_SYNONYM_TERM_LEN {
+            if term.trim().is_empty()
+                || term.len() > MAX_SYNONYM_TERM_LEN
+                || term.chars().any(char::is_control)
+            {
                 return Err(error(format!(
-                    "term {term:?} must be 1..={MAX_SYNONYM_TERM_LEN} bytes and not only whitespace"
+                    "term {term:?} must be 1..={MAX_SYNONYM_TERM_LEN} bytes, not only whitespace, without control characters"
                 )));
             }
             if !seen.insert(term.as_str()) {
                 return Err(error(format!("term {term:?} is listed twice")));
+            }
+            total = total.saturating_add(term.len());
+            if total > MAX_SYNONYM_BYTES {
+                return Err(error(format!(
+                    "synonym terms exceed {MAX_SYNONYM_BYTES} bytes in total"
+                )));
             }
         }
     }

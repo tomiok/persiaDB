@@ -9,7 +9,7 @@ use std::fmt;
 use persia_format::Writer;
 use persia_format::hash::xxh3_128;
 
-use super::{CollectionSchema, FieldKind};
+use super::{Field, FieldKind};
 
 const ENCODING_VERSION: u8 = 1;
 
@@ -50,16 +50,17 @@ impl fmt::Display for SchemaHash {
     }
 }
 
-pub(super) fn hash(schema: &CollectionSchema) -> SchemaHash {
-    SchemaHash(xxh3_128(&encode(schema)))
+/// The hash of `name` with `fields` (a schema, or the first fields of one: SPEC §6.2.5).
+pub(super) fn hash(name: &str, fields: &[Field]) -> SchemaHash {
+    SchemaHash(xxh3_128(&encode(name, fields)))
 }
 
-pub(super) fn encode(schema: &CollectionSchema) -> Vec<u8> {
+pub(super) fn encode(name: &str, fields: &[Field]) -> Vec<u8> {
     let mut w = Writer::new();
     w.write_u8(ENCODING_VERSION);
-    write_str(&mut w, schema.name());
-    write_len(&mut w, schema.fields().len());
-    for field in schema.fields() {
+    write_str(&mut w, name);
+    write_len(&mut w, fields.len());
+    for field in fields {
         write_str(&mut w, field.name());
         let (tag, options) = match field.kind() {
             FieldKind::Text(_) => (TYPE_TEXT, 3),
