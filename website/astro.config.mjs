@@ -162,6 +162,7 @@ export default defineConfig({
                     label: 'Guide',
                     items: [
                         { label: 'Overview', slug: 'guide/overview' },
+                        { label: 'Comparison', slug: 'guide/comparison' },
                         { label: 'Getting started', slug: 'guide/getting-started' },
                         { label: 'For AI agents', slug: 'guide/for-agents' },
                         { label: 'Key concepts', slug: 'guide/concepts' },

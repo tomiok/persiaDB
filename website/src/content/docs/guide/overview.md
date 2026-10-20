@@ -16,6 +16,9 @@ Think "SQLite for search": open a file, index documents, and get ranked results 
 never come back empty. The same segment bytes can live in a local file or in object storage
 (S3, GCS, Azure Blob) and can be served by stateless query nodes on Kubernetes.
 
+Where that design sits next to SQLite FTS5, Tantivy, and Meilisearch is
+[Comparison](/guide/comparison/). That page is not a benchmark. Persia DB does not search yet.
+
 A local database is two files (SPEC §4, §9):
 
 - `<name>.persia` — the index container (header and checksummed frames).
