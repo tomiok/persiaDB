@@ -117,6 +117,7 @@ For a search feature in production today, use one of the established tools. Pers
 ## Read next
 
 - [Overview](/guide/overview/) — what the project is, and what already exists.
+- [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.
 - [Getting started](/guide/getting-started/) — codecs you can call, and the API that is still illustrative.
 - [Features](/features/) and the [feature reference](/guide/features/) — each capability marked planned or done.
 - [How it works](/architecture/) and [file format and storage](/guide/file-format/) — segments, frames, and backends.

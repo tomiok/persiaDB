@@ -107,10 +107,11 @@ export default defineConfig({
                     description:
                         'Pre-alpha embedded search database written in Rust. Nothing opens a database, indexes, or searches yet. persia-format implements on-disk codecs only. Db::open and search in the docs are illustrative, from SPEC.md, and are not in the crate.',
                     details:
-                        'SPEC.md wins if a page disagrees with it. PROGRESS.md is the live roadmap counter. Do not call Db, Collection, put, commit, or search: those items are not in the repository. The intended usage and the FAQ are the Getting started page. Constraints for patches are the For AI agents page and CLAUDE.md.',
+                        'SPEC.md wins if a page disagrees with it. PROGRESS.md is the live roadmap counter. Do not call Db, Collection, put, commit, or search: those items are not in the repository. The intended usage is the Getting started page. Status, license, and comparison questions are the FAQ page. Constraints for patches are the For AI agents page and CLAUDE.md.',
                     promote: [
                         'index*',
                         'guide/getting-started*',
+                        'guide/faq*',
                         'guide/for-agents*',
                         'guide/overview*',
                     ],
@@ -120,6 +121,12 @@ export default defineConfig({
                             url: 'https://tomiok.github.io/persiaDB/guide/getting-started/',
                             description:
                                 'What you can call today, and the illustrative open, schema, commit, and search API',
+                        },
+                        {
+                            label: 'FAQ',
+                            url: 'https://tomiok.github.io/persiaDB/guide/faq/',
+                            description:
+                                'What Persia DB is, production readiness, SQLite FTS5, Tantivy, Meilisearch, file format, crash safety, SDKs, and the Apache-2.0 license',
                         },
                         {
                             label: 'For AI agents',
@@ -164,6 +171,7 @@ export default defineConfig({
                         { label: 'Overview', slug: 'guide/overview' },
                         { label: 'Comparison', slug: 'guide/comparison' },
                         { label: 'Getting started', slug: 'guide/getting-started' },
+                        { label: 'FAQ', slug: 'guide/faq' },
                         { label: 'For AI agents', slug: 'guide/for-agents' },
                         { label: 'Key concepts', slug: 'guide/concepts' },
                         { label: 'Feature reference', slug: 'guide/features' },

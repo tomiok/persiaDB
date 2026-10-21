@@ -118,6 +118,8 @@ The response is specified to carry what happened. This object is from SPEC §7.6
 
 ## Common questions
 
+The [FAQ](/guide/faq/) answers the same kind of question for status, how this differs from SQLite FTS5, Tantivy, and Meilisearch, the file format, crash safety, SDKs, and the license.
+
 ### Can I add Persia to a Rust project today?
 
 Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs. That dependency does not give you `Db::open`.

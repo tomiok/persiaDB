@@ -18,6 +18,7 @@ never come back empty. The same segment bytes can live in a local file or in obj
 
 Where that design sits next to SQLite FTS5, Tantivy, and Meilisearch is
 [Comparison](/guide/comparison/). That page is not a benchmark. Persia DB does not search yet.
+Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 
 A local database is two files (SPEC §4, §9):
 
