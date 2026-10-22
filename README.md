@@ -4,12 +4,7 @@
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](./LICENSE)
 [![Documentation](https://img.shields.io/badge/docs-persiaDB-0c5c6b)](https://tomiok.github.io/persiaDB/)
 
-**An embedded, single-file, cloud-native search database, written in Rust. Think "SQLite for search".**
-
-**Documentation:** https://tomiok.github.io/persiaDB/
-
-Open a file, index documents, and get ranked results that, by default, never come back empty.
-The same on-disk format can be served from object storage (S3 / GCS / Azure) and scaled out on Kubernetes.
+Persia DB is an embedded, single-file full-text search database written in Rust ("SQLite for search"). It is pre-alpha. The design is to open one file, index documents, and return ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob) and to be served by stateless query nodes. What the repository implements today includes on-disk codecs and the local-file storage backend, as library code. The `persia` crate exports no `Db` or `Collection`, and nothing in the repository runs a query. Read the [documentation](https://tomiok.github.io/persiaDB/), the [comparison with SQLite FTS5, Tantivy, and Meilisearch](https://tomiok.github.io/persiaDB/guide/comparison/), and the [FAQ](https://tomiok.github.io/persiaDB/guide/faq/).
 
 > **Status: pre-alpha.** Nothing works end-to-end yet, and the on-disk format is unstable until v1.0.
 > See [`PROGRESS.md`](./PROGRESS.md) for what is done.

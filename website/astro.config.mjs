@@ -79,6 +79,8 @@ export default defineConfig({
             },
             // Dates come from git log. The Pages workflow checks out the full history.
             lastUpdated: true,
+            // BreadcrumbList JSON-LD. The homepage and 404 are skipped in the middleware.
+            routeMiddleware: './src/routeData.ts',
             head: [
                 { tag: 'meta', attrs: { property: 'og:image', content: ogImage } },
                 { tag: 'meta', attrs: { property: 'og:image:alt', content: ogAlt } },
