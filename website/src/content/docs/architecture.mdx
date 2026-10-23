@@ -10,6 +10,7 @@ import StorageDiagram from '../../components/StorageDiagram.astro';
 import WinButton from '../../components/WinButton.astro';
 
 Persia is a library you open on a file, plus a server that embeds the same engine.
+That library shape is an [embedded search database](/guide/embedded-search/): full-text search in the application process, stored in a file.
 The engine is synchronous. It talks to disks and object storage only through a `Storage` trait
 that does not exist yet. Async belongs in the cloud backends and in the server.
 

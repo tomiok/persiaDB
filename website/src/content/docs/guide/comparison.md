@@ -31,6 +31,8 @@ The intended product is an embedded, single-file, cloud-native search database.
 Think "SQLite for search": open a file, index documents, and get ranked results that, by default,
 never come back empty. That is the design in [SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)
 and on the [overview](/guide/overview/). It is not what the crate does today.
+[What is an embedded search database?](/guide/embedded-search/) defines that in-process, single-file shape,
+and separates it from running a search server.
 
 What the repository implements today is on-disk codecs and storage.
 Nothing opens a database, builds an index, or runs a query.
@@ -116,6 +118,7 @@ For a search feature in production today, use one of the established tools. Pers
 
 ## Read next
 
+- [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.
 - [Getting started](/guide/getting-started/) — codecs you can call, and the API that is still illustrative.

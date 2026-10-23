@@ -116,6 +116,7 @@ export default defineConfig({
                         'guide/faq*',
                         'guide/for-agents*',
                         'guide/overview*',
+                        'guide/embedded-search*',
                     ],
                     optionalLinks: [
                         {
@@ -129,6 +130,12 @@ export default defineConfig({
                             url: 'https://tomiok.github.io/persiaDB/guide/faq/',
                             description:
                                 'What Persia DB is, production readiness, SQLite FTS5, Tantivy, Meilisearch, file format, crash safety, SDKs, and the Apache-2.0 license',
+                        },
+                        {
+                            label: 'What is an embedded search database?',
+                            url: 'https://tomiok.github.io/persiaDB/guide/embedded-search/',
+                            description:
+                                'In-process full-text search, one file, and no server. What Persia DB implements, and what is still specified only',
                         },
                         {
                             label: 'For AI agents',
@@ -171,6 +178,7 @@ export default defineConfig({
                     label: 'Guide',
                     items: [
                         { label: 'Overview', slug: 'guide/overview' },
+                        { label: 'Embedded search', slug: 'guide/embedded-search' },
                         { label: 'Comparison', slug: 'guide/comparison' },
                         { label: 'Getting started', slug: 'guide/getting-started' },
                         { label: 'FAQ', slug: 'guide/faq' },

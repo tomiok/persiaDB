@@ -16,7 +16,9 @@ Think "SQLite for search": open a file, index documents, and get ranked results 
 never come back empty. The same segment bytes can live in a local file or in object storage
 (S3, GCS, Azure Blob) and can be served by stateless query nodes on Kubernetes.
 
-Where that design sits next to SQLite FTS5, Tantivy, and Meilisearch is
+A longer definition of the embedded library — in your process, one file, no search server — is
+[What is an embedded search database?](/guide/embedded-search/).
+Where the design sits next to SQLite FTS5, Tantivy, and Meilisearch is
 [Comparison](/guide/comparison/). That page is not a benchmark. Persia DB does not search yet.
 Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 

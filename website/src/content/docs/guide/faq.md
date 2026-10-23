@@ -23,7 +23,7 @@ head:
             "name": "What is Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. Format primitives are done (milestone M1). The storage trait, the memory and local-file backends, and the single-file container are done (M2). Collection schema types are started in persia-engine (M3, in progress). The public persia crate exports no Db and no Collection. Nothing indexes a document or runs a query. Live status is PROGRESS.md."
+              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. Format primitives are done (milestone M1). The storage trait, the memory and local-file backends, and the single-file container are done (M2). Collection schema types are started in persia-engine (M3, in progress). The public persia crate exports no Db and no Collection. Nothing indexes a document or runs a query. Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
             }
           },
           {
@@ -47,7 +47,7 @@ head:
             "name": "Is Persia DB embedded or a server?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The design is an embedded library: in your process, open a file, with no daemon and no config file for the library (SPEC §14). An optional gRPC and HTTP server is planned (milestone M11) and is not implemented. See Server, cloud, and Kubernetes.\n\nWhat you can build against today is still a library, not that server. persia-format encodes and decodes on-disk bytes. persia-storage opens a single-file container and implements memory and local-file object stores. The persia command lists and removes temporary and quarantine files next to a container or a local store (persia container files, persia container sweep, persia store files, persia store sweep). It does not import documents or search. There is no Db::open."
+              "text": "The design is an embedded library: in your process, open a file, with no daemon and no config file for the library (SPEC §14). An optional gRPC and HTTP server is planned (milestone M11) and is not implemented. See Server, cloud, and Kubernetes. The longer explanation of that shape is https://tomiok.github.io/persiaDB/guide/embedded-search/.\n\nWhat you can build against today is still a library, not that server. persia-format encodes and decodes on-disk bytes. persia-storage opens a single-file container and implements memory and local-file object stores. The persia command lists and removes temporary and quarantine files next to a container or a local store (persia container files, persia container sweep, persia store files, persia store sweep). It does not import documents or search. There is no Db::open."
             }
           },
           {
@@ -114,6 +114,8 @@ Persia DB is an embedded, single-file, cloud-native search database written in R
 
 What the repository contains today is library code, not a search you can call. Format primitives are done (milestone M1). The storage trait, the memory and local-file backends, and the single-file container are done (M2). Collection schema types are started in `persia-engine` (M3, in progress). The public `persia` crate exports no `Db` and no `Collection`. Nothing indexes a document or runs a query. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
+What an embedded search database is, and how embedded full-text search in Rust fits this design, is [What is an embedded search database?](/guide/embedded-search/).
+
 ## Is Persia DB production ready?
 
 No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.
@@ -134,7 +136,7 @@ The Persia DB design is an embedded Rust library, one local .persia file, the sa
 
 ## Is Persia DB embedded or a server?
 
-The design is an embedded library: in your process, open a file, with no daemon and no config file for the library (SPEC §14). An optional gRPC and HTTP server is planned (milestone M11) and is not implemented. See [Server, cloud, and Kubernetes](/guide/server/).
+The design is an embedded library: in your process, open a file, with no daemon and no config file for the library (SPEC §14). An optional gRPC and HTTP server is planned (milestone M11) and is not implemented. See [Server, cloud, and Kubernetes](/guide/server/). [What is an embedded search database?](/guide/embedded-search/) is the longer explanation of that shape.
 
 What you can build against today is still a library, not that server. `persia-format` encodes and decodes on-disk bytes. `persia-storage` opens a single-file container and implements memory and local-file object stores. The `persia` command lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It does not import documents or search. There is no `Db::open`.
 
