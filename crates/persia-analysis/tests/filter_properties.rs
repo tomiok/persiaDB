@@ -69,7 +69,7 @@ fn check_one_to_one(filter: &dyn TokenFilter, text: &str) -> Result<Vec<Token>, 
 
 fn idempotent(filter: &dyn TokenFilter, once: &[Token]) -> Result<(), TestCaseError> {
     let twice = filtered(filter, once.to_vec());
-    prop_assert_eq!(texts(&twice), texts(once));
+    prop_assert_eq!(twice.as_slice(), once);
     Ok(())
 }
 
@@ -101,7 +101,8 @@ proptest! {
             let once = check_one_to_one(&filter, &text)?;
             for token in &once {
                 // Preserved characters are not recomposed, so only text without them is NFC.
-                prop_assert!(!filter.preserved().is_empty() || is_nfc(&token.text), "{token:?}");
+                let has_preserved = token.text.chars().any(|c| filter.preserved().contains(&c));
+                prop_assert!(has_preserved || is_nfc(&token.text), "{token:?}");
                 for c in token.text.chars() {
                     prop_assert!(
                         !matches!(c, '\u{300}'..='\u{36f}') || filter.preserved().contains(&c),

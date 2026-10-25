@@ -9,8 +9,9 @@ use crate::token::{Token, TokenFilter};
 /// Prefixes have `min..=max` characters (Unicode scalar values), shortest first, and are stacked on the position
 /// and span of their token. A token shorter than `min` produces none. With
 /// [`preserve_original`](Self::preserve_original), the whole token follows its prefixes when it is not one of them
-/// (longer than `max` or shorter than `min`). Put a [`TokenLengthGuard`](crate::TokenLengthGuard) first, so the
-/// prefixes of one token stay bounded.
+/// (longer than `max` or shorter than `min`). Put a [`TokenLengthGuard`](crate::TokenLengthGuard) right before
+/// it, after every filter that may lengthen a token (NFKC, lowercase, folding), so the prefixes of one token stay
+/// bounded (SPEC §6.3.2).
 ///
 /// ```
 /// use std::num::NonZeroUsize;

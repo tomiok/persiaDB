@@ -1,7 +1,8 @@
 //! Fuzz the token filters and the synonym lookup (ROADMAP 4.2; SPEC §6.3.2): arbitrary text never panics, every
 //! output token is non-empty and keeps the span and position of an input token in order, NFKC, lowercase and
 //! folding are idempotent, and synonym matches are ordered and disjoint. The first byte picks the edge n-gram bounds
-//! and whether the original is preserved; the text before the first `|` holds the synonym groups (`;` between
+//! and whether the original is preserved, and bit 6 whether the synonym analyzer removes English stopwords (so
+//! terms and queries have position gaps); the text before the first `|` holds the synonym groups (`;` between
 //! groups, `,` between terms).
 #![no_main]
 
@@ -28,10 +29,14 @@ fn check_from_input(input: &[Token], output: &[Token]) {
     }
 }
 
-fn analyze(text: &str) -> Vec<Token> {
+/// The synonym analyzer; with `stopwords`, removed stopwords leave position gaps that matches must line up with.
+fn analyze(text: &str, stopwords: Option<&StopwordFilter>) -> Vec<Token> {
     let mut tokens = Vec::new();
     StandardTokenizer.tokenize(text, &mut tokens);
     LowercaseFilter.apply(&mut tokens);
+    if let Some(stopwords) = stopwords {
+        stopwords.apply(&mut tokens);
+    }
     tokens
 }
 
@@ -81,12 +86,14 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let (synonyms, query) = text.split_once('|').unwrap_or(("", text));
-    let map = SynonymMap::new(
-        synonyms
-            .split(';')
-            .map(|group| group.split(',').map(analyze).collect::<Vec<_>>()),
-    );
-    let tokens = analyze(query);
+    let stopwords = (control & 0x40 != 0).then(StopwordFilter::english);
+    let map = SynonymMap::new(synonyms.split(';').map(|group| {
+        group
+            .split(',')
+            .map(|term| analyze(term, stopwords.as_ref()))
+            .collect::<Vec<_>>()
+    }));
+    let tokens = analyze(query, stopwords.as_ref());
     let mut previous_end = 0;
     for m in map.find(&tokens) {
         let range = m.tokens();

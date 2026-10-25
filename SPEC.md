@@ -752,17 +752,21 @@ versions.
   `Ø` → `O`, `đ`/`ð` → `d`, `Đ`/`Ð` → `D`, `ł` → `l`, `Ł` → `L`, `þ` → `th`, `Þ` → `TH`, `ħ` → `h`, `Ħ` → `H`,
   `ı` → `i` (nothing else: `ŧ`, `ƀ`, `ɨ` and the like are kept). Preserved characters are kept as listed, also
   inside a decomposition, and only the text between them is recomposed (case matters: preserving `ñ` does not
-  preserve `Ñ`). A Spanish analyzer may preserve `ñ`, so `año` and `ano` stay distinct. A preserved character only
-  matches as listed, so put `nfkc` first: a decomposed `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
+  preserve `Ñ`). The preserved set of each built-in analyzer is part of its definition (ROADMAP 4.4.2); preserving `ñ`
+  keeps `año` and `ano` distinct. A preserved character only matches as listed, so put `nfkc` first: a decomposed
+  `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
 - **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
   are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
   as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
   English keeps the classic 33-word list, while Spanish and Portuguese also list personal pronouns, possessives,
   demonstratives and the commonest forms of `ser`, `estar` and `haber`, leaving out words that are just as often
-  content words (`bajo`, `ante`, `era`).
-- **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters): replaces a token with its prefixes of `min..=max`
-  characters, shortest first; a token shorter than `min` produces none. With `preserve_original`, the whole token
-  follows them when it is longer than `max` or shorter than `min`. Used for optional prefix indexing.
+  content words (`bajo`, `ante`, `era`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
+  `SPANISH_STOPWORDS` and `PORTUGUESE_STOPWORDS`, pinned by a fingerprint test; the `fr`, `de` and `it` analyzers
+  (§6.3) get their lists when they are added (ROADMAP 4.4.10).
+- **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
+  replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
+  none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
+  Used for optional prefix indexing.
 - **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
   group (§6.2.1) is analyzed with the field's analyzer into a token sequence; a term that yields no tokens is ignored,
   and terms equal after analysis are one term. A term whose groups all shrink to it alone (`["New York", "new york"]`

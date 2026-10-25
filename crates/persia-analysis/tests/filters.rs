@@ -39,7 +39,7 @@ fn nfkc_table() {
         ("ﬁle", "file"),
         ("Ｗｉｆｉ", "Wifi"),
         ("x²", "x2"),
-        ("Å", "Å"),           // U+212B ANGSTROM SIGN → U+00C5
+        ("\u{212b}", "Å"),    // U+212B ANGSTROM SIGN → U+00C5
         ("e\u{301}", "é"),    // composed
         ("ｶﾀｶﾅ", "カタカナ"), // half-width katakana
         ("⑴", "(1)"),         // not re-tokenized
