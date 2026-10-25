@@ -125,7 +125,8 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct AnalyzerRegistry {
-    analyzers: BTreeMap<(String, u32), Arc<Analyzer>>,
+    /// Per name, its versions.
+    analyzers: BTreeMap<String, BTreeMap<u32, Arc<Analyzer>>>,
 }
 
 /// [`AnalyzerRegistry::register`] refused an analyzer.
@@ -134,6 +135,9 @@ pub enum RegisterError {
     /// The name is empty or contains `@`, so no `name@version` could refer to it.
     #[error("invalid analyzer name {0:?}")]
     InvalidName(String),
+    /// The name is a built-in analyzer's: its versions, released or future, are defined by this crate alone.
+    #[error("analyzer name {0:?} is reserved for a built-in analyzer")]
+    Reserved(String),
     /// Versions start at 1.
     #[error("analyzer {0:?}: version 0 is invalid")]
     InvalidVersion(String),
@@ -155,20 +159,24 @@ impl AnalyzerRegistry {
 
     /// A registry holding every version of every built-in analyzer ([`BUILTIN_ANALYZERS`]).
     pub fn builtin() -> Self {
-        let analyzers = BUILTIN_ANALYZERS
-            .iter()
-            .filter_map(|a| {
-                let analyzer = builtin_analyzer(a.name, a.version)?;
-                Some(((a.name.to_owned(), a.version), Arc::new(analyzer)))
-            })
-            .collect();
-        Self { analyzers }
+        let mut registry = Self::new();
+        for a in BUILTIN_ANALYZERS {
+            if let Some(analyzer) = builtin_analyzer(a.name, a.version) {
+                registry
+                    .analyzers
+                    .entry(a.name.to_owned())
+                    .or_default()
+                    .insert(a.version, Arc::new(analyzer));
+            }
+        }
+        registry
     }
 
     /// Adds `analyzer` as version `version` of `name`.
     ///
     /// # Errors
-    /// [`RegisterError`] if the name is empty or contains `@`, the version is 0, or the name and version are taken.
+    /// [`RegisterError`] if the name is empty, contains `@` or is a built-in analyzer's (any version: a built-in
+    /// name never means another chain, SPEC §6.3), the version is 0, or the name and version are taken.
     pub fn register(
         &mut self,
         name: &str,
@@ -178,35 +186,38 @@ impl AnalyzerRegistry {
         if name.is_empty() || name.contains('@') {
             return Err(RegisterError::InvalidName(name.to_owned()));
         }
+        if current_builtin_version(name).is_some() {
+            return Err(RegisterError::Reserved(name.to_owned()));
+        }
         if version == 0 {
             return Err(RegisterError::InvalidVersion(name.to_owned()));
         }
-        let key = (name.to_owned(), version);
-        if self.analyzers.contains_key(&key) {
+        let versions = self.analyzers.entry(name.to_owned()).or_default();
+        if versions.contains_key(&version) {
             return Err(RegisterError::Exists {
                 name: name.to_owned(),
                 version,
             });
         }
-        self.analyzers.insert(key, Arc::new(analyzer));
+        versions.insert(version, Arc::new(analyzer));
         Ok(())
     }
 
     /// Version `version` of `name`, if registered.
     pub fn get(&self, name: &str, version: u32) -> Option<&Arc<Analyzer>> {
-        self.analyzers.get(&(name.to_owned(), version))
+        self.analyzers.get(name)?.get(&version)
     }
 
     /// The highest registered version of `name`.
     pub fn current_version(&self, name: &str) -> Option<u32> {
-        self.versions(name).last()
+        self.versions(name).next_back()
     }
 
     /// The registered versions of `name`, ascending.
-    pub fn versions<'a>(&'a self, name: &'a str) -> impl Iterator<Item = u32> + 'a {
+    pub fn versions(&self, name: &str) -> impl DoubleEndedIterator<Item = u32> + '_ {
         self.analyzers
-            .keys()
-            .filter(move |(n, _)| n == name)
-            .map(|(_, version)| *version)
+            .get(name)
+            .into_iter()
+            .flat_map(|versions| versions.keys().copied())
     }
 }

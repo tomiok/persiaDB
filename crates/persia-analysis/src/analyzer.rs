@@ -7,10 +7,10 @@ use crate::token::{Token, TokenFilter, Tokenizer};
 
 /// Rewrites the text of a field value before it is tokenized (SPEC §6.3).
 ///
-/// Object safe, so an analyzer can chain any char filters behind pointers. Until char filters record an offset
-/// map (ROADMAP 4.4.7), the spans of an analyzer whose char filters change the text index the filtered text, not
-/// the original value; no built-in analyzer has a char filter.
-pub trait CharFilter: Send + Sync {
+/// Crate-private until char filters record an offset map (ROADMAP 4.4.7): without it, the spans of an analyzer whose
+/// char filters change the text would index the filtered text, not the original value (SPEC §6.3.1), and slicing
+/// the value with them could fall off its character boundaries. No built-in analyzer has a char filter.
+pub(crate) trait CharFilter: Send + Sync {
     /// The filtered text, borrowing `text` when the filter leaves it unchanged. Never fails or panics.
     fn filter<'a>(&self, text: &'a str) -> Cow<'a, str>;
 }
@@ -104,7 +104,8 @@ pub struct AnalyzerBuilder {
 
 impl AnalyzerBuilder {
     /// Appends a char filter; char filters run before the tokenizer, whenever they are added.
-    pub fn char_filter(mut self, filter: impl CharFilter + 'static) -> Self {
+    #[allow(dead_code, reason = "made public with the offset map, ROADMAP 4.4.7")]
+    pub(crate) fn char_filter(mut self, filter: impl CharFilter + 'static) -> Self {
         self.analyzer.char_filters.push(Box::new(filter));
         self
     }
@@ -126,5 +127,52 @@ impl fmt::Debug for AnalyzerBuilder {
         f.debug_tuple("AnalyzerBuilder")
             .field(&self.analyzer)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{LowercaseFilter, WhitespaceTokenizer};
+
+    /// Replaces `-` with a space, keeping the length, so spans still index the original text.
+    struct DashToSpace;
+
+    impl CharFilter for DashToSpace {
+        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
+            if text.contains('-') {
+                Cow::Owned(text.replace('-', " "))
+            } else {
+                Cow::Borrowed(text)
+            }
+        }
+    }
+
+    /// Upper-cases ASCII; only meaningful after [`DashToSpace`] when the chain order holds.
+    struct Upper;
+
+    impl CharFilter for Upper {
+        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
+            Cow::Owned(text.to_ascii_uppercase())
+        }
+    }
+
+    #[test]
+    fn char_filters_run_in_order_before_the_tokenizer() {
+        // Added after the token filter: char filters still run first.
+        let analyzer = Analyzer::builder(WhitespaceTokenizer)
+            .filter(LowercaseFilter)
+            .char_filter(DashToSpace)
+            .char_filter(Upper)
+            .build();
+        let mut tokens = Vec::new();
+        analyzer.analyze("well-known Fact", &mut tokens);
+        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["well", "known", "fact"]);
+        assert_eq!(
+            tokens.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(),
+            [(0, 4), (5, 10), (11, 15)]
+        );
+        assert!(!analyzer.stacks_tokens());
     }
 }

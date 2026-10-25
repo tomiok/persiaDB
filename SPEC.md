@@ -696,7 +696,7 @@ Readers keep the encoder of every `encoding_version` they accept.
 
 ### 6.3 Analyzers
 Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization; no
-built-in analyzer has one (their offset mapping is ROADMAP 4.4.7).
+built-in analyzer has one, and they are not open to users until they map spans back (§6.3.1, ROADMAP 4.4.7).
 Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
 analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
 (ROADMAP 4.4.10); until they exist a schema naming them is rejected.
@@ -708,9 +708,9 @@ new collection (§6.2.4).
 #### 6.3.1 Tokens and tokenizers
 A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
 on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
-the span, so the span always points at the characters the token came from. An analyzer whose char filters change the
-text maps spans back to the original field value before emitting them (ROADMAP 4.4.7), so spans always index the
-original value. `position` counts tokens from 0 within one value;
+the span, so the span always points at the characters the token came from. *Planned, not yet in effect (ROADMAP
+4.4.7):* an analyzer whose char filters change the text will map spans back to the original field value before
+emitting them, so spans always index the original value; until then analyzers cannot have char filters. `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
@@ -814,7 +814,8 @@ chain so it bounds the final terms.
 | `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
 | `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
 
-`keyword` and `whitespace` do not normalize: case and accents are significant. `es` keeps `ñ` because it tells words
+`keyword` and `whitespace` do not normalize: case and accents are significant. Their guard makes two values that share their
+first 255 bytes one term; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4). `es` keeps `ñ` because it tells words
 apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
 stemming, so `John’s` and `John's` both stem to `john`. Stemming before folding means a query typed without accents
 can stem differently from the accented word (`maçã` and `maca` in `pt`); the relaxation cascade (§7.6) is what
@@ -825,7 +826,9 @@ same version.
 Queries (§7) and synonym terms (§6.3.2) are analyzed with the field's analyzer **without the filters that stack
 tokens** (`edge_ngram`; `TokenFilter::stacks_tokens`): an index-time prefix such as `lapt` must match the query term
 `lapt` as is, and a query or synonym term expanded into prefixes could never line up with an analyzed query. Every
-other filter applies at both times, in the same order, so terms meet in the same form. No built-in analyzer stacks
+other filter applies at both times, in the same order, so terms meet in the same form. Without `preserve_original`, a query
+word longer than `max` analyzes to the whole word, which was never indexed, so L0 misses it and the relaxation
+cascade (§7.6, prefix level) is what finds it. No built-in analyzer stacks
 tokens, so for them query-time and index-time analysis are the same.
 
 ### 6.4 Documents

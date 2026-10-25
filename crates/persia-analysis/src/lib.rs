@@ -32,7 +32,7 @@ mod synonyms;
 mod token;
 mod whitespace;
 
-pub use analyzer::{Analyzer, AnalyzerBuilder, CharFilter};
+pub use analyzer::{Analyzer, AnalyzerBuilder};
 pub use apostrophe::ApostropheFilter;
 pub use fold::FoldingFilter;
 pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};

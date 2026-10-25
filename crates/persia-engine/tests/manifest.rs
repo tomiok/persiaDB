@@ -929,6 +929,19 @@ fn apply_schema_rules() {
         ))
         .unwrap();
     assert_eq!(next.collection("notes").unwrap().schema(), &evolved);
+    // ROADMAP 4.4.3: the unpinned analyzer of a definition evolves to the stored, pinned one; pinning alone is no
+    // schema change.
+    let pinned = CollectionSchema::from_json(&notes().to_json().unwrap()).unwrap();
+    let rebound = pinned.evolve(&notes()).unwrap();
+    assert_eq!(rebound, pinned);
+    b.apply(&change(
+        "notes",
+        CollectionChange {
+            schema: Some(rebound),
+            ..CollectionChange::default()
+        },
+    ))
+    .unwrap();
 }
 
 #[test]

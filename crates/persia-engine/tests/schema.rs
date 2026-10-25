@@ -1987,3 +1987,21 @@ fn unversioned_analyzer_rebinds_to_the_stored_version() {
     assert!(text(&stored).is_pinned());
     assert!(!text(&parse(&definition).unwrap()).is_pinned());
 }
+
+/// An added field with an unversioned analyzer gets the current version, and the stored form pins it.
+#[test]
+fn added_field_with_unversioned_analyzer_is_stored_pinned() {
+    let current = parse(&spec_value()).unwrap();
+    let proposed = parse(&patched(
+        "/fields/summary",
+        Some(json!({"type": "text", "analyzer": "en"})),
+    ))
+    .unwrap();
+    let evolved = current.evolve(&proposed).unwrap();
+    let json: Value = serde_json::from_str(&evolved.to_json().unwrap()).unwrap();
+    let want = format!(
+        "en@{}",
+        persia_analysis::current_builtin_version("en").unwrap()
+    );
+    assert_eq!(json.pointer("/fields/summary/analyzer"), Some(&json!(want)));
+}

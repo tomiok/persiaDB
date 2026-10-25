@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
-- `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains char filters, a tokenizer and token filters;
+- `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains a tokenizer and token filters (char filters come with their offset map, ROADMAP 4.4.7);
   `analyze` gives index-time tokens and `analyze_query` query-time tokens, without filters that stack tokens such as
   edge n-grams (§6.3.4), and `SynonymMap::analyzed` analyzes synonym terms the same way. The built-ins `standard`,
   `keyword`, `whitespace`, `en`, `es` and `pt` at version 1 (`builtin_analyzer`, `BUILTIN_ANALYZERS`; chains in
@@ -113,6 +113,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia-engine`: a schema naming the `fr`, `de` or `it` analyzer is rejected until those analyzers exist (ROADMAP
   4.4.10); the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and version).
+  Files an earlier development build wrote with `fr@1`, `de@1` or `it@1` in a schema no longer open (reported as
+  corrupt; nothing was released with them).
 
 ### Fixed
 - `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged

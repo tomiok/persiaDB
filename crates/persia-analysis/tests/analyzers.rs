@@ -1,11 +1,10 @@
 //! Analyzer pipelines, the built-in analyzers and the registry (ROADMAP 4.4.1, 4.4.2, 4.4.8; SPEC §6.3).
 #![allow(clippy::unwrap_used)] // helpers outside #[test] build fixed inputs
 
-use std::borrow::Cow;
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    Analyzer, AnalyzerRegistry, BUILTIN_ANALYZERS, CharFilter, DEFAULT_ANALYZER, EdgeNgramFilter,
+    Analyzer, AnalyzerRegistry, BUILTIN_ANALYZERS, DEFAULT_ANALYZER, EdgeNgramFilter,
     LowercaseFilter, RegisterError, StandardTokenizer, SynonymMap, Token, WhitespaceTokenizer,
     builtin_analyzer, current_builtin_version,
 };
@@ -212,6 +211,15 @@ fn registry_register_rules() {
         Err(RegisterError::InvalidVersion("zero".to_owned()))
     );
     assert!(registry.get("zero", 0).is_none());
+    // A built-in name is reserved at every version, released or not.
+    let mut builtins = AnalyzerRegistry::builtin();
+    for (name, version) in [("en", 1), ("en", 2), ("standard", 7)] {
+        assert_eq!(
+            builtins.register(name, version, custom()),
+            Err(RegisterError::Reserved(name.to_owned()))
+        );
+    }
+    assert!(builtins.get("en", 2).is_none());
 }
 
 #[test]
@@ -223,45 +231,6 @@ fn analyze_replaces_the_output() {
     assert_eq!(tokens.first().map(|t| t.position), Some(0));
     analyzer.analyze_query("", &mut tokens);
     assert_eq!(tokens, []);
-}
-
-/// Replaces `-` with a space, keeping the length, so spans still index the original text.
-struct DashToSpace;
-
-impl CharFilter for DashToSpace {
-    fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        if text.contains('-') {
-            Cow::Owned(text.replace('-', " "))
-        } else {
-            Cow::Borrowed(text)
-        }
-    }
-}
-
-/// Upper-cases ASCII; only meaningful after [`DashToSpace`] when the chain order holds.
-struct Upper;
-
-impl CharFilter for Upper {
-    fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
-        Cow::Owned(text.to_ascii_uppercase())
-    }
-}
-
-#[test]
-fn char_filters_run_in_order_before_the_tokenizer() {
-    // Added after the token filter: char filters still run first.
-    let analyzer = Analyzer::builder(WhitespaceTokenizer)
-        .filter(LowercaseFilter)
-        .char_filter(DashToSpace)
-        .char_filter(Upper)
-        .build();
-    let tokens = analyze(&analyzer, "well-known Fact");
-    assert_eq!(texts(&tokens), ["well", "known", "fact"]);
-    assert_eq!(
-        tokens.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(),
-        [(0, 4), (5, 10), (11, 15)]
-    );
-    assert!(!analyzer.stacks_tokens());
 }
 
 fn ngram_analyzer() -> Analyzer {
@@ -345,6 +314,40 @@ proptest! {
             let mut query = Vec::new();
             analyzer.analyze_query(&text, &mut query);
             prop_assert_eq!(&query, &tokens, "{}", a.name);
+        }
+    }
+}
+
+/// Part of the pinned definitions: these words stem differently when `fold` runs before `stem`, so reordering a
+/// language chain fails here (SPEC §6.3.3).
+#[test]
+fn language_chains_stem_before_folding() {
+    let expected: &[(&str, &str, &[&str])] = &[
+        ("es", "después cafés", &["despues", "cafes"]),
+        ("pt", "maçã", &["maca"]),
+        ("en", "résumés naïveté", &["resume", "naivete"]),
+    ];
+    for (name, text, want) in expected {
+        assert_eq!(builtin_texts(name, text), *want, "{name}");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(CASES))]
+
+    /// SPEC §6.3.4: with `preserve_original`, every query-time token of a text is among its index-time tokens at the
+    /// same position, so a query for an indexed word always finds it as is.
+    #[test]
+    fn query_tokens_are_among_stacked_index_tokens(text in text()) {
+        let analyzer = ngram_analyzer();
+        let index = analyze(&analyzer, &text);
+        let mut query = Vec::new();
+        analyzer.analyze_query(&text, &mut query);
+        for token in &query {
+            prop_assert!(
+                index.iter().any(|t| t.text == token.text && t.position == token.position),
+                "{token:?} not indexed"
+            );
         }
     }
 }
