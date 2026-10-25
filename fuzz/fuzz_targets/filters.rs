@@ -1,18 +1,18 @@
-//! Fuzz the token filters and the synonym lookup (ROADMAP 4.2; SPEC §6.3.2): arbitrary text never panics, every
-//! output token is non-empty and keeps the span and position of an input token in order, NFKC, lowercase and
-//! folding are idempotent, and synonym matches are ordered and disjoint. The first byte picks the edge n-gram bounds
-//! and whether the original is preserved, and bit 6 whether the synonym analyzer removes English stopwords (so
-//! terms and queries have position gaps); the text before the first `|` holds the synonym groups (`;` between
-//! groups, `,` between terms).
+//! Fuzz the token filters, the stemmers and the synonym lookup (ROADMAP 4.2, 4.3; SPEC §6.3.2): arbitrary text
+//! never panics, every output token is non-empty and keeps the span and position of an input token in order, NFKC,
+//! lowercase and folding are idempotent (stemming is not), and synonym matches are ordered and disjoint. The first
+//! byte picks the edge n-gram bounds and whether the original is preserved, and bit 6 whether the synonym analyzer
+//! removes English stopwords (so terms and queries have position gaps); the text before the first `|` holds the
+//! synonym groups (`;` between groups, `,` between terms).
 #![no_main]
 
 use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
-    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
-    WhitespaceTokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, LowercaseFilter,
+    NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, StemmerFilter,
+    StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
 };
 
 fn check_from_input(input: &[Token], output: &[Token]) {
@@ -60,11 +60,14 @@ fuzz_target!(|data: &[u8]| {
     let fold_preserving = FoldingFilter::preserving(preserved);
     let idempotent: [&dyn TokenFilter; 4] =
         [&NfkcFilter, &LowercaseFilter, &fold, &fold_preserving];
-    let others: [&dyn TokenFilter; 4] = [
+    let others: [&dyn TokenFilter; 7] = [
         &StopwordFilter::english(),
         &StopwordFilter::spanish(),
         &StopwordFilter::portuguese(),
         &ngrams,
+        &StemmerFilter::new(EnglishStemmer),
+        &StemmerFilter::new(SpanishStemmer),
+        &StemmerFilter::new(PortugueseStemmer),
     ];
     let tokenizers: [&dyn Tokenizer; 2] = [&StandardTokenizer, &WhitespaceTokenizer];
     for tokenizer in tokenizers {
