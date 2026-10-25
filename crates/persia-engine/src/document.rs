@@ -229,7 +229,9 @@ impl Document {
     /// # Errors
     /// [`DocumentError::UnknownFieldId`] if a field is not in `schema`, [`DocumentError::WrongType`] if a value
     /// does not have its field's type, [`DocumentError::OutOfRange`] for a non-finite float or a datetime out of range,
-    /// [`DocumentError::TooDeep`] for a stored value nested too deep.
+    /// [`DocumentError::TooDeep`] for a stored value nested too deep, [`DocumentError::NullStored`] for a `null` stored
+    /// or extra value, [`DocumentError::FieldName`] for an extra field whose name breaks the field name rule,
+    /// [`DocumentError::ExtraIsSchemaField`] for an extra field next to a value of the schema field of that name.
     pub fn to_json(&self, schema: &CollectionSchema) -> Result<String, DocumentError> {
         json::to_json(self, schema)
     }
