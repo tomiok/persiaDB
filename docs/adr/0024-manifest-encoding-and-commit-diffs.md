@@ -40,8 +40,10 @@ express and check what one commit changes.
    resurrect deletions committed after it was planned), updated entries and added segments; optional new fence
    token and WAL start. `apply` checks the transition (no regression of fence token, WAL start or tombstones; schema only
    through evolution; ids fresh and unique; `doc_count`/`size` fixed) and gives `seq + 1`. A diff planned on an
-   older manifest applies to a newer one exactly when the segments it touches are unchanged, which is the
-   conflict check a background merge needs. `diff(a, b)` returns the diff that `apply` turns `a` into `b` with, or
+   older manifest applies to a newer one when the segments it touches are unchanged (sidecars included) and the
+   rest of it is still a valid step there: a given fence token or WAL start not below the newer one, a
+   replacement schema that evolves from the newer schema, creates and drops still possible. A merge diff sets
+   none of those, so for it the segments are the whole conflict check. `diff(a, b)` returns the diff that `apply` turns `a` into `b` with, or
    an error when no single commit does (e.g. an added segment ordered before a kept one).
    Container compaction is a separate operation (`relocate`): it moves frame locations and may lower `wal_start`,
    which no commit may do.

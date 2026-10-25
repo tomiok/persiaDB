@@ -4,13 +4,19 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use persia_engine::manifest::Manifest;
+use persia_engine::manifest::{Manifest, ManifestEncodeError};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(manifest) = Manifest::decode(data) else {
         return;
     };
-    let bytes = manifest.encode().expect("a decoded manifest encodes");
+    let bytes = match manifest.encode() {
+        Ok(bytes) => bytes,
+        // The engine's schema JSON may be longer than the stored form (`1` is written `1.0`), so a manifest near the
+        // limit can decode but not re-encode. The writer then fails the commit; nothing is lost.
+        Err(ManifestEncodeError::TooLarge { .. }) => return,
+        Err(e) => panic!("a decoded manifest fails to encode: {e}"),
+    };
     let again = Manifest::decode(&bytes).expect("an encoded manifest decodes");
     assert_eq!(again, manifest);
     assert_eq!(again.encode().expect("encodes"), bytes);

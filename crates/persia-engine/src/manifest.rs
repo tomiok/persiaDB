@@ -272,7 +272,8 @@ impl Manifest {
     /// The encoding of SPEC §8.7.
     ///
     /// # Errors
-    /// [`ManifestEncodeError::TooLarge`] if it would exceed [`MAX_MANIFEST_LEN`].
+    /// [`ManifestEncodeError::TooLarge`] if it would exceed [`MAX_MANIFEST_LEN`]. A decoded manifest can: its schemas
+    /// are written in the engine's JSON form, which may be longer than the stored one (`1` becomes `1.0`).
     pub fn encode(&self) -> Result<Vec<u8>, ManifestEncodeError> {
         codec::encode(self)
     }

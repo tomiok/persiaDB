@@ -244,7 +244,7 @@ Deps: M1. (Parallel with M2.)
 - [x] 3.2.5 [T] property: random schema + random valid docs round-trip; invalid docs rejected with precise errors
 
 ## 3.3 Manifest model
-- [x] 3.3.1 `Manifest { seq, fence_token, collections: {name → {schema, segments[], tombstone_versions}}, wal_start }`
+- [x] 3.3.1 `Manifest { seq, fence_token, wal_start, collections: {name → {schema, segments[]}} }`; each segment entry holds its current tombstone sidecar (ADR-0024)
 - [x] 3.3.2 Manifest encode/decode (versioned) + hash
 - [x] 3.3.3 Manifest diff/apply helpers for commit planning
 - [x] 3.3.4 [T] golden manifest fixtures; fuzz decode
@@ -370,7 +370,7 @@ Deps: M2, M5.
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
-- [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR)
+- [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
 - [ ] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes)
 - [ ] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
 

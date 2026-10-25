@@ -859,7 +859,8 @@ Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2,
 - One sidecar per `(segment_id, version)`; `version` is a `u64`: 1 for a segment's first sidecar, one more per rewrite
   (§8.7.2; the manifest rules are normative, the payload below is still a proposal).
 - Payload: `segment_id u128`, `version u64`, `doc_count u32` (must equal the segment's), then the **full** set of deleted
-  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read.
+  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read; each
+  version is a superset of the previous one (deletions are never undone), which the writer checks before committing it.
 - Docids `>= doc_count` are corruption.
 - Stored locally as a `TombstoneSidecar` frame (SPEC §4.4), remotely as `tombstones/<collection>/<segment_id>.<ver>.tomb` (SPEC §10.4).
 - The manifest maps each live segment to its current sidecar version (absent = no deletions). Superseded sidecars become
@@ -951,11 +952,17 @@ gives the next manifest, `seq + 1`, and fails unless:
   version, so deletions committed since would come back in the merged segment;
 - an updated entry keeps `doc_count`, `size` and location; its sidecar is the next version (`version + 1`,
   `deleted` not lower) or the first (`version = 1`) of a segment that had none, never the current one (two deletes
-  planned on one manifest would both write the next version); deletions are never removed. An added segment's sidecar, if any, has version 1.
+  planned on one manifest would both write the next version); deletions are never removed. The manifest sees only
+  the `deleted` count, so it can reject a lower count but not a new set that drops some docids while keeping the
+  count: the writer builds each sidecar version as a superset of the previous one and checks that before it
+  commits (§8.3, ROADMAP 6.4.2). An added segment's sidecar, if any, has version 1.
 
 Kept segments stay in their order and added segments follow, in the diff's order. Diffs name segments by id, never
-by position, so one planned against an older manifest (a background merge) applies to a newer one exactly when the
-segments it touches are unchanged, sidecars included; otherwise it fails and is replanned. The diff between two
+by position, so one planned against an older manifest (a background merge) still applies to a newer one when the
+segments it touches are unchanged, sidecars included, and the rest of the diff is still a valid step from the newer
+manifest: its `fence_token` and `wal_start`, if given, are not below the newer ones, a replacement schema evolves from
+the newer schema, and collections it creates or drops have not been created or dropped meanwhile. Otherwise it fails
+and is replanned. A merge diff, which gives no `fence_token`, `wal_start` or schema, conflicts only on its segments. The diff between two
 manifests is the one that applies to the first and gives the second (`seq` aside); there is none if no single
 commit leads from one to the other.
 

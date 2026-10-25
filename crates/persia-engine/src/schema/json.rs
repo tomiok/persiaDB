@@ -85,10 +85,11 @@ fn first_missing(raw: &RawSchema) -> Option<String> {
             return Some(format!("field {name:?} leaves options to defaults"));
         }
     }
+    // `ranking: {}` and no `ranking` both mean no static rank: that is a choice, not a default.
     let rank_given = raw.ranking.as_ref().is_none_or(|r| {
         r.static_rank
             .as_ref()
-            .is_some_and(|s| s.weight.is_some() && s.function.is_some())
+            .is_none_or(|s| s.weight.is_some() && s.function.is_some())
     });
     if !rank_given {
         return Some("ranking leaves options to defaults".to_owned());

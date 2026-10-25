@@ -188,13 +188,13 @@ pub enum UpdateProblem {
     #[error("doc_count, size and location of a segment never change in a commit")]
     SegmentChanged,
     /// A first sidecar (of a new segment, or of one that had none) whose version is not 1.
-    #[error("a first tombstone sidecar has version 1")]
+    #[error("a first tombstone sidecar must have version 1")]
     FirstVersion,
     /// A sidecar removed, or a deleted count lowered.
     #[error("deletions cannot be removed")]
     DeletionsRemoved,
     /// A sidecar whose version is neither the current one nor one above it.
-    #[error("a rewritten sidecar's version is one above the current")]
+    #[error("a rewritten sidecar's version must be one above the current version")]
     VersionStep,
     /// The current sidecar version with different contents.
     #[error("a sidecar version never changes")]

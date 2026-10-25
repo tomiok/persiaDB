@@ -30,9 +30,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use persia_engine::manifest::{
-    ApplyError, CollectionChange, CollectionDiff, EntryProblem, Location, MAX_MANIFEST_LEN,
-    Manifest, ManifestCorruption, ManifestDiff, ManifestError, ManifestHash, SegmentEntry,
-    SegmentId, Tombstones, UpdateProblem,
+    ApplyError, CollectionChange, CollectionDiff, CollectionEntry, EntryProblem, Location,
+    MAX_MANIFEST_LEN, Manifest, ManifestCorruption, ManifestDiff, ManifestError, ManifestHash,
+    SegmentEntry, SegmentId, Tombstones, UpdateProblem,
 };
 use persia_engine::schema::{
     AnalyzerRef, BUILTIN_ANALYZERS, CollectionSchema, Fallback, FieldKind, FilterRelaxation,
@@ -1439,7 +1439,8 @@ fn diff_for(m: &Manifest, op: &Op, next_id: &mut u128) -> ManifestDiff {
             id: fresh(),
             doc_count: *docs,
             size: u64::from(*docs) * 64,
-            location: location(*frame, u64::from(*docs), u64::from(*docs)),
+            // Each flushed frame gets its own 1 MiB slot, so no two frame locations share an offset.
+            location: location(*frame, (*next_id as u64) << 17, u64::from(*docs)),
             tombstones: None,
         }),
         Op::Delete { pick, more, .. } if !segments.is_empty() => {
@@ -1502,12 +1503,23 @@ fn step_for(m: &Manifest, op: &Op, next_id: &mut u128) -> Step {
     let segments = m
         .collection(NAMES[*collection])
         .map_or(&[][..], |c| c.segments());
+    let to = 12288 + offset * 8;
+    let taken = m
+        .collections()
+        .flat_map(CollectionEntry::segments)
+        .any(|s| {
+            let sidecar = s.tombstones.map(|t| t.location);
+            std::iter::once(s.location)
+                .chain(sidecar)
+                .any(|l| matches!(l, Location::Frame { offset, .. } if offset == to))
+        });
     let mut moves = BTreeMap::new();
     if let Some(Location::Frame { offset: from, .. }) = segments
         .get(pick % segments.len().max(1))
         .map(|s| s.location)
+        && !taken
     {
-        moves.insert(from, 12288 + offset * 8);
+        moves.insert(from, to);
     }
     Step::Relocate {
         moves,
@@ -2569,10 +2581,13 @@ fn without_key(v: &Value, path: &[String]) -> Value {
     v
 }
 
-/// Removing a whole field entry leaves a smaller schema (valid if it had the last id), and an absent `ranking` is
-/// how a schema without a static rank is written; every other key is an option (SPEC §8.7.1).
+/// Removing a whole field entry leaves a smaller schema (valid if it had the last id), and an absent `ranking` (or
+/// `static_rank` inside it) is how a schema without a static rank is written; every other key is an option (SPEC
+/// §8.7.1).
 fn is_option(path: &[String]) -> bool {
-    !(path == ["ranking"] || (path.len() == 2 && path[0] == "fields"))
+    !(path == ["ranking"]
+        || path == ["ranking", "static_rank"]
+        || (path.len() == 2 && path[0] == "fields"))
 }
 
 fn catalog_manifest() -> Manifest {
@@ -3157,4 +3172,25 @@ fn two_deletes_planned_on_one_manifest_cannot_both_apply() {
             ApplyError::Update { .. }
         ));
     }
+}
+
+#[test]
+fn an_empty_ranking_object_is_no_static_rank() {
+    let mut value: Value = serde_json::from_str(&notes_json()).unwrap();
+    value["ranking"] = serde_json::json!({});
+    let json = value.to_string();
+    let mut body = header(1);
+    push_schema(&mut body, &json);
+    body.extend(0u32.to_le_bytes());
+    let m = Manifest::decode(&sealed(&body)).unwrap();
+    assert_eq!(m.collection("notes").unwrap().schema(), &notes());
+    // A static rank that leaves its options to defaults is still rejected.
+    value["ranking"] = serde_json::json!({"static_rank": {"field": "body"}});
+    let mut body = header(1);
+    push_schema(&mut body, &value.to_string());
+    body.extend(0u32.to_le_bytes());
+    assert!(matches!(
+        corrupt(&sealed(&body)),
+        (40, ManifestCorruption::Schema(_))
+    ));
 }
