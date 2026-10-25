@@ -36,8 +36,12 @@ fn tricky_inputs() {
         ("don't O'Neil l'été", &["don't", "O'Neil", "l'été"]),
         ("don\u{2019}t", &["don\u{2019}t"]),
         ("'quoted' dogs'", &["quoted", "dogs"]),
-        // Emails and URLs split at `@`, `:` and `/`; dotted names stay whole.
+        // Emails and URLs split at `@` and `/`; dotted names stay whole. A colon splits only when it is not
+        // between letters (UAX #29 MidLetter): `mailto:ana` and `key:value` stay whole, `https://` and `12:30`
+        // split.
         ("ana@example.com", &["ana", "example.com"]),
+        ("mailto:ana key:value", &["mailto:ana", "key:value"]),
+        ("12:30 a:1", &["12", "30", "a", "1"]),
         (
             "first.last@mail.example.org",
             &["first.last", "mail.example.org"],

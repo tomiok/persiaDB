@@ -74,9 +74,11 @@ impl TokenLengthGuard {
         match self.policy {
             LengthPolicy::Drop => tokens.retain(|token| token.text.len() <= max),
             LengthPolicy::Truncate => tokens.retain_mut(|token| {
-                if token.text.len() > max {
-                    token.text.truncate(token.text.floor_char_boundary(max));
+                if token.text.len() <= max {
+                    return true;
                 }
+                token.text.truncate(token.text.floor_char_boundary(max));
+                // Only an oversized token whose first character alone exceeds the limit ends up empty.
                 !token.text.is_empty()
             }),
         }

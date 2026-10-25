@@ -95,3 +95,19 @@ fn guards_every_value_appended_to_one_buffer() {
         .collect();
     assert_eq!(got, [("aa", 0), ("b", 1), ("c", 0), ("dd", 1)]);
 }
+
+#[test]
+fn tokens_within_the_limit_are_kept_even_if_empty() {
+    // A filter earlier in the chain may rewrite a token's text to nothing; the guard only acts on oversized
+    // tokens, under either policy.
+    for policy in [LengthPolicy::Truncate, LengthPolicy::Drop] {
+        let mut tokens = vec![Token {
+            text: String::new(),
+            start: 0,
+            end: 3,
+            position: 0,
+        }];
+        TokenLengthGuard::new(NonZeroUsize::new(2).unwrap(), policy).apply(&mut tokens);
+        assert_eq!(tokens.len(), 1, "{policy:?}");
+    }
+}

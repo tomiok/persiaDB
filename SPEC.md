@@ -704,7 +704,9 @@ Analyzer name+version is recorded in the schema; changing an analyzer requires a
 #### 6.3.1 Tokens and tokenizers
 A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
 on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
-the span, so highlighting always points at the source characters. `position` counts tokens from 0 within one value;
+the span, so the span always points at the characters the token came from. An analyzer whose char filters change the
+text maps spans back to the original field value before emitting them (ROADMAP 4.4.7), so spans always index the
+original value. `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. Tokens of one value have strictly
 increasing, non-overlapping spans. Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
@@ -713,8 +715,9 @@ every analyzer whose output it changes (§6.3), and CI fails if a dependency or 
 - **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
   punctuation, symbols and emoji produce no token (a keycap emoji such as `1️⃣` keeps its digit and is one).
   Consequences of UAX #29, relied on and tested: numbers with inner separators stay whole (`3.14`, `1,000`); an apostrophe between letters joins them (`don't`, `O'Neil`, also `’`);
-  emails and URLs split at `@`, `:` and `/` while dotted names stay whole (`ana@example.com` → `ana`,
-  `example.com`); `_` joins (`snake_case`); scripts written without spaces (Han, Hiragana, Thai, ...) fall back to
+  emails and URLs split at `@` and `/` while dotted names stay whole (`ana@example.com` → `ana`,
+  `example.com`); a colon joins letters on both sides (`mailto:ana`, `key:value`) and splits otherwise
+  (`https://`, `12:30`); `_` joins (`snake_case`); scripts written without spaces (Han, Hiragana, Thai, ...) fall back to
   one token per character, while Katakana runs and Hangul words stay whole. No dictionary segmentation in v1.
 - **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
 - **keyword**: the whole value is one token (none for an empty value).
