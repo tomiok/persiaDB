@@ -130,6 +130,11 @@ impl CollectionSchema {
         json::from_json(json)
     }
 
+    /// [`Self::from_json`] for a schema the engine stored (SPEC §8.7): every option must be given.
+    pub(crate) fn from_stored_json(json: &str) -> Result<Self, SchemaError> {
+        json::from_stored_json(json)
+    }
+
     /// The schema as JSON with every option written out, ids and analyzer versions included (ADR-0022).
     ///
     /// # Errors

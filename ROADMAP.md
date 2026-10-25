@@ -244,10 +244,10 @@ Deps: M1. (Parallel with M2.)
 - [x] 3.2.5 [T] property: random schema + random valid docs round-trip; invalid docs rejected with precise errors
 
 ## 3.3 Manifest model
-- [ ] 3.3.1 `Manifest { seq, fence_token, collections: {name → {schema, segments[], tombstone_versions}}, wal_start }`
-- [ ] 3.3.2 Manifest encode/decode (versioned) + hash
-- [ ] 3.3.3 Manifest diff/apply helpers for commit planning
-- [ ] 3.3.4 [T] golden manifest fixtures; fuzz decode
+- [x] 3.3.1 `Manifest { seq, fence_token, wal_start, collections: {name → {schema, segments[]}} }`; each segment entry holds its current tombstone sidecar (ADR-0024)
+- [x] 3.3.2 Manifest encode/decode (versioned) + hash
+- [x] 3.3.3 Manifest diff/apply helpers for commit planning
+- [x] 3.3.4 [T] golden manifest fixtures; fuzz decode
 
 ---
 
@@ -366,10 +366,11 @@ Deps: M2, M5.
 - [ ] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`)
 - [ ] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
 - [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
+- [ ] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
-- [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR)
+- [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
 - [ ] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes)
 - [ ] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
 

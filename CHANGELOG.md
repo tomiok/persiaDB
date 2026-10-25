@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the manifest (`manifest::Manifest`, SPEC §8.7; ADR-0024): per collection its schema and live
+  segments with their tombstone sidecars, plus `seq`, `fence_token` and `wal_start`. A checksummed, versioned binary
+  encoding (`encode`/`decode`, corrupt input is an error naming the offset) and `ManifestHash`. Commits are planned
+  as diffs (`ManifestDiff`): `apply` checks the transition (no fence, WAL or tombstone regression, schema changes
+  only through evolution, fresh segment ids) and `diff` recovers the diff between two manifests.
 - `persia-engine`: documents (`document::Document`, SPEC §6.4; ADR-0023). Values per field type (strings or lists of
   strings for `text`/`keyword`, one value for numerics, `bool` and `datetime`, any JSON for `stored`), validation
   against a schema with precise errors (field and list index), and limits (id, keyword length, field and value counts, nesting,
@@ -96,6 +101,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
 ### Format
+- Manifest encoding version 1 (SPEC §8.7; ADR-0024): magic `PMNF`, fixed-width little-endian scalar fields, and
+  variable-length segment entries (id, doc count, size, object or frame location, optional tombstone sidecar),
+  schemas as JSON with pinned ids and analyzer versions, CRC32C trailer. Golden files in `tests/fixtures/manifest/v1/`.
 - Document encoding for `DocStore` rows (SPEC §6.4.2; ADR-0023): a deterministic CBOR subset (definite lengths,
   shortest arguments, 64-bit floats, sorted keys), `array(5)[version 1, id, blob reference, fields by id, extra
   fields]`. Decoders reject anything non-canonical. Pinned by golden vectors.

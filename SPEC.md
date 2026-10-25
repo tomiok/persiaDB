@@ -37,7 +37,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 | **Segment** | Immutable, self-contained index unit for one collection (SPEC §5). |
 | **Memtable** | In-memory mutable buffer of recent writes; searchable (near-real-time). |
 | **WAL** | Write-ahead log of operations not yet flushed to a segment. |
-| **Manifest** | Versioned snapshot listing live segments per collection + schemas. |
+| **Manifest** | Versioned snapshot listing live segments per collection + schemas (SPEC §8.7). |
 | **Commit** | Atomic publication of a new manifest. |
 | **Frame** | Checksummed record in the single-file container (SPEC §4). |
 | **Blob** | Opaque client file, content-addressed, stored by chunks (SPEC §9). |
@@ -856,9 +856,11 @@ Delete = tombstone only. Tombstones are the only mutable-looking state; they liv
 (versioned, referenced by the manifest), never inside the immutable segment bytes.
 
 Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2, see SPEC §18.3):
-- One sidecar per `(segment_id, version)`; `version` is a `u64` that increases by 1 per rewrite.
+- One sidecar per `(segment_id, version)`; `version` is a `u64`: 1 for a segment's first sidecar, one more per rewrite
+  (§8.7.2; the manifest rules are normative, the payload below is still a proposal).
 - Payload: `segment_id u128`, `version u64`, `doc_count u32` (must equal the segment's), then the **full** set of deleted
-  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read.
+  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read; each
+  version is a superset of the previous one (deletions are never undone), which the writer checks before committing it.
 - Docids `>= doc_count` are corruption.
 - Stored locally as a `TombstoneSidecar` frame (SPEC §4.4), remotely as `tombstones/<collection>/<segment_id>.<ver>.tomb` (SPEC §10.4).
 - The manifest maps each live segment to its current sidecar version (absent = no deletions). Superseded sidecars become
@@ -879,6 +881,94 @@ On open: pick superblock → load manifest → replay WAL frames from `wal_start
 so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
+
+### 8.7 Manifest
+A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
+`fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current
+tombstone sidecar (§8.3). Locally it is the payload of the Manifest frame the superblock points at (§4.3), and its
+`seq`, `fence_token` and `wal_start` equal those of the slot that commits it (`wal_start` is a container offset);
+remotely it is `manifests/<seq:020>.mf` (§10.4), where `wal_start` is the `seq` of the first WAL object still needed
+(provisional until the remote WAL is designed, M12).
+```
+0   4  magic             bytes "PMNF" (0x50 0x4D 0x4E 0x46)
+4   4  version           u32 = 1
+8   8  seq               u64
+16  8  fence_token       u64
+24  8  wal_start         u64
+32  4  collection_count  u32
+36  ..  collections, in strictly ascending byte order of their names:
+          u32 schema_len, then schema_len bytes: the schema as JSON (§6.2), every field with its `id` and
+              every text field with an `analyzer` of the form "name@version"
+          u32 segment_count, then the live segments, oldest first (the order commits added them):
+            16  segment_id     u128
+            4   doc_count      u32
+            8   size           u64  (length of the segment's bytes, §5.1)
+            ..  location
+            1   tombstones     0 = none, 1 = present, followed by:
+                  8 version u64, 4 deleted u32, location
+..  4  crc32c            u32  over every byte before it
+location:  u8 1 = object (key from the ids, §10.4) | 2 = frame, followed by u64 offset, u64 len (whole frame, §4.4)
+```
+A manifest is at most 64 MiB. Reading it: the length, the magic, then the CRC32C trailer (it ends every version, so
+a damaged `version` reads as corruption), then `version` (0 is corruption; above 1 is unsupported), then the rest.
+Fields have one encoding each except the schema text: any valid JSON definition (§6.2) that gives every option
+explicitly, ids and `"name@version"` analyzers included, in any key order or spacing. Nothing is left to the reading
+build's defaults, so the same bytes read the same schema in every build (`"levels": "default"` follows the engine
+by design, §6.2.3). A schema option added later is a new manifest
+`version` (older readers then report it unsupported rather than corrupt); a newer build reading version 1 gives the
+option the behavior from before it existed. `ManifestHash` is XXH3-128 (§4.1) of the bytes as stored: a replica
+(§10.5) copies them, never a re-encoding.
+
+#### 8.7.1 Rules
+Anything else is corruption:
+- `segment_id`s are unique across the whole manifest; `1 ≤ doc_count ≤ 2^31` (§5.4); `size ≥ 1`.
+- A frame location has `offset` and `len` multiples of 8, `offset ≥ 12288`, `len ≥ 32`, and `offset + len` fits a
+  `u64`. That the frame exists, lies below `log_end` and has the right kind is checked when it is read.
+- A tombstone sidecar has `version ≥ 1` and `1 ≤ deleted ≤ doc_count`. A segment without deletions has none.
+- The stored schema is valid (§6.2.1–§6.2.3) and gives every option (§8.7); without ids a reader would assign them
+  by name order, and without versions bind the current analyzer, silently changing an evolved schema.
+
+The encoding allows both kinds of location in one manifest, but no layout uses that yet: a local container's
+manifest holds only frame locations and a remote one only object locations, and their readers treat any other
+location as corruption (ROADMAP 6.3.7).
+
+**Segment ids.** Writers draw each new `segment_id` at random (128 bits from a cryptographically secure source).
+An id is never reused: older snapshots may still reference a segment that was merged away (§8.5), and remote keys
+of segments and sidecars (§10.4) are named by it. A manifest can only check uniqueness within itself and against the
+manifest a commit builds on (§8.7.2); random ids make a collision with an older, no longer listed segment
+negligible (about `n² / 2^129` for `n` segments ever written).
+
+#### 8.7.2 Commits as diffs
+A commit is planned as a diff against the manifest it builds on: per collection, create (schema and first segments),
+drop, or change (a replacement schema; segments removed, each with the sidecar version it was read at, 0 for none;
+new entries for kept segments; segments added), and optionally a new `fence_token` and `wal_start`. Applying it
+gives the next manifest, `seq + 1`, and fails unless:
+- `fence_token` and `wal_start` do not go below the base's (§11.3, §8.2);
+- a created collection does not exist and its schema has its name; a dropped or changed one exists;
+- a replacement schema is what evolving the current one into it gives (§6.2.4), ids included;
+- removed and updated segments are live in that collection; each id appears once in the diff; an added segment's
+  id is in no collection of the base;
+- a removed segment's sidecar version is the one the diff names: a merge drops the documents deleted at that
+  version, so deletions committed since would come back in the merged segment;
+- an updated entry keeps `doc_count`, `size` and location; its sidecar is the next version (`version + 1`,
+  `deleted` not lower) or the first (`version = 1`) of a segment that had none, never the current one (two deletes
+  planned on one manifest would both write the next version); deletions are never removed. The manifest sees only
+  the `deleted` count, so it can reject a lower count but not a new set that drops some docids while keeping the
+  count: the writer builds each sidecar version as a superset of the previous one and checks that before it
+  commits (§8.3, ROADMAP 6.4.2). An added segment's sidecar, if any, has version 1.
+
+Kept segments stay in their order and added segments follow, in the diff's order. Diffs name segments by id, never
+by position, so one planned against an older manifest (a background merge) still applies to a newer one when the
+segments it touches are unchanged, sidecars included, and the rest of the diff is still a valid step from the newer
+manifest: its `fence_token` and `wal_start`, if given, are not below the newer ones, a replacement schema evolves from
+the newer schema, and collections it creates or drops have not been created or dropped meanwhile. Otherwise it fails
+and is replanned. A merge diff, which gives no `fence_token`, `wal_start` or schema, conflicts only on its segments. The diff between two
+manifests is the one that applies to the first and gives the second (`seq` aside); there is none if no single
+commit leads from one to the other.
+
+**Relocation.** A container compaction (§4.6) is not a diff: it moves frames down, so `wal_start` (a container
+offset) may go below the current one. Its manifest is the current one with `seq + 1`, every frame location moved
+to where the compaction copied the frame (same length), and the new `wal_start`; nothing else changes.
 
 ---
 
@@ -1206,6 +1296,10 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 - Golden files for every released format version live in `tests/fixtures/format/v<major>.<minor>/` and are opened
   by CI forever. `cargo xtask fixtures` writes (and CI checks) only the directory of the version the build writes;
   a released version's directory is never regenerated.
+- Encodings that live inside frames or objects rather than in the container layout have their own version field and
+  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024),
+  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`),
+  existing ones never.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

@@ -18,6 +18,10 @@ use super::{
 };
 
 pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
+    from_raw(parse(json)?)
+}
+
+fn parse(json: &str) -> Result<RawSchema, SchemaError> {
     if json.len() > MAX_SCHEMA_JSON_LEN {
         return Err(SchemaError::Json(format!(
             "{} bytes, at most {MAX_SCHEMA_JSON_LEN}",
@@ -26,11 +30,83 @@ pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
     }
     let raw: Object<RawSchema> =
         serde_json::from_str(json).map_err(|e| SchemaError::Json(e.to_string()))?;
-    from_raw(raw.0)
+    Ok(raw.0)
 }
 
 pub(super) fn to_json(schema: &CollectionSchema) -> Result<String, SchemaError> {
     serde_json::to_string(&to_raw(schema)).map_err(|e| SchemaError::Json(e.to_string()))
+}
+
+/// [`from_json`] for a schema the engine wrote (a manifest, SPEC §8.7): every option must be present, as [`to_json`]
+/// writes them, ids and `"name@version"` analyzers included. Defaults would renumber the fields of an evolved
+/// schema, move a field to a newer analyzer version, or change any setting with the reading build's defaults,
+/// without anything in the stored bytes changing.
+pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaError> {
+    let raw = parse(json)?;
+    if let Some(missing) = first_missing(&raw) {
+        return Err(SchemaError::Json(format!("stored schema: {missing}")));
+    }
+    from_raw(raw)
+}
+
+/// What a stored schema leaves to defaults, if anything.
+fn first_missing(raw: &RawSchema) -> Option<String> {
+    for (name, field) in &raw.fields.0 {
+        let given = match field {
+            RawField::Text {
+                id,
+                analyzer,
+                boost,
+                positions,
+                k1,
+                b,
+                stored,
+            } => {
+                if analyzer.as_deref().is_some_and(|a| !a.contains('@')) {
+                    return Some(format!("field {name:?} does not pin its analyzer version"));
+                }
+                id.is_some()
+                    && analyzer.is_some()
+                    && boost.is_some()
+                    && positions.is_some()
+                    && k1.is_some()
+                    && b.is_some()
+                    && stored.is_some()
+            }
+            RawField::Keyword { id, facet, stored } => {
+                id.is_some() && facet.is_some() && stored.is_some()
+            }
+            RawField::I64(s) | RawField::F64(s) | RawField::Bool(s) | RawField::Datetime(s) => {
+                s.id.is_some() && s.stored.is_some()
+            }
+            RawField::Stored { id } => id.is_some(),
+        };
+        if !given {
+            return Some(format!("field {name:?} leaves options to defaults"));
+        }
+    }
+    // `ranking: {}` and no `ranking` both mean no static rank: that is a choice, not a default.
+    let rank_given = raw.ranking.as_ref().is_none_or(|r| {
+        r.static_rank
+            .as_ref()
+            .is_none_or(|s| s.weight.is_some() && s.function.is_some())
+    });
+    if !rank_given {
+        return Some("ranking leaves options to defaults".to_owned());
+    }
+    let relaxation_given = raw.relaxation.as_ref().is_some_and(|r| {
+        r.enabled.is_some()
+            && r.min_results.is_some()
+            && r.levels.is_some()
+            && r.fallback.is_some()
+            && r.fill.is_some()
+            && r.filters.is_some()
+            && r.budget_ms.is_some()
+    });
+    if !relaxation_given || raw.synonyms.is_none() || raw.strict.is_none() {
+        return Some("relaxation, synonyms or strict left to defaults".to_owned());
+    }
+    None
 }
 
 impl Serialize for CollectionSchema {
