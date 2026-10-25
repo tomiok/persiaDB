@@ -511,11 +511,47 @@ footer .agent-links a:visited {
     color: var(--accent);
 }
 
+/*
+ * Landing loop. The player fills the article column; the 1px rule matches
+ * the rest of the page. Visitors who prefer reduced motion get the poster
+ * still, and the component drops the media sources so the file does not play.
+ */
+.hero-video {
+    margin: 1.25rem 0 1.5rem;
+    max-width: 100%;
+}
+
+.hero-video video,
+.hero-video img {
+    box-sizing: border-box;
+    width: 100%;
+    height: auto;
+    max-width: 100%;
+    border: 1px solid var(--line);
+    background: var(--paper);
+}
+
+.hero-video video {
+    display: block;
+}
+
+.hero-video img {
+    display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
     * {
         scroll-behavior: auto !important;
         transition: none !important;
         animation: none !important;
+    }
+
+    .hero-video video {
+        display: none;
+    }
+
+    .hero-video img {
+        display: block;
     }
 }
 

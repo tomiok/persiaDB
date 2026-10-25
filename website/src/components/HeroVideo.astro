@@ -1,0 +1,66 @@
+---
+// Public files are copied to the site root and served under `base`
+// (`/persiaDB/` on GitHub Pages). BASE_URL always includes that prefix.
+const root = import.meta.env.BASE_URL;
+const base = root.endsWith('/') ? root : `${root}/`;
+const poster = `${base}poster.png`;
+const webm = `${base}persia-hero.webm`;
+const mp4 = `${base}persia-hero.mp4`;
+const label =
+    'Persia DB motion graphic: open a file, search, and get ranked results. A misspelled query is relaxed. Embedded full-text search, written in Rust.';
+---
+
+<div class="hero-video">
+    <video
+        autoplay
+        muted
+        loop
+        playsinline
+        preload="auto"
+        poster={poster}
+        width="1920"
+        height="1080"
+        aria-label={label}
+    >
+        <source src={webm} type="video/webm" />
+        <source src={mp4} type="video/mp4" />
+    </video>
+    <img src={poster} alt={label} width="1920" height="1080" />
+    <script is:inline>
+        (function () {
+            var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
+            var root = document.currentScript && document.currentScript.parentElement;
+            var video = root && root.querySelector('video');
+            if (!video) return;
+            var sources = Array.prototype.slice.call(video.querySelectorAll('source'));
+            sources.forEach(function (source) {
+                source.dataset.src = source.getAttribute('src') || '';
+            });
+            function apply() {
+                if (reduce.matches) {
+                    video.pause();
+                    video.autoplay = false;
+                    sources.forEach(function (source) {
+                        source.removeAttribute('src');
+                    });
+                    video.load();
+                    return;
+                }
+                var restore = false;
+                sources.forEach(function (source) {
+                    if (!source.getAttribute('src') && source.dataset.src) {
+                        source.setAttribute('src', source.dataset.src);
+                        restore = true;
+                    }
+                });
+                if (!restore) return;
+                video.autoplay = true;
+                video.load();
+                var play = video.play();
+                if (play && play.catch) play.catch(function () {});
+            }
+            apply();
+            if (reduce.addEventListener) reduce.addEventListener('change', apply);
+        })();
+    </script>
+</div>
