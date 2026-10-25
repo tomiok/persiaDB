@@ -281,7 +281,7 @@ Deps: M0. (Parallel with M2/M3.)
 
 ## 4.4 Analyzer pipelines
 - [ ] 4.4.1 `Analyzer` = char filters → tokenizer → token filters; builder + registry by name+version
-- [ ] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`
+- [ ] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`; SPEC §6.3 lists each one's full chain, its length guard and its folding preserved set (e.g. whether `es` keeps `ñ`, found in the PR #17 review)
 - [ ] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3); the schema remembers whether a definition named a version, so evolution binds an unversioned `analyzer` to the current field's version (SPEC §6.2.4)
 - [ ] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
 - [ ] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
