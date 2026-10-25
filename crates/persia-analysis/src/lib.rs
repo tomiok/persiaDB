@@ -17,11 +17,14 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+mod analyzer;
+mod apostrophe;
 mod fold;
 mod length;
 mod lowercase;
 mod nfkc;
 mod ngram;
+mod registry;
 mod standard;
 mod stem;
 mod stop;
@@ -29,11 +32,17 @@ mod synonyms;
 mod token;
 mod whitespace;
 
+pub use analyzer::{Analyzer, AnalyzerBuilder, CharFilter};
+pub use apostrophe::ApostropheFilter;
 pub use fold::FoldingFilter;
 pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};
 pub use lowercase::LowercaseFilter;
 pub use nfkc::NfkcFilter;
 pub use ngram::EdgeNgramFilter;
+pub use registry::{
+    AnalyzerRegistry, BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER, RegisterError,
+    builtin_analyzer, current_builtin_version,
+};
 pub use standard::StandardTokenizer;
 pub use stem::{EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter};
 pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
