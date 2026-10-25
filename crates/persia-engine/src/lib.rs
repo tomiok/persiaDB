@@ -4,4 +4,5 @@
 #![forbid(unsafe_code)]
 
 pub mod document;
+pub mod manifest;
 pub mod schema;

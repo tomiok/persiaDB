@@ -18,6 +18,10 @@ use super::{
 };
 
 pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
+    from_raw(parse(json)?)
+}
+
+fn parse(json: &str) -> Result<RawSchema, SchemaError> {
     if json.len() > MAX_SCHEMA_JSON_LEN {
         return Err(SchemaError::Json(format!(
             "{} bytes, at most {MAX_SCHEMA_JSON_LEN}",
@@ -26,11 +30,38 @@ pub(super) fn from_json(json: &str) -> Result<CollectionSchema, SchemaError> {
     }
     let raw: Object<RawSchema> =
         serde_json::from_str(json).map_err(|e| SchemaError::Json(e.to_string()))?;
-    from_raw(raw.0)
+    Ok(raw.0)
 }
 
 pub(super) fn to_json(schema: &CollectionSchema) -> Result<String, SchemaError> {
     serde_json::to_string(&to_raw(schema)).map_err(|e| SchemaError::Json(e.to_string()))
+}
+
+/// [`from_json`] for a schema the engine wrote (a manifest, SPEC §8.7): every field must carry its `id` and every
+/// text field its analyzer as `"name@version"`, as [`to_json`] writes them. Defaults there would renumber the fields
+/// of an evolved schema, or move a field to a newer analyzer version, without anything in the text changing.
+pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaError> {
+    let raw = parse(json)?;
+    for (name, field) in &raw.fields.0 {
+        let (id, analyzer) = match field {
+            RawField::Text { id, analyzer, .. } => (id, Some(analyzer)),
+            RawField::Keyword { id, .. } | RawField::Stored { id } => (id, None),
+            RawField::I64(s) | RawField::F64(s) | RawField::Bool(s) | RawField::Datetime(s) => {
+                (&s.id, None)
+            }
+        };
+        if id.is_none() {
+            return Err(SchemaError::Json(format!(
+                "stored schema: field {name:?} has no id"
+            )));
+        }
+        if analyzer.is_some_and(|a| !a.as_deref().is_some_and(|a| a.contains('@'))) {
+            return Err(SchemaError::Json(format!(
+                "stored schema: field {name:?} does not pin its analyzer version"
+            )));
+        }
+    }
+    from_raw(raw)
 }
 
 impl Serialize for CollectionSchema {
