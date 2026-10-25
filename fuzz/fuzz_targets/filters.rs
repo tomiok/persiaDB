@@ -1,18 +1,18 @@
-//! Fuzz the token filters and the synonym lookup (ROADMAP 4.2; SPEC §6.3.2): arbitrary text never panics, every
-//! output token is non-empty and keeps the span and position of an input token in order, NFKC, lowercase and
-//! folding are idempotent, and synonym matches are ordered and disjoint. The first byte picks the edge n-gram bounds
-//! and whether the original is preserved, and bit 6 whether the synonym analyzer removes English stopwords (so
-//! terms and queries have position gaps); the text before the first `|` holds the synonym groups (`;` between
-//! groups, `,` between terms).
+//! Fuzz the token filters, the stemmers and the synonym lookup (ROADMAP 4.2, 4.3; SPEC §6.3.2): arbitrary text
+//! never panics, every output token is non-empty and keeps the span and position of an input token in order, NFKC,
+//! lowercase and folding are idempotent (stemming is not), and synonym matches are ordered and disjoint. The first
+//! byte picks the edge n-gram bounds and whether the original is preserved, and bit 6 whether the synonym analyzer
+//! removes English stopwords (so terms and queries have position gaps); the text before the first `|` holds the
+//! synonym groups (`;` between groups, `,` between terms).
 #![no_main]
 
 use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
-    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
-    WhitespaceTokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, LowercaseFilter,
+    NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, Stemmer, StemmerFilter,
+    StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
 };
 
 fn check_from_input(input: &[Token], output: &[Token]) {
@@ -66,6 +66,7 @@ fuzz_target!(|data: &[u8]| {
         &StopwordFilter::portuguese(),
         &ngrams,
     ];
+    let stemmers: [&dyn Stemmer; 3] = [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer];
     let tokenizers: [&dyn Tokenizer; 2] = [&StandardTokenizer, &WhitespaceTokenizer];
     for tokenizer in tokenizers {
         let mut input = Vec::new();
@@ -82,6 +83,22 @@ fuzz_target!(|data: &[u8]| {
             let mut output = input.clone();
             filter.apply(&mut output);
             check_from_input(&input, &output);
+        }
+        // Each token keeps its stem, and only a token whose stem is empty is dropped.
+        for stemmer in stemmers {
+            let mut output = input.clone();
+            StemmerFilter::new(stemmer).apply(&mut output);
+            let expected: Vec<Token> = input
+                .iter()
+                .filter_map(|token| {
+                    let stem = stemmer.stem(&token.text);
+                    (!stem.is_empty()).then(|| Token {
+                        text: stem.into_owned(),
+                        ..token.clone()
+                    })
+                })
+                .collect();
+            assert_eq!(output, expected);
         }
     }
 
