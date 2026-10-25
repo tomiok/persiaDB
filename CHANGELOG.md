@@ -13,6 +13,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   splits at Unicode word boundaries (UAX #29: numbers, apostrophes, emails and URLs as specified, one token per
   character for Han, Hiragana and Thai), `WhitespaceTokenizer` at Unicode white space, and `KeywordTokenizer` keeps
   the whole value. `TokenLengthGuard` truncates (default) or drops tokens longer than a limit (255 bytes by default).
+- `persia-analysis`: token filters (SPEC §6.3.2) behind a `TokenFilter` trait: `NfkcFilter`, `LowercaseFilter`
+  (Unicode default mapping, no Turkish tailoring), `FoldingFilter` (accents and diacritics, with a preserved set such
+  as `ñ`), `StopwordFilter` with embedded English, Spanish and Portuguese lists, and `EdgeNgramFilter` for prefix
+  indexing. `SynonymMap` finds the longest synonym terms in an analyzed query and lists their alternatives (§7.6 L1).
 - `persia-engine`: the manifest (`manifest::Manifest`, SPEC §8.7; ADR-0024): per collection its schema and live
   segments with their tombstone sidecars, plus `seq`, `fence_token` and `wal_start`. A checksummed, versioned binary
   encoding (`encode`/`decode`, corrupt input is an error naming the offset) and `ManifestHash`. Commits are planned

@@ -263,15 +263,15 @@ Deps: M0. (Parallel with M2/M3.)
 - [x] 4.1.3 Max token length guard (drop/truncate, configurable)
 
 ## 4.2 Normalization & filters
-- [ ] 4.2.1 Unicode NFKC normalization filter
-- [ ] 4.2.2 Lowercasing (Unicode-aware, including `ß`, Turkish-i policy documented)
-- [ ] 4.2.3 Accent/diacritic folding (`ñ`→`n` optional per analyzer, `ü`→`u`)
+- [~] 4.2.1 Unicode NFKC normalization filter
+- [~] 4.2.2 Lowercasing (Unicode-aware, including `ß`, Turkish-i policy documented)
+- [~] 4.2.3 Accent/diacritic folding (`ñ`→`n` optional per analyzer, `ü`→`u`)
 - 4.2.4 Stopword filter with embedded lists
-  - [ ] 4.2.4.1 English list
-  - [ ] 4.2.4.2 Spanish list
-  - [ ] 4.2.4.3 Portuguese list
-- [ ] 4.2.5 Synonym filter (expansion at query time; config from schema) (SPEC §7.6 L1)
-- [ ] 4.2.6 Edge n-gram filter (for optional prefix indexing)
+  - [~] 4.2.4.1 English list
+  - [~] 4.2.4.2 Spanish list
+  - [~] 4.2.4.3 Portuguese list
+- [~] 4.2.5 Synonym filter (expansion at query time; config from schema) (SPEC §7.6 L1)
+- [~] 4.2.6 Edge n-gram filter (for optional prefix indexing)
 
 ## 4.3 Stemmers
 - [ ] 4.3.1 Stemmer trait + Snowball-style English (Porter2)
