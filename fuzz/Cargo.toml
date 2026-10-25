@@ -118,3 +118,17 @@ path = "fuzz_targets/schema_json.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document_json"
+path = "fuzz_targets/document_json.rs"
+test = false
+doc = false
+bench = false
