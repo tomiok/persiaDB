@@ -12,6 +12,7 @@ const label =
 
 <div class="hero-video">
     <video
+        id="persia-hero-video"
         autoplay
         muted
         loop
@@ -22,45 +23,105 @@ const label =
         height="1080"
         aria-label={label}
     >
-        <source src={webm} type="video/webm" />
-        <source src={mp4} type="video/mp4" />
+        <!-- URLs stay in data-src until the script confirms motion is allowed. -->
+        <source data-src={webm} type="video/webm" />
+        <source data-src={mp4} type="video/mp4" />
     </video>
+    <button
+        type="button"
+        class="hero-video-toggle"
+        hidden
+        aria-controls="persia-hero-video"
+        aria-pressed="false"
+    >
+        Pause
+    </button>
     <img src={poster} alt={label} width="1920" height="1080" />
     <script is:inline>
         (function () {
             var reduce = window.matchMedia('(prefers-reduced-motion: reduce)');
             var root = document.currentScript && document.currentScript.parentElement;
-            var video = root && root.querySelector('video');
+            if (!root) return;
+            var video = root.querySelector('video');
+            var button = root.querySelector('.hero-video-toggle');
             if (!video) return;
             var sources = Array.prototype.slice.call(video.querySelectorAll('source'));
-            sources.forEach(function (source) {
-                source.dataset.src = source.getAttribute('src') || '';
-            });
-            function apply() {
-                if (reduce.matches) {
-                    video.pause();
-                    video.autoplay = false;
-                    sources.forEach(function (source) {
-                        source.removeAttribute('src');
-                    });
-                    video.load();
-                    return;
-                }
-                var restore = false;
+
+            function label(paused) {
+                if (!button || reduce.matches) return;
+                button.hidden = false;
+                button.textContent = paused ? 'Play' : 'Pause';
+                button.setAttribute('aria-label', paused ? 'Play hero video' : 'Pause hero video');
+                button.setAttribute('aria-pressed', paused ? 'true' : 'false');
+            }
+
+            function attach() {
+                var changed = false;
                 sources.forEach(function (source) {
-                    if (!source.getAttribute('src') && source.dataset.src) {
-                        source.setAttribute('src', source.dataset.src);
-                        restore = true;
+                    var url = source.getAttribute('data-src');
+                    if (url && !source.getAttribute('src')) {
+                        source.setAttribute('src', url);
+                        changed = true;
                     }
                 });
-                if (!restore) return;
-                video.autoplay = true;
-                video.load();
-                var play = video.play();
-                if (play && play.catch) play.catch(function () {});
+                return changed;
             }
-            apply();
-            if (reduce.addEventListener) reduce.addEventListener('change', apply);
+
+            function detach() {
+                video.pause();
+                video.autoplay = false;
+                sources.forEach(function (source) {
+                    source.removeAttribute('src');
+                });
+                video.load();
+                if (button) button.hidden = true;
+            }
+
+            function play() {
+                video.muted = true;
+                video.autoplay = true;
+                var pending = video.play();
+                if (pending && pending.then) {
+                    pending.then(
+                        function () {
+                            label(video.paused);
+                        },
+                        function () {
+                            label(true);
+                        }
+                    );
+                } else {
+                    label(video.paused);
+                }
+            }
+
+            function enable() {
+                if (attach()) video.load();
+                play();
+            }
+
+            if (button) {
+                button.addEventListener('click', function () {
+                    if (reduce.matches) return;
+                    if (video.paused) {
+                        if (attach()) video.load();
+                        play();
+                    } else {
+                        video.pause();
+                        video.autoplay = false;
+                        label(true);
+                    }
+                });
+            }
+
+            if (reduce.matches) detach();
+            else enable();
+            if (reduce.addEventListener) {
+                reduce.addEventListener('change', function () {
+                    if (reduce.matches) detach();
+                    else enable();
+                });
+            }
         })();
     </script>
 </div>

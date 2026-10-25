@@ -513,12 +513,37 @@ footer .agent-links a:visited {
 
 /*
  * Landing loop. The player fills the article column; the 1px rule matches
- * the rest of the page. Visitors who prefer reduced motion get the poster
- * still, and the component drops the media sources so the file does not play.
+ * the rest of the page. Media URLs are assigned only when motion is allowed.
+ * Visitors who prefer reduced motion get the poster still. Pause sits on the
+ * frame so the loop can be stopped without leaving the page.
  */
 .hero-video {
+    position: relative;
     margin: 1.25rem 0 1.5rem;
     max-width: 100%;
+}
+
+.hero-video-toggle {
+    position: absolute;
+    z-index: 1;
+    right: 0.6rem;
+    bottom: 0.6rem;
+    margin: 0;
+    background: var(--paper);
+    color: var(--ink);
+    font-family: inherit;
+    font-size: 0.8125rem;
+    line-height: 1.2;
+    padding: 0.4rem 0.65rem;
+    border: 1px solid var(--line);
+    border-radius: 0;
+    cursor: pointer;
+}
+
+.hero-video-toggle:hover,
+.hero-video-toggle:focus-visible {
+    background: var(--ink);
+    color: var(--paper);
 }
 
 .hero-video video,
@@ -546,8 +571,9 @@ footer .agent-links a:visited {
         animation: none !important;
     }
 
-    .hero-video video {
-        display: none;
+    .hero-video video,
+    .hero-video-toggle {
+        display: none !important;
     }
 
     .hero-video img {

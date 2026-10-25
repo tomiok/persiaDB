@@ -1,8 +1,10 @@
-import sys, math
+import sys, math, os
 from PIL import Image, ImageDraw, ImageFont
 W,H,FPS,DUR=1920,1080,30,16
 PAPER=(243,244,246);INK=(27,30,35);MUTED=(62,70,82);LINE=(207,211,218);WASH=(230,232,236);ACC=(12,92,107);ACC2=(142,58,38);GRAY=(107,114,128)
-FP="/usr/share/fonts/truetype/sand-box/google/JetBrains Mono/JetBrainsMono-VariableFont_wght.ttf"
+# Variable font shipped with this script (OFL). HERO_FONT overrides it.
+_HERE=os.path.dirname(os.path.abspath(__file__))
+FP=os.environ.get("HERO_FONT") or os.path.join(_HERE,"fonts","JetBrainsMono[wght].ttf")
 _c={}
 def F(s,w="Regular"):
     k=(s,w)
@@ -100,6 +102,9 @@ def frame(i):
         txt(d,(W/2,H/2+155),s,f,ACC,ua,"mm")
     return im
 if __name__=="__main__":
+    if not os.path.isfile(FP):
+        sys.stderr.write("render.py: JetBrains Mono variable font not found at %s\nSet HERO_FONT to a variable .ttf.\n"%FP)
+        sys.exit(1)
     if len(sys.argv)>1:
         for s in sys.argv[1:]:frame(int(float(s)*FPS)).save(f"still_{s}.png")
     else:
