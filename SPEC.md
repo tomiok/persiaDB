@@ -701,6 +701,27 @@ Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `white
 (`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding).
 Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
 
+### 6.3.1 Tokens and tokenizers
+A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
+on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
+the span, so highlighting always points at the source characters. `position` counts tokens from 0 within one value;
+a filter that removes a token leaves a gap, so a phrase never matches across it. Tokens of one value have strictly
+increasing, non-overlapping spans. Tokenizers never fail and never panic, on any UTF-8 input.
+
+- **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
+  punctuation, symbols and emoji produce no token. Consequences of UAX #29, relied on and tested: numbers with inner
+  separators stay whole (`3.14`, `1,000`); an apostrophe between letters joins them (`don't`, `O'Neil`, also `’`);
+  emails and URLs split at `@`, `:` and `/` while dotted names stay whole (`ana@example.com` → `ana`,
+  `example.com`); `_` joins (`snake_case`); scripts written without spaces (Han, Hiragana, Thai, ...) fall back to
+  one token per character, while Katakana runs and Hangul words stay whole. No dictionary segmentation in v1.
+- **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
+- **keyword**: the whole value is one token (none for an empty value).
+
+**Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
+the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is
+dropped); `drop` removes the token. Kept tokens keep their span and position. Which built-in analyzers apply the
+guard, and with which limit, is part of their definition (§6.3, ROADMAP 4.4.2).
+
 ### 6.4 Documents
 Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).
 

@@ -256,11 +256,11 @@ Deps: M0. (Parallel with M2/M3.)
 
 ## 4.1 Tokenizers
 - 4.1.1 Unicode word segmentation (UAX#29) tokenizer with offsets
-  - [ ] 4.1.1.1 Token struct `{text, start, end, position}`
-  - [ ] 4.1.1.2 Handling of numbers, emails, URLs, apostrophes, CJK fallback (per-char)
-  - [ ] 4.1.1.3 [T] table of tricky inputs; property: offsets valid and monotonic
-- [ ] 4.1.2 Whitespace tokenizer, keyword tokenizer
-- [ ] 4.1.3 Max token length guard (drop/truncate, configurable)
+  - [~] 4.1.1.1 Token struct `{text, start, end, position}`
+  - [~] 4.1.1.2 Handling of numbers, emails, URLs, apostrophes, CJK fallback (per-char)
+  - [~] 4.1.1.3 [T] table of tricky inputs; property: offsets valid and monotonic
+- [~] 4.1.2 Whitespace tokenizer, keyword tokenizer
+- [~] 4.1.3 Max token length guard (drop/truncate, configurable)
 
 ## 4.2 Normalization & filters
 - [ ] 4.2.1 Unicode NFKC normalization filter
