@@ -147,3 +147,10 @@ path = "fuzz_targets/tokenizers.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "filters"
+path = "fuzz_targets/filters.rs"
+test = false
+doc = false
+bench = false
