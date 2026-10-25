@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-10-25
-- Related: SPEC §4.3, §4.6, §6.2.4, §8.3, §8.7 (§8.7.1–§8.7.2), §10.4, §11.3; ROADMAP 3.3.1–3.3.4, 6.3.2, 6.3.7, 6.4.2
+- Related: SPEC §4.3, §4.6, §6.2.4, §8.3, §8.7 (§8.7.1–§8.7.2), §10.4, §11.3, §15; ROADMAP 3.3.1–3.3.4, 6.3.2, 6.3.7, 6.4.2
 
 ## Context
 
@@ -22,27 +22,34 @@ express and check what one commit changes.
    `size` lets a remote reader fetch a segment's trailing footer (§5.1) without a `HEAD`.
 2. **Locations.** An entry says where its bytes are: an object (the key follows from collection, id and version,
    §10.4) or a container frame (offset and total length, like the superblock's `manifest_off`/`manifest_len`).
-   Per entry rather than per manifest, so a replicating writer (§10.5) or a later layout can mix them without a
-   new version.
+   Per entry rather than per manifest, so a later layout could mix them without a new version; until one does,
+   each reader accepts only its own kind (SPEC §8.7.1, ROADMAP 6.3.7).
 3. **Encoding.** Fixed-width little-endian fields, counts as `u32`, a magic (`PMNF`) so a wrong object is named as
    such, and a CRC32C trailer, since a remote object has no frame CRC around it. The trailer ends every version and
    is checked before `version`, so bit rot in the version field is corruption, not "unsupported". At most 64 MiB:
    bounds what decoding allocates (counts are never used as capacities; every entry costs at least 30 input bytes).
-4. **Schemas as JSON.** The full schema (query-time settings included) is stored in its JSON form. Readers accept
-   any valid definition, not only the exact text this build writes, so a later release that adds an option with a
-   default (and writes it) does not make older manifests unreadable. The price is that a manifest has one encoding
-   only up to its schema text; the hash is therefore over the stored bytes. Stored schemas must give every field's
-   `id` and every analyzer's version: the JSON defaults would otherwise renumber an evolved schema by name order
-   or move a field to the current analyzer version. (Both would also fail the segments' schema hash check, §6.2.5;
-   rejecting at decode names the actual problem.)
+4. **Schemas as JSON.** The full schema (query-time settings included) is stored in its JSON form, with every
+   option written out: ids, `"name@version"` analyzers and every default. Readers accept any key order or spacing,
+   but nothing left to their own defaults, so the same bytes read the same schema in every build (defaults would
+   renumber an evolved schema by name order, bind the current analyzer version, or follow a changed default).
+   Adding a schema option is a new manifest `version`, so an older reader reports a newer manifest unsupported
+   rather than corrupt (strict parsing rejects the unknown key). The text is the one part of the encoding without a
+   single form, so the hash is over the stored bytes, and replicas copy bytes.
 5. **Commits as diffs** (SPEC §8.7.2). A diff names segments by id: create/drop/change per collection, and within
-   a change a replacement schema, removed ids, updated entries and added segments; optional new fence token and
-   WAL start. `apply` checks the transition (no regression of fence token, WAL start or tombstones; schema only
+   a change a replacement schema, removed ids (each with the sidecar version the plan read, so a merge cannot
+   resurrect deletions committed after it was planned), updated entries and added segments; optional new fence
+   token and WAL start. `apply` checks the transition (no regression of fence token, WAL start or tombstones; schema only
    through evolution; ids fresh and unique; `doc_count`/`size` fixed) and gives `seq + 1`. A diff planned on an
    older manifest applies to a newer one exactly when the segments it touches are unchanged, which is the
    conflict check a background merge needs. `diff(a, b)` returns the diff that `apply` turns `a` into `b` with, or
    an error when no single commit does (e.g. an added segment ordered before a kept one).
-6. **Golden fixtures** live in `tests/fixtures/manifest/v1/` (not in `tests/fixtures/format/`, which `cargo xtask
+   Container compaction is a separate operation (`relocate`): it moves frame locations and may lower `wal_start`,
+   which no commit may do.
+6. **Segment ids are random 128-bit values.** A manifest can check uniqueness only within itself and against its
+   base, so an id merged away could otherwise be reused while older snapshots or remote keys (§10.4) still name
+   it. A counter in the manifest would detect reuse, but a merge planned on an older manifest would then collide
+   with ids flushes took meanwhile; random ids need no coordination, and a collision is negligible.
+7. **Golden fixtures** live in `tests/fixtures/manifest/v1/` (not in `tests/fixtures/format/`, which `cargo xtask
    fixtures` owns and which cannot build engine types). An engine test checks they decode to known manifests that
    encode to the same bytes; missing ones are written with `PERSIA_WRITE_MANIFEST_FIXTURES=1`, existing ones never.
 

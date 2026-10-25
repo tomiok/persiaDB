@@ -26,6 +26,10 @@ const TOMBSTONES_SOME: u8 = 1;
 const HEAD_LEN: usize = 8;
 /// The CRC32C trailer.
 const TRAILER_LEN: usize = 4;
+/// The smallest collection: schema length and segment count.
+const MIN_COLLECTION_LEN: usize = 8;
+/// The smallest segment entry: id, `doc_count`, size, an object location, no tombstones.
+const MIN_SEGMENT_LEN: usize = 30;
 
 /// Why a manifest could not be decoded.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -136,21 +140,29 @@ pub(super) fn encode(manifest: &Manifest) -> Result<Vec<u8>, ManifestEncodeError
     w.write_u64(manifest.seq);
     w.write_u64(manifest.fence_token);
     w.write_u64(manifest.wal_start);
-    w.write_u32(u32::try_from(manifest.collections.len()).map_err(|_| too_large(usize::MAX))?);
+    // A count that does not fit a `u32` means at least that many entries of input, far above the limit.
+    let count = manifest.collections.len();
+    let at_least = |w: &Writer, n: usize, each: usize| {
+        too_large(w.len().saturating_add(n.saturating_mul(each)))
+    };
+    w.write_u32(u32::try_from(count).map_err(|_| at_least(&w, count, MIN_COLLECTION_LEN))?);
     for collection in manifest.collections.values() {
         let schema = collection
             .schema
             .to_json()
             .map_err(ManifestEncodeError::Schema)?;
-        w.write_u32(u32::try_from(schema.len()).map_err(|_| too_large(usize::MAX))?);
+        w.write_u32(u32::try_from(schema.len()).map_err(|_| at_least(&w, schema.len(), 1))?);
         w.write_bytes(schema.as_bytes());
-        let count = u32::try_from(collection.segments.len()).map_err(|_| too_large(usize::MAX))?;
-        w.write_u32(count);
-        for segment in &collection.segments {
-            write_segment(&mut w, segment);
-        }
+        let count = collection.segments.len();
+        w.write_u32(u32::try_from(count).map_err(|_| at_least(&w, count, MIN_SEGMENT_LEN))?);
         if w.len() > MAX_MANIFEST_LEN {
             return Err(too_large(w.len()));
+        }
+        for segment in &collection.segments {
+            write_segment(&mut w, segment);
+            if w.len() > MAX_MANIFEST_LEN {
+                return Err(too_large(w.len()));
+            }
         }
     }
     let crc = crc32c(w.as_slice());
@@ -250,7 +262,7 @@ fn decode_body(r: &mut Reader<'_>) -> Result<Manifest, ManifestError> {
             return Err(corrupt(at, ManifestCorruption::CollectionOrder { name }));
         }
         let segment_count = r.read_u32().or_eof()?;
-        // No capacity from the count: it is untrusted, and each entry is at least 30 bytes of input anyway.
+        // No capacity from the count: it is untrusted, and each entry is at least MIN_SEGMENT_LEN bytes of input.
         let mut segments = Vec::new();
         for _ in 0..segment_count {
             let at = r.offset();

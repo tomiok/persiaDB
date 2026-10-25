@@ -43,7 +43,7 @@ use persia_format::superblock::FIRST_FRAME_OFFSET;
 use crate::schema::CollectionSchema;
 
 pub use codec::{ManifestCorruption, ManifestEncodeError, ManifestError};
-pub use diff::{ApplyError, CollectionChange, CollectionDiff, ManifestDiff};
+pub use diff::{ApplyError, CollectionChange, CollectionDiff, ManifestDiff, UpdateProblem};
 
 /// Longest encoded manifest, in bytes (SPEC §8.7).
 pub const MAX_MANIFEST_LEN: usize = 64 << 20;
@@ -287,7 +287,9 @@ impl Manifest {
     }
 }
 
-/// XXH3-128 of an encoded manifest (SPEC §8.7): identifies a commit's bytes, e.g. across replicas.
+/// XXH3-128 of an encoded manifest (SPEC §8.7): identifies a commit's bytes as stored. Decoding and re-encoding may
+/// change the schema text, so whoever compares hashes (a replica, SPEC §10.5) copies the stored bytes, never a
+/// re-encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ManifestHash(u128);
 

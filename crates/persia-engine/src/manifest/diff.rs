@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::{CollectionEntry, EntryProblem, Manifest, SegmentEntry, SegmentId, Tombstones};
+use super::{
+    CollectionEntry, EntryProblem, Location, Manifest, SegmentEntry, SegmentId, Tombstones,
+};
 use crate::schema::{CollectionSchema, EvolutionError};
 
 /// The changes of one commit (SPEC §8.7.2).
@@ -41,9 +43,13 @@ pub enum CollectionDiff {
 pub struct CollectionChange {
     /// The schema that replaces the current one: the result of [`CollectionSchema::evolve`] on it.
     pub schema: Option<CollectionSchema>,
-    /// Live segments to remove (merged away).
-    pub removed: BTreeSet<SegmentId>,
-    /// New entries for kept segments: a new tombstone sidecar, or a new location.
+    /// Live segments to remove (merged away), each with the sidecar version the plan read it at (0 for none).
+    ///
+    /// A merge drops the documents deleted at that version; if the segment has a newer sidecar by the time the
+    /// diff is applied, its later deletions would come back in the merged segment, so the diff fails instead.
+    pub removed: BTreeMap<SegmentId, u64>,
+    /// New entries for kept segments: the next version of their tombstone sidecar, or their first; never the entry
+    /// as it is.
     pub updated: Vec<SegmentEntry>,
     /// New segments, oldest first; their ids must not appear in the base manifest.
     pub added: Vec<SegmentEntry>,
@@ -137,13 +143,29 @@ pub enum ApplyError {
         /// The rule.
         problem: EntryProblem,
     },
-    /// An update that changes what a segment holds, or moves its tombstones backwards (SPEC §8.7.2).
+    /// A removed segment whose sidecar changed since the diff was planned: its later deletions would be lost.
+    #[error("segment {id} was planned at sidecar version {planned}, but is at {current}")]
+    Conflict {
+        /// The segment.
+        id: SegmentId,
+        /// The sidecar version the diff names (0 for none).
+        planned: u64,
+        /// The base's sidecar version (0 for none).
+        current: u64,
+    },
+    /// An entry that is not a valid step from the segment's current one (SPEC §8.7.2).
     #[error("segment {id}: {problem}")]
     Update {
         /// The segment.
         id: SegmentId,
         /// What is wrong.
-        problem: &'static str,
+        problem: UpdateProblem,
+    },
+    /// [`Manifest::relocate`]: no frame location of the manifest is at this offset.
+    #[error("no frame location at offset {offset}")]
+    UnknownFrame {
+        /// The offset.
+        offset: u64,
     },
     /// [`Manifest::diff`]: the next manifest's segments are not the kept ones in order followed by the added ones.
     #[error("collection {collection:?}: segment order cannot result from one commit")]
@@ -153,8 +175,34 @@ pub enum ApplyError {
     },
 }
 
+/// Why an updated or added entry is not a valid step (SPEC §8.7.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum UpdateProblem {
+    /// `doc_count`, `size` or the location changed; only [`Manifest::relocate`] moves a segment.
+    #[error("doc_count, size and location of a segment never change in a commit")]
+    SegmentChanged,
+    /// A first sidecar (of a new segment, or of one that had none) whose version is not 1.
+    #[error("a first tombstone sidecar has version 1")]
+    FirstVersion,
+    /// A sidecar removed, or a deleted count lowered.
+    #[error("deletions cannot be removed")]
+    DeletionsRemoved,
+    /// A sidecar whose version is neither the current one nor one above it.
+    #[error("a rewritten sidecar's version is one above the current")]
+    VersionStep,
+    /// The current sidecar version with different contents.
+    #[error("a sidecar version never changes")]
+    SidecarChanged,
+    /// The entry as it is: an update writes a new sidecar. Two deletes planned on the same manifest would
+    /// otherwise both write the next version, and the second, its deletions lost, would apply as a no-op.
+    #[error("an update writes the next tombstone sidecar")]
+    Unchanged,
+}
+
 impl Manifest {
     /// The manifest that commit `diff` publishes on top of `self`, with `seq` one above (SPEC §8.7.2).
+    ///
+    /// The result is not bounded in size: one past [`super::MAX_MANIFEST_LEN`] is found by [`Manifest::encode`].
     ///
     /// # Errors
     /// [`ApplyError`] for the first rule `diff` breaks against `self`; `self` is unchanged.
@@ -265,11 +313,65 @@ impl Manifest {
         Ok(diff)
     }
 
+    /// The manifest a container compaction publishes (SPEC §4.6): every frame location at an offset in `moves` is
+    /// moved to the mapped offset (frames are copied whole, so lengths stay), `wal_start` is set, `seq` goes one up,
+    /// and nothing else changes. Not a diff: compaction moves frames down, so `wal_start` may go below the
+    /// current one, which no commit may do.
+    ///
+    /// # Errors
+    /// [`ApplyError::UnknownFrame`] for an offset of `moves` that no location holds, [`ApplyError::Entry`] for a
+    /// target that is not a valid frame location, [`ApplyError::SeqOverflow`].
+    pub fn relocate(
+        &self,
+        moves: &BTreeMap<u64, u64>,
+        wal_start: u64,
+    ) -> Result<Manifest, ApplyError> {
+        let seq = self.seq.checked_add(1).ok_or(ApplyError::SeqOverflow)?;
+        let mut used = BTreeSet::new();
+        let mut collections = self.collections.clone();
+        for segment in collections.values_mut().flat_map(|c| c.segments.iter_mut()) {
+            let mut entry = *segment;
+            entry.location = relocated(segment.location, moves, &mut used);
+            if let Some(t) = &mut entry.tombstones {
+                t.location = relocated(t.location, moves, &mut used);
+            }
+            check_entry(&entry)?;
+            *segment = entry;
+        }
+        if let Some(offset) = moves.keys().find(|o| !used.contains(*o)) {
+            return Err(ApplyError::UnknownFrame { offset: *offset });
+        }
+        Ok(Manifest {
+            seq,
+            fence_token: self.fence_token,
+            wal_start,
+            collections,
+        })
+    }
+
     fn segment_ids(&self) -> impl Iterator<Item = SegmentId> + '_ {
         self.collections
             .values()
             .flat_map(|c| c.segments.iter().map(|s| s.id))
     }
+}
+
+fn relocated(location: Location, moves: &BTreeMap<u64, u64>, used: &mut BTreeSet<u64>) -> Location {
+    match location {
+        Location::Frame { offset, len } => match moves.get(&offset) {
+            Some(to) => {
+                used.insert(offset);
+                Location::Frame { offset: *to, len }
+            }
+            None => location,
+        },
+        Location::Object => location,
+    }
+}
+
+/// The sidecar version of an entry, 0 for none.
+fn sidecar_version(segment: &SegmentEntry) -> u64 {
+    segment.tombstones.map_or(0, |t| t.version)
 }
 
 fn collection_change(old: &CollectionEntry, new: &CollectionEntry) -> CollectionChange {
@@ -279,8 +381,8 @@ fn collection_change(old: &CollectionEntry, new: &CollectionEntry) -> Collection
         removed: old
             .segments
             .iter()
-            .map(|s| s.id)
-            .filter(|id| !kept.contains(id))
+            .filter(|s| !kept.contains(&s.id))
+            .map(|s| (s.id, sidecar_version(s)))
             .collect(),
         ..CollectionChange::default()
     };
@@ -319,22 +421,26 @@ fn apply_change(
         collection: name.to_owned(),
         id,
     };
-    if let Some(id) = change
-        .removed
-        .iter()
-        .find(|id| entry.segment(**id).is_none())
-    {
-        return Err(no_such(*id));
+    for (id, planned) in &change.removed {
+        let segment = entry.segment(*id).ok_or_else(|| no_such(*id))?;
+        let current = sidecar_version(segment);
+        if current != *planned {
+            return Err(ApplyError::Conflict {
+                id: *id,
+                planned: *planned,
+                current,
+            });
+        }
     }
     let mut updates = BTreeMap::new();
     for update in &change.updated {
-        if change.removed.contains(&update.id) || updates.insert(update.id, update).is_some() {
+        if change.removed.contains_key(&update.id) || updates.insert(update.id, update).is_some() {
             return Err(ApplyError::DuplicateSegment { id: update.id });
         }
     }
     let mut segments = Vec::with_capacity(entry.segments.len());
     for segment in &entry.segments {
-        if change.removed.contains(&segment.id) {
+        if change.removed.contains_key(&segment.id) {
             continue;
         }
         match updates.remove(&segment.id) {
@@ -377,7 +483,7 @@ fn check_entry(segment: &SegmentEntry) -> Result<(), ApplyError> {
     })
 }
 
-/// A segment a commit adds: a fresh id, and a first tombstone sidecar if any.
+/// A segment a commit adds: an id not in the base, and a first tombstone sidecar if any.
 fn check_new(segment: &SegmentEntry, base_ids: &BTreeSet<SegmentId>) -> Result<(), ApplyError> {
     check_entry(segment)?;
     if base_ids.contains(&segment.id) {
@@ -386,44 +492,44 @@ fn check_new(segment: &SegmentEntry, base_ids: &BTreeSet<SegmentId>) -> Result<(
     if segment.tombstones.is_some_and(|t| t.version != 1) {
         return Err(ApplyError::Update {
             id: segment.id,
-            problem: "a new segment's first tombstone sidecar has version 1",
+            problem: UpdateProblem::FirstVersion,
         });
     }
     Ok(())
 }
 
-/// A kept segment's new entry: same contents; its sidecar the same (perhaps moved) or the next version.
+/// A kept segment's new entry: the same segment where it was, with the first or the next sidecar.
 fn check_update(old: &SegmentEntry, new: &SegmentEntry) -> Result<(), ApplyError> {
     check_entry(new)?;
-    let fail = |problem| {
-        Err(ApplyError::Update {
-            id: new.id,
-            problem,
-        })
+    let step = if (old.doc_count, old.size, old.location) == (new.doc_count, new.size, new.location)
+    {
+        match (old.tombstones, new.tombstones) {
+            (None, None) => Err(UpdateProblem::Unchanged),
+            (None, Some(t)) if t.version == 1 => Ok(()),
+            (None, Some(_)) => Err(UpdateProblem::FirstVersion),
+            (Some(_), None) => Err(UpdateProblem::DeletionsRemoved),
+            (Some(o), Some(n)) => check_sidecar_step(o, n),
+        }
+    } else {
+        Err(UpdateProblem::SegmentChanged)
     };
-    if (old.doc_count, old.size) != (new.doc_count, new.size) {
-        return fail("doc_count and size of a segment never change");
-    }
-    match (old.tombstones, new.tombstones) {
-        (None, None) => Ok(()),
-        (None, Some(t)) if t.version == 1 => Ok(()),
-        (None, Some(_)) => fail("the first tombstone sidecar has version 1"),
-        (Some(_), None) => fail("deletions cannot be removed"),
-        (Some(o), Some(n)) => check_sidecar_step(o, n).or_else(fail),
-    }
+    step.map_err(|problem| ApplyError::Update {
+        id: new.id,
+        problem,
+    })
 }
 
-fn check_sidecar_step(old: Tombstones, new: Tombstones) -> Result<(), &'static str> {
+fn check_sidecar_step(old: Tombstones, new: Tombstones) -> Result<(), UpdateProblem> {
     if new.version == old.version {
-        if new.deleted == old.deleted {
-            Ok(())
+        if new == old {
+            Err(UpdateProblem::Unchanged)
         } else {
-            Err("a sidecar version cannot change its deleted count")
+            Err(UpdateProblem::SidecarChanged)
         }
     } else if Some(new.version) != old.version.checked_add(1) {
-        Err("a rewritten sidecar's version is one above the current")
+        Err(UpdateProblem::VersionStep)
     } else if new.deleted < old.deleted {
-        Err("deletions cannot be removed")
+        Err(UpdateProblem::DeletionsRemoved)
     } else {
         Ok(())
     }
