@@ -889,8 +889,10 @@ fn to_json_refuses_values_nested_too_deep() {
     );
 }
 
-/// `to_json` of a typed document never writes JSON that reads back differently: no reserved or invalid extra
-/// names (they would become the id or the blob reference), no `null` stored values (they would read as absent).
+/// `to_json` of a typed document refuses what JSON cannot carry: reserved or invalid extra names (they would
+/// become the id or the blob reference) and `null` stored values (they would read as absent). An extra field named
+/// like a schema field the document does not set is written: rows indexed before the field was added hold one
+/// (SPEC §6.4.2), and its JSON reads back as that field.
 #[test]
 fn to_json_refuses_what_would_not_read_back() {
     let schema = all_types(false);
@@ -915,6 +917,14 @@ fn to_json_refuses_what_would_not_read_back() {
     );
     let doc = Document::new("1").with(id(&schema, "g"), Value::Json(json!([null])));
     assert_eq!(doc.to_json(&schema).unwrap(), r#"{"id":"1","g":[null]}"#);
+    let mut doc = Document::new("1");
+    doc.insert_extra("a", json!("legacy"));
+    let json = doc.to_json(&schema).unwrap();
+    assert_eq!(json, r#"{"id":"1","a":"legacy"}"#);
+    assert_eq!(
+        Document::from_json(&json, &schema).unwrap(),
+        Document::new("1").with(id(&schema, "a"), Value::String("legacy".into()))
+    );
 }
 
 // ---- Property tests (ROADMAP 3.2.5) ----
