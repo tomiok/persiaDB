@@ -47,3 +47,12 @@ pub(crate) fn push_spans<'a>(spans: impl Iterator<Item = (usize, &'a str)>, out:
         });
     }
 }
+
+/// Rewrites, removes or adds tokens in place (SPEC §6.3.2).
+///
+/// A filter never changes a token's span; a token whose text it empties is removed, and removing a token leaves a
+/// gap in positions. Object safe, so an analyzer can chain any filters behind pointers.
+pub trait TokenFilter: Send + Sync {
+    /// Applies the filter to `tokens`, the output of a tokenizer or of the previous filter.
+    fn apply(&self, tokens: &mut Vec<Token>);
+}

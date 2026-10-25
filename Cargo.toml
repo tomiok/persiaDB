@@ -50,7 +50,9 @@ tonic = "0.14.6"
 prost = "0.14.4"
 axum = "0.8.9"
 unicode-segmentation = "1.13.3"
-unicode-normalization = "0.1.25"
+# Pinned: 0.1.26 moves to Unicode 18.0.0, and analyzer output is defined by one Unicode version
+# (`persia_analysis::UNICODE_VERSION`, SPEC §6.3.1).
+unicode-normalization = "=0.1.25"
 # Binaries only (persia-server, persia-cli)
 clap = { version = "4.6.7", features = ["derive"] }
 anyhow = "1.0.104"

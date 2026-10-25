@@ -728,6 +728,45 @@ the longest prefix that fits and ends on a character boundary (a token whose fir
 dropped); `drop` removes the token. Kept tokens keep their span and position. Which built-in analyzers apply the
 guard, and with which limit, is part of their definition (§6.3, ROADMAP 4.4.2).
 
+#### 6.3.2 Token filters
+A token filter rewrites, removes or adds tokens; it never changes a token's span, and never fails or panics. A filter
+that leaves a token's text empty removes the token. Removing a token leaves a gap in positions (§6.3.1). Filters that
+add tokens (edge n-grams) stack them on the position and span of the token they came from, so after such a filter
+positions are non-decreasing rather than strictly increasing; spans of different positions still increase and do not
+overlap. Every filter is defined by the Unicode version of §6.3.1, and the embedded tables below (stopword lists,
+folding table) are part of the definition of every analyzer that uses them: changing one changes those analyzers'
+versions.
+
+- **nfkc**: Unicode NFKC normalization of the token text (`ﬁ` → `fi`, full-width `Ａ` → `A`, `²` → `2`). The result
+  may contain characters a tokenizer would have split at (`⑴` → `(1)`); it is not re-tokenized.
+- **lowercase**: the Unicode default lowercase mapping (`str::to_lowercase`), locale-independent, with the
+  `Final_Sigma` rule applied inside the token (`ΟΔΟΣ` → `οδος`). Lowercasing is not case folding: `ß` stays `ß` and
+  `ẞ` becomes `ß` (the `fold` filter maps both to `ss`). Turkish and Azeri casing is not tailored: `I` → `i`,
+  `İ` → `i̇` (`i` + U+0307, which `fold` reduces to `i`) and `ı` stays `ı`; a Turkish analyzer would need its own
+  filter.
+- **fold** (accent/diacritic folding): every character outside a per-filter *preserved* set is replaced by its
+  canonical decomposition without the combining marks U+0300–U+036F (Latin, Greek and Cyrillic accents: `é` → `e`,
+  `ü` → `u`, `ç` → `c`, `ǖ` → `u`, `ά` → `α`, `ё` → `е`), and the result is recomposed (NFC), so marks of other
+  scripts and Hangul syllables are unchanged. Letters with no decomposition fold by a fixed table, also when a
+  decomposition yields them (`Ǣ` → `AE`): `ß`/`ẞ` → `ss`, `æ` → `ae`, `Æ` → `AE`, `œ` → `oe`, `Œ` → `OE`, `ø` → `o`,
+  `Ø` → `O`, `đ`/`ð` → `d`, `Đ`/`Ð` → `D`, `ł` → `l`, `Ł` → `L`, `þ` → `th`, `Þ` → `TH`, `ħ` → `h`, `Ħ` → `H`,
+  `ı` → `i`. Preserved characters are kept as listed, also inside a decomposition, and only the text between them is
+  recomposed (case matters: preserving `ñ` does not preserve `Ñ`). A Spanish analyzer may preserve `ñ`, so `año`
+  and `ano` stay distinct. Folding is idempotent.
+- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
+  are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
+  as given.
+- **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters): replaces a token with its prefixes of `min..=max`
+  characters, shortest first; a token shorter than `min` produces none. With `preserve_original`, the whole token
+  follows them when it is longer than `max` or shorter than `min`. Used for optional prefix indexing; put the length
+  guard (§6.3.1) before it so a token's prefixes stay bounded.
+- **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
+  group (§6.2.1) is analyzed with the field's analyzer into a token sequence; a term that yields no tokens is ignored,
+  and terms equal after analysis are one term. Scanning the analyzed query left to right, the longest term starting at
+  each token matches when its texts are equal and its position gaps equal (a stopword gap must line up), the matched
+  tokens are skipped, and the match reports, in group order, then term order, the other terms of every group
+  containing it. Matches never overlap; the query compiler ORs the match with its alternatives.
+
 ### 6.4 Documents
 Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).
 
