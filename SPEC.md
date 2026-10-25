@@ -714,11 +714,12 @@ every analyzer whose output it changes (§6.3), and CI fails if a dependency or 
 
 - **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
   punctuation, symbols and emoji produce no token (a keycap emoji such as `1️⃣` keeps its digit and is one).
-  Consequences of UAX #29, relied on and tested: numbers with inner separators stay whole (`3.14`, `1,000`); an apostrophe between letters joins them (`don't`, `O'Neil`, also `’`);
-  emails and URLs split at `@` and `/` while dotted names stay whole (`ana@example.com` → `ana`,
-  `example.com`); a colon joins letters on both sides (`mailto:ana`, `key:value`) and splits otherwise
-  (`https://`, `12:30`); `_` joins (`snake_case`); scripts written without spaces (Han, Hiragana, Thai, ...) fall back to
-  one token per character, while Katakana runs and Hangul words stay whole. No dictionary segmentation in v1.
+  Consequences of UAX #29, relied on and tested: numbers with inner separators stay whole (`3.14`, `1,000`); an
+  apostrophe between letters joins them (`don't`, `O'Neil`, also `’`); emails and URLs split at `@` and `/` while
+  dotted names stay whole (`ana@example.com` → `ana`, `example.com`); a colon joins letters on both sides
+  (`mailto:ana`, `key:value`) and splits otherwise (`https://`, `12:30`); `_` joins (`snake_case`); scripts written
+  without spaces (Han, Hiragana, Thai, ...) fall back to one token per character, while Katakana runs and Hangul
+  words stay whole. No dictionary segmentation in v1.
 - **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
 - **keyword**: the whole value is one token (none for an empty value).
 

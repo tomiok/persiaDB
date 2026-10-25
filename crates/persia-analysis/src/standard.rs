@@ -13,8 +13,9 @@ use crate::token::{Token, Tokenizer, push_spans};
 ///
 /// - numbers with inner separators stay whole: `3.14`, `1,000`, `v2`;
 /// - an apostrophe between letters joins them: `don't`, `O'Neil` (typographic `’` too);
-/// - emails and URLs split at `@`, `:` and `/`, while dotted names stay whole: `user@example.com` gives `user`,
+/// - emails and URLs split at `@` and `/`, while dotted names stay whole: `user@example.com` gives `user`,
 ///   `example.com`;
+/// - a colon joins letters on both sides (`mailto:ana`, `key:value`) and splits otherwise (`https://`, `12:30`);
 /// - `_` joins words: `snake_case`;
 /// - scripts written without spaces between words (Han, Hiragana, Thai, ...) fall back to one token per
 ///   character, since UAX #29 has no dictionary; Katakana runs and Hangul words stay whole.
