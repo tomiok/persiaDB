@@ -912,7 +912,8 @@ A manifest is at most 64 MiB. Reading it: the length, the magic, then the CRC32C
 a damaged `version` reads as corruption), then `version` (0 is corruption; above 1 is unsupported), then the rest.
 Fields have one encoding each except the schema text: any valid JSON definition (§6.2) that gives every option
 explicitly, ids and `"name@version"` analyzers included, in any key order or spacing. Nothing is left to the reading
-build's defaults, so the same bytes read the same schema in every build. A schema option added later is a new manifest
+build's defaults, so the same bytes read the same schema in every build (`"levels": "default"` follows the engine
+by design, §6.2.3). A schema option added later is a new manifest
 `version` (older readers then report it unsupported rather than corrupt); a newer build reading version 1 gives the
 option the behavior from before it existed. `ManifestHash` is XXH3-128 (§4.1) of the bytes as stored: a replica
 (§10.5) copies them, never a re-encoding.

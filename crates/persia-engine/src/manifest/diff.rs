@@ -167,6 +167,12 @@ pub enum ApplyError {
         /// The offset.
         offset: u64,
     },
+    /// [`Manifest::relocate`]: two frame locations would be at this offset.
+    #[error("two frame locations at offset {offset}")]
+    FrameCollision {
+        /// The offset.
+        offset: u64,
+    },
     /// [`Manifest::diff`]: the next manifest's segments are not the kept ones in order followed by the added ones.
     #[error("collection {collection:?}: segment order cannot result from one commit")]
     SegmentOrder {
@@ -319,8 +325,10 @@ impl Manifest {
     /// current one, which no commit may do.
     ///
     /// # Errors
-    /// [`ApplyError::UnknownFrame`] for an offset of `moves` that no location holds, [`ApplyError::Entry`] for a
-    /// target that is not a valid frame location, [`ApplyError::SeqOverflow`].
+    /// [`ApplyError::UnknownFrame`] for an offset of `moves` that no location holds, [`ApplyError::FrameCollision`]
+    /// when two locations would share an offset, [`ApplyError::Entry`] for a target that is not a valid frame
+    /// location, [`ApplyError::SeqOverflow`]. `wal_start` is not checked here: the container checks its alignment
+    /// and bounds against the file (SPEC §4.3).
     pub fn relocate(
         &self,
         moves: &BTreeMap<u64, u64>,
@@ -340,6 +348,17 @@ impl Manifest {
         }
         if let Some(offset) = moves.keys().find(|o| !used.contains(*o)) {
             return Err(ApplyError::UnknownFrame { offset: *offset });
+        }
+        let mut targets = BTreeSet::new();
+        for segment in collections.values().flat_map(|c| c.segments.iter()) {
+            let sidecar = segment.tombstones.map(|t| t.location);
+            for location in std::iter::once(segment.location).chain(sidecar) {
+                if let Location::Frame { offset, .. } = location
+                    && !targets.insert(offset)
+                {
+                    return Err(ApplyError::FrameCollision { offset });
+                }
+            }
         }
         Ok(Manifest {
             seq,

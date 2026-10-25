@@ -2149,7 +2149,8 @@ fn variant(e: &ApplyError) -> usize {
         ApplyError::Conflict { .. } => 11,
         ApplyError::Update { .. } => 12,
         ApplyError::UnknownFrame { .. } => 13,
-        ApplyError::SegmentOrder { .. } => 14,
+        ApplyError::FrameCollision { .. } => 14,
+        ApplyError::SegmentOrder { .. } => 15,
     }
 }
 
@@ -2257,6 +2258,15 @@ fn every_apply_error_variant_is_reachable() {
         ),
         b.relocate(&BTreeMap::from([(12288, 16384)]), 100)
             .unwrap_err(),
+        Manifest::empty()
+            .apply(&create(
+                "notes",
+                notes(),
+                vec![frame(1, 10, 12288, 32), frame(2, 10, 12320, 32)],
+            ))
+            .unwrap()
+            .relocate(&BTreeMap::from([(12320, 12288)]), 0)
+            .unwrap_err(),
         b.diff(&reordered).unwrap_err(),
     ];
     for (i, e) in errors.iter().enumerate() {
@@ -2264,7 +2274,7 @@ fn every_apply_error_variant_is_reachable() {
         assert_ne!(e.to_string(), "");
     }
     let seen: BTreeSet<usize> = errors.iter().map(variant).collect();
-    assert_eq!(seen.len(), 15);
+    assert_eq!(seen.len(), 16);
 }
 
 #[test]
