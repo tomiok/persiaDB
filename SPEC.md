@@ -698,7 +698,8 @@ Readers keep the encoder of every `encoding_version` they accept.
 ### 6.3 Analyzers
 Pipeline: `char_filter* → tokenizer → token_filter*`.
 Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, language analyzers
-(`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding).
+(`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding; `fr`, `de` and `it` have
+no stopword lists or stemmers yet, ROADMAP 4.4.10).
 Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
@@ -774,8 +775,8 @@ those analyzers' versions.
   final `ç` becomes `c`, and, as it writes `ã` and `õ` as `a~` and `o~` while stemming, turns a literal `a~` or `o~`
   into `ã` or `õ` (only the `whitespace` and `keyword` tokenizers keep `~` inside a token). Stemming is not
   idempotent (`accelerated` → `acceler` → `accel`), so a query is stemmed once, by the same analyzer as the field. A
-  stem can be empty (`''s`), which removes the token. The `fr`, `de` and `it` stemmers come with their analyzers
-  (ROADMAP 4.4.10).
+  stem can be empty (`''s`), which removes the token. There are no `fr`, `de` or `it` stemmers yet: they come with
+  those analyzers, if §6.3 keeps them (ROADMAP 4.4.10).
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
   replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
   none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
