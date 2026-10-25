@@ -274,10 +274,10 @@ Deps: M0. (Parallel with M2/M3.)
 - [x] 4.2.6 Edge n-gram filter (for optional prefix indexing)
 
 ## 4.3 Stemmers
-- [~] 4.3.1 Stemmer trait + Snowball-style English (Porter2)
-- [~] 4.3.2 Spanish stemmer
-- [~] 4.3.3 Portuguese stemmer
-- [~] 4.3.4 [T] golden word lists per language; property: stemming is idempotent where documented
+- [x] 4.3.1 Stemmer trait + Snowball-style English (Porter2)
+- [x] 4.3.2 Spanish stemmer
+- [x] 4.3.3 Portuguese stemmer
+- [x] 4.3.4 [T] golden word lists per language; property: stemming is idempotent where documented
 
 ## 4.4 Analyzer pipelines
 - [ ] 4.4.1 `Analyzer` = char filters → tokenizer → token filters; builder + registry by name+version

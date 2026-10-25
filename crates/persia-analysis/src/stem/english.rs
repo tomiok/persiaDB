@@ -1,4 +1,4 @@
-//! The Snowball English stemmer ("Porter2"), as `algorithms/english.sbl` of Snowball 3.
+//! The Snowball English stemmer ("Porter2"), as `algorithms/english.sbl` of Snowball v3.1.1.
 
 use std::borrow::Cow;
 
@@ -26,7 +26,11 @@ pub struct EnglishStemmer;
 impl Stemmer for EnglishStemmer {
     fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
         if let Some(stem) = exception(word) {
-            return Cow::Borrowed(stem);
+            return if stem == word {
+                Cow::Borrowed(word)
+            } else {
+                Cow::Owned(stem.to_owned())
+            };
         }
         if word.chars().nth(2).is_none() {
             return Cow::Borrowed(word);
@@ -217,11 +221,8 @@ fn step_1b(w: &mut Word, p1: usize) {
 
 /// A final `y` after a consonant that is not the first letter becomes `i`.
 fn step_1c(w: &mut Word) {
-    let len = w.len();
-    if len < 3 {
-        return;
-    }
-    let Some(last) = len.checked_sub(1) else {
+    // The consonant before the `y` must not be the first letter, so the `y` is at least the third.
+    let Some(last) = w.len().checked_sub(1).filter(|&last| last >= 2) else {
         return;
     };
     if matches!(w.chars().get(last), Some('y' | 'Y'))

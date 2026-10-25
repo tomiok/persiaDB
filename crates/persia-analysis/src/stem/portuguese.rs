@@ -1,4 +1,4 @@
-//! The Snowball Portuguese stemmer, as `algorithms/portuguese.sbl` of Snowball 3.
+//! The Snowball Portuguese stemmer, as `algorithms/portuguese.sbl` of Snowball v3.1.1.
 
 use std::borrow::Cow;
 
@@ -9,7 +9,8 @@ use super::word::{Word, finish, r1_r2, rv};
 /// `brasileiras` → `brasileir`.
 ///
 /// Expects lowercase text with its accents (run it after [`LowercaseFilter`](crate::LowercaseFilter) and before
-/// [`FoldingFilter`](crate::FoldingFilter)); a final `ç` becomes `c`, and other accents are kept.
+/// [`FoldingFilter`](crate::FoldingFilter)); a final `ç` becomes `c`, and other accents are kept. It writes `ã` and
+/// `õ` as `a~` and `o~` while stemming, as Snowball does, so a literal `a~` in the input comes out as `ã`.
 ///
 /// ```
 /// use persia_analysis::{PortugueseStemmer, Stemmer};

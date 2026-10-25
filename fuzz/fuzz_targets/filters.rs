@@ -11,7 +11,7 @@ use std::num::NonZeroUsize;
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
     DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, LowercaseFilter,
-    NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, StemmerFilter,
+    NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, Stemmer, StemmerFilter,
     StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
 };
 
@@ -60,15 +60,13 @@ fuzz_target!(|data: &[u8]| {
     let fold_preserving = FoldingFilter::preserving(preserved);
     let idempotent: [&dyn TokenFilter; 4] =
         [&NfkcFilter, &LowercaseFilter, &fold, &fold_preserving];
-    let others: [&dyn TokenFilter; 7] = [
+    let others: [&dyn TokenFilter; 4] = [
         &StopwordFilter::english(),
         &StopwordFilter::spanish(),
         &StopwordFilter::portuguese(),
         &ngrams,
-        &StemmerFilter::new(EnglishStemmer),
-        &StemmerFilter::new(SpanishStemmer),
-        &StemmerFilter::new(PortugueseStemmer),
     ];
+    let stemmers: [&dyn Stemmer; 3] = [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer];
     let tokenizers: [&dyn Tokenizer; 2] = [&StandardTokenizer, &WhitespaceTokenizer];
     for tokenizer in tokenizers {
         let mut input = Vec::new();
@@ -85,6 +83,22 @@ fuzz_target!(|data: &[u8]| {
             let mut output = input.clone();
             filter.apply(&mut output);
             check_from_input(&input, &output);
+        }
+        // Each token keeps its stem, and only a token whose stem is empty is dropped.
+        for stemmer in stemmers {
+            let mut output = input.clone();
+            StemmerFilter::new(stemmer).apply(&mut output);
+            let expected: Vec<Token> = input
+                .iter()
+                .filter_map(|token| {
+                    let stem = stemmer.stem(&token.text);
+                    (!stem.is_empty()).then(|| Token {
+                        text: stem.into_owned(),
+                        ..token.clone()
+                    })
+                })
+                .collect();
+            assert_eq!(output, expected);
         }
     }
 

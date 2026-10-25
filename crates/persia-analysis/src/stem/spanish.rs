@@ -1,4 +1,4 @@
-//! The Snowball Spanish stemmer, as `algorithms/spanish.sbl` of Snowball 3.
+//! The Snowball Spanish stemmer, as `algorithms/spanish.sbl` of Snowball v3.1.1.
 
 use std::borrow::Cow;
 

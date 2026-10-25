@@ -1,7 +1,8 @@
 //! Stemmers and the stemming filter (SPEC §6.3.2).
 //!
 //! The stemmers implement the Snowball algorithms (snowballstem.org) for English (Porter2), Spanish and Portuguese
-//! as of Snowball 3, written from their published definitions; the Snowball test vocabularies pin their output.
+//! as of Snowball v3.1.1, written from their published definitions; the Snowball test vocabularies (snowball-data
+//! commit `019921c3a41c2b70063ee3feb215a00c8e594597`) pin their output.
 
 mod english;
 mod portuguese;
@@ -9,6 +10,7 @@ mod spanish;
 mod word;
 
 use std::borrow::Cow;
+use std::sync::Arc;
 
 pub use english::EnglishStemmer;
 pub use portuguese::PortugueseStemmer;
@@ -21,10 +23,29 @@ use crate::token::{Token, TokenFilter};
 /// A stemmer never fails or panics, on any input. Its output is not a dictionary word, only a key that the
 /// inflections of one word share. Stemming is not idempotent: a stem may stem further
 /// (`accelerated` → `acceler` → `accel` in English), so query terms and indexed terms must go through the same
-/// analyzer. Object safe, so an analyzer can hold any stemmer behind a pointer.
+/// analyzer. Object safe, and implemented for references, `Box` and `Arc`, so an analyzer can pick a stemmer at run
+/// time (`StemmerFilter<Box<dyn Stemmer>>`).
 pub trait Stemmer: Send + Sync {
     /// The stem of `word`, borrowing `word` when it is its own stem.
     fn stem<'a>(&self, word: &'a str) -> Cow<'a, str>;
+}
+
+impl<S: Stemmer + ?Sized> Stemmer for &S {
+    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+        (**self).stem(word)
+    }
+}
+
+impl<S: Stemmer + ?Sized> Stemmer for Box<S> {
+    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+        (**self).stem(word)
+    }
+}
+
+impl<S: Stemmer + ?Sized> Stemmer for Arc<S> {
+    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+        (**self).stem(word)
+    }
 }
 
 /// Replaces each token's text with its stem (SPEC §6.3.2), keeping its span and position.
@@ -57,11 +78,13 @@ impl<S: Stemmer> StemmerFilter<S> {
 impl<S: Stemmer> TokenFilter for StemmerFilter<S> {
     fn apply(&self, tokens: &mut Vec<Token>) {
         for token in tokens.iter_mut() {
-            let stem = match self.stemmer.stem(&token.text) {
-                Cow::Borrowed(_) => continue,
-                Cow::Owned(stem) => stem,
-            };
-            token.text = stem;
+            // Compared rather than matched on `Cow::Borrowed`: a stemmer may return a borrowed stem that is not the
+            // word (a `'static` table entry).
+            let stem = self.stemmer.stem(&token.text);
+            if stem != token.text.as_str() {
+                let stem = stem.into_owned();
+                token.text = stem;
+            }
         }
         tokens.retain(|token| !token.text.is_empty());
     }

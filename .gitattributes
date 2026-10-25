@@ -4,6 +4,8 @@
 # Golden fixtures and fuzz seeds are raw bytes: no EOL conversion, no textual diff/merge.
 # Unanchored: crate-local fixtures (crates/*/tests/fixtures) and Go testdata are covered too.
 **/tests/fixtures/** binary
+# Except notes such as the license of the stemmer vocabularies, so they can be reviewed.
+**/tests/fixtures/**/*.md -binary diff merge text
 **/fuzz/corpus/** binary
 **/testdata/** binary
 *.persia binary

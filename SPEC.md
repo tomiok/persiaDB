@@ -764,14 +764,18 @@ those analyzers' versions.
   `SPANISH_STOPWORDS` and `PORTUGUESE_STOPWORDS`, pinned by a fingerprint test; the `fr`, `de` and `it` analyzers
   (§6.3) get their lists when they are added (ROADMAP 4.4.10).
 - **stem** `{language}`: replaces the token text with its stem, by the Snowball algorithm of the language
-  (snowballstem.org, as of Snowball 3): `english` (Porter2), `spanish`, `portuguese`. The Snowball test vocabularies
-  (`voc.txt` → `output.txt` of snowball-data, checked in with the stemmer tests) are normative: every word stems to
-  its listed stem. The algorithms expect lowercase text with its accents, so `stem` runs after `lowercase` and `stop`
-  and before `fold`. English treats only U+0027 as an apostrophe (mapping `’` is up to the analyzer, ROADMAP 4.4.2)
-  and leaves words of fewer than 3 characters alone; Spanish drops the acute accents of `á é í ó ú` and keeps `ñ` and
-  `ü`; Portuguese keeps its accents except that a final `ç` becomes `c`. Stemming is not idempotent (`accelerated` →
-  `acceler` → `accel`), so a query is stemmed once, by the same analyzer as the field. A stem can be empty (`''s`),
-  which removes the token. The `fr`, `de` and `it` stemmers come with their analyzers (ROADMAP 4.4.10).
+  (snowballstem.org, `algorithms/<language>.sbl` of Snowball v3.1.1): `english` (Porter2), `spanish`,
+  `portuguese`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
+  `019921c3a41c2b70063ee3feb215a00c8e594597`, checked in with the stemmer tests) are normative: every word stems to
+  its listed stem. The algorithms expect lowercase text with its accents, so `stem` runs after `nfkc` (to them a
+  decomposed accent is a consonant), `lowercase` and `stop`, and before `fold`. English treats only U+0027 as an
+  apostrophe (mapping `’` is up to the analyzer, ROADMAP 4.4.2) and leaves words of fewer than 3 characters alone;
+  Spanish drops the acute accents of `á é í ó ú` and keeps `ñ` and `ü`; Portuguese keeps its accents except that a
+  final `ç` becomes `c`, and, as it writes `ã` and `õ` as `a~` and `o~` while stemming, turns a literal `a~` or `o~`
+  into `ã` or `õ` (only the `whitespace` and `keyword` tokenizers keep `~` inside a token). Stemming is not
+  idempotent (`accelerated` → `acceler` → `accel`), so a query is stemmed once, by the same analyzer as the field. A
+  stem can be empty (`''s`), which removes the token. The `fr`, `de` and `it` stemmers come with their analyzers
+  (ROADMAP 4.4.10).
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
   replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
   none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.

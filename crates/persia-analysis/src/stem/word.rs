@@ -3,6 +3,8 @@
 //! Positions are character indices. The algorithms only edit the end of a word, so regions computed on the word
 //! before stemming (`RV`, `R1`, `R2`) stay valid as it shrinks.
 
+use std::borrow::Cow;
+
 pub(super) struct Word {
     chars: Vec<char>,
 }
@@ -174,10 +176,10 @@ pub(super) fn rv(chars: &[char], is_vowel: fn(char) -> bool) -> usize {
 }
 
 /// The stemmed word, borrowing `original` when stemming left it unchanged.
-pub(super) fn finish<'a>(original: &'a str, chars: &[char]) -> std::borrow::Cow<'a, str> {
+pub(super) fn finish<'a>(original: &'a str, chars: &[char]) -> Cow<'a, str> {
     if original.chars().eq(chars.iter().copied()) {
-        std::borrow::Cow::Borrowed(original)
+        Cow::Borrowed(original)
     } else {
-        std::borrow::Cow::Owned(chars.iter().collect())
+        Cow::Owned(chars.iter().collect())
     }
 }

@@ -21,7 +21,8 @@ fn vocabulary(tsv: &str) -> impl Iterator<Item = (&str, &str)> {
     tsv.lines().map(|line| line.split_once('\t').unwrap())
 }
 
-/// Every vocabulary word stems to its reference stem; the failures (at most 20 shown) are listed at once.
+/// Every vocabulary word stems to its reference stem, by the stemmer and through `StemmerFilter`; the failures (at
+/// most 20 shown) are listed at once.
 fn check_vocabulary(stemmer: &dyn Stemmer, tsv: &str, expected_words: usize) {
     let mut words = 0;
     let mut wrong = Vec::new();
@@ -30,6 +31,24 @@ fn check_vocabulary(stemmer: &dyn Stemmer, tsv: &str, expected_words: usize) {
         let stem = stemmer.stem(word);
         if stem != expected {
             wrong.push(format!("{word} -> {stem} (expected {expected})"));
+        }
+        let mut tokens = vec![Token {
+            text: word.to_owned(),
+            start: 0,
+            end: word.len(),
+            position: 0,
+        }];
+        StemmerFilter::new(stemmer).apply(&mut tokens);
+        let filtered: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+        let want: &[&str] = if expected.is_empty() {
+            &[]
+        } else {
+            &[expected]
+        };
+        if filtered != want {
+            wrong.push(format!(
+                "filter: {word} -> {filtered:?} (expected {expected})"
+            ));
         }
     }
     assert_eq!(words, expected_words, "vocabulary size");
@@ -166,4 +185,44 @@ proptest! {
             prop_assert_eq!(&stemmed.text, &SpanishStemmer.stem(&token.text));
         }
     }
+}
+
+/// Edge cases where the port follows Snowball on input the vocabularies lack, so a cleanup cannot drift.
+#[test]
+fn snowball_edge_cases_are_kept() {
+    let cases: [(&dyn Stemmer, &str, &str); 6] = [
+        // A leading apostrophe goes, then the possessive: nothing is left.
+        (&EnglishStemmer, "''s", ""),
+        // An input `Y` counts as a consonant; marked `y`s are restored to lowercase.
+        (&EnglishStemmer, "Yelling", "Yell"),
+        (&EnglishStemmer, "sayYing", "sayi"),
+        // `skies` is a table exception, not the `-ies` rule.
+        (&EnglishStemmer, "skies", "sky"),
+        // Portuguese writes `ã` as `a~` while stemming, so a literal `a~` comes back as `ã`.
+        (&PortugueseStemmer, "a~o", "ão"),
+        (&PortugueseStemmer, "maçã", "maçã"),
+    ];
+    for (stemmer, word, stem) in cases {
+        assert_eq!(stemmer.stem(word), stem, "{word:?}");
+    }
+}
+
+#[test]
+fn stemmers_can_be_picked_at_run_time() {
+    let filters: Vec<StemmerFilter<Box<dyn Stemmer>>> = vec![
+        StemmerFilter::new(Box::new(EnglishStemmer)),
+        StemmerFilter::new(Box::new(SpanishStemmer)),
+        StemmerFilter::new(Box::new(std::sync::Arc::new(PortugueseStemmer))),
+    ];
+    let stems: Vec<String> = filters
+        .iter()
+        .zip(["skies", "canciones", "brasileiras"])
+        .map(|(filter, word)| {
+            let mut tokens = Vec::new();
+            WhitespaceTokenizer.tokenize(word, &mut tokens);
+            filter.apply(&mut tokens);
+            tokens.remove(0).text
+        })
+        .collect();
+    assert_eq!(stems, ["sky", "cancion", "brasileir"]);
 }
