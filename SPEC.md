@@ -37,7 +37,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 | **Segment** | Immutable, self-contained index unit for one collection (SPEC §5). |
 | **Memtable** | In-memory mutable buffer of recent writes; searchable (near-real-time). |
 | **WAL** | Write-ahead log of operations not yet flushed to a segment. |
-| **Manifest** | Versioned snapshot listing live segments per collection + schemas. |
+| **Manifest** | Versioned snapshot listing live segments per collection + schemas (SPEC §8.7). |
 | **Commit** | Atomic publication of a new manifest. |
 | **Frame** | Checksummed record in the single-file container (SPEC §4). |
 | **Blob** | Opaque client file, content-addressed, stored by chunks (SPEC §9). |
@@ -879,6 +879,67 @@ On open: pick superblock → load manifest → replay WAL frames from `wal_start
 so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
+
+### 8.7 Manifest
+A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
+`fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current
+tombstone sidecar (§8.3). Locally it is the payload of the Manifest frame the superblock points at (§4.3), and its
+`seq`, `fence_token` and `wal_start` equal those of the slot that commits it (`wal_start` is a container offset);
+remotely it is `manifests/<seq:020>.mf` (§10.4), where `wal_start` is the `seq` of the first WAL object still needed.
+```
+0   4  magic             bytes "PMNF" (0x50 0x4D 0x4E 0x46)
+4   4  version           u32 = 1
+8   8  seq               u64
+16  8  fence_token       u64
+24  8  wal_start         u64
+32  4  collection_count  u32
+36  ..  collections, in strictly ascending byte order of their names:
+          u32 schema_len, then schema_len bytes: the schema as JSON (§6.2), every field with its `id` and
+              every text field with an `analyzer` of the form "name@version"
+          u32 segment_count, then the live segments, oldest first (the order commits added them):
+            16  segment_id     u128
+            4   doc_count      u32
+            8   size           u64  (length of the segment's bytes, §5.1)
+            ..  location
+            1   tombstones     0 = none, 1 = present, followed by:
+                  8 version u64, 4 deleted u32, location
+..  4  crc32c            u32  over every byte before it
+location:  u8 1 = object (key from the ids, §10.4) | 2 = frame, followed by u64 offset, u64 len (whole frame, §4.4)
+```
+A manifest is at most 64 MiB. Reading it: the length, the magic, then the CRC32C trailer (it ends every version, so
+a damaged `version` reads as corruption), then `version` (0 is corruption; above 1 is unsupported), then the rest.
+Fields have one encoding each; the schema text is any valid JSON definition meeting the rule above (writers use
+the engine's own JSON form, so a schema reads back the same after an upgrade that adds options with defaults).
+`ManifestHash` is XXH3-128 (§4.1) of the bytes as stored.
+
+#### 8.7.1 Rules
+Anything else is corruption:
+- `segment_id`s are unique across the whole manifest; `1 ≤ doc_count ≤ 2^31` (§5.4); `size ≥ 1`.
+- A frame location has `offset` and `len` multiples of 8, `offset ≥ 12288`, `len ≥ 32`, and `offset + len` fits a
+  `u64`. That the frame exists, lies below `log_end` and has the right kind is checked when it is read.
+- A tombstone sidecar has `version ≥ 1` and `1 ≤ deleted ≤ doc_count`. A segment without deletions has none.
+- The stored schema is valid (§6.2.1–§6.2.3) and gives its ids and analyzer versions; without them a reader would
+  assign ids by name order or the current analyzer version, silently changing an evolved schema.
+
+#### 8.7.2 Commits as diffs
+A commit is planned as a diff against the manifest it builds on: per collection, create (schema and first segments),
+drop, or change (a replacement schema; segment ids removed; new entries for kept segments; segments added), and
+optionally a new `fence_token` and `wal_start`. Applying it gives the next manifest, `seq + 1`, and fails unless:
+- `fence_token` and `wal_start` do not go below the base's (§11.3, §8.2);
+- a created collection does not exist and its schema has its name; a dropped or changed one exists;
+- a replacement schema is what evolving the current one into it gives (§6.2.4), ids included;
+- removed and updated segments are live in that collection; each id appears once in the diff; an added segment's
+  id is in no collection of the base;
+- an updated entry keeps `doc_count` and `size`; its location may change (container compaction, §4.6); its
+  sidecar is unchanged except for its location, or is the next version (`version + 1`, `deleted` not lower), or is
+  the first (`version = 1`) of a segment that had none; deletions are never removed. An added segment's sidecar, if
+  any, has version 1.
+
+Kept segments stay in their order and added segments follow, in the diff's order. Diffs name segments by id, never
+by position, so one planned against an older manifest (a background merge) applies to a newer one exactly when the
+segments it touches are unchanged; otherwise it fails and is replanned. The diff between two manifests is the one
+that applies to the first and gives the second (`seq` aside); there is none if no single commit leads from one to
+the other.
 
 ---
 
