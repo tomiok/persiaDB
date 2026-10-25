@@ -676,11 +676,15 @@ proptest! {
         let t = if lower.0 { 't' } else { 'T' };
         let text = format!("{y:04}-{mo:02}-{d:02}{t}{h:02}:{mi:02}:{s:02}{frac_text}{off_text}");
         let r = parse(&schema, &format!(r#"{{"id": "1", "f": "{text}"}}"#));
-        let expected = (d <= month_len(y, mo))
-            .then(|| naive_micros(y, mo, d, h, mi, s, micros, off.unwrap_or(0)))
-            .filter(|v| (MIN_DATETIME..=MAX_DATETIME).contains(v));
+        // A date that does not exist is not a datetime; an instant outside the range is out of range, as for the
+        // integer form.
+        let expected = (d <= month_len(y, mo)).then(|| naive_micros(y, mo, d, h, mi, s, micros, off.unwrap_or(0)));
         match expected {
-            Some(v) => prop_assert_eq!(r.map(|doc| doc.get(id(&schema, "f")).cloned()), Ok(Some(Value::Datetime(v))), "{}", text),
+            Some(v) if (MIN_DATETIME..=MAX_DATETIME).contains(&v) => prop_assert_eq!(r.map(|doc| doc.get(id(&schema, "f")).cloned()), Ok(Some(Value::Datetime(v))), "{}", text),
+            Some(_) => prop_assert!(
+                matches!(&r, Err(DocumentError::OutOfRange { field, .. }) if field == "f"),
+                "{}: {:?}", text, r
+            ),
             None => prop_assert!(
                 matches!(&r, Err(DocumentError::InvalidDatetime { field, .. }) if field == "f"),
                 "{}: {:?}", text, r

@@ -190,10 +190,18 @@ fn encode_json(e: &mut Encoder, value: &serde_json::Value) {
             }
         }
         J::Object(map) => {
+            e.map(map.len());
+            // The length does not depend on the order, so counting needs no sorted copy.
+            if e.is_counting() {
+                for (key, item) in map {
+                    e.text(key);
+                    encode_json(e, item);
+                }
+                return;
+            }
             // serde_json's map is sorted unless a crate in the build enables `preserve_order`.
             let mut entries: Vec<_> = map.iter().collect();
             entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
-            e.map(entries.len());
             for (key, item) in entries {
                 e.text(key);
                 encode_json(e, item);

@@ -42,7 +42,8 @@ pub const MAX_KEYWORD_LEN: usize = 32 << 10;
 pub const MAX_DOCUMENT_FIELDS: usize = 1024;
 /// Deepest nesting of arrays and objects in a `stored` value (SPEC §6.4.1).
 pub const MAX_STORED_DEPTH: usize = 64;
-/// Most values a document holds: field values, list elements and the values inside stored values (SPEC §6.4.1).
+/// Most values a document holds: field values, extra field values, list elements and the values inside stored and
+/// extra values (SPEC §6.4.1).
 pub const MAX_DOCUMENT_VALUES: usize = 1 << 20;
 /// Longest JSON text [`Document::from_json`] reads, in bytes (SPEC §6.4.1).
 pub const MAX_DOCUMENT_JSON_LEN: usize = 16 << 20;
@@ -97,7 +98,8 @@ impl Value {
 pub enum FieldSet {
     /// Every field.
     All,
-    /// Only fields with `stored: true` (SPEC §6.2.2): a `DocStore` row.
+    /// Only fields with `stored: true` (SPEC §6.2.2), plus the id, blob reference and extra fields, which are
+    /// always written: a `DocStore` row.
     Stored,
 }
 

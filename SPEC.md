@@ -756,9 +756,10 @@ array(5) [
 ```
 Values by field type: `text`/`keyword` a text string, or an array of text strings for a list; `i64` and `datetime` an
 integer; `f64` a float that is neither NaN, an infinity nor `-0.0`; `bool` a simple value; `stored` and `extra` a
-JSON value: `null`, `false`, `true`, an integer in `-2^63..2^64`, a finite float, a text string, an array, or a map
-with text keys. `DocStore` rows encode the stored fields only (`stored: true`, §6.2.2); the id, the blob reference and
-the extra fields are always included. A reader decodes a row with the collection's current schema: evolution keeps
+JSON value other than `null` (an absent value is left out): `false`, `true`, an integer in `-2^63..2^64`, a finite
+float, a text string, an array, or a map with text keys, whose elements and values may also be `null`.
+`DocStore` rows encode the stored fields only (`stored: true`, §6.2.2); the id, the blob reference and the extra
+fields are always included. A reader decodes a row with the collection's current schema: evolution keeps
 field ids and types (§6.2.4). An extra field named like a field added to the schema later stays an extra field
 (but an extra field next to a value of the schema field of that name is corruption). So a row may hold what a new
 document could not (such an extra field, or extra fields of a collection that has since become `strict`): it is

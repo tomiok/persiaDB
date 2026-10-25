@@ -889,6 +889,34 @@ fn to_json_refuses_values_nested_too_deep() {
     );
 }
 
+/// `to_json` of a typed document never writes JSON that reads back differently: no reserved or invalid extra
+/// names (they would become the id or the blob reference), no `null` stored values (they would read as absent).
+#[test]
+fn to_json_refuses_what_would_not_read_back() {
+    let schema = all_types(false);
+    for name in ["id", "blob", "ID", "_x", "a-b"] {
+        let mut doc = Document::new("1");
+        doc.insert_extra(name, json!(1));
+        assert!(
+            matches!(doc.to_json(&schema), Err(DocumentError::FieldName { name: ref n, .. }) if n == name),
+            "{name}"
+        );
+    }
+    let mut doc = Document::new("1");
+    doc.insert_extra("X", json!(null));
+    assert_eq!(
+        doc.to_json(&schema),
+        Err(DocumentError::NullStored { field: "X".into() })
+    );
+    let doc = Document::new("1").with(id(&schema, "g"), Value::Json(json!(null)));
+    assert_eq!(
+        doc.to_json(&schema),
+        Err(DocumentError::NullStored { field: "g".into() })
+    );
+    let doc = Document::new("1").with(id(&schema, "g"), Value::Json(json!([null])));
+    assert_eq!(doc.to_json(&schema).unwrap(), r#"{"id":"1","g":[null]}"#);
+}
+
 // ---- Property tests (ROADMAP 3.2.5) ----
 
 fn field_kind() -> impl Strategy<Value = FieldKind> {

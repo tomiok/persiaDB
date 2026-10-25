@@ -29,7 +29,7 @@ discipline and must have one encoding per document.
    names follow the field name rules, so a later schema can add a field of that name. An old row's extra field
    stays an extra field after that; an extra field next to the schema field of the same name is corruption.
 5. **Limits**: id 1–512 bytes (§6.1), keyword value 32 KiB (below what term dictionaries handle comfortably),
-   1024 fields per document (as per schema), 64 levels of nesting in stored values (bounds decoder recursion),
+   1024 fields per document (schema and extra fields together), 64 levels of nesting in stored values (bounds decoder recursion),
    1 048 576 values (field values, list elements, values inside stored values: caps what decoding a hostile row of
    one-byte items allocates at about 32 MiB), 16 MiB of JSON and 16 MiB of encoding. JSON parsing rejects duplicate
    keys at every level.

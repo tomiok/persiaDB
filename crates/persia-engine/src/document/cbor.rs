@@ -39,6 +39,11 @@ impl Encoder {
         self.buf
     }
 
+    /// Whether only the length is kept, so the order of what is written does not matter.
+    pub(super) fn is_counting(&self) -> bool {
+        self.count_only
+    }
+
     /// How many bytes were written (saturating).
     pub(super) fn len(&self) -> usize {
         self.len
