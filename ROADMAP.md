@@ -263,15 +263,15 @@ Deps: M0. (Parallel with M2/M3.)
 - [x] 4.1.3 Max token length guard (drop/truncate, configurable)
 
 ## 4.2 Normalization & filters
-- [ ] 4.2.1 Unicode NFKC normalization filter
-- [ ] 4.2.2 Lowercasing (Unicode-aware, including `ß`, Turkish-i policy documented)
-- [ ] 4.2.3 Accent/diacritic folding (`ñ`→`n` optional per analyzer, `ü`→`u`)
+- [x] 4.2.1 Unicode NFKC normalization filter
+- [x] 4.2.2 Lowercasing (Unicode-aware, including `ß`, Turkish-i policy documented)
+- [x] 4.2.3 Accent/diacritic folding (`ñ`→`n` optional per analyzer, `ü`→`u`)
 - 4.2.4 Stopword filter with embedded lists
-  - [ ] 4.2.4.1 English list
-  - [ ] 4.2.4.2 Spanish list
-  - [ ] 4.2.4.3 Portuguese list
-- [ ] 4.2.5 Synonym filter (expansion at query time; config from schema) (SPEC §7.6 L1)
-- [ ] 4.2.6 Edge n-gram filter (for optional prefix indexing)
+  - [x] 4.2.4.1 English list
+  - [x] 4.2.4.2 Spanish list
+  - [x] 4.2.4.3 Portuguese list
+- [x] 4.2.5 Synonym filter (expansion at query time; config from schema) (SPEC §7.6 L1)
+- [x] 4.2.6 Edge n-gram filter (for optional prefix indexing)
 
 ## 4.3 Stemmers
 - [ ] 4.3.1 Stemmer trait + Snowball-style English (Porter2)
@@ -281,12 +281,15 @@ Deps: M0. (Parallel with M2/M3.)
 
 ## 4.4 Analyzer pipelines
 - [ ] 4.4.1 `Analyzer` = char filters → tokenizer → token filters; builder + registry by name+version
-- [ ] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`
+- [ ] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`; SPEC §6.3 lists each one's full chain, its length guard and its folding preserved set (e.g. whether `es` keeps `ñ`, found in the PR #17 review)
 - [ ] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3); the schema remembers whether a definition named a version, so evolution binds an unversioned `analyzer` to the current field's version (SPEC §6.2.4)
 - [ ] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
 - [ ] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
 - [ ] 4.4.6 Unicode version bumps (found in the 4.1 review): moving `persia_analysis::UNICODE_VERSION` (unicode-segmentation or toolchain update) bumps the version of every built-in analyzer whose output changes, with a test listing which ones (SPEC §6.3.1)
 - [ ] 4.4.7 Char-filter offset mapping (found in the PR #15 review): a char filter that changes the text records an offset map, and the analyzer maps token spans back to the original field value (SPEC §6.3.1); property: spans stay on char boundaries of the original value, strictly increasing
+- [ ] 4.4.8 Query-time analysis for fields whose analyzer stacks tokens (found in the 4.2 review): with `edge_ngram`, queries and synonym terms (SPEC §6.3.2) are analyzed without it, or `SynonymMap::find` never matches stacked prefixes; define the query-time analyzer in SPEC §6.3
+- [ ] 4.4.9 Folding fast path (found in the 4.2 review): `FoldingFilter` allocates for every non-ASCII token even when nothing folds; pre-scan for foldable characters, measured by the 4.4.5 benchmark
+- [ ] 4.4.10 Built-in `fr`, `de`, `it` analyzers (found in the PR #17 review): SPEC §6.3 lists them but 4.2.4, 4.3 and 4.4.2 plan only `en`, `es`, `pt`; add their stopword lists and stemmers, or scope them out of §6.3
 
 ---
 

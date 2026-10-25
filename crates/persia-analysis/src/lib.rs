@@ -17,19 +17,32 @@
 #![deny(clippy::arithmetic_side_effects)]
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
 
+mod fold;
 mod length;
+mod lowercase;
+mod nfkc;
+mod ngram;
 mod standard;
+mod stop;
+mod synonyms;
 mod token;
 mod whitespace;
 
+pub use fold::FoldingFilter;
 pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};
+pub use lowercase::LowercaseFilter;
+pub use nfkc::NfkcFilter;
+pub use ngram::EdgeNgramFilter;
 pub use standard::StandardTokenizer;
-pub use token::{Token, Tokenizer};
+pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
+pub use synonyms::{DEFAULT_SYNONYM_EXPANSIONS, SynonymMap, SynonymMatch};
+pub use token::{Token, TokenFilter, Tokenizer};
 pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
 
-/// The Unicode version whose tables define tokenization (SPEC §6.3.1): the UAX #29 word boundaries of
-/// `unicode-segmentation` and the `char` properties of the standard library must both be at this version, so a
-/// dependency or toolchain update cannot silently change what an analyzer version produces.
+/// The Unicode version whose tables define tokenization and token filters (SPEC §6.3.1, §6.3.2): the UAX #29 word
+/// boundaries of `unicode-segmentation`, the normalization tables of `unicode-normalization` and the `char`
+/// properties and case mappings of the standard library must all be at this version, so a dependency or toolchain
+/// update cannot silently change what an analyzer version produces.
 pub const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
 
 #[cfg(test)]
@@ -46,6 +59,11 @@ mod tests {
             unicode_segmentation::UNICODE_VERSION,
             pinned,
             "unicode-segmentation tables"
+        );
+        assert_eq!(
+            unicode_normalization::UNICODE_VERSION,
+            UNICODE_VERSION,
+            "unicode-normalization tables"
         );
         assert_eq!(
             char::UNICODE_VERSION,

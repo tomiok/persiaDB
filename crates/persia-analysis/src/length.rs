@@ -2,7 +2,7 @@
 
 use std::num::NonZeroUsize;
 
-use crate::token::Token;
+use crate::token::{Token, TokenFilter};
 
 /// Default longest token, in bytes of UTF-8, that a [`TokenLengthGuard`] keeps whole.
 pub const DEFAULT_MAX_TOKEN_LEN: NonZeroUsize = match NonZeroUsize::new(255) {
@@ -82,5 +82,11 @@ impl TokenLengthGuard {
                 !token.text.is_empty()
             }),
         }
+    }
+}
+
+impl TokenFilter for TokenLengthGuard {
+    fn apply(&self, tokens: &mut Vec<Token>) {
+        TokenLengthGuard::apply(self, tokens);
     }
 }
