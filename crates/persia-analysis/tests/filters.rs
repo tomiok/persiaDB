@@ -44,6 +44,7 @@ fn nfkc_table() {
         ("ｶﾀｶﾅ", "カタカナ"), // half-width katakana
         ("⑴", "(1)"),         // not re-tokenized
         ("½", "1⁄2"),
+        ("\u{fdfa}", "صلى الله عليه وسلم"), // 18 characters from one (SPEC §6.3.2 length note)
     ] {
         assert_eq!(one(&NfkcFilter, input), expected, "{input:?}");
     }
@@ -132,6 +133,57 @@ fn folding_preserves_listed_characters_only() {
 }
 
 #[test]
+fn folding_preserves_listed_characters_inside_a_decomposition() {
+    // `Ǣ` is `Æ` and a macron; `ü` is `u` and a diaeresis.
+    assert_eq!(one(&FoldingFilter::preserving(['Æ']), "Ǣ"), "Æ");
+    assert_eq!(
+        one(&FoldingFilter::preserving(['\u{308}']), "ü"),
+        "u\u{308}"
+    );
+    // A preserved character is not recomposed: U+0344 is not NFC, and NFC would split it into two marks.
+    assert_eq!(
+        one(&FoldingFilter::preserving(['\u{344}']), "`\u{344}"),
+        "`\u{344}"
+    );
+    // Only composed input matches a preserved `ñ` (SPEC §6.3.2: `nfkc` goes first).
+    assert_eq!(one(&FoldingFilter::preserving(['ñ']), "n\u{303}"), "n");
+}
+
+/// The folding table is part of every analyzer that uses it (SPEC §6.3.2): this fingerprint of the fold of every
+/// scalar value changes with any edit of the table or of the Unicode tables, and updating it means bumping the
+/// versions of those analyzers.
+#[test]
+fn folding_is_pinned() {
+    let mut tokens: Vec<Token> = (0..=u32::from(char::MAX))
+        .filter_map(char::from_u32)
+        .zip(0..)
+        .map(|(c, position)| Token {
+            text: c.to_string(),
+            start: 0,
+            end: c.len_utf8(),
+            position,
+        })
+        .collect();
+    FoldingFilter::default().apply(&mut tokens);
+    let fingerprint = tokens
+        .iter()
+        .flat_map(|t| {
+            t.position
+                .to_le_bytes()
+                .into_iter()
+                .chain(t.text.bytes())
+                .chain([0xff])
+        })
+        .fold(0xcbf2_9ce4_8422_2325_u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        });
+    assert_eq!(
+        (tokens.len(), fingerprint),
+        (1_111_952, 13_066_509_306_887_631_778)
+    );
+}
+
+#[test]
 fn folding_drops_a_token_of_marks_only() {
     let mut tokens = tokens("a \u{301}\u{308} b");
     FoldingFilter::default().apply(&mut tokens);
@@ -162,7 +214,16 @@ fn stopwords_match_exactly() {
         Vec::<String>::new()
     );
     assert_eq!(texts(&StopwordFilter::spanish(), "mas más"), ["mas"]);
-    assert_eq!(texts(&StopwordFilter::portuguese(), "não é você"), ["não"]);
+    assert_eq!(
+        texts(&StopwordFilter::portuguese(), "não é você"),
+        Vec::<String>::new()
+    );
+    // Words as often used as content words stay.
+    assert_eq!(
+        texts(&StopwordFilter::spanish(), "bajo ante era"),
+        ["bajo", "ante", "era"]
+    );
+    assert_eq!(texts(&StopwordFilter::portuguese(), "era"), ["era"]);
     assert_eq!(
         texts(&StopwordFilter::new(["foo"]), "foo bar Foo"),
         ["bar", "Foo"]
@@ -205,8 +266,8 @@ fn embedded_stopword_lists_are_pinned() {
         fingerprints,
         [
             (33, 14_029_973_542_677_213_976),
-            (91, 6_593_422_813_128_545_095),
-            (82, 751_173_662_811_929_325)
+            (88, 15_764_952_924_425_316_783),
+            (82, 7_466_230_536_459_025_178)
         ]
     );
 }

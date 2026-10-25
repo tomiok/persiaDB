@@ -51,7 +51,8 @@ prost = "0.14.4"
 axum = "0.8.9"
 unicode-segmentation = "1.13.3"
 # Pinned: 0.1.26 moves to Unicode 18.0.0, and analyzer output is defined by one Unicode version
-# (`persia_analysis::UNICODE_VERSION`, SPEC §6.3.1).
+# (`persia_analysis::UNICODE_VERSION`, SPEC §6.3.1). An exact pin stops a downstream graph that needs `^0.1.26` from
+# resolving: the ADR due before the first crates.io publish (CLAUDE.md, Toolchain) must settle it.
 unicode-normalization = "=0.1.25"
 # Binaries only (persia-server, persia-cli)
 clap = { version = "4.6.7", features = ["derive"] }

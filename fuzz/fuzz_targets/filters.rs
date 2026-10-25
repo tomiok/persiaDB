@@ -9,8 +9,9 @@ use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter, StandardTokenizer, StopwordFilter,
-    SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
+    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
+    WhitespaceTokenizer,
 };
 
 fn check_from_input(input: &[Token], output: &[Token]) {
@@ -93,7 +94,10 @@ fuzz_target!(|data: &[u8]| {
             previous_end <= range.start && range.start < range.end && range.end <= tokens.len()
         );
         previous_end = range.end;
-        for alternative in map.alternatives(&m) {
+        assert!(
+            map.alternatives(&m, DEFAULT_SYNONYM_EXPANSIONS).len() <= DEFAULT_SYNONYM_EXPANSIONS
+        );
+        for alternative in map.alternatives(&m, DEFAULT_SYNONYM_EXPANSIONS) {
             assert!(!alternative.is_empty());
         }
     }

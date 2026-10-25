@@ -1,8 +1,10 @@
 //! Stopword filter and its embedded lists (SPEC §6.3.2).
 //!
-//! The lists are closed-class words (articles, prepositions, conjunctions, pronouns and the most common auxiliary
-//! forms), lowercase NFC with their accents, sorted by bytes. They are part of the definition of every analyzer
-//! that uses them: changing a list changes those analyzers' versions (SPEC §6.3).
+//! The lists are closed-class words, lowercase NFC with their accents, sorted by bytes: articles, prepositions,
+//! conjunctions and negation in all three; English is the classic 33-word list, while Spanish and Portuguese also
+//! hold personal pronouns, possessives, demonstratives and the commonest forms of `ser`, `estar` and `haber`, and
+//! leave out words just as often used as content words (`bajo`, `ante`, `era`). They are part of the definition
+//! of every analyzer that uses them: changing a list changes those analyzers' versions (SPEC §6.3).
 
 use std::collections::HashSet;
 
@@ -17,25 +19,24 @@ pub const ENGLISH_STOPWORDS: &[&str] = &[
 
 /// Spanish stopwords.
 pub const SPANISH_STOPWORDS: &[&str] = &[
-    "a", "al", "ante", "bajo", "como", "con", "contra", "cuando", "de", "del", "desde", "donde",
-    "durante", "e", "el", "ella", "ellas", "ellos", "en", "entre", "era", "es", "esa", "esas",
-    "ese", "eso", "esos", "esta", "estas", "este", "esto", "estos", "está", "fue", "ha", "han",
-    "hasta", "hay", "la", "las", "le", "les", "lo", "los", "me", "mi", "mis", "muy", "más", "mí",
-    "ni", "no", "nos", "nosotros", "o", "os", "para", "pero", "por", "porque", "que", "se", "ser",
-    "si", "sin", "sino", "sobre", "son", "su", "sus", "sí", "también", "te", "ti", "tras", "tu",
-    "tus", "tú", "u", "un", "una", "unas", "uno", "unos", "usted", "ustedes", "vosotros", "y",
-    "ya", "yo", "él",
+    "a", "al", "como", "con", "contra", "cuando", "de", "del", "desde", "donde", "durante", "e",
+    "el", "ella", "ellas", "ellos", "en", "entre", "es", "esa", "esas", "ese", "eso", "esos",
+    "esta", "estas", "este", "esto", "estos", "está", "fue", "ha", "han", "hasta", "hay", "la",
+    "las", "le", "les", "lo", "los", "me", "mi", "mis", "muy", "más", "mí", "ni", "no", "nos",
+    "nosotros", "o", "os", "para", "pero", "por", "porque", "que", "se", "ser", "si", "sin",
+    "sino", "sobre", "son", "su", "sus", "sí", "también", "te", "ti", "tras", "tu", "tus", "tú",
+    "u", "un", "una", "unas", "uno", "unos", "usted", "ustedes", "vosotros", "y", "ya", "yo", "él",
 ];
 
 /// Portuguese stopwords.
 pub const PORTUGUESE_STOPWORDS: &[&str] = &[
     "a", "ao", "aos", "as", "com", "como", "da", "das", "de", "do", "dos", "e", "ela", "elas",
-    "ele", "eles", "em", "entre", "era", "essa", "essas", "esse", "esses", "esta", "estas", "este",
+    "ele", "eles", "em", "entre", "essa", "essas", "esse", "esses", "esta", "estas", "este",
     "estes", "está", "eu", "foi", "há", "isso", "isto", "já", "lhe", "lhes", "mais", "mas", "me",
-    "meu", "minha", "muito", "na", "nas", "nem", "no", "nos", "num", "numa", "nós", "o", "os",
-    "ou", "para", "pela", "pelas", "pelo", "pelos", "por", "porque", "quando", "que", "se", "sem",
-    "ser", "seu", "seus", "sua", "suas", "são", "também", "te", "tu", "um", "uma", "umas", "uns",
-    "você", "vocês", "à", "às", "é",
+    "meu", "minha", "muito", "na", "nas", "nem", "no", "nos", "num", "numa", "não", "nós", "o",
+    "os", "ou", "para", "pela", "pelas", "pelo", "pelos", "por", "porque", "quando", "que", "se",
+    "sem", "ser", "seu", "seus", "sua", "suas", "são", "também", "te", "tu", "um", "uma", "umas",
+    "uns", "você", "vocês", "à", "às", "é",
 ];
 
 /// Removes tokens whose text is exactly one of a list of words (SPEC §6.3.2), leaving a gap in positions.

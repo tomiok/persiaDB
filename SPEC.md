@@ -707,8 +707,8 @@ on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token f
 the span, so the span always points at the characters the token came from. An analyzer whose char filters change the
 text maps spans back to the original field value before emitting them (ROADMAP 4.4.7), so spans always index the
 original value. `position` counts tokens from 0 within one value;
-a filter that removes a token leaves a gap, so a phrase never matches across it. Tokens of one value have strictly
-increasing, non-overlapping spans. Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
+a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
+value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
 every analyzer whose output it changes (§6.3), and CI fails if a dependency or toolchain update moves it unnoticed.
 
@@ -750,22 +750,31 @@ versions.
   scripts and Hangul syllables are unchanged. Letters with no decomposition fold by a fixed table, also when a
   decomposition yields them (`Ǣ` → `AE`): `ß`/`ẞ` → `ss`, `æ` → `ae`, `Æ` → `AE`, `œ` → `oe`, `Œ` → `OE`, `ø` → `o`,
   `Ø` → `O`, `đ`/`ð` → `d`, `Đ`/`Ð` → `D`, `ł` → `l`, `Ł` → `L`, `þ` → `th`, `Þ` → `TH`, `ħ` → `h`, `Ħ` → `H`,
-  `ı` → `i`. Preserved characters are kept as listed, also inside a decomposition, and only the text between them is
-  recomposed (case matters: preserving `ñ` does not preserve `Ñ`). A Spanish analyzer may preserve `ñ`, so `año`
-  and `ano` stay distinct. Folding is idempotent.
+  `ı` → `i` (nothing else: `ŧ`, `ƀ`, `ɨ` and the like are kept). Preserved characters are kept as listed, also
+  inside a decomposition, and only the text between them is recomposed (case matters: preserving `ñ` does not
+  preserve `Ñ`). A Spanish analyzer may preserve `ñ`, so `año` and `ano` stay distinct. A preserved character only
+  matches as listed, so put `nfkc` first: a decomposed `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
 - **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
   are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
-  as given.
+  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
+  English keeps the classic 33-word list, while Spanish and Portuguese also list personal pronouns, possessives,
+  demonstratives and the commonest forms of `ser`, `estar` and `haber`, leaving out words that are just as often
+  content words (`bajo`, `ante`, `era`).
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters): replaces a token with its prefixes of `min..=max`
   characters, shortest first; a token shorter than `min` produces none. With `preserve_original`, the whole token
-  follows them when it is longer than `max` or shorter than `min`. Used for optional prefix indexing; put the length
-  guard (§6.3.1) before it so a token's prefixes stay bounded.
+  follows them when it is longer than `max` or shorter than `min`. Used for optional prefix indexing.
 - **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
   group (§6.2.1) is analyzed with the field's analyzer into a token sequence; a term that yields no tokens is ignored,
-  and terms equal after analysis are one term. Scanning the analyzed query left to right, the longest term starting at
-  each token matches when its texts are equal and its position gaps equal (a stopword gap must line up), the matched
-  tokens are skipped, and the match reports, in group order, then term order, the other terms of every group
-  containing it. Matches never overlap; the query compiler ORs the match with its alternatives.
+  and terms equal after analysis are one term. A term whose groups all shrink to it alone (`["New York", "new york"]`
+  under lowercasing) has nothing to expand to and never matches. Scanning the analyzed query left to right, the
+  longest term starting at each token matches when its texts are equal and its position gaps equal (a stopword gap
+  must line up), the matched tokens are skipped, and the match reports, in group order, then term order, the other
+  terms of every group containing it, each once, up to a cap (default 50, §7.6 L1). Matches never overlap; the query
+  compiler ORs the match with its alternatives.
+
+`nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
+bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay
+bounded.
 
 ### 6.4 Documents
 Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).
@@ -881,7 +890,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | Level | Name | Behavior |
 |---|---|---|
 | L0 | `exact` | All query terms required (AND), analyzed |
-| L1 | `synonyms` | Expand terms with collection synonyms (OR within group) |
+| L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
 | L2 | `drop_terms` | `minimum_should_match` steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term. Stopwords/low-IDF terms dropped first |
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST; corrected terms reported |

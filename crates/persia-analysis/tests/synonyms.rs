@@ -1,7 +1,8 @@
 //! Query-time synonym lookup (ROADMAP 4.2.5; SPEC §6.3.2, §7.6 L1).
 
 use persia_analysis::{
-    LowercaseFilter, StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, LowercaseFilter, StandardTokenizer, StopwordFilter, SynonymMap,
+    Token, TokenFilter, Tokenizer,
 };
 
 /// A small analyzer: standard words, lowercase, English stopwords.
@@ -28,7 +29,7 @@ fn expand(map: &SynonymMap, query: &str) -> Vec<(std::ops::Range<usize>, Vec<Str
         .iter()
         .map(|m| {
             let alternatives = map
-                .alternatives(m)
+                .alternatives(m, DEFAULT_SYNONYM_EXPANSIONS)
                 .iter()
                 .map(|term| {
                     term.iter()
@@ -102,8 +103,58 @@ fn a_term_in_several_groups_expands_to_all_of_them_once() {
 
 #[test]
 fn terms_without_tokens_are_ignored() {
-    let map = map(&[&["the", "of", "a"], &["!!!", "bang"]]);
-    // Ranges index the analyzed tokens, where "the" is already gone.
-    assert_eq!(expand(&map, "the bang"), [(0..1, vec![])]);
+    // "bang" is left alone in its group, so it has nothing to expand to and does not match.
+    let map = map(&[&["the", "of", "a"], &["!!!", "bang"], &["boom", "!"]]);
+    assert_eq!(expand(&map, "the bang boom"), []);
     assert_eq!(SynonymMap::default().find(&analyze("anything")), []);
+}
+
+#[test]
+fn a_group_that_collapses_to_one_term_does_not_hide_shorter_terms() {
+    // Both spellings of "New York" lowercase to one term: it must not match, or "york" would never expand.
+    let collapsed = map(&[&["New York", "new york"], &["york", "yorkshire"]]);
+    assert_eq!(
+        expand(&collapsed, "new york"),
+        [(1..2, vec!["yorkshire".into()])]
+    );
+    // The same term with a real synonym in another group still matches.
+    let with_nyc = map(&[&["New York", "new york"], &["new york", "nyc"]]);
+    assert_eq!(expand(&with_nyc, "NEW YORK"), [(0..2, vec!["nyc".into()])]);
+}
+
+#[test]
+fn a_decreasing_position_keeps_the_match_found_so_far() {
+    let map = map(&[&["p", "y"], &["p q", "w"]]);
+    let token = |text: &str, position| Token {
+        text: text.into(),
+        start: 0,
+        end: 1,
+        position,
+    };
+    let tokens = [token("p", 5), token("q", 0)];
+    let matches = map.find(&tokens);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].tokens(), 0..1);
+}
+
+#[test]
+fn alternatives_are_capped_in_group_then_term_order() {
+    let words: Vec<String> = (0..120).map(|i| format!("w{i}")).collect();
+    let mut first: Vec<&str> = vec!["x"];
+    first.extend(words[..60].iter().map(String::as_str));
+    let mut second: Vec<&str> = vec!["x"];
+    second.extend(words[60..].iter().map(String::as_str));
+    let map = map(&[&first, &second]);
+    let tokens = analyze("x");
+    let matches = map.find(&tokens);
+    let texts = |limit| -> Vec<String> {
+        map.alternatives(&matches[0], limit)
+            .iter()
+            .map(|t| t[0].text.clone())
+            .collect()
+    };
+    assert_eq!(texts(DEFAULT_SYNONYM_EXPANSIONS), words[..50]);
+    assert_eq!(texts(70), words[..70]);
+    assert_eq!(texts(1000), words);
+    assert_eq!(texts(0), Vec::<String>::new());
 }

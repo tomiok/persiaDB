@@ -4,8 +4,9 @@
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter, StandardTokenizer, StopwordFilter,
-    SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
+    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
+    WhitespaceTokenizer,
 };
 use proptest::prelude::*;
 use unicode_normalization::{is_nfc, is_nfkc};
@@ -110,6 +111,16 @@ proptest! {
             }
             idempotent(&filter, &once)?;
         }
+        // Every preserved character of a token survives folding.
+        let filter = FoldingFilter::preserving(preserve.iter().copied());
+        let input = whitespace_tokens(&text);
+        let output = filtered(&filter, input.clone());
+        for token in &input {
+            let kept = output.iter().find(|t| t.position == token.position);
+            for c in token.text.chars().filter(|c| preserve.contains(c)) {
+                prop_assert!(kept.is_some_and(|t| t.text.contains(c)), "{c:?} of {token:?} lost: {kept:?}");
+            }
+        }
     }
 
     #[test]
@@ -170,7 +181,7 @@ proptest! {
             let joined = matched.join(" ");
             prop_assert!(groups.iter().flatten().any(|term| *term == joined));
             let alternatives: Vec<String> =
-                map.alternatives(&m).iter().map(|t| texts(t).join(" ")).collect();
+                map.alternatives(&m, DEFAULT_SYNONYM_EXPANSIONS).iter().map(|t| texts(t).join(" ")).collect();
             prop_assert!(!alternatives.contains(&joined));
             let mut unique = alternatives.clone();
             unique.sort();

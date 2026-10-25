@@ -35,7 +35,7 @@ pub use nfkc::NfkcFilter;
 pub use ngram::EdgeNgramFilter;
 pub use standard::StandardTokenizer;
 pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
-pub use synonyms::{SynonymMap, SynonymMatch};
+pub use synonyms::{DEFAULT_SYNONYM_EXPANSIONS, SynonymMap, SynonymMatch};
 pub use token::{Token, TokenFilter, Tokenizer};
 pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
 
