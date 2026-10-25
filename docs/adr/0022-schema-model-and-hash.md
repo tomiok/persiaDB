@@ -43,19 +43,20 @@ is persisted in every segment, so it must not drift across releases, dependency 
 7. **Old segments verify by truncation.** A segment also records how many fields it was indexed with. Evolution
    only appends fields and never changes what the hash covers, so an earlier version's hash is the current
    schema's hash over its first `field_count` fields (`CollectionSchema::hash_at`); no history of hashes is kept.
-8. **Analyzer registry stub.** Until M4 (ROADMAP 4.4.1, 4.4.3) provides one, the schema module lists the built-in
-   analyzer names of SPEC §6.3 at version 1 and rejects anything else.
+8. **Analyzer registry.** The schema accepts exactly the built-in analyzer versions `persia-analysis` ships
+   (`BUILTIN_ANALYZERS`, SPEC §6.3.3) and rejects anything else. *Amended in ROADMAP 4.4.3:* this replaced a stub
+   list in the schema module that also named `fr`, `de` and `it`, which have no analyzer yet (ROADMAP 4.4.10).
 
 ## Consequences
 
 - A definition is either fully valid or rejected with its first problem (a field or option name, or serde_json's
   line and column); nothing is ignored, except ids in a definition proposed for evolution, which are internal.
 - Adding a field changes the hash; segments written before still verify through `hash_at` (decision 7).
-- An unversioned `analyzer` resolves to the current version; once a second version exists, evolution must bind it
-  to the field's current version instead (SPEC §6.2.4, ROADMAP 4.4.3).
+- An unversioned `analyzer` resolves to the current version in a new schema, and binds to the field's version on
+  evolution (SPEC §6.2.4). `AnalyzerRef` remembers whether the definition named the version; that flag is not part
+  of its identity or of the hash.
 - The query-time settings live in the same schema but outside the hash; the manifest (3.3) persists the whole schema.
   If it persists the serde form, that form becomes an on-disk format and falls under the format discipline then.
-- The built-in analyzer list duplicates SPEC §6.3 until M4 replaces it with the real registry.
 
 ## Alternatives considered
 

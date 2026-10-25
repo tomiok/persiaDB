@@ -221,14 +221,16 @@ The schema sketch in SPEC §6.2, illustrative:
 ```
 
 Analyzers are a pipeline: character filters, then a tokenizer, then token filters (SPEC §6.3).
-Built-ins planned for the first cut (ROADMAP 4.4.2) are `standard` (Unicode word boundaries, NFKC,
-lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, and `pt` (stopwords, a
-Snowball-style stemmer, accent folding). SPEC §6.3 also names `fr`, `de`, and `it`; whether those
-three ship in v1 is open (SPEC §18.7). Positions, used for phrases, are opt-in per field
-(SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
+The built-ins are `standard` (Unicode word boundaries, NFKC, lowercase), `keyword`, `whitespace`, and
+the language analyzers `en`, `es`, and `pt` (stopwords, a Snowball-style stemmer, accent folding;
+`es` keeps `ñ`). SPEC §6.3.3 lists each one's full chain. `fr`, `de`, and `it` are planned
+(ROADMAP 4.4.10; SPEC §18.7). Positions, used for phrases, are opt-in per field (SPEC §18.4).
 
-Text analysis depends only on the finished bootstrap milestone, so it can start in parallel with the
-rest of the format work (ROADMAP M4). It has not started.
+A field names its analyzer as `"es"` (the current version) or `"es@1"`; the stored schema always
+records the version, so an index keeps analyzing queries the way it was built. Re-applying a
+definition with an unversioned `"es"` after a release adds `es@2` leaves the field at `es@1`
+(SPEC §6.2.4). Fields that index edge n-grams analyze queries and synonyms without them
+(SPEC §6.3.4).
 
 ### Durability
 

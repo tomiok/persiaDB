@@ -1,26 +1,10 @@
 //! Field types and per-type options (SPEC §6.1, §6.2.2).
 
 use std::fmt;
+use std::hash::{Hash, Hasher};
 
-/// Built-in analyzers of SPEC §6.3, all at version 1. M4 replaces this list with the analyzer registry
-/// (ROADMAP 4.4.1, 4.4.3; ADR-0022).
-pub const BUILTIN_ANALYZERS: &[&str] = &[
-    "standard",
-    "keyword",
-    "whitespace",
-    "en",
-    "es",
-    "pt",
-    "fr",
-    "de",
-    "it",
-];
-
-/// The analyzer a text field gets when it names none.
-pub const DEFAULT_ANALYZER: &str = "standard";
-
-/// The only version each built-in analyzer has so far.
-const CURRENT_VERSION: u32 = 1;
+use persia_analysis::current_builtin_version;
+pub use persia_analysis::{BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER};
 
 /// The value types of SPEC §6.1.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -170,27 +154,42 @@ impl Default for KeywordOptions {
 }
 
 /// A built-in analyzer at a specific version (SPEC §6.3); written as `name@version`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Its identity is the name and version: two refs are equal when they name the same analyzer version. A ref also
+/// remembers whether the definition it came from named the version ([`is_pinned`](Self::is_pinned)), so that
+/// evolution can bind an unversioned `analyzer` to the version a field was indexed with (SPEC §6.2.4).
+#[derive(Debug, Clone)]
 pub struct AnalyzerRef {
     name: String,
     version: u32,
+    pinned: bool,
 }
 
 impl AnalyzerRef {
-    /// The current version of built-in analyzer `name`, or `None` if there is no such analyzer.
+    /// The current version of built-in analyzer `name`, not pinned, or `None` if there is no such analyzer.
     pub fn builtin(name: &str) -> Option<Self> {
-        Self::new(name, CURRENT_VERSION)
-    }
-
-    /// Version `version` of built-in analyzer `name`, or `None` if it does not exist.
-    pub fn new(name: &str, version: u32) -> Option<Self> {
-        (BUILTIN_ANALYZERS.contains(&name) && version == CURRENT_VERSION).then(|| Self {
+        let version = current_builtin_version(name)?;
+        Some(Self {
             name: name.to_owned(),
             version,
+            pinned: false,
         })
     }
 
-    /// Parses `"name"` (the current version) or `"name@version"` (canonical decimal, no sign or leading zero).
+    /// Version `version` of built-in analyzer `name`, pinned, or `None` if it does not exist.
+    pub fn new(name: &str, version: u32) -> Option<Self> {
+        let exists = BUILTIN_ANALYZERS
+            .iter()
+            .any(|a| a.name == name && a.version == version);
+        exists.then(|| Self {
+            name: name.to_owned(),
+            version,
+            pinned: true,
+        })
+    }
+
+    /// Parses `"name"` (the current version, not pinned) or `"name@version"` (pinned; canonical decimal, no sign or
+    /// leading zero).
     pub fn parse(text: &str) -> Option<Self> {
         let Some((name, version)) = text.split_once('@') else {
             return Self::builtin(text);
@@ -213,14 +212,48 @@ impl AnalyzerRef {
     pub fn version(&self) -> u32 {
         self.version
     }
+
+    /// Whether the definition named the version (`"es@1"`) rather than leaving it to the current one (`"es"`).
+    /// A schema the engine stored always pins its versions (SPEC §6.2.2).
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// The same analyzer at `version`, pinned, without checking that the version exists: tests of version binding
+    /// need a version the build does not ship yet.
+    #[cfg(test)]
+    pub(crate) fn at_unchecked(&self, version: u32) -> Self {
+        Self {
+            name: self.name.clone(),
+            version,
+            pinned: true,
+        }
+    }
+}
+
+impl PartialEq for AnalyzerRef {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.version == other.version
+    }
+}
+
+impl Eq for AnalyzerRef {}
+
+impl Hash for AnalyzerRef {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+        self.version.hash(state);
+    }
 }
 
 impl Default for AnalyzerRef {
+    /// The current version of [`DEFAULT_ANALYZER`], not pinned.
     fn default() -> Self {
-        Self {
+        Self::builtin(DEFAULT_ANALYZER).unwrap_or_else(|| Self {
             name: DEFAULT_ANALYZER.to_owned(),
-            version: CURRENT_VERSION,
-        }
+            version: 1,
+            pinned: false,
+        })
     }
 }
 
@@ -250,15 +283,30 @@ mod tests {
     }
 
     #[test]
-    fn every_builtin_resolves_at_version_one() {
-        for name in BUILTIN_ANALYZERS {
-            assert_eq!(
-                AnalyzerRef::builtin(name).map(|a| a.version()),
-                Some(1),
-                "{name}"
-            );
+    fn every_builtin_resolves_through_the_registry() {
+        for a in BUILTIN_ANALYZERS {
+            let pinned = AnalyzerRef::new(a.name, a.version).unwrap();
+            assert!(pinned.is_pinned());
+            assert_eq!((pinned.name(), pinned.version()), (a.name, a.version));
+            assert!(AnalyzerRef::builtin(a.name).unwrap().version() >= a.version);
+        }
+        for gone in ["fr", "de", "it"] {
+            assert_eq!(AnalyzerRef::builtin(gone), None, "{gone}");
         }
         assert_eq!(AnalyzerRef::default().name(), DEFAULT_ANALYZER);
+        assert!(!AnalyzerRef::default().is_pinned());
+    }
+
+    #[test]
+    fn pinning_is_remembered_but_not_identity() {
+        use std::hash::BuildHasher;
+        let unpinned = AnalyzerRef::parse("es").unwrap();
+        let pinned = AnalyzerRef::parse("es@1").unwrap();
+        assert!(!unpinned.is_pinned() && pinned.is_pinned());
+        assert_eq!(unpinned, pinned);
+        let state = std::collections::hash_map::RandomState::new();
+        assert_eq!(state.hash_one(&unpinned), state.hash_one(&pinned));
+        assert_ne!(pinned, pinned.at_unchecked(2));
     }
 
     #[test]

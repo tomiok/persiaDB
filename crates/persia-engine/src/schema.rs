@@ -38,8 +38,8 @@ pub use config::{
 };
 pub use evolution::EvolutionError;
 pub use field::{
-    AnalyzerRef, BUILTIN_ANALYZERS, DEFAULT_ANALYZER, FieldKind, FieldType, KeywordOptions,
-    TextOptions,
+    AnalyzerRef, BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER, FieldKind, FieldType,
+    KeywordOptions, TextOptions,
 };
 
 /// Most fields a collection may declare (SPEC §6.2.1).

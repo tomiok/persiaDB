@@ -10,6 +10,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
+- `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains char filters, a tokenizer and token filters;
+  `analyze` gives index-time tokens and `analyze_query` query-time tokens, without filters that stack tokens such as
+  edge n-grams (§6.3.4), and `SynonymMap::analyzed` analyzes synonym terms the same way. The built-ins `standard`,
+  `keyword`, `whitespace`, `en`, `es` and `pt` at version 1 (`builtin_analyzer`, `BUILTIN_ANALYZERS`; chains in
+  §6.3.3), and `AnalyzerRegistry` to look analyzers up by name and version. `ApostropheFilter` maps `‘` and `’` to
+  `'` for the English stemmer.
+- `persia-engine`: an `analyzer` given without a version binds to the field's current version on schema evolution
+  (SPEC §6.2.4); `AnalyzerRef::is_pinned` tells whether a definition named the version.
 - `persia-analysis`: tokenizers (SPEC §6.3.1). `Token` carries its text, byte span and position; `StandardTokenizer`
   splits at Unicode word boundaries (UAX #29: numbers, apostrophes, emails and URLs as specified, one token per
   character for Han, Hiragana and Thai), `WhitespaceTokenizer` at Unicode white space, and `KeywordTokenizer` keeps
@@ -101,6 +109,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Container::read_frame_source`, which returns a payload as a `ByteSource`: without copying it for an uncompressed
   frame the mapping covers; read into a buffer for other uncompressed frames, decompressed into one for compressed
   frames (SPEC §4.7; ADR-0017).
+
+### Changed
+- `persia-engine`: a schema naming the `fr`, `de` or `it` analyzer is rejected until those analyzers exist (ROADMAP
+  4.4.10); the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and version).
 
 ### Fixed
 - `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged

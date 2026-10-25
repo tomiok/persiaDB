@@ -2761,7 +2761,7 @@ fn any_field_kind() -> impl Strategy<Value = FieldKind> {
     )
         .prop_map(|(analyzer, boost, positions, k1, b, stored)| {
             FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin(analyzer).unwrap(),
+                analyzer: AnalyzerRef::new(analyzer.name, analyzer.version).unwrap(),
                 boost,
                 positions,
                 k1,

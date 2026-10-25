@@ -412,13 +412,12 @@ fn analyzers() {
         "whitespace",
         "en",
         "pt",
-        "fr",
-        "de",
-        "it",
     ] {
         parse(&patched("/fields/title/analyzer", Some(json!(name)))).unwrap();
     }
-    for name in ["", "ES", "klingon", "es@2", "es@01", "es@"] {
+    for name in [
+        "", "ES", "klingon", "es@2", "es@01", "es@", "fr", "de", "it",
+    ] {
         assert_eq!(
             parse(&patched("/fields/title/analyzer", Some(json!(name)))),
             Err(SchemaError::UnknownAnalyzer {
@@ -827,7 +826,7 @@ fn field_kind() -> impl Strategy<Value = FieldKind> {
     )
         .prop_map(|(analyzer, boost, positions, k1, b, stored)| {
             FieldKind::Text(TextOptions {
-                analyzer: AnalyzerRef::builtin(analyzer).unwrap(),
+                analyzer: AnalyzerRef::new(analyzer.name, analyzer.version).unwrap(),
                 boost,
                 positions,
                 k1,
@@ -1602,9 +1601,12 @@ fn apply_index_change(
         IndexChange::Analyzer => match kind {
             FieldKind::Text(o) => {
                 let names = persia_engine::schema::BUILTIN_ANALYZERS;
-                let at = names.iter().position(|n| *n == o.analyzer.name()).unwrap();
-                o.analyzer =
-                    AnalyzerRef::builtin(names.get((at + 1) % names.len()).unwrap()).unwrap();
+                let at = names
+                    .iter()
+                    .position(|a| a.name == o.analyzer.name() && a.version == o.analyzer.version())
+                    .unwrap();
+                let next = names.get((at + 1) % names.len()).unwrap();
+                o.analyzer = AnalyzerRef::new(next.name, next.version).unwrap();
             }
             other => *other = FieldKind::Text(TextOptions::default()),
         },
@@ -1965,4 +1967,23 @@ proptest! {
         prop_assert_eq!(v2.hash_at(fields.len()), Some(v1.hash()));
         prop_assert_eq!(v2.hash_at(fields.len() + 1), Some(v2.hash()));
     }
+}
+
+/// SPEC §6.2.4 (ROADMAP 4.4.3): a stored schema pins its versions, and re-applying the unversioned definition binds to
+/// them; the binding is visible in the evolved schema's JSON and keeps the hash.
+#[test]
+fn unversioned_analyzer_rebinds_to_the_stored_version() {
+    let definition = spec_value();
+    let stored =
+        CollectionSchema::from_json(&parse(&definition).unwrap().to_json().unwrap()).unwrap();
+    let evolved = stored.evolve(&parse(&definition).unwrap()).unwrap();
+    assert_eq!(evolved.hash(), stored.hash());
+    let json: Value = serde_json::from_str(&evolved.to_json().unwrap()).unwrap();
+    assert_eq!(json.pointer("/fields/title/analyzer"), Some(&json!("es@1")));
+    let text = |s: &CollectionSchema| match s.field("title").map(|f| f.kind().clone()) {
+        Some(FieldKind::Text(o)) => o.analyzer,
+        other => panic!("{other:?}"),
+    };
+    assert!(text(&stored).is_pinned());
+    assert!(!text(&parse(&definition).unwrap()).is_pinned());
 }
