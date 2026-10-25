@@ -26,3 +26,31 @@ pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};
 pub use standard::StandardTokenizer;
 pub use token::{Token, Tokenizer};
 pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
+
+/// The Unicode version whose tables define tokenization (SPEC §6.3.1): the UAX #29 word boundaries of
+/// `unicode-segmentation` and the `char` properties of the standard library must both be at this version, so a
+/// dependency or toolchain update cannot silently change what an analyzer version produces.
+pub const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
+
+#[cfg(test)]
+mod tests {
+    use super::UNICODE_VERSION;
+
+    /// Fails on a `unicode-segmentation` or toolchain update that moves to another Unicode version: bump
+    /// `UNICODE_VERSION` deliberately, together with the versions of the analyzers it changes (SPEC §6.3.1).
+    #[test]
+    fn unicode_tables_are_at_the_pinned_version() {
+        let (major, minor, update) = UNICODE_VERSION;
+        let pinned = (u64::from(major), u64::from(minor), u64::from(update));
+        assert_eq!(
+            unicode_segmentation::UNICODE_VERSION,
+            pinned,
+            "unicode-segmentation tables"
+        );
+        assert_eq!(
+            char::UNICODE_VERSION,
+            UNICODE_VERSION,
+            "standard library char tables"
+        );
+    }
+}

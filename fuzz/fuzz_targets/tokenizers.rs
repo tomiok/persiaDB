@@ -46,14 +46,25 @@ fuzz_target!(|data: &[u8]| {
         check(text, &tokens);
         let mut guarded = tokens.clone();
         guard.apply(&mut guarded);
-        let mut originals = tokens.iter();
-        for token in &guarded {
-            assert!(!token.text.is_empty() && token.text.len() <= max.get());
-            let original = originals
-                .find(|o| o.position == token.position)
-                .expect("guard keeps tokens in order");
-            assert_eq!((token.start, token.end), (original.start, original.end));
-            assert!(original.text.starts_with(&token.text));
+        // Exactly the tokens that fit, or (truncating) whose longest char-aligned prefix is non-empty, survive,
+        // in order, with their span and position, as the original or that prefix.
+        let mut kept = guarded.iter();
+        for original in &tokens {
+            let fits = original.text.len() <= max.get();
+            let prefix = &original.text[..original.text.floor_char_boundary(max.get())];
+            if !fits && (policy == LengthPolicy::Drop || prefix.is_empty()) {
+                continue;
+            }
+            let token = kept.next().expect("a surviving token was dropped");
+            assert_eq!(
+                (token.start, token.end, token.position),
+                (original.start, original.end, original.position)
+            );
+            assert_eq!(
+                token.text,
+                if fits { original.text.as_str() } else { prefix }
+            );
         }
+        assert!(kept.next().is_none(), "the guard invented a token");
     }
 });

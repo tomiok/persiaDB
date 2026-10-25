@@ -81,3 +81,17 @@ fn default_guard() {
     assert_eq!(tokens[0].text.len(), 255);
     assert_eq!(tokens[0].end, 300);
 }
+
+#[test]
+fn guards_every_value_appended_to_one_buffer() {
+    // Tokenizers append, so a buffer can hold the tokens of several values; the guard leaves positions alone.
+    let mut tokens = Vec::new();
+    WhitespaceTokenizer.tokenize("aaaa b", &mut tokens);
+    WhitespaceTokenizer.tokenize("c dddd", &mut tokens);
+    TokenLengthGuard::new(NonZeroUsize::new(2).unwrap(), LengthPolicy::Truncate).apply(&mut tokens);
+    let got: Vec<(&str, u32)> = tokens
+        .iter()
+        .map(|t| (t.text.as_str(), t.position))
+        .collect();
+    assert_eq!(got, [("aa", 0), ("b", 1), ("c", 0), ("dd", 1)]);
+}

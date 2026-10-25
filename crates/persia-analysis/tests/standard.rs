@@ -16,6 +16,11 @@ fn tricky_inputs() {
         ("   \t\n", &[]),
         ("!?.,;:-()[]{}", &[]),
         ("🙂 👍🏽 ★", &[]),
+        // A keycap emoji keeps its digit, so it is a word.
+        (
+            "1\u{fe0f}\u{20e3} 👨\u{200d}👩\u{200d}👧",
+            &["1\u{fe0f}\u{20e3}"],
+        ),
         // Plain words, punctuation and mixed case.
         ("Hello, world!", &["Hello", "world"]),
         ("  leading and trailing  ", &["leading", "and", "trailing"]),
@@ -65,7 +70,8 @@ fn tricky_inputs() {
         ("ＡＢＣ１２３", &["ＡＢＣ１２３"]),
         // Control characters and NUL separate words.
         ("a\u{0}b\u{7}c", &["a", "b", "c"]),
-        // Zero-width joiner and BOM do not split a word.
+        // Zero-width joiner and BOM inside a word do not split it; a leading BOM is not part of the word.
+        ("a\u{200d}b wo\u{feff}rd", &["a\u{200d}b", "wo\u{feff}rd"]),
         ("\u{feff}word", &["word"]),
     ];
     for (input, expected) in table {

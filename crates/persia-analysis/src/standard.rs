@@ -8,7 +8,8 @@ use crate::token::{Token, Tokenizer, push_spans};
 /// analyzer (SPEC §6.3).
 ///
 /// A word is a segment between two boundaries that contains at least one alphanumeric character, so spaces,
-/// punctuation and symbols (emoji included) produce no token. Following UAX #29 (SPEC §6.3.1):
+/// punctuation and symbols (emoji included) produce no token; a keycap emoji such as `1️⃣` keeps its digit and is
+/// one. Following UAX #29 (SPEC §6.3.1):
 ///
 /// - numbers with inner separators stay whole: `3.14`, `1,000`, `v2`;
 /// - an apostrophe between letters joins them: `don't`, `O'Neil` (typographic `’` too);
