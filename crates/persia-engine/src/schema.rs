@@ -27,6 +27,8 @@ mod field;
 mod json;
 mod validate;
 
+pub(crate) use validate::field_name_problem;
+
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -126,6 +128,11 @@ impl CollectionSchema {
     /// [`SchemaError::Json`] for malformed or non-conforming JSON, another variant for a rule of SPEC §6.2.1–§6.2.3.
     pub fn from_json(json: &str) -> Result<Self, SchemaError> {
         json::from_json(json)
+    }
+
+    /// [`Self::from_json`] for a schema the engine stored (SPEC §8.7): every option must be given.
+    pub(crate) fn from_stored_json(json: &str) -> Result<Self, SchemaError> {
+        json::from_stored_json(json)
     }
 
     /// The schema as JSON with every option written out, ids and analyzer versions included (ADR-0022).

@@ -37,7 +37,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 | **Segment** | Immutable, self-contained index unit for one collection (SPEC §5). |
 | **Memtable** | In-memory mutable buffer of recent writes; searchable (near-real-time). |
 | **WAL** | Write-ahead log of operations not yet flushed to a segment. |
-| **Manifest** | Versioned snapshot listing live segments per collection + schemas. |
+| **Manifest** | Versioned snapshot listing live segments per collection + schemas (SPEC §8.7). |
 | **Commit** | Atomic publication of a new manifest. |
 | **Frame** | Checksummed record in the single-file container (SPEC §4). |
 | **Blob** | Opaque client file, content-addressed, stored by chunks (SPEC §9). |
@@ -537,8 +537,7 @@ Writers use the true minimum and the minimal width.
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
 the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;
 otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
-bit pattern round-trips exactly. Whether writers canonicalize `-0.0` and NaN before keying is decided with
-the document model (ROADMAP 3.2.6).
+bit pattern round-trips exactly. Writers never key `-0.0` or NaN: a document holds neither in an `f64` field (§6.4.1).
 
 ### 5.3 Sections (per segment)
 | Section | Per | Content | Encoding |
@@ -551,7 +550,7 @@ the document model (ROADMAP 3.2.6).
 | `Positions` | field (opt-in) | token positions | delta + bit-packed; only if field has `positions: true` |
 | `Norms` | text field | quantized field length per doc (1 byte, Lucene-style) | array |
 | `Columns` | numeric/keyword/date/bool field | doc values for filter/sort/facet | columnar; low-card keyword = dictionary + bit-packed ords; numerics = FOR/bit-pack; roaring for bool/sparse |
-| `DocStore` | segment | original documents (CBOR) | row blocks, zstd |
+| `DocStore` | segment | stored fields of documents (CBOR, §6.4.2) | row blocks, zstd |
 | `IdMap` | segment | external id ↔ internal `docid` | FST (id→docid) + array (docid→id offset) |
 | `BlobRefs` | segment | docid → blob_ref | column |
 
@@ -702,9 +701,148 @@ Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `white
 (`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding).
 Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
 
-### 6.4 Document encoding
-Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore`.
-Unknown fields (not in schema): rejected by default (`strict: true`), or kept as `stored` if `strict: false`.
+#### 6.3.1 Tokens and tokenizers
+A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
+on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
+the span, so the span always points at the characters the token came from. An analyzer whose char filters change the
+text maps spans back to the original field value before emitting them (ROADMAP 4.4.7), so spans always index the
+original value. `position` counts tokens from 0 within one value;
+a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
+value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
+defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
+every analyzer whose output it changes (§6.3), and CI fails if a dependency or toolchain update moves it unnoticed.
+
+- **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
+  punctuation, symbols and emoji produce no token (a keycap emoji such as `1️⃣` keeps its digit and is one).
+  Consequences of UAX #29, relied on and tested: numbers with inner separators stay whole (`3.14`, `1,000`); an
+  apostrophe between letters joins them (`don't`, `O'Neil`, also `’`); emails and URLs split at `@` and `/` while
+  dotted names stay whole (`ana@example.com` → `ana`, `example.com`); a colon joins letters on both sides
+  (`mailto:ana`, `key:value`) and splits otherwise (`https://`, `12:30`); `_` joins (`snake_case`); scripts written
+  without spaces (Han, Hiragana, Thai, ...) fall back to one token per character, while Katakana runs and Hangul
+  words stay whole. No dictionary segmentation in v1.
+- **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
+- **keyword**: the whole value is one token (none for an empty value).
+
+**Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
+the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is
+dropped); `drop` removes the token. Kept tokens keep their span and position. Which built-in analyzers apply the
+guard, and with which limit, is part of their definition (§6.3, ROADMAP 4.4.2).
+
+#### 6.3.2 Token filters
+A token filter rewrites, removes or adds tokens; it never changes a token's span, and never fails or panics. A filter
+that leaves a token's text empty removes the token. Removing a token leaves a gap in positions (§6.3.1). Filters that
+add tokens (edge n-grams) stack them on the position and span of the token they came from, so after such a filter
+positions are non-decreasing rather than strictly increasing; spans of different positions still increase and do not
+overlap. Every filter is defined by the Unicode version of §6.3.1, and the embedded tables below (stopword lists,
+folding table) are part of the definition of every analyzer that uses them: changing one changes those analyzers'
+versions.
+
+- **nfkc**: Unicode NFKC normalization of the token text (`ﬁ` → `fi`, full-width `Ａ` → `A`, `²` → `2`). The result
+  may contain characters a tokenizer would have split at (`⑴` → `(1)`); it is not re-tokenized.
+- **lowercase**: the Unicode default lowercase mapping (`str::to_lowercase`), locale-independent, with the
+  `Final_Sigma` rule applied inside the token (`ΟΔΟΣ` → `οδος`). Lowercasing is not case folding: `ß` stays `ß` and
+  `ẞ` becomes `ß` (the `fold` filter maps both to `ss`). Turkish and Azeri casing is not tailored: `I` → `i`,
+  `İ` → `i̇` (`i` + U+0307, which `fold` reduces to `i`) and `ı` stays `ı`; a Turkish analyzer would need its own
+  filter.
+- **fold** (accent/diacritic folding): every character outside a per-filter *preserved* set is replaced by its
+  canonical decomposition without the combining marks U+0300–U+036F (Latin, Greek and Cyrillic accents: `é` → `e`,
+  `ü` → `u`, `ç` → `c`, `ǖ` → `u`, `ά` → `α`, `ё` → `е`), and the result is recomposed (NFC), so marks of other
+  scripts and Hangul syllables are unchanged. Letters with no decomposition fold by a fixed table, also when a
+  decomposition yields them (`Ǣ` → `AE`): `ß`/`ẞ` → `ss`, `æ` → `ae`, `Æ` → `AE`, `œ` → `oe`, `Œ` → `OE`, `ø` → `o`,
+  `Ø` → `O`, `đ`/`ð` → `d`, `Đ`/`Ð` → `D`, `ł` → `l`, `Ł` → `L`, `þ` → `th`, `Þ` → `TH`, `ħ` → `h`, `Ħ` → `H`,
+  `ı` → `i` (nothing else: `ŧ`, `ƀ`, `ɨ` and the like are kept). Preserved characters are kept as listed, also
+  inside a decomposition, and only the text between them is recomposed (case matters: preserving `ñ` does not
+  preserve `Ñ`). The preserved set of each built-in analyzer is part of its definition (ROADMAP 4.4.2); preserving `ñ`
+  keeps `año` and `ano` distinct. A preserved character only matches as listed, so put `nfkc` first: a decomposed
+  `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
+- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
+  are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
+  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
+  English keeps the classic 33-word list, while Spanish and Portuguese also list personal pronouns, possessives,
+  demonstratives and the commonest forms of `ser`, `estar` and `haber`, leaving out words that are just as often
+  content words (`bajo`, `ante`, `era`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
+  `SPANISH_STOPWORDS` and `PORTUGUESE_STOPWORDS`, pinned by a fingerprint test; the `fr`, `de` and `it` analyzers
+  (§6.3) get their lists when they are added (ROADMAP 4.4.10).
+- **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
+  replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
+  none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
+  Used for optional prefix indexing.
+- **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
+  group (§6.2.1) is analyzed with the field's analyzer into a token sequence; a term that yields no tokens is ignored,
+  and terms equal after analysis are one term. A term whose groups all shrink to it alone (`["New York", "new york"]`
+  under lowercasing) has nothing to expand to and never matches. Scanning the analyzed query left to right, the
+  longest term starting at each token matches when its texts are equal and its position gaps equal (a stopword gap
+  must line up), the matched tokens are skipped, and the match reports, in group order, then term order, the other
+  terms of every group containing it, each once, up to a cap (default 50, §7.6 L1). Matches never overlap; the query
+  compiler ORs the match with its alternatives.
+
+`nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
+bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay
+bounded.
+
+### 6.4 Documents
+Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).
+
+#### 6.4.1 Values and limits
+A document is an `id`, an optional `blob` reference (§9.1) and a value per field it has; every field is optional.
+
+| Field type | Value | JSON form |
+|---|---|---|
+| `text`, `keyword` | a string, or a list of strings (multi-valued) | a string, or an array of strings |
+| `i64` | a signed 64-bit integer | an integer in the `i64` range (no fraction or exponent; `-0` is 0, and so is a negative zero written with a fraction or exponent, which JSON parsers cannot tell apart) |
+| `f64` | a finite `f64`; `-0.0` is stored as `0.0` | any number (integers are converted to the nearest `f64`) |
+| `bool` | `true` or `false` | `true` or `false` |
+| `datetime` | microseconds since the Unix epoch, UTC, from `0000-01-01T00:00:00Z` to `9999-12-31T23:59:59.999999Z` | an integer (microseconds) or an RFC 3339 string with a `Z` or `±hh:mm` offset, at most 6 fractional digits and seconds `00`–`59` (no leap seconds); written as RFC 3339 in UTC, `YYYY-MM-DDTHH:MM:SSZ` with `.ffffff` when the microseconds are not zero |
+| `stored` | any JSON value | any JSON value |
+
+- Only `text` and `keyword` fields are multi-valued: numeric, `bool` and `datetime` doc values hold one value per
+  document (§5.2.1). A list keeps its order; an empty list is a value (it indexes nothing).
+- `null` as a field's JSON value means the field is absent, as does `"blob": null`; `null` inside a `stored` value
+  is kept. A `null` inside a list of strings is an error, and so is a `null` stored value in a typed API.
+- **Floats (`f64` fields).** NaN and the infinities are rejected (JSON cannot express them; typed APIs reject them).
+  `-0.0` becomes `0.0` when the value enters a document, so the order-preserving key of §5.2.1 never sees `-0.0` or
+  NaN and a range filter on either side of zero includes zero. Numbers inside a `stored` value are kept as parsed:
+  an integer in `-2^63..2^64` exactly, any other number as the nearest `f64` (so `-0` reads as `-0.0`).
+- **Keys.** `id` and `blob` are the document's id and blob reference. Any other key is a field name. A key the
+  schema does not have is an error when the collection is `strict` (the default, §6.2.1). Otherwise it is kept as an
+  extra `stored` value under that name, which must satisfy the field name rules of §6.2.1. Duplicate keys at any level
+  are errors.
+- **Limits.** `id` is 1–512 bytes of UTF-8. A `keyword` value is at most 32 KiB. A document has at most 1024
+  fields, schema fields and extra fields together. A `stored` value nests arrays and objects at most 64 levels
+  deep. A document holds at most 1 048 576 values: each field value, each element of a list, and each value inside
+  a `stored` or extra value (array elements and object members, at any depth) counts once. The JSON text is at most
+  16 MiB, and so is the binary encoding (§6.4.2) of the whole document.
+- **Output.** `get` writes an object with `id`, then `blob` if present, then the fields and extra fields in
+  ascending byte order of their names; values in the forms above.
+
+#### 6.4.2 Binary encoding
+The encoding of a document in `DocStore` (and anywhere else a document is persisted) is CBOR (RFC 8949) restricted so
+that each document has exactly one encoding (ADR-0023):
+- definite lengths only; every argument in its shortest form; no tags; text strings are valid UTF-8;
+- the only simple values are `false`, `true` and `null`; floats are always 64-bit (`0xfb`), never 16- or 32-bit;
+- map keys are strictly increasing: unsigned integers by value, text strings by their UTF-8 bytes.
+
+Anything else is corruption, and so is a value the rules of §6.4.1 reject.
+```
+array(5) [
+  version   uint    1 (0 is corruption; above 1 is unsupported, read before the array length is checked,
+                    so a later version may change it)
+  id        text
+  blob      bytes (exactly one BlobRef encoding, §9.1) or null
+  fields    map: uint field id -> value, ids of the collection's schema
+  extra     map: text name -> JSON value (non-strict collections, §6.4.1)
+]
+```
+Values by field type: `text`/`keyword` a text string, or an array of text strings for a list; `i64` and `datetime` an
+integer; `f64` a float that is neither NaN, an infinity nor `-0.0`; `bool` a simple value; `stored` and `extra` a
+JSON value other than `null` (an absent value is left out): `false`, `true`, an integer in `-2^63..2^64`, a finite
+float, a text string, an array, or a map with text keys, whose elements and values may also be `null`.
+`DocStore` rows encode the stored fields only (`stored: true`, §6.2.2); the id, the blob reference and the extra
+fields are always included. A reader decodes a row with the collection's current schema: evolution keeps
+field ids and types (§6.2.4). An extra field named like a field added to the schema later stays an extra field
+(but an extra field next to a value of the schema field of that name is corruption). So a row may hold what a new
+document could not (such an extra field, or extra fields of a collection that has since become `strict`): it is
+returned as it is, and copied as bytes, never re-validated.
 
 ---
 
@@ -756,7 +894,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | Level | Name | Behavior |
 |---|---|---|
 | L0 | `exact` | All query terms required (AND), analyzed |
-| L1 | `synonyms` | Expand terms with collection synonyms (OR within group) |
+| L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
 | L2 | `drop_terms` | `minimum_should_match` steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term. Stopwords/low-IDF terms dropped first |
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST; corrected terms reported |
@@ -797,9 +935,11 @@ Delete = tombstone only. Tombstones are the only mutable-looking state; they liv
 (versioned, referenced by the manifest), never inside the immutable segment bytes.
 
 Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2, see SPEC §18.3):
-- One sidecar per `(segment_id, version)`; `version` is a `u64` that increases by 1 per rewrite.
+- One sidecar per `(segment_id, version)`; `version` is a `u64`: 1 for a segment's first sidecar, one more per rewrite
+  (§8.7.2; the manifest rules are normative, the payload below is still a proposal).
 - Payload: `segment_id u128`, `version u64`, `doc_count u32` (must equal the segment's), then the **full** set of deleted
-  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read.
+  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read; each
+  version is a superset of the previous one (deletions are never undone), which the writer checks before committing it.
 - Docids `>= doc_count` are corruption.
 - Stored locally as a `TombstoneSidecar` frame (SPEC §4.4), remotely as `tombstones/<collection>/<segment_id>.<ver>.tomb` (SPEC §10.4).
 - The manifest maps each live segment to its current sidecar version (absent = no deletions). Superseded sidecars become
@@ -820,6 +960,94 @@ On open: pick superblock → load manifest → replay WAL frames from `wal_start
 so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
+
+### 8.7 Manifest
+A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
+`fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current
+tombstone sidecar (§8.3). Locally it is the payload of the Manifest frame the superblock points at (§4.3), and its
+`seq`, `fence_token` and `wal_start` equal those of the slot that commits it (`wal_start` is a container offset);
+remotely it is `manifests/<seq:020>.mf` (§10.4), where `wal_start` is the `seq` of the first WAL object still needed
+(provisional until the remote WAL is designed, M12).
+```
+0   4  magic             bytes "PMNF" (0x50 0x4D 0x4E 0x46)
+4   4  version           u32 = 1
+8   8  seq               u64
+16  8  fence_token       u64
+24  8  wal_start         u64
+32  4  collection_count  u32
+36  ..  collections, in strictly ascending byte order of their names:
+          u32 schema_len, then schema_len bytes: the schema as JSON (§6.2), every field with its `id` and
+              every text field with an `analyzer` of the form "name@version"
+          u32 segment_count, then the live segments, oldest first (the order commits added them):
+            16  segment_id     u128
+            4   doc_count      u32
+            8   size           u64  (length of the segment's bytes, §5.1)
+            ..  location
+            1   tombstones     0 = none, 1 = present, followed by:
+                  8 version u64, 4 deleted u32, location
+..  4  crc32c            u32  over every byte before it
+location:  u8 1 = object (key from the ids, §10.4) | 2 = frame, followed by u64 offset, u64 len (whole frame, §4.4)
+```
+A manifest is at most 64 MiB. Reading it: the length, the magic, then the CRC32C trailer (it ends every version, so
+a damaged `version` reads as corruption), then `version` (0 is corruption; above 1 is unsupported), then the rest.
+Fields have one encoding each except the schema text: any valid JSON definition (§6.2) that gives every option
+explicitly, ids and `"name@version"` analyzers included, in any key order or spacing. Nothing is left to the reading
+build's defaults, so the same bytes read the same schema in every build (`"levels": "default"` follows the engine
+by design, §6.2.3). A schema option added later is a new manifest
+`version` (older readers then report it unsupported rather than corrupt); a newer build reading version 1 gives the
+option the behavior from before it existed. `ManifestHash` is XXH3-128 (§4.1) of the bytes as stored: a replica
+(§10.5) copies them, never a re-encoding.
+
+#### 8.7.1 Rules
+Anything else is corruption:
+- `segment_id`s are unique across the whole manifest; `1 ≤ doc_count ≤ 2^31` (§5.4); `size ≥ 1`.
+- A frame location has `offset` and `len` multiples of 8, `offset ≥ 12288`, `len ≥ 32`, and `offset + len` fits a
+  `u64`. That the frame exists, lies below `log_end` and has the right kind is checked when it is read.
+- A tombstone sidecar has `version ≥ 1` and `1 ≤ deleted ≤ doc_count`. A segment without deletions has none.
+- The stored schema is valid (§6.2.1–§6.2.3) and gives every option (§8.7); without ids a reader would assign them
+  by name order, and without versions bind the current analyzer, silently changing an evolved schema.
+
+The encoding allows both kinds of location in one manifest, but no layout uses that yet: a local container's
+manifest holds only frame locations and a remote one only object locations, and their readers treat any other
+location as corruption (ROADMAP 6.3.7).
+
+**Segment ids.** Writers draw each new `segment_id` at random (128 bits from a cryptographically secure source).
+An id is never reused: older snapshots may still reference a segment that was merged away (§8.5), and remote keys
+of segments and sidecars (§10.4) are named by it. A manifest can only check uniqueness within itself and against the
+manifest a commit builds on (§8.7.2); random ids make a collision with an older, no longer listed segment
+negligible (about `n² / 2^129` for `n` segments ever written).
+
+#### 8.7.2 Commits as diffs
+A commit is planned as a diff against the manifest it builds on: per collection, create (schema and first segments),
+drop, or change (a replacement schema; segments removed, each with the sidecar version it was read at, 0 for none;
+new entries for kept segments; segments added), and optionally a new `fence_token` and `wal_start`. Applying it
+gives the next manifest, `seq + 1`, and fails unless:
+- `fence_token` and `wal_start` do not go below the base's (§11.3, §8.2);
+- a created collection does not exist and its schema has its name; a dropped or changed one exists;
+- a replacement schema is what evolving the current one into it gives (§6.2.4), ids included;
+- removed and updated segments are live in that collection; each id appears once in the diff; an added segment's
+  id is in no collection of the base;
+- a removed segment's sidecar version is the one the diff names: a merge drops the documents deleted at that
+  version, so deletions committed since would come back in the merged segment;
+- an updated entry keeps `doc_count`, `size` and location; its sidecar is the next version (`version + 1`,
+  `deleted` not lower) or the first (`version = 1`) of a segment that had none, never the current one (two deletes
+  planned on one manifest would both write the next version); deletions are never removed. The manifest sees only
+  the `deleted` count, so it can reject a lower count but not a new set that drops some docids while keeping the
+  count: the writer builds each sidecar version as a superset of the previous one and checks that before it
+  commits (§8.3, ROADMAP 6.4.2). An added segment's sidecar, if any, has version 1.
+
+Kept segments stay in their order and added segments follow, in the diff's order. Diffs name segments by id, never
+by position, so one planned against an older manifest (a background merge) still applies to a newer one when the
+segments it touches are unchanged, sidecars included, and the rest of the diff is still a valid step from the newer
+manifest: its `fence_token` and `wal_start`, if given, are not below the newer ones, a replacement schema evolves from
+the newer schema, and collections it creates or drops have not been created or dropped meanwhile. Otherwise it fails
+and is replanned. A merge diff, which gives no `fence_token`, `wal_start` or schema, conflicts only on its segments. The diff between two
+manifests is the one that applies to the first and gives the second (`seq` aside); there is none if no single
+commit leads from one to the other.
+
+**Relocation.** A container compaction (§4.6) is not a diff: it moves frames down, so `wal_start` (a container
+offset) may go below the current one. Its manifest is the current one with `seq + 1`, every frame location moved
+to where the compaction copied the frame (same length), and the new `wal_start`; nothing else changes.
 
 ---
 
@@ -1147,6 +1375,10 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 - Golden files for every released format version live in `tests/fixtures/format/v<major>.<minor>/` and are opened
   by CI forever. `cargo xtask fixtures` writes (and CI checks) only the directory of the version the build writes;
   a released version's directory is never regenerated.
+- Encodings that live inside frames or objects rather than in the container layout have their own version field and
+  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024),
+  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`),
+  existing ones never.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

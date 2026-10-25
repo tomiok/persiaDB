@@ -15,6 +15,7 @@ libfuzzer-sys = "0.4.13"
 persia-format = { path = "../crates/persia-format" }
 persia-storage = { path = "../crates/persia-storage" }
 persia-engine = { path = "../crates/persia-engine" }
+persia-analysis = { path = "../crates/persia-analysis" }
 # Same version and features as the workspace (no `legacy`), to read a frame's declared size in the fuzz harness.
 zstd = { version = "0.14.0", default-features = false }
 
@@ -115,6 +116,41 @@ bench = false
 [[bin]]
 name = "schema_json"
 path = "fuzz_targets/schema_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document"
+path = "fuzz_targets/document.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "document_json"
+path = "fuzz_targets/document_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "manifest"
+path = "fuzz_targets/manifest.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tokenizers"
+path = "fuzz_targets/tokenizers.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filters"
+path = "fuzz_targets/filters.rs"
 test = false
 doc = false
 bench = false

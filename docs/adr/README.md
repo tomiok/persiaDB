@@ -45,3 +45,5 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0020](./0020-cli-depends-on-storage.md) | The `persia` CLI may depend on `persia-storage` directly | proposed |
 | [0021](./0021-os-calls-for-file-system-type-and-identity.md) | `libc` and `windows-sys` for the file system type and the Windows file identity | proposed |
 | [0022](./0022-schema-model-and-hash.md) | Collection schema model, strict JSON and the schema hash | proposed |
+| [0023](./0023-document-model-and-encoding.md) | Document model, canonical floats and the CBOR document encoding | proposed |
+| [0024](./0024-manifest-encoding-and-commit-diffs.md) | Manifest encoding and commits as diffs | proposed |
