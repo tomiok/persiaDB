@@ -256,11 +256,11 @@ Deps: M0. (Parallel with M2/M3.)
 
 ## 4.1 Tokenizers
 - 4.1.1 Unicode word segmentation (UAX#29) tokenizer with offsets
-  - [ ] 4.1.1.1 Token struct `{text, start, end, position}`
-  - [ ] 4.1.1.2 Handling of numbers, emails, URLs, apostrophes, CJK fallback (per-char)
-  - [ ] 4.1.1.3 [T] table of tricky inputs; property: offsets valid and monotonic
-- [ ] 4.1.2 Whitespace tokenizer, keyword tokenizer
-- [ ] 4.1.3 Max token length guard (drop/truncate, configurable)
+  - [x] 4.1.1.1 Token struct `{text, start, end, position}`
+  - [x] 4.1.1.2 Handling of numbers, emails, URLs, apostrophes, CJK fallback (per-char)
+  - [x] 4.1.1.3 [T] table of tricky inputs; property: offsets valid and monotonic
+- [x] 4.1.2 Whitespace tokenizer, keyword tokenizer
+- [x] 4.1.3 Max token length guard (drop/truncate, configurable)
 
 ## 4.2 Normalization & filters
 - [ ] 4.2.1 Unicode NFKC normalization filter
@@ -285,6 +285,8 @@ Deps: M0. (Parallel with M2/M3.)
 - [ ] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3); the schema remembers whether a definition named a version, so evolution binds an unversioned `analyzer` to the current field's version (SPEC §6.2.4)
 - [ ] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
 - [ ] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
+- [ ] 4.4.6 Unicode version bumps (found in the 4.1 review): moving `persia_analysis::UNICODE_VERSION` (unicode-segmentation or toolchain update) bumps the version of every built-in analyzer whose output changes, with a test listing which ones (SPEC §6.3.1)
+- [ ] 4.4.7 Char-filter offset mapping (found in the PR #15 review): a char filter that changes the text records an offset map, and the analyzer maps token spans back to the original field value (SPEC §6.3.1); property: spans stay on char boundaries of the original value, strictly increasing
 
 ---
 
