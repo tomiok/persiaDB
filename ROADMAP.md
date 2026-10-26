@@ -324,19 +324,19 @@ Deps: M1, M3, M4. The heart of the index format.
 - [x] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
 
 ## 5.3 Segment reader
-- [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version
-- [ ] 5.3.2 Term lookup: FST get + term-info decode
+- [~] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version
+- [~] 5.3.2 Term lookup: FST get + term-info decode
 - 5.3.3 Postings iterator
-  - [ ] 5.3.3.1 Sequential `next()` over blocks
-  - [ ] 5.3.3.2 `advance(target)` using skip entries
-  - [ ] 5.3.3.3 Frequency access aligned with docid blocks
-  - [ ] 5.3.3.4 Block-level metadata access (`max_tf`, `last_docid`) for block-max WAND
-- [ ] 5.3.4 Positions iterator (phrase support)
-- [ ] 5.3.5 Norms accessor, columns accessor (typed readers)
-- [ ] 5.3.6 Doc fetch by docid (DocStore block cache) and by external id (IdMap FST)
-- [ ] 5.3.7 Tombstone overlay view (roaring) applied on iteration
-- [ ] 5.3.8 Prefix/range term enumeration (FST range) and Levenshtein-automaton intersection hook (used in M8)
-- [ ] 5.3.9 `#![deny(clippy::arithmetic_side_effects)]` on the segment-reader modules of `persia-engine` (continues 1.1.5)
+  - [~] 5.3.3.1 Sequential `next()` over blocks
+  - [~] 5.3.3.2 `advance(target)` using skip entries
+  - [~] 5.3.3.3 Frequency access aligned with docid blocks
+  - [~] 5.3.3.4 Block-level metadata access (`max_tf`, `last_docid`) for block-max WAND
+- [~] 5.3.4 Positions iterator (phrase support)
+- [~] 5.3.5 Norms accessor, columns accessor (typed readers)
+- [~] 5.3.6 Doc fetch by docid (DocStore block cache) and by external id (IdMap FST)
+- [~] 5.3.7 Tombstone overlay view (roaring) applied on iteration
+- [~] 5.3.8 Prefix/range term enumeration (FST range) and Levenshtein-automaton intersection hook (used in M8)
+- [~] 5.3.9 `#![deny(clippy::arithmetic_side_effects)]` on the segment-reader modules of `persia-engine` (continues 1.1.5)
 
 ## 5.4 Verification & tooling
 - [ ] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data
