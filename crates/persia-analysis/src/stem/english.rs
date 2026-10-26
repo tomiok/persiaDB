@@ -1,5 +1,7 @@
 //! The Snowball English stemmer ("Porter2"), as `algorithms/english.sbl` of Snowball v3.1.1.
 
+use std::borrow::Cow;
+
 use super::CharStemmer;
 use super::word::{Word, after_vowel_and_consonant};
 use crate::Scratch;
@@ -23,15 +25,16 @@ use crate::Scratch;
 pub struct EnglishStemmer;
 
 impl CharStemmer for EnglishStemmer {
-    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+    fn shortcut<'a>(&self, word: &'a str) -> Option<Cow<'a, str>> {
         if let Some(stem) = exception(word) {
-            Word::new(&mut scratch.chars, stem);
-            return;
+            return Some(Cow::Borrowed(stem));
         }
+        // Words of fewer than 3 characters are left alone.
+        word.chars().nth(2).is_none().then_some(Cow::Borrowed(word))
+    }
+
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
         let mut w = Word::new(&mut scratch.chars, word);
-        if word.chars().nth(2).is_none() {
-            return;
-        }
         let y_found = prelude(&mut w);
         let (p1, p2) = regions(w.chars());
         step_1a(&mut w);

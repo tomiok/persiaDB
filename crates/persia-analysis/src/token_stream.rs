@@ -8,7 +8,7 @@ use crate::token::Token;
 
 /// Spare strings with more capacity than this (in bytes) are freed rather than kept: 4 times the default token
 /// length limit, so one huge value (a 10 MB `keyword` value) does not stay allocated for the stream's lifetime.
-const MAX_KEPT_STRING_CAPACITY: usize = 4 * crate::DEFAULT_MAX_TOKEN_LEN.get();
+pub(crate) const MAX_KEPT_STRING_CAPACITY: usize = 4 * crate::DEFAULT_MAX_TOKEN_LEN.get();
 /// At most this many spare strings are kept.
 const MAX_KEPT_STRINGS: usize = 4096;
 /// Cleared token buffers shrink to this many tokens.
@@ -23,8 +23,9 @@ const MAX_KEPT_TOKENS: usize = 4096;
 /// many tokens, as long, as a value needs: tokenizing and filters that rewrite in place or through `rewrite` then
 /// allocate nothing for the stream, and the built-in stemmers and folding work in its [`Scratch`] buffers, so every
 /// built-in analyzer stops allocating altogether (ROADMAP 4.4.12; `tests/allocations.rs` counts). Exceptions: a token
-/// holding `Σ` (lowercasing it needs `str::to_lowercase`), long runs of combining marks (the normalization iterators
-/// buffer them), and char filters. What it keeps is bounded: at most 4096 spare strings of up to 1020 bytes, and token
+/// longer than the 1020-byte retention bound (its string is not kept, so each value holding one allocates again), a
+/// token holding `Σ` (lowercasing it needs `str::to_lowercase`), long runs of combining marks (the normalization
+/// iterators buffer them), and char filters. What it keeps is bounded: at most 4096 spare strings of up to 1020 bytes, and token
 /// buffers of 4096 tokens once cleared. Dereferences to the token slice.
 ///
 /// ```

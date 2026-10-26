@@ -49,3 +49,13 @@ After the 4.4 batch B review (fold pre-scan checks characters before NFC; `fr`, 
 | Recorded | `fold/ascii` | `fold/spanish` | `fold/non_ascii_unfoldable` |
 |---|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 160 M | 21.0 M | 20.6 M |
+
+After 4.4.12 (stemmers and folding work in `Scratch` buffers):
+
+| Recorded | `standard` | `whitespace` | `keyword` (values/s) | `en` | `es` | `pt` | `fr` | `de` | `it` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 14.7 M | 32.7 M | 27.6 M | 3.05 M | 1.70 M | 1.66 M | 1.38 M | 2.40 M | 1.50 M |
+
+| Recorded | `fold/ascii` | `fold/spanish` | `fold/non_ascii_unfoldable` |
+|---|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 154 M | 22.8 M | 20.5 M |

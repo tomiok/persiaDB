@@ -76,10 +76,19 @@ forward_stemmer!(&S, Box<S>, Arc<S>);
 /// A built-in stemmer: it stems `word` into `scratch.chars`, using `scratch.work` for steps that rebuild the word.
 pub(crate) trait CharStemmer {
     fn stem_chars(&self, word: &str, scratch: &mut Scratch);
+
+    /// The stem of `word` when it needs no buffer (a table entry, or a word left alone), else `None`: such words then
+    /// neither allocate in [`Stemmer::stem`] nor copy through the buffers.
+    fn shortcut<'a>(&self, _word: &'a str) -> Option<Cow<'a, str>> {
+        None
+    }
 }
 
 /// [`Stemmer::stem`] of a built-in, with fresh buffers.
 fn stem_with_fresh_buffers<'a>(stemmer: &impl CharStemmer, word: &'a str) -> Cow<'a, str> {
+    if let Some(stem) = stemmer.shortcut(word) {
+        return stem;
+    }
     let mut scratch = Scratch::new();
     let mut out = String::new();
     if stem_into_buffers(stemmer, word, &mut scratch, &mut out) {
@@ -96,6 +105,13 @@ fn stem_into_buffers(
     scratch: &mut Scratch,
     out: &mut String,
 ) -> bool {
+    if let Some(stem) = stemmer.shortcut(word) {
+        let changed = stem != word;
+        if changed {
+            out.push_str(&stem);
+        }
+        return changed;
+    }
     stemmer.stem_chars(word, scratch);
     let changed = !word.chars().eq(scratch.chars.iter().copied());
     if changed {

@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-10-26
-- Related: ROADMAP 4.4.4, 4.4.12; ADR-0010 (the unsafe policy)
+- Related: ROADMAP 4.4.4, 4.4.12; CLAUDE.md "Coding rules" (the unsafe policy); ADR-0010 (the mmap unsafe boundary)
 
 ## Context
 

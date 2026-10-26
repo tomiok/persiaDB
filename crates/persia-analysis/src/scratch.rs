@@ -17,8 +17,8 @@ pub struct Scratch {
 }
 
 /// Buffers above this many characters (or bytes, for `text`) are shrunk after use, so one huge token does not stay
-/// allocated: 4 times the default token length limit.
-const MAX_KEPT: usize = 4 * crate::DEFAULT_MAX_TOKEN_LEN.get();
+/// allocated: the bound [`TokenStream`](crate::TokenStream) keeps its spare strings to.
+const MAX_KEPT: usize = crate::token_stream::MAX_KEPT_STRING_CAPACITY;
 
 impl Scratch {
     /// Empty buffers.

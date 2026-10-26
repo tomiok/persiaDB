@@ -288,3 +288,67 @@ fn long_tokens_stem() {
         }
     }
 }
+
+/// A stemmer outside the crate implements only `stem`; the default `stem_into` must carry each kind of result through
+/// `StemmerFilter`: an unchanged word, an owned stem, a borrowed `'static` stem that differs from the word, and an
+/// empty stem, which removes the token.
+#[test]
+fn the_default_stem_into_serves_custom_stemmers() {
+    struct Table;
+
+    impl Stemmer for Table {
+        fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+            match word {
+                "cats" => Cow::Owned("cat".to_owned()),
+                "mice" => Cow::Borrowed("mouse"),
+                "the" => Cow::Borrowed(""),
+                "same" => Cow::Owned("same".to_owned()),
+                _ => Cow::Borrowed(word),
+            }
+        }
+    }
+
+    let mut tokens = TokenStream::new();
+    WhitespaceTokenizer.tokenize("cats mice the same dog", &mut tokens);
+    StemmerFilter::new(Table).apply(&mut tokens);
+    let got: Vec<(&str, u32)> = tokens
+        .iter()
+        .map(|t| (t.text.as_str(), t.position))
+        .collect();
+    assert_eq!(got, [("cat", 0), ("mouse", 1), ("same", 3), ("dog", 4)]);
+    // Directly: `false` and an empty `out` when the stem is the word, owned or borrowed.
+    let mut scratch = persia_analysis::Scratch::new();
+    let mut out = String::new();
+    for word in ["same", "dog"] {
+        assert!(!Table.stem_into(word, &mut scratch, &mut out), "{word}");
+        assert!(out.is_empty(), "{word}");
+    }
+    assert!(Table.stem_into("mice", &mut scratch, &mut out));
+    assert_eq!(out, "mouse");
+}
+
+/// Built-ins agree through both entry points, the table and short-word shortcut included.
+#[test]
+fn stem_and_stem_into_agree() {
+    let mut scratch = persia_analysis::Scratch::new();
+    for stemmer in stemmers() {
+        for word in [
+            "skies",
+            "news",
+            "at",
+            "a",
+            "",
+            "running",
+            "canciones",
+            "l'été",
+            "häuser",
+            "città",
+        ] {
+            let mut out = String::new();
+            let changed = stemmer.stem_into(word, &mut scratch, &mut out);
+            let stem = stemmer.stem(word);
+            assert_eq!(changed, stem != word, "{word}");
+            assert_eq!(if changed { out.as_str() } else { word }, stem, "{word}");
+        }
+    }
+}
