@@ -376,14 +376,15 @@ impl<F: ContainerFile> Container<F> {
                 // A read-only open holds no lock: a writer's recovery may truncate a torn tail under the scan, never
                 // below its `log_end` (SPEC §4.7), which is at least this one's, and append again at once. Scan again
                 // up to the file's current end, shorter or longer. Each rescan needs another writer to crash and
-                // recover during the scan, so a few always suffice; the cap makes the loop end regardless. A length
-                // that did not change is a real short read, not a race.
+                // recover during the scan, so a few always suffice; the cap makes the loop end regardless. An unchanged
+                // length does not tell a real short read from a writer that truncated and appended back to the same
+                // length, so it is rescanned too: a real short read fails again, and the cap returns its error.
                 Err(Error::Io { op, source })
                     if self.mode == Mode::ReadOnly
                         && source.kind() == io::ErrorKind::UnexpectedEof =>
                 {
                     let now = self.file.file_len().map_err(Error::io("stat"))?;
-                    if now < log_end || now == file_len || rescans >= MAX_READ_ONLY_RESCANS {
+                    if now < log_end || rescans >= MAX_READ_ONLY_RESCANS {
                         return Err(Error::Io { op, source });
                     }
                     rescans = rescans.saturating_add(1);

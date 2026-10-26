@@ -290,9 +290,10 @@ nothing. The container is reopened, and recovery decides what survived.
   logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
   the flags. As it holds no lock, a writer may commit or truncate a torn tail while it opens: it checks the active
   slot against a file length taken *after* reading the slots (a commit writes its frames before its slot, §4.5), and
-  when its scan from `log_end` hits the end of a file whose length changed under it (a writer's recovery truncates a
-  torn tail, never below `log_end`, §4.7, and may append again at once) it scans again up to the current end, up to 8
-  times. A short read of a file whose length did not change, or that shrank below `log_end`, still fails the open.
+  when its scan from `log_end` hits the end of the file (a writer's recovery truncates a torn tail, never below
+  `log_end`, §4.7, and may append again at once, even back to the same length) it scans again up to the file's
+  current end, at most 8 times. A short read that persists past those, or a file that shrank below `log_end`, still
+  fails the open.
 - **Recovery** (§8.6), in this order, for both modes: validate the header (§4.2); pick the active slot (§4.3) and
   check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
   bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:
