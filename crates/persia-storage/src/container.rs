@@ -309,8 +309,11 @@ impl<F: ContainerFile> Container<F> {
 
     /// [`Container::open_on`] after the lock, if any, was taken.
     fn recover(file: F, mode: Mode, policy: TailPolicy<'_, F>) -> Result<Self> {
-        let file_len = file.file_len().map_err(Error::io("stat"))?;
-        let prefix = read_at(&file, 0, file_len.min(FIRST_FRAME_OFFSET))?;
+        let prefix_len = file
+            .file_len()
+            .map_err(Error::io("stat"))?
+            .min(FIRST_FRAME_OFFSET);
+        let prefix = read_at(&file, 0, prefix_len)?;
         let mut r = Reader::new(&prefix);
         let header = Header::decode(&mut r)?;
         if mode == Mode::ReadWrite && header.access() == Access::ReadOnly {
@@ -323,6 +326,9 @@ impl<F: ContainerFile> Container<F> {
         debug_assert_eq!(r.position(), HEADER_LEN);
         let active = Superblock::read_active(&mut r)?;
         debug_assert_eq!(r.position(), HEADER_LEN + SLOTS_LEN);
+        // Taken after reading the slots: a read-only open holds no lock, and a writer may commit after any earlier
+        // look at the length. A commit writes its frames before its slot (SPEC §4.5), so the file now holds them all.
+        let file_len = file.file_len().map_err(Error::io("stat"))?;
         active.check_bounds(file_len)?;
         let sb = active.superblock;
         if sb.seq != 0 {
@@ -360,8 +366,34 @@ impl<F: ContainerFile> Container<F> {
         policy: &TailPolicy<'_, F>,
     ) -> Result<()> {
         let log_end = self.active.superblock.log_end;
-        let scanner = StreamScanner::new(log_end, file_len).expect_frame_seq(self.next_frame_seq);
-        let (scanner, end) = scan(&self.file, scanner, frames)?;
+        let committed = frames.len();
+        let mut file_len = file_len;
+        let mut rescans = 0;
+        let (scanner, end) = loop {
+            let scanner =
+                StreamScanner::new(log_end, file_len).expect_frame_seq(self.next_frame_seq);
+            match scan(&self.file, scanner, frames) {
+                // A read-only open holds no lock: a writer's recovery may truncate a torn tail under the scan, never
+                // below its `log_end` (SPEC §4.7), which is at least this one's, and append again at once. Scan again
+                // up to the file's current end, shorter or longer. Each rescan needs another writer to crash and
+                // recover during the scan, so a few always suffice; the cap makes the loop end regardless. An unchanged
+                // length does not tell a real short read from a writer that truncated and appended back to the same
+                // length, so it is rescanned too: a real short read fails again, and the cap returns its error.
+                Err(Error::Io { op, source })
+                    if self.mode == Mode::ReadOnly
+                        && source.kind() == io::ErrorKind::UnexpectedEof =>
+                {
+                    let now = self.file.file_len().map_err(Error::io("stat"))?;
+                    if now < log_end || rescans >= MAX_READ_ONLY_RESCANS {
+                        return Err(Error::Io { op, source });
+                    }
+                    rescans = rescans.saturating_add(1);
+                    frames.truncate(committed);
+                    file_len = now;
+                }
+                done => break done?,
+            }
+        };
         self.next_frame_seq = scanner.next_frame_seq().unwrap_or(self.next_frame_seq);
         self.end = end.offset();
         match &end {
@@ -1014,6 +1046,9 @@ pub struct SpaceUsage {
 
 /// The dead-space ratio at which compaction is due by default (SPEC §4.6).
 pub const DEFAULT_DEAD_SPACE_PERCENT: u8 = 40;
+
+/// Most times a read-only open rescans a tail that a writer truncated under it (SPEC §4.5.1).
+const MAX_READ_ONLY_RESCANS: u32 = 8;
 
 impl SpaceUsage {
     /// Bytes compaction would reclaim.

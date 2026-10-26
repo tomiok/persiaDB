@@ -118,6 +118,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   corrupt; nothing was released with them).
 
 ### Fixed
+- `persia-storage`: a read-only `Container::open` beside a writer in another process no longer fails spuriously: with an
+  I/O error when the writer's recovery truncated a torn tail under its scan (and perhaps appended again), or with a
+  false "superblock does not fit the container" when the writer committed between its look at the file length and its
+  read of the slots (SPEC §4.5.1).
 - `persia-storage`: directories are synced on Windows too (`FlushFileBuffers` on a directory handle), so an acknowledged
   local-backend write or container create survives a machine crash there (SPEC §4.5.2).
 - `persia-storage`: on Windows the container writer lock is on a `<name>.lock` file beside the container, so readers

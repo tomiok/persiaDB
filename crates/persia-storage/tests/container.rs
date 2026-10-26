@@ -1036,3 +1036,350 @@ fn windows_bare_files_cannot_be_opened_for_writing() {
     let reader = Container::open_on(std::fs::File::open(&path).unwrap(), Mode::ReadOnly).unwrap();
     assert_eq!(reader.superblock().seq, writer.superblock().seq);
 }
+
+/// What [`Interleaved`] runs once.
+type Hook = Box<dyn FnOnce() + Send>;
+
+/// A file another process changes while this one opens it: `hook` runs once, just before the first read whose
+/// offset satisfies `before`. A read-only open takes no lock (SPEC §4.5.1), so a writer may commit, or recover and
+/// truncate a torn tail, at any point of it.
+#[derive(Clone)]
+struct Interleaved {
+    file: SimFile,
+    before: std::sync::Arc<dyn Fn(u64) -> bool + Send + Sync>,
+    hook: std::sync::Arc<std::sync::Mutex<Option<Hook>>>,
+    /// Runs once, at the first look at the file length after `hook` ran.
+    on_stat: std::sync::Arc<std::sync::Mutex<Option<Hook>>>,
+}
+
+impl std::fmt::Debug for Interleaved {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Interleaved")
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Interleaved {
+    fn new(
+        file: &SimFile,
+        before: impl Fn(u64) -> bool + Send + Sync + 'static,
+        hook: impl FnOnce() + Send + 'static,
+    ) -> Self {
+        let hook: Hook = Box::new(hook);
+        Self {
+            file: file.clone(),
+            before: std::sync::Arc::new(before),
+            hook: std::sync::Arc::new(std::sync::Mutex::new(Some(hook))),
+            on_stat: std::sync::Arc::default(),
+        }
+    }
+
+    /// Also runs `then` at the first look at the file length after the read hook ran.
+    fn then_at_stat(self, then: impl FnOnce() + Send + 'static) -> Self {
+        let then: Hook = Box::new(then);
+        *self.on_stat.lock().unwrap() = Some(then);
+        self
+    }
+
+    fn fired(&self) -> bool {
+        self.hook.lock().unwrap().is_none()
+    }
+}
+
+impl ContainerFile for Interleaved {
+    fn file_len(&self) -> std::io::Result<u64> {
+        if self.fired() {
+            let then = self.on_stat.lock().unwrap().take();
+            if let Some(then) = then {
+                then();
+            }
+        }
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        if (self.before)(offset) {
+            let hook = self.hook.lock().unwrap().take();
+            if let Some(hook) = hook {
+                hook();
+            }
+        }
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> std::io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+/// A writer's recovery truncates a torn tail while a read-only open scans it (SPEC §4.4, §4.5.1): the read-only
+/// open reads up to the new end of the file instead of failing on the bytes that are gone. Seen as a flaky
+/// `kill_9_writers_never_disturb_a_mapped_reader_process` (`container_process.rs`).
+#[test]
+fn a_read_only_open_survives_a_torn_tail_truncated_under_its_scan() {
+    let mut c = new_sim();
+    commit_batch(&mut c, &[b"w1"], b"m1");
+    let synced = c.append(FrameKind::WalChunk, b"w2", NONE).unwrap();
+    c.sync().unwrap();
+    let file = c.file().clone();
+    drop(c);
+    let torn = synced.end();
+    // A frame header cut short, then a long run of garbage: a torn tail the scan reads in several chunks.
+    let mut w = Writer::new();
+    encode_frame(
+        &mut w,
+        FrameKind::Segment,
+        synced.frame_seq + 1,
+        &vec![5; 64 << 10],
+        NONE,
+    )
+    .unwrap();
+    file.write_all_at(&w.as_slice()[..40 << 10], torn).unwrap();
+    let len = file.file_len().unwrap();
+
+    let writer = file.clone();
+    let racing = Interleaved::new(
+        &file,
+        move |offset| offset >= torn,
+        move || {
+            let w = Container::open_on(writer, Mode::ReadWrite).unwrap();
+            assert_eq!(w.recovery().truncated_from, Some(len));
+        },
+    );
+    let ro = Container::open_on(racing.clone(), Mode::ReadOnly)
+        .unwrap_or_else(|e| panic!("read-only open beside a truncating writer: {e}"));
+    assert!(racing.fired());
+    assert_eq!(file.file_len().unwrap(), torn);
+    assert_eq!(ro.recovery().scan_end, ScanEnd::Clean { offset: torn });
+    assert_eq!(ro.end(), torn);
+    assert_eq!(ro.uncommitted_frames(), &[synced]);
+    assert_eq!(ro.read_frame(synced.offset, MAX).unwrap().payload, b"w2");
+}
+
+/// A writer commits between a read-only open's look at the file length and its read of the superblock slots: the
+/// open checks the slot it picked against a length taken after reading it, so the new commit is not mistaken for a
+/// superblock pointing past the end of the file (SPEC §4.3, §4.5.1).
+#[test]
+fn a_read_only_open_survives_a_commit_before_it_reads_the_slots() {
+    let mut c = new_sim();
+    commit_batch(&mut c, &[b"w1"], b"m1");
+    let file = c.file().clone();
+    let racing = Interleaved::new(
+        &file,
+        |offset| offset < F,
+        move || {
+            commit_batch(&mut c, &[b"w2", &[3; 4096]], &[4; 4096]);
+        },
+    );
+    let ro = Container::open_on(racing.clone(), Mode::ReadOnly)
+        .unwrap_or_else(|e| panic!("read-only open beside a committing writer: {e}"));
+    assert!(racing.fired());
+    assert_eq!(ro.superblock().seq, 2);
+    assert_eq!(manifest(&ro), [4; 4096]);
+    assert_eq!(ro.end(), file.file_len().unwrap());
+}
+
+/// A synced WAL frame after one commit, then a torn tail of 40 KiB of a frame cut short: returns the file, the
+/// synced frame, where the torn tail starts, and the file's length.
+fn torn_tail_file() -> (SimFile, FrameRef, u64, u64) {
+    let mut c = new_sim();
+    commit_batch(&mut c, &[b"w1"], b"m1");
+    let synced = c.append(FrameKind::WalChunk, b"w2", NONE).unwrap();
+    c.sync().unwrap();
+    let file = c.file().clone();
+    drop(c);
+    let torn = synced.end();
+    let mut w = Writer::new();
+    encode_frame(
+        &mut w,
+        FrameKind::Segment,
+        synced.frame_seq + 1,
+        &vec![5; 64 << 10],
+        NONE,
+    )
+    .unwrap();
+    file.write_all_at(&w.as_slice()[..40 << 10], torn).unwrap();
+    let len = file.file_len().unwrap();
+    (file, synced, torn, len)
+}
+
+/// The writer that truncated the tail appends again before the read-only open looks at the length once more, so the
+/// file is longer than when the scan began: the open still rescans up to the current end (found in review).
+#[test]
+fn a_read_only_open_survives_a_truncate_then_append_under_its_scan() {
+    let (file, synced, torn, len) = torn_tail_file();
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (recovering, appending) = (file.clone(), std::sync::Arc::clone(&writer));
+    let stash = std::sync::Arc::clone(&writer);
+    let racing = Interleaved::new(
+        &file,
+        move |offset| offset >= torn,
+        move || {
+            let w = Container::open_on(recovering, Mode::ReadWrite).unwrap();
+            assert_eq!(w.recovery().truncated_from, Some(len));
+            *stash.lock().unwrap() = Some(w);
+        },
+    )
+    .then_at_stat(move || {
+        let mut guard = appending.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        w.append(FrameKind::WalChunk, &vec![7; 128 << 10], NONE)
+            .unwrap();
+        w.sync().unwrap();
+    });
+    let ro = Container::open_on(racing.clone(), Mode::ReadOnly)
+        .unwrap_or_else(|e| panic!("read-only open beside a truncating, appending writer: {e}"));
+    assert!(racing.fired());
+    assert!(file.file_len().unwrap() > len);
+    assert_eq!(ro.end(), file.file_len().unwrap());
+    assert_eq!(ro.uncommitted_frames().len(), 2);
+    assert_eq!(ro.uncommitted_frames().first(), Some(&synced));
+}
+
+/// A file that shrinks below `log_end` under a read-only scan is not a writer's recovery (which never truncates
+/// committed bytes): the open fails with the I/O error.
+#[test]
+fn a_read_only_open_fails_when_the_file_shrinks_below_log_end() {
+    let (file, _, torn, _) = torn_tail_file();
+    let log_end = {
+        let c = Container::open_on(file.clone(), Mode::ReadOnly).unwrap();
+        c.superblock().log_end
+    };
+    let cut = file.clone();
+    let racing = Interleaved::new(
+        &file,
+        move |offset| offset >= torn,
+        move || {
+            cut.set_len(log_end - 8).unwrap();
+        },
+    );
+    let err = Container::open_on(racing.clone(), Mode::ReadOnly).unwrap_err();
+    assert!(racing.fired());
+    assert!(err.to_string().contains("end of file"), "{err}");
+}
+
+/// A read-write open holds the lock, so a short read under its scan is a real I/O error: it never rescans.
+#[test]
+fn a_read_write_open_does_not_rescan() {
+    let (file, synced, torn, _) = torn_tail_file();
+    let cut = file.clone();
+    let racing = Interleaved::new(
+        &file,
+        move |offset| offset >= torn,
+        move || {
+            cut.set_len(synced.end()).unwrap();
+        },
+    );
+    let err = Container::open_on(racing.clone(), Mode::ReadWrite).unwrap_err();
+    assert!(racing.fired());
+    assert!(err.to_string().contains("end of file"), "{err}");
+}
+
+/// The writer that truncated the tail appends frames that end exactly where the old tail did, so at the read-only
+/// open's re-stat the length is unchanged: that is still a race to rescan, not a real short read (found in review).
+#[test]
+fn a_read_only_open_survives_a_truncate_then_append_back_to_the_same_length() {
+    let (file, synced, torn, len) = torn_tail_file();
+    let tail = usize::try_from(len - torn).unwrap();
+    // The payload whose frame fills the truncated tail exactly.
+    let payload = (0..tail)
+        .rev()
+        .find(|&p| {
+            let mut w = Writer::new();
+            encode_frame(&mut w, FrameKind::WalChunk, 0, &vec![7; p], NONE).unwrap();
+            w.as_slice().len() == tail
+        })
+        .unwrap();
+    let writer = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let (recovering, appending) = (file.clone(), std::sync::Arc::clone(&writer));
+    let stash = std::sync::Arc::clone(&writer);
+    let racing = Interleaved::new(
+        &file,
+        move |offset| offset >= torn,
+        move || {
+            let w = Container::open_on(recovering, Mode::ReadWrite).unwrap();
+            assert_eq!(w.recovery().truncated_from, Some(len));
+            *stash.lock().unwrap() = Some(w);
+        },
+    )
+    .then_at_stat(move || {
+        let mut guard = appending.lock().unwrap();
+        let w = guard.as_mut().unwrap();
+        w.append(FrameKind::WalChunk, &vec![7; payload], NONE)
+            .unwrap();
+        w.sync().unwrap();
+    });
+    let ro = Container::open_on(racing.clone(), Mode::ReadOnly)
+        .unwrap_or_else(|e| panic!("read-only open beside a writer back at the same length: {e}"));
+    assert!(racing.fired());
+    assert_eq!(file.file_len().unwrap(), len);
+    assert_eq!(ro.end(), len);
+    assert_eq!(ro.uncommitted_frames().len(), 2);
+    assert_eq!(ro.uncommitted_frames().first(), Some(&synced));
+}
+
+/// A file that always reads short past `from`, at an unchanged length: a real short read, not a writer.
+#[derive(Debug, Clone)]
+struct ShortReads {
+    file: SimFile,
+    from: u64,
+    failed: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl ContainerFile for ShortReads {
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        if offset >= self.from {
+            self.failed
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> std::io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+/// A real short read on a file that does not change still fails the read-only open, after the bounded rescans
+/// (SPEC §4.5.1: at most 8).
+#[test]
+fn a_read_only_open_fails_on_a_persistent_short_read_after_its_rescans() {
+    let (file, _, torn, _) = torn_tail_file();
+    let short = ShortReads {
+        file,
+        from: torn,
+        failed: std::sync::Arc::default(),
+    };
+    let err = Container::open_on(short.clone(), Mode::ReadOnly).unwrap_err();
+    assert!(err.to_string().contains("end of file"), "{err}");
+    assert_eq!(
+        short.failed.load(std::sync::atomic::Ordering::Relaxed),
+        1 + 8
+    );
+}
