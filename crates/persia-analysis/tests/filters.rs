@@ -4,14 +4,15 @@
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    ENGLISH_STOPWORDS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
-    PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StandardTokenizer, StopwordFilter, Token, TokenFilter,
-    Tokenizer, WhitespaceTokenizer,
+    ENGLISH_STOPWORDS, EdgeNgramFilter, FRENCH_STOPWORDS, FoldingFilter, GERMAN_STOPWORDS,
+    ITALIAN_STOPWORDS, LowercaseFilter, NfkcFilter, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS,
+    StandardTokenizer, StopwordFilter, Token, TokenFilter, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 use unicode_normalization::is_nfc;
 
-fn tokens(text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+fn tokens(text: &str) -> TokenStream {
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize(text, &mut tokens);
     tokens
 }
@@ -154,7 +155,7 @@ fn folding_preserves_listed_characters_inside_a_decomposition() {
 /// versions of those analyzers.
 #[test]
 fn folding_is_pinned() {
-    let mut tokens: Vec<Token> = (0..=u32::from(char::MAX))
+    let tokens: Vec<Token> = (0..=u32::from(char::MAX))
         .filter_map(char::from_u32)
         .zip(0..)
         .map(|(c, position)| Token {
@@ -164,6 +165,7 @@ fn folding_is_pinned() {
             position,
         })
         .collect();
+    let mut tokens = TokenStream::from(tokens);
     FoldingFilter::default().apply(&mut tokens);
     let fingerprint = tokens
         .iter()
@@ -233,7 +235,14 @@ fn stopwords_match_exactly() {
 
 #[test]
 fn embedded_stopword_lists_are_sorted_unique_lowercase_nfc() {
-    for list in [ENGLISH_STOPWORDS, SPANISH_STOPWORDS, PORTUGUESE_STOPWORDS] {
+    for list in [
+        ENGLISH_STOPWORDS,
+        SPANISH_STOPWORDS,
+        PORTUGUESE_STOPWORDS,
+        FRENCH_STOPWORDS,
+        GERMAN_STOPWORDS,
+        ITALIAN_STOPWORDS,
+    ] {
         assert!(
             list.windows(2).all(|w| w[0] < w[1]),
             "not sorted and unique: {list:?}"
@@ -242,7 +251,7 @@ fn embedded_stopword_lists_are_sorted_unique_lowercase_nfc() {
             assert!(!word.is_empty() && is_nfc(word), "{word:?}");
             assert_eq!(word.to_lowercase(), *word);
             // One token of the standard tokenizer, so a stopword can match a standard token.
-            let mut tokens = Vec::new();
+            let mut tokens = TokenStream::new();
             StandardTokenizer.tokenize(word, &mut tokens);
             assert_eq!(tokens.len(), 1, "{word:?}");
         }
@@ -260,14 +269,24 @@ fn embedded_stopword_lists_are_pinned() {
                 (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
             })
     }
-    let fingerprints =
-        [ENGLISH_STOPWORDS, SPANISH_STOPWORDS, PORTUGUESE_STOPWORDS].map(|l| (l.len(), fnv1a(l)));
+    let fingerprints = [
+        ENGLISH_STOPWORDS,
+        SPANISH_STOPWORDS,
+        PORTUGUESE_STOPWORDS,
+        FRENCH_STOPWORDS,
+        GERMAN_STOPWORDS,
+        ITALIAN_STOPWORDS,
+    ]
+    .map(|l| (l.len(), fnv1a(l)));
     assert_eq!(
         fingerprints,
         [
             (33, 14_029_973_542_677_213_976),
             (88, 15_764_952_924_425_316_783),
-            (82, 7_466_230_536_459_025_178)
+            (82, 7_466_230_536_459_025_178),
+            (98, 11_043_779_927_621_127_924),
+            (121, 6_155_768_547_106_240_763),
+            (128, 10_121_328_516_025_050_439),
         ]
     );
 }

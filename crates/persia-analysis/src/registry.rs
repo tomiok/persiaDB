@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use crate::analyzer::Analyzer;
 use crate::{
-    ApostropheFilter, EnglishStemmer, FoldingFilter, KeywordTokenizer, LowercaseFilter, NfkcFilter,
-    PortugueseStemmer, SpanishStemmer, StandardTokenizer, StemmerFilter, StopwordFilter,
-    TokenLengthGuard, WhitespaceTokenizer,
+    ApostropheFilter, ElisionFilter, EnglishStemmer, FoldingFilter, FrenchStemmer, GermanStemmer,
+    ItalianStemmer, KeywordTokenizer, LowercaseFilter, NfkcFilter, PortugueseStemmer,
+    SpanishStemmer, StandardTokenizer, StemmerFilter, StopwordFilter, TokenLengthGuard,
+    WhitespaceTokenizer,
 };
 
 /// A built-in analyzer version (SPEC §6.3.3).
@@ -19,15 +20,29 @@ pub struct BuiltinAnalyzer {
     pub version: u32,
 }
 
-/// Every built-in analyzer version, ascending by name, then version. A version, once released, is never removed or
-/// changed: an index built with it must analyze queries the same way forever (SPEC §6.3).
+/// Every built-in analyzer version, ascending by name, then version. A version, once released, is never removed and
+/// its chain never changes: an index built with it must analyze queries the same way (SPEC §6.3). A Unicode version
+/// bump that changes an analyzer's output supersedes its version with a new one instead; each current version has
+/// a fingerprint in `tests/unicode_fingerprints.rs` (SPEC §6.3.1, ADR-0025).
 pub const BUILTIN_ANALYZERS: &[BuiltinAnalyzer] = &[
+    BuiltinAnalyzer {
+        name: "de",
+        version: 1,
+    },
     BuiltinAnalyzer {
         name: "en",
         version: 1,
     },
     BuiltinAnalyzer {
         name: "es",
+        version: 1,
+    },
+    BuiltinAnalyzer {
+        name: "fr",
+        version: 1,
+    },
+    BuiltinAnalyzer {
+        name: "it",
         version: 1,
     },
     BuiltinAnalyzer {
@@ -63,10 +78,10 @@ pub fn current_builtin_version(name: &str) -> Option<u32> {
 /// Version `version` of built-in analyzer `name` (SPEC §6.3.3), or `None` if it does not exist.
 ///
 /// ```
-/// use persia_analysis::builtin_analyzer;
+/// use persia_analysis::{builtin_analyzer, TokenStream};
 ///
 /// let es = builtin_analyzer("es", 1).ok_or("no es@1")?;
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// es.analyze("Los años de las canciones", &mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 /// assert_eq!(texts, ["años", "cancion"]);
@@ -105,6 +120,32 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
             .filter(StemmerFilter::new(PortugueseStemmer))
             .filter(FoldingFilter::default())
             .filter(TokenLengthGuard::default()),
+        ("fr", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(ElisionFilter::french())
+            .filter(StopwordFilter::french())
+            .filter(StemmerFilter::new(FrenchStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
+        ("de", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(StopwordFilter::german())
+            .filter(StemmerFilter::new(GermanStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
+        ("it", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(ElisionFilter::italian())
+            .filter(StopwordFilter::italian())
+            .filter(StemmerFilter::new(ItalianStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
         _ => return None,
     };
     Some(analyzer.build())
@@ -116,7 +157,7 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
 /// every segment of a field is indexed, and every query on it analyzed, by the same version.
 ///
 /// ```
-/// use persia_analysis::AnalyzerRegistry;
+/// use persia_analysis::{AnalyzerRegistry, TokenStream};
 ///
 /// let registry = AnalyzerRegistry::builtin();
 /// assert_eq!(registry.current_version("en"), Some(1));

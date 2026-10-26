@@ -9,10 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-analysis`: built-in `fr`, `de` and `it` analyzers at version 1 (SPEC §6.3.3): `ElisionFilter` (`FRENCH_ELISIONS`, `ITALIAN_ELISIONS`), `FrenchStemmer`, `GermanStemmer`
+  and `ItalianStemmer` (Snowball 3.1.1, checked against the full Snowball vocabularies; French and Italian remove
+  elisions such as `l'` and `nell'`) and `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS`, `ITALIAN_STOPWORDS`. Schemas may name them.
+- `persia-analysis`: `FoldingFilter` skips the allocation for non-ASCII tokens with nothing to fold (a pre-scan, about
+  3× faster on such text, same output).
+- `persia-analysis`: a Criterion benchmark of every built-in analyzer and of folding (tokens per second, baselines in
+  `docs/benchmarks.md`), and an `analyzers` fuzz target over the built-ins and char filters.
+- `persia-engine`: a stored schema naming an analyzer version this build lacks (written by a newer build, e.g.
+  `es@2`) is `ManifestError::UnsupportedAnalyzer` (`SchemaError::UnsupportedAnalyzer`), not corruption (SPEC §6.2.2).
+- `persia-analysis`: a Unicode version bump gives a new version to exactly the built-in analyzers whose output it
+  changes, found by fingerprints of their output over every Unicode scalar value; superseded versions keep working
+  (SPEC §6.3.1, ADR-0025).
+- `persia-analysis`: char filters (`CharFilter`, `CharFilterOutput`, `AnalyzerBuilder::char_filter`; SPEC §6.3.1). A
+  filter keeps or replaces pieces of the value, and the analyzer maps token spans back to the original value, so
+  highlighting with them works whatever the filters did.
 - Website: `llms.txt` lists every documentation page for agents, and each HTML page links to it. `llms-full.txt` is those pages in Markdown. URLs include the `/persiaDB/` base.
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
-- `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains a tokenizer and token filters; char filters
-  are not public yet, they wait for their offset map (ROADMAP 4.4.7). `analyze` gives index-time tokens and
+- `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains char filters, a tokenizer and token filters. `analyze` gives index-time tokens and
   `analyze_query` query-time tokens, without filters that stack tokens such as edge n-grams (§6.3.4), and
   `SynonymMap::analyzed` analyzes synonym terms the same way. The built-ins `standard`, `keyword`, `whitespace`,
   `en`, `es` and `pt` at version 1 (`builtin_analyzer`, `BUILTIN_ANALYZERS`; chains in
@@ -113,10 +127,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
-- `persia-engine`: a schema naming the `fr`, `de` or `it` analyzer is rejected until those analyzers exist (ROADMAP
-  4.4.10); the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and version).
-  Files an earlier development build wrote with `fr@1`, `de@1` or `it@1` in a schema no longer open (reported as
-  corrupt; nothing was released with them).
+- `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
+  `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
+  converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens, within bounds (at most
+  4096 spare strings of up to 1020 bytes, and 4096 token slots once cleared), so analyzing value after value stops
+  growing its buffers once it has grown; values beyond those bounds allocate again, and stemmers and folding still
+  allocate for the tokens they change (ROADMAP 4.4.12).
+- `persia-engine`: the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and
+  version). `fr@1`, `de@1` and `it@1` now name the analyzers of ROADMAP 4.4.10 (see Added); files an earlier
+  development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
 - `persia-storage`: a read-only `Container::open` beside a writer in another process no longer fails spuriously: with an

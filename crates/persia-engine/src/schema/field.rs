@@ -191,16 +191,17 @@ impl AnalyzerRef {
     /// Parses `"name"` (the current version, not pinned) or `"name@version"` (pinned; canonical decimal, no sign or
     /// leading zero).
     pub fn parse(text: &str) -> Option<Self> {
-        let Some((name, version)) = text.split_once('@') else {
+        if !text.contains('@') {
             return Self::builtin(text);
-        };
-        let canonical = !version.is_empty()
-            && version.bytes().all(|b| b.is_ascii_digit())
-            && !version.starts_with('0');
-        if !canonical {
-            return None;
         }
-        Self::new(name, version.parse().ok()?)
+        let (name, version) = split_versioned(text)?;
+        Self::new(name, version)
+    }
+
+    /// Whether `text` is a well-formed `"name@version"` (a name of built-in shape, a canonical version from 1), whether or
+    /// not this build has that analyzer version: a stored schema naming one it lacks was written by a newer build.
+    pub(crate) fn is_well_formed_versioned(text: &str) -> bool {
+        split_versioned(text).is_some()
     }
 
     /// The analyzer's name.
@@ -229,6 +230,28 @@ impl AnalyzerRef {
             pinned: true,
         }
     }
+}
+
+/// `"name@version"` split into a name of built-in shape ([`is_builtin_name`]) and a version written in canonical decimal (no sign or leading zero,
+/// so from 1) that fits a `u32`.
+fn split_versioned(text: &str) -> Option<(&str, u32)> {
+    let (name, version) = text.split_once('@')?;
+    let canonical = is_builtin_name(name)
+        && !version.is_empty()
+        && version.bytes().all(|b| b.is_ascii_digit())
+        && !version.starts_with('0');
+    if !canonical {
+        return None;
+    }
+    Some((name, version.parse().ok()?))
+}
+
+/// Whether `name` has the shape of a built-in analyzer name, `[a-z][a-z0-9_-]*` (SPEC §6.3.3), whether or not this
+/// build has it.
+fn is_builtin_name(name: &str) -> bool {
+    let mut bytes = name.bytes();
+    bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+        && bytes.all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
 }
 
 impl PartialEq for AnalyzerRef {
@@ -290,7 +313,7 @@ mod tests {
             assert_eq!((pinned.name(), pinned.version()), (a.name, a.version));
             assert!(AnalyzerRef::builtin(a.name).unwrap().version() >= a.version);
         }
-        for gone in ["fr", "de", "it"] {
+        for gone in ["nl", "zh", "ru"] {
             assert_eq!(AnalyzerRef::builtin(gone), None, "{gone}");
         }
         // `Default` falls back only if the default analyzer is missing from the registry: never.

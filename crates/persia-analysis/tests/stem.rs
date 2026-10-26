@@ -8,14 +8,18 @@
 use std::borrow::Cow;
 
 use persia_analysis::{
-    EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter, Token, TokenFilter,
-    Tokenizer, WhitespaceTokenizer,
+    EnglishStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer, PortugueseStemmer,
+    SpanishStemmer, Stemmer, StemmerFilter, Token, TokenFilter, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 use proptest::prelude::*;
 
 const ENGLISH: &str = include_str!("fixtures/stem/english.tsv");
 const SPANISH: &str = include_str!("fixtures/stem/spanish.tsv");
 const PORTUGUESE: &str = include_str!("fixtures/stem/portuguese.tsv");
+const FRENCH: &str = include_str!("fixtures/stem/french.tsv");
+const GERMAN: &str = include_str!("fixtures/stem/german.tsv");
+const ITALIAN: &str = include_str!("fixtures/stem/italian.tsv");
 
 fn vocabulary(tsv: &str) -> impl Iterator<Item = (&str, &str)> {
     tsv.lines().map(|line| line.split_once('\t').unwrap())
@@ -32,12 +36,12 @@ fn check_vocabulary(stemmer: &dyn Stemmer, tsv: &str, expected_words: usize) {
         if stem != expected {
             wrong.push(format!("{word} -> {stem} (expected {expected})"));
         }
-        let mut tokens = vec![Token {
+        let mut tokens = TokenStream::from(vec![Token {
             text: word.to_owned(),
             start: 0,
             end: word.len(),
             position: 0,
-        }];
+        }]);
         StemmerFilter::new(stemmer).apply(&mut tokens);
         let filtered: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
         let want: &[&str] = if expected.is_empty() {
@@ -93,8 +97,11 @@ fn stems_that_stem_further_are_counted() {
         count(&EnglishStemmer, ENGLISH),
         count(&SpanishStemmer, SPANISH),
         count(&PortugueseStemmer, PORTUGUESE),
+        count(&FrenchStemmer, FRENCH),
+        count(&GermanStemmer, GERMAN),
+        count(&ItalianStemmer, ITALIAN),
     ];
-    assert_eq!(counts, [1_526, 2_404, 2_519]);
+    assert_eq!(counts, [1_526, 2_404, 2_519, 1_843, 710, 965]);
 }
 
 #[test]
@@ -125,6 +132,9 @@ fn unchanged_words_are_borrowed() {
         &EnglishStemmer as &dyn Stemmer,
         &SpanishStemmer,
         &PortugueseStemmer,
+        &FrenchStemmer,
+        &GermanStemmer,
+        &ItalianStemmer,
     ] {
         for word in ["", "x", "zzz", "東京"] {
             assert!(
@@ -137,7 +147,7 @@ fn unchanged_words_are_borrowed() {
 
 #[test]
 fn the_filter_keeps_spans_and_positions_and_drops_empty_stems() {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     // `''s` loses its leading apostrophe and then its possessive: its stem is empty.
     WhitespaceTokenizer.tokenize("The ''s cats running", &mut tokens);
     StemmerFilter::new(EnglishStemmer).apply(&mut tokens);
@@ -149,8 +159,15 @@ fn the_filter_keeps_spans_and_positions_and_drops_empty_stems() {
     assert_eq!(got, expected);
 }
 
-fn stemmers() -> [&'static dyn Stemmer; 3] {
-    [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer]
+fn stemmers() -> [&'static dyn Stemmer; 6] {
+    [
+        &EnglishStemmer,
+        &SpanishStemmer,
+        &PortugueseStemmer,
+        &FrenchStemmer,
+        &GermanStemmer,
+        &ItalianStemmer,
+    ]
 }
 
 proptest! {
@@ -164,7 +181,7 @@ proptest! {
 
     /// Words made of the letters the algorithms look at, where the interesting suffix rules fire.
     #[test]
-    fn stemming_letter_words_never_panics(word in "[aeiouyáéíóúâêôãõçñü'ltsnrmdgcbvx~]{0,16}") {
+    fn stemming_letter_words_never_panics(word in "[aeiouyáéíóúâêôãõçñüäöëïàèìòùîûß'ltsnrmdgcbvxqhUIYH~]{0,16}") {
         for stemmer in stemmers() {
             let _ = stemmer.stem(&word);
         }
@@ -172,7 +189,7 @@ proptest! {
 
     #[test]
     fn the_filter_only_rewrites_texts(text in "[a-záéíóúñ' ]{0,64}") {
-        let mut original: Vec<Token> = Vec::new();
+        let mut original = TokenStream::new();
         WhitespaceTokenizer.tokenize(&text, &mut original);
         let mut tokens = original.clone();
         StemmerFilter::new(SpanishStemmer).apply(&mut tokens);
@@ -190,7 +207,7 @@ proptest! {
 /// Edge cases where the port follows Snowball on input the vocabularies lack, so a cleanup cannot drift.
 #[test]
 fn snowball_edge_cases_are_kept() {
-    let cases: [(&dyn Stemmer, &str, &str); 6] = [
+    let cases: [(&dyn Stemmer, &str, &str); 16] = [
         // A leading apostrophe goes, then the possessive: nothing is left.
         (&EnglishStemmer, "''s", ""),
         // An input `Y` counts as a consonant; marked `y`s are restored to lowercase.
@@ -201,6 +218,19 @@ fn snowball_edge_cases_are_kept() {
         // Portuguese writes `ã` as `a~` while stemming, so a literal `a~` comes back as `ã`.
         (&PortugueseStemmer, "a~o", "ão"),
         (&PortugueseStemmer, "maçã", "maçã"),
+        // French retries a position after marking the next letter, so a `ë`/`ï` vowel is still rewritten
+        // (Snowball 3.1.1 `stemwords`; outside the vocabulary).
+        (&FrenchStemmer, "aïyeux", "aïi"),
+        (&FrenchStemmer, "ëie", "ëi"),
+        (&FrenchStemmer, "ëya", "ëi"),
+        (&FrenchStemmer, "ëier", "ëi"),
+        (&FrenchStemmer, "êëière", "êëi"),
+        (&FrenchStemmer, "aïiques", "aïiqu"),
+        (&FrenchStemmer, "l'", "l'"),
+        (&ItalianStemmer, "un'altra", "altra"),
+        // German leaves `ue` alone after `q` and marks `u` between vowels.
+        (&GermanStemmer, "quelle", "quell"),
+        (&GermanStemmer, "bauer", "bau"),
     ];
     for (stemmer, word, stem) in cases {
         assert_eq!(stemmer.stem(word), stem, "{word:?}");
@@ -218,11 +248,43 @@ fn stemmers_can_be_picked_at_run_time() {
         .iter()
         .zip(["skies", "canciones", "brasileiras"])
         .map(|(filter, word)| {
-            let mut tokens = Vec::new();
+            let mut tokens = TokenStream::new();
             WhitespaceTokenizer.tokenize(word, &mut tokens);
             filter.apply(&mut tokens);
-            tokens.remove(0).text
+            tokens.first().unwrap().text.clone()
         })
         .collect();
     assert_eq!(stems, ["sky", "cancion", "brasileir"]);
+}
+
+#[test]
+fn german_matches_the_snowball_vocabulary() {
+    check_vocabulary(&GermanStemmer, GERMAN, 35_053);
+}
+
+#[test]
+fn italian_matches_the_snowball_vocabulary() {
+    check_vocabulary(&ItalianStemmer, ITALIAN, 37_426);
+}
+
+#[test]
+fn french_matches_the_snowball_vocabulary() {
+    check_vocabulary(&FrenchStemmer, FRENCH, 21_653);
+}
+
+/// Smoke test: the stemmers run before the length guard (SPEC §6.3.3), so they see whole tokens, and 1 MB tokens must
+/// stem at all (the French prelude once inserted into a vector per `ë`, which took seconds for these). It checks
+/// termination only, as tests use no wall clock; the `analyzers` benchmark is where a slowdown shows.
+#[test]
+fn long_tokens_stem() {
+    let words = [
+        "ë".repeat(500_000),
+        "aï".repeat(250_000),
+        "é".repeat(500_000),
+    ];
+    for stemmer in stemmers() {
+        for word in &words {
+            let _stem = stemmer.stem(word);
+        }
+    }
 }

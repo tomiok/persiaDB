@@ -2,7 +2,8 @@
 
 use std::num::NonZeroUsize;
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Default longest token, in bytes of UTF-8, that a [`TokenLengthGuard`] keeps whole.
 pub const DEFAULT_MAX_TOKEN_LEN: NonZeroUsize = match NonZeroUsize::new(255) {
@@ -29,9 +30,9 @@ pub enum LengthPolicy {
 ///
 /// ```
 /// use std::num::NonZeroUsize;
-/// use persia_analysis::{LengthPolicy, TokenLengthGuard, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, LengthPolicy, TokenLengthGuard, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("año extraordinario", &mut tokens);
 /// let guard = TokenLengthGuard::new(NonZeroUsize::new(5).unwrap(), LengthPolicy::Truncate);
 /// guard.apply(&mut tokens);
@@ -69,7 +70,7 @@ impl TokenLengthGuard {
     }
 
     /// Truncates or drops, per the policy, every token of `tokens` whose text is longer than the limit.
-    pub fn apply(&self, tokens: &mut Vec<Token>) {
+    pub fn apply(&self, tokens: &mut TokenStream) {
         let max = self.max_len.get();
         match self.policy {
             LengthPolicy::Drop => tokens.retain(|token| token.text.len() <= max),
@@ -86,7 +87,7 @@ impl TokenLengthGuard {
 }
 
 impl TokenFilter for TokenLengthGuard {
-    fn apply(&self, tokens: &mut Vec<Token>) {
+    fn apply(&self, tokens: &mut TokenStream) {
         TokenLengthGuard::apply(self, tokens);
     }
 }

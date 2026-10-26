@@ -130,7 +130,8 @@ impl CollectionSchema {
         json::from_json(json)
     }
 
-    /// [`Self::from_json`] for a schema the engine stored (SPEC §8.7): every option must be given.
+    /// [`Self::from_json`] for a schema the engine stored (SPEC §8.7): every option must be given, and a well-formed
+    /// analyzer version this build lacks is [`SchemaError::UnsupportedAnalyzer`] rather than unknown.
     pub(crate) fn from_stored_json(json: &str) -> Result<Self, SchemaError> {
         json::from_stored_json(json)
     }
@@ -377,6 +378,17 @@ pub enum SchemaError {
         /// The field.
         field: String,
         /// The analyzer as given.
+        analyzer: String,
+    },
+    /// A stored schema (SPEC §8.7) names a well-formed analyzer version this build does not have, such as `es@2`
+    /// or a later built-in: a newer build wrote it. Like an unknown format feature, it is not corruption (SPEC §15).
+    #[error(
+        "field {field:?}: analyzer {analyzer:?} is not supported by this build (written by a newer one)"
+    )]
+    UnsupportedAnalyzer {
+        /// The field.
+        field: String,
+        /// The analyzer as stored, `name@version`.
         analyzer: String,
     },
     /// `ranking.static_rank.field` is not a field of the schema, or not an `i64`, `f64` or `datetime` field.

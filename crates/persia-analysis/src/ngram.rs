@@ -2,7 +2,8 @@
 
 use std::num::NonZeroUsize;
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Replaces each token by its prefixes, for optional prefix indexing (SPEC §6.3.2).
 ///
@@ -15,10 +16,10 @@ use crate::token::{Token, TokenFilter};
 ///
 /// ```
 /// use std::num::NonZeroUsize;
-/// use persia_analysis::{EdgeNgramFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, EdgeNgramFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
 /// let n = |n| NonZeroUsize::new(n).unwrap();
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("año a", &mut tokens);
 /// EdgeNgramFilter::new(n(2), n(3)).unwrap().apply(&mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
@@ -73,9 +74,8 @@ impl TokenFilter for EdgeNgramFilter {
         true
     }
 
-    fn apply(&self, tokens: &mut Vec<Token>) {
-        let input = std::mem::take(tokens);
-        for token in input {
+    fn apply(&self, tokens: &mut TokenStream) {
+        tokens.rebuild(|token, tokens| {
             // Byte offsets just past each character, so `&text[..end]` is a prefix of `chars` characters.
             let ends = token
                 .text
@@ -91,17 +91,14 @@ impl TokenFilter for EdgeNgramFilter {
                         break;
                     };
                     is_prefix = end == token.text.len();
-                    tokens.push(Token {
-                        text: prefix.to_owned(),
-                        start: token.start,
-                        end: token.end,
-                        position: token.position,
-                    });
+                    tokens.push(prefix, token.start, token.end, token.position);
                 }
             }
             if self.preserve_original && !is_prefix && !token.text.is_empty() {
-                tokens.push(token);
+                tokens.push_token(token);
+            } else {
+                tokens.recycle(token.text);
             }
-        }
+        });
     }
 }

@@ -637,7 +637,13 @@ field, which must then be exactly `0..n`. The engine writes the ids when it seri
 
 `stored: false` keeps the value out of the `DocStore` (it is indexed but `get` does not return it). Floats must be finite;
 `-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3) as `"name"` (its current version) or `"name@version"`;
-the engine writes `"name@version"`, so a stored schema pins the version it was indexed with.
+the engine writes `"name@version"`, so a stored schema pins the version it was indexed with. A definition naming an
+analyzer or version this build does not have is rejected (unknown analyzer). A stored schema (§8.7) naming a
+well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `nl@1`
+read by a build that only has `es@1`) was written by a newer build: like an unknown format feature (§15), it is
+reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption. As with an unknown format
+feature, the whole manifest is then unsupported: a build cannot open a database one of whose collections it cannot
+analyze, since it could neither query that collection nor keep it intact on its next commit.
 
 #### 6.2.3 Ranking and relaxation
 `ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
@@ -700,26 +706,35 @@ schema's hash over its first `field_count` fields: a reader verifies an old segm
 Readers keep the encoder of every `encoding_version` they accept.
 
 ### 6.3 Analyzers
-Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization; no
-built-in analyzer has one, and they are not open to users until they map spans back (§6.3.1, ROADMAP 4.4.7).
+Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization, and
+the analyzer maps token spans back to the original value (§6.3.1); no built-in analyzer has one.
 Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
-analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
-(ROADMAP 4.4.10); until they exist a schema naming them is rejected.
+analyzers `en`, `es`, `pt`, `fr`, `de` and `it` (stopwords + Snowball stemmer + accent folding).
 Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
-in the schema (§6.2.2); a released version never changes its output (its chain, tables and Unicode version are
-frozen), so any change to a built-in analyzer is a new version. Changing a field's analyzer requires a reindex into a
-new collection (§6.2.4).
+in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
+is a new version. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
+dependency or toolchain update that fixes them within one) can change a released version's output, and the analyzer
+then gets a new version that supersedes it (§6.3.1). This holds as far as the fingerprints of §6.3.1 see: a change visible only
+outside their probe contexts could move an output unversioned. Changing a field's analyzer requires a reindex into a new collection
+(§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
-A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
-on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
-the span, so the span always points at the characters the token came from. *Planned, not yet in effect (ROADMAP
-4.4.7):* an analyzer whose char filters change the text will map spans back to the original field value before
-emitting them, so spans always index the original value; until then analyzers cannot have char filters. `position` counts tokens from 0 within one value;
+A token is `{text, start, end, position}`. `start..end` is its byte span in the field value, on UTF-8 character
+boundaries; a tokenizer sets `text` to that span of its input, and token filters may rewrite `text` but never the
+span, so the span always points at the characters the token came from (through char filters, which change the
+tokenizer's input, the analyzer maps spans back to the original value, see below). `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
-defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
-every analyzer whose output it changes (§6.3), and CI fails if a dependency or toolchain update moves it unnoticed.
+defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`), and CI fails if a dependency or toolchain
+update moves it unnoticed. Each current built-in version has a fingerprint of its output over every Unicode scalar
+value in a set of probe contexts chosen to tell the UAX #29 word-break classes apart (alone, between letters and
+digits, after `a.` and `1.`, before a quote, doubled, around a period, next to an accent), and a test, run on every
+pull request, lists the analyzers whose fingerprint moved. Any dependency or toolchain change that moves one (moving
+to another Unicode version, or a fix within one) gives a new version, with the same chain, to every built-in analyzer
+whose fingerprint it moves, and only to those (ADR-0025); a change visible only outside the probe contexts can go
+unnoticed. The versions they supersede stay available and run on the build's Unicode tables, as a build has only one set: a field
+indexed with one keeps working, and only text affected by the changed tables or algorithms may analyze differently
+than when it was indexed, until the collection is reindexed at the new version (§6.2.4).
 
 - **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
   punctuation, symbols and emoji produce no token (a keycap emoji such as `1️⃣` keeps its digit and is one).
@@ -731,6 +746,20 @@ every analyzer whose output it changes (§6.3), and CI fails if a dependency or 
   words stay whole. No dictionary segmentation in v1.
 - **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
 - **keyword**: the whole value is one token (none for an empty value).
+
+**Char filters.** A char filter consumes the field value from its start in pieces of whole characters, keeping each
+piece or replacing it with other text (possibly empty, which deletes it; a replaced empty piece is an insertion), and
+never fails or panics. The analyzer tokenizes the last filter's output and maps every span back through each
+filter, last first, before any token filter runs, so spans always index the original value: an offset in kept text
+maps to the same character of the input; a span start inside a replacement maps to the start of the replaced piece
+and a span end inside one to its end, so the span covers every character its text came from; at a deletion a start
+maps past the deleted piece and an end before it (deleting `<b>` from `x<b>bold` gives the token `xbold` the span
+`x<b>bold`; replacing `<b>` with a space gives `bold` the span `bold`). Mapped spans lie on character boundaries
+of the original value, and their starts and their ends never decrease; they need not be strictly increasing or
+disjoint, as one replacement can yield several tokens (`½` → ` one half ` gives `one` and `half` the span of `½`) or
+the end of one token and the start of the next, and a token made only of inserted text has an empty span at the
+insertion point (when chained filters map such an empty span onto a deletion, it takes the position before the
+deletion). Positions are unaffected.
 
 **Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
 the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is
@@ -766,17 +795,25 @@ those analyzers' versions.
   `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
 - **apostrophe**: replaces the typographic apostrophes `‘` (U+2018) and `’` (U+2019) with `'` (U+0027). UAX #29
   joins letters across all three (`don’t` is one token), but the English stemmer knows only U+0027.
-- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
+- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese, French, German, Italian)
   are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
-  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
-  English keeps the classic 33-word list, while Spanish and Portuguese also list personal pronouns, possessives,
-  demonstratives and the commonest forms of `ser`, `estar` and `haber`, leaving out words that are just as often
-  content words (`bajo`, `ante`, `era`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
-  `SPANISH_STOPWORDS` and `PORTUGUESE_STOPWORDS`, pinned by a fingerprint test; the `fr`, `de` and `it` analyzers
-  (§6.3) get their lists when they are added (ROADMAP 4.4.10).
+  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all of them;
+  English keeps the classic 33-word list, while the others also list personal pronouns, possessives,
+  demonstratives and the commonest forms of the auxiliaries (`ser`, `estar`, `haber`; `être`, `avoir`; `sein`,
+  `haben`, `werden`; `essere`, `avere`), leaving out words that are just as often content words (`bajo`, `ante`,
+  `era`; `or`, `car`, `été`; `stato`, `più`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
+  `SPANISH_STOPWORDS`, `PORTUGUESE_STOPWORDS`, `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS` and `ITALIAN_STOPWORDS`, pinned
+  by a fingerprint test. German leaves out the modal verbs (`kann`, `will`, also a
+  noun) and keeps `sein` and `man`, which are nouns far less often than function words; French keeps `est` (also
+  "east") and the possessive `son` (also "sound"), Italian drops `sei` (also "six"). In `fr` and `it`, `elision`
+  runs before `stop`, so `c'est` and `l'ho` are the stopwords `est` and `ho`.
+- **elision** `{prefixes}`: removes a leading listed word and the U+0027 after it, when something follows
+  (`l'été` → `été`; `l'` alone is kept). The embedded lists (`persia_analysis::FRENCH_ELISIONS`, `ITALIAN_ELISIONS`)
+  hold the prefixes the French and Italian stemmers remove (`stem` below) plus, for French, the conjunctions ending in `qu`
+  (`lorsqu'`, `puisqu'`, `jusqu'`, `quelqu'`, `quoiqu'`). It runs after `apostrophe` (`l’été`) and before `stop`.
 - **stem** `{language}`: replaces the token text with its stem, by the Snowball algorithm of the language
   (snowballstem.org, `algorithms/<language>.sbl` of Snowball v3.1.1): `english` (Porter2), `spanish`,
-  `portuguese`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
+  `portuguese`, `french`, `german`, `italian`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
   `019921c3a41c2b70063ee3feb215a00c8e594597`, checked in with the stemmer tests) are normative: every word stems to
   its listed stem. The algorithms expect lowercase text with its accents, so `stem` runs after `nfkc` (to them a
   decomposed accent is a consonant), `lowercase` and `stop`, and before `fold`. English treats only U+0027 as an
@@ -785,8 +822,11 @@ those analyzers' versions.
   final `ç` becomes `c`, and, as it writes `ã` and `õ` as `a~` and `o~` while stemming, turns a literal `a~` or `o~`
   into `ã` or `õ` (only the `whitespace` and `keyword` tokenizers keep `~` inside a token). Stemming is not
   idempotent (`accelerated` → `acceler` → `accel`), so a query is stemmed once, by the same analyzer as the field. A
-  stem can be empty (`''s`), which removes the token. There are no `fr`, `de` or `it` stemmers yet: they come with
-  those analyzers, if §6.3 keeps them (ROADMAP 4.4.10).
+  stem can be empty (`''s`), which removes the token. French and Italian remove a leading
+  elided article, pronoun or preposition before U+0027 (French `c' d' j' l' m' n' s' t' qu'`; Italian `l' d' dell'
+  nell' un'` and the others of `italian.sbl`) when something follows it; French writes `ë` and `ï` back after
+  stemming; German writes `ß` as `ss` and `ae`, `oe`, `ue` as umlauts (not in `qu`), then removes the umlauts from
+  the stem; Italian reads acute accents as grave ones and keeps them.
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
   replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
   none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
@@ -806,7 +846,7 @@ bounded.
 
 #### 6.3.3 Built-in analyzers
 Every built-in analyzer is at version 1 (`persia_analysis::BUILTIN_ANALYZERS`; `builtin_analyzer(name, version)`
-builds one). Each chain below is the whole definition of that version, with the tables and Unicode version its
+builds one). Built-in names are, and will stay, of the shape `[a-z][a-z0-9_-]*`. Each chain below is the whole definition of that version, with the tables and Unicode version its
 filters name (§6.3.2); `guard` is the length guard of §6.3.1 at its defaults (255 bytes, `truncate`), last in every
 chain so it bounds the final terms.
 
@@ -818,12 +858,16 @@ chain so it bounds the final terms.
 | `en@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (English), `stem` (`english`), `fold` (preserves nothing), `guard` |
 | `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
 | `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
+| `fr@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `elision` (French), `stop` (French), `stem` (`french`), `fold` (preserves nothing), `guard` |
+| `de@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (German), `stem` (`german`), `fold` (preserves nothing), `guard` |
+| `it@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `elision` (Italian), `stop` (Italian), `stem` (`italian`), `fold` (preserves nothing), `guard` |
 
 `keyword` and `whitespace` do not normalize: case and accents are significant. The guard truncates each token, so
 under `keyword` (one token per value) two values that share their first 255 bytes are one term, and under
 `whitespace` two words that do; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4).
 `es` keeps `ñ` because it tells words apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
-stemming, so `John’s` and `John's` both stem to `john`. Stemming before folding means a query typed without accents
+stemming, so `John’s` and `John's` both stem to `john`; `fr` and `it` map it too, as their elisions (`l’été`, `nell’estate`)
+are written with `’` as often as with `'`, and `de` for its `'s` endings (`Grimm’sche`). Stemming before folding means a query typed without accents
 can stem differently from the accented word (`maçã` and `maca` in `pt`); the relaxation cascade (§7.6) is what
 bridges such misses. A test pins every built-in's output on a fixed text, so a change to a chain cannot ship as the
 same version.

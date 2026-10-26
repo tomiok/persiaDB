@@ -4,9 +4,9 @@
 //! the token stream (SPEC §6.3.1):
 //!
 //! ```
-//! use persia_analysis::{StandardTokenizer, Tokenizer};
+//! use persia_analysis::{TokenStream, StandardTokenizer, Tokenizer};
 //!
-//! let mut tokens = Vec::new();
+//! let mut tokens = TokenStream::new();
 //! StandardTokenizer.tokenize("Don't panic, 42!", &mut tokens);
 //! let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 //! assert_eq!(texts, ["Don't", "panic", "42"]);
@@ -19,6 +19,8 @@
 
 mod analyzer;
 mod apostrophe;
+mod char_filter;
+mod elision;
 mod fold;
 mod length;
 mod lowercase;
@@ -30,10 +32,13 @@ mod stem;
 mod stop;
 mod synonyms;
 mod token;
+mod token_stream;
 mod whitespace;
 
 pub use analyzer::{Analyzer, AnalyzerBuilder};
 pub use apostrophe::ApostropheFilter;
+pub use char_filter::{CharFilter, CharFilterOutput};
+pub use elision::{ElisionFilter, FRENCH_ELISIONS, ITALIAN_ELISIONS};
 pub use fold::FoldingFilter;
 pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};
 pub use lowercase::LowercaseFilter;
@@ -44,16 +49,25 @@ pub use registry::{
     builtin_analyzer, current_builtin_version,
 };
 pub use standard::StandardTokenizer;
-pub use stem::{EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter};
-pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
+pub use stem::{
+    EnglishStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer, PortugueseStemmer,
+    SpanishStemmer, Stemmer, StemmerFilter,
+};
+pub use stop::{
+    ENGLISH_STOPWORDS, FRENCH_STOPWORDS, GERMAN_STOPWORDS, ITALIAN_STOPWORDS, PORTUGUESE_STOPWORDS,
+    SPANISH_STOPWORDS, StopwordFilter,
+};
 pub use synonyms::{DEFAULT_SYNONYM_EXPANSIONS, SynonymMap, SynonymMatch};
 pub use token::{Token, TokenFilter, Tokenizer};
+pub use token_stream::TokenStream;
 pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
 
 /// The Unicode version whose tables define tokenization and token filters (SPEC §6.3.1, §6.3.2): the UAX #29 word
 /// boundaries of `unicode-segmentation`, the normalization tables of `unicode-normalization` and the `char`
 /// properties and case mappings of the standard library must all be at this version, so a dependency or toolchain
-/// update cannot silently change what an analyzer version produces.
+/// update cannot silently change what an analyzer version produces. After moving it, the fingerprint test
+/// (`tests/unicode_fingerprints.rs`) lists the built-in analyzers whose output it changed in the probe contexts, and each
+/// gets a new version, added by hand to [`BUILTIN_ANALYZERS`] (SPEC §6.3.1, ADR-0025).
 pub const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
 
 #[cfg(test)]
@@ -61,25 +75,29 @@ mod tests {
     use super::UNICODE_VERSION;
 
     /// Fails on a `unicode-segmentation` or toolchain update that moves to another Unicode version: bump
-    /// `UNICODE_VERSION` deliberately, together with the versions of the analyzers it changes (SPEC §6.3.1).
+    /// `UNICODE_VERSION` deliberately, together with the versions of the analyzers it changes, which
+    /// `tests/unicode_fingerprints.rs` lists (SPEC §6.3.1, ADR-0025).
     #[test]
     fn unicode_tables_are_at_the_pinned_version() {
+        const BUMP: &str = "Unicode tables moved: bump UNICODE_VERSION, then run `cargo test -p persia-analysis \
+                            --release --features slow --test unicode_fingerprints` and give every analyzer it lists \
+                            a new version (ADR-0025)";
         let (major, minor, update) = UNICODE_VERSION;
         let pinned = (u64::from(major), u64::from(minor), u64::from(update));
         assert_eq!(
             unicode_segmentation::UNICODE_VERSION,
             pinned,
-            "unicode-segmentation tables"
+            "unicode-segmentation tables. {BUMP}"
         );
         assert_eq!(
             unicode_normalization::UNICODE_VERSION,
             UNICODE_VERSION,
-            "unicode-normalization tables"
+            "unicode-normalization tables. {BUMP}"
         );
         assert_eq!(
             char::UNICODE_VERSION,
             UNICODE_VERSION,
-            "standard library char tables"
+            "standard library char tables. {BUMP}"
         );
     }
 }

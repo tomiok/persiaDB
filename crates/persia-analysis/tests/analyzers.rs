@@ -5,8 +5,8 @@ use std::num::NonZeroUsize;
 
 use persia_analysis::{
     Analyzer, AnalyzerRegistry, BUILTIN_ANALYZERS, DEFAULT_ANALYZER, EdgeNgramFilter,
-    LowercaseFilter, RegisterError, StandardTokenizer, SynonymMap, Token, WhitespaceTokenizer,
-    builtin_analyzer, current_builtin_version,
+    LowercaseFilter, RegisterError, StandardTokenizer, SynonymMap, Token, TokenStream,
+    WhitespaceTokenizer, builtin_analyzer, current_builtin_version,
 };
 use proptest::prelude::*;
 
@@ -15,8 +15,8 @@ const CASES: u32 = 256;
 #[cfg(feature = "slow")]
 const CASES: u32 = 10_000;
 
-fn analyze(analyzer: &Analyzer, text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+fn analyze(analyzer: &Analyzer, text: &str) -> TokenStream {
+    let mut tokens = TokenStream::new();
     analyzer.analyze(text, &mut tokens);
     tokens
 }
@@ -90,10 +90,78 @@ fn builtin_chains_are_pinned() {
                 "the", "first", "cafe’s", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
             ],
         ),
+        (
+            "fr",
+            &[
+                "the", "first", "cafe'", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
+            ],
+        ),
+        (
+            "de",
+            &[
+                "the", "first", "cafe", "anos", "don't", "stop", "running", "naiv", "1⁄2", "cana",
+            ],
+        ),
+        (
+            "it",
+            &[
+                "the", "first", "cafe's", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
+            ],
+        ),
     ];
     for (name, want) in expected {
         assert_eq!(builtin_texts(name, text), *want, "{name}");
     }
+}
+
+/// Each new language analyzer on a sentence of its language: elisions (`l’`, `c'`, `nell’`, through the apostrophe
+/// filter), stopwords, stemming, then folding (SPEC §6.3.3).
+#[test]
+fn fr_de_it_analyze_their_languages() {
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "fr",
+            "L’été dernier, les enfants jouaient dans les forêts de l'Auvergne et c'était magnifique.",
+            &[
+                "ete", "derni", "enfant", "jou", "foret", "auvergn", "magnif",
+            ],
+        ),
+        (
+            "de",
+            "Die Häuser der Straße wurden aufeinanderfolgend renoviert, und Grimm'sche Märchen gelesen.",
+            &[
+                "haus",
+                "strass",
+                "aufeinanderfolg",
+                "renoviert",
+                "grimm",
+                "march",
+                "geles",
+            ],
+        ),
+        (
+            "it",
+            "Nell’estate degli anni passati, le città italiane erano piene di turisti velocemente.",
+            &[
+                "estat", "anni", "pass", "citt", "italian", "eran", "pien", "turist", "veloc",
+            ],
+        ),
+    ];
+    for (name, text, want) in cases {
+        assert_eq!(builtin_texts(name, text), *want, "{name}");
+    }
+    // Elided function words are stopwords: the elision goes before `stop` (SPEC §6.3.3).
+    assert_eq!(
+        builtin_texts(
+            "fr",
+            "c'est qu'il n'a pas d'un j'ai l'on s'il qu'elle lorsqu’il"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        builtin_texts("it", "l'ho dell'anno un'altra"),
+        ["anno", "altra"]
+    );
 }
 
 #[test]
@@ -144,6 +212,16 @@ fn builtin_list_is_sorted_unique_and_constructible() {
     assert!(BUILTIN_ANALYZERS.windows(2).all(|w| w[0] < w[1]));
     for a in BUILTIN_ANALYZERS {
         assert!(a.version >= 1);
+        // SPEC §6.3.3: a stored schema tells a newer build's analyzer from corruption by this shape (§6.2.2).
+        let mut bytes = a.name.bytes();
+        assert!(
+            bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+                && bytes.all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'_'
+                    || b == b'-'),
+            "{a:?}"
+        );
         assert!(builtin_analyzer(a.name, a.version).is_some(), "{a:?}");
         let next = a.version + 1;
         let listed = BUILTIN_ANALYZERS
@@ -152,7 +230,7 @@ fn builtin_list_is_sorted_unique_and_constructible() {
         assert_eq!(builtin_analyzer(a.name, next).is_some(), listed, "{a:?}");
     }
     assert_eq!(current_builtin_version(DEFAULT_ANALYZER), Some(1));
-    for missing in ["", "fr", "de", "it", "EN", "en@1"] {
+    for missing in ["", "nl", "zh", "FR", "en@1"] {
         assert_eq!(current_builtin_version(missing), None, "{missing:?}");
         assert!(builtin_analyzer(missing, 1).is_none(), "{missing:?}");
     }
@@ -177,8 +255,8 @@ fn registry_resolves_builtins_by_name_and_version() {
         );
     }
     assert!(registry.get("en", 2).is_none());
-    assert!(registry.get("fr", 1).is_none());
-    assert_eq!(registry.current_version("fr"), None);
+    assert!(registry.get("nl", 1).is_none());
+    assert_eq!(registry.current_version("nl"), None);
 }
 
 #[test]
@@ -253,7 +331,7 @@ fn query_analysis_leaves_out_stacking_filters() {
         texts(&analyze(&analyzer, "Laptop")),
         ["la", "lap", "lapt", "laptop"]
     );
-    let mut query = Vec::new();
+    let mut query = TokenStream::new();
     analyzer.analyze_query("Lapt X", &mut query);
     assert_eq!(texts(&query), ["lapt", "x"]);
     assert_eq!(query.iter().map(|t| t.position).collect::<Vec<_>>(), [0, 1]);
@@ -268,7 +346,7 @@ fn query_analysis_leaves_out_stacking_filters() {
 fn synonyms_on_a_stacking_analyzer_match_queries() {
     let analyzer = ngram_analyzer();
     let map = SynonymMap::analyzed([["New York", "NYC"]], &analyzer);
-    let mut query = Vec::new();
+    let mut query = TokenStream::new();
     analyzer.analyze_query("flights to new york", &mut query);
     let matches = map.find(&query);
     assert_eq!(matches.len(), 1);
@@ -311,7 +389,7 @@ proptest! {
                 prop_assert!(pair[0].position < pair[1].position, "{}: {pair:?}", a.name);
                 prop_assert!(pair[0].end <= pair[1].start, "{}: {pair:?}", a.name);
             }
-            let mut query = Vec::new();
+            let mut query = TokenStream::new();
             analyzer.analyze_query(&text, &mut query);
             prop_assert_eq!(&query, &tokens, "{}", a.name);
         }
@@ -341,7 +419,7 @@ proptest! {
     fn query_tokens_are_among_stacked_index_tokens(text in text()) {
         let analyzer = ngram_analyzer();
         let index = analyze(&analyzer, &text);
-        let mut query = Vec::new();
+        let mut query = TokenStream::new();
         analyzer.analyze_query(&text, &mut query);
         for token in &query {
             prop_assert!(

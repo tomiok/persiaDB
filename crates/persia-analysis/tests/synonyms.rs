@@ -2,16 +2,16 @@
 
 use persia_analysis::{
     DEFAULT_SYNONYM_EXPANSIONS, LowercaseFilter, StandardTokenizer, StopwordFilter, SynonymMap,
-    Token, TokenFilter, Tokenizer,
+    Token, TokenFilter, TokenStream, Tokenizer,
 };
 
 /// A small analyzer: standard words, lowercase, English stopwords.
 fn analyze(text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     StandardTokenizer.tokenize(text, &mut tokens);
     LowercaseFilter.apply(&mut tokens);
     StopwordFilter::english().apply(&mut tokens);
-    tokens
+    tokens.into_vec()
 }
 
 fn map(groups: &[&[&str]]) -> SynonymMap {
