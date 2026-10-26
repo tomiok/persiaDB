@@ -55,4 +55,10 @@ pub(crate) fn push_spans<'a>(spans: impl Iterator<Item = (usize, &'a str)>, out:
 pub trait TokenFilter: Send + Sync {
     /// Applies the filter to `tokens`, the output of a tokenizer or of the previous filter.
     fn apply(&self, tokens: &mut Vec<Token>);
+
+    /// Whether the filter adds tokens stacked on the position of the token they came from (edge n-grams). An
+    /// [`Analyzer`](crate::Analyzer) leaves such filters out of query-time analysis (SPEC §6.3.4).
+    fn stacks_tokens(&self) -> bool {
+        false
+    }
 }

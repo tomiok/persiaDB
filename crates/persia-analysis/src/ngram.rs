@@ -69,6 +69,10 @@ impl EdgeNgramFilter {
 }
 
 impl TokenFilter for EdgeNgramFilter {
+    fn stacks_tokens(&self) -> bool {
+        true
+    }
+
     fn apply(&self, tokens: &mut Vec<Token>) {
         let input = std::mem::take(tokens);
         for token in input {

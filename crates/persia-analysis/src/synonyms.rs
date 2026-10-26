@@ -3,6 +3,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
+use crate::analyzer::Analyzer;
 use crate::token::Token;
 
 /// How many alternatives one synonym match expands to by default (SPEC §7.6 L1).
@@ -103,6 +104,40 @@ impl SynonymMap {
         }
         map.unmark_terms_without_alternatives();
         map
+    }
+
+    /// Builds the map from groups of raw terms (a collection's `synonyms`, SPEC §6.2.1), analyzing each term with
+    /// the query-time analysis of the field's `analyzer` (SPEC §6.3.4): an analyzer that stacks edge n-grams would
+    /// otherwise turn a term into prefixes no analyzed query ever lines up with.
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use persia_analysis::{Analyzer, EdgeNgramFilter, LowercaseFilter, StandardTokenizer, SynonymMap};
+    ///
+    /// let ngrams = EdgeNgramFilter::new(NonZeroUsize::MIN, NonZeroUsize::new(20).ok_or("max")?).ok_or("bounds")?;
+    /// let analyzer = Analyzer::builder(StandardTokenizer).filter(LowercaseFilter).filter(ngrams).build();
+    /// let map = SynonymMap::analyzed([["TV", "television"]], &analyzer);
+    /// let mut query = Vec::new();
+    /// analyzer.analyze_query("cheap tv", &mut query);
+    /// assert_eq!(map.find(&query).len(), 1);
+    /// # Ok::<(), &str>(())
+    /// ```
+    pub fn analyzed<G, T, S>(groups: G, analyzer: &Analyzer) -> Self
+    where
+        G: IntoIterator<Item = T>,
+        T: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        Self::new(groups.into_iter().map(|group| {
+            group
+                .into_iter()
+                .map(|term| {
+                    let mut tokens = Vec::new();
+                    analyzer.analyze_query(term.as_ref(), &mut tokens);
+                    tokens
+                })
+                .collect::<Vec<_>>()
+        }))
     }
 
     /// A term whose groups all collapsed to it alone after analysis (`["New York", "new york"]`) has nothing to

@@ -662,10 +662,9 @@ A new definition replaces the current schema when, matching fields **by name**:
   collection (§6.3);
 - added fields are allowed: they get the next ids in ascending byte order of their names, and documents indexed earlier
   read as missing them. Ids in the new definition are ignored (they are internal): existing fields keep theirs.
-- *Planned, not yet in effect (ROADMAP 4.4.3):* an `analyzer` given without a version will bind to the current field's
-  version, so re-applying an unchanged definition after a release adds a newer analyzer version is not a change; an
-  explicit different version still is. Until then every built-in analyzer has only version 1, so an unversioned
-  `analyzer` and the field's version always agree.
+- an `analyzer` given without a version binds to the field's current version when it names the same analyzer, so
+  re-applying an unchanged definition after a release adds a newer analyzer version is not a change (the field keeps
+  its version); a pinned different version (`"es@2"` for a field at `es@1`) or another analyzer still is.
 
 `boost`, `k1`, `b`, `ranking`, `relaxation`, `synonyms` and `strict` may change freely: they act at query or write time.
 
@@ -696,18 +695,22 @@ schema's hash over its first `field_count` fields: a reader verifies an old segm
 Readers keep the encoder of every `encoding_version` they accept.
 
 ### 6.3 Analyzers
-Pipeline: `char_filter* → tokenizer → token_filter*`.
-Built-ins: `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, language analyzers
-(`en`, `es`, `pt`, `fr`, `de`, `it`: stopwords + snowball-style stemmer + accent folding; `fr`, `de` and `it` have
-no stopword lists or stemmers yet, ROADMAP 4.4.10).
-Analyzer name+version is recorded in the schema; changing an analyzer requires a reindex into a new collection (§6.2.4).
+Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization; no
+built-in analyzer has one, and they are not open to users until they map spans back (§6.3.1, ROADMAP 4.4.7).
+Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
+analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
+(ROADMAP 4.4.10); until they exist a schema naming them is rejected.
+Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
+in the schema (§6.2.2); a released version never changes its output (its chain, tables and Unicode version are
+frozen), so any change to a built-in analyzer is a new version. Changing a field's analyzer requires a reindex into a
+new collection (§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
 A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
 on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
-the span, so the span always points at the characters the token came from. An analyzer whose char filters change the
-text maps spans back to the original field value before emitting them (ROADMAP 4.4.7), so spans always index the
-original value. `position` counts tokens from 0 within one value;
+the span, so the span always points at the characters the token came from. *Planned, not yet in effect (ROADMAP
+4.4.7):* an analyzer whose char filters change the text will map spans back to the original field value before
+emitting them, so spans always index the original value; until then analyzers cannot have char filters. `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
@@ -727,7 +730,7 @@ every analyzer whose output it changes (§6.3), and CI fails if a dependency or 
 **Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
 the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is
 dropped); `drop` removes the token. Kept tokens keep their span and position. Which built-in analyzers apply the
-guard, and with which limit, is part of their definition (§6.3, ROADMAP 4.4.2).
+guard, and with which limit, is part of their definition (§6.3.3).
 
 #### 6.3.2 Token filters
 A token filter rewrites, removes or adds tokens; it never changes a token's span, and never fails or panics. A filter
@@ -753,9 +756,11 @@ those analyzers' versions.
   `Ø` → `O`, `đ`/`ð` → `d`, `Đ`/`Ð` → `D`, `ł` → `l`, `Ł` → `L`, `þ` → `th`, `Þ` → `TH`, `ħ` → `h`, `Ħ` → `H`,
   `ı` → `i` (nothing else: `ŧ`, `ƀ`, `ɨ` and the like are kept). Preserved characters are kept as listed, also
   inside a decomposition, and only the text between them is recomposed (case matters: preserving `ñ` does not
-  preserve `Ñ`). The preserved set of each built-in analyzer is part of its definition (ROADMAP 4.4.2); preserving `ñ`
+  preserve `Ñ`). The preserved set of each built-in analyzer is part of its definition (§6.3.3); preserving `ñ`
   keeps `año` and `ano` distinct. A preserved character only matches as listed, so put `nfkc` first: a decomposed
   `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
+- **apostrophe**: replaces the typographic apostrophes `‘` (U+2018) and `’` (U+2019) with `'` (U+0027). UAX #29
+  joins letters across all three (`don’t` is one token), but the English stemmer knows only U+0027.
 - **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
   are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
   as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
@@ -770,7 +775,7 @@ those analyzers' versions.
   `019921c3a41c2b70063ee3feb215a00c8e594597`, checked in with the stemmer tests) are normative: every word stems to
   its listed stem. The algorithms expect lowercase text with its accents, so `stem` runs after `nfkc` (to them a
   decomposed accent is a consonant), `lowercase` and `stop`, and before `fold`. English treats only U+0027 as an
-  apostrophe (mapping `’` is up to the analyzer, ROADMAP 4.4.2) and leaves words of fewer than 3 characters alone;
+  apostrophe (the `en` analyzer maps `‘` and `’` to it first, §6.3.3) and leaves words of fewer than 3 characters alone;
   Spanish drops the acute accents of `á é í ó ú` and keeps `ñ` and `ü`; Portuguese keeps its accents except that a
   final `ç` becomes `c`, and, as it writes `ã` and `õ` as `a~` and `o~` while stemming, turns a literal `a~` or `o~`
   into `ã` or `õ` (only the `whitespace` and `keyword` tokenizers keep `~` inside a token). Stemming is not
@@ -780,9 +785,9 @@ those analyzers' versions.
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
   replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
   none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
-  Used for optional prefix indexing.
+  Used for optional prefix indexing. It stacks tokens, so it applies at index time only (§6.3.4).
 - **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
-  group (§6.2.1) is analyzed with the field's analyzer into a token sequence; a term that yields no tokens is ignored,
+  group (§6.2.1) is analyzed with the field's query-time analysis (§6.3.4) into a token sequence; a term that yields no tokens is ignored,
   and terms equal after analysis are one term. A term whose groups all shrink to it alone (`["New York", "new york"]`
   under lowercasing) has nothing to expand to and never matches. Scanning the analyzed query left to right, the
   longest term starting at each token matches when its texts are equal and its position gaps equal (a stopword gap
@@ -793,6 +798,40 @@ those analyzers' versions.
 `nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
 bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay
 bounded.
+
+#### 6.3.3 Built-in analyzers
+Every built-in analyzer is at version 1 (`persia_analysis::BUILTIN_ANALYZERS`; `builtin_analyzer(name, version)`
+builds one). Each chain below is the whole definition of that version, with the tables and Unicode version its
+filters name (§6.3.2); `guard` is the length guard of §6.3.1 at its defaults (255 bytes, `truncate`), last in every
+chain so it bounds the final terms.
+
+| Analyzer | Tokenizer | Token filters, in order |
+|---|---|---|
+| `standard@1` | `standard` | `nfkc`, `lowercase`, `guard` |
+| `keyword@1` | `keyword` | `guard` |
+| `whitespace@1` | `whitespace` | `guard` |
+| `en@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (English), `stem` (`english`), `fold` (preserves nothing), `guard` |
+| `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
+| `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
+
+`keyword` and `whitespace` do not normalize: case and accents are significant. The guard truncates each token, so
+under `keyword` (one token per value) two values that share their first 255 bytes are one term, and under
+`whitespace` two words that do; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4).
+`es` keeps `ñ` because it tells words apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
+stemming, so `John’s` and `John's` both stem to `john`. Stemming before folding means a query typed without accents
+can stem differently from the accented word (`maçã` and `maca` in `pt`); the relaxation cascade (§7.6) is what
+bridges such misses. A test pins every built-in's output on a fixed text, so a change to a chain cannot ship as the
+same version.
+
+#### 6.3.4 Query-time analysis
+Queries (§7) and synonym terms (§6.3.2) are analyzed with the field's analyzer **without the filters that stack
+tokens** (`edge_ngram`; `TokenFilter::stacks_tokens`): an index-time prefix such as `lapt` must match the query term
+`lapt` as is, and a query or synonym term expanded into prefixes could never line up with an analyzed query. Every
+other filter applies at both times, in the same order, so terms meet in the same form. Without `preserve_original`, a query
+word longer than `max` analyzes to the whole word, which was never indexed, and no level of the cascade (§7.6)
+shortens it: L3 expands it as a prefix (`laptop*`), which no prefix of at most `max` characters matches. A field
+that expects longer query words sets `preserve_original` or a larger `max`. No built-in analyzer stacks
+tokens, so for them query-time and index-time analysis are the same.
 
 ### 6.4 Documents
 Documents are submitted as JSON (or typed structs in SDKs) and stored as CBOR in `DocStore` (ADR-0023).

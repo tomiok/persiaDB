@@ -532,6 +532,7 @@ name = "persia-analysis"
 version = "0.0.0"
 dependencies = [
  "proptest",
+ "thiserror",
  "unicode-normalization",
  "unicode-segmentation",
 ]
