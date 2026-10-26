@@ -706,9 +706,10 @@ Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keywor
 analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
 (ROADMAP 4.4.10); until they exist a schema naming them is rejected.
 Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
-in the schema (§6.2.2); a released version never changes its output (its chain, tables and Unicode version are
-frozen), so any change to a built-in analyzer is a new version. Changing a field's analyzer requires a reindex into a
-new collection (§6.2.4).
+in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
+is a new version. Only a Unicode version bump can change a released version's output, and the analyzer then gets a
+new version that supersedes it (§6.3.1). Changing a field's analyzer requires a reindex into a new collection
+(§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
 A token is `{text, start, end, position}`. `start..end` is its byte span in the field value, on UTF-8 character
@@ -717,8 +718,13 @@ span, so the span always points at the characters the token came from (through c
 tokenizer's input, the analyzer maps spans back to the original value, see below). `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
-defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
-every analyzer whose output it changes (§6.3), and CI fails if a dependency or toolchain update moves it unnoticed.
+defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`), and CI fails if a dependency or toolchain
+update moves it unnoticed. Moving to another gives a new version, with the same chain, to every built-in analyzer whose
+output it changes, and only to those (ADR-0025): each current built-in version has a fingerprint of its output over
+every Unicode scalar value, alone and in a few contexts, and a test lists the analyzers whose fingerprint moved. The
+versions they supersede stay available and run on the build's Unicode tables, as a build has only one set: a field
+indexed with one keeps working, and only text with the characters whose properties changed may analyze differently
+than when it was indexed, until the collection is reindexed at the new version (§6.2.4).
 
 - **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;
   punctuation, symbols and emoji produce no token (a keycap emoji such as `1️⃣` keeps its digit and is one).

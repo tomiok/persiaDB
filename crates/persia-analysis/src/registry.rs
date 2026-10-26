@@ -19,8 +19,10 @@ pub struct BuiltinAnalyzer {
     pub version: u32,
 }
 
-/// Every built-in analyzer version, ascending by name, then version. A version, once released, is never removed or
-/// changed: an index built with it must analyze queries the same way forever (SPEC §6.3).
+/// Every built-in analyzer version, ascending by name, then version. A version, once released, is never removed and
+/// its chain never changes: an index built with it must analyze queries the same way (SPEC §6.3). A Unicode version
+/// bump that changes an analyzer's output supersedes its version with a new one instead; each current version has
+/// a fingerprint in `tests/unicode_fingerprints.rs` (SPEC §6.3.1, ADR-0025).
 pub const BUILTIN_ANALYZERS: &[BuiltinAnalyzer] = &[
     BuiltinAnalyzer {
         name: "en",
