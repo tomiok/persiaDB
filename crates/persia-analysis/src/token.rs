@@ -3,7 +3,8 @@
 /// One token of analyzed text.
 ///
 /// `start..end` is the token's byte span in the text given to the tokenizer: both ends are UTF-8 character
-/// boundaries, so it can be used to highlight the source. A tokenizer sets `text` to exactly that span; token
+/// boundaries, so it can be used to highlight the source (an [`Analyzer`](crate::Analyzer) maps spans back to the
+/// value given to it, before its char filters, SPEC §6.3.1). A tokenizer sets `text` to exactly that span; token
 /// filters may later rewrite `text` (lowercase it, truncate it) but keep the span, so it always points at the
 /// original characters. `position` counts tokens from 0 in one call to [`Tokenizer::tokenize`]; phrase and
 /// proximity queries compare positions, so a filter that removes a token leaves a gap rather than renumbering.

@@ -700,8 +700,8 @@ schema's hash over its first `field_count` fields: a reader verifies an old segm
 Readers keep the encoder of every `encoding_version` they accept.
 
 ### 6.3 Analyzers
-Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization; no
-built-in analyzer has one, and they are not open to users until they map spans back (§6.3.1, ROADMAP 4.4.7).
+Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization, and
+the analyzer maps token spans back to the original value (§6.3.1); no built-in analyzer has one.
 Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
 analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
 (ROADMAP 4.4.10); until they exist a schema naming them is rejected.
@@ -711,11 +711,10 @@ frozen), so any change to a built-in analyzer is a new version. Changing a field
 new collection (§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
-A token is `{text, start, end, position}`. `start..end` is its byte span in the field value given to the tokenizer,
-on UTF-8 character boundaries; a tokenizer sets `text` to that span, and token filters may rewrite `text` but never
-the span, so the span always points at the characters the token came from. *Planned, not yet in effect (ROADMAP
-4.4.7):* an analyzer whose char filters change the text will map spans back to the original field value before
-emitting them, so spans always index the original value; until then analyzers cannot have char filters. `position` counts tokens from 0 within one value;
+A token is `{text, start, end, position}`. `start..end` is its byte span in the field value, on UTF-8 character
+boundaries; a tokenizer sets `text` to that span of its input, and token filters may rewrite `text` but never the
+span, so the span always points at the characters the token came from (through char filters, which change the
+tokenizer's input, the analyzer maps spans back to the original value, see below). `position` counts tokens from 0 within one value;
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`): moving to another changes the version of
@@ -731,6 +730,19 @@ every analyzer whose output it changes (§6.3), and CI fails if a dependency or 
   words stay whole. No dictionary segmentation in v1.
 - **whitespace**: splits at Unicode `White_Space`; everything else, punctuation included, stays in the token.
 - **keyword**: the whole value is one token (none for an empty value).
+
+**Char filters.** A char filter consumes the field value from its start in pieces of whole characters, keeping each
+piece or replacing it with other text (possibly empty, which deletes it; a replaced empty piece is an insertion), and
+never fails or panics. The analyzer tokenizes the last filter's output and maps every span back through each
+filter, last first, before any token filter runs, so spans always index the original value: an offset in kept text
+maps to the same character of the input; a span start inside a replacement maps to the start of the replaced piece
+and a span end inside one to its end, so the span covers every character its text came from; at a deletion a start
+maps past the deleted piece and an end before it (deleting `<b>` from `x<b>bold` gives the token `xbold` the span
+`x<b>bold`; replacing `<b>` with a space gives `bold` the span `bold`). Mapped spans lie on character boundaries
+of the original value, and their starts and their ends never decrease; they need not be strictly increasing or
+disjoint, as one replacement can yield several tokens (`½` → ` one half ` gives `one` and `half` the span of `½`) or
+the end of one token and the start of the next, and a token made only of inserted text has an empty span at the
+insertion point. Positions are unaffected.
 
 **Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
 the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is

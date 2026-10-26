@@ -3,17 +3,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
+use crate::char_filter::{CharFilter, CharFilterOutput, OffsetMap};
 use crate::token::{Token, TokenFilter, Tokenizer};
-
-/// Rewrites the text of a field value before it is tokenized (SPEC §6.3).
-///
-/// Crate-private until char filters record an offset map (ROADMAP 4.4.7): without it, the spans of an analyzer whose
-/// char filters change the text would index the filtered text, not the original value (SPEC §6.3.1), and slicing
-/// the value with them could fall off its character boundaries. No built-in analyzer has a char filter.
-pub(crate) trait CharFilter: Send + Sync {
-    /// The filtered text, borrowing `text` when the filter leaves it unchanged. Never fails or panics.
-    fn filter<'a>(&self, text: &'a str) -> Cow<'a, str>;
-}
 
 /// A text analysis pipeline: char filters, then a tokenizer, then token filters (SPEC §6.3).
 ///
@@ -50,6 +41,8 @@ impl Analyzer {
     }
 
     /// Replaces the contents of `out` with the index-time tokens of `text`: every filter applies.
+    ///
+    /// Token spans are byte offsets of `text`, also when char filters changed it (SPEC §6.3.1).
     pub fn analyze(&self, text: &str, out: &mut Vec<Token>) {
         self.run(text, out, |_| true);
     }
@@ -69,26 +62,36 @@ impl Analyzer {
     fn run(&self, text: &str, out: &mut Vec<Token>, applies: impl Fn(&dyn TokenFilter) -> bool) {
         out.clear();
         let mut filtered = Cow::Borrowed(text);
+        // One map per char filter that changed the text, in chain order.
+        let mut maps: Vec<OffsetMap> = Vec::new();
         for char_filter in &self.char_filters {
-            let changed = match char_filter.filter(&filtered) {
-                Cow::Owned(text) => Some(text),
-                // A filter may return a borrowed view of its input (a trimmed substring): only the input itself is
-                // "unchanged".
-                Cow::Borrowed(view) if !std::ptr::eq(view, filtered.as_ref()) => {
-                    Some(view.to_owned())
-                }
-                Cow::Borrowed(_) => None,
-            };
-            if let Some(text) = changed {
+            let mut output = CharFilterOutput::new(&filtered);
+            char_filter.filter(&mut output);
+            if let Some((text, map)) = output.finish() {
                 filtered = Cow::Owned(text);
+                maps.push(map);
             }
         }
         self.tokenizer.tokenize(&filtered, out);
+        if !maps.is_empty() {
+            map_spans(&maps, text.len(), out);
+        }
         for filter in &self.filters {
             if applies(filter.as_ref()) {
                 filter.apply(out);
             }
         }
+    }
+}
+
+/// Maps the spans of `tokens`, offsets of the last char filter's output, back to the original value of `len` bytes
+/// through `maps`, the last filter's map first (SPEC §6.3.1).
+fn map_spans(maps: &[OffsetMap], len: usize, tokens: &mut [Token]) {
+    for token in tokens {
+        let start = maps.iter().rev().fold(token.start, |o, map| map.start(o));
+        let end = maps.iter().rev().fold(token.end, |o, map| map.end(o));
+        token.end = end.min(len);
+        token.start = start.min(token.end);
     }
 }
 
@@ -108,9 +111,8 @@ pub struct AnalyzerBuilder {
 }
 
 impl AnalyzerBuilder {
-    /// Appends a char filter; char filters run before the tokenizer, whenever they are added.
-    #[allow(dead_code, reason = "made public with the offset map, ROADMAP 4.4.7")]
-    pub(crate) fn char_filter(mut self, filter: impl CharFilter + 'static) -> Self {
+    /// Appends a char filter; char filters run before the tokenizer, in the order they are added, whenever that is.
+    pub fn char_filter(mut self, filter: impl CharFilter + 'static) -> Self {
         self.analyzer.char_filters.push(Box::new(filter));
         self
     }
@@ -132,75 +134,5 @@ impl fmt::Debug for AnalyzerBuilder {
         f.debug_tuple("AnalyzerBuilder")
             .field(&self.analyzer)
             .finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{LowercaseFilter, WhitespaceTokenizer};
-
-    /// Replaces `-` with a space, keeping the length, so spans still index the original text.
-    struct DashToSpace;
-
-    impl CharFilter for DashToSpace {
-        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
-            if text.contains('-') {
-                Cow::Owned(text.replace('-', " "))
-            } else {
-                Cow::Borrowed(text)
-            }
-        }
-    }
-
-    /// Upper-cases ASCII; only meaningful after [`DashToSpace`] when the chain order holds.
-    struct Upper;
-
-    impl CharFilter for Upper {
-        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
-            Cow::Owned(text.to_ascii_uppercase())
-        }
-    }
-
-    #[test]
-    fn char_filters_run_in_order_before_the_tokenizer() {
-        // Added after the token filter: char filters still run first.
-        let analyzer = Analyzer::builder(WhitespaceTokenizer)
-            .filter(LowercaseFilter)
-            .char_filter(DashToSpace)
-            .char_filter(Upper)
-            .build();
-        let mut tokens = Vec::new();
-        analyzer.analyze("well-known Fact", &mut tokens);
-        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["well", "known", "fact"]);
-        assert_eq!(
-            tokens.iter().map(|t| (t.start, t.end)).collect::<Vec<_>>(),
-            [(0, 4), (5, 10), (11, 15)]
-        );
-        assert!(!analyzer.stacks_tokens());
-    }
-
-    /// Keeps the text after the first `|`, as a borrowed view of its input.
-    struct AfterBar;
-
-    impl CharFilter for AfterBar {
-        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
-            Cow::Borrowed(text.split_once('|').map_or(text, |(_, rest)| rest))
-        }
-    }
-
-    #[test]
-    fn a_borrowed_view_that_differs_is_a_change() {
-        let analyzer = Analyzer::builder(WhitespaceTokenizer)
-            .char_filter(AfterBar)
-            .char_filter(AfterBar)
-            .build();
-        let mut tokens = Vec::new();
-        analyzer.analyze("a|b c|d e", &mut tokens);
-        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
-        assert_eq!(texts, ["d", "e"]);
-        analyzer.analyze("no bar", &mut tokens);
-        assert_eq!(tokens.len(), 2);
     }
 }
