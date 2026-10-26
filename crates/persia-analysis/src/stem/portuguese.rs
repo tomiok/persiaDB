@@ -1,9 +1,8 @@
 //! The Snowball Portuguese stemmer, as `algorithms/portuguese.sbl` of Snowball v3.1.1.
 
-use std::borrow::Cow;
-
-use super::Stemmer;
-use super::word::{Word, finish, r1_r2, rv};
+use super::CharStemmer;
+use super::word::{Word, r1_r2, rv};
+use crate::Scratch;
 
 /// The Snowball Portuguese stemmer (SPEC §6.3.2): `canções` → `cançõ`, `felizmente` → `feliz`,
 /// `brasileiras` → `brasileir`.
@@ -24,10 +23,11 @@ use super::word::{Word, finish, r1_r2, rv};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PortugueseStemmer;
 
-impl Stemmer for PortugueseStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+impl CharStemmer for PortugueseStemmer {
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let Scratch { chars, work, .. } = scratch;
         // `ã` and `õ` are written as a vowel and `~`, a non-vowel, while stemming.
-        let mut chars = Vec::with_capacity(word.len());
+        chars.clear();
         for c in word.chars() {
             match c {
                 'ã' => chars.extend(['a', '~']),
@@ -49,21 +49,21 @@ impl Stemmer for PortugueseStemmer {
             residual_suffix(&mut w, pv);
         }
         residual_form(&mut w, pv);
-        let mut out = Vec::with_capacity(w.len());
+        work.clear();
         for &c in w.chars() {
-            match (out.last(), c) {
+            match (work.last(), c) {
                 (Some('a'), '~') => {
-                    out.pop();
-                    out.push('ã');
+                    work.pop();
+                    work.push('ã');
                 }
                 (Some('o'), '~') => {
-                    out.pop();
-                    out.push('õ');
+                    work.pop();
+                    work.push('õ');
                 }
-                _ => out.push(c),
+                _ => work.push(c),
             }
         }
-        finish(word, &out)
+        std::mem::swap(chars, work);
     }
 }
 
@@ -145,14 +145,14 @@ const STANDARD: &[(&str, Standard)] = &[
 ];
 
 /// Removes `suffix` if the word ends with it in R2.
-fn delete_in_r2(w: &mut Word, suffix: &str, p2: usize) {
+fn delete_in_r2(w: &mut Word<'_>, suffix: &str, p2: usize) {
     if let Some(start) = w.ends_with(suffix).filter(|&s| s >= p2) {
         w.truncate(start);
     }
 }
 
 /// Removes the longest of `suffixes` the word ends with, if it is in R2; returns which one it removed.
-fn delete_longest_in_r2<'a>(w: &mut Word, suffixes: &[&'a str], p2: usize) -> Option<&'a str> {
+fn delete_longest_in_r2<'a>(w: &mut Word<'_>, suffixes: &[&'a str], p2: usize) -> Option<&'a str> {
     let (suffix, start) = w.longest_suffix(w.len(), suffixes, 0)?;
     (start >= p2).then(|| {
         w.truncate(start);
@@ -161,7 +161,7 @@ fn delete_longest_in_r2<'a>(w: &mut Word, suffixes: &[&'a str], p2: usize) -> Op
 }
 
 /// Noun and adjective suffixes; returns whether one was removed or replaced.
-fn standard_suffix(w: &mut Word, p1: usize, p2: usize, pv: usize) -> bool {
+fn standard_suffix(w: &mut Word<'_>, p1: usize, p2: usize, pv: usize) -> bool {
     let Some((rule, start)) = w.longest_rule(STANDARD, 0) else {
         return false;
     };
@@ -202,7 +202,7 @@ fn standard_suffix(w: &mut Word, p1: usize, p2: usize, pv: usize) -> bool {
 }
 
 /// Verb suffixes in RV; returns whether one was removed.
-fn verb_suffix(w: &mut Word, pv: usize) -> bool {
+fn verb_suffix(w: &mut Word<'_>, pv: usize) -> bool {
     const SUFFIXES: &[&str] = &[
         "ada", "ida", "ia", "aria", "eria", "iria", "ará", "ara", "erá", "era", "irá", "ava",
         "asse", "esse", "isse", "aste", "este", "iste", "ei", "arei", "erei", "irei", "am", "iam",
@@ -225,7 +225,7 @@ fn verb_suffix(w: &mut Word, pv: usize) -> bool {
 }
 
 /// A final `-os`, `a`, `i`, `o`, `á`, `í` or `ó` in RV.
-fn residual_suffix(w: &mut Word, pv: usize) {
+fn residual_suffix(w: &mut Word<'_>, pv: usize) {
     if let Some((_, start)) = w.longest_suffix(w.len(), &["os", "a", "i", "o", "á", "í", "ó"], 0)
         && start >= pv
     {
@@ -234,7 +234,7 @@ fn residual_suffix(w: &mut Word, pv: usize) {
 }
 
 /// A final `e`, `é` or `ê` in RV, then a `u` after `g` or an `i` after `c` in RV; a final `ç` becomes `c`.
-fn residual_form(w: &mut Word, pv: usize) {
+fn residual_form(w: &mut Word<'_>, pv: usize) {
     match w.longest_suffix(w.len(), &["e", "é", "ê", "ç"], 0) {
         Some(("ç", start)) => w.replace_tail(start, "c"),
         Some((_, start)) if start >= pv => {

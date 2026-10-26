@@ -1,9 +1,8 @@
 //! The Snowball German stemmer, as `algorithms/german.sbl` of Snowball v3.1.1.
 
-use std::borrow::Cow;
-
-use super::Stemmer;
-use super::word::{Word, after_vowel_and_consonant, finish};
+use super::CharStemmer;
+use super::word::{Word, after_vowel_and_consonant};
+use crate::Scratch;
 
 /// The Snowball German stemmer (SPEC §6.3.2): `häuser` → `haus`, `aufeinanderfolgenden` → `aufeinanderfolg`,
 /// `straße` → `strass`.
@@ -24,9 +23,11 @@ use super::word::{Word, after_vowel_and_consonant, finish};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct GermanStemmer;
 
-impl Stemmer for GermanStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
-        let mut w = Word::from_chars(prelude(word));
+impl CharStemmer for GermanStemmer {
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let Scratch { chars, work, .. } = scratch;
+        prelude(word, work, chars);
+        let mut w = Word::from_chars(chars);
         let (p1, p2) = regions(w.chars());
         standard_suffix(&mut w, p1, p2);
         for c in w.chars_mut() {
@@ -38,7 +39,6 @@ impl Stemmer for GermanStemmer {
                 other => other,
             };
         }
-        finish(word, w.chars())
     }
 }
 
@@ -48,8 +48,10 @@ fn is_vowel(c: char) -> bool {
 
 /// Marks `u` and `y` between vowels as consonants (`U`, `Y`), then writes `ß` as `ss` and `ae`, `oe`, `ue` as umlauts,
 /// leaving `qu` alone.
-fn prelude(word: &str) -> Vec<char> {
-    let mut chars: Vec<char> = word.chars().collect();
+/// The result goes to `out`; `chars` is a work buffer.
+fn prelude(word: &str, chars: &mut Vec<char>, out: &mut Vec<char>) {
+    chars.clear();
+    chars.extend(word.chars());
     // Snowball's `repeat goto (v [('u'] v <- 'U') or ('y'] v <- 'Y'))`: `goto` leaves the cursor where a match starts, and
     // the marked letter cannot match again there, so the search goes on from the next letter: the vowel after a
     // marked letter can start the next match (`aueua` marks both `u`s).
@@ -68,7 +70,7 @@ fn prelude(word: &str) -> Vec<char> {
         }
         i = i.saturating_add(1);
     }
-    let mut out = Vec::with_capacity(chars.len());
+    out.clear();
     let mut rest = chars.as_slice();
     while let Some((&c, tail)) = rest.split_first() {
         let next = tail.first().copied();
@@ -97,7 +99,6 @@ fn prelude(word: &str) -> Vec<char> {
             }
         }
     }
-    out
 }
 
 /// `R1` (at least 3 characters in) and `R2`, the latter searched from where `R1` was before that adjustment.
@@ -131,14 +132,14 @@ fn is_et_ending(c: char) -> bool {
     )
 }
 
-fn standard_suffix(w: &mut Word, p1: usize, p2: usize) {
+fn standard_suffix(w: &mut Word<'_>, p1: usize, p2: usize) {
     step_1(w, p1);
     step_2(w, p1);
     step_3(w, p1, p2);
     apostrophe(w);
 }
 
-fn step_1(w: &mut Word, p1: usize) {
+fn step_1(w: &mut Word<'_>, p1: usize) {
     const SUFFIXES: &[&str] = &[
         "em", "ern", "er", "erin", "erinnen", "e", "en", "es", "s", "ln", "lns",
     ];
@@ -173,7 +174,7 @@ fn step_1(w: &mut Word, p1: usize) {
     }
 }
 
-fn step_2(w: &mut Word, p1: usize) {
+fn step_2(w: &mut Word<'_>, p1: usize) {
     const SUFFIXES: &[&str] = &["en", "er", "est", "st", "et"];
     const ET_EXCEPTIONS: &[&str] = &["geordn", "intern", "plan", "tick", "tr"];
     let Some((suffix, start)) = w.longest_suffix(w.len(), SUFFIXES, 0) else {
@@ -201,7 +202,7 @@ fn step_2(w: &mut Word, p1: usize) {
     }
 }
 
-fn step_3(w: &mut Word, p1: usize, p2: usize) {
+fn step_3(w: &mut Word<'_>, p1: usize, p2: usize) {
     const SUFFIXES: &[&str] = &["end", "ung", "ig", "ik", "isch", "lich", "heit", "keit"];
     let Some((suffix, start)) = w.longest_suffix(w.len(), SUFFIXES, 0) else {
         return;
@@ -245,7 +246,7 @@ fn step_3(w: &mut Word, p1: usize, p2: usize) {
 }
 
 /// `'s`, `'sch` or `'` after at least two characters (`Grimm'sch` → `Grimm`).
-fn apostrophe(w: &mut Word) {
+fn apostrophe(w: &mut Word<'_>) {
     if let Some((_, start)) = w.longest_suffix(w.len(), &["'s", "'sch", "'"], 0)
         && start >= 2
     {

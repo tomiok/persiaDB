@@ -1,31 +1,32 @@
 //! A word as characters, with the suffix tests and edits the Snowball algorithms are written in.
 //!
 //! Positions are character indices. The algorithms only edit the end of a word, so regions computed on the word
-//! before stemming (`RV`, `R1`, `R2`) stay valid as it shrinks.
+//! before stemming (`RV`, `R1`, `R2`) stay valid as it shrinks. A word lives in a caller's buffer (a
+//! [`Scratch`](crate::Scratch)), so stemming allocates nothing once the buffer has grown.
 
-use std::borrow::Cow;
-
-pub(super) struct Word {
-    chars: Vec<char>,
+pub(super) struct Word<'a> {
+    chars: &'a mut Vec<char>,
 }
 
-impl Word {
-    pub(super) fn new(text: &str) -> Self {
-        Self {
-            chars: text.chars().collect(),
-        }
+impl<'a> Word<'a> {
+    /// `text` in `buf`, replacing what it held.
+    pub(super) fn new(buf: &'a mut Vec<char>, text: &str) -> Self {
+        buf.clear();
+        buf.extend(text.chars());
+        Self { chars: buf }
     }
 
-    pub(super) fn from_chars(chars: Vec<char>) -> Self {
-        Self { chars }
+    /// The characters already in `buf`.
+    pub(super) fn from_chars(buf: &'a mut Vec<char>) -> Self {
+        Self { chars: buf }
     }
 
     pub(super) fn chars(&self) -> &[char] {
-        &self.chars
+        self.chars
     }
 
     pub(super) fn chars_mut(&mut self) -> &mut [char] {
-        &mut self.chars
+        self.chars
     }
 
     pub(super) fn len(&self) -> usize {
@@ -59,12 +60,12 @@ impl Word {
 
     /// The longest entry of `suffixes` ending at `end` and starting at or after `min_start`, with its start
     /// (Snowball's `substring ... among`).
-    pub(super) fn longest_suffix<'a>(
+    pub(super) fn longest_suffix<'s>(
         &self,
         end: usize,
-        suffixes: &[&'a str],
+        suffixes: &[&'s str],
         min_start: usize,
-    ) -> Option<(&'a str, usize)> {
+    ) -> Option<(&'s str, usize)> {
         suffixes
             .iter()
             .filter_map(|&s| {
@@ -173,13 +174,4 @@ pub(super) fn rv(chars: &[char], is_vowel: fn(char) -> bool) -> usize {
         (len >= 3).then_some(3)
     };
     found.unwrap_or(len)
-}
-
-/// The stemmed word, borrowing `original` when stemming left it unchanged.
-pub(super) fn finish<'a>(original: &'a str, chars: &[char]) -> Cow<'a, str> {
-    if original.chars().eq(chars.iter().copied()) {
-        Cow::Borrowed(original)
-    } else {
-        Cow::Owned(chars.iter().collect())
-    }
 }

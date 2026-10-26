@@ -52,12 +52,12 @@ impl FoldingFilter {
 
     /// Writes the folded `text` to the empty `out` and returns `true`, or returns `false` when folding leaves
     /// `text` unchanged (`out` may then hold a copy of `text`; the caller clears it).
-    fn fold_into(&self, text: &str, out: &mut String) -> bool {
+    fn fold_into(&self, text: &str, out: &mut String, run: &mut String) -> bool {
         // ASCII has no decomposition and no folding table entry.
         if text.is_ascii() || self.folds_to_itself(text) {
             return false;
         }
-        self.fold_all_into(text, out)
+        self.fold_all_into(text, out, run)
     }
 
     /// Whether folding provably leaves `text` unchanged, found without allocating (ROADMAP 4.4.9): `text` is NFC
@@ -85,14 +85,15 @@ impl FoldingFilter {
     #[cfg(test)]
     fn fold_all(&self, text: &str) -> Option<String> {
         let mut folded = String::new();
-        self.fold_all_into(text, &mut folded).then_some(folded)
+        self.fold_all_into(text, &mut folded, &mut String::new())
+            .then_some(folded)
     }
 
     /// [`Self::fold_into`] without the pre-scan.
-    fn fold_all_into(&self, text: &str, folded: &mut String) -> bool {
+    fn fold_all_into(&self, text: &str, folded: &mut String, run: &mut String) -> bool {
         // The folded run since the last preserved character, recomposed when one comes or at the end. Preserved
         // characters bypass recomposition, which could rewrite them (U+0344 is not NFC) and break idempotence.
-        let mut run = String::new();
+        run.clear();
         let keep = |c: char, folded: &mut String, run: &mut String| {
             folded.extend(run.nfc());
             run.clear();
@@ -100,13 +101,13 @@ impl FoldingFilter {
         };
         for c in text.chars() {
             if self.is_preserved(c) {
-                keep(c, folded, &mut run);
+                keep(c, folded, run);
                 continue;
             }
             // The table and the preserved set apply to the parts too: `Ǣ` is `Æ` and a macron.
             decompose_canonical(c, |part| {
                 if self.is_preserved(part) {
-                    keep(part, folded, &mut run);
+                    keep(part, folded, run);
                 } else if let Some(letter) = fold_letter(part) {
                     run.push_str(letter);
                 } else if !is_folded_mark(part) {
@@ -122,7 +123,9 @@ impl FoldingFilter {
 impl TokenFilter for FoldingFilter {
     fn apply(&self, tokens: &mut TokenStream) {
         // A token made only of combining marks folds to nothing, and `rewrite` removes it.
-        tokens.rewrite(|text, out| self.fold_into(text, out));
+        tokens.rewrite_with_scratch(|text, out, scratch| {
+            self.fold_into(text, out, &mut scratch.text)
+        });
     }
 }
 

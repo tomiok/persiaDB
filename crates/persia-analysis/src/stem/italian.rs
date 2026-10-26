@@ -1,9 +1,8 @@
 //! The Snowball Italian stemmer, as `algorithms/italian.sbl` of Snowball v3.1.1.
 
-use std::borrow::Cow;
-
-use super::Stemmer;
-use super::word::{Word, finish, r1_r2, rv};
+use super::CharStemmer;
+use super::word::{Word, r1_r2, rv};
+use crate::Scratch;
 
 /// The Snowball Italian stemmer (SPEC §6.3.2): `abbandonata` → `abbandon`, `nell'estate` → `estat`,
 /// `velocemente` → `veloc`.
@@ -24,9 +23,12 @@ use super::word::{Word, finish, r1_r2, rv};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ItalianStemmer;
 
-impl Stemmer for ItalianStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
-        let mut w = Word::from_chars(prelude(&elide(word)));
+impl CharStemmer for ItalianStemmer {
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let Scratch { chars, work, .. } = scratch;
+        elide(word, work);
+        prelude(work, chars);
+        let mut w = Word::from_chars(chars);
         let pv = regions_rv(w.chars());
         let (p1, p2) = r1_r2(w.chars(), is_vowel);
         attached_pronoun(&mut w, pv);
@@ -41,7 +43,6 @@ impl Stemmer for ItalianStemmer {
                 other => other,
             };
         }
-        finish(word, w.chars())
     }
 }
 
@@ -50,28 +51,28 @@ fn is_vowel(c: char) -> bool {
 }
 
 /// The word without a leading elided article or preposition, when something follows it.
-fn elide(word: &str) -> Vec<char> {
+fn elide(word: &str, chars: &mut Vec<char>) {
     const ELISIONS: &[&str] = &[
         "d'", "l'", "m'", "s'", "t'", "v'", "all'", "dall'", "dell'", "gl'", "nell'", "quell'",
         "quest'", "sull'", "tutt'", "un'",
     ];
-    let chars: Vec<char> = word.chars().collect();
+    chars.clear();
+    chars.extend(word.chars());
     // At most one entry is a prefix: each ends at the first apostrophe.
     let elided = ELISIONS
         .iter()
         .map(|e| e.chars().count())
         .zip(ELISIONS)
         .find(|&(len, e)| len < chars.len() && chars.iter().copied().take(len).eq(e.chars()));
-    match elided {
-        Some((len, _)) => chars.get(len..).unwrap_or_default().to_vec(),
-        None => chars,
+    if let Some((len, _)) = elided {
+        chars.drain(..len);
     }
 }
 
 /// Acute accents written as grave ones, `qu` as `qU`, and `u` and `i` between vowels marked as consonants (`U`,
 /// `I`).
-fn prelude(chars: &[char]) -> Vec<char> {
-    let mut out: Vec<char> = Vec::with_capacity(chars.len());
+fn prelude(chars: &[char], out: &mut Vec<char>) {
+    out.clear();
     let mut after_q = false;
     for &c in chars {
         out.push(match c {
@@ -102,7 +103,6 @@ fn prelude(chars: &[char]) -> Vec<char> {
         }
         i = i.saturating_add(1);
     }
-    out
 }
 
 /// `RV` as in Spanish, except that it starts after `divan` in words beginning so (`divano` must not stem like
@@ -121,7 +121,7 @@ fn regions_rv(chars: &[char]) -> usize {
 
 /// An enclitic pronoun after a gerund or an infinitive in RV: `-ando`/`-endo` lose the pronoun, `-ar`/`-er`/`-ir`
 /// get `e` for it (`mangiarla` → `mangiare`).
-fn attached_pronoun(w: &mut Word, pv: usize) {
+fn attached_pronoun(w: &mut Word<'_>, pv: usize) {
     const PRONOUNS: &[&str] = &[
         "ci", "gli", "la", "le", "li", "lo", "mi", "ne", "si", "ti", "vi", "sene", "gliela",
         "gliele", "glieli", "glielo", "gliene", "mela", "mele", "meli", "melo", "mene", "tela",
@@ -221,7 +221,7 @@ const STANDARD: &[(&str, Standard)] = &[
 ];
 
 /// Deletes the `suffix` ending the word if it starts at or after `from`; whether it did.
-fn delete_from(w: &mut Word, suffix: &str, from: usize) -> bool {
+fn delete_from(w: &mut Word<'_>, suffix: &str, from: usize) -> bool {
     match w.ends_with(suffix) {
         Some(start) if start >= from => {
             w.truncate(start);
@@ -232,7 +232,7 @@ fn delete_from(w: &mut Word, suffix: &str, from: usize) -> bool {
 }
 
 /// The longest standard suffix, if its rule's region holds; `false` (so verb suffixes are tried) otherwise.
-fn standard_suffix(w: &mut Word, pv: usize, p1: usize, p2: usize) -> bool {
+fn standard_suffix(w: &mut Word<'_>, pv: usize, p1: usize, p2: usize) -> bool {
     let Some((rule, start)) = w.longest_rule(STANDARD, 0) else {
         return false;
     };
@@ -283,7 +283,7 @@ fn standard_suffix(w: &mut Word, pv: usize, p1: usize, p2: usize) -> bool {
 }
 
 /// The longest verb ending inside RV.
-fn verb_suffix(w: &mut Word, pv: usize) {
+fn verb_suffix(w: &mut Word<'_>, pv: usize) {
     const VERB: &[&str] = &[
         "ammo", "ando", "ano", "are", "arono", "asse", "assero", "assi", "assimo", "ata", "ate",
         "ati", "ato", "ava", "avamo", "avano", "avate", "avi", "avo", "emmo", "enda", "ende",
@@ -301,7 +301,7 @@ fn verb_suffix(w: &mut Word, pv: usize) {
 }
 
 /// A final vowel in RV, then an `i` before it in RV; an `h` after `c` or `g` in RV (`amiche` → `amic`).
-fn vowel_suffix(w: &mut Word, pv: usize) {
+fn vowel_suffix(w: &mut Word<'_>, pv: usize) {
     let len = w.len();
     let last = w.before(len);
     if let Some(start) = len.checked_sub(1)

@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-analysis`: allocation-free analysis for every built-in analyzer once its `TokenStream` has grown: `Scratch`
+  buffers lent by `TokenStream::rewrite_with_scratch`, and `Stemmer::stem_into`, which the built-in stemmers implement
+  in them (its default goes through `stem`). A counting-allocator test checks it (ADR-0026). Still allocating: tokens
+  longer than 1020 bytes (their strings are not kept), tokens holding `Σ` (lowercased with `str::to_lowercase`), long
+  runs of combining marks (buffered by the normalization iterators), and char filters.
 - `persia-analysis`: built-in `fr`, `de` and `it` analyzers at version 1 (SPEC §6.3.3): `ElisionFilter` (`FRENCH_ELISIONS`, `ITALIAN_ELISIONS`), `FrenchStemmer`, `GermanStemmer`
   and `ItalianStemmer` (Snowball 3.1.1, checked against the full Snowball vocabularies; French and Italian remove
   elisions such as `l'` and `nell'`) and `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS`, `ITALIAN_STOPWORDS`. Schemas may name them.
@@ -133,8 +138,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
   converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens, within bounds (at most
   4096 spare strings of up to 1020 bytes, and 4096 token slots once cleared), so analyzing value after value stops
-  growing its buffers once it has grown; values beyond those bounds allocate again, and stemmers and folding still
-  allocate for the tokens they change (ROADMAP 4.4.12).
+  growing its buffers once it has grown; values beyond those bounds allocate again.
 - `persia-engine`: the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and
   version). `fr@1`, `de@1` and `it@1` now name the analyzers of ROADMAP 4.4.10 (see Added); files an earlier
   development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.

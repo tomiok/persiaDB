@@ -1,9 +1,8 @@
 //! The Snowball French stemmer, as `algorithms/french.sbl` of Snowball v3.1.1.
 
-use std::borrow::Cow;
-
-use super::Stemmer;
-use super::word::{Word, finish, r1_r2};
+use super::CharStemmer;
+use super::word::{Word, r1_r2};
+use crate::Scratch;
 
 /// The Snowball French stemmer (SPEC §6.3.2): `continuellement` → `continuel`, `l'ambassadeur` → `ambassadeur`,
 /// `généralement` → `général`.
@@ -24,9 +23,12 @@ use super::word::{Word, finish, r1_r2};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FrenchStemmer;
 
-impl Stemmer for FrenchStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
-        let mut w = Word::from_chars(prelude(&elide(word)));
+impl CharStemmer for FrenchStemmer {
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let Scratch { chars, work, .. } = scratch;
+        elide(word, work);
+        prelude(work, chars);
+        let mut w = Word::from_chars(chars);
         let pv = rv(w.chars());
         let (p1, p2) = r1_r2(w.chars(), is_vowel);
         let r = Regions { pv, p1, p2 };
@@ -47,7 +49,8 @@ impl Stemmer for FrenchStemmer {
         }
         un_double(&mut w);
         un_accent(&mut w);
-        finish(word, &postlude(w.chars()))
+        postlude(w.chars(), work);
+        std::mem::swap(chars, work);
     }
 }
 
@@ -80,7 +83,7 @@ fn is_vowel(c: char) -> bool {
     )
 }
 
-fn replace_last(w: &mut Word, last: Option<usize>, c: char) {
+fn replace_last(w: &mut Word<'_>, last: Option<usize>, c: char) {
     if let Some(slot) = last.and_then(|i| w.chars_mut().get_mut(i)) {
         *slot = c;
     }
@@ -88,22 +91,23 @@ fn replace_last(w: &mut Word, last: Option<usize>, c: char) {
 
 /// The word without a leading elided `c'`, `d'`, `j'`, `l'`, `m'`, `n'`, `s'`, `t'` or `qu'`, when something
 /// follows it.
-fn elide(word: &str) -> Vec<char> {
-    let chars: Vec<char> = word.chars().collect();
+fn elide(word: &str, chars: &mut Vec<char>) {
+    chars.clear();
+    chars.extend(word.chars());
     let prefix = match chars.as_slice() {
         ['c' | 'd' | 'j' | 'l' | 'm' | 'n' | 's' | 't', '\'', _, ..] => 2,
         ['q', 'u', '\'', _, ..] => 3,
         _ => 0,
     };
-    chars.get(prefix..).unwrap_or_default().to_vec()
+    chars.drain(..prefix);
 }
 
 /// Marks `u`, `i` and `y` that act as consonants (`U`, `I`, `Y`), and writes `ë`, `ï` as `He`, `Hi` (Snowball's
 /// `repeat goto (...)`: `goto` leaves the cursor where a match starts, and nothing matches again at a
 /// rewritten letter, so the search goes on from the next letter).
-fn prelude(chars: &[char]) -> Vec<char> {
-    let mut c: Vec<char> = chars.to_vec();
-    let mut out: Vec<char> = Vec::with_capacity(c.len());
+/// Rewrites `c` while it writes the result to `out`.
+fn prelude(c: &mut Vec<char>, out: &mut Vec<char>) {
+    out.clear();
     let mut i = 0;
     while let Some(&first) = c.get(i) {
         let mut cur = first;
@@ -119,9 +123,9 @@ fn prelude(chars: &[char]) -> Vec<char> {
             };
             if is_vowel(cur) && matches!(next, Some('u' | 'i')) && after.is_some_and(is_vowel) {
                 // A vowel, then `u` or `i` before a vowel.
-                mark(&mut c, if next == Some('u') { 'U' } else { 'I' });
+                mark(c, if next == Some('u') { 'U' } else { 'I' });
             } else if is_vowel(cur) && next == Some('y') {
-                mark(&mut c, 'Y');
+                mark(c, 'Y');
             } else if cur == 'ë' || cur == 'ï' {
                 // `He` or `Hi`: the `H` goes out, and its letter is the next position.
                 out.push('H');
@@ -129,7 +133,7 @@ fn prelude(chars: &[char]) -> Vec<char> {
             } else if cur == 'y' && next.is_some_and(is_vowel) {
                 cur = 'Y';
             } else if cur == 'q' && next == Some('u') {
-                mark(&mut c, 'U');
+                mark(c, 'U');
             } else {
                 break;
             }
@@ -137,7 +141,6 @@ fn prelude(chars: &[char]) -> Vec<char> {
         out.push(cur);
         i = i.saturating_add(1);
     }
-    out
 }
 
 /// `RV`: after the third letter if the first two are vowels, or after `par`, `col`, `tap` or `ni` + vowel at the
@@ -172,8 +175,8 @@ fn rv(chars: &[char]) -> usize {
 
 /// Writes the consonant marks back as letters: `I`, `U`, `Y` as `i`, `u`, `y`, `He`, `Hi` as `ë`, `ï`, and drops
 /// any other `H`.
-fn postlude(chars: &[char]) -> Vec<char> {
-    let mut out = Vec::with_capacity(chars.len());
+fn postlude(chars: &[char], out: &mut Vec<char>) {
+    out.clear();
     let mut rest = chars;
     while let Some((&c, tail)) = rest.split_first() {
         rest = tail;
@@ -193,7 +196,6 @@ fn postlude(chars: &[char]) -> Vec<char> {
             (other, _) => out.push(other),
         }
     }
-    out
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -280,12 +282,12 @@ const STANDARD: &[(&str, Standard)] = &[
 ];
 
 /// The suffix `s` ending the word, when it starts at or after `from`: its start.
-fn at_end(w: &Word, s: &str, from: usize) -> Option<usize> {
+fn at_end(w: &Word<'_>, s: &str, from: usize) -> Option<usize> {
     w.ends_with(s).filter(|&start| start >= from)
 }
 
 /// A preceding `ic`: deleted in R2, else written `iqU`.
-fn ic(w: &mut Word, p2: usize) {
+fn ic(w: &mut Word<'_>, p2: usize) {
     if let Some(start) = w.ends_with("ic") {
         if start >= p2 {
             w.truncate(start);
@@ -297,7 +299,7 @@ fn ic(w: &mut Word, p2: usize) {
 
 /// The longest standard suffix and its rule: `None` if none applies, `Some(true)` if it was removed, `Some(false)`
 /// if the word was rewritten but the verb steps must still run (Snowball's `fail(...)`).
-fn standard_suffix(w: &mut Word, r: Regions) -> Option<bool> {
+fn standard_suffix(w: &mut Word<'_>, r: Regions) -> Option<bool> {
     let (rule, start) = w.longest_rule(STANDARD, 0)?;
     let Regions { pv, p1, p2 } = r;
     let in_r2 = start >= p2;
@@ -372,7 +374,7 @@ fn standard_suffix(w: &mut Word, r: Regions) -> Option<bool> {
 
 /// After `-ement` is removed: `iv` (and `at` before it) in R2; `eus` deleted in R2 or written `eux` in R1; `abl`,
 /// `iqU` in R2; `ièr`, `Ièr` written `i` in RV.
-fn ement_tail(w: &mut Word, r: Regions) {
+fn ement_tail(w: &mut Word<'_>, r: Regions) {
     let Regions { pv, p1, p2 } = r;
     let Some((s, at)) = w.longest_suffix(w.len(), &["iv", "eus", "abl", "iqU", "ièr", "Ièr"], 0)
     else {
@@ -393,7 +395,7 @@ fn ement_tail(w: &mut Word, r: Regions) {
 }
 
 /// The longest `-ir` verb ending inside RV, after a non-vowel other than `H` also inside RV.
-fn i_verb_suffix(w: &mut Word, pv: usize) -> bool {
+fn i_verb_suffix(w: &mut Word<'_>, pv: usize) -> bool {
     const SUFFIXES: &[&str] = &[
         "îmes", "ît", "îtes", "i", "ie", "ies", "ir", "ira", "irai", "iraIent", "irais", "irait",
         "iras", "irent", "irez", "iriez", "irions", "irons", "iront", "is", "issaIent", "issais",
@@ -414,7 +416,7 @@ fn i_verb_suffix(w: &mut Word, pv: usize) -> bool {
 }
 
 /// The longest other verb ending inside RV.
-fn verb_suffix(w: &mut Word, r: Regions) -> bool {
+fn verb_suffix(w: &mut Word<'_>, r: Regions) -> bool {
     const DELETE: &[&str] = &[
         "é", "ée", "ées", "és", "èrent", "er", "era", "erai", "eraIent", "erais", "erait", "eras",
         "erez", "eriez", "erions", "erons", "eront", "ez", "iez", "eais",
@@ -459,7 +461,7 @@ fn verb_suffix(w: &mut Word, r: Regions) -> bool {
 
 /// When no other suffix was removed: a final `s` (unless after `a`, `i`, `o`, `u`, `è` or `s`, but after `Hi`), then
 /// inside RV `-ion` after `s` or `t` in R2, `-ier`/`-ière` written `i`, or a final `e`.
-fn residual_suffix(w: &mut Word, r: Regions) {
+fn residual_suffix(w: &mut Word<'_>, r: Regions) {
     if let Some(s) = w.ends_with("s") {
         let after_hi = w.suffix_start(s, "Hi").is_some();
         let removable = w
@@ -491,7 +493,7 @@ fn residual_suffix(w: &mut Word, r: Regions) {
 }
 
 /// A final `enn`, `onn`, `ett`, `ell` or `eill` loses its last letter.
-fn un_double(w: &mut Word) {
+fn un_double(w: &mut Word<'_>) {
     if ["enn", "onn", "ett", "ell", "eill"]
         .iter()
         .any(|s| w.ends_with(s).is_some())
@@ -501,7 +503,7 @@ fn un_double(w: &mut Word) {
 }
 
 /// An `é` or `è` before the final run of non-vowels becomes `e`.
-fn un_accent(w: &mut Word) {
+fn un_accent(w: &mut Word<'_>) {
     let chars = w.chars();
     let Some(last_vowel) = chars.iter().rposition(|&c| is_vowel(c)) else {
         return;

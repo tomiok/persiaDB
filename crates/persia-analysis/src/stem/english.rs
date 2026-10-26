@@ -2,8 +2,9 @@
 
 use std::borrow::Cow;
 
-use super::Stemmer;
-use super::word::{Word, after_vowel_and_consonant, finish};
+use super::CharStemmer;
+use super::word::{Word, after_vowel_and_consonant};
+use crate::Scratch;
 
 /// The Snowball English stemmer, Porter2 (SPEC §6.3.2): `running` → `run`, `generalizations` → `general`,
 /// `skies` → `sky`.
@@ -23,19 +24,18 @@ use super::word::{Word, after_vowel_and_consonant, finish};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EnglishStemmer;
 
-impl Stemmer for EnglishStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
+impl CharStemmer for EnglishStemmer {
+    fn shortcut<'a>(&self, word: &'a str) -> Option<Cow<'a, str>> {
         if let Some(stem) = exception(word) {
-            return if stem == word {
-                Cow::Borrowed(word)
-            } else {
-                Cow::Owned(stem.to_owned())
-            };
+            // An invariant entry (`news`, `sky`) borrows the word itself, as `Stemmer::stem` promises.
+            return Some(Cow::Borrowed(if stem == word { word } else { stem }));
         }
-        if word.chars().nth(2).is_none() {
-            return Cow::Borrowed(word);
-        }
-        let mut w = Word::new(word);
+        // Words of fewer than 3 characters are left alone.
+        word.chars().nth(2).is_none().then_some(Cow::Borrowed(word))
+    }
+
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let mut w = Word::new(&mut scratch.chars, word);
         let y_found = prelude(&mut w);
         let (p1, p2) = regions(w.chars());
         step_1a(&mut w);
@@ -52,7 +52,6 @@ impl Stemmer for EnglishStemmer {
                 }
             }
         }
-        finish(word, w.chars())
     }
 }
 
@@ -83,7 +82,7 @@ fn exception(word: &str) -> Option<&'static str> {
 
 /// Drops a leading apostrophe and marks consonant `y`s (initial, or after a vowel) as `Y`. Returns whether it
 /// marked any.
-fn prelude(w: &mut Word) -> bool {
+fn prelude(w: &mut Word<'_>) -> bool {
     if w.chars().first() == Some(&'\'') {
         w.remove_first();
     }
@@ -123,7 +122,7 @@ fn regions(chars: &[char]) -> (usize, usize) {
 
 /// Whether the word up to `end` ends in a short syllable: non-vowel, vowel, non-vowel other than `w`, `x`, `Y`;
 /// or vowel, non-vowel at the start of the word; or `past`.
-fn ends_short(w: &Word, end: usize) -> bool {
+fn ends_short(w: &Word<'_>, end: usize) -> bool {
     let at = |back: usize| {
         end.checked_sub(back)
             .and_then(|i| w.chars().get(i))
@@ -140,14 +139,14 @@ fn ends_short(w: &Word, end: usize) -> bool {
     last_three || two_letter_word || w.suffix_start(end, "past").is_some()
 }
 
-fn has_vowel(w: &Word, end: usize) -> bool {
+fn has_vowel(w: &Word<'_>, end: usize) -> bool {
     w.chars()
         .get(..end)
         .is_some_and(|head| head.iter().copied().any(is_vowel))
 }
 
 /// Possessives and plurals.
-fn step_1a(w: &mut Word) {
+fn step_1a(w: &mut Word<'_>) {
     if let Some((_, start)) = w.longest_suffix(w.len(), &["'", "'s", "'s'"], 0) {
         w.truncate(start);
     }
@@ -163,7 +162,7 @@ fn step_1a(w: &mut Word) {
 }
 
 /// `-eed`, `-ed`, `-ing` and their `-ly` forms.
-fn step_1b(w: &mut Word, p1: usize) {
+fn step_1b(w: &mut Word<'_>, p1: usize) {
     const ENDINGS: &[&str] = &[
         "at", "bl", "iz", "bb", "dd", "ff", "gg", "mm", "nn", "pp", "rr", "tt",
     ];
@@ -220,7 +219,7 @@ fn step_1b(w: &mut Word, p1: usize) {
 }
 
 /// A final `y` after a consonant that is not the first letter becomes `i`.
-fn step_1c(w: &mut Word) {
+fn step_1c(w: &mut Word<'_>) {
     // The consonant before the `y` must not be the first letter, so the `y` is at least the third.
     let Some(last) = w.len().checked_sub(1).filter(|&last| last >= 2) else {
         return;
@@ -232,7 +231,7 @@ fn step_1c(w: &mut Word) {
     }
 }
 
-fn step_2(w: &mut Word, p1: usize) {
+fn step_2(w: &mut Word<'_>, p1: usize) {
     const SUFFIXES: &[&str] = &[
         "tional", "enci", "anci", "abli", "entli", "izer", "ization", "ational", "ation", "ator",
         "alism", "aliti", "alli", "fulness", "ousli", "ousness", "iveness", "iviti", "biliti",
@@ -266,7 +265,7 @@ fn step_2(w: &mut Word, p1: usize) {
     w.replace_tail(start, with);
 }
 
-fn step_3(w: &mut Word, p1: usize, p2: usize) {
+fn step_3(w: &mut Word<'_>, p1: usize, p2: usize) {
     const SUFFIXES: &[&str] = &[
         "tional", "ational", "alize", "icate", "iciti", "ical", "ful", "ness", "ative",
     ];
@@ -288,7 +287,7 @@ fn step_3(w: &mut Word, p1: usize, p2: usize) {
     w.replace_tail(start, with);
 }
 
-fn step_4(w: &mut Word, p2: usize) {
+fn step_4(w: &mut Word<'_>, p2: usize) {
     const SUFFIXES: &[&str] = &[
         "al", "ance", "ence", "er", "ic", "able", "ible", "ant", "ement", "ment", "ent", "ism",
         "ate", "iti", "ous", "ive", "ize", "ion",
@@ -302,7 +301,7 @@ fn step_4(w: &mut Word, p2: usize) {
     w.truncate(start);
 }
 
-fn step_5(w: &mut Word, p1: usize, p2: usize) {
+fn step_5(w: &mut Word<'_>, p1: usize, p2: usize) {
     match w.longest_suffix(w.len(), &["e", "l"], 0) {
         Some(("e", start)) => {
             if start >= p2 || (start >= p1 && !ends_short(w, start)) {

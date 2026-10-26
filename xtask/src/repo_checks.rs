@@ -239,6 +239,7 @@ mod tests {
         "crates/persia-format/tests/source_props.rs",    // ADR-0010: maps its own temporary files
         "crates/persia-storage/src/container/mapped.rs", // ADR-0017
         "crates/persia-storage/src/sys.rs",              // ADR-0021
+        "crates/persia-analysis/tests/allocations.rs",   // ADR-0026: counting allocator
     ];
 
     #[test]
