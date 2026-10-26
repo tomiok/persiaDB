@@ -802,8 +802,14 @@ those analyzers' versions.
   `haben`, `werden`; `essere`, `avere`), leaving out words that are just as often content words (`bajo`, `ante`,
   `era`; `or`, `car`, `été`; `stato`, `più`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
   `SPANISH_STOPWORDS`, `PORTUGUESE_STOPWORDS`, `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS` and `ITALIAN_STOPWORDS`, pinned
-  by a fingerprint test. A stopword is matched before stemming, so an elided form (`l'arbre`, one token) is not one
-  even though the French stemmer later removes its `l'`.
+  by a fingerprint test. German leaves out the modal verbs (`kann`, `will`, also a
+  noun) and keeps `sein` and `man`, which are nouns far less often than function words; French keeps `est` (also
+  "east") and the possessive `son` (also "sound"), Italian drops `sei` (also "six"). In `fr` and `it`, `elision`
+  runs before `stop`, so `c'est` and `l'ho` are the stopwords `est` and `ho`.
+- **elision** `{prefixes}`: removes a leading listed word and the U+0027 after it, when something follows
+  (`l'été` → `été`; `l'` alone is kept). The embedded lists (`persia_analysis::FRENCH_ELISIONS`, `ITALIAN_ELISIONS`)
+  hold the prefixes the French and Italian stemmers remove (`stem` below) plus, for French, the conjunctions ending in `qu`
+  (`lorsqu'`, `puisqu'`, `jusqu'`, `quelqu'`, `quoiqu'`). It runs after `apostrophe` (`l’été`) and before `stop`.
 - **stem** `{language}`: replaces the token text with its stem, by the Snowball algorithm of the language
   (snowballstem.org, `algorithms/<language>.sbl` of Snowball v3.1.1): `english` (Porter2), `spanish`,
   `portuguese`, `french`, `german`, `italian`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
@@ -851,9 +857,9 @@ chain so it bounds the final terms.
 | `en@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (English), `stem` (`english`), `fold` (preserves nothing), `guard` |
 | `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
 | `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
-| `fr@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (French), `stem` (`french`), `fold` (preserves nothing), `guard` |
+| `fr@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `elision` (French), `stop` (French), `stem` (`french`), `fold` (preserves nothing), `guard` |
 | `de@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (German), `stem` (`german`), `fold` (preserves nothing), `guard` |
-| `it@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (Italian), `stem` (`italian`), `fold` (preserves nothing), `guard` |
+| `it@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `elision` (Italian), `stop` (Italian), `stem` (`italian`), `fold` (preserves nothing), `guard` |
 
 `keyword` and `whitespace` do not normalize: case and accents are significant. The guard truncates each token, so
 under `keyword` (one token per value) two values that share their first 255 bytes are one term, and under

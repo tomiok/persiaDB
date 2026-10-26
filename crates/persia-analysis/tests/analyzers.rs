@@ -123,7 +123,7 @@ fn fr_de_it_analyze_their_languages() {
             "fr",
             "L’été dernier, les enfants jouaient dans les forêts de l'Auvergne et c'était magnifique.",
             &[
-                "ete", "derni", "enfant", "jou", "foret", "auvergn", "etait", "magnif",
+                "ete", "derni", "enfant", "jou", "foret", "auvergn", "magnif",
             ],
         ),
         (
@@ -132,7 +132,6 @@ fn fr_de_it_analyze_their_languages() {
             &[
                 "haus",
                 "strass",
-                "wurd",
                 "aufeinanderfolg",
                 "renoviert",
                 "grimm",
@@ -151,6 +150,18 @@ fn fr_de_it_analyze_their_languages() {
     for (name, text, want) in cases {
         assert_eq!(builtin_texts(name, text), *want, "{name}");
     }
+    // Elided function words are stopwords: the elision goes before `stop` (SPEC §6.3.3).
+    assert_eq!(
+        builtin_texts(
+            "fr",
+            "c'est qu'il n'a pas d'un j'ai l'on s'il qu'elle lorsqu’il"
+        ),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        builtin_texts("it", "l'ho dell'anno un'altra"),
+        ["anno", "altra"]
+    );
 }
 
 #[test]

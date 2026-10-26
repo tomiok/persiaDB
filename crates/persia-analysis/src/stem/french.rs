@@ -102,38 +102,40 @@ fn elide(word: &str) -> Vec<char> {
 /// `repeat goto (...)`: `goto` leaves the cursor where a match starts, and nothing matches again at a
 /// rewritten letter, so the search goes on from the next letter).
 fn prelude(chars: &[char]) -> Vec<char> {
-    let mut out: Vec<char> = chars.to_vec();
+    let mut c: Vec<char> = chars.to_vec();
+    let mut out: Vec<char> = Vec::with_capacity(c.len());
     let mut i = 0;
-    while let Some(&c) = out.get(i) {
-        let next = out.get(i.saturating_add(1)).copied();
-        let after = out.get(i.saturating_add(2)).copied();
-        let set = |out: &mut Vec<char>, at: usize, to: char| {
-            if let Some(slot) = out.get_mut(at) {
-                *slot = to;
+    while let Some(&first) = c.get(i) {
+        let mut cur = first;
+        // Snowball retries at the same position after a match (each one rewrites a letter, so this ends): a vowel
+        // whose next letter was just marked can still be an `ë` or `ï` to rewrite (`ëie` → `HeIe`).
+        loop {
+            let next = c.get(i.saturating_add(1)).copied();
+            let after = c.get(i.saturating_add(2)).copied();
+            let mark = |c: &mut Vec<char>, to: char| {
+                if let Some(slot) = c.get_mut(i.saturating_add(1)) {
+                    *slot = to;
+                }
+            };
+            if is_vowel(cur) && matches!(next, Some('u' | 'i')) && after.is_some_and(is_vowel) {
+                // A vowel, then `u` or `i` before a vowel.
+                mark(&mut c, if next == Some('u') { 'U' } else { 'I' });
+            } else if is_vowel(cur) && next == Some('y') {
+                mark(&mut c, 'Y');
+            } else if cur == 'ë' || cur == 'ï' {
+                // `He` or `Hi`: the `H` goes out, and its letter is the next position.
+                out.push('H');
+                cur = if cur == 'ë' { 'e' } else { 'i' };
+            } else if cur == 'y' && next.is_some_and(is_vowel) {
+                cur = 'Y';
+            } else if cur == 'q' && next == Some('u') {
+                mark(&mut c, 'U');
+            } else {
+                break;
             }
-        };
-        let vowel_after = after.is_some_and(is_vowel);
-        let at_next = i.saturating_add(1);
-        // A vowel, then `u` or `i` before a vowel, or a `y`.
-        if is_vowel(c) && matches!(next, Some('u' | 'i')) && vowel_after {
-            set(&mut out, at_next, if next == Some('u') { 'U' } else { 'I' });
-            i = i.saturating_add(1);
-        } else if is_vowel(c) && next == Some('y') {
-            set(&mut out, at_next, 'Y');
-            i = i.saturating_add(1);
-        } else if c == 'ë' || c == 'ï' {
-            set(&mut out, i, 'H');
-            out.insert(at_next, if c == 'ë' { 'e' } else { 'i' });
-            i = i.saturating_add(1);
-        } else if c == 'y' && next.is_some_and(is_vowel) {
-            set(&mut out, i, 'Y');
-            i = i.saturating_add(1);
-        } else if c == 'q' && next == Some('u') {
-            set(&mut out, at_next, 'U');
-            i = i.saturating_add(1);
-        } else {
-            i = i.saturating_add(1);
         }
+        out.push(cur);
+        i = i.saturating_add(1);
     }
     out
 }

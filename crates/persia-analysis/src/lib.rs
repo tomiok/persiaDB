@@ -20,6 +20,7 @@
 mod analyzer;
 mod apostrophe;
 mod char_filter;
+mod elision;
 mod fold;
 mod length;
 mod lowercase;
@@ -37,6 +38,7 @@ mod whitespace;
 pub use analyzer::{Analyzer, AnalyzerBuilder};
 pub use apostrophe::ApostropheFilter;
 pub use char_filter::{CharFilter, CharFilterOutput};
+pub use elision::{ElisionFilter, FRENCH_ELISIONS, ITALIAN_ELISIONS};
 pub use fold::FoldingFilter;
 pub use length::{DEFAULT_MAX_TOKEN_LEN, LengthPolicy, TokenLengthGuard};
 pub use lowercase::LowercaseFilter;

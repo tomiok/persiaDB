@@ -5,9 +5,10 @@ use std::sync::Arc;
 
 use crate::analyzer::Analyzer;
 use crate::{
-    ApostropheFilter, EnglishStemmer, FoldingFilter, FrenchStemmer, GermanStemmer, ItalianStemmer,
-    KeywordTokenizer, LowercaseFilter, NfkcFilter, PortugueseStemmer, SpanishStemmer,
-    StandardTokenizer, StemmerFilter, StopwordFilter, TokenLengthGuard, WhitespaceTokenizer,
+    ApostropheFilter, ElisionFilter, EnglishStemmer, FoldingFilter, FrenchStemmer, GermanStemmer,
+    ItalianStemmer, KeywordTokenizer, LowercaseFilter, NfkcFilter, PortugueseStemmer,
+    SpanishStemmer, StandardTokenizer, StemmerFilter, StopwordFilter, TokenLengthGuard,
+    WhitespaceTokenizer,
 };
 
 /// A built-in analyzer version (SPEC §6.3.3).
@@ -123,6 +124,7 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
             .filter(NfkcFilter)
             .filter(LowercaseFilter)
             .filter(ApostropheFilter)
+            .filter(ElisionFilter::french())
             .filter(StopwordFilter::french())
             .filter(StemmerFilter::new(FrenchStemmer))
             .filter(FoldingFilter::default())
@@ -139,6 +141,7 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
             .filter(NfkcFilter)
             .filter(LowercaseFilter)
             .filter(ApostropheFilter)
+            .filter(ElisionFilter::italian())
             .filter(StopwordFilter::italian())
             .filter(StemmerFilter::new(ItalianStemmer))
             .filter(FoldingFilter::default())

@@ -207,7 +207,7 @@ proptest! {
 /// Edge cases where the port follows Snowball on input the vocabularies lack, so a cleanup cannot drift.
 #[test]
 fn snowball_edge_cases_are_kept() {
-    let cases: [(&dyn Stemmer, &str, &str); 6] = [
+    let cases: [(&dyn Stemmer, &str, &str); 16] = [
         // A leading apostrophe goes, then the possessive: nothing is left.
         (&EnglishStemmer, "''s", ""),
         // An input `Y` counts as a consonant; marked `y`s are restored to lowercase.
@@ -218,6 +218,19 @@ fn snowball_edge_cases_are_kept() {
         // Portuguese writes `ã` as `a~` while stemming, so a literal `a~` comes back as `ã`.
         (&PortugueseStemmer, "a~o", "ão"),
         (&PortugueseStemmer, "maçã", "maçã"),
+        // French retries a position after marking the next letter, so a `ë`/`ï` vowel is still rewritten
+        // (Snowball 3.1.1 `stemwords`; outside the vocabulary).
+        (&FrenchStemmer, "aïyeux", "aïi"),
+        (&FrenchStemmer, "ëie", "ëi"),
+        (&FrenchStemmer, "ëya", "ëi"),
+        (&FrenchStemmer, "ëier", "ëi"),
+        (&FrenchStemmer, "êëière", "êëi"),
+        (&FrenchStemmer, "aïiques", "aïiqu"),
+        (&FrenchStemmer, "l'", "l'"),
+        (&ItalianStemmer, "un'altra", "altra"),
+        // German leaves `ue` alone after `q` and marks `u` between vowels.
+        (&GermanStemmer, "quelle", "quell"),
+        (&GermanStemmer, "bauer", "bau"),
     ];
     for (stemmer, word, stem) in cases {
         assert_eq!(stemmer.stem(word), stem, "{word:?}");
@@ -257,4 +270,20 @@ fn italian_matches_the_snowball_vocabulary() {
 #[test]
 fn french_matches_the_snowball_vocabulary() {
     check_vocabulary(&FrenchStemmer, FRENCH, 21_653);
+}
+
+/// The stemmers run before the length guard (SPEC §6.3.3), so they see whole tokens: a 1 MB token must stem in linear
+/// time (the French prelude once inserted into a vector per `ë`, which took seconds for this one).
+#[test]
+fn long_tokens_stem_in_linear_time() {
+    let words = [
+        "ë".repeat(500_000),
+        "aï".repeat(250_000),
+        "é".repeat(500_000),
+    ];
+    for stemmer in stemmers() {
+        for word in &words {
+            let _stem = stemmer.stem(word);
+        }
+    }
 }
