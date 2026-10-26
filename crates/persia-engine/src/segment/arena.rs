@@ -77,6 +77,24 @@ impl Arena {
         Ok((id, true))
     }
 
+    /// Forgets every string with an id at or above `len` (a failed document's new terms). Rebuilds the table, which
+    /// costs its size: an error path only.
+    pub(crate) fn truncate(&mut self, len: usize) {
+        if len >= self.ends.len() {
+            return;
+        }
+        let end = len
+            .checked_sub(1)
+            .and_then(|last| self.ends.get(last))
+            .copied()
+            .unwrap_or(0);
+        self.bytes.truncate(end);
+        self.ends.truncate(len);
+        self.hashes.truncate(len);
+        self.slots.fill(EMPTY);
+        self.rehash_into_slots();
+    }
+
     /// The string with id `id` (empty for an id that was never returned).
     pub(crate) fn key(&self, id: u32) -> &[u8] {
         let Ok(i) = usize::try_from(id) else {
@@ -133,13 +151,17 @@ impl Arena {
     }
 
     fn grow(&mut self) {
-        let len = self.slots.len().saturating_mul(2);
-        let mask = len.wrapping_sub(1);
-        let mut slots = vec![EMPTY; len];
+        self.slots = vec![EMPTY; self.slots.len().saturating_mul(2)];
+        self.rehash_into_slots();
+    }
+
+    /// Places every id in `slots`, which must be empty and large enough.
+    fn rehash_into_slots(&mut self) {
+        let mask = self.slots.len().wrapping_sub(1);
         for (id, &hash) in (0_u32..).zip(&self.hashes) {
             #[allow(clippy::cast_possible_truncation)]
             let mut slot = (hash as usize) & mask;
-            while let Some(s) = slots.get_mut(slot) {
+            while let Some(s) = self.slots.get_mut(slot) {
                 if *s == EMPTY {
                     *s = id;
                     break;
@@ -147,7 +169,6 @@ impl Arena {
                 slot = slot.wrapping_add(1) & mask;
             }
         }
-        self.slots = slots;
     }
 }
 
@@ -188,6 +209,22 @@ mod tests {
         }
         assert!(a.slots.len() >= 2 * a.len());
         assert!(a.size_in_bytes() >= a.bytes.len() + a.slots.len() * 4);
+    }
+
+    #[test]
+    fn truncate_forgets_later_keys() {
+        let mut a = Arena::default();
+        for i in 0..100_u32 {
+            a.intern(&i.to_le_bytes()).unwrap();
+        }
+        a.truncate(40);
+        assert_eq!(a.len(), 40);
+        assert_eq!(a.get(&39_u32.to_le_bytes()), Some(39));
+        assert_eq!(a.get(&40_u32.to_le_bytes()), None);
+        assert_eq!(a.intern(&99_u32.to_le_bytes()), Ok((40, true)));
+        assert_eq!(a.key(40), 99_u32.to_le_bytes());
+        a.truncate(0);
+        assert_eq!((a.len(), a.get(&0_u32.to_le_bytes())), (0, None));
     }
 
     proptest! {

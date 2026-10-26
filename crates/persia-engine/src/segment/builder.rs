@@ -102,8 +102,8 @@ pub struct SegmentBuilder {
     pub(crate) blobs: Vec<(u32, usize)>,
     pub(crate) blob_bytes: Vec<u8>,
     max_docs: u32,
-    /// Set when an internal limit broke halfway through a document: the builder holds part of it.
-    poisoned: bool,
+    /// Largest position a token may get; `u32::MAX` but in tests.
+    max_position: u32,
     tokens: TokenStream,
     /// `(term id, position)` of the field being indexed.
     occurrences: Vec<(u32, u32)>,
@@ -152,7 +152,7 @@ impl SegmentBuilder {
             blobs: Vec::new(),
             blob_bytes: Vec::new(),
             max_docs: MAX_DOCS,
-            poisoned: false,
+            max_position: u32::MAX,
             tokens: TokenStream::new(),
             occurrences: Vec::new(),
         })
@@ -173,13 +173,10 @@ impl SegmentBuilder {
     ///
     /// # Errors
     /// [`SegmentError::Document`] for a document `schema` rejects, [`SegmentError::DuplicateId`] for an id already
-    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents: the builder is unchanged then.
-    /// [`SegmentError::TooLarge`] when an internal index would overflow, after which the builder holds part of the
-    /// document and every call fails with [`SegmentError::Poisoned`].
+    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents, [`SegmentError::TooLarge`] when the document would
+    /// overflow an internal index (a position past `u32::MAX`, more than `u32::MAX` terms). The builder is then as it
+    /// was (only spare capacity may have grown, so [`Self::size_in_bytes`] can too).
     pub fn add(&mut self, doc: &Document) -> Result<u32, SegmentError> {
-        if self.poisoned {
-            return Err(SegmentError::Poisoned);
-        }
         let docid = self.doc_count();
         if docid >= self.max_docs {
             return Err(SegmentError::Full {
@@ -193,9 +190,10 @@ impl SegmentBuilder {
                 id: doc.id().to_owned(),
             });
         }
+        let mark = self.mark();
         let result = self.index(docid, doc, &row);
         if result.is_err() {
-            self.poisoned = true;
+            self.rollback(&mark);
         }
         result.map(|()| docid)
     }
@@ -227,6 +225,7 @@ impl SegmentBuilder {
                         inverted,
                         docid,
                         [s.as_str()],
+                        self.max_position,
                         &mut self.tokens,
                         &mut self.occurrences,
                     )?;
@@ -238,6 +237,7 @@ impl SegmentBuilder {
                         inverted,
                         docid,
                         values,
+                        self.max_position,
                         &mut self.tokens,
                         &mut self.occurrences,
                     )?;
@@ -298,10 +298,74 @@ impl SegmentBuilder {
             )
     }
 
+    /// Where every accumulator ends before a document, so a failed one can be undone.
+    fn mark(&self) -> Mark {
+        Mark {
+            ids: self.ids.len(),
+            rows: self.rows.ends.len(),
+            row_bytes: self.rows.bytes.len(),
+            blobs: self.blobs.len(),
+            blob_bytes: self.blob_bytes.len(),
+            fields: self
+                .fields
+                .iter()
+                .map(|f| match f {
+                    FieldBuilder::Text { inverted, .. } | FieldBuilder::Keyword { inverted } => {
+                        FieldMark::Inverted(inverted.mark())
+                    }
+                    FieldBuilder::Column(c) => FieldMark::Column(c.values.len()),
+                    FieldBuilder::Stored => FieldMark::None,
+                })
+                .collect(),
+        }
+    }
+
+    /// Undoes everything added since `mark`.
+    fn rollback(&mut self, mark: &Mark) {
+        self.ids.truncate(mark.ids);
+        self.rows.ends.truncate(mark.rows);
+        self.rows.bytes.truncate(mark.row_bytes);
+        self.blobs.truncate(mark.blobs);
+        self.blob_bytes.truncate(mark.blob_bytes);
+        for (field, m) in self.fields.iter_mut().zip(&mark.fields) {
+            match (field, m) {
+                (
+                    FieldBuilder::Text { inverted, .. } | FieldBuilder::Keyword { inverted },
+                    FieldMark::Inverted(m),
+                ) => inverted.rollback(m),
+                (FieldBuilder::Column(c), &FieldMark::Column(n)) => c.values.truncate(n),
+                _ => {}
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_max_position(&mut self, max_position: u32) {
+        self.max_position = max_position;
+    }
+
     #[cfg(test)]
     pub(crate) fn set_max_docs(&mut self, max_docs: u32) {
         self.max_docs = max_docs;
     }
+}
+
+/// The lengths of a builder's accumulators before a document.
+#[derive(Debug)]
+struct Mark {
+    ids: usize,
+    rows: usize,
+    row_bytes: usize,
+    blobs: usize,
+    blob_bytes: usize,
+    fields: Vec<FieldMark>,
+}
+
+#[derive(Debug)]
+enum FieldMark {
+    Inverted(inverted::Mark),
+    Column(usize),
+    None,
 }
 
 /// Indexes the values of one `text` field of document `docid` (SPEC §5.3.3: value `i + 1` starts
@@ -311,27 +375,31 @@ fn index_text<'a>(
     inverted: &mut Inverted,
     docid: u32,
     values: impl IntoIterator<Item = &'a str>,
+    max_position: u32,
     tokens: &mut TokenStream,
     occurrences: &mut Vec<(u32, u32)>,
 ) -> Result<(), SegmentError> {
     occurrences.clear();
-    let mut base = 0_u32;
+    // u64: the base after the last value may pass u32::MAX without any position doing so.
+    let mut base = 0_u64;
     let mut len = 0_u32;
     let overflow = || SegmentError::TooLarge { what: "positions" };
     for value in values {
         analyzer.analyze(value, tokens);
-        let mut end = 0_u32;
+        let mut end = 0_u64;
         for token in tokens.iter() {
+            let position = u32::try_from(base.saturating_add(u64::from(token.position)))
+                .ok()
+                .filter(|&p| p <= max_position)
+                .ok_or_else(overflow)?;
             let (term, _) = inverted.intern(token.text.as_bytes())?;
-            let position = base.checked_add(token.position).ok_or_else(overflow)?;
             occurrences.push((term, position));
-            end = end.max(token.position.checked_add(1).ok_or_else(overflow)?);
+            end = end.max(u64::from(token.position).saturating_add(1));
             len = len.checked_add(1).ok_or_else(overflow)?;
         }
         base = base
-            .checked_add(end)
-            .and_then(|b| b.checked_add(POSITION_GAP))
-            .ok_or_else(overflow)?;
+            .saturating_add(end)
+            .saturating_add(u64::from(POSITION_GAP));
     }
     inverted.add_doc(docid, occurrences, len)
 }
@@ -498,8 +566,8 @@ mod tests {
     }
 
     #[test]
-    fn values_are_a_position_gap_apart_and_poison_sticks() {
-        let (mut b, t, _) = builder();
+    fn values_are_a_position_gap_apart() {
+        let (b, t, _) = builder();
         let mut inverted = Inverted::new(true);
         let mut tokens = TokenStream::new();
         let mut occ = Vec::new();
@@ -508,12 +576,72 @@ mod tests {
             _ => panic!("t is a text field"),
         };
         let many = vec!["x"; 3];
-        index_text(&analyzer, &mut inverted, 0, many, &mut tokens, &mut occ).unwrap();
+        index_text(
+            &analyzer,
+            &mut inverted,
+            0,
+            many,
+            u32::MAX,
+            &mut tokens,
+            &mut occ,
+        )
+        .unwrap();
         assert_eq!(inverted.positions.as_deref(), Some(&[0, 101, 202][..]));
         assert_eq!(inverted.lengths, [(0, 3)]);
+    }
 
-        b.poisoned = true;
-        assert_eq!(b.add(&Document::new("a")), Err(SegmentError::Poisoned));
+    /// A document that overflows positions halfway is rolled back entirely: new terms, postings, its id and row,
+    /// columns of fields indexed before the failing one.
+    #[test]
+    fn too_large_rolls_the_document_back() {
+        use crate::segment::{SegmentMeta, SegmentWriter};
+        let schema = SchemaBuilder::new("c")
+            .field("a", FieldKind::I64 { stored: true })
+            .field("k", FieldKind::Keyword(KeywordOptions::default()))
+            .field(
+                "t",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .build()
+            .unwrap();
+        let id = |n: &str| schema.field(n).unwrap().id();
+        let registry = AnalyzerRegistry::builtin();
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let ok = Document::new("ok")
+            .with(id("t"), Value::String("one two".into()))
+            .with(id("k"), Value::String("x".into()));
+        // Positions 0 and 101 + 0: the second value passes a limit of 100.
+        let bad = Document::new("bad")
+            .with(id("a"), Value::I64(7))
+            .with(id("k"), Value::String("new".into()))
+            .with(
+                id("t"),
+                Value::Strings(vec!["fresh".into(), "words".into()]),
+            );
+
+        let mut expected = SegmentBuilder::new(&schema, &registry).unwrap();
+        expected.add(&ok).unwrap();
+        let expected = SegmentWriter::new(&expected, meta).finish().unwrap();
+
+        let mut b = SegmentBuilder::new(&schema, &registry).unwrap();
+        b.set_max_position(100);
+        b.add(&ok).unwrap();
+        assert_eq!(
+            b.add(&bad),
+            Err(SegmentError::TooLarge { what: "positions" })
+        );
+        assert_eq!(b.doc_count(), 1);
+        assert_eq!(SegmentWriter::new(&b, meta).finish().unwrap(), expected);
+        // The id is free again, and the builder keeps working.
+        b.set_max_position(u32::MAX);
+        assert_eq!(b.add(&bad), Ok(1));
     }
 
     #[test]

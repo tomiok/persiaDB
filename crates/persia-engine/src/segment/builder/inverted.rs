@@ -19,6 +19,16 @@ pub(crate) struct Posting {
     pub(crate) pos_start: u32,
 }
 
+/// The lengths of an [`Inverted`]'s accumulators at one point.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Mark {
+    terms: usize,
+    postings: usize,
+    positions: usize,
+    lengths: usize,
+    sum_len: u64,
+}
+
 /// The inverted index of one field, as documents arrive.
 #[derive(Debug)]
 pub(crate) struct Inverted {
@@ -89,6 +99,28 @@ impl Inverted {
         self.lengths.push((doc, len));
         self.sum_len = self.sum_len.saturating_add(u64::from(len));
         Ok(())
+    }
+
+    /// Where the accumulators end, for [`Self::rollback`].
+    pub(crate) fn mark(&self) -> Mark {
+        Mark {
+            terms: self.terms.len(),
+            postings: self.postings.len(),
+            positions: self.positions.as_ref().map_or(0, Vec::len),
+            lengths: self.lengths.len(),
+            sum_len: self.sum_len,
+        }
+    }
+
+    /// Undoes everything added since `mark`, terms included.
+    pub(crate) fn rollback(&mut self, mark: &Mark) {
+        self.terms.truncate(mark.terms);
+        self.postings.truncate(mark.postings);
+        if let Some(p) = &mut self.positions {
+            p.truncate(mark.positions);
+        }
+        self.lengths.truncate(mark.lengths);
+        self.sum_len = mark.sum_len;
     }
 
     /// Documents with a field length above 0 (SPEC §5.1 `docs_with_field`).

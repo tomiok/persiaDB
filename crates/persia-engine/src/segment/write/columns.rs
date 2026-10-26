@@ -46,7 +46,8 @@ pub(super) fn keyword(
     let too_large = || SegmentError::TooLarge {
         what: "keyword column",
     };
-    let mut w = header(TAG_KEYWORD);
+    // The dictionary, after the header and the two offsets (8 + 16 bytes).
+    let mut w = Writer::with_base_offset(24);
     w.write_u64(u64::try_from(grouped.order.len()).map_err(|_| too_large())?);
     let mut end = 0_u64;
     for &term in &grouped.order {
@@ -87,9 +88,15 @@ pub(super) fn keyword(
             *n = n.saturating_add(1);
         }
     }
+    let starts_off = w.offset();
     for_column(&starts, &mut w)?;
+    let ords_off = w.offset();
     for_column(&ords, &mut w)?;
-    Ok(w.into_inner())
+    let mut out = header(TAG_KEYWORD);
+    out.write_u64(starts_off);
+    out.write_u64(ords_off);
+    out.write_bytes(w.as_slice());
+    Ok(out.into_inner())
 }
 
 fn header(tag: u8) -> Writer {
@@ -112,12 +119,15 @@ fn presence(column: &Column, doc_count: u32, w: &mut Writer) -> Result<(), Segme
 
 /// A length-prefixed roaring bitmap in the portable format.
 fn bitmap(docs: impl Iterator<Item = u32>, w: &mut Writer) -> Result<(), SegmentError> {
-    let too_large = || SegmentError::TooLarge { what: "bitmap" };
-    // Docids arrive ascending and distinct.
-    let bitmap = RoaringBitmap::from_sorted_iter(docs).map_err(|_| too_large())?;
+    // Docids arrive ascending and distinct, and writing to a `Vec` cannot fail.
+    let internal = |what| SegmentError::Internal { what };
+    let bitmap =
+        RoaringBitmap::from_sorted_iter(docs).map_err(|_| internal("docids out of order"))?;
     let mut bytes = Vec::with_capacity(bitmap.serialized_size());
-    bitmap.serialize_into(&mut bytes).map_err(|_| too_large())?;
-    w.write_u64(u64::try_from(bytes.len()).map_err(|_| too_large())?);
+    bitmap
+        .serialize_into(&mut bytes)
+        .map_err(|_| internal("bitmap serialization"))?;
+    w.write_u64(u64::try_from(bytes.len()).map_err(|_| SegmentError::TooLarge { what: "bitmap" })?);
     w.write_bytes(&bytes);
     Ok(())
 }

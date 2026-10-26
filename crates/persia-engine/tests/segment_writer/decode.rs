@@ -192,7 +192,7 @@ pub fn terms(f: &Footer, field: u32, norms: Option<&[u8]>, positions: bool) -> I
     let skip = section(5).map(|s| stream(s));
     let pos = section(6).map(|s| stream(s));
     assert_eq!(pos.is_some(), positions);
-    assert_eq!(info.len(), dict.len() * 48);
+    assert_eq!(info.len(), dict.len() * 56);
 
     let mut index = Index::default();
     let mut any_skip = false;
@@ -201,7 +201,7 @@ pub fn terms(f: &Footer, field: u32, norms: Option<&[u8]>, positions: bool) -> I
     let (mut next_postings, mut next_freqs, mut next_pos, mut next_skip) = (0, 0, 0, 0);
     while let Some((term, value)) = fst::Streamer::next(&mut stream) {
         assert_eq!(value, ordinal, "FST value is the term's rank");
-        let mut ri = Reader::new(&info[ordinal as usize * 48..][..48]);
+        let mut ri = Reader::new(&info[ordinal as usize * 56..][..56]);
         ordinal += 1;
         let (p_off, f_off, s_off, x_off) = (
             ri.read_u64().unwrap() as usize,
@@ -211,7 +211,9 @@ pub fn terms(f: &Footer, field: u32, norms: Option<&[u8]>, positions: bool) -> I
         );
         let ttf = ri.read_u64().unwrap();
         let df = ri.read_u32().unwrap() as usize;
-        assert_eq!(ri.read_u32().unwrap(), 0);
+        let term_max_tf = ri.read_u32().unwrap();
+        let term_min_norm = ri.read_u8().unwrap();
+        ri.expect_zeros(7).unwrap();
         assert!(df >= 1);
         // Lists are laid out in term order, back to back.
         assert_eq!((p_off, f_off), (next_postings, next_freqs));
@@ -280,6 +282,16 @@ pub fn terms(f: &Footer, field: u32, norms: Option<&[u8]>, positions: bool) -> I
         assert_eq!(
             ttf,
             occurrences.iter().map(|o| u64::from(o.tf)).sum::<u64>()
+        );
+        assert_eq!(
+            term_max_tf,
+            blocks.iter().map(|b| b.1).max().unwrap(),
+            "term max_tf"
+        );
+        assert_eq!(
+            term_min_norm,
+            blocks.iter().map(|b| b.3).min().unwrap(),
+            "term min_norm"
         );
 
         if df >= BLOCK_LEN {
@@ -380,6 +392,8 @@ pub fn keyword_column(stream: &[u8], doc_count: u32) -> BTreeMap<u32, Vec<Vec<u8
     let mut r = Reader::new(stream);
     assert_eq!(r.read_u8().unwrap(), 3);
     r.expect_zeros(7).unwrap();
+    let starts_off = r.read_u64().unwrap() as usize;
+    let ords_off = r.read_u64().unwrap() as usize;
     let count = r.read_u64().unwrap() as usize;
     let ends: Vec<usize> = (0..count).map(|_| r.read_u64().unwrap() as usize).collect();
     let data = r.read_bytes(ends.last().copied().unwrap_or(0)).unwrap();
@@ -390,7 +404,9 @@ pub fn keyword_column(stream: &[u8], doc_count: u32) -> BTreeMap<u32, Vec<Vec<u8
         start = end;
     }
     assert!(dict.windows(2).all(|w| w[0] < w[1]), "dictionary sorted");
+    assert_eq!(r.position(), starts_off, "starts_off");
     let starts = for_column(&mut r);
+    assert_eq!(r.position(), ords_off, "ords_off");
     let ords = for_column(&mut r);
     assert!(r.is_empty());
     assert_eq!(starts.len(), doc_count as usize + 1);

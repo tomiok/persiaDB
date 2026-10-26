@@ -11,7 +11,7 @@ use super::super::builder::inverted::{Inverted, Posting};
 use super::{Grouped, WriteOptions, raw_section};
 
 /// Bytes of a `TermInfo` record (SPEC §5.3.1).
-pub(super) const TERM_INFO_LEN: usize = 48;
+pub(super) const TERM_INFO_LEN: usize = 56;
 /// Bytes of a `Skip` entry (SPEC §5.3.2).
 pub(super) const SKIP_ENTRY_LEN: usize = 40;
 
@@ -71,7 +71,13 @@ pub(super) fn write_terms(
             prev = Some(entry.last_docid);
             entries.push(entry);
         }
-        let first = entries.first().copied().unwrap_or(SkipEntry::EMPTY);
+        let Some(&first) = entries.first() else {
+            return Err(SegmentError::Internal {
+                what: "a term without postings",
+            });
+        };
+        let max_tf = entries.iter().map(|e| e.max_tf).max().unwrap_or(0);
+        let min_norm = entries.iter().map(|e| e.min_norm).min().unwrap_or(0);
         // Only lists with a full block have skip entries; a shorter one is a single tail block.
         let skip_off = if list.len() >= BLOCK_LEN {
             lists.write_skip(&entries)?
@@ -89,7 +95,9 @@ pub(super) fn write_terms(
         w.write_u64(first.positions_off);
         w.write_u64(ttf);
         w.write_u32(df);
-        w.write_u32(0);
+        w.write_u32(max_tf);
+        w.write_u8(min_norm);
+        w.write_zeros(7);
         debug_assert_eq!(w.len(), TERM_INFO_LEN);
         info.write(w.as_slice())?;
 
@@ -120,17 +128,6 @@ struct Lists {
     skip: BlockWriter,
     positions: Option<BlockWriter>,
     values: Vec<u32>,
-}
-
-impl SkipEntry {
-    const EMPTY: Self = Self {
-        last_docid: 0,
-        max_tf: 0,
-        postings_off: 0,
-        freqs_off: 0,
-        positions_off: 0,
-        min_norm: 0,
-    };
 }
 
 impl Lists {
@@ -171,10 +168,15 @@ impl Lists {
 
         for p in block {
             entry.max_tf = entry.max_tf.max(p.tf);
-            let norm = norms
-                .and_then(|n| n.get(p.doc as usize))
-                .copied()
-                .unwrap_or(0);
+            let norm = match norms {
+                Some(n) => n
+                    .get(p.doc as usize)
+                    .copied()
+                    .ok_or(SegmentError::Internal {
+                        what: "a docid past the norms",
+                    })?,
+                None => 0,
+            };
             entry.min_norm = entry.min_norm.min(norm);
             entry.last_docid = p.doc;
         }
@@ -239,12 +241,18 @@ fn position_deltas(
 ) -> Result<(), SegmentError> {
     out.clear();
     for p in block {
+        let positions = inverted.positions_of(p);
+        if positions.len() != p.tf as usize {
+            return Err(SegmentError::Internal {
+                what: "a posting without its positions",
+            });
+        }
         let mut prev = 0;
-        for &position in inverted.positions_of(p) {
-            // Positions of a posting ascend (`Inverted::add_doc` sorts them).
-            let delta = position.checked_sub(prev).ok_or(SegmentError::Encode(
-                EncodeError::NotStrictlyIncreasing { index: out.len() },
-            ))?;
+        for &position in positions {
+            // Positions of a posting never decrease (`Inverted::add_doc` sorts them).
+            let delta = position.checked_sub(prev).ok_or(SegmentError::Internal {
+                what: "positions out of order",
+            })?;
             out.push(delta);
             prev = position;
         }

@@ -241,8 +241,28 @@ fn check(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
             }
         }
     }
-    let expected_sections = f.sections.keys().filter(|(_, field)| *field == seg).count();
-    assert!(expected_sections >= 3);
+    // Framing rules of SPEC §5.3: each kind under a field of the right type, field ids below the count.
+    for &(kind, field) in f.sections.keys() {
+        if field == seg {
+            assert!((9..=12).contains(&kind), "kind {kind} at segment level");
+            continue;
+        }
+        assert!(field < f.field_count, "field {field}");
+        let ty = schema.fields()[field as usize].field_type();
+        let allowed: &[u16] = match ty {
+            FieldType::Text => &[1, 2, 3, 4, 5, 6, 7],
+            FieldType::Keyword => &[1, 2, 3, 4, 5, 8],
+            FieldType::Stored => &[],
+            _ => &[8],
+        };
+        assert!(allowed.contains(&kind), "kind {kind} under a {ty:?} field");
+    }
+    for kind in [9, 10, 11] {
+        assert!(
+            f.sections.contains_key(&(kind, seg)),
+            "kind {kind} is always present"
+        );
+    }
 }
 
 const WORDS: &[&str] = &[
@@ -480,7 +500,8 @@ fn fixture_path() -> PathBuf {
 fn golden_segment() {
     let schema = schema();
     let docs = golden_docs(&schema);
-    let bytes = build(&schema, &docs, WriteOptions::default());
+    // A pinned zstd level: the default may change, the fixture may not.
+    let bytes = build(&schema, &docs, GOLDEN_OPTIONS);
     check(&schema, &docs, &bytes);
     let path = fixture_path();
     if std::env::var_os("PERSIA_WRITE_SEGMENT_FIXTURES").is_some() && !path.exists() {
@@ -493,12 +514,14 @@ fn golden_segment() {
             path.display()
         )
     });
+    // The stored file must always read as its documents (what a reader of format 1.0 sees), and today's writer
+    // must still produce the same format: same footer fields and sections with the same content. Compressed
+    // bytes are not compared, so a zstd update cannot break a frozen fixture (ADR-0027).
     check(&schema, &docs, &stored);
-    assert!(
-        bytes == stored,
-        "segment encoding changed: format 1.0 is pinned by {}",
-        path.display()
-    );
+    assert_same_content(&bytes, &stored);
+    if bytes != stored {
+        eprintln!("note: {} differs only in compressed bytes", path.display());
+    }
     let f = decode::parse(&stored);
     assert!(
         f.sections.contains_key(&(5, id(&schema, "title").get())),
@@ -527,5 +550,76 @@ fn block_boundaries() {
             n >= 128,
             "{n} docs"
         );
+    }
+}
+
+/// Options of the golden segment: the default block size, zstd level 3 (pinned).
+const GOLDEN_OPTIONS: WriteOptions = WriteOptions {
+    block_size: 16 * 1024,
+    zstd_level: 3,
+};
+
+/// Two segments hold the same format-level content: footer fields, the same sections, each with the same raw bytes
+/// (FSTs) or the same decoded stream and block size (block-framed ones).
+fn assert_same_content(a: &[u8], b: &[u8]) {
+    let (fa, fb) = (decode::parse(a), decode::parse(b));
+    assert_eq!(
+        (
+            fa.format,
+            fa.segment_id,
+            fa.schema_hash,
+            fa.schema_encoding_version,
+            fa.field_count
+        ),
+        (
+            fb.format,
+            fb.segment_id,
+            fb.schema_hash,
+            fb.schema_encoding_version,
+            fb.field_count
+        )
+    );
+    assert_eq!(
+        (
+            fa.doc_count,
+            fa.merge_generation,
+            fa.created_at,
+            &fa.stats,
+            &fa.min_id,
+            &fa.max_id
+        ),
+        (
+            fb.doc_count,
+            fb.merge_generation,
+            fb.created_at,
+            &fb.stats,
+            &fb.min_id,
+            &fb.max_id
+        )
+    );
+    assert_eq!(
+        fa.sections.keys().collect::<Vec<_>>(),
+        fb.sections.keys().collect::<Vec<_>>()
+    );
+    for ((kind, field), sa) in &fa.sections {
+        let sb = &fb.sections[&(*kind, *field)];
+        if matches!(kind, 1 | 10) {
+            assert_eq!(sa, sb, "raw section {kind} of field {field}");
+        } else {
+            let (ra, rb) = (
+                persia_format::block::BlockReader::open(sa, 0).unwrap(),
+                persia_format::block::BlockReader::open(sb, 0).unwrap(),
+            );
+            assert_eq!(
+                ra.block_size(),
+                rb.block_size(),
+                "block size of section {kind}"
+            );
+            assert_eq!(
+                decode::stream(sa),
+                decode::stream(sb),
+                "section {kind} of field {field}"
+            );
+        }
     }
 }

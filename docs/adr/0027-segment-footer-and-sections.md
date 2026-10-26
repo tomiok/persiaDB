@@ -29,7 +29,12 @@ statistics and section table of a 1024-field schema, and the TermInfo record had
    checksummed.
 4. **`IdMap` split.** The SPEC's "FST + array" becomes two kinds: `IdMap` (FST, id → docid) and `IdList` (record
    array, docid → id). Each direction then has its own framing and can be fetched alone.
-5. **TermInfo** is a 48-byte record. It adds `freqs_off`, which the SPEC's field list lacked. `skip_off` is 0 when
+5. **TermInfo** is a 56-byte record. It adds `freqs_off`, which the SPEC's field list lacked, and the term's
+   `max_tf` and `min_norm`. MaxScore and block-max WAND need a per-term score bound before iterating; without it, a
+   reader would scan every Skip entry of a long list (or decode a short one) for each query term, often from object
+   storage. The bound pairs the largest tf with the shortest field, possibly from different documents, so it is valid
+   for any BM25F parameters but loose; Lucene's (freq, norm) Pareto sets are tighter and could come later behind a
+   flag. `skip_off` is 0 when
    `df < 128`, and `positions_off` is 0 without positions. Fixed width keeps lookup O(1) from the FST ordinal.
 6. **Freqs** store `tf − 1` in blocks aligned with the postings blocks, without their own count. **Skip** has one
    40-byte entry per block, tail included, for every term with at least one full block. Entries hold all three
@@ -45,21 +50,25 @@ statistics and section table of a 1024-field schema, and the TermInfo record had
    document's FOR block, and a shared bitmap layout uses roaring's portable format.
    - Numeric columns are presence plus keys. A missing document holds its block's minimum, so it costs no bits.
    - Bool columns are presence plus a `true` bitmap.
-   - Keyword columns are dictionary + starts + ords, so multi-valued keywords and facets work. This one encoding
+   - Keyword columns are dictionary + starts + ords, with the starts and ords offsets in the header so a cold remote
+     read needs no chain of dependent fetches, so multi-valued keywords and facets work. This one encoding
      covers every cardinality in v1. The dictionary duplicates the `TermDict` keys, because an FST cannot map an
      ordinal back to its key cheaply.
 10. **Record arrays.** `DocStore`, `IdList` and `BlobRefs` all use one layout: `u64` ends, then the records, zstd
     blocks. Rows may span blocks, as SPEC §5.2 already allows.
 11. **Builder rules.** A segment has at least one document. Within one segment a duplicate id is rejected; upserts
-    across segments are the write path's business (§8.3). Output is deterministic for the same input, meta and
-    options.
+    across segments are the write path's business (§8.3). A rejected document (invalid, duplicate, segment full, or an
+    internal limit such as positions past `u32::MAX`) leaves the builder exactly as it was. Output is deterministic for
+    the same input, meta, options **and zstd library version**: the compressed sections depend on zstd's output.
 
 ## Consequences
 
 - The on-disk format depends on two crates' serializations: `fst` (map format 3) and roaring's portable format, the
   standard one shared by CRoaring and Java. The golden segment `tests/fixtures/segment/v1.0/basic.pseg` pins both.
-  A dependency update that changed either would fail that test instead of silently changing the format.
-- About 24 bytes per document for the three record arrays' ends, before zstd. 48 bytes per term for TermInfo, before
+  A dependency update that changed either would fail that test instead of silently changing the format. The golden
+  test compares decoded content (block streams, raw sections, footer fields), not compressed bytes, and writes the
+  fixture at a pinned zstd level, so a zstd update does not break a frozen fixture.
+- About 24 bytes per document for the three record arrays' ends, before zstd. 56 bytes per term for TermInfo, before
   any compression; inlining tiny posting lists (pulsing) is left for later.
 - The keyword dictionary costs a second copy of the distinct values.
 - Readers (ROADMAP 5.3) must validate every rule SPEC §5.3 lists. The writer cannot violate them, and the
@@ -75,5 +84,7 @@ statistics and section table of a 1024-field schema, and the TermInfo record had
 - **Per-term allocation in the builder (`HashMap<String, Vec<Posting>>`).** That is simpler, but it allocates per
   term and per list growth. The flat posting log plus a counting sort by term at flush is O(n) and allocates per
   field, not per term.
+- **No CRC trailer on the FSTs.** `fst` map format 3 ends in its own CRC32C, but the trailer makes every raw section
+  self-checking the same way, whatever the payload, for 4 bytes.
 - **Variable-length (varint) TermInfo.** It is smaller, but needs an index to stay O(1). It is worth revisiting with
   pulsing.

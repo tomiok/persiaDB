@@ -73,9 +73,13 @@ pub enum SegmentError {
         /// What overflowed.
         what: &'static str,
     },
-    /// An earlier [`SegmentError::TooLarge`] left a document half added.
-    #[error("builder unusable after an earlier error")]
-    Poisoned,
+    /// An invariant of the builder did not hold while writing: a bug, reported rather than written as a corrupt
+    /// segment.
+    #[error("internal error: {what}")]
+    Internal {
+        /// What did not hold.
+        what: &'static str,
+    },
     /// A section encoder rejected its input: invalid [`WriteOptions`], or a bug.
     #[error(transparent)]
     Encode(#[from] persia_format::EncodeError),

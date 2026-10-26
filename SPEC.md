@@ -82,7 +82,7 @@ A local database is two files:
 
 ### 4.1 Conventions
 - All integers little-endian. All structures 8-byte aligned, except inside a block-framed section (SPEC §5.2), whose
-  blocks and block table are byte-aligned (only the section start is aligned). Offsets are absolute `u64`.
+  blocks and block table are byte-aligned (only the section start is aligned). Offsets are absolute `u64`, except inside a segment, whose offsets are relative to its first byte (§5.1).
 - Checksum: **CRC32C** for headers/frames; **xxh3-64** (or xxh3-128) for internal content hashes and routing where
   noted, always with the default secret and seed 0: persisted hashes depend on it, so changing it is a format change.
   Blob ids are **SHA-256** (SPEC §9.1, ADR-0002).
@@ -446,7 +446,18 @@ There is no deleted count: deletions live outside the segment (SPEC §8.3). Fiel
 `sum_field_len` sums the field lengths of §5.3.4. The section table lists every section in segment order, which is
 ascending `(field_id, section_kind)`: a field's sections in kind order, field by field, then the segment-level sections
 (`field_id` `0xFFFF_FFFF`, §5.3). `min_id`/`max_id` allow routing and pruning by document id. A reader checks the
-locator, bounds `footer_len`, and verifies the CRC before it uses any other footer field.
+locator, bounds `footer_len`, and verifies the CRC before it uses any other footer field. Then each of these is
+corruption:
+- `footer_len` below 98 (the fixed part, two 1-byte ids and the CRC) or above 1 MiB, or a footer start
+  (`len − 8 − footer_len`) that is negative or not a multiple of 8; bytes after `max_id`;
+- a non-zero reserved byte; `doc_count` outside `1..=2^31`; `schema_field_count` above the current schema's field
+  count, or a schema hash other than its hash over that many fields (§6.2.5);
+- `field_stats_count` other than the number of `text` and `keyword` fields below `schema_field_count`, or statistics
+  out of field order, of another field type, or with `docs_with_field > doc_count`;
+- a section table not in strictly ascending `(field_id, section_kind)`; a section whose offset is not a multiple of
+  8, that starts before the previous one ends or 8 or more bytes after it, or that ends after the footer start (or
+  more than 7 bytes before it); non-zero padding;
+- `min_id` or `max_id` outside 1..=512 bytes, or `min_id > max_id`.
 
 ### 5.2 Blocks
 All large sections are split into **fixed-size logical blocks (default 16 KiB uncompressed)**, each
@@ -602,8 +613,8 @@ field of the wrong type, two sections with the same `(section_kind, field_id)`, 
 
 #### 5.3.1 Term dictionary
 `TermDict` is an FST (the `fst` crate's map format, version 3) whose keys are the field's terms (UTF-8 bytes, in byte
-order) and whose value is the term's ordinal: its rank in that order. `TermInfo` is the stream of one 48-byte record
-per term, record `i` at position `48·i`:
+order) and whose value is the term's ordinal: its rank in that order. `TermInfo` is the stream of one 56-byte record
+per term, record `i` at position `56·i`:
 ```
 0   8  postings_off   u64  start of the term's list in Postings
 8   8  freqs_off      u64  start of its frequencies in Freqs
@@ -611,10 +622,18 @@ per term, record `i` at position `48·i`:
 24  8  positions_off  u64  start of its positions in Positions; 0 without Positions
 32  8  ttf            u64  sum of the term's frequencies
 40  4  df             u32  documents with the term, ≥ 1
-44  4  reserved       MUST be zero
+44  4  max_tf         u32  largest frequency of the term in any document
+48  1  min_norm       u8   smallest norm byte (§5.3.4) of the term's documents; 0 for a keyword field
+49  7  reserved       MUST be zero
 ```
+`max_tf` and `min_norm` bound the term's score before its list is read (MaxScore and block-max WAND, §7.3), without
+scanning its Skip entries; they are the maxima and minima of those entries when it has them.
 A `text` field's terms are the token texts of its analyzer (§6.3); a `keyword` field's are its values, as they are.
-Lists are written in term order, so each offset is the end of the previous term's.
+Lists MUST be written in term order, back to back: the `postings_off`, `freqs_off` and (with Positions)
+`positions_off` of record `i + 1` are where term `i`'s data ends in those streams, and the last term's ends at the
+stream's end; likewise the `skip_off` of each term with `df ≥ 128` is where the previous such term's entries end. A reader finds a list's length that way; anything
+else is corruption, as is a `df` of 0, an offset past its stream, `skip_off` other than 0 when `df < 128`, or
+`positions_off` other than 0 without Positions.
 
 #### 5.3.2 Postings, freqs and skip entries
 A term's postings are the blocks of §5.2.1. Its frequencies (`tf ≥ 1`, occurrences of the term in the document's
@@ -635,11 +654,12 @@ A term with `df ≥ 128` has one 40-byte `Skip` entry per postings block, tail i
 The first entry's offsets equal the TermInfo's. A shorter list is one tail block and needs none.
 
 #### 5.3.3 Positions
-A token's position is its position in its value (§6.3.1), plus the value's base: in a multi-valued field, value
-`i + 1` starts `100` (`POSITION_GAP`) positions after the end of value `i` (its last token's position plus one, or 0
-when it has no tokens), so a phrase never matches across values. For each postings block of a term, its documents'
-positions form one run (§5.3.2) of `Σ tf` values: per document, in docid order, its `tf` positions ascending, the first
-as is and each next one as the difference to the previous. Each block's run starts at its Skip entry's
+A token's position is its position in its value (§6.3.1) plus the value's base. `base_0 = 0` and
+`base_(i+1) = base_i + end_i + 100` (`POSITION_GAP`), where `end_i` is one more than the largest position of a token
+of value `i` within that value, or 0 when it has none: so a phrase never matches across values. A position above
+`u32::MAX` is not representable; the builder rejects the document. For each postings block of a term, its documents'
+positions form one run (§5.3.2) of `Σ tf` values: per document, in docid order, its `tf` positions in non-decreasing order (stacked tokens may share
+one), the first as is and each next one as the difference to the previous (0 for a repeat). Each block's run starts at its Skip entry's
 `positions_off` (the first at the TermInfo's).
 
 #### 5.3.4 Norms
@@ -659,18 +679,26 @@ every block but the last has 1024 values. A **bitmap** is `len u64` then `len` b
 portable serialization format; a **presence** bitmap of length 0 means every document has a value.
 - **Numeric** (tag 1; `i64`, `f64`, `datetime`): presence, then a FOR column of `doc_count` order-preserving keys
   (§5.2.1). A document without a value holds an unspecified key (writers store its block's minimum).
-- **Bool** (tag 2): presence, then the bitmap of the documents whose value is `true` (always written; a subset of
-  the present ones).
-- **Keyword** (tag 3): the dictionary, `count u64`, `count` value ends (`u64`, relative to the first value), the
-  values (distinct, strictly increasing bytes; ord `i` is value `i`); then a FOR column of `doc_count + 1` starts and
+- **Bool** (tag 2): presence, then the bitmap of the documents whose value is `true` (always written, so its `len` is
+  never 0; a subset of the present ones).
+- **Keyword** (tag 3): `starts_off u64` and `ords_off u64`, where the two FOR columns below start (stream positions,
+  so a reader fetches any part without reading what precedes it); the dictionary, `count u64` (at least 1), `count`
+  value ends (`u64`, relative to the first value), the values (distinct, strictly increasing bytes; ord `i` is value `i`); then a FOR column of `doc_count + 1` starts and
   a FOR column of ords: document `d` has ords `starts[d]..starts[d+1]`, strictly increasing (its distinct values). An
-  empty list holds no ords, so it reads as missing. `starts[0] = 0` and the last start is the number of ords.
+  empty list holds no ords, so it reads as missing. `starts[0] = 0`, starts never decrease, the last start is the number
+  of ords, and every ord is below `count`.
+
+Anything else is corruption: an unknown tag, non-zero reserved bytes, a FOR column whose `count` differs from the
+one stated above or whose block ends do not increase, a bitmap that does not deserialize or holds a docid at or above
+`doc_count`, trailing bytes after the last part.
 
 #### 5.3.6 Documents, ids and blobs
 A **record array** of `n` records is `n` record ends (`u64`, relative to the first record), then the records
 back to back: record `d` spans `[end[d−1], end[d])` (`end[−1] = 0`). `DocStore` holds the documents' rows (§6.4.2),
 `IdList` their ids (UTF-8 bytes) and `BlobRefs` their `BlobRef` encodings (§9.1), empty for a document without a blob;
-each has `doc_count` records, in docid order. A record may span blocks (§5.2). `IdMap` is an FST from each id to its
+each has `doc_count` records, in docid order. A record may span blocks (§5.2). Ends that decrease, or a last end
+other than the stream length minus `8·n`, are corruption, and so is an empty `IdList` record or a non-empty `BlobRefs`
+record that is not exactly one `BlobRef` encoding. `IdMap` is an FST from each id to its
 docid; a segment holds an id at most once (the builder rejects a duplicate; how the write path handles an upsert of a document not yet flushed is open, ROADMAP 6).
 
 ### 5.4 Internal doc ids

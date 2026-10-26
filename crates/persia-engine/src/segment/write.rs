@@ -160,7 +160,8 @@ impl<'a> SegmentWriter<'a> {
             SEGMENT_FIELD,
             &store::doc_store(b, options)?,
         )?;
-        out.push(SectionKind::IdMap, SEGMENT_FIELD, &store::id_map(b)?)?;
+        let ids = b.ids.sorted_ids();
+        out.push(SectionKind::IdMap, SEGMENT_FIELD, &store::id_map(b, &ids)?)?;
         out.push(
             SectionKind::IdList,
             SEGMENT_FIELD,
@@ -170,7 +171,6 @@ impl<'a> SegmentWriter<'a> {
             out.push(SectionKind::BlobRefs, SEGMENT_FIELD, &blobs)?;
         }
         out.align();
-        let ids = b.ids.sorted_ids();
         let min_id = ids.first().map_or(&[][..], |&id| b.ids.key(id));
         let max_id = ids.last().map_or(&[][..], |&id| b.ids.key(id));
         let footer = Footer {

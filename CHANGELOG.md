@@ -164,7 +164,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Format
 - Segment format 1.0 (SPEC §5.1, §5.3; ADR-0027): footer with a `PSEG` locator (up to 1 MiB; statistics, section
   table, id range, CRC32C), section kinds 1–12 (all block-framed but the two FSTs, which carry a CRC32C trailer),
-  48-byte TermInfo records, `tf − 1` frequencies aligned with postings blocks, 40-byte skip entries, per-block position
+  56-byte TermInfo records (with per-term `max_tf` and `min_norm`), `tf − 1` frequencies aligned with postings blocks, 40-byte skip entries, per-block position
   runs with a gap of 100 between values, Lucene `SmallFloat` norms, tagged columns (FOR numeric, roaring bool,
   dictionary + ords keyword) and record arrays for rows, ids and blob references. Golden segment in
   `tests/fixtures/segment/v1.0/`.

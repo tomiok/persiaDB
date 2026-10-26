@@ -374,7 +374,8 @@ fn blob_refs_present_iff_some_document_has_a_blob() {
 
 fn positions_of(bytes: &[u8], field: u32, doc: u32) -> BTreeMap<Vec<u8>, Vec<u32>> {
     let f = decode::parse(bytes);
-    decode::terms(&f, field, None, true)
+    let norms = decode::stream(&f.sections[&(7, field)]);
+    decode::terms(&f, field, Some(&norms), true)
         .terms
         .into_iter()
         .filter_map(|(term, occ)| {

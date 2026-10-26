@@ -302,25 +302,26 @@ Deps: M1, M3, M4. The heart of the index format.
 
 ## 5.1 In-memory index builder
 - 5.1.1 Term → postings accumulator per field (docid, tf, positions)
-  - [~] 5.1.1.1 Term interning/arena to avoid per-term allocation
-  - [~] 5.1.1.2 Per-doc field length accounting (norms input)
-- [~] 5.1.2 Column builders (keyword dict + ords, numeric, bool) per field
-- [~] 5.1.3 DocStore builder (CBOR rows → zstd blocks)
-- [~] 5.1.4 IdMap builder (id → docid, docid → id)
-- [~] 5.1.5 Builder memory accounting (`size_in_bytes`) for flush thresholds
+  - [x] 5.1.1.1 Term interning/arena to avoid per-term allocation
+  - [x] 5.1.1.2 Per-doc field length accounting (norms input)
+- [x] 5.1.2 Column builders (keyword dict + ords, numeric, bool) per field
+- [x] 5.1.3 DocStore builder (CBOR rows → zstd blocks)
+- [x] 5.1.4 IdMap builder (id → docid, docid → id)
+- [x] 5.1.5 Builder memory accounting (`size_in_bytes`) for flush thresholds
+- [ ] 5.1.6 Flush peak memory (found in the 5.1–5.2 review): `SegmentWriter::finish` holds every section as a `Vec` and copies it into the output, plus the grouped postings and dense norms and keys, so a flush peaks at 2–3× `size_in_bytes`; stream sections to the output (or a `Storage` writer) and document the bound the M6 flush threshold relies on
 
 ## 5.2 Section writers (SPEC §5.3)
 - 5.2.1 Term dictionary (FST) writer with term-info array
-  - [~] 5.2.1.1 Sorted term emission; value = index into term-info
-  - [~] 5.2.1.2 Term-info record encoding (postings off, df, ttf, skip off, positions off)
-- [~] 5.2.2 Postings + freqs writer (128-blocks) with skip entries (`last_docid`, offset, `max_tf`, `min_norm`)
-- [~] 5.2.3 Positions writer (opt-in per field)
-- [~] 5.2.4 Norms writer (1-byte quantization table; document quantization error bounds)
-- [~] 5.2.5 Columns writer (dictionary-encoded keyword, FOR numeric, roaring sparse)
-- [~] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden container fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011)
-- [~] 5.2.7 Segment footer writer: stats, section table, schema hash (with its `encoding_version` and field count, SPEC §6.2.5), CRC; trailing locator (SPEC §5.1)
-- [~] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
-- [~] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
+  - [x] 5.2.1.1 Sorted term emission; value = index into term-info
+  - [x] 5.2.1.2 Term-info record encoding (postings off, df, ttf, skip off, positions off)
+- [x] 5.2.2 Postings + freqs writer (128-blocks) with skip entries (`last_docid`, offset, `max_tf`, `min_norm`)
+- [x] 5.2.3 Positions writer (opt-in per field)
+- [x] 5.2.4 Norms writer (1-byte quantization table; document quantization error bounds)
+- [x] 5.2.5 Columns writer (dictionary-encoded keyword, FOR numeric, roaring sparse)
+- [x] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden segment fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011; a segment inside a container frame is covered by the commit path, M6)
+- [x] 5.2.7 Segment footer writer: stats, section table, schema hash (with its `encoding_version` and field count, SPEC §6.2.5), CRC; trailing locator (SPEC §5.1)
+- [x] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
+- [x] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
 
 ## 5.3 Segment reader
 - [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version

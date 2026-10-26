@@ -22,10 +22,10 @@ pub(super) fn id_list(b: &SegmentBuilder, options: WriteOptions) -> Result<Vec<u
     record_array(ends, bytes, options)
 }
 
-/// The `IdMap` section: an FST from each id to its docid.
-pub(super) fn id_map(b: &SegmentBuilder) -> Result<Vec<u8>, SegmentError> {
+/// The `IdMap` section: an FST from each id to its docid; `sorted` holds the docids in id order.
+pub(super) fn id_map(b: &SegmentBuilder, sorted: &[u32]) -> Result<Vec<u8>, SegmentError> {
     let mut map = fst::MapBuilder::memory();
-    for (i, docid) in b.ids.sorted_ids().into_iter().enumerate() {
+    for (i, &docid) in sorted.iter().enumerate() {
         map.insert(b.ids.key(docid), u64::from(docid))
             .map_err(|_| fst_error(i))?;
     }
