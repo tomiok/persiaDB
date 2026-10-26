@@ -46,7 +46,29 @@ pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaErr
     if let Some(missing) = first_missing(&raw) {
         return Err(SchemaError::Json(format!("stored schema: {missing}")));
     }
+    if let Some(unsupported) = first_unsupported_analyzer(&raw) {
+        return Err(unsupported);
+    }
     from_raw(raw)
+}
+
+/// The first text field naming a well-formed `name@version` this build lacks, as
+/// [`SchemaError::UnsupportedAnalyzer`]: in a stored schema that is a newer build's analyzer, not corruption.
+fn first_unsupported_analyzer(raw: &RawSchema) -> Option<SchemaError> {
+    raw.fields.0.iter().find_map(|(name, field)| match field {
+        RawField::Text {
+            analyzer: Some(analyzer),
+            ..
+        } if AnalyzerRef::parse(analyzer).is_none()
+            && AnalyzerRef::is_well_formed_versioned(analyzer) =>
+        {
+            Some(SchemaError::UnsupportedAnalyzer {
+                field: name.clone(),
+                analyzer: analyzer.clone(),
+            })
+        }
+        _ => None,
+    })
 }
 
 /// What a stored schema leaves to defaults, if anything.

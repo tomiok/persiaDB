@@ -48,6 +48,19 @@ pub enum ManifestError {
         /// The version read.
         version: u32,
     },
+    /// A stored schema names an analyzer version this build does not have (a newer build wrote it, SPEC §6.2.2,
+    /// §15): the manifest is valid, but this build cannot index or query that field.
+    #[error(
+        "collection schema at offset {offset}: field {field:?} uses analyzer {analyzer:?}, which this build lacks"
+    )]
+    UnsupportedAnalyzer {
+        /// Offset of the schema text from the start of the encoding.
+        offset: u64,
+        /// The field.
+        field: String,
+        /// The analyzer as stored, `name@version`.
+        analyzer: String,
+    },
 }
 
 impl ManifestError {
@@ -297,7 +310,16 @@ fn read_schema(r: &mut Reader<'_>) -> Result<CollectionSchema, ManifestError> {
     let schema_error = |e| corrupt(at, ManifestCorruption::Schema(e));
     let text = std::str::from_utf8(text)
         .map_err(|_| schema_error(SchemaError::Json("not valid UTF-8".to_owned())))?;
-    CollectionSchema::from_stored_json(text).map_err(schema_error)
+    CollectionSchema::from_stored_json(text).map_err(|e| match e {
+        SchemaError::UnsupportedAnalyzer { field, analyzer } => {
+            ManifestError::UnsupportedAnalyzer {
+                offset: at,
+                field,
+                analyzer,
+            }
+        }
+        e => schema_error(e),
+    })
 }
 
 fn read_segment(r: &mut Reader<'_>) -> Result<SegmentEntry, ManifestError> {

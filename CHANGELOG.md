@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: a stored schema naming an analyzer version this build lacks (written by a newer build, e.g.
+  `es@2`) is `ManifestError::UnsupportedAnalyzer` (`SchemaError::UnsupportedAnalyzer`), not corruption (SPEC §6.2.2).
 - `persia-analysis`: a Unicode version bump gives a new version to exactly the built-in analyzers whose output it
   changes, found by fingerprints of their output over every Unicode scalar value; superseded versions keep working
   (SPEC §6.3.1, ADR-0025).

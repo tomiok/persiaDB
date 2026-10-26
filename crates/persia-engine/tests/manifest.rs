@@ -6,7 +6,8 @@
 //!    those bytes. They are never regenerated once released (SPEC §15); `PERSIA_WRITE_MANIFEST_FIXTURES=1` writes
 //!    missing ones.
 //! 2. `decode` never panics: every strict prefix and every bit flip is `Corrupt`, every rule of SPEC §8.7.1 is
-//!    `Corrupt` at the offending entry, and a version above 1 is `UnsupportedVersion`.
+//!    `Corrupt` at the offending entry, a version above 1 is `UnsupportedVersion`, and a well-formed analyzer version
+//!    this build lacks is `UnsupportedAnalyzer`.
 //! 3. Whatever `decode` accepts survives `encode` → `decode` unchanged, and re-encoding is byte-stable; outside the
 //!    schema text every field has one encoding, so an accepted input re-encodes to itself.
 //! 4. `apply` builds `seq + 1` and rejects every rule of SPEC §8.7.2 (every `ApplyError` variant is reached);
@@ -563,6 +564,65 @@ fn schema_rules() {
         .apply(&create("empty", empty, vec![]))
         .unwrap();
     assert_eq!(Manifest::decode(&m.encode().unwrap()).unwrap(), m);
+}
+
+/// SPEC §6.2.2, §15: a stored schema naming a well-formed analyzer version this build lacks was written by a newer
+/// build, so it is unsupported, not corrupt; a malformed name is corruption.
+#[test]
+fn analyzer_versions_this_build_lacks_are_unsupported() {
+    let stored = notes_json();
+    assert!(stored.contains(r#""analyzer":"standard@1""#), "{stored}");
+    let with = |analyzer: &str| {
+        let json = stored.replace("standard@1", analyzer);
+        let mut body = header(1);
+        push_schema(&mut body, &json);
+        body.extend(0u32.to_le_bytes());
+        Manifest::decode(&sealed(&body))
+    };
+    for analyzer in ["standard@2", "en@4294967295", "fr@1", "klingon@7"] {
+        let e = with(analyzer).unwrap_err();
+        assert_eq!(
+            e,
+            ManifestError::UnsupportedAnalyzer {
+                offset: 40,
+                field: "body".to_owned(),
+                analyzer: analyzer.to_owned()
+            }
+        );
+        assert!(!e.is_corruption(), "{e}");
+    }
+    for analyzer in [
+        "standard@0",
+        "standard@01",
+        "standard@+1",
+        "standard@",
+        "@1",
+        "standard@4294967296",
+        "standard@1@1",
+        "standard@x",
+    ] {
+        assert!(
+            matches!(
+                with(analyzer),
+                Err(ManifestError::Corrupt {
+                    offset: 40,
+                    reason: ManifestCorruption::Schema(_)
+                })
+            ),
+            "{analyzer}"
+        );
+    }
+    // Checked after the CRC, like the encoding version: a damaged schema text is corruption.
+    let mut damaged = {
+        let json = stored.replace("standard@1", "standard@2");
+        let mut body = header(1);
+        push_schema(&mut body, &json);
+        body.extend(0u32.to_le_bytes());
+        sealed(&body)
+    };
+    let last = damaged.len() - 1;
+    damaged[last] ^= 1;
+    assert!(Manifest::decode(&damaged).unwrap_err().is_corruption());
 }
 
 #[test]
@@ -2073,6 +2133,9 @@ fn every_resealed_bit_flip_is_rejected_or_reencodes_to_itself() {
                         Err(ManifestError::Corrupt { offset, .. }) => {
                             assert!((8..=body_end as u64).contains(&offset), "{at}: {offset}");
                         }
+                        // A flip inside an analyzer name can spell another well-formed `name@version`.
+                        Err(ManifestError::UnsupportedAnalyzer { .. })
+                            if texts.iter().any(|t| t.contains(&i)) => {}
                         Err(e) => panic!("{at}: {e:?}"),
                         Ok(decoded) => {
                             let again = decoded.encode().unwrap();
@@ -2657,23 +2720,25 @@ fn a_stored_schema_leaving_any_option_to_defaults_is_corrupt() {
 fn a_stored_analyzer_names_a_known_version() {
     let full: Value = serde_json::from_str(&catalog_v2().to_json().unwrap()).unwrap();
     for analyzer in [
-        "es",
-        "es@",
-        "es@0",
-        "es@01",
-        "es@+1",
-        "es@2",
-        "@1",
-        "es@1@1",
-        "ES@1",
-        "klingon@1",
-        " es@1",
-        "es@1 ",
+        "es", "es@", "es@0", "es@01", "es@+1", "@1", "es@1@1", "ES@1", " es@1", "es@1 ", "1es@1",
         "",
     ] {
         let mut v = full.clone();
         v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
         assert!(schema_corrupt(&decode_with_schema(&v)), "{analyzer:?}");
+    }
+    // Well-formed versions this build lacks were written by a newer build (ROADMAP 4.4.11).
+    for analyzer in ["es@2", "klingon@1", "zh-hans@1", "x_2@3"] {
+        let mut v = full.clone();
+        v["fields"]["title"]["analyzer"] = Value::String(analyzer.into());
+        assert!(
+            matches!(
+                decode_with_schema(&v),
+                Err(ManifestError::UnsupportedAnalyzer { ref field, analyzer: ref a, .. })
+                    if field == "title" && a == analyzer
+            ),
+            "{analyzer:?}"
+        );
     }
 }
 

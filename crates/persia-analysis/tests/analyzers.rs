@@ -144,6 +144,16 @@ fn builtin_list_is_sorted_unique_and_constructible() {
     assert!(BUILTIN_ANALYZERS.windows(2).all(|w| w[0] < w[1]));
     for a in BUILTIN_ANALYZERS {
         assert!(a.version >= 1);
+        // SPEC §6.3.3: a stored schema tells a newer build's analyzer from corruption by this shape (§6.2.2).
+        let mut bytes = a.name.bytes();
+        assert!(
+            bytes.next().is_some_and(|b| b.is_ascii_lowercase())
+                && bytes.all(|b| b.is_ascii_lowercase()
+                    || b.is_ascii_digit()
+                    || b == b'_'
+                    || b == b'-'),
+            "{a:?}"
+        );
         assert!(builtin_analyzer(a.name, a.version).is_some(), "{a:?}");
         let next = a.version + 1;
         let listed = BUILTIN_ANALYZERS

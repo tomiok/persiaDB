@@ -637,7 +637,11 @@ field, which must then be exactly `0..n`. The engine writes the ids when it seri
 
 `stored: false` keeps the value out of the `DocStore` (it is indexed but `get` does not return it). Floats must be finite;
 `-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3) as `"name"` (its current version) or `"name@version"`;
-the engine writes `"name@version"`, so a stored schema pins the version it was indexed with.
+the engine writes `"name@version"`, so a stored schema pins the version it was indexed with. A definition naming an
+analyzer or version this build does not have is rejected (unknown analyzer). A stored schema (§8.7) naming a
+well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `fr@1`
+read by a build that only has `es@1`) was written by a newer build: like an unknown format feature (§15), it is
+reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption.
 
 #### 6.2.3 Ranking and relaxation
 `ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
@@ -824,7 +828,7 @@ bounded.
 
 #### 6.3.3 Built-in analyzers
 Every built-in analyzer is at version 1 (`persia_analysis::BUILTIN_ANALYZERS`; `builtin_analyzer(name, version)`
-builds one). Each chain below is the whole definition of that version, with the tables and Unicode version its
+builds one). Built-in names are, and will stay, of the shape `[a-z][a-z0-9_-]*`. Each chain below is the whole definition of that version, with the tables and Unicode version its
 filters name (§6.3.2); `guard` is the length guard of §6.3.1 at its defaults (255 bytes, `truncate`), last in every
 chain so it bounds the final terms.
 
