@@ -260,6 +260,39 @@ fn golden_segment_reads_as_its_documents() {
     check_reads(&schema, &golden_docs(&schema), &stored);
 }
 
+/// `Segment::sections` is the section table (SPEC §5.1) as `decode` parses it independently: kinds, fields, offsets,
+/// lengths, and for each block-framed section its stream length, block count and block size.
+#[test]
+fn section_table_matches_the_decoder() {
+    let schema = schema();
+    let stored = std::fs::read(fixture_path()).unwrap();
+    let seg = open(&schema, &stored).unwrap();
+    let sections = seg.sections().unwrap();
+    let decoded = super::decode::parse(&stored);
+    assert_eq!(sections.len(), decoded.sections.len());
+    let mut end = 0;
+    for s in &sections {
+        assert!(s.offset >= end && s.offset % 8 == 0, "{s:?}");
+        end = s.offset + s.len;
+        let section = &stored[s.offset as usize..end as usize];
+        assert!(
+            decoded.sections.contains_key(&(s.kind.code(), s.field)),
+            "{s:?}"
+        );
+        match s.stream {
+            Some(st) => {
+                assert!(s.kind.is_block_framed());
+                let r = persia_format::block::BlockReader::open(section, 0).unwrap();
+                assert_eq!(
+                    (st.len, st.block_count, st.block_size),
+                    (r.len(), r.block_count(), r.block_size())
+                );
+            }
+            None => assert!(!s.kind.is_block_framed(), "{s:?}"),
+        }
+    }
+}
+
 /// `n` documents with tags at different densities: lists of many full blocks, a tail, and single blocks.
 fn dense(n: u32) -> (CollectionSchema, Vec<Document>, Vec<u8>) {
     let schema = schema();

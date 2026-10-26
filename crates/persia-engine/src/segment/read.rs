@@ -184,11 +184,15 @@ impl Segment {
             .sections
             .iter()
             .map(|s| {
-                let stream = self.stream(s.kind, s.field)?.map(|st| StreamInfo {
-                    len: st.len(),
-                    block_count: st.block_count(),
-                    block_size: u32::try_from(st.block_size()).unwrap_or(u32::MAX),
-                });
+                let stream = if s.kind.is_block_framed() {
+                    self.stream(s.kind, s.field)?.map(|st| StreamInfo {
+                        len: st.len(),
+                        block_count: st.block_count(),
+                        block_size: u32::try_from(st.block_size()).unwrap_or(u32::MAX),
+                    })
+                } else {
+                    None
+                };
                 Ok(SectionInfo {
                     kind: s.kind,
                     field: s.field,
