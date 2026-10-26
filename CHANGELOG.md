@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Website: `llms.txt` lists every documentation page for agents, and each HTML page links to it. `llms-full.txt` is those pages in Markdown. URLs include the `/persiaDB/` base.
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
 - `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains a tokenizer and token filters; char filters
   are not public yet, they wait for their offset map (ROADMAP 4.4.7). `analyze` gives index-time tokens and

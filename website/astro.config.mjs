@@ -3,11 +3,10 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import { satteri } from '@astrojs/markdown-satteri';
 import starlightLlmsTxt from 'starlight-llms-txt';
+import { base, llmsTxtUrl, origin, persiaLlmsTxt, summary } from './src/llms-index.mjs';
 
 // GitHub Pages project site: https://tomiok.github.io/persiaDB/
 // `site` is the origin; `base` is the repository path (Astro's GitHub Pages guide).
-const origin = 'https://tomiok.github.io';
-const base = '/persiaDB';
 
 // Crawlers ignore relative og:image URLs. Keep these absolute and under `base`.
 const ogImage = `${origin}${base}/og.png`;
@@ -82,6 +81,17 @@ export default defineConfig({
             // BreadcrumbList JSON-LD. The homepage and 404 are skipped in the middleware.
             routeMiddleware: './src/routeData.ts',
             head: [
+                // llmstxt.org: agents look for this hint. The href is absolute and includes `base`.
+                {
+                    tag: 'link',
+                    attrs: {
+                        rel: 'alternate',
+                        type: 'text/plain',
+                        href: llmsTxtUrl,
+                        title: 'llms.txt',
+                    },
+                },
+                { tag: 'link', attrs: { rel: 'describedby', href: llmsTxtUrl } },
                 { tag: 'meta', attrs: { property: 'og:image', content: ogImage } },
                 { tag: 'meta', attrs: { property: 'og:image:alt', content: ogAlt } },
                 { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
@@ -104,12 +114,11 @@ export default defineConfig({
                 Footer: './src/components/SiteFooter.astro',
             },
             plugins: [
+                // Writes llms-full.txt and llms-small.txt (Markdown of the pages).
+                // persiaLlmsTxt() replaces llms.txt so the index lists every page.
                 starlightLlmsTxt({
                     projectName: 'Persia DB',
-                    description:
-                        'Pre-alpha embedded search database written in Rust. Nothing opens a database, indexes, or searches yet. persia-format implements on-disk codecs only. Db::open and search in the docs are illustrative, from SPEC.md, and are not in the crate.',
-                    details:
-                        'SPEC.md wins if a page disagrees with it. PROGRESS.md is the live roadmap counter. Do not call Db, Collection, put, commit, or search: those items are not in the repository. The intended usage is the Getting started page. Status, license, and comparison questions are the FAQ page. Constraints for patches are the For AI agents page and CLAUDE.md.',
+                    description: summary,
                     promote: [
                         'index*',
                         'guide/getting-started*',
@@ -117,47 +126,6 @@ export default defineConfig({
                         'guide/for-agents*',
                         'guide/overview*',
                         'guide/embedded-search*',
-                    ],
-                    optionalLinks: [
-                        {
-                            label: 'Getting started',
-                            url: 'https://tomiok.github.io/persiaDB/guide/getting-started/',
-                            description:
-                                'What you can call today, and the illustrative open, schema, commit, and search API',
-                        },
-                        {
-                            label: 'FAQ',
-                            url: 'https://tomiok.github.io/persiaDB/guide/faq/',
-                            description:
-                                'What Persia DB is, production readiness, SQLite FTS5, Tantivy, Meilisearch, file format, crash safety, SDKs, and the Apache-2.0 license',
-                        },
-                        {
-                            label: 'What is an embedded search database?',
-                            url: 'https://tomiok.github.io/persiaDB/guide/embedded-search/',
-                            description:
-                                'In-process full-text search, one file, and no server. What Persia DB implements, and what is still specified only',
-                        },
-                        {
-                            label: 'For AI agents',
-                            url: 'https://tomiok.github.io/persiaDB/guide/for-agents/',
-                            description: 'Status, constraints, and the calls that are not in the crate',
-                        },
-                        {
-                            label: 'Embedded SDKs',
-                            url: 'https://tomiok.github.io/persiaDB/guide/sdks/',
-                            description:
-                                'Planned in-process Go and TypeScript bindings. Not implemented. The network clients are a different milestone.',
-                        },
-                        {
-                            label: 'SPEC.md',
-                            url: 'https://github.com/tomiok/persiaDB/blob/main/SPEC.md',
-                            description: 'Design contract. It wins if the site disagrees',
-                        },
-                        {
-                            label: 'PROGRESS.md',
-                            url: 'https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md',
-                            description: 'Live roadmap counter',
-                        },
                     ],
                 }),
             ],
@@ -198,6 +166,9 @@ export default defineConfig({
                 },
             ],
         }),
+        // Runs after Starlight so it can replace the plugin's llms.txt and
+        // rewrite root-relative links inside llms-full.txt.
+        persiaLlmsTxt(),
     ],
     markdown: {
         processor: satteri({ mdastPlugins: prefixBaseLinks }),
