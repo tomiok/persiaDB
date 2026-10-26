@@ -8,7 +8,8 @@
 
 use std::collections::HashSet;
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// English stopwords.
 pub const ENGLISH_STOPWORDS: &[&str] = &[
@@ -46,9 +47,9 @@ pub const PORTUGUESE_STOPWORDS: &[&str] = &[
 /// matched as given.
 ///
 /// ```
-/// use persia_analysis::{StopwordFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, StopwordFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("la casa de papel", &mut tokens);
 /// StopwordFilter::spanish().apply(&mut tokens);
 /// let kept: Vec<(&str, u32)> = tokens.iter().map(|t| (t.text.as_str(), t.position)).collect();
@@ -89,7 +90,7 @@ impl StopwordFilter {
 }
 
 impl TokenFilter for StopwordFilter {
-    fn apply(&self, tokens: &mut Vec<Token>) {
+    fn apply(&self, tokens: &mut TokenStream) {
         tokens.retain(|token| !token.text.is_empty() && !self.is_stopword(&token.text));
     }
 }

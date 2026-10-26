@@ -65,10 +65,10 @@ pub fn current_builtin_version(name: &str) -> Option<u32> {
 /// Version `version` of built-in analyzer `name` (SPEC §6.3.3), or `None` if it does not exist.
 ///
 /// ```
-/// use persia_analysis::builtin_analyzer;
+/// use persia_analysis::{builtin_analyzer, TokenStream};
 ///
 /// let es = builtin_analyzer("es", 1).ok_or("no es@1")?;
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// es.analyze("Los años de las canciones", &mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 /// assert_eq!(texts, ["años", "cancion"]);
@@ -118,7 +118,7 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
 /// every segment of a field is indexed, and every query on it analyzed, by the same version.
 ///
 /// ```
-/// use persia_analysis::AnalyzerRegistry;
+/// use persia_analysis::{AnalyzerRegistry, TokenStream};
 ///
 /// let registry = AnalyzerRegistry::builtin();
 /// assert_eq!(registry.current_version("en"), Some(1));

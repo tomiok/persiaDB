@@ -3,7 +3,8 @@
 use unicode_normalization::char::decompose_canonical;
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Removes accents and diacritics from Latin, Greek and Cyrillic letters (SPEC §6.3.2): `é` → `e`, `ü` → `u`,
 /// `ç` → `c`, `ß` → `ss`, `ø` → `o`.
@@ -14,9 +15,9 @@ use crate::token::{Token, TokenFilter};
 /// matters), also inside a decomposition, and are not recomposed, so an analyzer can keep `año` apart from `ano`:
 ///
 /// ```
-/// use persia_analysis::{FoldingFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, FoldingFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("pingüino año Straße", &mut tokens);
 /// let mut preserving = tokens.clone();
 /// FoldingFilter::default().apply(&mut tokens);
@@ -49,13 +50,14 @@ impl FoldingFilter {
         self.preserved.binary_search(&c).is_ok()
     }
 
-    /// Folds `text`, or returns `None` when it is unchanged.
-    fn fold(&self, text: &str) -> Option<String> {
+    /// Writes the folded `text` to the empty `out` and returns `true`, or returns `false` when folding leaves
+    /// `text` unchanged.
+    fn fold_into(&self, text: &str, out: &mut String) -> bool {
         // ASCII has no decomposition and no folding table entry.
         if text.is_ascii() || self.folds_to_itself(text) {
-            return None;
+            return false;
         }
-        self.fold_all(text)
+        self.fold_all_into(text, out)
     }
 
     /// Whether folding provably leaves `text` unchanged, found without allocating (ROADMAP 4.4.9): `text` is NFC
@@ -79,9 +81,15 @@ impl FoldingFilter {
             })
     }
 
-    /// [`Self::fold`] without the pre-scan.
+    /// [`Self::fold_all_into`] into a new string, or `None` when unchanged.
+    #[cfg(test)]
     fn fold_all(&self, text: &str) -> Option<String> {
-        let mut folded = String::with_capacity(text.len());
+        let mut folded = String::new();
+        self.fold_all_into(text, &mut folded).then_some(folded)
+    }
+
+    /// [`Self::fold_into`] without the pre-scan.
+    fn fold_all_into(&self, text: &str, folded: &mut String) -> bool {
         // The folded run since the last preserved character, recomposed when one comes or at the end. Preserved
         // characters bypass recomposition, which could rewrite them (U+0344 is not NFC) and break idempotence.
         let mut run = String::new();
@@ -92,13 +100,13 @@ impl FoldingFilter {
         };
         for c in text.chars() {
             if self.is_preserved(c) {
-                keep(c, &mut folded, &mut run);
+                keep(c, folded, &mut run);
                 continue;
             }
             // The table and the preserved set apply to the parts too: `Ǣ` is `Æ` and a macron.
             decompose_canonical(c, |part| {
                 if self.is_preserved(part) {
-                    keep(part, &mut folded, &mut run);
+                    keep(part, folded, &mut run);
                 } else if let Some(letter) = fold_letter(part) {
                     run.push_str(letter);
                 } else if !is_folded_mark(part) {
@@ -107,19 +115,14 @@ impl FoldingFilter {
             });
         }
         folded.extend(run.nfc());
-        (folded != text).then_some(folded)
+        folded != text
     }
 }
 
 impl TokenFilter for FoldingFilter {
-    fn apply(&self, tokens: &mut Vec<Token>) {
-        tokens.retain_mut(|token| {
-            if let Some(folded) = self.fold(&token.text) {
-                token.text = folded;
-            }
-            // A token made only of combining marks folds to nothing.
-            !token.text.is_empty()
-        });
+    fn apply(&self, tokens: &mut TokenStream) {
+        // A token made only of combining marks folds to nothing, and `rewrite` removes it.
+        tokens.rewrite(|text, out| self.fold_into(text, out));
     }
 }
 

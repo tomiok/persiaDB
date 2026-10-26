@@ -37,7 +37,7 @@ fn fingerprints_list_every_current_builtin() {
 mod slow {
     #![allow(clippy::unwrap_used)] // fixed inputs
 
-    use persia_analysis::{Token, UNICODE_VERSION, builtin_analyzer};
+    use persia_analysis::{Token, TokenStream, UNICODE_VERSION, builtin_analyzer};
 
     use super::FINGERPRINTS;
 
@@ -97,7 +97,7 @@ mod slow {
         let analyzer = builtin_analyzer(name, version).unwrap();
         let mut hash = Fnv::new();
         let mut text = String::new();
-        let mut tokens = Vec::new();
+        let mut tokens = TokenStream::new();
         let scalars: Vec<char> = (0..=u32::from(char::MAX))
             .filter_map(char::from_u32)
             .collect();

@@ -1,6 +1,7 @@
 //! Apostrophe normalization filter (SPEC §6.3.2).
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Replaces the typographic apostrophes `‘` (U+2018) and `’` (U+2019) with `'` (U+0027), the only apostrophe the
 /// English stemmer knows (SPEC §6.3.2).
@@ -9,9 +10,9 @@ use crate::token::{Token, TokenFilter};
 /// be different terms. Spans and positions are kept.
 ///
 /// ```
-/// use persia_analysis::{ApostropheFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, ApostropheFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("don’t", &mut tokens);
 /// ApostropheFilter.apply(&mut tokens);
 /// assert_eq!(tokens[0].text, "don't");
@@ -25,11 +26,19 @@ const fn is_typographic_apostrophe(c: char) -> bool {
 }
 
 impl TokenFilter for ApostropheFilter {
-    fn apply(&self, tokens: &mut Vec<Token>) {
-        for token in tokens.iter_mut() {
-            if token.text.contains(is_typographic_apostrophe) {
-                token.text = token.text.replace(is_typographic_apostrophe, "'");
+    fn apply(&self, tokens: &mut TokenStream) {
+        tokens.rewrite(|text, out| {
+            if !text.contains(is_typographic_apostrophe) {
+                return false;
             }
-        }
+            out.extend(text.chars().map(|c| {
+                if is_typographic_apostrophe(c) {
+                    '\''
+                } else {
+                    c
+                }
+            }));
+            true
+        });
     }
 }

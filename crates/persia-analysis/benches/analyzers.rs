@@ -10,7 +10,7 @@ use std::hint::black_box;
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use persia_analysis::{
     BUILTIN_ANALYZERS, ENGLISH_STOPWORDS, FoldingFilter, KeywordTokenizer, PORTUGUESE_STOPWORDS,
-    SPANISH_STOPWORDS, StandardTokenizer, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
+    SPANISH_STOPWORDS, StandardTokenizer, TokenFilter, TokenStream, Tokenizer, WhitespaceTokenizer,
     builtin_analyzer,
 };
 
@@ -80,7 +80,7 @@ fn corpus(analyzer: &str) -> Vec<String> {
 
 /// How many tokens `tokenizer` emits for `values`: the work an analyzer does per iteration.
 fn token_count(tokenizer: &dyn Tokenizer, values: &[String]) -> u64 {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     values
         .iter()
         .map(|v| {
@@ -105,7 +105,7 @@ fn analyzers(c: &mut Criterion) {
         let tokens = token_count(tokenizer, &values);
         group.throughput(Throughput::Elements(tokens));
         group.bench_with_input(BenchmarkId::new(a.name, a.version), &values, |b, values| {
-            let mut out = Vec::new();
+            let mut out = TokenStream::new();
             b.iter(|| {
                 for value in values {
                     analyzer.analyze(black_box(value), &mut out);
@@ -119,9 +119,9 @@ fn analyzers(c: &mut Criterion) {
 
 /// Lowercased tokens for the folding filter: ASCII (nothing to fold), Spanish (some accents) and non-ASCII text
 /// with nothing to fold, the case a pre-scan speeds up (ROADMAP 4.4.9).
-fn fold_inputs() -> Vec<(&'static str, Vec<Token>)> {
+fn fold_inputs() -> Vec<(&'static str, TokenStream)> {
     let tokenize = |values: Vec<String>| {
-        let mut all = Vec::new();
+        let mut all = TokenStream::new();
         for v in &values {
             StandardTokenizer.tokenize(&v.to_lowercase(), &mut all);
         }

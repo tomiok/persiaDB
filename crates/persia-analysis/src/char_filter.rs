@@ -12,7 +12,7 @@ use std::fmt;
 /// Object safe, so an analyzer can chain any char filters behind pointers.
 ///
 /// ```
-/// use persia_analysis::{Analyzer, CharFilter, CharFilterOutput, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, Analyzer, CharFilter, CharFilterOutput, WhitespaceTokenizer};
 ///
 /// /// Spells out `&` as ` and `.
 /// struct Ampersand;
@@ -27,7 +27,7 @@ use std::fmt;
 /// }
 ///
 /// let analyzer = Analyzer::builder(WhitespaceTokenizer).char_filter(Ampersand).build();
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// analyzer.analyze("salt&pepper", &mut tokens);
 /// let spans: Vec<(&str, usize, usize)> = tokens.iter().map(|t| (t.text.as_str(), t.start, t.end)).collect();
 /// // `and` comes from the `&` at byte 4: its span is that byte of the original value.

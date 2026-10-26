@@ -5,6 +5,7 @@ use std::ops::Range;
 
 use crate::analyzer::Analyzer;
 use crate::token::Token;
+use crate::token_stream::TokenStream;
 
 /// How many alternatives one synonym match expands to by default (SPEC §7.6 L1).
 pub const DEFAULT_SYNONYM_EXPANSIONS: usize = 50;
@@ -18,11 +19,12 @@ pub const DEFAULT_SYNONYM_EXPANSIONS: usize = 50;
 ///
 /// ```
 /// use persia_analysis::{
-///     DEFAULT_SYNONYM_EXPANSIONS, LowercaseFilter, SynonymMap, TokenFilter, Tokenizer, WhitespaceTokenizer,
+///     DEFAULT_SYNONYM_EXPANSIONS, LowercaseFilter, SynonymMap, TokenFilter, TokenStream, Tokenizer,
+///     WhitespaceTokenizer,
 /// };
 ///
 /// let analyze = |text: &str| {
-///     let mut tokens = Vec::new();
+///     let mut tokens = TokenStream::new();
 ///     WhitespaceTokenizer.tokenize(text, &mut tokens);
 ///     LowercaseFilter.apply(&mut tokens);
 ///     tokens
@@ -75,11 +77,12 @@ impl SynonymMatch {
 }
 
 impl SynonymMap {
-    /// Builds the map from groups of analyzed terms.
-    pub fn new<G, T>(groups: G) -> Self
+    /// Builds the map from groups of analyzed terms (token vectors or [`TokenStream`]s).
+    pub fn new<G, T, V>(groups: G) -> Self
     where
         G: IntoIterator<Item = T>,
-        T: IntoIterator<Item = Vec<Token>>,
+        T: IntoIterator<Item = V>,
+        V: Into<Vec<Token>>,
     {
         let mut map = Self {
             trie: vec![Node::default()],
@@ -88,7 +91,7 @@ impl SynonymMap {
         for (group_id, group) in groups.into_iter().enumerate() {
             let mut members = Vec::new();
             for term in group {
-                let Some(term_id) = map.insert(term) else {
+                let Some(term_id) = map.insert(term.into()) else {
                     continue;
                 };
                 // Group ids only grow, so each list stays ascending, and its last entry tells whether this group
@@ -112,12 +115,12 @@ impl SynonymMap {
     ///
     /// ```
     /// use std::num::NonZeroUsize;
-    /// use persia_analysis::{Analyzer, EdgeNgramFilter, LowercaseFilter, StandardTokenizer, SynonymMap};
+    /// use persia_analysis::{Analyzer, EdgeNgramFilter, LowercaseFilter, StandardTokenizer, SynonymMap, TokenStream};
     ///
     /// let ngrams = EdgeNgramFilter::new(NonZeroUsize::MIN, NonZeroUsize::new(20).ok_or("max")?).ok_or("bounds")?;
     /// let analyzer = Analyzer::builder(StandardTokenizer).filter(LowercaseFilter).filter(ngrams).build();
     /// let map = SynonymMap::analyzed([["TV", "television"]], &analyzer);
-    /// let mut query = Vec::new();
+    /// let mut query = TokenStream::new();
     /// analyzer.analyze_query("cheap tv", &mut query);
     /// assert_eq!(map.find(&query).len(), 1);
     /// # Ok::<(), &str>(())
@@ -132,7 +135,7 @@ impl SynonymMap {
             group
                 .into_iter()
                 .map(|term| {
-                    let mut tokens = Vec::new();
+                    let mut tokens = TokenStream::new();
                     analyzer.analyze_query(term.as_ref(), &mut tokens);
                     tokens
                 })

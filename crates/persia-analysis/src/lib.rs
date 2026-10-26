@@ -4,9 +4,9 @@
 //! the token stream (SPEC §6.3.1):
 //!
 //! ```
-//! use persia_analysis::{StandardTokenizer, Tokenizer};
+//! use persia_analysis::{TokenStream, StandardTokenizer, Tokenizer};
 //!
-//! let mut tokens = Vec::new();
+//! let mut tokens = TokenStream::new();
 //! StandardTokenizer.tokenize("Don't panic, 42!", &mut tokens);
 //! let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 //! assert_eq!(texts, ["Don't", "panic", "42"]);
@@ -31,6 +31,7 @@ mod stem;
 mod stop;
 mod synonyms;
 mod token;
+mod token_stream;
 mod whitespace;
 
 pub use analyzer::{Analyzer, AnalyzerBuilder};
@@ -50,6 +51,7 @@ pub use stem::{EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, Stemm
 pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
 pub use synonyms::{DEFAULT_SYNONYM_EXPANSIONS, SynonymMap, SynonymMatch};
 pub use token::{Token, TokenFilter, Tokenizer};
+pub use token_stream::TokenStream;
 pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
 
 /// The Unicode version whose tables define tokenization and token filters (SPEC §6.3.1, §6.3.2): the UAX #29 word

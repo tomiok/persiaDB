@@ -2,7 +2,8 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::token::{Token, Tokenizer, push_spans};
+use crate::token::{Tokenizer, push_spans};
+use crate::token_stream::TokenStream;
 
 /// Splits text at Unicode word boundaries (UAX #29) and keeps the words, the tokenizer of the `standard`
 /// analyzer (SPEC §6.3).
@@ -21,9 +22,9 @@ use crate::token::{Token, Tokenizer, push_spans};
 ///   character, since UAX #29 has no dictionary; Katakana runs and Hangul words stay whole.
 ///
 /// ```
-/// use persia_analysis::{StandardTokenizer, Tokenizer};
+/// use persia_analysis::{TokenStream, StandardTokenizer, Tokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// StandardTokenizer.tokenize("mail ana@example.com", &mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 /// assert_eq!(texts, ["mail", "ana", "example.com"]);
@@ -32,7 +33,7 @@ use crate::token::{Token, Tokenizer, push_spans};
 pub struct StandardTokenizer;
 
 impl Tokenizer for StandardTokenizer {
-    fn tokenize(&self, text: &str, out: &mut Vec<Token>) {
+    fn tokenize(&self, text: &str, out: &mut TokenStream) {
         push_spans(text.unicode_word_indices(), out);
     }
 }

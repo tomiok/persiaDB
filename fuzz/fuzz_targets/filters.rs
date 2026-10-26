@@ -12,7 +12,7 @@ use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
     DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, LowercaseFilter,
     NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, Stemmer, StemmerFilter,
-    StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer, WhitespaceTokenizer,
+    StopwordFilter, SynonymMap, Token, TokenFilter, TokenStream, Tokenizer, WhitespaceTokenizer,
 };
 
 fn check_from_input(input: &[Token], output: &[Token]) {
@@ -31,13 +31,13 @@ fn check_from_input(input: &[Token], output: &[Token]) {
 
 /// The synonym analyzer; with `stopwords`, removed stopwords leave position gaps that matches must line up with.
 fn analyze(text: &str, stopwords: Option<&StopwordFilter>) -> Vec<Token> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     StandardTokenizer.tokenize(text, &mut tokens);
     LowercaseFilter.apply(&mut tokens);
     if let Some(stopwords) = stopwords {
         stopwords.apply(&mut tokens);
     }
-    tokens
+    tokens.into_vec()
 }
 
 fuzz_target!(|data: &[u8]| {
@@ -69,7 +69,7 @@ fuzz_target!(|data: &[u8]| {
     let stemmers: [&dyn Stemmer; 3] = [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer];
     let tokenizers: [&dyn Tokenizer; 2] = [&StandardTokenizer, &WhitespaceTokenizer];
     for tokenizer in tokenizers {
-        let mut input = Vec::new();
+        let mut input = TokenStream::new();
         tokenizer.tokenize(text, &mut input);
         for filter in idempotent {
             let mut once = input.clone();

@@ -35,3 +35,7 @@ Throughput is in values per second (G = 10^9, M = 10^6).
 |---|---|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 4.4.5 baseline | 120 M | 20.8 M | 6.28 M |
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 4.4.9 pre-scan | 134 M | 18.6 M | 20.0 M |
+
+| Recorded | Commit | `standard` | `whitespace` | `keyword` | `en` | `es` | `pt` |
+|---|---|--:|--:|--:|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 4.4.4 `TokenStream` | 12.9 M | 29.5 M | 27.1 M | 2.46 M | 1.64 M | 1.58 M |

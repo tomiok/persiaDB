@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used)] // helpers outside #[test] build fixed inputs
 
 use persia_analysis::{
-    Analyzer, CharFilter, CharFilterOutput, LowercaseFilter, StandardTokenizer, Token,
+    Analyzer, CharFilter, CharFilterOutput, LowercaseFilter, StandardTokenizer, Token, TokenStream,
     WhitespaceTokenizer,
 };
 use proptest::prelude::*;
@@ -12,8 +12,8 @@ const CASES: u32 = 512;
 #[cfg(feature = "slow")]
 const CASES: u32 = 20_000;
 
-fn analyze(analyzer: &Analyzer, text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+fn analyze(analyzer: &Analyzer, text: &str) -> TokenStream {
+    let mut tokens = TokenStream::new();
     analyzer.analyze(text, &mut tokens);
     tokens
 }

@@ -4,11 +4,12 @@
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    DEFAULT_MAX_TOKEN_LEN, LengthPolicy, Token, TokenLengthGuard, Tokenizer, WhitespaceTokenizer,
+    DEFAULT_MAX_TOKEN_LEN, LengthPolicy, Token, TokenLengthGuard, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 
 fn guarded(text: &str, max: usize, policy: LengthPolicy) -> Vec<(String, usize, usize, u32)> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize(text, &mut tokens);
     TokenLengthGuard::new(NonZeroUsize::new(max).unwrap(), policy).apply(&mut tokens);
     tokens
@@ -75,7 +76,7 @@ fn default_guard() {
     assert_eq!(DEFAULT_MAX_TOKEN_LEN.get(), 255);
     assert_eq!(guard.policy(), LengthPolicy::Truncate);
     let long = "x".repeat(300);
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize(&long, &mut tokens);
     guard.apply(&mut tokens);
     assert_eq!(tokens[0].text.len(), 255);
@@ -85,7 +86,7 @@ fn default_guard() {
 #[test]
 fn guards_every_value_appended_to_one_buffer() {
     // Tokenizers append, so a buffer can hold the tokens of several values; the guard leaves positions alone.
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize("aaaa b", &mut tokens);
     WhitespaceTokenizer.tokenize("c dddd", &mut tokens);
     TokenLengthGuard::new(NonZeroUsize::new(2).unwrap(), LengthPolicy::Truncate).apply(&mut tokens);
@@ -101,12 +102,12 @@ fn tokens_within_the_limit_are_kept_even_if_empty() {
     // A filter earlier in the chain may rewrite a token's text to nothing; the guard only acts on oversized
     // tokens, under either policy.
     for policy in [LengthPolicy::Truncate, LengthPolicy::Drop] {
-        let mut tokens = vec![Token {
+        let mut tokens = TokenStream::from(vec![Token {
             text: String::new(),
             start: 0,
             end: 3,
             position: 0,
-        }];
+        }]);
         TokenLengthGuard::new(NonZeroUsize::new(2).unwrap(), policy).apply(&mut tokens);
         assert_eq!(tokens.len(), 1, "{policy:?}");
     }

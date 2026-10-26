@@ -16,7 +16,8 @@ pub use english::EnglishStemmer;
 pub use portuguese::PortugueseStemmer;
 pub use spanish::SpanishStemmer;
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Reduces a word to its stem (SPEC §6.3.2).
 ///
@@ -55,9 +56,9 @@ impl<S: Stemmer + ?Sized> Stemmer for Arc<S> {
 /// [`FoldingFilter`](crate::FoldingFilter). A token whose stem is empty is removed.
 ///
 /// ```
-/// use persia_analysis::{EnglishStemmer, StemmerFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, EnglishStemmer, StemmerFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("connected connecting connections", &mut tokens);
 /// StemmerFilter::new(EnglishStemmer).apply(&mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
@@ -76,16 +77,16 @@ impl<S: Stemmer> StemmerFilter<S> {
 }
 
 impl<S: Stemmer> TokenFilter for StemmerFilter<S> {
-    fn apply(&self, tokens: &mut Vec<Token>) {
-        for token in tokens.iter_mut() {
+    fn apply(&self, tokens: &mut TokenStream) {
+        tokens.rewrite(|text, out| {
             // Compared rather than matched on `Cow::Borrowed`: a stemmer may return a borrowed stem that is not the
-            // word (a `'static` table entry).
-            let stem = self.stemmer.stem(&token.text);
-            if stem != token.text.as_str() {
-                let stem = stem.into_owned();
-                token.text = stem;
+            // word (a `'static` table entry). An empty stem empties the token, which `rewrite` removes.
+            let stem = self.stemmer.stem(text);
+            if stem == text {
+                return false;
             }
-        }
-        tokens.retain(|token| !token.text.is_empty());
+            out.push_str(&stem);
+            true
+        });
     }
 }

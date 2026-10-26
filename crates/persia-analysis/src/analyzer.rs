@@ -5,6 +5,7 @@ use std::fmt;
 
 use crate::char_filter::{CharFilter, CharFilterOutput, OffsetMap};
 use crate::token::{Token, TokenFilter, Tokenizer};
+use crate::token_stream::TokenStream;
 
 /// A text analysis pipeline: char filters, then a tokenizer, then token filters (SPEC §6.3).
 ///
@@ -14,10 +15,10 @@ use crate::token::{Token, TokenFilter, Tokenizer};
 /// (SPEC §6.3.4).
 ///
 /// ```
-/// use persia_analysis::{Analyzer, LowercaseFilter, StandardTokenizer};
+/// use persia_analysis::{TokenStream, Analyzer, LowercaseFilter, StandardTokenizer};
 ///
 /// let analyzer = Analyzer::builder(StandardTokenizer).filter(LowercaseFilter).build();
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// analyzer.analyze("Hello, World!", &mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
 /// assert_eq!(texts, ["hello", "world"]);
@@ -43,14 +44,14 @@ impl Analyzer {
     /// Replaces the contents of `out` with the index-time tokens of `text`: every filter applies.
     ///
     /// Token spans are byte offsets of `text`, also when char filters changed it (SPEC §6.3.1).
-    pub fn analyze(&self, text: &str, out: &mut Vec<Token>) {
+    pub fn analyze(&self, text: &str, out: &mut TokenStream) {
         self.run(text, out, |_| true);
     }
 
     /// Replaces the contents of `out` with the query-time tokens of `text`: the filters that stack tokens
     /// ([`TokenFilter::stacks_tokens`]) are left out, so a query term matches the stacked index terms as is
     /// (SPEC §6.3.4). The same as [`analyze`](Self::analyze) for an analyzer without such filters.
-    pub fn analyze_query(&self, text: &str, out: &mut Vec<Token>) {
+    pub fn analyze_query(&self, text: &str, out: &mut TokenStream) {
         self.run(text, out, |filter| !filter.stacks_tokens());
     }
 
@@ -59,7 +60,7 @@ impl Analyzer {
         self.filters.iter().any(|filter| filter.stacks_tokens())
     }
 
-    fn run(&self, text: &str, out: &mut Vec<Token>, applies: impl Fn(&dyn TokenFilter) -> bool) {
+    fn run(&self, text: &str, out: &mut TokenStream, applies: impl Fn(&dyn TokenFilter) -> bool) {
         out.clear();
         let mut filtered = Cow::Borrowed(text);
         // One map per char filter that changed the text, in chain order.

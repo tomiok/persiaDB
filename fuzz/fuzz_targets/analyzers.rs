@@ -8,7 +8,7 @@
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
     Analyzer, BUILTIN_ANALYZERS, CharFilter, CharFilterOutput, LowercaseFilter, StandardTokenizer,
-    Token, builtin_analyzer,
+    Token, TokenStream, builtin_analyzer,
 };
 
 /// Replaces each character whose code point has `mask` bits in common with `control` by one of a few strings,
@@ -69,8 +69,8 @@ fuzz_target!(|data: &[u8]| {
     let Ok(text) = std::str::from_utf8(rest) else {
         return;
     };
-    let mut tokens = Vec::new();
-    let mut query = Vec::new();
+    let mut tokens = TokenStream::new();
+    let mut query = TokenStream::new();
     for a in BUILTIN_ANALYZERS {
         let analyzer = builtin_analyzer(a.name, a.version).expect("listed built-ins exist");
         analyzer.analyze(text, &mut tokens);

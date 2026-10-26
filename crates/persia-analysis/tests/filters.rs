@@ -6,12 +6,12 @@ use std::num::NonZeroUsize;
 use persia_analysis::{
     ENGLISH_STOPWORDS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
     PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StandardTokenizer, StopwordFilter, Token, TokenFilter,
-    Tokenizer, WhitespaceTokenizer,
+    TokenStream, Tokenizer, WhitespaceTokenizer,
 };
 use unicode_normalization::is_nfc;
 
-fn tokens(text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+fn tokens(text: &str) -> TokenStream {
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize(text, &mut tokens);
     tokens
 }
@@ -154,7 +154,7 @@ fn folding_preserves_listed_characters_inside_a_decomposition() {
 /// versions of those analyzers.
 #[test]
 fn folding_is_pinned() {
-    let mut tokens: Vec<Token> = (0..=u32::from(char::MAX))
+    let tokens: Vec<Token> = (0..=u32::from(char::MAX))
         .filter_map(char::from_u32)
         .zip(0..)
         .map(|(c, position)| Token {
@@ -164,6 +164,7 @@ fn folding_is_pinned() {
             position,
         })
         .collect();
+    let mut tokens = TokenStream::from(tokens);
     FoldingFilter::default().apply(&mut tokens);
     let fingerprint = tokens
         .iter()
@@ -242,7 +243,7 @@ fn embedded_stopword_lists_are_sorted_unique_lowercase_nfc() {
             assert!(!word.is_empty() && is_nfc(word), "{word:?}");
             assert_eq!(word.to_lowercase(), *word);
             // One token of the standard tokenizer, so a stopword can match a standard token.
-            let mut tokens = Vec::new();
+            let mut tokens = TokenStream::new();
             StandardTokenizer.tokenize(word, &mut tokens);
             assert_eq!(tokens.len(), 1, "{word:?}");
         }

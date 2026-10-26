@@ -5,8 +5,8 @@ use std::num::NonZeroUsize;
 
 use persia_analysis::{
     Analyzer, AnalyzerRegistry, BUILTIN_ANALYZERS, DEFAULT_ANALYZER, EdgeNgramFilter,
-    LowercaseFilter, RegisterError, StandardTokenizer, SynonymMap, Token, WhitespaceTokenizer,
-    builtin_analyzer, current_builtin_version,
+    LowercaseFilter, RegisterError, StandardTokenizer, SynonymMap, Token, TokenStream,
+    WhitespaceTokenizer, builtin_analyzer, current_builtin_version,
 };
 use proptest::prelude::*;
 
@@ -15,8 +15,8 @@ const CASES: u32 = 256;
 #[cfg(feature = "slow")]
 const CASES: u32 = 10_000;
 
-fn analyze(analyzer: &Analyzer, text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+fn analyze(analyzer: &Analyzer, text: &str) -> TokenStream {
+    let mut tokens = TokenStream::new();
     analyzer.analyze(text, &mut tokens);
     tokens
 }
@@ -263,7 +263,7 @@ fn query_analysis_leaves_out_stacking_filters() {
         texts(&analyze(&analyzer, "Laptop")),
         ["la", "lap", "lapt", "laptop"]
     );
-    let mut query = Vec::new();
+    let mut query = TokenStream::new();
     analyzer.analyze_query("Lapt X", &mut query);
     assert_eq!(texts(&query), ["lapt", "x"]);
     assert_eq!(query.iter().map(|t| t.position).collect::<Vec<_>>(), [0, 1]);
@@ -278,7 +278,7 @@ fn query_analysis_leaves_out_stacking_filters() {
 fn synonyms_on_a_stacking_analyzer_match_queries() {
     let analyzer = ngram_analyzer();
     let map = SynonymMap::analyzed([["New York", "NYC"]], &analyzer);
-    let mut query = Vec::new();
+    let mut query = TokenStream::new();
     analyzer.analyze_query("flights to new york", &mut query);
     let matches = map.find(&query);
     assert_eq!(matches.len(), 1);
@@ -321,7 +321,7 @@ proptest! {
                 prop_assert!(pair[0].position < pair[1].position, "{}: {pair:?}", a.name);
                 prop_assert!(pair[0].end <= pair[1].start, "{}: {pair:?}", a.name);
             }
-            let mut query = Vec::new();
+            let mut query = TokenStream::new();
             analyzer.analyze_query(&text, &mut query);
             prop_assert_eq!(&query, &tokens, "{}", a.name);
         }
@@ -351,7 +351,7 @@ proptest! {
     fn query_tokens_are_among_stacked_index_tokens(text in text()) {
         let analyzer = ngram_analyzer();
         let index = analyze(&analyzer, &text);
-        let mut query = Vec::new();
+        let mut query = TokenStream::new();
         analyzer.analyze_query(&text, &mut query);
         for token in &query {
             prop_assert!(

@@ -9,7 +9,7 @@ use std::borrow::Cow;
 
 use persia_analysis::{
     EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter, Token, TokenFilter,
-    Tokenizer, WhitespaceTokenizer,
+    TokenStream, Tokenizer, WhitespaceTokenizer,
 };
 use proptest::prelude::*;
 
@@ -32,12 +32,12 @@ fn check_vocabulary(stemmer: &dyn Stemmer, tsv: &str, expected_words: usize) {
         if stem != expected {
             wrong.push(format!("{word} -> {stem} (expected {expected})"));
         }
-        let mut tokens = vec![Token {
+        let mut tokens = TokenStream::from(vec![Token {
             text: word.to_owned(),
             start: 0,
             end: word.len(),
             position: 0,
-        }];
+        }]);
         StemmerFilter::new(stemmer).apply(&mut tokens);
         let filtered: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
         let want: &[&str] = if expected.is_empty() {
@@ -137,7 +137,7 @@ fn unchanged_words_are_borrowed() {
 
 #[test]
 fn the_filter_keeps_spans_and_positions_and_drops_empty_stems() {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     // `''s` loses its leading apostrophe and then its possessive: its stem is empty.
     WhitespaceTokenizer.tokenize("The ''s cats running", &mut tokens);
     StemmerFilter::new(EnglishStemmer).apply(&mut tokens);
@@ -172,7 +172,7 @@ proptest! {
 
     #[test]
     fn the_filter_only_rewrites_texts(text in "[a-záéíóúñ' ]{0,64}") {
-        let mut original: Vec<Token> = Vec::new();
+        let mut original = TokenStream::new();
         WhitespaceTokenizer.tokenize(&text, &mut original);
         let mut tokens = original.clone();
         StemmerFilter::new(SpanishStemmer).apply(&mut tokens);
@@ -218,10 +218,10 @@ fn stemmers_can_be_picked_at_run_time() {
         .iter()
         .zip(["skies", "canciones", "brasileiras"])
         .map(|(filter, word)| {
-            let mut tokens = Vec::new();
+            let mut tokens = TokenStream::new();
             WhitespaceTokenizer.tokenize(word, &mut tokens);
             filter.apply(&mut tokens);
-            tokens.remove(0).text
+            tokens.first().unwrap().text.clone()
         })
         .collect();
     assert_eq!(stems, ["sky", "cancion", "brasileir"]);
