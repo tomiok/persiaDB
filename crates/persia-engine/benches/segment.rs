@@ -1,21 +1,29 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
-//! 5.2). Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
+//! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3).
+//! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
 
 use std::hint::black_box;
+use std::ops::Bound;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::schema::{
-    CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
-use persia_engine::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
+use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter, TermInfo};
+use persia_format::ByteSource;
 
 const DOCS: u64 = 2_000;
 const VOCABULARY: u64 = 5_000;
+const META: SegmentMeta = SegmentMeta {
+    segment_id: 1,
+    created_at: 0,
+    merge_generation: 0,
+};
 
 fn schema() -> CollectionSchema {
     SchemaBuilder::new("bench")
@@ -97,11 +105,6 @@ fn bench(c: &mut Criterion) {
     let schema = schema();
     let registry = AnalyzerRegistry::builtin();
     let docs = documents(&schema);
-    let meta = SegmentMeta {
-        segment_id: 1,
-        created_at: 0,
-        merge_generation: 0,
-    };
 
     let mut group = c.benchmark_group("segment");
     group.throughput(Throughput::Elements(DOCS));
@@ -110,10 +113,134 @@ fn bench(c: &mut Criterion) {
     });
     let built = build(&schema, &registry, &docs);
     group.bench_function("finish", |b| {
-        b.iter(|| black_box(SegmentWriter::new(&built, meta).finish().unwrap()));
+        b.iter(|| black_box(SegmentWriter::new(&built, META).finish().unwrap()));
     });
     group.finish();
 }
 
-criterion_group!(benches, bench);
+/// Terms of `field` with their `TermInfo`, in term order.
+fn all_terms(seg: &Segment, field: FieldId) -> Vec<(Vec<u8>, TermInfo)> {
+    let terms = seg.terms(field).unwrap();
+    let mut stream = terms.range(Bound::Unbounded, Bound::Unbounded);
+    let mut out = Vec::new();
+    while let Some(next) = stream.next() {
+        let (term, info) = next.unwrap();
+        out.push((term.to_vec(), info));
+    }
+    out
+}
+
+fn total_df(terms: &[(Vec<u8>, TermInfo)]) -> u64 {
+    terms.iter().map(|(_, i)| u64::from(i.df())).sum()
+}
+
+/// Reading the segment the indexing benchmarks build (ROADMAP 5.3): open, term lookup, postings iteration,
+/// skipping, positions and document fetch.
+fn bench_read(c: &mut Criterion) {
+    let schema = schema();
+    let registry = AnalyzerRegistry::builtin();
+    let docs = documents(&schema);
+    let built = build(&schema, &registry, &docs);
+    let bytes = SegmentWriter::new(&built, META).finish().unwrap();
+    let source = ByteSource::new(bytes.into());
+    let seg = Segment::open(source.clone(), &schema).unwrap();
+    let field = |name: &str| schema.field(name).unwrap().id();
+    let (title, body) = (field("title"), field("body"));
+    let body_terms = all_terms(&seg, body);
+    let title_terms = all_terms(&seg, title);
+    // The frequent terms (df >= 200 of 2 000): lists of two or more 128-blocks, so `advance` skips blocks.
+    let frequent: Vec<TermInfo> = body_terms
+        .iter()
+        .filter(|(_, i)| i.df() >= 200)
+        .map(|(_, i)| i.clone())
+        .collect();
+    assert!(frequent.len() >= 4, "too few long postings lists");
+
+    let mut group = c.benchmark_group("segment_read");
+    group.throughput(Throughput::Elements(1));
+    group.bench_function("open", |b| {
+        b.iter(|| black_box(Segment::open(source.clone(), &schema).unwrap()));
+    });
+
+    group.throughput(Throughput::Elements(body_terms.len() as u64));
+    group.bench_function("term_get", |b| {
+        let mut terms = seg.terms(body).unwrap();
+        b.iter(|| {
+            for (term, _) in &body_terms {
+                black_box(terms.get(term).unwrap());
+            }
+        });
+    });
+
+    // Every posting of every body term, with its frequency.
+    group.throughput(Throughput::Elements(total_df(&body_terms)));
+    group.bench_function("postings_freq", |b| {
+        let terms = seg.terms(body).unwrap();
+        b.iter(|| {
+            let mut sum = 0_u64;
+            for (_, info) in &body_terms {
+                let mut p = terms.postings(info).unwrap();
+                while let Some(doc) = p.next().unwrap() {
+                    sum += u64::from(doc) + u64::from(p.freq().unwrap());
+                }
+            }
+            black_box(sum)
+        });
+    });
+
+    // `advance` to every 64th docid on the frequent terms; a target past the current block skips by its `Skip` entries.
+    let targets: Vec<u32> = (0..u32::try_from(DOCS).unwrap()).step_by(64).collect();
+    group.throughput(Throughput::Elements(
+        (frequent.len() * targets.len()) as u64,
+    ));
+    group.bench_function("advance", |b| {
+        let terms = seg.terms(body).unwrap();
+        b.iter(|| {
+            let mut sum = 0_u64;
+            for info in &frequent {
+                let mut p = terms.postings(info).unwrap();
+                for &t in &targets {
+                    match p.advance(t).unwrap() {
+                        Some(doc) => sum += u64::from(doc),
+                        None => break,
+                    }
+                }
+            }
+            black_box(sum)
+        });
+    });
+
+    // Every posting of every title term, with its positions.
+    group.throughput(Throughput::Elements(total_df(&title_terms)));
+    group.bench_function("positions", |b| {
+        let terms = seg.terms(title).unwrap();
+        b.iter(|| {
+            let mut sum = 0_u64;
+            for (_, info) in &title_terms {
+                let mut p = terms.postings(info).unwrap();
+                while p.next().unwrap().is_some() {
+                    sum += p
+                        .positions()
+                        .unwrap()
+                        .iter()
+                        .map(|&x| u64::from(x))
+                        .sum::<u64>();
+                }
+            }
+            black_box(sum)
+        });
+    });
+
+    group.throughput(Throughput::Elements(DOCS));
+    group.bench_function("document", |b| {
+        b.iter(|| {
+            for d in 0..u32::try_from(DOCS).unwrap() {
+                black_box(seg.document(d).unwrap());
+            }
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench, bench_read);
 criterion_main!(benches);

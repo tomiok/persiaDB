@@ -1,5 +1,6 @@
-//! Segment writer (SPEC §5, ROADMAP 5.1–5.2): every segment written is decoded by a strict, independent decoder
+//! Segments (SPEC §5, ROADMAP 5.1–5.3). Writer: every segment written is decoded by a strict, independent decoder
 //! (`decode`) and compared with a naive model of its documents (`model`); determinism; the golden segment.
+//! Reader (`read`, `corrupt`): everything reads back as the model; iteration, enumeration, footer rules, damage.
 //!
 //! The golden file `tests/fixtures/segment/v1.0/basic.pseg` pins the bytes of format 1.0: it is never regenerated
 //! once released (SPEC §15); `PERSIA_WRITE_SEGMENT_FIXTURES=1` writes it when it is missing.
@@ -20,9 +21,12 @@
     missing_docs
 )]
 
+mod corrupt;
 mod decode;
 mod edges;
 mod model;
+mod read;
+mod sections;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

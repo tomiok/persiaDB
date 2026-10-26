@@ -324,31 +324,35 @@ Deps: M1, M3, M4. The heart of the index format.
 - [x] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
 
 ## 5.3 Segment reader
-- [ ] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version
-- [ ] 5.3.2 Term lookup: FST get + term-info decode
+- [x] 5.3.1 Open: locate/validate footer, parse section table, verify schema hash (`CollectionSchema::hash_at` the recorded field count, SPEC §6.2.5) and version
+- [x] 5.3.2 Term lookup: FST get + term-info decode
 - 5.3.3 Postings iterator
-  - [ ] 5.3.3.1 Sequential `next()` over blocks
-  - [ ] 5.3.3.2 `advance(target)` using skip entries
-  - [ ] 5.3.3.3 Frequency access aligned with docid blocks
-  - [ ] 5.3.3.4 Block-level metadata access (`max_tf`, `last_docid`) for block-max WAND
-- [ ] 5.3.4 Positions iterator (phrase support)
-- [ ] 5.3.5 Norms accessor, columns accessor (typed readers)
-- [ ] 5.3.6 Doc fetch by docid (DocStore block cache) and by external id (IdMap FST)
-- [ ] 5.3.7 Tombstone overlay view (roaring) applied on iteration
-- [ ] 5.3.8 Prefix/range term enumeration (FST range) and Levenshtein-automaton intersection hook (used in M8)
-- [ ] 5.3.9 `#![deny(clippy::arithmetic_side_effects)]` on the segment-reader modules of `persia-engine` (continues 1.1.5)
+  - [x] 5.3.3.1 Sequential `next()` over blocks
+  - [x] 5.3.3.2 `advance(target)` using skip entries
+  - [x] 5.3.3.3 Frequency access aligned with docid blocks
+  - [x] 5.3.3.4 Block-level metadata access (`max_tf`, `last_docid`) for block-max WAND
+- [x] 5.3.4 Positions iterator (phrase support)
+- [x] 5.3.5 Norms accessor, columns accessor (typed readers)
+- [x] 5.3.6 Doc fetch by docid (DocStore block cache) and by external id (IdMap FST)
+- [x] 5.3.7 Tombstone overlay view (roaring) applied on iteration
+- [x] 5.3.8 Prefix/range term enumeration (FST range) and Levenshtein-automaton intersection hook (used in M8)
+- [x] 5.3.9 `#![deny(clippy::arithmetic_side_effects)]` on the segment-reader modules of `persia-engine` (continues 1.1.5)
+- [ ] 5.3.10 Block tables validated once per segment (found in 5.3): every accessor call (`terms`, `norms`, columns) and every document fetch (`document`, `id_of`, `blob_ref`) reopens its sections' `BlockReader`, re-verifying the block-table CRC, and each `terms()` call decodes its TermInfo blocks again; keep the validated tables (an owned `BlockTable` in `persia-format`, or segment-lifetime readers) so per-query cost does not grow with section size
+- [ ] 5.3.11 Decoded-block caching for postings (found in 5.3): each `Postings` iterator decodes, and re-verifies the CRC of, the framed blocks it reads; share decoded blocks across iterators and queries (the SPEC §10.6 block cache) and measure it in 5.5.5
+- [ ] 5.3.12 Lazy column access (found in the 5.3 review): `numeric_column` and `keyword_column` decode a whole column into 8 bytes per document; read FOR blocks on demand (SPEC §5.2.1 makes any value O(1)) so a 100M-document segment does not need 800 MB per column
+- [ ] 5.3.13 Positions per document (found in the 5.3 review): `Postings::positions` decodes a block's whole positions run (capped at 2^26 values, a resource error beyond); decode only the current document's positions, on demand, so memory stays proportional to one document's term frequency
 
 ## 5.4 Verification & tooling
-- [ ] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data
+- [ ] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data; also the rules that span a whole section, which lookups do not check (found in 5.3): the `skip_off` chain and the end of the last skip region, TermInfo `max_tf`/`min_norm` equal to the extremes of their skip entries and norms, writers' minimal bit widths, a Skip section only when some df ≥ 128, `IdList` ids equal to the `DocStore` rows' ids; un-ignore `sections::skip_entries_not_back_to_back_are_corruption`
 - [ ] 5.4.2 `persia inspect segment` (CLI): footer, sections, sizes, per-field stats
 - [ ] 5.4.3 `persia dump segment --field f --term t` debugging output
 
 ## 5.5 Tests
 - [ ] 5.5.1 Property: build segment from random docs → read back every doc/term/posting/column exactly equals the model
 - [ ] 5.5.2 Golden segment fixtures (+ determinism test)
-- [ ] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open
+- [ ] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open (the `segment` target, added in 5.3, opens raw bytes and edited block-framed sections with valid CRCs; still missing: edits to the raw FST sections)
 - [ ] 5.5.4 Large-doc / empty-collection / single-doc / 2^20-doc edge-case tests
-- [ ] 5.5.5 Bench: build throughput, term lookup, postings decode, doc fetch
+- [x] 5.5.5 Bench: build throughput, term lookup, postings decode, doc fetch
 
 ---
 
