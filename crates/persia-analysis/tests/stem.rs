@@ -138,10 +138,18 @@ fn unchanged_words_are_borrowed() {
     ] {
         for word in ["", "x", "zzz", "東京"] {
             assert!(
-                matches!(stemmer.stem(word), Cow::Borrowed(w) if w == word),
+                matches!(stemmer.stem(word), Cow::Borrowed(w) if std::ptr::eq(w, word)),
                 "{word:?}"
             );
         }
+    }
+    // English table entries that are their own stem borrow the word itself, not the table's copy of it.
+    for word in ["news", "sky", "howe", "atlas", "cosmos", "bias", "andes"] {
+        let word = word.to_owned();
+        assert!(
+            matches!(EnglishStemmer.stem(&word), Cow::Borrowed(w) if std::ptr::eq(w, word.as_str())),
+            "{word:?}"
+        );
     }
 }
 

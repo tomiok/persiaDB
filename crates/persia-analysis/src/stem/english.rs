@@ -27,7 +27,8 @@ pub struct EnglishStemmer;
 impl CharStemmer for EnglishStemmer {
     fn shortcut<'a>(&self, word: &'a str) -> Option<Cow<'a, str>> {
         if let Some(stem) = exception(word) {
-            return Some(Cow::Borrowed(stem));
+            // An invariant entry (`news`, `sky`) borrows the word itself, as `Stemmer::stem` promises.
+            return Some(Cow::Borrowed(if stem == word { word } else { stem }));
         }
         // Words of fewer than 3 characters are left alone.
         word.chars().nth(2).is_none().then_some(Cow::Borrowed(word))
