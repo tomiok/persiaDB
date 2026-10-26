@@ -24,6 +24,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-analysis`: char filters (`CharFilter`, `CharFilterOutput`, `AnalyzerBuilder::char_filter`; SPEC §6.3.1). A
   filter keeps or replaces pieces of the value, and the analyzer maps token spans back to the original value, so
   highlighting with them works whatever the filters did.
+- Roadmap: post-MVP milestones M16–M30 (v1.1 through v3.0). M0–M15 stay the MVP and v1.0. The progress percentage and burn-up still count only those leaves.
+- Docs: the first embedded binding release follows the v1.0 tag (M15, then M16). ROADMAP 10.5.2's `v0.1.0-alpha` tag stays the core's notice that the format is unstable.
 - Website: `llms.txt` lists every documentation page for agents, and each HTML page links to it. `llms-full.txt` is those pages in Markdown. URLs include the `/persiaDB/` base.
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
 - `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains char filters, a tokenizer and token filters. `analyze` gives index-time tokens and

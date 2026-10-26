@@ -34,15 +34,16 @@ design). Rows look like:
 
 | Package | Core revision | ABI | Format majors it can read | Format majors it will write |
 |---|---|---|---|---|
-| `@persiadb/node` 0.1.0-alpha.0 | `v0.1.0-alpha` | 0.1 | 1 | 1 |
-| `sdk/persia` v0.1.0-alpha.0 | same | 0.1 | 1 | 1 |
+| `@persiadb/node` 1.0.0 | `v1.0.0` | 0.1 | 1 | 1 |
+| `sdk/persia` v1.0.0 | same | 0.1 | 1 | 1 |
 
-Until v1.0 the honest content of that table is "this package opens files written by the core revision
-it was built with, and by nothing else we are willing to promise." A newer package may read an older
-pre-1.0 file only when the core it links still can. SPEC §15 already says a released format version is
-frozen and an unreleased one may change in place. Pre-alpha tags are not that freeze. ROADMAP 10.5.2
-requires the `v0.1.0-alpha` tag to say the format is unstable. The SDK tags repeat that sentence in
-their release notes.
+The first published binding follows the core `v1.0.0` tag (ROADMAP M15 and M16.4), after sections 16.1–16.3.
+ROADMAP 10.5.2 still tags the core `v0.1.0-alpha` and that tag says the format is unstable; it is not the
+binding cut. Until v1.0 the honest content of a compatibility row, if one were published, would be "this
+package opens files written by the core revision it was built with, and by nothing else we are willing to
+promise." A newer package may read an older pre-1.0 file only when the core it links still can. SPEC §15
+already says a released format version is frozen and an unreleased one may change in place. Pre-alpha tags
+are not that freeze.
 
 Network-client compatibility (SDK ↔ server, ROADMAP 14.4) is a different matrix. Do not merge the rows.
 
@@ -141,9 +142,10 @@ itself rejects N-API.
 
 One core tag, then the bindings. Never the other way around: the bindings have nothing to wrap.
 
-1. Tag the core, currently planned as `v0.1.0-alpha` with an explicit "format unstable" notice
-   (ROADMAP 10.5.2). The core is not published to crates.io until its own release-engineering leaf
-   (10.5.1) says so. The bindings do not require the core to be on crates.io; they build from the git tag.
+1. Tag the core `v1.0.0` (ROADMAP M15). The earlier `v0.1.0-alpha` tag (ROADMAP 10.5.2) says the format is
+   unstable and is not the binding cut. Publishing the modules is M16.4, after M16.1–M16.3. The core is not
+   published to crates.io until its own release-engineering leaf (10.5.1) says so. The bindings do not
+   require the core to be on crates.io; they build from the git tag.
 2. CI on that tag builds `persia-ffi` staticlibs and the `.node` packages. The workflow lives in
    `.github/workflows/` next to the existing CI. It does not run on every pull request of the core:
    a docs change or a format-crate change does not need six cross compilers. It runs on tags, on

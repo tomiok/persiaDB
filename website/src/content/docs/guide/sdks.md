@@ -20,7 +20,7 @@ SPEC §13 names both, and they are easy to mix up.
 |---|---|---|
 | Who calls them | A Go or TypeScript program that wants a file, the way Rust will call `Db::open` | A program talking to `persia-server` |
 | Paths | `sdk/persia`, `sdk/node` (neither directory exists) | `sdk/rust` (`persia-client`), `sdk/go` (`persia-go`) |
-| Milestone | After the embedded API (ROADMAP M10). No leaves filed yet. | M14, after the server (M11) and sharding (M13) |
+| Milestone | M16 (target v1.1), after v1.0. Design: ADR-0018. Blocked on M15. | M14, after the server (M11) and sharding (M13) |
 | Status | Design only | Not started |
 
 The network clients are described on [Server, cloud, and Kubernetes](/guide/server/).
@@ -35,12 +35,12 @@ One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second sear
 - **TypeScript** ships first as an N-API addon (`@persiadb/node`) for Node.js, Bun, and Deno. The addon
   calls the same Rust functions the C ABI calls. A WASM package for browsers and edge isolates comes
   later, only after a storage backend exists that does not need mmap or POSIX fsync. That backend is
-  not on the roadmap.
+  ROADMAP M28 (target v2.3).
 
 Prebuilt binaries are how a caller builds without Rust: a checksummed `libpersia.a` for Go, and
 per-platform optional npm dependencies for Node. Until format v1.0 there is no compatibility promise
-(SPEC §15). The first binding release follows a core tag that says the format is unstable
-(ROADMAP 10.5.2).
+(SPEC §15). The first binding release follows the v1.0 tag (M15, then M16). ROADMAP 10.5.2's
+`v0.1.0-alpha` tag is the core's notice that the format is still unstable; it is not the binding cut.
 
 ## The call, once it exists
 
