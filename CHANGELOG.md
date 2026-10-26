@@ -31,6 +31,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-analysis`: char filters (`CharFilter`, `CharFilterOutput`, `AnalyzerBuilder::char_filter`; SPEC §6.3.1). A
   filter keeps or replaces pieces of the value, and the analyzer maps token spans back to the original value, so
   highlighting with them works whatever the filters did.
+- Website: `llms.txt` lists every documentation page for agents, and each HTML page links to it. `llms-full.txt` is those pages in Markdown. URLs include the `/persiaDB/` base.
 - Website: looping hero video on the landing page, with a pause control. Visitors who prefer reduced motion, and browsers without JavaScript, see the poster still.
 - `persia-analysis`: analyzers (SPEC §6.3). `Analyzer::builder` chains char filters, a tokenizer and token filters. `analyze` gives index-time tokens and
   `analyze_query` query-time tokens, without filters that stack tokens such as edge n-grams (§6.3.4), and
