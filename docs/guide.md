@@ -228,7 +228,7 @@ the language analyzers `en`, `es`, and `pt` (stopwords, a Snowball-style stemmer
 
 A field names its analyzer as `"es"` (the current version) or `"es@1"`; the stored schema always
 records the version, so an index keeps analyzing queries the way it was built. Re-applying a
-definition with an unversioned `"es"` after a release adds `es@2` leaves the field at `es@1`
+definition with an unversioned `"es"`, after a release that adds `es@2`, leaves the field at `es@1`
 (SPEC §6.2.4). Fields that index edge n-grams analyze queries and synonyms without them
 (SPEC §6.3.4).
 

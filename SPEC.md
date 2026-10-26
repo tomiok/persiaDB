@@ -814,9 +814,10 @@ chain so it bounds the final terms.
 | `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
 | `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
 
-`keyword` and `whitespace` do not normalize: case and accents are significant. Their guard makes two values that share their
-first 255 bytes one term; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4). `es` keeps `ñ` because it tells words
-apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
+`keyword` and `whitespace` do not normalize: case and accents are significant. The guard truncates each token, so
+under `keyword` (one token per value) two values that share their first 255 bytes are one term, and under
+`whitespace` two words that do; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4).
+`es` keeps `ñ` because it tells words apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
 stemming, so `John’s` and `John's` both stem to `john`. Stemming before folding means a query typed without accents
 can stem differently from the accented word (`maçã` and `maca` in `pt`); the relaxation cascade (§7.6) is what
 bridges such misses. A test pins every built-in's output on a fixed text, so a change to a chain cannot ship as the
@@ -827,8 +828,9 @@ Queries (§7) and synonym terms (§6.3.2) are analyzed with the field's analyzer
 tokens** (`edge_ngram`; `TokenFilter::stacks_tokens`): an index-time prefix such as `lapt` must match the query term
 `lapt` as is, and a query or synonym term expanded into prefixes could never line up with an analyzed query. Every
 other filter applies at both times, in the same order, so terms meet in the same form. Without `preserve_original`, a query
-word longer than `max` analyzes to the whole word, which was never indexed, so L0 misses it and the relaxation
-cascade (§7.6, prefix level) is what finds it. No built-in analyzer stacks
+word longer than `max` analyzes to the whole word, which was never indexed, and no level of the cascade (§7.6)
+shortens it: L3 expands it as a prefix (`laptop*`), which no prefix of at most `max` characters matches. A field
+that expects longer query words sets `preserve_original` or a larger `max`. No built-in analyzer stacks
 tokens, so for them query-time and index-time analysis are the same.
 
 ### 6.4 Documents

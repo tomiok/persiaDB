@@ -931,17 +931,30 @@ fn apply_schema_rules() {
     assert_eq!(next.collection("notes").unwrap().schema(), &evolved);
     // ROADMAP 4.4.3: the unpinned analyzer of a definition evolves to the stored, pinned one; pinning alone is no
     // schema change.
+    let analyzer = |s: &CollectionSchema| match s.field("body").map(|f| f.kind().clone()) {
+        Some(FieldKind::Text(o)) => o.analyzer,
+        other => panic!("{other:?}"),
+    };
     let pinned = CollectionSchema::from_json(&notes().to_json().unwrap()).unwrap();
+    assert!(analyzer(&pinned).is_pinned());
+    assert!(!analyzer(&notes()).is_pinned());
     let rebound = pinned.evolve(&notes()).unwrap();
+    // The evolved schema keeps the stored ref, pin included, rather than the definition's unpinned one.
+    assert!(analyzer(&rebound).is_pinned());
     assert_eq!(rebound, pinned);
-    b.apply(&change(
-        "notes",
-        CollectionChange {
-            schema: Some(rebound),
-            ..CollectionChange::default()
-        },
-    ))
-    .unwrap();
+    let next = b
+        .apply(&change(
+            "notes",
+            CollectionChange {
+                schema: Some(rebound.clone()),
+                ..CollectionChange::default()
+            },
+        ))
+        .unwrap();
+    let applied = next.collection("notes").unwrap().schema();
+    assert_eq!(applied, &rebound);
+    assert_eq!(applied.hash(), notes().hash());
+    assert_eq!(applied.to_json().unwrap(), notes().to_json().unwrap());
 }
 
 #[test]

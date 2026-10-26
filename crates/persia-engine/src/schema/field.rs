@@ -293,6 +293,11 @@ mod tests {
         for gone in ["fr", "de", "it"] {
             assert_eq!(AnalyzerRef::builtin(gone), None, "{gone}");
         }
+        // `Default` falls back only if the default analyzer is missing from the registry: never.
+        assert_eq!(
+            Some(AnalyzerRef::default()),
+            AnalyzerRef::builtin(DEFAULT_ANALYZER)
+        );
         assert_eq!(AnalyzerRef::default().name(), DEFAULT_ANALYZER);
         assert!(!AnalyzerRef::default().is_pinned());
     }

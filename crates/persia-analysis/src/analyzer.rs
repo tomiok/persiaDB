@@ -72,6 +72,11 @@ impl Analyzer {
         for char_filter in &self.char_filters {
             let changed = match char_filter.filter(&filtered) {
                 Cow::Owned(text) => Some(text),
+                // A filter may return a borrowed view of its input (a trimmed substring): only the input itself is
+                // "unchanged".
+                Cow::Borrowed(view) if !std::ptr::eq(view, filtered.as_ref()) => {
+                    Some(view.to_owned())
+                }
                 Cow::Borrowed(_) => None,
             };
             if let Some(text) = changed {
@@ -174,5 +179,28 @@ mod tests {
             [(0, 4), (5, 10), (11, 15)]
         );
         assert!(!analyzer.stacks_tokens());
+    }
+
+    /// Keeps the text after the first `|`, as a borrowed view of its input.
+    struct AfterBar;
+
+    impl CharFilter for AfterBar {
+        fn filter<'a>(&self, text: &'a str) -> Cow<'a, str> {
+            Cow::Borrowed(text.split_once('|').map_or(text, |(_, rest)| rest))
+        }
+    }
+
+    #[test]
+    fn a_borrowed_view_that_differs_is_a_change() {
+        let analyzer = Analyzer::builder(WhitespaceTokenizer)
+            .char_filter(AfterBar)
+            .char_filter(AfterBar)
+            .build();
+        let mut tokens = Vec::new();
+        analyzer.analyze("a|b c|d e", &mut tokens);
+        let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, ["d", "e"]);
+        analyzer.analyze("no bar", &mut tokens);
+        assert_eq!(tokens.len(), 2);
     }
 }
