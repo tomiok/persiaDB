@@ -128,10 +128,12 @@ pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, Re
     for d in 0..n {
         out.docs.push(seg.document(d)?);
         let doc_id = seg.id_of(d)?;
-        assert_eq!(seg.docid_of(&doc_id)?, Some(d));
+        // `Segment::verify` (below) checks that the IdMap maps the id back to `d`.
         out.ids.push(doc_id);
         out.blobs.push(seg.blob_ref(d)?);
     }
+    // Everything read back: the whole-segment rules must hold too (ROADMAP 5.4.1).
+    seg.verify()?;
     Ok(out)
 }
 

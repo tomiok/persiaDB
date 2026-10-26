@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: `Segment::verify` (ROADMAP 5.4.1) reads a whole segment and checks what no lookup can: every block
+  and raw CRC; each term's `df`, `ttf`, `max_tf` and `min_norm` against its list and each Skip entry's bounds against
+  its block; the `skip_off` chain and the end of the Skip section; minimal bit widths and FOR minimums; norms and field
+  statistics against the term frequencies; keyword columns against the postings; stored values against the columns;
+  the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; and sections that hold
+  nothing. `Segment::sections` lists the section table with each block-framed section's stream size.
 - `persia-engine`: the segment reader (SPEC §5, ROADMAP 5.3). `Segment::open` checks the footer, section table, padding,
   section presence, every block table and raw CRC, and the schema hash at the field count the segment records, so a
   segment written before fields were added opens with the evolved schema. `Segment::terms` gives a `TermIndex` (term
