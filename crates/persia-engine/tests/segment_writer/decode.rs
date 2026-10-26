@@ -321,7 +321,7 @@ fn bitmap(r: &mut Reader<'_>) -> Option<RoaringBitmap> {
     Some(RoaringBitmap::deserialize_from(r.read_bytes(len).unwrap()).unwrap())
 }
 
-fn for_column(r: &mut Reader<'_>) -> Vec<u64> {
+pub fn for_column(r: &mut Reader<'_>) -> Vec<u64> {
     let count = r.read_u64().unwrap() as usize;
     let blocks = count.div_ceil(VALUES_PER_BLOCK);
     let ends: Vec<usize> = (0..blocks)

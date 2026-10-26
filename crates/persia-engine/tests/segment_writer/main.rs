@@ -21,6 +21,7 @@
 )]
 
 mod decode;
+mod edges;
 mod model;
 
 use std::collections::BTreeMap;

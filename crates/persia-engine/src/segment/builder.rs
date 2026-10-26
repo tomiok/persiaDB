@@ -400,6 +400,103 @@ mod tests {
         assert_eq!((b.doc_count(), b.size_in_bytes()), (2, size));
     }
 
+    /// A `Full` rejection leaves the segment byte-identical to never having tried (`add` docs).
+    #[test]
+    fn full_rejection_leaves_output_byte_identical() {
+        use crate::segment::{SegmentMeta, SegmentWriter};
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 2,
+            merge_generation: 0,
+        };
+        let (mut a, t, k) = builder();
+        let (mut b, _, _) = builder();
+        let doc = |id: &str| {
+            Document::new(id)
+                .with(t, Value::String(format!("{id} words")))
+                .with(k, Value::String(id.into()))
+        };
+        for x in [&mut a, &mut b] {
+            x.set_max_docs(2);
+            x.add(&doc("a")).unwrap();
+            x.add(&doc("b")).unwrap();
+        }
+        assert_eq!(b.add(&doc("c")), Err(SegmentError::Full { max_docs: 2 }));
+        assert_eq!(b.add(&doc("a")), Err(SegmentError::Full { max_docs: 2 }));
+        assert_eq!(
+            SegmentWriter::new(&a, meta).finish().unwrap(),
+            SegmentWriter::new(&b, meta).finish().unwrap()
+        );
+    }
+
+    /// Duplicates every token at its own position: a stacking filter whose stacked tokens share their text.
+    struct Twice;
+    impl persia_analysis::TokenFilter for Twice {
+        fn apply(&self, tokens: &mut TokenStream) {
+            tokens.rebuild(|token, out| {
+                out.push(&token.text, token.start, token.end, token.position);
+                out.push_token(token);
+            });
+        }
+        fn stacks_tokens(&self) -> bool {
+            true
+        }
+    }
+
+    /// No built-in analyzer stacks tokens and a schema can only name built-ins, so this swaps the analyzer in:
+    /// stacked tokens (edge n-grams, and equal tokens at one position) count in `tf` and the field length, their
+    /// positions repeat (delta 0, SPEC §5.3.3), and the writer accepts them.
+    #[test]
+    fn stacked_tokens_are_indexed_and_written() {
+        use crate::segment::{SegmentMeta, SegmentWriter};
+        use persia_analysis::{EdgeNgramFilter, WhitespaceTokenizer};
+        use std::num::NonZeroUsize;
+        let n = |n| NonZeroUsize::new(n).unwrap();
+        let (mut b, t, _) = builder();
+        let stacking = Analyzer::builder(WhitespaceTokenizer)
+            .filter(
+                EdgeNgramFilter::new(n(1), n(3))
+                    .unwrap()
+                    .preserve_original(true),
+            )
+            .filter(Twice)
+            .build();
+        assert!(stacking.stacks_tokens());
+        match &mut b.fields[t.get() as usize] {
+            FieldBuilder::Text { analyzer, .. } => *analyzer = Arc::new(stacking),
+            _ => panic!("t is a text field"),
+        }
+        let doc = Document::new("d").with(t, Value::Strings(vec!["abcd ab".into(), "a".into()]));
+        b.add(&doc).unwrap();
+        let FieldBuilder::Text { inverted, .. } = &b.fields[t.get() as usize] else {
+            panic!("t is a text field")
+        };
+        let g = inverted.by_term();
+        let got: Vec<(&[u8], u32, &[u32])> = g
+            .order
+            .iter()
+            .zip(&g.postings)
+            .map(|(&id, p)| (inverted.terms.key(id), p.tf, inverted.positions_of(p)))
+            .collect();
+        // Value 0: a ab abc abcd @0, a ab @1 (each twice); end 2. Value 1 starts at 102: a @102 (twice).
+        assert_eq!(
+            got,
+            [
+                (&b"a"[..], 6, &[0, 0, 1, 1, 102, 102][..]),
+                (b"ab", 4, &[0, 0, 1, 1]),
+                (b"abc", 2, &[0, 0]),
+                (b"abcd", 2, &[0, 0]),
+            ]
+        );
+        assert_eq!(inverted.lengths, [(0, 14)]);
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        SegmentWriter::new(&b, meta).finish().unwrap();
+    }
+
     #[test]
     fn values_are_a_position_gap_apart_and_poison_sticks() {
         let (mut b, t, _) = builder();
