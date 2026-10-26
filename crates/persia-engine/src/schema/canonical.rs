@@ -33,6 +33,9 @@ const OPT_STORED: u8 = 4;
 pub struct SchemaHash(u128);
 
 impl SchemaHash {
+    /// The `encoding_version` of the canonical encoding this build hashes (SPEC §6.2.5); segments record it.
+    pub const ENCODING_VERSION: u8 = ENCODING_VERSION;
+
     /// Wraps a hash read from a segment.
     pub const fn from_u128(value: u128) -> Self {
         Self(value)

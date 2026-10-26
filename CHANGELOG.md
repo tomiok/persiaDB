@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: segments (SPEC §5, ADR-0027). `SegmentBuilder` indexes documents in memory (interned terms, one
+  posting log per field, columns, `DocStore` rows and ids; `size_in_bytes` for flush thresholds) and `SegmentWriter`
+  writes a deterministic segment: term dictionary (FST), term info, postings, frequencies, skip entries, positions,
+  norms, columns, `DocStore`, `IdMap`, `IdList`, `BlobRefs` and the footer. A Criterion benchmark (`segment`).
+- `persia-analysis`: `TokenStream::size_in_bytes`, the heap bytes a stream keeps between uses (for memory accounting).
 - `persia-analysis`: allocation-free analysis for every built-in analyzer once its `TokenStream` has grown: `Scratch`
   buffers lent by `TokenStream::rewrite_with_scratch`, and `Stemmer::stem_into`, which the built-in stemmers implement
   in them (its default goes through `stem`). A counting-allocator test checks it (ADR-0026). Still allocating: tokens
@@ -158,6 +163,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
 ### Format
+- Segment format 1.0 (SPEC §5.1, §5.3; ADR-0027): footer with a `PSEG` locator (up to 1 MiB; statistics, section
+  table, id range, CRC32C), section kinds 1–12 (all block-framed but the two FSTs, which carry a CRC32C trailer),
+  56-byte TermInfo records (with per-term `max_tf` and `min_norm`), `tf − 1` frequencies aligned with postings blocks, 40-byte skip entries, per-block position
+  runs with a gap of 100 between values, Lucene `SmallFloat` norms, tagged columns (FOR numeric, roaring bool,
+  dictionary + ords keyword) and record arrays for rows, ids and blob references. Golden segment in
+  `tests/fixtures/segment/v1.0/`.
 - Manifest encoding version 1 (SPEC §8.7; ADR-0024): magic `PMNF`, fixed-width little-endian scalar fields, and
   variable-length segment entries (id, doc count, size, object or frame location, optional tombstone sidecar),
   schemas as JSON with pinned ids and analyzer versions, CRC32C trailer. Golden files in `tests/fixtures/manifest/v1/`.

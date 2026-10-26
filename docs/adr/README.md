@@ -49,3 +49,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0024](./0024-manifest-encoding-and-commit-diffs.md) | Manifest encoding and commits as diffs | proposed |
 | [0025](./0025-unicode-version-bumps-of-builtin-analyzers.md) | Unicode version bumps give changed built-in analyzers new versions; superseded ones keep working | proposed |
 | [0026](./0026-counting-allocator-in-tests.md) | A counting global allocator in allocation tests | proposed |
+| [0027](./0027-segment-footer-and-sections.md) | Segment footer, section kinds and section encodings | proposed |
