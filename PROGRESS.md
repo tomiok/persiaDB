@@ -3,6 +3,8 @@
 
 **161/438 leaves done (37%)** · 0 in progress · `███████████░░░░░░░░░░░░░░░░░░░` · last snapshot: 2026-10-25
 
+MVP (M0–M15): the counts above. Post-MVP: **0/150 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up.
+
 Status lives in [`ROADMAP.md`](./ROADMAP.md) checkboxes (`[ ]` todo · `[~]` in progress · `[x]` done).
 After changing one, run `cargo xtask progress --record`.
 
@@ -75,11 +77,37 @@ flowchart LR
 | **M14** SDKs | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 17 | M11, M13 |
 | **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 21 | M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14 |
 
+## Post-MVP
+
+Not included in the headline, the graph, the ready-next list, or the burn-up.
+
+| Milestone | State | Progress | Done | Doing | Leaves | Deps |
+|---|---|---|--:|--:|--:|---|
+| **M16** Embedded SDKs (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 18 | M15 |
+| **M17** Highlighting and snippets (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M7, M15 |
+| **M18** Autocomplete (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M4, M8, M10, M15 |
+| **M19** Import (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 11 | M10, M15 |
+| **M20** Encryption at rest (v1.2) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 10 | M2, M12, M15 |
+| **M21** Python SDK (v1.2) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M14, M16 |
+| **M22** Multi-tenant mode (v2.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 8 | M12, M15 |
+| **M23** Persia Cloud (v2.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 11 | M13, M20, M22 |
+| **M24** CDC connectors (v2.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 11 | M11, M15 |
+| **M25** Web dashboard (v2.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 11 | M11, M15 |
+| **M26** UI components (v2.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 6 | M11, M17, M18 |
+| **M27** AI search (v2.2) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 14 | M9, M15, M17 |
+| **M28** On-device (v2.3) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 9 | M2, M16 |
+| **M29** Geo filters and sorting (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 7 | M7, M15 |
+| **M30** Enterprise (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 10 | M13, M20, M22, M25 |
+
+### Ready (post-MVP)
+
+_Nothing ready._
+
 ## In progress
 
 _Nothing in progress._
 
-## Ready next (first 15 todo leaves whose milestone deps are done)
+## Ready next (first 15 MVP todo leaves whose milestone deps are done)
 
 - `4.4.4` Zero-allocation fast path (reuse buffers via `TokenStream`) (M4)
 - `4.4.5` Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics (M4)
@@ -100,7 +128,7 @@ _Nothing in progress._
 
 ## Burn-up
 
-Gray line: total leaves (scope). Blue line: leaves done.
+Gray line: total MVP leaves (M0–M15 scope). Blue line: MVP leaves done. Post-MVP leaves are not on this chart.
 
 ```mermaid
 ---
@@ -110,7 +138,7 @@ config:
       plotColorPalette: "#9a9a96, #2a78d6"
 ---
 xychart-beta
-  title "Leaves: scope vs done"
+  title "MVP leaves: scope vs done"
   x-axis ["2026-10-07", "2026-10-08", "2026-10-09", "2026-10-10", "2026-10-11", "2026-10-12", "2026-10-13", "2026-10-14", "2026-10-16", "2026-10-17", "2026-10-18", "2026-10-19", "2026-10-25"]
   y-axis "Leaves" 0 --> 438
   line [389, 390, 395, 400, 409, 412, 415, 419, 424, 430, 431, 431, 438]

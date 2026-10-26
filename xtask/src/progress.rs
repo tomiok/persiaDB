@@ -6,6 +6,10 @@
 //!
 //! `--record` upserts today's snapshot (UTC date, or `--date YYYY-MM-DD`); `--check` fails if `PROGRESS.md`
 //! or the latest snapshot is stale (CI).
+//!
+//! The headline percentage, the burn-up, and `docs/progress-history.csv` count milestones M0–M15 only.
+//! Those are the MVP and ship as v1.0. Later milestones render in their own section, so adding them does
+//! not move that percentage.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -55,14 +59,36 @@ impl Milestone {
         self.leaves.iter().filter(|l| l.status == status).count()
     }
 
-    /// "Schema, documents (`persia-engine::schema`)" -> "Schema, documents"
+    /// "Schema, documents (`persia-engine::schema`)" -> "Schema, documents".
+    /// A post-MVP heading keeps its version: "Embedded SDKs (target: v1.1)" -> "Embedded SDKs (v1.1)".
     pub(crate) fn short_title(&self) -> String {
-        self.title
-            .split(" (")
-            .next()
-            .unwrap_or_default()
-            .replace('"', "'")
+        let (head, rest) = self
+            .title
+            .split_once(" (")
+            .unwrap_or((self.title.as_str(), ""));
+        let mut out = head.replace('"', "'");
+        if let Some(target) = rest.strip_prefix("target:") {
+            let target = target.split(')').next().unwrap_or(target).trim();
+            if !target.is_empty() {
+                out.push_str(" (");
+                out.push_str(target);
+                out.push(')');
+            }
+        }
+        out
     }
+}
+
+/// M0–M15 are the MVP (v1.0). The headline percentage and the burn-up count only these.
+const MVP_LAST: u32 = 15;
+
+fn milestone_number(key: &str) -> Option<u32> {
+    key.strip_prefix('M')?.parse().ok()
+}
+
+/// `true` for M0–M15. A key that is not `M` plus a number is not part of the MVP percentage.
+fn is_mvp(ms: &Milestone) -> bool {
+    milestone_number(&ms.key).is_some_and(|n| n <= MVP_LAST)
 }
 
 /// Milestone states. Icon + word always accompany the color (never color alone).
@@ -451,18 +477,42 @@ fn format_history(rows: &[Snapshot]) -> String {
     out
 }
 
-fn totals(milestones: &[Milestone]) -> (usize, usize, usize) {
-    let leaves = milestones.iter().flat_map(|ms| &ms.leaves);
-    let (mut done, mut doing, mut total) = (0, 0, 0);
-    for leaf in leaves {
-        total += 1;
-        match leaf.status {
-            Status::Done => done += 1,
-            Status::Doing => doing += 1,
-            Status::Todo => {}
+fn totals<'a>(milestones: impl IntoIterator<Item = &'a Milestone>) -> (usize, usize, usize) {
+    let mut done = 0;
+    let mut doing = 0;
+    let mut total = 0;
+    for ms in milestones {
+        for leaf in &ms.leaves {
+            total += 1;
+            match leaf.status {
+                Status::Done => done += 1,
+                Status::Doing => doing += 1,
+                Status::Todo => {}
+            }
         }
     }
     (done, doing, total)
+}
+
+fn milestone_table_row(ms: &Milestone, state: State) -> String {
+    let (d, g, t) = (
+        ms.count(Status::Done),
+        ms.count(Status::Doing),
+        ms.leaves.len(),
+    );
+    let deps = if ms.deps.is_empty() {
+        "—".to_owned()
+    } else {
+        ms.deps.join(", ")
+    };
+    format!(
+        "| **{}** {} | {} | `{}` {} | {d} | {g} | {t} | {deps} |",
+        ms.key,
+        ms.short_title(),
+        state.label(),
+        bar(d, g, t, 20),
+        pct(d, t)
+    )
 }
 
 #[allow(clippy::too_many_lines)] // one linear template, easier to read in one piece
@@ -479,7 +529,8 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
             .copied()
             .unwrap_or(State::Blocked)
     };
-    let (done, doing, total) = totals(milestones);
+    let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
+    let (post_done, post_doing, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
     let last = history
         .last()
         .map_or("never (run with --record)", |r| r.date.as_str());
@@ -509,7 +560,25 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         "```mermaid".into(),
         "flowchart LR".into(),
     ];
-    for ms in milestones {
+    if post_total > 0 {
+        // Index 4 is the blank line under the headline; 5 is the status sentence.
+        debug_assert!(out.get(4).is_some_and(String::is_empty));
+        debug_assert!(out.get(5).is_some_and(|s| s.starts_with("Status lives")));
+        out.insert(
+            5,
+            format!(
+                "MVP (M0–M{MVP_LAST}): the counts above. Post-MVP: **{post_done}/{post_total} leaves done ({})** · {post_doing} in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up.",
+                pct(post_done, post_total)
+            ),
+        );
+        out.insert(6, String::new());
+    }
+    let mvp_keys: BTreeSet<&str> = milestones
+        .iter()
+        .filter(|ms| is_mvp(ms))
+        .map(|ms| ms.key.as_str())
+        .collect();
+    for ms in milestones.iter().filter(|ms| is_mvp(ms)) {
         let (d, t, s) = (ms.count(Status::Done), ms.leaves.len(), state_of(ms));
         out.push(format!(
             "  {}[\"{}<br/><b>{}</b> {}<br/>{d}/{t} · {}\"]:::{}",
@@ -524,6 +593,7 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
     out.extend(
         reduced_edges(milestones)
             .into_iter()
+            .filter(|(a, b)| mvp_keys.contains(a.as_str()) && mvp_keys.contains(b.as_str()))
             .map(|(a, b)| format!("  {a} --> {b}")),
     );
     out.extend(
@@ -534,25 +604,46 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
     out.extend(["```", "", "## Milestones", ""].map(String::from));
     out.push("| Milestone | State | Progress | Done | Doing | Leaves | Deps |".into());
     out.push("|---|---|---|--:|--:|--:|---|".into());
-    for ms in milestones {
-        let (d, g, t) = (
-            ms.count(Status::Done),
-            ms.count(Status::Doing),
-            ms.leaves.len(),
+    for ms in milestones.iter().filter(|ms| is_mvp(ms)) {
+        out.push(milestone_table_row(ms, state_of(ms)));
+    }
+    if post_total > 0 {
+        out.extend(
+            [
+                "",
+                "## Post-MVP",
+                "",
+                "Not included in the headline, the graph, the ready-next list, or the burn-up.",
+                "",
+                "| Milestone | State | Progress | Done | Doing | Leaves | Deps |",
+                "|---|---|---|--:|--:|--:|---|",
+            ]
+            .map(String::from),
         );
-        let deps = if ms.deps.is_empty() {
-            "—".to_owned()
-        } else {
-            ms.deps.join(", ")
-        };
-        out.push(format!(
-            "| **{}** {} | {} | `{}` {} | {d} | {g} | {t} | {deps} |",
-            ms.key,
-            ms.short_title(),
-            state_of(ms).label(),
-            bar(d, g, t, 20),
-            pct(d, t)
-        ));
+        for ms in milestones.iter().filter(|ms| !is_mvp(ms)) {
+            out.push(milestone_table_row(ms, state_of(ms)));
+        }
+        out.extend(["", "### Ready (post-MVP)", ""].map(String::from));
+        let post_ready: Vec<String> = milestones
+            .iter()
+            .filter(|ms| !is_mvp(ms) && matches!(state_of(ms), State::Ready | State::Doing))
+            .flat_map(|ms| {
+                ms.leaves
+                    .iter()
+                    .filter(|l| l.status == Status::Todo)
+                    .map(move |l| format!("- `{}` {} ({})", l.id, l.text, ms.key))
+            })
+            .collect();
+        if post_ready.is_empty() {
+            out.push("_Nothing ready._".into());
+        }
+        out.extend(post_ready.iter().take(READY_NEXT_LIMIT).cloned());
+        if post_ready.len() > READY_NEXT_LIMIT {
+            out.push(format!(
+                "- … and {} more",
+                post_ready.len() - READY_NEXT_LIMIT
+            ));
+        }
     }
 
     out.extend(["", "## In progress", ""].map(String::from));
@@ -571,13 +662,19 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
     out.extend(doing_leaves);
 
     out.push(String::new());
-    out.push(format!(
-        "## Ready next (first {READY_NEXT_LIMIT} todo leaves whose milestone deps are done)"
-    ));
+    out.push(if post_total == 0 {
+        format!(
+            "## Ready next (first {READY_NEXT_LIMIT} todo leaves whose milestone deps are done)"
+        )
+    } else {
+        format!(
+            "## Ready next (first {READY_NEXT_LIMIT} MVP todo leaves whose milestone deps are done)"
+        )
+    });
     out.push(String::new());
     let ready: Vec<String> = milestones
         .iter()
-        .filter(|ms| matches!(state_of(ms), State::Ready | State::Doing))
+        .filter(|ms| is_mvp(ms) && matches!(state_of(ms), State::Ready | State::Doing))
         .flat_map(|ms| {
             ms.leaves
                 .iter()
@@ -599,9 +696,13 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         let join =
             |f: fn(&Snapshot) -> String| history.iter().map(f).collect::<Vec<_>>().join(", ");
         let max_total = history.iter().map(|r| r.total).max().unwrap_or(0);
+        out.push(if post_total == 0 {
+            "Gray line: total leaves (scope). Blue line: leaves done.".to_owned()
+        } else {
+            "Gray line: total MVP leaves (M0–M15 scope). Blue line: MVP leaves done. Post-MVP leaves are not on this chart.".to_owned()
+        });
         out.extend(
             [
-                "Gray line: total leaves (scope). Blue line: leaves done.",
                 "",
                 "```mermaid",
                 "---",
@@ -611,10 +712,14 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
                 "      plotColorPalette: \"#9a9a96, #2a78d6\"",
                 "---",
                 "xychart-beta",
-                "  title \"Leaves: scope vs done\"",
             ]
             .map(String::from),
         );
+        out.push(if post_total == 0 {
+            "  title \"Leaves: scope vs done\"".to_owned()
+        } else {
+            "  title \"MVP leaves: scope vs done\"".to_owned()
+        });
         out.push(format!(
             "  x-axis [{}]",
             join(|r| format!("\"{}\"", r.date))
@@ -711,7 +816,8 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
         Err(e) => return Err(e).context("reading docs/progress-history.csv"),
     };
-    let (done, doing, total) = totals(&milestones);
+    let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
+    let (post_done, _post_doing, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
 
     if record {
         let date = match date {
@@ -747,13 +853,15 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
             eprintln!("{}\nRun: {COMMAND} --record", stale.join("\n"));
             return Ok(false);
         }
-        println!("progress up to date: {done}/{total} done, {doing} in progress");
+        println!(
+            "progress up to date: {done}/{total} MVP done, {doing} in progress; post-MVP {post_done}/{post_total}"
+        );
         return Ok(true);
     }
 
     std::fs::write(&progress_path, rendered).context("writing PROGRESS.md")?;
     println!(
-        "PROGRESS.md: {done}/{total} done ({}), {doing} in progress",
+        "PROGRESS.md: {done}/{total} MVP done ({}), {doing} in progress; post-MVP {post_done}/{post_total}",
         pct(done, total)
     );
     Ok(true)
@@ -918,8 +1026,63 @@ Deps: M0–M1
     fn real_roadmap_parses_and_renders() {
         let ms = parse_roadmap(include_str!("../../ROADMAP.md")).unwrap();
         assert!(ms.len() >= 16);
+        let mvp_leaves: usize = ms
+            .iter()
+            .filter(|m| is_mvp(m))
+            .map(|m| m.leaves.len())
+            .sum();
+        let post_leaves: usize = ms
+            .iter()
+            .filter(|m| !is_mvp(m))
+            .map(|m| m.leaves.len())
+            .sum();
+        let (done, _, total) = totals(ms.iter().filter(|m| is_mvp(m)));
+        assert_eq!(total, mvp_leaves);
         let out = render(&ms, &[]);
         assert!(out.starts_with("<!-- GENERATED by `cargo xtask progress`"));
         assert!(out.contains("_No snapshots yet."));
+        assert!(out.contains(&format!("**{done}/{total} leaves done")));
+        if post_leaves > 0 {
+            assert!(out.contains("## Post-MVP"), "{out}");
+            assert!(
+                !out.contains(&format!("{done}/{}", total + post_leaves)),
+                "{out}"
+            );
+        }
+    }
+
+    #[test]
+    fn post_mvp_leaves_do_not_move_the_mvp_percentage() {
+        let text = "\
+# M0 — Bootstrap
+Deps: none.
+- [x] 0.1 Done leaf
+
+# M15 — Release
+Deps: M0.
+- [ ] 15.1 Ship
+
+# M16 — Later (target: v1.1)
+Deps: M15.
+- [ ] 16.1 Not yet
+- [ ] 16.2 Also not
+";
+        let ms = parse_roadmap(text).unwrap();
+        assert_eq!(ms[2].short_title(), "Later (v1.1)");
+        assert_eq!(totals(ms.iter().filter(|m| is_mvp(m))), (1, 0, 2));
+        assert_eq!(totals(ms.iter().filter(|m| !is_mvp(m))), (0, 0, 2));
+        let out = render(&ms, &[]);
+        assert!(out.contains("**1/2 leaves done (50%)**"), "{out}");
+        assert!(out.contains("Post-MVP: **0/2 leaves done (0%)**"), "{out}");
+        assert!(out.contains("## Post-MVP"), "{out}");
+        assert!(!out.contains("1/4"), "{out}");
+        let ready = out.split("## Ready next").nth(1).unwrap();
+        let ready = ready.split("## Burn-up").next().unwrap();
+        assert!(ready.contains("15.1"), "{ready}");
+        assert!(!ready.contains("16.1"), "{ready}");
+        let graph = out.split("```mermaid").nth(1).unwrap();
+        let graph = graph.split("```").next().unwrap();
+        assert!(graph.contains("M15"), "{graph}");
+        assert!(!graph.contains("M16"), "{graph}");
     }
 }

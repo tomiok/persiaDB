@@ -1,6 +1,6 @@
 ---
 title: "Milestones and dependencies"
-description: "What each Persia DB milestone from M0 to v1.0 delivers, which milestones it depends on, and where the live status lives."
+description: "What each Persia DB milestone from M0 to v1.0 delivers, which milestones it depends on, and the post-MVP milestones through v3.0."
 ---
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
@@ -35,6 +35,7 @@ Block framing (1.5), the container header and superblock (1.6), and frame encode
 The next format leaves are the streaming frame encoder (1.7.5), then mmap (1.8).
 Text analysis (M4) may proceed alongside them.
 The generated ready-next list is in [`PROGRESS.md`](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+That percentage is M0–M15 only. Milestones after v1.0 are at the end of this page.
 
 ## M0 — Project bootstrap
 
@@ -145,7 +146,7 @@ behind a flag.
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
 automation. These are network clients. In-process Go and TypeScript bindings are a separate design
-([Embedded SDKs](/guide/sdks/)), blocked on M10, with no roadmap leaves yet.
+([Embedded SDKs](/guide/sdks/)). The checkboxes are M16 (target v1.1), blocked on v1.0.
 
 ## M15 — Benchmarks, hardening, v1.0
 
@@ -154,3 +155,79 @@ a regression gate, SIMD and other work driven by profiles, soak and chaos tests,
 and the format 1.0 freeze: open questions closed as ADRs, golden fixtures for every released
 version, a documentation site (embedded, server, cloud, Kubernetes, relaxation tuning, operations),
 and the `v1.0.0` release. This guide is source material for that later site (ROADMAP 15.5.4).
+
+M0–M15 are the MVP. The live percentage in [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) counts only those leaves. Milestones after M15 are post-MVP and are not in the snapshot table above.
+
+## After v1.0
+
+| Target | Milestones | Depends on |
+|---|---|---|
+| v1.1 | **M16** Embedded SDKs, **M17** Highlighting and snippets, **M18** Autocomplete, **M19** Import | M15, plus the feature's own deps |
+| v1.2 | **M20** Encryption at rest, **M21** Python SDK | M20 on the storage backends; M21 on the C ABI (M16) |
+| v2.0 | **M22** Multi-tenant, **M23** Persia Cloud, **M24** CDC connectors, **M25** Web dashboard | M22 before M23; M23 also needs encryption (M20) |
+| v2.1 | **M26** UI components | Server HTTP, highlighting, autocomplete |
+| v2.2 | **M27** AI search | Format 1.0, blobs, snippets |
+| v2.3 | **M28** On-device | The C ABI, and a storage backend without mmap |
+| v3.0 | **M29** Geo, **M30** Enterprise | M29 needs query and the format freeze; M30 needs tenancy, encryption, and the dashboard |
+
+Multi-tenant is numbered before Persia Cloud because the hosted service is one file per tenant. v2.1, v2.2, and v2.3 are separate targets so a UI kit does not wait on embeddings, and embeddings do not wait on phones. Geo has no dependency on those three; it stays on v3.0 with the enterprise format work. The leaf list is [ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md).
+
+## M16 — Embedded SDKs (v1.1)
+
+Blocked on M15. Go via cgo and `@persiadb/node` via N-API, both through `persia-ffi`, as [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md) already specify. This page does not repeat that design. The network clients stay M14. The browser build is M28.
+
+## M17 — Highlighting and snippets (v1.1)
+
+Blocked on M7 and M15. SPEC §7.7 already plans `explain` inside M7. Highlights are the post-v1 half: fragments sliced from the stored field, off unless the query asks.
+
+## M18 — Autocomplete (v1.1)
+
+Blocked on analysis (M4), the prefix walk (M8), the embedded API (M10), and v1.0. A `suggest` call returns completions from edge n-grams or from the term dictionary. It is not a search, and it does not run relaxation.
+
+## M19 — Import (v1.1)
+
+Blocked on the CLI (M10) and v1.0. `persia import` gains Elasticsearch, Meilisearch, and a SQLite FTS5 dump. JSONL import is already leaf 10.4.2. The SQLite path does not link `rusqlite`.
+
+## M20 — Encryption at rest (v1.2)
+
+Blocked on local and cloud storage and on v1.0. SPEC §1.2 leaves encryption to the disk for v1. This milestone encrypts bytes Persia writes, behind an incompatible format flag, including objects in the bucket. The key is not in the file.
+
+## M21 — Python SDK (v1.2)
+
+Blocked on the C ABI (M16) and on the network-client conformance suite (M14). The embedded package calls `persia.h`. A smaller HTTP client covers programs that will not load a native library. Neither one reimplements the engine.
+
+## M22 — Multi-tenant mode (v2.0)
+
+Blocked on cloud storage and v1.0. One `.persia` file per tenant, backups to S3, and a server route that cannot see another tenant's file. Per-document principals are M30.
+
+## M23 — Persia Cloud (v2.0)
+
+Blocked on Kubernetes (M13), encryption (M20), and multi-tenant files (M22). A hosted control plane with a free tier. Local reads stay local. The cloud project is the source of truth after sync. The operator UI is the M25 dashboard, not a second app.
+
+## M24 — CDC connectors (v2.0)
+
+Blocked on the server and v1.0. A separate process tails Postgres, MySQL, or Supabase (Supabase is the Postgres connector) and writes through the public API. Nothing in the query path talks to the database.
+
+## M25 — Web dashboard (v2.0)
+
+Blocked on the server and v1.0. An index explorer, a query playground, editors for boosts, synonyms, and pin/hide rules, and a list of queries that stayed empty. Auth is the server's API keys.
+
+## M26 — UI components (v2.1)
+
+Blocked on the HTTP API, highlighting, and autocomplete. Search box, suggestions, hits, and facets for React, Vue, and Svelte, sharing one HTTP client. These packages do not embed the engine.
+
+## M27 — AI search (v2.2)
+
+Blocked on blobs, v1.0, and snippets. A vector field (SPEC §18.6), hybrid ranking, an embedding model shipped in the repo, a read-only MCP server, and retrieval of passages from one file. Writing the answer stays outside the process.
+
+## M28 — On-device (v2.3)
+
+Blocked on the storage trait and the C ABI. iOS and Android link `libpersia`. WASM waits on a storage backend with no mmap and no POSIX fsync, which ADR-0018 already requires and which this milestone builds.
+
+## M29 — Geo filters and sorting (v3.0)
+
+Blocked on query and v1.0. A `geo_point` field, a bounding box, a circle, and sort by distance. Nothing here depends on M26–M28. The filters are not relaxed.
+
+## M30 — Enterprise (v3.0)
+
+Blocked on Kubernetes, encryption, multi-tenant mode, and the dashboard. Per-document allow and deny rules, an audit log, OpenID Connect login, and an on-premises bundle that boots without calling Persia Cloud.

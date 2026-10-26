@@ -1,5 +1,7 @@
 # Persia DB — Roadmap
 
+**Versions.** M0–M15 are the MVP and ship as v1.0. Milestones M16 and later are post-MVP; each heading names its target version. The percentage and burn-up in [`PROGRESS.md`](./PROGRESS.md) count M0–M15 only.
+
 How to read this file:
 - Numbering is hierarchical: `M1` → `1.1` → `1.1.1` → `1.1.1.1`. **Every leaf is one GitHub issue** (title: `[1.1.1] short title`).
 - A leaf is small: ≤ 1 day of focused work, one PR, independently testable.
@@ -743,3 +745,396 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.5.3 Upgrade/compatibility test: open all historical fixtures
 - [ ] 15.5.4 Documentation site (guides: embedded, server, cloud, k8s, relaxation tuning, operations runbook)
 - [ ] 15.5.5 `v1.0.0` release checklist and announcement
+
+---
+
+# After v1.0
+
+M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone still does not start until its dependencies are done, unless its own text says otherwise.
+
+| Target | Milestones |
+|---|---|
+| v1.0 | M0–M15, the MVP |
+| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import |
+| v1.2 | M20 Encryption at rest, M21 Python SDK |
+| v2.0 | M22 Multi-tenant, M23 Persia Cloud, M24 CDC connectors, M25 Web dashboard |
+| v2.1 | M26 UI components |
+| v2.2 | M27 AI search |
+| v2.3 | M28 On-device |
+| v3.0 | M29 Geo, M30 Enterprise |
+
+Two orderings differ from a straight list of the features. Multi-tenant is M22 and Persia Cloud is M23, so the hosted service can depend on one file per tenant. v2.1, v2.2, and v2.3 are separate targets so the UI kit does not wait on embeddings, and embeddings do not wait on a portable storage backend. Geo (M29) has no dependency on M26–M28; it stays on v3.0 beside the enterprise format work, and it can move earlier later without renumbering M16–M28. Encryption (M20) is a dependency of Persia Cloud. That only orders work inside the table above: v1.2 still comes before v2.0.
+
+---
+
+# M16 — Embedded SDKs (target: v1.1)
+Deps: M15 (format 1.0 and the M10 facade).
+
+The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). This milestone schedules that design. It does not restate it. Network clients stay M14. The browser package is M28.
+
+## 16.1 C ABI (`persia-ffi`)
+- [ ] 16.1.1 Add `persia-ffi` (crate types `lib`, `staticlib`, `cdylib`) depending only on `persia`; record the edge in `ALLOWED` and the C-export module in `UNSAFE_ALLOWED` (ADR-0018, ADR-0003)
+- [ ] 16.1.2 Safe Rust API over `Db` and `Collection`: open, close, create and open a collection, put, upsert, delete, get, put_batch, commit, search, blobs (SPEC §8.1, §9.6, §13.1)
+- [ ] 16.1.3 Committed `persia.h` from `cargo xtask ffi-header` (no `build.rs`). C exports catch panics; that handle is poisoned afterwards (`docs/sdk/c-abi.md`)
+- [ ] 16.1.4 Stable error codes mapped from the Rust error type. Corruption is an error. A mapped-page fault still ends the process (SPEC §17, ADR-0010)
+- [ ] 16.1.5 [T] A document and a search round-trip through the C API; a panic in the core returns an error and poisons that handle; hostile UTF-8 is an error
+
+## 16.2 Go (`sdk/persia`, cgo)
+- [ ] 16.2.1 Module `github.com/tomiok/persiaDB/sdk/persia`, package `persia`, cgo linked to `libpersia` (ADR-0018, `docs/sdk/go.md`)
+- [ ] 16.2.2 `Open`, collections, put, get, delete, search, blobs, `context.Context`, and `errors.Is` sentinels, with the cancellation check `docs/sdk/go.md` already describes
+- [ ] 16.2.3 Checksummed prebuilt static libraries per OS and architecture, and a documented source build (`docs/sdk/distribution.md`)
+- [ ] 16.2.4 Conformance adapter for the 14.1 scenarios with `transport: embedded` (SPEC §13.2)
+- [ ] 16.2.5 [T] `go test` with the race detector; a file written by Go opens in Rust and returns the same hits
+
+## 16.3 TypeScript (`sdk/node`, `@persiadb/node`)
+- [ ] 16.3.1 N-API addon outside the Cargo workspace, linking the `persia-ffi` rlib (ADR-0003, ADR-0018, `docs/sdk/typescript.md`)
+- [ ] 16.3.2 Promises, `PersiaError.code`, and `get` of a missing id returns null. Workers stay as `docs/sdk/typescript.md` describes them
+- [ ] 16.3.3 Prebuilt `.node` binaries per platform, and an npm pack dry-run in CI
+- [ ] 16.3.4 Conformance adapter, same scenarios as 16.2.4
+- [ ] 16.3.5 [T] Node, and Bun or Deno, opens a file written by Rust and returns the same hits
+
+## 16.4 Release
+- [ ] 16.4.1 Publish only after the v1.0 tag. File format, C ABI, and package versions stay distinct numbers (ADR-0018, SPEC §15, `docs/sdk/distribution.md`)
+- [ ] 16.4.2 Compatibility table for the Go module and `@persiadb/node` against the core tag they were built from
+- [ ] 16.4.3 CI builds the static libraries and the `.node` packages. Users of the engine do not run that matrix (ADR-0018)
+
+---
+
+# M17 — Highlighting and snippets (target: v1.1)
+Deps: M7, M15.
+
+SPEC §7.7: `explain` is already 7.7.1. Highlights are post-v1 and land here. A highlight is a slice of the stored field value, using token spans (SPEC §6.3.1) and the char-filter offset map (4.4.7).
+
+## 17.1 SPEC
+- [ ] 17.1.1 Extend SPEC §7.7 and the §7.1 query sketch: fields, fragment size, tags, and max fragments. Offsets are into the stored value. The flag defaults off
+
+## 17.2 Snippets
+- [ ] 17.2.1 Build fragments from stored text. When the field has positions, align them with analyzer spans. Without positions, scan the stored value with the query analyzer, and document that this path is the slow one
+- [ ] 17.2.2 A multi-value field, an empty value, or a value with no match yields no fragment for that value. That is not an error
+- [ ] 17.2.3 [T] Property: every span is on a character boundary of the original value, and the slice matches the term after query-time analysis (SPEC §6.3.4). Fuzz stored text plus a query
+
+## 17.3 API
+- [ ] 17.3.1 `highlight` on the embedded query, in `persia.proto`, and on the HTTP search route. Generated stubs stay committed (ADR-0003)
+- [ ] 17.3.2 The hit carries fragments. Score order does not change, including relaxation offsets (SPEC §7.6)
+- [ ] 17.3.3 [T] Differential against a naive highlighter in the reference model: the same spans for a fixed analyzer
+
+## 17.4 Cost
+- [ ] 17.4.1 Bench snippet generation on the 15.1 harness. Highlighting has its own budget and reports truncation; it does not silently spend `relax.budget_ms` (SPEC §7.6)
+
+---
+
+# M18 — Autocomplete (target: v1.1)
+Deps: M4, M8, M10, M15.
+
+Search-as-you-type is a `suggest` API, not `search` with a short string. A field that indexed edge n-grams answers from those terms (SPEC §6.3.2, §6.3.4). Any other field answers from an FST prefix walk, the same dictionary walk as relaxation L3 (SPEC §7.6). Suggestions are completions. They do not run the relaxation cascade.
+
+## 18.1 SPEC
+- [ ] 18.1.1 SPEC: `suggest(prefix, fields, limit, filter)`. Say which fields use edge n-grams and which use the FST walk. Fuzzy suggestions stay off unless the request asks
+
+## 18.2 Terms
+- [ ] 18.2.1 Return terms that start with the analyzed prefix, ordered by document frequency, and capped by `limit`. A term whose live postings are all tombstoned is not suggested
+- [ ] 18.2.2 Extra on-disk bytes, such as a popularity count, need an ADR, a format flag, and a golden fixture before they are written (SPEC §15). Query-time state stays out of the schema hash, as synonyms do (SPEC §6.2)
+- [ ] 18.2.3 [T] Property: every suggestion starts with the prefix after query analysis; `limit` holds; deleting the last document for a term drops it. Fuzz the prefix
+
+## 18.3 API
+- [ ] 18.3.1 `Collection::suggest`, `persia suggest`, and the same RPC and HTTP route. Generated stubs stay committed
+- [ ] 18.3.2 Keyword filters apply. `relax` is not a suggest parameter
+- [ ] 18.3.3 [T] Index "red shoes" and "red socks". "re" returns both, "red s" narrows, and "rd" returns nothing while fuzzy is off
+
+## 18.4 Latency
+- [ ] 18.4.1 Bench in-process suggest and record p99. The path reads the dictionary, not stored fields
+
+---
+
+# M19 — Import (target: v1.1)
+Deps: M10, M15.
+
+`persia import` of JSONL is 10.4.2. This milestone adds Elasticsearch, Meilisearch, and SQLite FTS5. Documents go through the normal write path (SPEC §8). The importer does not keep the source engine's ranking.
+
+## 19.1 Shape
+- [ ] 19.1.1 Subcommands `elasticsearch`, `meilisearch`, and `sqlite-fts5` beside JSONL (10.4.2). Shared flags: source, mapping file, batch size, checkpoint path
+- [ ] 19.1.2 Mapping from a source field to a Persia field type and analyzer (SPEC §6.1, §6.2). Unknown fields are stored extras or skipped, per flag. A `strict` collection rejects what SPEC §6.4 rejects
+- [ ] 19.1.3 [T] Dry-run prints the mapping and the counts and writes no file
+
+## 19.2 Elasticsearch
+- [ ] 19.2.1 Read `_source` pages (scroll or point-in-time). Map text, keyword, long, double, boolean, and date onto SPEC §6.1. Any other type is stored JSON or a documented skip
+- [ ] 19.2.2 Resume from the last committed batch. Auth and TLS options. Secrets stay out of logs (SPEC §17)
+- [ ] 19.2.3 [T] Fixture HTTP responses, no live cluster: fields map, and a stop between batches then a rerun upserts without duplicating ids (SPEC §8.3)
+
+## 19.3 Meilisearch
+- [ ] 19.3.1 Page the documents endpoint with the same mapping, checkpoint, and secret rules as 19.2
+- [ ] 19.3.2 [T] A fixture payload of a few documents round-trips the mapped values
+
+## 19.4 SQLite FTS5
+- [ ] 19.4.1 Read a JSON or CSV dump of the FTS5 content table, and document the `sqlite3` invocation that writes it. Do not link `rusqlite` (banned, ADR-0001). Do not shell out from a library crate. A CLI-only SQLite reader waits on its own ADR
+- [ ] 19.4.2 [T] A checked-in dump of three rows becomes three documents, and importing it again upserts in place
+
+## 19.5 Docs
+- [ ] 19.5.1 One example per source, including what is not imported: scripted scores, Meilisearch ranking rules, and the FTS5 tokenizer configuration
+
+---
+
+# M20 — Encryption at rest (target: v1.2)
+Deps: M2, M12, M15.
+
+SPEC §1.2 leaves encryption to the disk and the storage service for v1. This milestone encrypts bytes Persia writes. It does not replace TLS (SPEC §12.3) or per-document access control (M30).
+
+## 20.1 SPEC and ADR
+- [ ] 20.1.1 ADR and SPEC §17: the threat model, the primitive, where the nonce lives, and the crate added to the allowed list and `deny.toml` in that same change. The key is not stored in the file
+- [ ] 20.1.2 An `incompat_flags` bit (SPEC §15). A reader without the key gets a distinct error, not plaintext and not a generic `Corrupt`. Golden fixture of a header that sets the bit
+- [ ] 20.1.3 SPEC §1.2: encryption at rest is this v1.2 flag, and the v1 non-goal stays true for files that do not set it
+
+## 20.2 Local container
+- [ ] 20.2.1 Encrypt the ranges the ADR names. The header stays readable enough to report that the file is encrypted. A bit flip fails closed. The ADR says whether the checksum covers plaintext or ciphertext, and a test locks that choice
+- [ ] 20.2.2 A key-provider interface and one file-based provider. The key never appears in logs, `persia inspect`, or error text (SPEC §17)
+- [ ] 20.2.3 [T] The wrong key fails. A crash at each commit step still reopens on the previous snapshot or the new one, never a mix (SPEC §4.5). An unencrypted fixture still opens. Fuzz ciphertext
+
+## 20.3 Object storage
+- [ ] 20.3.1 The same scheme for remote segment, manifest, and blob objects (SPEC §10.4, §9.4), so a bucket is not a plaintext copy
+- [ ] 20.3.2 [T] Conformance on memory storage and one emulator: put with the key, get with the key, refuse without it
+
+## 20.4 Rotation
+- [ ] 20.4.1 A new key wraps new commits. Older frames stay readable until compaction rewrites them (SPEC §4.6). Document which keys a reader must still hold
+- [ ] 20.4.2 [T] A file with frames from two keys opens with both. Dropping the old key fails the old frames and still opens the new ones
+
+---
+
+# M21 — Python SDK (target: v1.2)
+Deps: M14, M16.
+
+One engine (ADR-0001). The embedded package calls the C ABI from M16 (`docs/sdk/c-abi.md`). It does not reimplement segments, the WAL, or ranking. The network client speaks the server's HTTP JSON (SPEC §12) for processes that will not load a native library.
+
+## 21.1 Embedded (`sdk/python`)
+- [ ] 21.1.1 Package layout. Bind `persia.h` with cffi or ctypes. Installing the package does not require a Rust toolchain (`docs/sdk/distribution.md`)
+- [ ] 21.1.2 Open, collection, put, get, delete, search, blobs, and commit. Exceptions carry the stable `code` from 16.1.4
+- [ ] 21.1.3 Release the GIL around the native call. One database still has one writer (SPEC §8.4). A call already inside the engine does not cancel
+- [ ] 21.1.4 Wheels that ship the prebuilt library, and a `pip` dry-run in CI
+- [ ] 21.1.5 [T] Conformance adapter (`transport: embedded`, 14.1). A file written in Python opens in Rust and returns the same hits
+
+## 21.2 Network client
+- [ ] 21.2.1 Search, put, and get over the HTTP JSON gateway, with timeouts and the idempotent retries the Rust client documents (14.2.4)
+- [ ] 21.2.2 [T] The 14.1 scenarios against `persia-server`, with the same expectations as `persia-client`
+
+## 21.3 Docs
+- [ ] 21.3.1 SPEC §13 names the Python package beside the Go and TypeScript bindings, on its own path. A short guide page
+
+---
+
+# M22 — Multi-tenant mode (target: v2.0)
+Deps: M12, M15.
+
+One `.persia` file per tenant, plus that file's blob sidecar. The tenant id is a path segment, not a field. Persia Cloud (M23) runs on this layout. Per-document principals are M30.
+
+## 22.1 Isolation
+- [ ] 22.1.1 ADR: where tenant files live, and the rule that one query never opens two tenants. SPEC §1.2 already rules out cross-collection queries; this rules out cross-file queries
+- [ ] 22.1.2 The server routes a credential to one tenant file. The wrong tenant id is not found, and the handler does not stat another tenant's path
+- [ ] 22.1.3 [T] Two tenants and the same document id produce independent hits. The test fails if one request can see the other file
+
+## 22.2 Backups
+- [ ] 22.2.1 Copy one tenant to an S3-compatible URL on a schedule, reusing replicate and restore (12.5) rather than a second uploader
+- [ ] 22.2.2 Restore one tenant without opening the others. [T] After restore, search matches the backed-up committed snapshot
+- [ ] 22.2.3 Quotas: a max file size and a max document count. Over quota is a distinct error, and the write is refused before commit
+
+## 22.3 Operations
+- [ ] 22.3.1 Create, list, and delete a tenant. Delete is explicit. When a backup exists, the grace period is documented and tested
+- [ ] 22.3.2 Metrics may carry a tenant label. Document the cardinality cap (SPEC §12.4)
+
+---
+
+# M23 — Persia Cloud (target: v2.0)
+Deps: M13, M20, M22.
+
+A hosted service. The data plane is `persia-server` on tenant files (M22), deployed with the M13 chart, with encryption from M20. The control plane is accounts, projects, and API keys. A local file keeps serving reads. After sync, the cloud project is the source of truth.
+
+## 23.1 Control plane
+- [ ] 23.1.1 ADR: what the control plane stores, and what stays inside the tenant file. A project owns one or more tenants
+- [ ] 23.1.2 Free-tier limits (tenants, documents, bytes, request rate) published as numbers. Over the limit is a machine-readable error, not a silently truncated index
+- [ ] 23.1.3 API keys for a project. Opening a local path still has no auth (SPEC §12.3)
+
+## 23.2 Sync
+- [ ] 23.2.1 SPEC for the sync protocol. The cloud project is the source of truth. The local file serves reads while offline and queues writes in an outbox
+- [ ] 23.2.2 Push committed local batches and pull remote commits. The ADR picks the conflict rule, last writer wins or a stored conflict, and the tests lock that rule
+- [ ] 23.2.3 A search reads the open local snapshot and does not wait on the network. The response can carry sync lag
+- [ ] 23.2.4 [T] An offline put is searchable locally, then on the cloud after reconnect. A cloud put appears locally after pull. A crash during push drops neither a committed local batch nor a remote commit, and it does not duplicate an id
+
+## 23.3 Client
+- [ ] 23.3.1 Open a cloud project by URL. The credential is an API key, documented next to the provider chains (SPEC §10.3), and it is not described as a cloud IAM role
+- [ ] 23.3.2 Meter requests and stored bytes as metrics. Taking payment is out of scope; the ADR says so
+
+## 23.4 Operations
+- [ ] 23.4.1 Runbook: Helm install of the data plane, free-tier limits, backup age (M22), and encryption keys (M20)
+- [ ] 23.4.2 Document the operator URL. The UI itself is M25; this leaf does not build a second one
+
+---
+
+# M24 — CDC connectors (target: v2.0)
+Deps: M11, M15.
+
+A connector tails Postgres, MySQL, or Supabase and writes through the public API (SPEC §8.1). It is its own process. Indexing does not run on the query path. Supabase uses the Postgres connector and does not get a second parser.
+
+## 24.1 Framework
+- [ ] 24.1.1 ADR: where the checkpoint lives, delivery (at-least-once plus upsert), and how a row becomes a document id
+- [ ] 24.1.2 Map a table to a collection, the primary key to the document id, and the common SQL types onto SPEC §6.1. A column with no mapping is skipped or stored, per flag
+- [ ] 24.1.3 [T] Kill the connector after a commit and start it again. Committed rows are not lost and ids are not duplicated (SPEC §8.3)
+
+## 24.2 Postgres
+- [ ] 24.2.1 Logical replication. The ADR picks the plugin or `pgoutput`. Insert, update, and delete
+- [ ] 24.2.2 [T] Docker-compose Postgres: a committed row is searchable within the documented lag, and a delete stops matching
+
+## 24.3 MySQL
+- [ ] 24.3.1 A binlog reader for insert, update, and delete, with the same checkpoint and mapping as 24.1
+- [ ] 24.3.2 [T] The same assertions as 24.2.2 against a MySQL container
+
+## 24.4 Supabase
+- [ ] 24.4.1 Document the publication and the replication slot. Reuse 24.2
+- [ ] 24.4.2 [T] A fixture publication that includes a delete. After the connector applies it, the row does not match
+
+## 24.5 Operator
+- [ ] 24.5.1 `persia sync postgres`, `mysql`, and `supabase`. A config file. Secrets redacted (SPEC §17)
+- [ ] 24.5.2 A lag metric, and a distinct error when the slot or the binlog position is gone
+
+---
+
+# M25 — Web dashboard (target: v2.0)
+Deps: M11, M15.
+
+A UI on `persia-server`: what is indexed, what a query did, and which queries came back empty. Persia Cloud links here (23.4.2). Auth is the server's API keys (SPEC §12.3). There is no second account system.
+
+## 25.1 Explorer
+- [ ] 25.1.1 ADR: static assets served by the server, or a separate app under `website/`. Either way it calls only the public HTTP API
+- [ ] 25.1.2 Collections, field types, and segment stats from the existing inspect and stats surfaces (5.4, 10.4)
+- [ ] 25.1.3 [T] An empty database and one collection with documents both render
+
+## 25.2 Playground
+- [ ] 25.2.1 Run a search. Show hits, the relaxation object (SPEC §7.6), and explain when the request set it (7.7.1)
+- [ ] 25.2.2 Show highlight fragments and suggestions when the response includes them (M17, M18). A v1.0 server, which has neither, still shows hits
+
+## 25.3 Relevance
+- [ ] 25.3.1 Edit field boosts, synonyms, and relaxation defaults inside the evolution rules (SPEC §6.2.4)
+- [ ] 25.3.2 Query rules: pin an id, hide an id, or rewrite the query text. SPEC says where the rules are stored and that they run before scoring. Any on-disk change follows the format discipline
+- [ ] 25.3.3 [T] A pin puts that id first, a hide removes it, and a synonym edit changes the next search. Rules do not drop filters (SPEC §7.6)
+
+## 25.4 Analytics
+- [ ] 25.4.1 Record the query text, the hit count, and the relaxation level. The zero-result list is the queries that stayed empty, including after the cascade
+- [ ] 25.4.2 Retention, sampling, and a switch that stops storing the raw query text (SPEC §17)
+- [ ] 25.4.3 [T] A query that is still empty after relaxation appears on the zero-result list. A query that matched only through fuzzy does not
+
+---
+
+# M26 — UI components (target: v2.1)
+Deps: M11, M17, M18.
+
+A search box, autocomplete, hits, and facets for React, Vue, and Svelte. One framework-free client talks HTTP JSON to the server (SPEC §12). The widgets do not embed the engine. `@persiadb/node` (M16) stays the in-process SDK; these packages are the browser UI.
+
+## 26.1 Client
+- [ ] 26.1.1 `@persiadb/ui` data client: search, suggest, and facets. No ranking code
+- [ ] 26.1.2 A state helper for the text, the filters, the facet refinements, and the page. The three bindings share it
+
+## 26.2 Widgets
+- [ ] 26.2.1 Search box, suggestion list (M18), hits with a highlight slot (M17), and a facet list (SPEC §7.5)
+- [ ] 26.2.2 React, Vue, and Svelte packages, each a wrapper over 26.1
+- [ ] 26.2.3 [T] The framework-free core against a fixture HTTP response. One component test per framework: type a prefix, see a suggestion, see a hit
+
+## 26.3 Docs
+- [ ] 26.3.1 One example per framework on the website, pointed at a local server
+
+---
+
+# M27 — AI search (target: v2.2)
+Deps: M9, M15, M17.
+
+Hybrid text and vector search, an embedding model shipped with the repo, an MCP server, and retrieval over one file. SPEC §1.2 and §18.6 reserve vectors for after v1. This milestone returns passages. It does not call a chat model to write an answer.
+
+## 27.1 Vectors
+- [ ] 27.1.1 ADR for the segment layout (SPEC §18.6), the metric, and the `incompat_flags` bit (SPEC §15). A reader that does not know the bit refuses the file
+- [ ] 27.1.2 Field type `vector`: a fixed dimension of finite `f32` values. The schema hash includes the dimension (SPEC §6.2). Evolution can add the field and cannot change the dimension
+- [ ] 27.1.3 Writer and reader for the vector section, including the cluster postings the ADR chose. A golden fixture
+- [ ] 27.1.4 [T] A round-trip property. Fuzz the section. Truncation and a NaN are `Corrupt`
+
+## 27.2 Hybrid query
+- [ ] 27.2.1 SPEC §7: a query may carry text, a vector, or both. Document how the two rankings combine. Filters still apply and are not relaxed (SPEC §7.6)
+- [ ] 27.2.2 [T] Differential against a brute-force scan on the reference model, within a stated epsilon. A filter removes a near neighbor
+
+## 27.3 Embeddings
+- [ ] 27.3.1 Ship one embedding model in the repo. Record its license, its dimension, and a checksum of the weights. Embedding does not call the network
+- [ ] 27.3.2 Helpers that fill a `vector` field from a text field at index time and at query time. A caller may still supply the vector
+- [ ] 27.3.3 [T] The same string embeds to the same vector. One golden sentence pins the model
+
+## 27.4 MCP
+- [ ] 27.4.1 An MCP server exposes `search`, `get`, and `suggest` on the public API. The default is read-only
+- [ ] 27.4.2 [T] A scripted MCP client and `Collection::search` return the same ids on a fixture database
+
+## 27.5 Single-file RAG
+- [ ] 27.5.1 Chunks live in a collection: text, a vector, and a `blob_ref` or a source id (SPEC §9). Retrieval returns those chunks with snippets (M17)
+- [ ] 27.5.2 The command returns passages and citations. It does not call an external model. The docs say that generating an answer happens outside this process
+- [ ] 27.5.3 [T] Two blobs in one file. The returned chunk is the one that contains the query term, and the citation id is that blob
+
+---
+
+# M28 — On-device (target: v2.3)
+Deps: M2, M16.
+
+iOS and Android link `libpersia` (M16). WASM does not, until a `Storage` backend exists with no mmap and no POSIX fsync (ADR-0018, `docs/sdk/typescript.md`). That backend is 28.1. The ADR states what a crash can lose. It does not assume the local commit protocol (SPEC §4.5) holds unchanged.
+
+## 28.1 Portable storage
+- [ ] 28.1.1 ADR: the backend, which SPEC §10.1 capabilities it does not offer, and what a crash can drop. This is the gap ADR-0018 left open
+- [ ] 28.1.2 Implement that backend. Run the conformance suite for the capabilities it claims, and test that the ones it lacks return unsupported
+
+## 28.2 WASM
+- [ ] 28.2.1 `@persiadb/wasm` (`sdk/wasm`) on 28.1. Do not ship a build of the mmap container that merely hopes the host can map it (ADR-0018)
+- [ ] 28.2.2 A browser demo opens an in-memory or origin-private database, puts a document, and searches, with no network
+- [ ] 28.2.3 [T] The embedded conformance subset that 28.1 supports passes in the wasm package
+
+## 28.3 Apple platforms
+- [ ] 28.3.1 A package that links `libpersia.a` for a device and for the simulator. Document the slices
+- [ ] 28.3.2 [T] A simulator test opens a file in the app sandbox and searches it
+
+## 28.4 Android
+- [ ] 28.4.1 An archive that links the same static library through the NDK, via JNI or the C ABI
+- [ ] 28.4.2 [T] An emulator test with the same contract as 28.3.2
+
+---
+
+# M29 — Geo filters and sorting (target: v3.0)
+Deps: M7, M15.
+
+A `geo_point` field, a bounding box, a circle, and sort by distance. Nothing here depends on M26–M28. The target stays v3.0 so the new field type lands with the other v3.0 format work. These are filters, so relaxation does not drop them (SPEC §7.6).
+
+## 29.1 SPEC
+- [ ] 29.1.1 SPEC §6.1: `geo_point`, WGS84, and the valid ranges. Adding the field is allowed evolution; changing it is not (SPEC §6.2.4)
+- [ ] 29.1.2 SPEC §7: bounding box, circle, and distance sort. The circle uses haversine. The antimeridian and the poles have specified behavior
+
+## 29.2 Index
+- [ ] 29.2.1 ADR for the on-disk encoding and the format flag (SPEC §15). A golden fixture
+- [ ] 29.2.2 Writer, reader, and a filter bitmap intersected like any other filter (SPEC §7.3)
+- [ ] 29.2.3 [T] A point inside the box matches and a point outside does not. The antimeridian and the poles follow 29.1.2. Distance sort is non-decreasing. A corrupt coordinate is an error. Fuzz the section
+
+## 29.3 API
+- [ ] 29.3.1 The query JSON and the embedded API accept the filters and the sort
+- [ ] 29.3.2 Bench a selective geo filter against a full scan on the 15.1 harness. Record the numbers, and do not treat them as a promise (SPEC §16.2)
+
+---
+
+# M30 — Enterprise (target: v3.0)
+Deps: M13, M20, M22, M25.
+
+Per-document access control, an audit log, SSO, and an on-prem bundle. Tenant isolation stays M22. Encryption of bytes at rest stays M20. This milestone is the layer above those.
+
+## 30.1 Document access control
+- [ ] 30.1.1 ADR and SPEC: allow and deny principals stored on the document. The request cannot turn the query-time filter off. Embedded mode with no principal stays open, as SPEC §12.3 says, unless the caller passes one
+- [ ] 30.1.2 The filter runs for every search, including relaxed levels (SPEC §7.6). A forbidden id never appears in hits, facets, or suggestions
+- [ ] 30.1.3 [T] Two principals and two documents. A query whose text matches both returns one. With access control on and no principal, nothing matches
+
+## 30.2 Audit log
+- [ ] 30.2.1 An append-only log of who did what, to which tenant and collection, and when. A hash chain makes a flipped byte detectable. This log is not the WAL, and compaction does not drop it
+- [ ] 30.2.2 Export, a retention period, and a page on the M25 dashboard
+- [ ] 30.2.3 [T] A put and a denied read each append one record. A flipped byte fails verification. Fuzz the log decoder
+
+## 30.3 Single sign-on
+- [ ] 30.3.1 OpenID Connect authorization-code login on the server. The identity is the principal from 30.1. API keys still work for machines (SPEC §12.3)
+- [ ] 30.3.2 [T] A local identity-provider stub issues a token, a search runs as that principal, and the audit record names the principal
+
+## 30.4 On-premises packaging
+- [ ] 30.4.1 The M13 Helm chart, an air-gapped image bundle, the SBOM from 15.4.2, and the M20 key provider. Booting the chart does not call Persia Cloud
+- [ ] 30.4.2 An install guide for the cluster, single sign-on, backup (M22), and audit export. The guide says the hosted control plane (M23) is not in the bundle
+

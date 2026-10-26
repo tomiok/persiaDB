@@ -1,11 +1,11 @@
 ---
 title: Roadmap
-description: Milestone status for Persia DB as of 2026-10-11. Bootstrap is done. Format primitives are in progress.
+description: Milestone status for Persia DB. M0–M15 are the MVP (v1.0). Later milestones run through v3.0.
 ---
 
 import WinButton from '../../components/WinButton.astro';
 
-Work is a tree of milestones, `M0` through `M15`. Every leaf is one issue and one pull request.
+Work is a tree of milestones. `M0` through `M15` are the MVP and ship as v1.0. Every leaf is one issue and one pull request.
 This table is the **2026-10-11** snapshot from
 [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves, 17%**.
 That file is regenerated from checkboxes in
@@ -40,6 +40,22 @@ Frame encode, decode, and scan (1.7.1–1.7.4) are done.
 The next format work is the streaming frame encoder (1.7.5), then mmap (1.8).
 Text analysis (M4) may proceed alongside that.
 What each milestone contains, in prose, is the [milestones page](/guide/roadmap/).
+
+## After v1.0
+
+The snapshot above is M0–M15 only. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) keeps that percentage on those leaves and reports M16–M30 separately. None of the later milestones have been started.
+
+| Target | Milestones | Delivers |
+|---|---|---|
+| v1.1 | M16–M19 | Embedded Go and TypeScript SDKs, highlighting, autocomplete, import from Elasticsearch, Meilisearch, and SQLite FTS5 |
+| v1.2 | M20–M21 | Encryption at rest, Python SDK |
+| v2.0 | M22–M25 | One file per tenant, Persia Cloud, CDC from Postgres, MySQL, and Supabase, web dashboard |
+| v2.1 | M26 | React, Vue, and Svelte search components |
+| v2.2 | M27 | Hybrid text and vector search, in-repo embeddings, MCP, single-file retrieval |
+| v2.3 | M28 | WASM, iOS, and Android |
+| v3.0 | M29–M30 | Geo filters and sort, document access control, audit log, SSO, on-premises packaging |
+
+Multi-tenant (M22) comes before Persia Cloud (M23) because the service is one file per tenant, and Cloud also waits on encryption (M20). The longer notes are the [milestones page](/guide/roadmap/).
 
 <p class="actions">
     <WinButton href="/guide/roadmap/">Milestones and dependencies</WinButton>
