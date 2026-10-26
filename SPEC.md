@@ -288,7 +288,10 @@ nothing. The container is reopened, and recovery decides what survived.
   other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
   logically. A container with unknown `rocompat_flags` (§4.2) opens only read-only: a read-write open fails, naming
-  the flags.
+  the flags. As it holds no lock, a writer may commit or truncate a torn tail while it opens: it checks the active
+  slot against a file length taken *after* reading the slots (a commit writes its frames before its slot, §4.5), and
+  when its scan from `log_end` finds the file shrunk under it (never below `log_end`, §4.7) it scans again up to the
+  new end, so neither race fails the open.
 - **Recovery** (§8.6), in this order, for both modes: validate the header (§4.2); pick the active slot (§4.3) and
   check it against the file length (§4.3); check that `manifest_off` holds a valid Manifest frame of `manifest_len`
   bytes; validate the frames of `wal_start..log_end` (§8.6); scan from `log_end` (§4.4). Then by the scan's end:

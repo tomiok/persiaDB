@@ -43,8 +43,6 @@ const SEED_ENV: &str = "PERSIA_CONTAINER_CHILD_SEED";
 const STALL_ENV: &str = "PERSIA_CONTAINER_CHILD_STALL_AFTER";
 /// Prefix of the lines children report; anything else on their stdout is libtest's.
 const TAG: &str = "@@persia ";
-/// A writer child stops on its own after this long, so a broken parent never leaves it running.
-const CHILD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[cfg(unix)]
 fn base_seed() -> u64 {
@@ -205,14 +203,30 @@ fn append_payload(c: &mut Container, kind: FrameKind, stall: bool) -> FrameRef {
     w.finish().unwrap()
 }
 
-/// Opens `path` read-write and appends and commits until killed (or [`CHILD_DEADLINE`]). Large frames are streamed
-/// in pieces ([`append_payload`]), so kills tear them. With [`STALL_ENV`] set to `n`, the first large frame after
-/// `n` acknowledgements stalls half-way.
+/// Set once stdin reaches EOF. The parent holds a writer's stdin until it reaped the writer, so EOF means the parent
+/// is gone: the writer then stops instead of running on. Not a timer: when slow `fsync`s stretch a writer's run past
+/// a deadline (a 30 s one expired with many copies of the kill-9 tests running at once), it exits by itself before
+/// the parent's kill, and the parent fails with `writer exited before the kill`.
+fn parent_gone() -> Arc<std::sync::atomic::AtomicBool> {
+    let gone = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&gone);
+    std::thread::spawn(move || {
+        let mut sink = Vec::new();
+        // An error ends the wait too (nothing more can come from the parent), and is reported after.
+        let ended = std::io::stdin().read_to_end(&mut sink);
+        flag.store(true, std::sync::atomic::Ordering::Relaxed);
+        ended.unwrap();
+    });
+    gone
+}
+
+/// Opens `path` read-write and appends and commits until killed, or until its stdin closes ([`parent_gone`]). Large
+/// frames are streamed in pieces ([`append_payload`]), so kills tear them. With [`STALL_ENV`] set to `n`, the first
+/// large frame after `n` acknowledgements stalls half-way.
 ///
 /// Reports `opened <seq>` after recovery, `synced <offset> <len> <frame_seq>` for each WAL frame once `sync`
 /// returned, and `commit <seq> <manifest_offset> <manifest_len> <frame_seq>` once `commit` returned.
 fn child_writer(path: &Path, seed: u64) {
-    let start = std::time::Instant::now();
     let mut rng = Rng(seed);
     let stall_after: Option<usize> = std::env::var(STALL_ENV).ok().map(|n| n.parse().unwrap());
     let mut acks = 0;
@@ -229,7 +243,8 @@ fn child_writer(path: &Path, seed: u64) {
         }
     };
     report(&format!("opened {}", c.superblock().seq));
-    while start.elapsed() < CHILD_DEADLINE {
+    let parent_gone = parent_gone();
+    while !parent_gone.load(std::sync::atomic::Ordering::Relaxed) {
         let mut batch = Vec::new();
         for _ in 0..rng.range(1, 5) {
             let stall = stall_after.is_some_and(|n| acks >= n);
@@ -682,7 +697,12 @@ fn run_and_kill_writer(
     let mut torn = None;
     loop {
         let Ok(msg) = rx.recv() else {
-            panic!("{ctx}: writer exited before the kill");
+            let status = child.wait().unwrap();
+            panic!(
+                "{ctx}: writer exited before the kill after {} reports, {}",
+                iter_acks.len(),
+                describe(status)
+            );
         };
         if let Some(offset) = msg.strip_prefix("stalled ") {
             assert_eq!(kill, Kill::MidFrame, "{ctx}: {msg}");
@@ -898,8 +918,15 @@ fn concurrent_creates_in_processes_yield_one_container() {
         assert_eq!(next_tagged(out).as_deref(), Some("ready"));
     }
     // Release them as close together as pipes allow.
-    for (child, _) in &mut children {
-        child.stdin.as_mut().unwrap().write_all(b"go\n").unwrap();
+    for (child, out) in &mut children {
+        if let Err(e) = child.stdin.as_mut().unwrap().write_all(b"go\n") {
+            let last = next_tagged(out);
+            let status = child.wait().unwrap();
+            panic!(
+                "create child gone ({e}), last reported {last:?}, {}",
+                describe(status)
+            );
+        }
     }
     let mut outcomes = Vec::new();
     for (mut child, mut out) in children {
@@ -949,8 +976,15 @@ impl MappedReader {
     /// Asks for a full pass over every mapped frame and returns its `ok` line.
     fn check(&mut self, ctx: &str) -> String {
         let stdin = self.child.stdin.as_mut().unwrap();
-        stdin.write_all(b"check\n").unwrap();
-        stdin.flush().unwrap();
+        // A reader that already died closed its end of the pipe: report how it ended, not the `BrokenPipe`.
+        if let Err(e) = stdin.write_all(b"check\n").and_then(|()| stdin.flush()) {
+            let last = next_tagged(&mut self.out);
+            let status = self.child.wait().unwrap();
+            panic!(
+                "{ctx}: mapped reader gone ({e}), last reported {last:?}, {}",
+                describe(status)
+            );
+        }
         let reply = next_tagged(&mut self.out);
         match reply {
             Some(r) if r.starts_with("ok ") => r,
