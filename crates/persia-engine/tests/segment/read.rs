@@ -49,7 +49,7 @@ fn read_index(terms: &TermIndex<'_>, positions: bool) -> Result<Index, ReadError
         assert_eq!(info.ordinal(), ordinal);
         ordinal += 1;
         let term = term.to_vec();
-        let mut postings = terms.postings(&info);
+        let mut postings = terms.postings(&info)?;
         let mut occ = Vec::new();
         while let Some(doc) = postings.next()? {
             let tf = postings.freq()?;
@@ -127,8 +127,8 @@ pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, Re
     }
     for d in 0..n {
         out.docs.push(seg.document(d)?);
-        let doc_id = seg.doc_id(d)?;
-        assert_eq!(seg.docid(&doc_id)?, Some(d));
+        let doc_id = seg.id_of(d)?;
+        assert_eq!(seg.docid_of(&doc_id)?, Some(d));
         out.ids.push(doc_id);
         out.blobs.push(seg.blob_ref(d)?);
     }
@@ -220,7 +220,7 @@ fn check_reads(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
             ids.last().unwrap().as_bytes()
         )
     );
-    assert_eq!(seg.docid("no such id").unwrap(), None);
+    assert_eq!(seg.docid_of("no such id").unwrap(), None);
     for field in schema.fields() {
         if let Some(stats) = seg.field_stats(field.id()) {
             let index = &want.terms[&field.id().get()];
@@ -314,7 +314,7 @@ proptest! {
         let info = terms.get(term.as_bytes()).unwrap().unwrap();
         let all = model_list(docs, schema, term);
         let live: Vec<(u32, u32)> = all.iter().copied().filter(|(d, _)| !deleted.contains(d)).collect();
-        let mut p = terms.postings(&info).with_tombstones(&tombstones);
+        let mut p = terms.postings(&info).unwrap().with_tombstones(&tombstones);
         prop_assert_eq!(p.df() as usize, all.len());
         // Index into `live` of the current document; None before the first.
         let mut at: Option<usize> = None;
@@ -371,7 +371,7 @@ fn block_max_bounds_every_block() {
     let mut terms = seg.terms(title).unwrap();
     let info = terms.get(b"alpha").unwrap().unwrap();
     assert_eq!(info.df(), 2100);
-    let mut p = terms.postings(&info);
+    let mut p = terms.postings(&info).unwrap();
     let mut blocks = BTreeSet::new();
     while let Some(d) = p.next().unwrap() {
         let m = p.block_max().unwrap();
@@ -404,14 +404,17 @@ fn tombstones_out_of_range_are_corruption() {
             doc_count: 300
         }
     );
-    assert!(err.is_corruption());
+    assert!(
+        !err.is_corruption(),
+        "the sidecar is corrupt, not the segment"
+    );
     let all = Tombstones::new((0..300).collect(), 300).unwrap();
     assert_eq!(all.len(), 300);
     let mut terms = seg.terms(id(&schema, "tag")).unwrap();
     let info = terms.get(b"all").unwrap().unwrap();
-    let mut p = terms.postings(&info).with_tombstones(&all);
+    let mut p = terms.postings(&info).unwrap().with_tombstones(&all);
     assert_eq!(p.next().unwrap(), None);
-    let mut p = terms.postings(&info).with_tombstones(&all);
+    let mut p = terms.postings(&info).unwrap().with_tombstones(&all);
     assert_eq!(p.advance(10).unwrap(), None);
 }
 
@@ -513,7 +516,7 @@ fn caller_errors() {
     );
     for err in [
         seg.document(300).map(drop).unwrap_err(),
-        seg.doc_id(300).map(drop).unwrap_err(),
+        seg.id_of(300).map(drop).unwrap_err(),
         seg.blob_ref(300).map(drop).unwrap_err(),
     ] {
         assert_eq!(
@@ -934,4 +937,111 @@ fn collect_terms<A: fst::Automaton>(
 fn add_u64(b: &mut [u8], at: usize, delta: u64) {
     let v = u64::from_le_bytes(b[at..at + 8].try_into().unwrap());
     b[at..at + 8].copy_from_slice(&(v + delta).to_le_bytes());
+}
+
+/// Block-max bounds when targets go down between calls: the block of the first document at or after each target,
+/// with its own `max_tf` (found in the 5.3 review: a later block's bounds were returned).
+#[test]
+fn shallow_advance_with_falling_targets() {
+    let schema = schema();
+    let title = id(&schema, "title");
+    // Docs 0..128 hold `w` 5 times, the rest once: the first block's max_tf is 5, every other block's 1.
+    let docs: Vec<Document> = (0..1000_u32)
+        .map(|i| {
+            let text = if i < 128 { "w w w w w" } else { "w" };
+            Document::new(format!("d{i:04}")).with(title, Value::String(text.into()))
+        })
+        .collect();
+    let bytes = build(&schema, &docs, WriteOptions::default());
+    let seg = open(&schema, &bytes).unwrap();
+    let mut terms = seg.terms(title).unwrap();
+    let info = terms.get(b"w").unwrap().unwrap();
+    let mut p = terms.postings(&info).unwrap();
+    let tf = |d: u32| if d < 128 { 5 } else { 1 };
+    for target in [700, 10, 999, 0, 128, 127, 500, 1000] {
+        let got = p.shallow_advance(target).unwrap();
+        if target >= 1000 {
+            assert_eq!(got, None);
+            continue;
+        }
+        let m = got.unwrap();
+        // The block holding `target`: blocks are 128 documents here.
+        assert_eq!(
+            m.last_docid,
+            ((target / 128) * 128 + 127).min(999),
+            "target {target}"
+        );
+        assert_eq!(m.max_tf, tf(target), "target {target}");
+    }
+    assert_eq!(p.next().unwrap(), Some(0));
+    assert_eq!(p.freq().unwrap(), 5);
+}
+
+/// Reader-side list lengths around the 128-docid block: tail only, one full block, full blocks then a tail.
+#[test]
+fn advance_across_block_boundaries() {
+    let schema = schema();
+    let tag = id(&schema, "tag");
+    for n in [1_u32, 127, 128, 129, 255, 256, 257] {
+        let docs: Vec<Document> = (0..n)
+            .map(|i| Document::new(format!("{i:04}")).with(tag, Value::String("same".into())))
+            .collect();
+        let bytes = build(&schema, &docs, WriteOptions::default());
+        let seg = open(&schema, &bytes).unwrap();
+        let mut terms = seg.terms(tag).unwrap();
+        let info = terms.get(b"same").unwrap().unwrap();
+        for target in [0, 1, 126, 127, 128, 129, 255, 256, 257, 300] {
+            let mut p = terms.postings(&info).unwrap();
+            let want = (target < n).then_some(target);
+            assert_eq!(p.advance(target).unwrap(), want, "n {n}, target {target}");
+            assert_eq!(
+                p.next().unwrap(),
+                want.and_then(|d| (d + 1 < n).then_some(d + 1))
+            );
+        }
+        let mut p = terms.postings(&info).unwrap();
+        let mut count = 0;
+        while p.next().unwrap().is_some() {
+            count += 1;
+        }
+        assert_eq!(count, n);
+    }
+}
+
+#[test]
+fn ordinals_and_term_infos_are_checked() {
+    let schema = schema();
+    let bytes = build(&schema, &golden_docs(&schema), WriteOptions::default());
+    let seg = open(&schema, &bytes).unwrap();
+    let mut tags = seg.terms(id(&schema, "tag")).unwrap();
+    let len = tags.len();
+    let err = tags.info(len).unwrap_err();
+    assert_eq!(err, ReadError::OrdinalOutOfRange { ordinal: len, len });
+    assert!(!err.is_corruption());
+    assert_eq!(tags.info(0).unwrap().ordinal(), 0);
+
+    // A TermInfo of another field, or of another segment, is refused.
+    let red = tags.get(b"red").unwrap().unwrap();
+    let titles = seg.terms(id(&schema, "title")).unwrap();
+    assert_eq!(
+        titles.postings(&red).map(drop),
+        Err(ReadError::ForeignTermInfo)
+    );
+    let mut other = meta();
+    other.segment_id += 1;
+    let mut b =
+        persia_engine::segment::SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    for d in golden_docs(&schema) {
+        b.add(&d).unwrap();
+    }
+    let other = persia_engine::segment::SegmentWriter::new(&b, other)
+        .finish()
+        .unwrap();
+    let other = open(&schema, &other).unwrap();
+    let other_tags = other.terms(id(&schema, "tag")).unwrap();
+    assert_eq!(
+        other_tags.postings(&red).map(drop),
+        Err(ReadError::ForeignTermInfo)
+    );
+    assert!(tags.postings(&red).is_ok());
 }

@@ -121,7 +121,7 @@ enum State {
 /// let segment = Segment::open(ByteSource::new(bytes.into()), &schema)?;
 /// let mut terms = segment.terms(tag)?;
 /// let info = terms.get(b"fizz")?.ok_or("no term")?;
-/// let mut postings = terms.postings(&info);
+/// let mut postings = terms.postings(&info)?;
 /// assert_eq!(postings.next()?, Some(0));
 /// assert_eq!(postings.advance(200)?, Some(201)); // skips whole blocks through the Skip entries
 /// assert_eq!(postings.freq()?, 1);
@@ -416,7 +416,15 @@ impl<'s> Postings<'s> {
                 min_norm: self.info.min_norm(),
             }));
         }
-        let mut k = self.shallow.max(self.block.unwrap_or(0));
+        // From the current block, or from where the last call stopped if `target` is past every block before it
+        // (targets may go down between calls; the block for a smaller one must not be skipped).
+        let mut k = self.block.unwrap_or(0);
+        if let Some(before) = self.shallow.checked_sub(1)
+            && self.shallow > k
+            && self.entry(before)?.last_docid < target
+        {
+            k = self.shallow;
+        }
         while k < self.block_count {
             let e = self.entry(k)?;
             if e.last_docid >= target {
@@ -606,6 +614,21 @@ impl<'s> Postings<'s> {
             .as_mut()
             .ok_or_else(|| missing(Which::Postings))?;
         let stream = lists.postings.stream;
+        // The largest a block can be (SPEC §5.2.1), checked before anything is read: a crafted extent must not make
+        // the reader decode more.
+        let max = if n == BLOCK_LEN {
+            1 + 4 + 16 * 32
+        } else {
+            1 + 5 * MAX_TAIL
+        };
+        if ext.postings.end.saturating_sub(ext.postings.start) > max {
+            return Err(stream.corrupt(
+                ext.postings.start,
+                SegmentCorruption::Invalid {
+                    what: "a postings block longer than any block can be",
+                },
+            ));
+        }
         let mut r = lists
             .postings
             .reader(ext.postings.start, ext.postings.end)?;
@@ -662,6 +685,15 @@ impl<'s> Postings<'s> {
         let n = self.len;
         let lists = self.lists.as_mut().ok_or_else(|| missing(Which::Freqs))?;
         let stream = lists.freqs.stream;
+        let n_u64 = u64::try_from(n).unwrap_or(128);
+        if ext.freqs.end.saturating_sub(ext.freqs.start) > max_run_len(n_u64) {
+            return Err(stream.corrupt(
+                ext.freqs.start,
+                SegmentCorruption::Invalid {
+                    what: "a frequency run longer than any run of its length can be",
+                },
+            ));
+        }
         let mut r = lists.freqs.reader(ext.freqs.start, ext.freqs.end)?;
         let tfs = self.tfs.get_mut(..n).unwrap_or_default();
         read_run_into(&mut r, tfs).map_err(|e| stream.error(e))?;
@@ -713,13 +745,22 @@ impl<'s> Postings<'s> {
         let stream = cursor.stream;
         // Every value costs at least one byte per 128 (a packed group of width 0): a bound before allocating.
         let bytes = range.end.saturating_sub(range.start);
-        if total > bytes.saturating_mul(128) {
+        if total > bytes.saturating_mul(128)
+            || total > self.info.ttf()
+            || bytes > max_run_len(total)
+        {
             return Err(stream.corrupt(
                 range.start,
                 SegmentCorruption::Invalid {
-                    what: "a positions run shorter than its frequencies",
+                    what: "a positions run whose length does not fit its frequencies",
                 },
             ));
+        }
+        if total > MAX_BLOCK_POSITIONS {
+            // A valid segment may hold such a block, but this reader decodes a block's positions at once.
+            return Err(stream.error(persia_format::Error::OutOfMemory {
+                bytes: total.checked_mul(4),
+            }));
         }
         let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
         self.positions.clear();
@@ -804,4 +845,17 @@ fn missing(which: Which) -> ReadError {
             what: "a posting list without its section",
         },
     }
+}
+
+/// Most docids in a tail block.
+const MAX_TAIL: u64 = 127;
+/// Most positions this reader decodes for one postings block (256 MiB of `u32`).
+const MAX_BLOCK_POSITIONS: u64 = 1 << 26;
+
+/// The longest a run of `n` values can be (SPEC §5.3.2): a width byte and 512 bytes per 128-group, then a varint of
+/// at most 5 bytes per value.
+fn max_run_len(n: u64) -> u64 {
+    (n / 128)
+        .saturating_mul(1 + 16 * 32)
+        .saturating_add((n % 128).saturating_mul(5))
 }

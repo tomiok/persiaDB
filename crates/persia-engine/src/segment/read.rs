@@ -24,7 +24,7 @@ pub use postings::{BlockMax, Postings, Tombstones};
 pub use terms::{TermIndex, TermInfo, TermStream};
 
 use super::kind::{SEGMENT_FIELD, SectionKind};
-use crate::document::Document;
+use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind, FieldType};
 use footer::{Footer, Section};
 use store::BlockCache;
@@ -53,7 +53,7 @@ use terms::{Lists, TERM_INFO_LEN};
 /// assert_eq!((segment.segment_id(), segment.doc_count()), (7, 1));
 /// let info = segment.terms(body)?.get(b"hello")?.ok_or("no term")?;
 /// assert_eq!(info.df(), 1);
-/// assert_eq!(segment.docid("n1")?, Some(0));
+/// assert_eq!(segment.docid_of("n1")?, Some(0));
 /// assert_eq!(segment.document(0)?.get(body), Some(&Value::String("Hello, world".into())));
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
@@ -183,7 +183,7 @@ impl Segment {
         };
         let need = |kind| {
             self.stream(kind, id)?
-                .ok_or_else(|| presence_error(kind, id, false))
+                .ok_or_else(|| self.presence_error(kind, id, false))
         };
         let lists = Lists {
             postings: need(SectionKind::Postings)?,
@@ -197,6 +197,7 @@ impl Segment {
             lists,
             self.doc_count(),
             keyword,
+            (self.segment_id(), id),
         ))
     }
 
@@ -275,9 +276,9 @@ impl Segment {
     /// The document with id `id`, and its docid, if the segment has it (via the `IdMap`).
     ///
     /// # Errors
-    /// As [`Self::document`] and [`Self::docid`].
+    /// As [`Self::document`] and [`Self::docid_of`].
     pub fn document_by_id(&self, id: &str) -> Result<Option<(u32, Document)>, ReadError> {
-        match self.docid(id)? {
+        match self.docid_of(id)? {
             Some(docid) => Ok(Some((docid, self.document(docid)?))),
             None => Ok(None),
         }
@@ -287,7 +288,7 @@ impl Segment {
     ///
     /// # Errors
     /// A corruption if the `IdMap` maps `id` to a docid at or above [`Self::doc_count`].
-    pub fn docid(&self, id: &str) -> Result<Option<u32>, ReadError> {
+    pub fn docid_of(&self, id: &str) -> Result<Option<u32>, ReadError> {
         let Some(value) = self.id_map.as_ref().and_then(|m| m.get(id)) else {
             return Ok(None);
         };
@@ -309,7 +310,7 @@ impl Segment {
     ///
     /// # Errors
     /// As [`Self::document`]; an empty or non-UTF-8 id is a corruption.
-    pub fn doc_id(&self, docid: u32) -> Result<String, ReadError> {
+    pub fn id_of(&self, docid: u32) -> Result<String, ReadError> {
         let bytes = self.record(SectionKind::IdList, docid)?;
         let bad = || ReadError::Section {
             kind: SectionKind::IdList,
@@ -359,6 +360,18 @@ impl Segment {
         Ok(Some(blob))
     }
 
+    /// A section SPEC §5.3 "Presence" requires is missing, or one it rules out is there; reported at the segment start.
+    fn presence_error(&self, kind: SectionKind, field: u32, present: bool) -> ReadError {
+        ReadError::Corrupt {
+            offset: self.source.base_offset(),
+            reason: SegmentCorruption::Presence {
+                kind: kind.code(),
+                field,
+                present,
+            },
+        }
+    }
+
     fn check_docid(&self, docid: u32) -> Result<(), ReadError> {
         if docid < self.doc_count() {
             Ok(())
@@ -374,8 +387,15 @@ impl Segment {
         self.check_docid(docid)?;
         let stream = self
             .stream(kind, SEGMENT_FIELD)?
-            .ok_or_else(|| presence_error(kind, SEGMENT_FIELD, false))?;
-        store::record(&stream, self.doc_count(), docid, &self.cache)
+            .ok_or_else(|| self.presence_error(kind, SEGMENT_FIELD, false))?;
+        // The longest record any valid segment holds (SPEC §6.4.1, §9.1).
+        let max = match kind {
+            SectionKind::IdList => MAX_ID_LEN,
+            SectionKind::BlobRefs => BlobRef::MAX_ENCODED_LEN,
+            _ => MAX_DOCUMENT_LEN,
+        };
+        let max = u64::try_from(max).unwrap_or(u64::MAX);
+        store::record(&stream, self.doc_count(), docid, max, &self.cache)
     }
 
     /// A field of the schema.
@@ -424,7 +444,7 @@ impl Segment {
             let required: &[SectionKind] = match f.kind() {
                 FieldKind::Text(o) => {
                     if any && has(SectionKind::Positions) != o.positions {
-                        return Err(presence_error(SectionKind::Positions, id, !o.positions));
+                        return Err(self.presence_error(SectionKind::Positions, id, !o.positions));
                     }
                     &[
                         SectionKind::TermDict,
@@ -444,7 +464,7 @@ impl Segment {
                 _ => &[],
             };
             if any && let Some(&kind) = required.iter().find(|&&k| !has(k)) {
-                return Err(presence_error(kind, id, false));
+                return Err(self.presence_error(kind, id, false));
             }
             if let Some(stats) = self.field_stats(f.id())
                 && any != (stats.docs_with_field > 0)
@@ -461,7 +481,7 @@ impl Segment {
             SectionKind::IdList,
         ] {
             if self.section(kind, SEGMENT_FIELD).is_none() {
-                return Err(presence_error(kind, SEGMENT_FIELD, false));
+                return Err(self.presence_error(kind, SEGMENT_FIELD, false));
             }
         }
         Ok(())
@@ -481,7 +501,7 @@ impl Segment {
             if kind.is_block_framed() {
                 let stream = self
                     .stream(kind, field)?
-                    .ok_or_else(|| presence_error(kind, field, false))?;
+                    .ok_or_else(|| self.presence_error(kind, field, false))?;
                 match kind {
                     SectionKind::TermInfo => {
                         let terms = self
@@ -519,6 +539,7 @@ impl Segment {
             let range = section.range.start..section.range.end.saturating_sub(4);
             let payload = self.bytes(&Section { kind, field, range })?;
             let map = fst::Map::new(payload).map_err(|_| fst_error(SegmentCorruption::Fst))?;
+            check_fst_values(&map, kind, doc_count).map_err(fst_error)?;
             if kind == SectionKind::IdMap {
                 if u64::try_from(map.len()).ok() != Some(u64::from(doc_count)) {
                     return Err(fst_error(SegmentCorruption::Fst));
@@ -541,21 +562,36 @@ fn section_slice<'a>(segment: &'a [u8], section: &Section) -> &'a [u8] {
         .unwrap_or_default()
 }
 
-fn presence_error(kind: SectionKind, field: u32, present: bool) -> ReadError {
-    ReadError::Corrupt {
-        offset: 0,
-        reason: SegmentCorruption::Presence {
-            kind: kind.code(),
-            field,
-            present,
-        },
-    }
-}
-
 fn type_error(field: FieldId, field_type: FieldType, what: &'static str) -> ReadError {
     ReadError::FieldType {
         field,
         field_type,
         what,
     }
+}
+
+/// Walks an FST once (SPEC §5.3.1, §5.3.6): a `TermDict` maps each term to its rank, an `IdMap` each id to a distinct
+/// docid below `doc_count`. The walk also reaches every node a later lookup or range scan can.
+fn check_fst_values(
+    map: &fst::Map<ByteSource>,
+    kind: SectionKind,
+    doc_count: u32,
+) -> Result<(), SegmentCorruption> {
+    let mut stream = map.stream();
+    let mut rank = 0_u64;
+    let mut docids = RoaringBitmap::new();
+    while let Some((_, value)) = fst::Streamer::next(&mut stream) {
+        let ok = if kind == SectionKind::IdMap {
+            u32::try_from(value).is_ok_and(|d| d < doc_count && docids.insert(d))
+        } else {
+            value == rank
+        };
+        if !ok {
+            return Err(SegmentCorruption::Invalid {
+                what: "an FST value other than the term's rank or a distinct docid",
+            });
+        }
+        rank = rank.saturating_add(1);
+    }
+    Ok(())
 }

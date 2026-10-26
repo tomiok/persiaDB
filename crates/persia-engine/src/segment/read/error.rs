@@ -66,7 +66,8 @@ pub enum ReadError {
         /// Why its row does not decode.
         source: DecodeError,
     },
-    /// A tombstone set names a docid the segment does not have (SPEC §8.3).
+    /// A tombstone set names a docid the segment does not have (SPEC §8.3): the tombstone sidecar is corrupt, not
+    /// the segment, so [`ReadError::is_corruption`] is false (it is about the segment's bytes).
     #[error("tombstone for docid {docid}, but the segment has {doc_count} documents")]
     Tombstone {
         /// The docid.
@@ -92,6 +93,17 @@ pub enum ReadError {
         /// What was asked for.
         what: &'static str,
     },
+    /// The caller asked for a term ordinal at or above the field's term count.
+    #[error("term ordinal {ordinal} out of range (the field has {len} terms)")]
+    OrdinalOutOfRange {
+        /// The ordinal asked for.
+        ordinal: u64,
+        /// The field's term count.
+        len: u64,
+    },
+    /// The caller passed a [`super::TermInfo`] that another field or segment returned.
+    #[error("term info of another field or segment")]
+    ForeignTermInfo,
     /// The caller named a field the segment's schema does not have.
     #[error("field {field} is not in the segment's schema")]
     UnknownField {
@@ -104,14 +116,17 @@ impl ReadError {
     /// Whether the segment's bytes are corrupt, as opposed to a caller, resource or unsupported-format error.
     pub fn is_corruption(&self) -> bool {
         match self {
-            Self::Corrupt { .. } | Self::Section { .. } | Self::Tombstone { .. } => true,
+            Self::Corrupt { .. } | Self::Section { .. } => true,
             Self::Block { source, .. } => source.is_corruption(),
             Self::Format(e) => e.is_corruption(),
             Self::Document { source, .. } => source.is_corruption(),
             Self::Unsupported { .. }
             | Self::DocOutOfRange { .. }
             | Self::FieldType { .. }
-            | Self::UnknownField { .. } => false,
+            | Self::UnknownField { .. }
+            | Self::OrdinalOutOfRange { .. }
+            | Self::ForeignTermInfo
+            | Self::Tombstone { .. } => false,
         }
     }
 }

@@ -29,6 +29,8 @@ pub struct TermInfo {
     /// Start of the term's `Skip` entries; `None` when `df < 128`.
     pub(super) skip: Option<u64>,
     pub(super) positions: Option<Range<u64>>,
+    /// The segment id and field id of the index that returned it.
+    owner: (u128, u32),
 }
 
 impl TermInfo {
@@ -75,6 +77,7 @@ struct InfoReader<'s> {
     doc_count: u32,
     keyword: bool,
     lists: Lists<'s>,
+    owner: (u128, u32),
 }
 
 impl InfoReader<'_> {
@@ -129,7 +132,8 @@ impl InfoReader<'_> {
         if df == 0 || df > self.doc_count {
             return Err(self.corrupt(at, "a df of 0 or above doc_count"));
         }
-        if max_tf == 0 || ttf < u64::from(df) || ttf < u64::from(max_tf) {
+        let ttf_bound = u64::from(df).saturating_mul(u64::from(max_tf));
+        if max_tf == 0 || ttf < u64::from(df) || ttf < u64::from(max_tf) || ttf > ttf_bound {
             return Err(self.corrupt(at, "ttf or max_tf inconsistent with df"));
         }
         if self.keyword && min_norm != 0 {
@@ -151,6 +155,13 @@ impl InfoReader<'_> {
             None if positions_off == 0 => None,
             None => return Err(self.corrupt(at, "a positions_off without Positions")),
         };
+        // Lists are back to back from the start of their streams (SPEC §5.3.1).
+        let starts_late = postings.start != 0
+            || freqs.start != 0
+            || positions.as_ref().is_some_and(|p| p.start != 0);
+        if ordinal == 0 && starts_late {
+            return Err(self.corrupt(at, "bytes before the first list"));
+        }
         let skip = if u64::from(df) >= u64::try_from(BLOCK_LEN).unwrap_or(128) {
             let fits = blocks
                 .checked_mul(SKIP_ENTRY_LEN)
@@ -176,6 +187,7 @@ impl InfoReader<'_> {
             freqs,
             skip,
             positions,
+            owner: self.owner,
         })
     }
 }
@@ -203,6 +215,7 @@ impl<'s> TermIndex<'s> {
         lists: Lists<'s>,
         doc_count: u32,
         keyword: bool,
+        owner: (u128, u32),
     ) -> Self {
         let count = u64::try_from(dict.len()).unwrap_or(u64::MAX);
         Self {
@@ -213,6 +226,7 @@ impl<'s> TermIndex<'s> {
                 doc_count,
                 keyword,
                 lists,
+                owner,
             }),
         }
     }
@@ -243,25 +257,29 @@ impl<'s> TermIndex<'s> {
     /// The term info of the term with rank `ordinal`.
     ///
     /// # Errors
-    /// As [`Self::get`]; an `ordinal` at or above [`Self::len`] is reported as a corrupt `TermDict`.
+    /// As [`Self::get`]; [`ReadError::OrdinalOutOfRange`] for an `ordinal` at or above [`Self::len`].
     pub fn info(&mut self, ordinal: u64) -> Result<TermInfo, ReadError> {
+        let len = self.len();
         match self.infos.as_mut() {
-            Some(infos) => infos.info(ordinal),
-            None => Err(ReadError::Section {
-                kind: super::super::SectionKind::TermDict,
-                field: u32::MAX,
-                position: 0,
-                reason: SegmentCorruption::Fst,
-            }),
+            Some(infos) if ordinal < len => infos.info(ordinal),
+            _ => Err(ReadError::OrdinalOutOfRange { ordinal, len }),
         }
     }
 
     /// The posting list of a term this index returned.
-    pub fn postings(&self, info: &TermInfo) -> Postings<'s> {
-        let (doc_count, keyword, lists) = self.infos.as_ref().map_or((0, false, None), |i| {
-            (i.doc_count, i.keyword, Some(i.lists))
-        });
-        Postings::new(info.clone(), lists, doc_count, keyword)
+    ///
+    /// # Errors
+    /// [`ReadError::ForeignTermInfo`] for a [`TermInfo`] of another field or segment.
+    pub fn postings(&self, info: &TermInfo) -> Result<Postings<'s>, ReadError> {
+        match &self.infos {
+            Some(i) if i.owner == info.owner => Ok(Postings::new(
+                info.clone(),
+                Some(i.lists),
+                i.doc_count,
+                i.keyword,
+            )),
+            _ => Err(ReadError::ForeignTermInfo),
+        }
     }
 
     /// The terms in `range` (byte order), with their term info.

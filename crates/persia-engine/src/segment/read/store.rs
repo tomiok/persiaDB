@@ -20,18 +20,28 @@ pub(super) struct BlockCache {
     blocks: Mutex<VecDeque<CachedBlock>>,
 }
 
+/// The cached block `(kind, index)`, moved to the most recent end.
+fn lookup(
+    blocks: &mut VecDeque<CachedBlock>,
+    kind: SectionKind,
+    index: u32,
+) -> Option<Arc<Vec<u8>>> {
+    let i = blocks
+        .iter()
+        .position(|&(k, b, _)| k == kind && b == index)?;
+    let entry = blocks.remove(i)?;
+    let block = Arc::clone(&entry.2);
+    blocks.push_back(entry);
+    Some(block)
+}
+
 impl BlockCache {
     fn get(&self, stream: &Stream<'_>, index: u32) -> Result<Arc<Vec<u8>>, ReadError> {
         let kind = stream.kind;
         {
             let mut blocks = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
-            if let Some(i) = blocks.iter().position(|&(k, b, _)| k == kind && b == index) {
-                let entry = blocks.remove(i);
-                if let Some(entry) = entry {
-                    let block = Arc::clone(&entry.2);
-                    blocks.push_back(entry);
-                    return Ok(block);
-                }
+            if let Some(block) = lookup(&mut blocks, kind, index) {
+                return Ok(block);
             }
         }
         // Decoded outside the lock, so readers of other blocks do not wait on it.
@@ -39,6 +49,10 @@ impl BlockCache {
         stream.read_block(index, &mut buf)?;
         let block = Arc::new(buf);
         let mut blocks = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
+        // Another reader may have decoded it meanwhile: keep one copy.
+        if let Some(cached) = lookup(&mut blocks, kind, index) {
+            return Ok(cached);
+        }
         if blocks.len() >= CACHED_BLOCKS {
             blocks.pop_front();
         }
@@ -46,24 +60,22 @@ impl BlockCache {
         Ok(block)
     }
 
-    /// Appends stream bytes `start..end` to `out`, block by block through the cache.
-    fn read(
-        &self,
-        stream: &Stream<'_>,
-        start: u64,
-        end: u64,
-        out: &mut Vec<u8>,
-    ) -> Result<(), ReadError> {
-        if start > end || end > stream.len() {
-            return Err(stream.corrupt(
-                start,
-                SegmentCorruption::Invalid {
-                    what: "a record past the end of its stream",
-                },
-            ));
-        }
+    /// Fills `out` with the stream bytes from `start`, block by block through the cache.
+    fn read(&self, stream: &Stream<'_>, start: u64, out: &mut [u8]) -> Result<(), ReadError> {
+        let end = start
+            .checked_add(u64::try_from(out.len()).unwrap_or(u64::MAX))
+            .filter(|&e| e <= stream.len())
+            .ok_or_else(|| {
+                stream.corrupt(
+                    start,
+                    SegmentCorruption::Invalid {
+                        what: "a record past the end of its stream",
+                    },
+                )
+            })?;
         let block_size = stream.block_size();
         let mut pos = start;
+        let mut written = 0_usize;
         while pos < end {
             let index = pos.checked_div(block_size).unwrap_or(0);
             let block_start = index.saturating_mul(block_size);
@@ -71,31 +83,28 @@ impl BlockCache {
             let from = usize::try_from(pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
             let to_pos = end.min(block_start.saturating_add(block_size));
             let to = usize::try_from(to_pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
-            let bytes = block.get(from..to).ok_or_else(|| {
+            let short = || {
                 stream.corrupt(
                     pos,
                     SegmentCorruption::Invalid {
                         what: "a block shorter than its table says",
                     },
                 )
-            })?;
-            out.extend_from_slice(bytes);
+            };
+            let bytes = block.get(from..to).ok_or_else(short)?;
+            let next = written.saturating_add(bytes.len());
+            out.get_mut(written..next)
+                .ok_or_else(short)?
+                .copy_from_slice(bytes);
+            written = next;
             pos = to_pos;
         }
         Ok(())
     }
 
     fn u64_at(&self, stream: &Stream<'_>, at: u64) -> Result<u64, ReadError> {
-        let mut buf = Vec::with_capacity(8);
-        self.read(stream, at, at.saturating_add(8), &mut buf)?;
-        let bytes: [u8; 8] = buf.as_slice().try_into().map_err(|_| {
-            stream.corrupt(
-                at,
-                SegmentCorruption::Invalid {
-                    what: "a record end past the end of its stream",
-                },
-            )
-        })?;
+        let mut bytes = [0_u8; 8];
+        self.read(stream, at, &mut bytes)?;
         Ok(u64::from_le_bytes(bytes))
     }
 }
@@ -128,11 +137,13 @@ pub(super) fn check_records(
     Ok(())
 }
 
-/// Record `docid` of a record array of `count` records.
+/// Record `docid` of a record array of `count` records. One longer than `max` bytes (the longest valid record of the
+/// section) is corruption, reported before anything is allocated.
 pub(super) fn record(
     stream: &Stream<'_>,
     count: u32,
     docid: u32,
+    max: u64,
     cache: &BlockCache,
 ) -> Result<Vec<u8>, ReadError> {
     let header = u64::from(count).saturating_mul(8);
@@ -151,18 +162,16 @@ pub(super) fn record(
             },
         ));
     }
-    let mut out = Vec::new();
-    let len = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
-    out.try_reserve_exact(len).map_err(|_| {
-        stream.error(persia_format::Error::OutOfMemory {
-            bytes: Some(end.saturating_sub(start)),
-        })
-    })?;
-    cache.read(
-        stream,
-        header.saturating_add(start),
-        header.saturating_add(end),
-        &mut out,
-    )?;
+    let len = end.saturating_sub(start);
+    if len > max {
+        return Err(stream.corrupt(
+            end_at,
+            SegmentCorruption::Invalid {
+                what: "a record longer than any valid one",
+            },
+        ));
+    }
+    let mut out = vec![0_u8; usize::try_from(len).unwrap_or(0)];
+    cache.read(stream, header.saturating_add(start), &mut out)?;
     Ok(out)
 }

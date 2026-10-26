@@ -65,6 +65,18 @@ impl Parts<'_, '_> {
             .corrupt(position, SegmentCorruption::Invalid { what })
     }
 
+    /// An empty vector with room for `n` values: sized by the stream, so it fails cleanly rather than aborting.
+    fn vec<T>(&self, n: u64) -> Result<Vec<T>, ReadError> {
+        let mut v = Vec::new();
+        let n_usize = usize::try_from(n).unwrap_or(usize::MAX);
+        v.try_reserve_exact(n_usize).map_err(|_| {
+            self.stream.error(persia_format::Error::OutOfMemory {
+                bytes: n.checked_mul(8),
+            })
+        })?;
+        Ok(v)
+    }
+
     fn u64(&mut self) -> Result<u64, ReadError> {
         self.r.read_u64().map_err(|e| self.stream.error(e))
     }
@@ -112,12 +124,12 @@ impl Parts<'_, '_> {
         if blocks.saturating_mul(21) > remaining {
             return Err(self.bad(at, "a FOR column longer than its stream"));
         }
-        let mut ends = Vec::with_capacity(usize::try_from(blocks).unwrap_or(0));
+        let mut ends = self.vec(blocks)?;
         for _ in 0..blocks {
             ends.push(self.u64()?);
         }
         let data_at = self.r.offset();
-        let mut values = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+        let mut values = self.vec(count)?;
         let mut start = 0_u64;
         for (i, &end) in ends.iter().enumerate() {
             let len = end
@@ -309,7 +321,7 @@ impl KeywordColumn {
             if count == 0 || count.saturating_mul(8) > remaining {
                 return Err(p.bad(at, "a keyword dictionary count"));
             }
-            let mut value_ends = Vec::with_capacity(usize::try_from(count).unwrap_or(0));
+            let mut value_ends = p.vec(count)?;
             for _ in 0..count {
                 let end = p.u64()?;
                 value_ends.push(usize::try_from(end).map_err(|_| p.bad(at, "a value end"))?);
