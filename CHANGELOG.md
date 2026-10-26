@@ -8,13 +8,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-### Changed
-- `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
-  `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
-  converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens (within bounds), so
-  analyzing value after value stops growing its buffers once it has grown; stemmers and folding still allocate for the
-  tokens they change (ROADMAP 4.4.12).
-
 ### Added
 - `persia-analysis`: built-in `fr`, `de` and `it` analyzers at version 1 (SPEC §6.3.3): `ElisionFilter` (`FRENCH_ELISIONS`, `ITALIAN_ELISIONS`), `FrenchStemmer`, `GermanStemmer`
   and `ItalianStemmer` (Snowball 3.1.1, checked against the full Snowball vocabularies; French and Italian remove
@@ -134,10 +127,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
-- `persia-engine`: a schema naming the `fr`, `de` or `it` analyzer is rejected until those analyzers exist (ROADMAP
-  4.4.10); the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and version).
-  Files an earlier development build wrote with `fr@1`, `de@1` or `it@1` in a schema no longer open (reported as
-  corrupt; nothing was released with them).
+- `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
+  `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
+  converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens, within bounds (at most
+  4096 spare strings of up to 1020 bytes, and 4096 token slots once cleared), so analyzing value after value stops
+  growing its buffers once it has grown; values beyond those bounds allocate again, and stemmers and folding still
+  allocate for the tokens they change (ROADMAP 4.4.12).
+- `persia-engine`: the built-in analyzer list now comes from `persia-analysis` (`BUILTIN_ANALYZERS` lists name and
+  version). `fr@1`, `de@1` and `it@1` now name the analyzers of ROADMAP 4.4.10 (see Added); files an earlier
+  development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
 - `persia-storage`: a read-only `Container::open` beside a writer in another process no longer fails spuriously: with an

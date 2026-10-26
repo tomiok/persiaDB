@@ -272,10 +272,11 @@ fn french_matches_the_snowball_vocabulary() {
     check_vocabulary(&FrenchStemmer, FRENCH, 21_653);
 }
 
-/// The stemmers run before the length guard (SPEC §6.3.3), so they see whole tokens: a 1 MB token must stem in linear
-/// time (the French prelude once inserted into a vector per `ë`, which took seconds for this one).
+/// Smoke test: the stemmers run before the length guard (SPEC §6.3.3), so they see whole tokens, and 1 MB tokens must
+/// stem at all (the French prelude once inserted into a vector per `ë`, which took seconds for these). It checks
+/// termination only, as tests use no wall clock; the `analyzers` benchmark is where a slowdown shows.
 #[test]
-fn long_tokens_stem_in_linear_time() {
+fn long_tokens_stem() {
     let words = [
         "ë".repeat(500_000),
         "aï".repeat(250_000),

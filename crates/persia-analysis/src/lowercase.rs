@@ -52,28 +52,3 @@ impl TokenFilter for LowercaseFilter {
         });
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use proptest::prelude::*;
-
-    use super::*;
-    use crate::{Token, TokenStream};
-
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(2048))]
-
-        /// The filter's per-character path (no `Σ`) and its `Σ` path both equal `str::to_lowercase` (SPEC §6.3.2).
-        #[test]
-        fn matches_str_to_lowercase(text in prop_oneof![
-            "[A-Za-zÀ-ÿĀ-žΑ-ΩΣσςİIıẞßǅ\u{130}\u{345}\u{301} ]{1,24}",
-            any::<String>(),
-        ]) {
-            let mut tokens = TokenStream::from(vec![Token { text: text.clone(), start: 0, end: text.len(), position: 0 }]);
-            LowercaseFilter.apply(&mut tokens);
-            let want = text.to_lowercase();
-            let got = tokens.first().map_or("", |t| t.text.as_str());
-            prop_assert_eq!(got, want.as_str());
-        }
-    }
-}

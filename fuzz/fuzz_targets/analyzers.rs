@@ -7,8 +7,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    Analyzer, BUILTIN_ANALYZERS, CharFilter, CharFilterOutput, LowercaseFilter, StandardTokenizer,
-    Token, TokenStream, builtin_analyzer,
+    Analyzer, BUILTIN_ANALYZERS, CharFilter, CharFilterOutput, DEFAULT_MAX_TOKEN_LEN,
+    LowercaseFilter, StandardTokenizer, Token, TokenStream, builtin_analyzer,
 };
 
 /// Replaces each character whose code point has `mask` bits in common with `control` by one of a few strings,
@@ -46,7 +46,7 @@ impl CharFilter for Driven {
 fn check_builtin(name: &str, text: &str, tokens: &[Token]) {
     for token in tokens {
         assert!(
-            !token.text.is_empty() && token.text.len() <= 255,
+            !token.text.is_empty() && token.text.len() <= DEFAULT_MAX_TOKEN_LEN.get(),
             "{name}: {token:?}"
         );
         assert!(

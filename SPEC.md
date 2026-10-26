@@ -714,7 +714,8 @@ Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`
 in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
 is a new version. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
 dependency or toolchain update that fixes them within one) can change a released version's output, and the analyzer
-then gets a new version that supersedes it (§6.3.1). Changing a field's analyzer requires a reindex into a new collection
+then gets a new version that supersedes it (§6.3.1). This holds as far as the fingerprints of §6.3.1 see: a change visible only
+outside their probe contexts could move an output unversioned. Changing a field's analyzer requires a reindex into a new collection
 (§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
@@ -732,7 +733,7 @@ pull request, lists the analyzers whose fingerprint moved. Any dependency or too
 to another Unicode version, or a fix within one) gives a new version, with the same chain, to every built-in analyzer
 whose fingerprint it moves, and only to those (ADR-0025); a change visible only outside the probe contexts can go
 unnoticed. The versions they supersede stay available and run on the build's Unicode tables, as a build has only one set: a field
-indexed with one keeps working, and only text with the characters whose properties changed may analyze differently
+indexed with one keeps working, and only text affected by the changed tables or algorithms may analyze differently
 than when it was indexed, until the collection is reindexed at the new version (§6.2.4).
 
 - **standard**: Unicode word boundaries (UAX #29), keeping the segments that contain an alphanumeric character;

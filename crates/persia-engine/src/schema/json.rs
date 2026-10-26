@@ -42,33 +42,41 @@ pub(super) fn to_json(schema: &CollectionSchema) -> Result<String, SchemaError> 
 /// schema, move a field to a newer analyzer version, or change any setting with the reading build's defaults,
 /// without anything in the stored bytes changing.
 pub(super) fn from_stored_json(json: &str) -> Result<CollectionSchema, SchemaError> {
-    let raw = parse(json)?;
+    let mut raw = parse(json)?;
     if let Some(missing) = first_missing(&raw) {
         return Err(SchemaError::Json(format!("stored schema: {missing}")));
     }
-    if let Some(unsupported) = first_unsupported_analyzer(&raw) {
-        return Err(unsupported);
+    // A newer build's analyzer is unsupported only if the rest of the schema is valid: check everything else with
+    // the default analyzer in its place, so a damaged schema is still corruption.
+    let unsupported = replace_unsupported_analyzers(&mut raw);
+    let schema = from_raw(raw)?;
+    match unsupported {
+        Some(e) => Err(e),
+        None => Ok(schema),
     }
-    from_raw(raw)
 }
 
-/// The first text field naming a well-formed `name@version` this build lacks, as
-/// [`SchemaError::UnsupportedAnalyzer`]: in a stored schema that is a newer build's analyzer, not corruption.
-fn first_unsupported_analyzer(raw: &RawSchema) -> Option<SchemaError> {
-    raw.fields.0.iter().find_map(|(name, field)| match field {
-        RawField::Text {
+/// Replaces, in every text field naming a well-formed `name@version` this build lacks, the analyzer with the default
+/// one, and returns the first such field as [`SchemaError::UnsupportedAnalyzer`]: in a stored schema that is a newer
+/// build's analyzer, not corruption.
+fn replace_unsupported_analyzers(raw: &mut RawSchema) -> Option<SchemaError> {
+    let mut first = None;
+    for (name, field) in &mut raw.fields.0 {
+        if let RawField::Text {
             analyzer: Some(analyzer),
             ..
-        } if AnalyzerRef::parse(analyzer).is_none()
-            && AnalyzerRef::is_well_formed_versioned(analyzer) =>
+        } = field
+            && AnalyzerRef::parse(analyzer).is_none()
+            && AnalyzerRef::is_well_formed_versioned(analyzer)
         {
-            Some(SchemaError::UnsupportedAnalyzer {
+            let given = std::mem::replace(analyzer, TextOptions::default().analyzer.to_string());
+            first.get_or_insert(SchemaError::UnsupportedAnalyzer {
                 field: name.clone(),
-                analyzer: analyzer.clone(),
-            })
+                analyzer: given,
+            });
         }
-        _ => None,
-    })
+    }
+    first
 }
 
 /// What a stored schema leaves to defaults, if anything.

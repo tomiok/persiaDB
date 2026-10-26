@@ -112,7 +112,7 @@ pub struct AnalyzerBuilder {
 }
 
 impl AnalyzerBuilder {
-    /// Appends a char filter; char filters run before the tokenizer, in the order they are added, whenever that is.
+    /// Appends a char filter; char filters run before the tokenizer, in the order they are added.
     pub fn char_filter(mut self, filter: impl CharFilter + 'static) -> Self {
         self.analyzer.char_filters.push(Box::new(filter));
         self

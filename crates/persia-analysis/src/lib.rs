@@ -65,8 +65,9 @@ pub use whitespace::{KeywordTokenizer, WhitespaceTokenizer};
 /// The Unicode version whose tables define tokenization and token filters (SPEC §6.3.1, §6.3.2): the UAX #29 word
 /// boundaries of `unicode-segmentation`, the normalization tables of `unicode-normalization` and the `char`
 /// properties and case mappings of the standard library must all be at this version, so a dependency or toolchain
-/// update cannot silently change what an analyzer version produces. Moving it gives every built-in analyzer whose
-/// output changes a new version (SPEC §6.3.1, ADR-0025).
+/// update cannot silently change what an analyzer version produces. After moving it, the fingerprint test
+/// (`tests/unicode_fingerprints.rs`) lists the built-in analyzers whose output it changed in the probe contexts, and each
+/// gets a new version, added by hand to [`BUILTIN_ANALYZERS`] (SPEC §6.3.1, ADR-0025).
 pub const UNICODE_VERSION: (u8, u8, u8) = (17, 0, 0);
 
 #[cfg(test)]

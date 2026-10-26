@@ -52,7 +52,7 @@ fn prelude(word: &str) -> Vec<char> {
     let mut chars: Vec<char> = word.chars().collect();
     // Snowball's `repeat goto (v [('u'] v <- 'U') or ('y'] v <- 'Y'))`: `goto` leaves the cursor where a match starts, and
     // the marked letter cannot match again there, so the search goes on from the next letter: the vowel after a
-    // marked letter can start the next match (`jouaient` marks both `U` and `I`).
+    // marked letter can start the next match (`aueua` marks both `u`s).
     let mut i = 0;
     while let (Some(&a), Some(&b), Some(&c)) = (
         chars.get(i),

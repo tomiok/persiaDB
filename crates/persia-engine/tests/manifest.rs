@@ -2740,6 +2740,11 @@ fn a_stored_analyzer_names_a_known_version() {
             "{analyzer:?}"
         );
     }
+    // Only a schema valid in every other way is unsupported: an unavailable analyzer does not hide damage.
+    let mut v = full.clone();
+    v["fields"]["title"]["analyzer"] = Value::String("es@2".into());
+    v["fields"]["title"]["boost"] = Value::from(0.0);
+    assert!(schema_corrupt(&decode_with_schema(&v)));
 }
 
 #[test]

@@ -93,8 +93,9 @@ fn spans_index_the_original_value() {
 }
 
 #[test]
-fn deleted_text_is_outside_spans() {
-    // `<b>` and `</b>` are deleted: `bold` spans only its letters, though the tokenizer saw `xboldy`.
+fn deletions_tighten_spans_at_token_edges() {
+    // `<b>` and `</b>` are deleted: inside `xboldy` they stay in its span, which covers its first and last kept
+    // characters; a deletion at a token edge is left out of the span (`bold` below).
     let text = "x<b>bold</b>y";
     let analyzer = Analyzer::builder(WhitespaceTokenizer)
         .char_filter(Replace {

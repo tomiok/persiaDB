@@ -31,8 +31,9 @@ build carries one set of Unicode tables and cannot reproduce the output of the p
    new fingerprint; analyzers whose fingerprint is unchanged keep their version. Unversioned names in new definitions
    resolve to the new version (§6.2.2), and evolution keeps existing fields at theirs (§6.2.4).
 3. **Superseded versions keep working.** A superseded version stays in `BUILTIN_ANALYZERS` and is built with the
-   build's tables: a field indexed with it opens and is queried as before, and only text containing the characters
-   whose properties changed can analyze differently from when it was indexed. Reindexing into a collection at the
+   build's tables: a field indexed with it opens and is queried as before, and only text affected by the changed tables or
+   algorithms (characters whose properties changed, or sequences an algorithm fix treats differently) can analyze
+   differently from when it was indexed. Reindexing into a collection at the
    new version (§6.2.4) restores exact agreement. SPEC §6.3 now says what is frozen: a version's chain and tables,
    and, for the current version of each analyzer, its output under the build's Unicode version.
 
