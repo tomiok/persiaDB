@@ -313,7 +313,7 @@ mod tests {
             assert_eq!((pinned.name(), pinned.version()), (a.name, a.version));
             assert!(AnalyzerRef::builtin(a.name).unwrap().version() >= a.version);
         }
-        for gone in ["fr", "de", "it"] {
+        for gone in ["nl", "zh", "ru"] {
             assert_eq!(AnalyzerRef::builtin(gone), None, "{gone}");
         }
         // `Default` falls back only if the default analyzer is missing from the registry: never.

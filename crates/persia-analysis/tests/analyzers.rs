@@ -90,8 +90,65 @@ fn builtin_chains_are_pinned() {
                 "the", "first", "cafe’s", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
             ],
         ),
+        (
+            "fr",
+            &[
+                "the", "first", "cafe'", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
+            ],
+        ),
+        (
+            "de",
+            &[
+                "the", "first", "cafe", "anos", "don't", "stop", "running", "naiv", "1⁄2", "cana",
+            ],
+        ),
+        (
+            "it",
+            &[
+                "the", "first", "cafe's", "anos", "don't", "stop", "running", "naiv", "1⁄2", "can",
+            ],
+        ),
     ];
     for (name, want) in expected {
+        assert_eq!(builtin_texts(name, text), *want, "{name}");
+    }
+}
+
+/// Each new language analyzer on a sentence of its language: elisions (`l’`, `c'`, `nell’`, through the apostrophe
+/// filter), stopwords, stemming, then folding (SPEC §6.3.3).
+#[test]
+fn fr_de_it_analyze_their_languages() {
+    let cases: &[(&str, &str, &[&str])] = &[
+        (
+            "fr",
+            "L’été dernier, les enfants jouaient dans les forêts de l'Auvergne et c'était magnifique.",
+            &[
+                "ete", "derni", "enfant", "jou", "foret", "auvergn", "etait", "magnif",
+            ],
+        ),
+        (
+            "de",
+            "Die Häuser der Straße wurden aufeinanderfolgend renoviert, und Grimm'sche Märchen gelesen.",
+            &[
+                "haus",
+                "strass",
+                "wurd",
+                "aufeinanderfolg",
+                "renoviert",
+                "grimm",
+                "march",
+                "geles",
+            ],
+        ),
+        (
+            "it",
+            "Nell’estate degli anni passati, le città italiane erano piene di turisti velocemente.",
+            &[
+                "estat", "anni", "pass", "citt", "italian", "eran", "pien", "turist", "veloc",
+            ],
+        ),
+    ];
+    for (name, text, want) in cases {
         assert_eq!(builtin_texts(name, text), *want, "{name}");
     }
 }
@@ -162,7 +219,7 @@ fn builtin_list_is_sorted_unique_and_constructible() {
         assert_eq!(builtin_analyzer(a.name, next).is_some(), listed, "{a:?}");
     }
     assert_eq!(current_builtin_version(DEFAULT_ANALYZER), Some(1));
-    for missing in ["", "fr", "de", "it", "EN", "en@1"] {
+    for missing in ["", "nl", "zh", "FR", "en@1"] {
         assert_eq!(current_builtin_version(missing), None, "{missing:?}");
         assert!(builtin_analyzer(missing, 1).is_none(), "{missing:?}");
     }
@@ -187,8 +244,8 @@ fn registry_resolves_builtins_by_name_and_version() {
         );
     }
     assert!(registry.get("en", 2).is_none());
-    assert!(registry.get("fr", 1).is_none());
-    assert_eq!(registry.current_version("fr"), None);
+    assert!(registry.get("nl", 1).is_none());
+    assert_eq!(registry.current_version("nl"), None);
 }
 
 #[test]

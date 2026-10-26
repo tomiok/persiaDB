@@ -1,10 +1,10 @@
 # Stemmer golden vocabularies
 
 Each `<language>.tsv` holds one `word<TAB>stem` line per word: `voc.txt` and `output.txt` of the
-[snowball-data](https://github.com/snowballstem/snowball-data) repository (`english/`, `spanish/`, `portuguese/`,
+[snowball-data](https://github.com/snowballstem/snowball-data) repository (`english/`, `spanish/`, `portuguese/`, `french/`, `german/`, `italian/`,
 commit `019921c3a41c2b70063ee3feb215a00c8e594597`), joined with `paste voc.txt output.txt`. They are the reference
 output of the `algorithms/<language>.sbl` of Snowball v3.1.1 that
-`persia_analysis::{EnglishStemmer, SpanishStemmer, PortugueseStemmer}` implement (SPEC §6.3.2); `tests/stem.rs`
+`persia_analysis::{EnglishStemmer, SpanishStemmer, PortugueseStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer}` implement (SPEC §6.3.2); `tests/stem.rs`
 checks every line. Changing a file changes the definition of every analyzer using that stemmer.
 
 The data is distributed under the following license:

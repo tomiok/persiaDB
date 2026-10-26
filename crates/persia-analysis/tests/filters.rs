@@ -4,9 +4,10 @@
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    ENGLISH_STOPWORDS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
-    PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StandardTokenizer, StopwordFilter, Token, TokenFilter,
-    TokenStream, Tokenizer, WhitespaceTokenizer,
+    ENGLISH_STOPWORDS, EdgeNgramFilter, FRENCH_STOPWORDS, FoldingFilter, GERMAN_STOPWORDS,
+    ITALIAN_STOPWORDS, LowercaseFilter, NfkcFilter, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS,
+    StandardTokenizer, StopwordFilter, Token, TokenFilter, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 use unicode_normalization::is_nfc;
 
@@ -234,7 +235,14 @@ fn stopwords_match_exactly() {
 
 #[test]
 fn embedded_stopword_lists_are_sorted_unique_lowercase_nfc() {
-    for list in [ENGLISH_STOPWORDS, SPANISH_STOPWORDS, PORTUGUESE_STOPWORDS] {
+    for list in [
+        ENGLISH_STOPWORDS,
+        SPANISH_STOPWORDS,
+        PORTUGUESE_STOPWORDS,
+        FRENCH_STOPWORDS,
+        GERMAN_STOPWORDS,
+        ITALIAN_STOPWORDS,
+    ] {
         assert!(
             list.windows(2).all(|w| w[0] < w[1]),
             "not sorted and unique: {list:?}"
@@ -261,14 +269,24 @@ fn embedded_stopword_lists_are_pinned() {
                 (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
             })
     }
-    let fingerprints =
-        [ENGLISH_STOPWORDS, SPANISH_STOPWORDS, PORTUGUESE_STOPWORDS].map(|l| (l.len(), fnv1a(l)));
+    let fingerprints = [
+        ENGLISH_STOPWORDS,
+        SPANISH_STOPWORDS,
+        PORTUGUESE_STOPWORDS,
+        FRENCH_STOPWORDS,
+        GERMAN_STOPWORDS,
+        ITALIAN_STOPWORDS,
+    ]
+    .map(|l| (l.len(), fnv1a(l)));
     assert_eq!(
         fingerprints,
         [
             (33, 14_029_973_542_677_213_976),
             (88, 15_764_952_924_425_316_783),
-            (82, 7_466_230_536_459_025_178)
+            (82, 7_466_230_536_459_025_178),
+            (92, 12_270_017_066_995_133_539),
+            (98, 5_026_018_152_473_654_355),
+            (119, 16_734_980_814_399_131_230),
         ]
     );
 }

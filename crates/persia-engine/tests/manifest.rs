@@ -579,7 +579,7 @@ fn analyzer_versions_this_build_lacks_are_unsupported() {
         body.extend(0u32.to_le_bytes());
         Manifest::decode(&sealed(&body))
     };
-    for analyzer in ["standard@2", "en@4294967295", "fr@1", "klingon@7"] {
+    for analyzer in ["standard@2", "en@4294967295", "nl@1", "klingon@7"] {
         let e = with(analyzer).unwrap_err();
         assert_eq!(
             e,

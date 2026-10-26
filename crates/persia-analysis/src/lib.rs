@@ -47,8 +47,14 @@ pub use registry::{
     builtin_analyzer, current_builtin_version,
 };
 pub use standard::StandardTokenizer;
-pub use stem::{EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter};
-pub use stop::{ENGLISH_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, StopwordFilter};
+pub use stem::{
+    EnglishStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer, PortugueseStemmer,
+    SpanishStemmer, Stemmer, StemmerFilter,
+};
+pub use stop::{
+    ENGLISH_STOPWORDS, FRENCH_STOPWORDS, GERMAN_STOPWORDS, ITALIAN_STOPWORDS, PORTUGUESE_STOPWORDS,
+    SPANISH_STOPWORDS, StopwordFilter,
+};
 pub use synonyms::{DEFAULT_SYNONYM_EXPANSIONS, SynonymMap, SynonymMatch};
 pub use token::{Token, TokenFilter, Tokenizer};
 pub use token_stream::TokenStream;

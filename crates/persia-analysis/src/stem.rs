@@ -1,10 +1,13 @@
 //! Stemmers and the stemming filter (SPEC §6.3.2).
 //!
-//! The stemmers implement the Snowball algorithms (snowballstem.org) for English (Porter2), Spanish and Portuguese
-//! as of Snowball v3.1.1, written from their published definitions; the Snowball test vocabularies (snowball-data
+//! The stemmers implement the Snowball algorithms (snowballstem.org) for English (Porter2), Spanish, Portuguese,
+//! French, German and Italian as of Snowball v3.1.1, written from their published definitions; the Snowball test vocabularies (snowball-data
 //! commit `019921c3a41c2b70063ee3feb215a00c8e594597`) pin their output.
 
 mod english;
+mod french;
+mod german;
+mod italian;
 mod portuguese;
 mod spanish;
 mod word;
@@ -13,6 +16,9 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 pub use english::EnglishStemmer;
+pub use french::FrenchStemmer;
+pub use german::GermanStemmer;
+pub use italian::ItalianStemmer;
 pub use portuguese::PortugueseStemmer;
 pub use spanish::SpanishStemmer;
 

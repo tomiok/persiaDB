@@ -9,8 +9,11 @@ use persia_analysis::{BUILTIN_ANALYZERS, current_builtin_version};
 
 /// `(name, version, fingerprint)` of every current built-in analyzer version, under `UNICODE_VERSION`.
 const FINGERPRINTS: &[(&str, u32, u64)] = &[
+    ("de", 1, 0x8e94_3a88_c865_0221),
     ("en", 1, 0xdadf_8d19_5704_91a5),
     ("es", 1, 0xe8c3_0685_3dd8_b14a),
+    ("fr", 1, 0xca78_9362_9e54_4c22),
+    ("it", 1, 0xdecd_f05c_fcc4_e454),
     ("keyword", 1, 0xa39e_5096_d574_d0b0),
     ("pt", 1, 0x6c2f_a889_1270_1099),
     ("standard", 1, 0x058e_1e10_2d60_e902),

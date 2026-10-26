@@ -412,11 +412,14 @@ fn analyzers() {
         "whitespace",
         "en",
         "pt",
+        "fr",
+        "de@1",
+        "it",
     ] {
         parse(&patched("/fields/title/analyzer", Some(json!(name)))).unwrap();
     }
     for name in [
-        "", "ES", "klingon", "es@2", "es@01", "es@", "fr", "de", "it",
+        "", "ES", "klingon", "es@2", "es@01", "es@", "nl", "zh", "fr@2",
     ] {
         assert_eq!(
             parse(&patched("/fields/title/analyzer", Some(json!(name)))),

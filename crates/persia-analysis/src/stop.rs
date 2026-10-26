@@ -1,9 +1,10 @@
 //! Stopword filter and its embedded lists (SPEC §6.3.2).
 //!
 //! The lists are closed-class words, lowercase NFC with their accents, sorted by bytes: articles, prepositions,
-//! conjunctions and negation in all three; English is the classic 33-word list, while Spanish and Portuguese also
-//! hold personal pronouns, possessives, demonstratives and the commonest forms of `ser`, `estar` and `haber`, and
-//! leave out words just as often used as content words (`bajo`, `ante`, `era`). They are part of the definition
+//! conjunctions and negation in all of them; English is the classic 33-word list, while the others also hold
+//! personal pronouns, possessives, demonstratives and the commonest forms of the auxiliaries (`ser`, `estar`,
+//! `haber`; `être`, `avoir`; `sein`, `haben`, `werden`; `essere`, `avere`), and leave out words just as often used as
+//! content words (`bajo`, `ante`, `era`; `or`, `car`, `été`; `stato`, `più`). They are part of the definition
 //! of every analyzer that uses them: changing a list changes those analyzers' versions (SPEC §6.3).
 
 use std::collections::HashSet;
@@ -38,6 +39,45 @@ pub const PORTUGUESE_STOPWORDS: &[&str] = &[
     "os", "ou", "para", "pela", "pelas", "pelo", "pelos", "por", "porque", "quando", "que", "se",
     "sem", "ser", "seu", "seus", "sua", "suas", "são", "também", "te", "tu", "um", "uma", "umas",
     "uns", "você", "vocês", "à", "às", "é",
+];
+
+/// French stopwords.
+pub const FRENCH_STOPWORDS: &[&str] = &[
+    "a", "ai", "au", "aux", "avait", "avec", "avez", "avons", "ce", "ceci", "cela", "ces", "cet",
+    "cette", "chez", "comme", "contre", "dans", "de", "depuis", "des", "du", "elle", "elles", "en",
+    "entre", "es", "est", "et", "eux", "il", "ils", "je", "la", "le", "les", "leur", "leurs",
+    "lorsque", "lui", "ma", "mais", "me", "mes", "moi", "mon", "ne", "ni", "non", "nos", "notre",
+    "nous", "on", "ont", "ou", "où", "par", "pas", "pour", "puisque", "quand", "que", "qui", "sa",
+    "sans", "se", "ses", "si", "sommes", "son", "sont", "sous", "suis", "sur", "ta", "te", "tes",
+    "toi", "ton", "tu", "un", "une", "vers", "vos", "votre", "vous", "y", "à", "ça", "étaient",
+    "était", "êtes",
+];
+
+/// German stopwords.
+pub const GERMAN_STOPWORDS: &[&str] = &[
+    "aber", "als", "am", "an", "auf", "aus", "bei", "beim", "bin", "bis", "bist", "dass", "dein",
+    "deine", "dem", "den", "denn", "der", "des", "dich", "die", "diese", "diesem", "diesen",
+    "dieser", "dieses", "dir", "du", "durch", "ein", "eine", "einem", "einen", "einer", "eines",
+    "er", "es", "euch", "euer", "eure", "für", "gegen", "habe", "haben", "hat", "hatte", "ich",
+    "ihm", "ihn", "ihnen", "ihr", "ihre", "im", "in", "ins", "ist", "kein", "keine", "keinem",
+    "keinen", "keiner", "mein", "meine", "mich", "mir", "mit", "nach", "nicht", "ob", "oder",
+    "ohne", "sein", "seine", "sich", "sie", "sind", "sondern", "um", "und", "uns", "unser",
+    "unsere", "unter", "vom", "von", "vor", "war", "waren", "weil", "wenn", "werden", "wie", "wir",
+    "wird", "zu", "zum", "zur", "über",
+];
+
+/// Italian stopwords.
+pub const ITALIAN_STOPWORDS: &[&str] = &[
+    "a", "abbiamo", "agli", "ai", "al", "alla", "alle", "allo", "anche", "avete", "che", "ci",
+    "col", "come", "con", "da", "dagli", "dai", "dal", "dalla", "dalle", "dallo", "degli", "dei",
+    "del", "della", "delle", "dello", "di", "e", "ed", "essere", "fra", "fu", "gli", "ha", "hai",
+    "hanno", "ho", "i", "il", "in", "io", "la", "le", "lei", "lo", "loro", "lui", "ma", "me", "mi",
+    "mia", "mie", "miei", "mio", "ne", "negli", "nei", "nel", "nella", "nelle", "nello", "noi",
+    "non", "nostra", "nostre", "nostri", "nostro", "né", "o", "per", "perché", "quando", "quegli",
+    "quei", "quel", "quella", "quelle", "quelli", "quello", "queste", "questi", "questo", "se",
+    "sei", "si", "siamo", "siete", "sono", "su", "sua", "sue", "sugli", "sui", "sul", "sulla",
+    "sulle", "sullo", "suo", "suoi", "te", "ti", "tra", "tu", "tua", "tue", "tuo", "tuoi", "un",
+    "una", "uno", "vi", "voi", "vostra", "vostre", "vostri", "vostro", "è",
 ];
 
 /// Removes tokens whose text is exactly one of a list of words (SPEC §6.3.2), leaving a gap in positions.
@@ -81,6 +121,21 @@ impl StopwordFilter {
     /// The embedded Portuguese list, [`PORTUGUESE_STOPWORDS`].
     pub fn portuguese() -> Self {
         Self::new(PORTUGUESE_STOPWORDS.iter().copied())
+    }
+
+    /// The embedded French list, [`FRENCH_STOPWORDS`].
+    pub fn french() -> Self {
+        Self::new(FRENCH_STOPWORDS.iter().copied())
+    }
+
+    /// The embedded German list, [`GERMAN_STOPWORDS`].
+    pub fn german() -> Self {
+        Self::new(GERMAN_STOPWORDS.iter().copied())
+    }
+
+    /// The embedded Italian list, [`ITALIAN_STOPWORDS`].
+    pub fn italian() -> Self {
+        Self::new(ITALIAN_STOPWORDS.iter().copied())
     }
 
     /// Whether `text` is one of the filter's words.

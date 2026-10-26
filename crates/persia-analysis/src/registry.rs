@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use crate::analyzer::Analyzer;
 use crate::{
-    ApostropheFilter, EnglishStemmer, FoldingFilter, KeywordTokenizer, LowercaseFilter, NfkcFilter,
-    PortugueseStemmer, SpanishStemmer, StandardTokenizer, StemmerFilter, StopwordFilter,
-    TokenLengthGuard, WhitespaceTokenizer,
+    ApostropheFilter, EnglishStemmer, FoldingFilter, FrenchStemmer, GermanStemmer, ItalianStemmer,
+    KeywordTokenizer, LowercaseFilter, NfkcFilter, PortugueseStemmer, SpanishStemmer,
+    StandardTokenizer, StemmerFilter, StopwordFilter, TokenLengthGuard, WhitespaceTokenizer,
 };
 
 /// A built-in analyzer version (SPEC §6.3.3).
@@ -25,11 +25,23 @@ pub struct BuiltinAnalyzer {
 /// a fingerprint in `tests/unicode_fingerprints.rs` (SPEC §6.3.1, ADR-0025).
 pub const BUILTIN_ANALYZERS: &[BuiltinAnalyzer] = &[
     BuiltinAnalyzer {
+        name: "de",
+        version: 1,
+    },
+    BuiltinAnalyzer {
         name: "en",
         version: 1,
     },
     BuiltinAnalyzer {
         name: "es",
+        version: 1,
+    },
+    BuiltinAnalyzer {
+        name: "fr",
+        version: 1,
+    },
+    BuiltinAnalyzer {
+        name: "it",
         version: 1,
     },
     BuiltinAnalyzer {
@@ -105,6 +117,30 @@ pub fn builtin_analyzer(name: &str, version: u32) -> Option<Analyzer> {
             .filter(LowercaseFilter)
             .filter(StopwordFilter::portuguese())
             .filter(StemmerFilter::new(PortugueseStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
+        ("fr", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(StopwordFilter::french())
+            .filter(StemmerFilter::new(FrenchStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
+        ("de", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(StopwordFilter::german())
+            .filter(StemmerFilter::new(GermanStemmer))
+            .filter(FoldingFilter::default())
+            .filter(TokenLengthGuard::default()),
+        ("it", 1) => Analyzer::builder(StandardTokenizer)
+            .filter(NfkcFilter)
+            .filter(LowercaseFilter)
+            .filter(ApostropheFilter)
+            .filter(StopwordFilter::italian())
+            .filter(StemmerFilter::new(ItalianStemmer))
             .filter(FoldingFilter::default())
             .filter(TokenLengthGuard::default()),
         _ => return None,

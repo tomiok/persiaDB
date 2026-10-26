@@ -10,9 +10,10 @@ use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, LowercaseFilter,
-    NfkcFilter, PortugueseStemmer, SpanishStemmer, StandardTokenizer, Stemmer, StemmerFilter,
-    StopwordFilter, SynonymMap, Token, TokenFilter, TokenStream, Tokenizer, WhitespaceTokenizer,
+    DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, EnglishStemmer, FoldingFilter, FrenchStemmer,
+    GermanStemmer, ItalianStemmer, LowercaseFilter, NfkcFilter, PortugueseStemmer, SpanishStemmer,
+    StandardTokenizer, Stemmer, StemmerFilter, StopwordFilter, SynonymMap, Token, TokenFilter,
+    TokenStream, Tokenizer, WhitespaceTokenizer,
 };
 
 fn check_from_input(input: &[Token], output: &[Token]) {
@@ -66,7 +67,14 @@ fuzz_target!(|data: &[u8]| {
         &StopwordFilter::portuguese(),
         &ngrams,
     ];
-    let stemmers: [&dyn Stemmer; 3] = [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer];
+    let stemmers: [&dyn Stemmer; 6] = [
+        &EnglishStemmer,
+        &SpanishStemmer,
+        &PortugueseStemmer,
+        &FrenchStemmer,
+        &GermanStemmer,
+        &ItalianStemmer,
+    ];
     let tokenizers: [&dyn Tokenizer; 2] = [&StandardTokenizer, &WhitespaceTokenizer];
     for tokenizer in tokenizers {
         let mut input = TokenStream::new();

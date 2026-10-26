@@ -639,7 +639,7 @@ field, which must then be exactly `0..n`. The engine writes the ids when it seri
 `-0.0` reads as `0.0`. `analyzer` names a built-in analyzer (§6.3) as `"name"` (its current version) or `"name@version"`;
 the engine writes `"name@version"`, so a stored schema pins the version it was indexed with. A definition naming an
 analyzer or version this build does not have is rejected (unknown analyzer). A stored schema (§8.7) naming a
-well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `fr@1`
+well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `nl@1`
 read by a build that only has `es@1`) was written by a newer build: like an unknown format feature (§15), it is
 reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption. As with an unknown format
 feature, the whole manifest is then unsupported: a build cannot open a database one of whose collections it cannot
@@ -709,8 +709,7 @@ Readers keep the encoder of every `encoding_version` they accept.
 Pipeline: `char_filter* → tokenizer → token_filter*`. Char filters rewrite the field value before tokenization, and
 the analyzer maps token spans back to the original value (§6.3.1); no built-in analyzer has one.
 Built-ins (§6.3.3): `standard` (Unicode UAX#29 words, NFKC, lowercase), `keyword`, `whitespace`, and the language
-analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding). `fr`, `de` and `it` are planned
-(ROADMAP 4.4.10); until they exist a schema naming them is rejected.
+analyzers `en`, `es`, `pt`, `fr`, `de` and `it` (stopwords + Snowball stemmer + accent folding).
 Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
 in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
 is a new version. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
@@ -795,17 +794,19 @@ those analyzers' versions.
   `n` + U+0303 is not a preserved `ñ`. Folding is idempotent.
 - **apostrophe**: replaces the typographic apostrophes `‘` (U+2018) and `’` (U+2019) with `'` (U+0027). UAX #29
   joins letters across all three (`don’t` is one token), but the English stemmer knows only U+0027.
-- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese)
+- **stop**: removes tokens whose text is exactly a word of a list. The embedded lists (English, Spanish, Portuguese, French, German, Italian)
   are lowercase NFC with their accents, so `stop` runs after `lowercase` and before `fold`; a custom list is matched
-  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all three;
-  English keeps the classic 33-word list, while Spanish and Portuguese also list personal pronouns, possessives,
-  demonstratives and the commonest forms of `ser`, `estar` and `haber`, leaving out words that are just as often
-  content words (`bajo`, `ante`, `era`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
-  `SPANISH_STOPWORDS` and `PORTUGUESE_STOPWORDS`, pinned by a fingerprint test; the `fr`, `de` and `it` analyzers
-  (§6.3) get their lists when they are added (ROADMAP 4.4.10).
+  as given. The lists hold closed-class words only: articles, prepositions, conjunctions and negation in all of them;
+  English keeps the classic 33-word list, while the others also list personal pronouns, possessives,
+  demonstratives and the commonest forms of the auxiliaries (`ser`, `estar`, `haber`; `être`, `avoir`; `sein`,
+  `haben`, `werden`; `essere`, `avere`), leaving out words that are just as often content words (`bajo`, `ante`,
+  `era`; `or`, `car`, `été`; `stato`, `più`). The normative lists are `persia_analysis::ENGLISH_STOPWORDS`,
+  `SPANISH_STOPWORDS`, `PORTUGUESE_STOPWORDS`, `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS` and `ITALIAN_STOPWORDS`, pinned
+  by a fingerprint test. A stopword is matched before stemming, so an elided form (`l'arbre`, one token) is not one
+  even though the French stemmer later removes its `l'`.
 - **stem** `{language}`: replaces the token text with its stem, by the Snowball algorithm of the language
   (snowballstem.org, `algorithms/<language>.sbl` of Snowball v3.1.1): `english` (Porter2), `spanish`,
-  `portuguese`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
+  `portuguese`, `french`, `german`, `italian`. The Snowball test vocabularies (`voc.txt` → `output.txt` of snowball-data at commit
   `019921c3a41c2b70063ee3feb215a00c8e594597`, checked in with the stemmer tests) are normative: every word stems to
   its listed stem. The algorithms expect lowercase text with its accents, so `stem` runs after `nfkc` (to them a
   decomposed accent is a consonant), `lowercase` and `stop`, and before `fold`. English treats only U+0027 as an
@@ -814,8 +815,11 @@ those analyzers' versions.
   final `ç` becomes `c`, and, as it writes `ã` and `õ` as `a~` and `o~` while stemming, turns a literal `a~` or `o~`
   into `ã` or `õ` (only the `whitespace` and `keyword` tokenizers keep `~` inside a token). Stemming is not
   idempotent (`accelerated` → `acceler` → `accel`), so a query is stemmed once, by the same analyzer as the field. A
-  stem can be empty (`''s`), which removes the token. There are no `fr`, `de` or `it` stemmers yet: they come with
-  those analyzers, if §6.3 keeps them (ROADMAP 4.4.10).
+  stem can be empty (`''s`), which removes the token. French and Italian remove a leading
+  elided article, pronoun or preposition before U+0027 (French `c' d' j' l' m' n' s' t' qu'`; Italian `l' d' dell'
+  nell' un'` and the others of `italian.sbl`) when something follows it; French writes `ë` and `ï` back after
+  stemming; German writes `ß` as `ss` and `ae`, `oe`, `ue` as umlauts (not in `qu`), then removes the umlauts from
+  the stem; Italian reads acute accents as grave ones and keeps them.
 - **edge_ngram** `{min, max}` (1 ≤ `min` ≤ `max`, in characters: Unicode scalar values, not grapheme clusters):
   replaces a token with its prefixes of `min..=max` characters, shortest first; a token shorter than `min` produces
   none. With `preserve_original`, the whole token follows them when it is longer than `max` or shorter than `min`.
@@ -847,12 +851,16 @@ chain so it bounds the final terms.
 | `en@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (English), `stem` (`english`), `fold` (preserves nothing), `guard` |
 | `es@1` | `standard` | `nfkc`, `lowercase`, `stop` (Spanish), `stem` (`spanish`), `fold` (preserves `ñ`), `guard` |
 | `pt@1` | `standard` | `nfkc`, `lowercase`, `stop` (Portuguese), `stem` (`portuguese`), `fold` (preserves nothing), `guard` |
+| `fr@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (French), `stem` (`french`), `fold` (preserves nothing), `guard` |
+| `de@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (German), `stem` (`german`), `fold` (preserves nothing), `guard` |
+| `it@1` | `standard` | `nfkc`, `lowercase`, `apostrophe`, `stop` (Italian), `stem` (`italian`), `fold` (preserves nothing), `guard` |
 
 `keyword` and `whitespace` do not normalize: case and accents are significant. The guard truncates each token, so
 under `keyword` (one token per value) two values that share their first 255 bytes are one term, and under
 `whitespace` two words that do; exact matching of long values is what the `keyword` field type is for (§6.1, §6.4).
 `es` keeps `ñ` because it tells words apart (`año`, `ano`); `ü` and the acute accents fold, so `pingüino` and `pinguino` are one term. `en` maps `’` before
-stemming, so `John’s` and `John's` both stem to `john`. Stemming before folding means a query typed without accents
+stemming, so `John’s` and `John's` both stem to `john`; `fr` and `it` map it too, as their elisions (`l’été`, `nell’estate`)
+are written with `’` as often as with `'`, and `de` for its `'s` endings (`Grimm’sche`). Stemming before folding means a query typed without accents
 can stem differently from the accented word (`maçã` and `maca` in `pt`); the relaxation cascade (§7.6) is what
 bridges such misses. A test pins every built-in's output on a fixed text, so a change to a chain cannot ship as the
 same version.

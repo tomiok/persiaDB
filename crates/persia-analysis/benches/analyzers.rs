@@ -9,14 +9,17 @@ use std::hint::black_box;
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use persia_analysis::{
-    BUILTIN_ANALYZERS, ENGLISH_STOPWORDS, FoldingFilter, KeywordTokenizer, PORTUGUESE_STOPWORDS,
-    SPANISH_STOPWORDS, StandardTokenizer, TokenFilter, TokenStream, Tokenizer, WhitespaceTokenizer,
-    builtin_analyzer,
+    BUILTIN_ANALYZERS, ENGLISH_STOPWORDS, FRENCH_STOPWORDS, FoldingFilter, GERMAN_STOPWORDS,
+    ITALIAN_STOPWORDS, KeywordTokenizer, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS,
+    StandardTokenizer, TokenFilter, TokenStream, Tokenizer, WhitespaceTokenizer, builtin_analyzer,
 };
 
 const ENGLISH: &str = include_str!("../tests/fixtures/stem/english.tsv");
 const SPANISH: &str = include_str!("../tests/fixtures/stem/spanish.tsv");
 const PORTUGUESE: &str = include_str!("../tests/fixtures/stem/portuguese.tsv");
+const FRENCH: &str = include_str!("../tests/fixtures/stem/french.tsv");
+const GERMAN: &str = include_str!("../tests/fixtures/stem/german.tsv");
+const ITALIAN: &str = include_str!("../tests/fixtures/stem/italian.tsv");
 
 /// Words per field value, and values per iteration.
 const WORDS_PER_VALUE: usize = 12;
@@ -74,6 +77,9 @@ fn corpus(analyzer: &str) -> Vec<String> {
     match analyzer {
         "es" => values(SPANISH, SPANISH_STOPWORDS, 2),
         "pt" => values(PORTUGUESE, PORTUGUESE_STOPWORDS, 3),
+        "fr" => values(FRENCH, FRENCH_STOPWORDS, 6),
+        "de" => values(GERMAN, GERMAN_STOPWORDS, 7),
+        "it" => values(ITALIAN, ITALIAN_STOPWORDS, 8),
         _ => values(ENGLISH, ENGLISH_STOPWORDS, 1),
     }
 }

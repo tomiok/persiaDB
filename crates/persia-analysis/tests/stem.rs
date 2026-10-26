@@ -8,14 +8,18 @@
 use std::borrow::Cow;
 
 use persia_analysis::{
-    EnglishStemmer, PortugueseStemmer, SpanishStemmer, Stemmer, StemmerFilter, Token, TokenFilter,
-    TokenStream, Tokenizer, WhitespaceTokenizer,
+    EnglishStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer, PortugueseStemmer,
+    SpanishStemmer, Stemmer, StemmerFilter, Token, TokenFilter, TokenStream, Tokenizer,
+    WhitespaceTokenizer,
 };
 use proptest::prelude::*;
 
 const ENGLISH: &str = include_str!("fixtures/stem/english.tsv");
 const SPANISH: &str = include_str!("fixtures/stem/spanish.tsv");
 const PORTUGUESE: &str = include_str!("fixtures/stem/portuguese.tsv");
+const FRENCH: &str = include_str!("fixtures/stem/french.tsv");
+const GERMAN: &str = include_str!("fixtures/stem/german.tsv");
+const ITALIAN: &str = include_str!("fixtures/stem/italian.tsv");
 
 fn vocabulary(tsv: &str) -> impl Iterator<Item = (&str, &str)> {
     tsv.lines().map(|line| line.split_once('\t').unwrap())
@@ -93,8 +97,11 @@ fn stems_that_stem_further_are_counted() {
         count(&EnglishStemmer, ENGLISH),
         count(&SpanishStemmer, SPANISH),
         count(&PortugueseStemmer, PORTUGUESE),
+        count(&FrenchStemmer, FRENCH),
+        count(&GermanStemmer, GERMAN),
+        count(&ItalianStemmer, ITALIAN),
     ];
-    assert_eq!(counts, [1_526, 2_404, 2_519]);
+    assert_eq!(counts, [1_526, 2_404, 2_519, 1_843, 710, 965]);
 }
 
 #[test]
@@ -125,6 +132,9 @@ fn unchanged_words_are_borrowed() {
         &EnglishStemmer as &dyn Stemmer,
         &SpanishStemmer,
         &PortugueseStemmer,
+        &FrenchStemmer,
+        &GermanStemmer,
+        &ItalianStemmer,
     ] {
         for word in ["", "x", "zzz", "東京"] {
             assert!(
@@ -149,8 +159,15 @@ fn the_filter_keeps_spans_and_positions_and_drops_empty_stems() {
     assert_eq!(got, expected);
 }
 
-fn stemmers() -> [&'static dyn Stemmer; 3] {
-    [&EnglishStemmer, &SpanishStemmer, &PortugueseStemmer]
+fn stemmers() -> [&'static dyn Stemmer; 6] {
+    [
+        &EnglishStemmer,
+        &SpanishStemmer,
+        &PortugueseStemmer,
+        &FrenchStemmer,
+        &GermanStemmer,
+        &ItalianStemmer,
+    ]
 }
 
 proptest! {
@@ -164,7 +181,7 @@ proptest! {
 
     /// Words made of the letters the algorithms look at, where the interesting suffix rules fire.
     #[test]
-    fn stemming_letter_words_never_panics(word in "[aeiouyáéíóúâêôãõçñü'ltsnrmdgcbvx~]{0,16}") {
+    fn stemming_letter_words_never_panics(word in "[aeiouyáéíóúâêôãõçñüäöëïàèìòùîûß'ltsnrmdgcbvxqhUIYH~]{0,16}") {
         for stemmer in stemmers() {
             let _ = stemmer.stem(&word);
         }
@@ -225,4 +242,19 @@ fn stemmers_can_be_picked_at_run_time() {
         })
         .collect();
     assert_eq!(stems, ["sky", "cancion", "brasileir"]);
+}
+
+#[test]
+fn german_matches_the_snowball_vocabulary() {
+    check_vocabulary(&GermanStemmer, GERMAN, 35_053);
+}
+
+#[test]
+fn italian_matches_the_snowball_vocabulary() {
+    check_vocabulary(&ItalianStemmer, ITALIAN, 37_426);
+}
+
+#[test]
+fn french_matches_the_snowball_vocabulary() {
+    check_vocabulary(&FrenchStemmer, FRENCH, 21_653);
 }
