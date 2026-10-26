@@ -6,9 +6,8 @@ description: "How Persia DB crates are layered in Rust, from persia-format up to
 import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
 
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
-`persia-format` is the only crate with real code,
-and it currently covers encodings, checksums, and block codecs. Frames and the superblock are still
-ROADMAP 1.6–1.7. Every other crate is a workspace stub.
+`persia-format`, `persia-storage`, `persia-engine` (schema, documents, and manifests), and `persia-analysis` contain library code.
+`persia` exports no `Db`. `persia-server` is an empty `main`. `persia-blob` and `persia-proto` are module docs only.
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
 
@@ -27,15 +26,15 @@ Three rules shape the rest of the design:
 
 | Crate | Role | Status |
 |---|---|---|
-| `persia-format` | Encodings, checksums, block codecs. No I/O policy. | In progress (M1) |
-| `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Planned (M2, M12) |
-| `persia-analysis` | Tokenizers, normalizers, stemmers. | Planned (M4); ready to start |
-| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Planned (M3, M5–M8) |
-| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | Planned (M9) |
-| `persia` | The embedded API: `Db` and `Collection`. | Planned (M10) |
-| `persia-proto` | `persia.proto` and committed generated code. | Planned (M11) |
-| `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Planned (M11, M13) |
-| `persia-cli` | `persia inspect`, `dump`, `verify`, `compact`, `bench`. | Planned (M10) |
+| `persia-format` | Encodings, checksums, frames, block codecs. No I/O policy. | Implemented (M1) |
+| `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Memory, local file, and the container are implemented (M2). Cloud is M12. |
+| `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Library code exists. Open leaves are in PROGRESS.md (M4). |
+| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Schema, documents, and manifests exist (M3). Segments and query do not (M5–M8). |
+| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | No API yet (M9) |
+| `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10) |
+| `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
+| `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Empty `main` (M11, M13) |
+| `persia-cli` | Sweep temporary and quarantine files. `inspect`, `dump`, `verify`, `compact`, and `bench` are later. | Sweep commands exist. The rest is M10. |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. The public facade orders blob writes before the document commit so the engine never has

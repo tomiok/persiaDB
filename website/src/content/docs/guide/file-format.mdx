@@ -26,9 +26,8 @@ An unknown major version or an unknown incompatible flag is a hard reject. An un
 read-only-compatible flag opens the file read-only. Every format change is a SPEC update, a version
 or flag bump, an ADR, and a golden fixture (see [Contributing](/guide/contributing/)).
 
-The container header, the superblock slots, and frame encode, decode, and scan are implemented in `persia-format` (ROADMAP 1.6 and 1.7.1–1.7.4).
-The streaming frame encoder (1.7.5) is still ahead.
-`persia-format` already has the encodings those structures use, plus the compression codecs
+The container header, the superblock slots, and frames (encode, decode, scan, and the streaming encoder) are implemented in `persia-format` (ROADMAP 1.6 and 1.7).
+`persia-format` also has the encodings those structures use, plus the compression codecs
 below.
 
 ## Segments and blocks
@@ -54,11 +53,8 @@ Any other codec byte is corruption. The reader refuses a declared length above t
 before it allocates (the decompression-bomb guard, ADR-0005). Writers may store `None` when zstd
 does not shrink the block. The zstd level is a writer choice and is not stored.
 
-`compress` / `decompress` for those two codecs is done (ROADMAP 1.4.1–1.4.3). The on-disk block
-header, the block table, and random-access reads are not (ROADMAP 1.5). A few layout questions are
-explicitly still open there: where a section records its block size, how a stored document larger
-than one block is split, and what the section table's own codec field means next to the per-block
-codec (ROADMAP 1.5.5, SPEC §5.2).
+`compress` / `decompress` for those two codecs is done (ROADMAP 1.4). The on-disk block
+header, the block table, and random-access reads are implemented (ROADMAP 1.5, SPEC §5.2).
 
 Integer codecs that will sit *inside* blocks (delta-coded doc ids, bit-packing, postings blocks,
 frame-of-reference for numbers) are implemented and tested (ROADMAP 1.2, ADR-0004). They are not
@@ -66,8 +62,9 @@ wired into a segment writer yet (that is M5).
 
 ## One storage interface, several backends
 
-The engine will see every backend as the same trait: get, ranged get, put, put-if-absent, list,
-delete (SPEC §10.1). The trait sketch in the SPEC is illustrative; the Rust types are ROADMAP 2.1.
+The engine is specified to see every backend as the same trait: get, ranged get, put, put-if-absent, list,
+delete (SPEC §10.1). The `Storage` trait and the memory and local-file backends are implemented (M2).
+S3, GCS, and Azure Blob are not (M12). The query engine that would call the trait is not written.
 
 | Backend | How a database is addressed | Milestone |
 |---|---|---|

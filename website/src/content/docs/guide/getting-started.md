@@ -1,21 +1,39 @@
 ---
-title: "Getting started"
-description: "How to use Persia DB. What you can call today, and the intended open, schema, index, commit, and search API, marked as illustrative where it is not implemented."
+title: "Getting started with PersiaDB"
+description: "Getting started with PersiaDB, a Rust search library aimed at embedded full-text search. The embedded Db API is planned. Format-layer codecs, storage, schema, and analysis are what you can call today. Nothing runs a query."
+head:
+  - tag: title
+    content: "Getting started with PersiaDB: a Rust search library"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Getting started with PersiaDB: a Rust search library"
 ---
 
-Persia DB does not yet open a database, index a document, or answer a query.
-This page separates the library code that exists from the API the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) describes.
-When the two disagree, the SPEC wins. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): **69 of 406 leaves (17%)** on 2026-10-11.
+Getting started with PersiaDB means separating this Rust search library's design from the code you can call.
+The design is embedded full-text search in Rust: a library in your process, one file, ranked results, and no search daemon.
+That embedded `Db` API is planned (roadmap M10) and is not in the crate.
+What you can call today starts with the format-layer codecs in `persia-format`, plus the storage, schema, and analysis libraries below.
+Nothing indexes a document or runs a query.
 
-## What works today
+[What is an embedded search database?](/guide/embedded-search/) defines that in-process shape.
+The [comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch, and it is not a benchmark.
+The [FAQ](/guide/faq/) has the short answers.
+When this page and the [SPEC](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) disagree, the SPEC wins.
+Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md): %%PROGRESS_SUMMARY%%.
+The same snapshot, by milestone, is the [roadmap](/roadmap/).
+
+## What this Rust search library implements today
 
 The crates are not published (`publish = false` in the workspace). There is no crates.io release and no `cargo add persia`.
 
 `persia`, the embedded API crate, exports no types. Its source is the module docs in [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs). There is no `Db` and no `Collection`.
 
-`persia-cli` and `persia-server` are empty `main` functions. No `inspect`, `dump`, `verify`, `compact`, or search command runs.
+`persia-server` is an empty `main` function. No gRPC or HTTP server runs.
 
-`persia-format` is the crate with an implementation. It encodes and decodes bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
+`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It does not inspect an index, dump documents, verify segments, compact, import, or search.
+
+`persia-format` encodes and decodes on-disk bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
 
 ```toml
 [dependencies]
@@ -38,9 +56,13 @@ assert_eq!(decoded, header);
 assert_eq!(decoded.access(), Access::ReadWrite);
 ```
 
-Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, and frames (encode, decode, and scan; ROADMAP 1.7.1–1.7.4). The streaming frame encoder (1.7.5) is not written yet. The public module list is [lib.rs lines 10–34](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L34). The [code](/guide/code/) page quotes the exports.
+Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, frames (including the streaming encoder), the memory-map reader, and `BlobId` / `BlobRef`. The public module list is [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs). The [code](/guide/code/) page quotes exports from that file.
 
-## Intended API
+`persia-storage` implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container: create, open, append, commit, recover, and compact. That commit is the container file, not an index of documents. `persia-engine` implements collection schema, document validation, and manifest types. It does not build a segment or answer a query. `persia-analysis` implements tokenizers, filters, English, Spanish, and Portuguese stemmers, and the built-in analyzers `standard`, `keyword`, `whitespace`, `en`, `es`, and `pt`. It does not search. `persia-blob` exports no API.
+
+Those crates are in the same git repository and are unpublished the same way. Depending on them does not give you `Db::open`.
+
+## Embedded full-text search in Rust
 
 **Illustrative. Not implemented.** Nothing in this section is a function you can call. Names match the README sketch and SPEC §6.2, §7.1, §7.6, §8.1, and §9.6. They are not a stability promise. The first release that is supposed to provide them is `v0.1` (ROADMAP M10), which is blocked on the write path, query, relaxation, and blobs.
 
@@ -114,7 +136,7 @@ The response is specified to carry what happened. This object is from SPEC §7.6
 
 ### Command line
 
-**Planned (ROADMAP 10.4).** The `persia` binary is specified to grow `inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary in the tree does none of those. `main` is empty.
+**Planned (ROADMAP 10.4), except the file-sweep commands above.** The `persia` binary is specified to grow `inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary in the tree does none of those.
 
 ## Common questions
 
@@ -122,11 +144,11 @@ The [FAQ](/guide/faq/) answers the same kind of question for status, how this di
 
 ### Can I add Persia to a Rust project today?
 
-Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs. That dependency does not give you `Db::open`.
+Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs, and on `persia-storage`, `persia-engine`, and `persia-analysis` for the container, schema types, and analyzers. None of those dependencies give you `Db::open`.
 
 ### How do I open a database, index, and search?
 
-You don't, yet. Those calls are the illustrative block on this page. The milestone that is supposed to ship them is M10 (`v0.1`). It waits on storage, segments, the write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
+You don't, yet, through `Db::open`. Those calls are the illustrative block on this page. A lower-level container open exists in `persia-storage`. It does not index or search. The milestone that is supposed to ship the embedded API is M10 (`v0.1`). It waits on the document write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
 
 ### How do I read which relaxation was applied?
 

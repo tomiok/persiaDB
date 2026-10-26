@@ -28,9 +28,9 @@ import WinButton from '../../components/WinButton.astro';
     Nothing works end to end yet, and the on-disk format is unstable until v1.0.
     There is no compatibility promise
     ([SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)).
-    On 2026-10-11 the roadmap stood at **69 of 406 leaves (17%)**: project bootstrap is done, and
-    format primitives are in progress (header, superblock, and frames included). The live counter is
-    [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+    The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md):
+    %%PROGRESS_SUMMARY%%.
+    The [roadmap](/roadmap/) page breaks that snapshot down by milestone.
 </PreAlpha>
 
 <HeroVideo />
@@ -51,10 +51,10 @@ import WinButton from '../../components/WinButton.astro';
 | Property | What it means | Status |
 |---|---|---|
 | Zero friction | `Db::open("app.persia")` just works. No daemon and no config file for the embedded library. | Planned (M10) |
-| Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | In progress, from the format layer up |
+| Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | Format codecs and text analysis exist. Scoring and query execution do not. |
 | Never zero results | A query that matches nothing is relaxed step by step, and the response says what changed. | Planned (M8) |
 | Cloud-native | Immutable segments. The same bytes locally and in object storage. Stateless query nodes. | Planned (M12, M13) |
-| Correctness, then speed | Checksums, crash-safe commits, and fuzzed parsers come before performance claims. | Checksums and codecs exist; commits do not yet |
+| Correctness, then speed | Checksums, crash-safe commits, and fuzzed parsers come before performance claims. | Checksums, fuzzed parsers, and the container commit exist. A document index does not. |
 
 The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) (draft v0.1).
 When this site and the SPEC disagree, the SPEC wins.

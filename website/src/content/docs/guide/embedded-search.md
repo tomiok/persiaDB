@@ -13,8 +13,8 @@ head:
 > **Status: pre-alpha.** Persia DB does not open a database, index a document, or answer a query.
 > `Db::open` and `search` elsewhere on this site are illustrative, from
 > [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md).
-> Counts below are the [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) snapshot of 2026-10-19:
-> **130 of 431 leaves (30%)**. That file is the live counter.
+> Counts below are read from [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) when the site is built:
+> %%PROGRESS_SUMMARY%%. That file is the live counter.
 > When this page and the SPEC disagree, the SPEC wins.
 
 An **embedded search database** is a search library that runs in the same process as the application. You link it in. Queries are function calls in that process. There is no search daemon to install, and no separate server process that has to be up before a query can run.
@@ -50,7 +50,7 @@ The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SP
 |---|---|---|
 | In-process library. No daemon and no config file for the embedded API. Options are builders, with defaults. | [SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration) | Planned (M10). The `persia` crate exports no `Db` and no `Collection`. |
 | One local file, `<name>.persia`, plus an optional `<name>.persia.blobs` pack for client bytes such as PDF or images. | SPEC §4, §9 | The container format and the single-file container (open, append, commit, recover, compact) are implemented (M1, M2). Segment sections — the term dictionary, postings, stored documents — are not written (M5). The blob store has not been started (M9). `BlobId` and `BlobRef` exist as types in `persia-format`. |
-| The engine is written in this repository: analysis, BM25F, filters, facets, and query execution. | SPEC §6, §7. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on Tantivy, Lucene, or SQLite. | Planned (M4, M7). `persia-analysis` is a stub. Nothing runs a query. |
+| The engine is written in this repository: analysis, BM25F, filters, facets, and query execution. | SPEC §6, §7. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on Tantivy, Lucene, or SQLite. | Tokenizers and built-in analyzers are in `persia-analysis`. BM25F, filters, facets, and query execution are not implemented. Nothing runs a query. |
 | A query with too few hits is relaxed step by step (synonyms, dropped terms, prefix, a fuzzy step, then a fallback). The response names the step. On by default. | [SPEC §7.6](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) | Planned (M8). Ranking and relaxation settings exist as schema config structs. The cascade does not run. |
 | Segments are immutable. The same segment bytes live in a local file or in S3, GCS, or Azure Blob. Query nodes are stateless. | SPEC §3, §5, §10, §11 | Segments are not written (M5). Memory and local-file storage exist (M2). Object-storage backends and Kubernetes are planned (M12, M13). |
 | A power loss leaves the previous commit or the new one. | [SPEC §4.5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local), §8 | The container commit is implemented and crash-tested (M2). There is no document write path: no memtable, no engine WAL replay, and no index commit (M6). A searchable document cannot be stored and recovered yet. |
@@ -65,7 +65,7 @@ Out of scope for v1 ([SPEC §1.2](https://github.com/tomiok/persiaDB/blob/main/S
 
 ## What the code can do today
 
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) recorded 130 of 431 roadmap leaves done (30%) on 2026-10-19. Milestones M0 (bootstrap), M1 (format primitives), and M2 (the storage trait, memory and local-file backends, and the single-file container) are done. M3 (schema, documents, collections) is in progress: the collection schema model is implemented — field types, validation, strict JSON, a schema hash, evolution rules, and ranking and relaxation settings. Documents and the manifest type are not written. Text analysis (M4) and the blob store (M9) are ready to start and have no implementation. Segments, the write path, query, and relaxation are later milestones (M5–M8).
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. Milestone states are on the [roadmap](/roadmap/) page, generated from that file. What you can call is library code: `persia-format` (on-disk codecs, including the streaming frame encoder), `persia-storage` (the `Storage` trait, memory and local-file backends, and the single-file container), `persia-engine` (collection schema, documents, and manifest types; they do not index), and `persia-analysis` (tokenizers and built-in analyzers; it does not search). `persia-blob` exports no API. Segments, the document write path, query, and relaxation are not implemented.
 
 A git dependency can use:
 
