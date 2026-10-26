@@ -157,6 +157,39 @@ fn chained_maps_compose() {
     assert_eq!(spans(text, &tokens), [("AS", "aß"), ("SB", "ßb")]);
 }
 
+/// Inserts `text` at byte `at`.
+struct Insert {
+    at: usize,
+    text: &'static str,
+}
+
+impl CharFilter for Insert {
+    fn filter(&self, out: &mut CharFilterOutput<'_>) {
+        out.keep(self.at);
+        out.replace(0, self.text);
+    }
+}
+
+#[test]
+fn an_empty_span_on_a_deletion_takes_the_position_before_it() {
+    // `-` is deleted, then ` XY ` inserted where it was: `XY` has no original characters, and the deletion would send
+    // its empty span's start past the `-` and its end before it; it is the empty span before the `-` (SPEC §6.3.1).
+    let text = "a -b";
+    let analyzer = Analyzer::builder(WhitespaceTokenizer)
+        .char_filter(Replace { from: "-", to: "" })
+        .char_filter(Insert {
+            at: 2,
+            text: " XY ",
+        })
+        .build();
+    let tokens = analyze(&analyzer, text);
+    let got: Vec<(&str, usize, usize)> = tokens
+        .iter()
+        .map(|t| (t.text.as_str(), t.start, t.end))
+        .collect();
+    assert_eq!(got, [("a", 0, 1), ("XY", 2, 2), ("b", 3, 4)]);
+}
+
 /// A char filter driven by generated edits: per character, keep it, delete it, or replace it with a string.
 #[derive(Debug, Clone)]
 struct Scripted {

@@ -2,19 +2,19 @@
 //!
 //! Each current built-in analyzer version has a fingerprint of its output over every Unicode scalar value, alone and
 //! next to letters and digits. Moving `UNICODE_VERSION` (a `unicode-segmentation`, `unicode-normalization` or
-//! toolchain update) fails here for exactly the analyzers whose output changes, listed with their new fingerprints:
+//! toolchain update) fails here for the analyzers whose output changes in the probe contexts, listed with their new fingerprints:
 //! each gets a new version with the same chain, and its old version is superseded (ADR-0025).
 
 use persia_analysis::{BUILTIN_ANALYZERS, current_builtin_version};
 
 /// `(name, version, fingerprint)` of every current built-in analyzer version, under `UNICODE_VERSION`.
 const FINGERPRINTS: &[(&str, u32, u64)] = &[
-    ("en", 1, 0x28a0_0bb4_d834_6846),
-    ("es", 1, 0x02da_0001_0777_7a7e),
-    ("keyword", 1, 0x9d66_7270_27a8_05b1),
-    ("pt", 1, 0xb5ad_aa41_e3d7_3928),
-    ("standard", 1, 0x2ee4_3dc2_6833_58ec),
-    ("whitespace", 1, 0xb6b7_4f88_8210_49ee),
+    ("en", 1, 0xdadf_8d19_5704_91a5),
+    ("es", 1, 0xe8c3_0685_3dd8_b14a),
+    ("keyword", 1, 0xa39e_5096_d574_d0b0),
+    ("pt", 1, 0x6c2f_a889_1270_1099),
+    ("standard", 1, 0x058e_1e10_2d60_e902),
+    ("whitespace", 1, 0x8744_e2dd_23e1_ea3a),
 ];
 
 #[test]
@@ -69,13 +69,26 @@ mod slow {
         }
     }
 
+    /// Where `c` goes in each probe (`#`), chosen so the UAX #29 classes it could move between analyze differently
+    /// in at least one: alone; between letters and digits (`ALetter`, `Numeric`, `Extend`, `ExtendNumLet` join);
+    /// after `a.` and `1.` (`MidLetter`/`MidNum` rules `WB6`/`WB7` vs `WB11`/`WB12`: `a.x` is one word, `a.5`
+    /// two); before a quote (`Hebrew_Letter`, `WB7a`); doubled and around a period (self-joining classes such as
+    /// `Katakana`, `WB13`; `MidNumLet`); after `é` (case, folding, composition).
+    const PROBES: &[&str] = &[
+        "#", "a#b", "1#2", "a.#", "1.#", "#'", "#.#", "##", "é#", "#\u{301}",
+    ];
+
     /// The probes of `c`, one per line: a line break always ends a word (UAX #29 rules `WB3a` and `WB3b`), so
     /// probes never join.
     fn push_probes(c: char, text: &mut String) {
-        for (before, after) in [("", ""), ("a", "b"), ("1", "2"), ("é", "")] {
-            text.push_str(before);
-            text.push(c);
-            text.push_str(after);
+        for probe in PROBES {
+            for p in probe.chars() {
+                if p == '#' {
+                    text.push(c);
+                } else {
+                    text.push(p);
+                }
+            }
             text.push('\n');
         }
     }

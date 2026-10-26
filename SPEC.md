@@ -641,7 +641,9 @@ the engine writes `"name@version"`, so a stored schema pins the version it was i
 analyzer or version this build does not have is rejected (unknown analyzer). A stored schema (§8.7) naming a
 well-formed one it lacks (a built-in name of the shape of §6.3.3 and a canonical version, such as `es@2` or `fr@1`
 read by a build that only has `es@1`) was written by a newer build: like an unknown format feature (§15), it is
-reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption.
+reported as *unsupported*, never as corruption; a malformed one (`es@01`, `ES@1`) is corruption. As with an unknown format
+feature, the whole manifest is then unsupported: a build cannot open a database one of whose collections it cannot
+analyze, since it could neither query that collection nor keep it intact on its next commit.
 
 #### 6.2.3 Ranking and relaxation
 `ranking.static_rank` (optional): `field` (required: an `i64`, `f64` or `datetime` field), `weight` (`1.0`;
@@ -711,8 +713,9 @@ analyzers `en`, `es`, `pt` (stopwords + snowball-style stemmer + accent folding)
 (ROADMAP 4.4.10); until they exist a schema naming them is rejected.
 Analyzers are looked up by name and version (`persia_analysis::AnalyzerRegistry`). Analyzer name+version is recorded
 in the schema (§6.2.2); a released version never changes its chain or tables, so any change to a built-in analyzer
-is a new version. Only a Unicode version bump can change a released version's output, and the analyzer then gets a
-new version that supersedes it (§6.3.1). Changing a field's analyzer requires a reindex into a new collection
+is a new version. Only a change of the Unicode data or algorithms the build uses (a Unicode version bump, or a
+dependency or toolchain update that fixes them within one) can change a released version's output, and the analyzer
+then gets a new version that supersedes it (§6.3.1). Changing a field's analyzer requires a reindex into a new collection
 (§6.2.4).
 
 #### 6.3.1 Tokens and tokenizers
@@ -723,10 +726,13 @@ tokenizer's input, the analyzer maps spans back to the original value, see below
 a filter that removes a token leaves a gap, so a phrase never matches across it. The tokens a tokenizer emits for one
 value have strictly increasing, non-overlapping spans (filters that stack tokens relax this, §6.3.2). Tokenizers never fail and never panic, on any UTF-8 input. Tokenization is
 defined by one Unicode version (17.0.0; `persia_analysis::UNICODE_VERSION`), and CI fails if a dependency or toolchain
-update moves it unnoticed. Moving to another gives a new version, with the same chain, to every built-in analyzer whose
-output it changes, and only to those (ADR-0025): each current built-in version has a fingerprint of its output over
-every Unicode scalar value, alone and in a few contexts, and a test lists the analyzers whose fingerprint moved. The
-versions they supersede stay available and run on the build's Unicode tables, as a build has only one set: a field
+update moves it unnoticed. Each current built-in version has a fingerprint of its output over every Unicode scalar
+value in a set of probe contexts chosen to tell the UAX #29 word-break classes apart (alone, between letters and
+digits, after `a.` and `1.`, before a quote, doubled, around a period, next to an accent), and a test, run on every
+pull request, lists the analyzers whose fingerprint moved. Any dependency or toolchain change that moves one (moving
+to another Unicode version, or a fix within one) gives a new version, with the same chain, to every built-in analyzer
+whose fingerprint it moves, and only to those (ADR-0025); a change visible only outside the probe contexts can go
+unnoticed. The versions they supersede stay available and run on the build's Unicode tables, as a build has only one set: a field
 indexed with one keeps working, and only text with the characters whose properties changed may analyze differently
 than when it was indexed, until the collection is reindexed at the new version (§6.2.4).
 
@@ -752,7 +758,8 @@ maps past the deleted piece and an end before it (deleting `<b>` from `x<b>bold`
 of the original value, and their starts and their ends never decrease; they need not be strictly increasing or
 disjoint, as one replacement can yield several tokens (`½` → ` one half ` gives `one` and `half` the span of `½`) or
 the end of one token and the start of the next, and a token made only of inserted text has an empty span at the
-insertion point. Positions are unaffected.
+insertion point (when chained filters map such an empty span onto a deletion, it takes the position before the
+deletion). Positions are unaffected.
 
 **Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
 the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is

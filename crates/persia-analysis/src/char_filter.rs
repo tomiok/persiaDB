@@ -7,6 +7,8 @@ use std::fmt;
 /// A filter consumes its input from the start, piece by piece, through a [`CharFilterOutput`]: each piece is kept
 /// as is or replaced by other text. The output records which input bytes every replacement came from, so the
 /// analyzer maps token spans back to the original value (SPEC §6.3.1). Input the filter does not consume is kept.
+/// The map holds one entry per replacement: a filter that replaces every character on its own builds a map as long
+/// as the text, and one that replaces a run in one call gives every token inside the run the run's whole span.
 /// Object safe, so an analyzer can chain any char filters behind pointers.
 ///
 /// ```

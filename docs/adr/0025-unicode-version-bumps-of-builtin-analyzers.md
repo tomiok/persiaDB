@@ -17,14 +17,19 @@ build carries one set of Unicode tables and cannot reproduce the output of the p
 ## Decision
 
 1. **Fingerprints.** Every current built-in analyzer version has a recorded fingerprint: FNV-1a 64 over its tokens
-   (text, span, position) for every Unicode scalar value, alone and in a few contexts (`a·b`, `1·2`, after `é`), one
-   probe per line so probes never join (`tests/unicode_fingerprints.rs`). A bump fails that test for exactly the
-   analyzers whose output changed, with their new fingerprints. It takes seconds in release, so it runs in the
-   nightly `--features slow --release` job and must be run for a bump; the cheap pin test stays in the default
-   suite and names the command.
-2. **New versions for changed analyzers only.** Each listed analyzer gets a new version with the same chain and
-   records its new fingerprint; analyzers whose fingerprint is unchanged keep their version. Unversioned names in
-   new definitions resolve to the new version (§6.2.2), and evolution keeps existing fields at theirs (§6.2.4).
+   (text, span, position) for every Unicode scalar value in a set of probe contexts, one probe per line so probes
+   never join (`tests/unicode_fingerprints.rs`). The contexts are chosen to tell the UAX #29 word-break classes apart:
+   alone, between letters and digits, after `a.` and `1.` (`MidLetter` vs `MidNum`: `a.x` is one word, `a.5` two),
+   before a quote (`Hebrew_Letter`), doubled and around a period (self-joining classes such as `Katakana`), and next
+   to an accent (case, folding, composition). A change that moves a fingerprint fails the test, which lists the
+   analyzers it moved with their new fingerprints; a change visible only outside these contexts can go unnoticed, so
+   the contexts grow when a review finds such a case. The test takes seconds in release and runs on every pull
+   request (`ci.yml`) and nightly, so a `Cargo.lock` or toolchain change that moves a fingerprint fails its own PR.
+2. **New versions for changed analyzers only.** The trigger is any moved fingerprint, not only a change of
+   `UNICODE_VERSION`: a `unicode-segmentation` or `unicode-normalization` patch release can fix a table or the
+   algorithm within one Unicode version. Each listed analyzer gets a new version with the same chain and records its
+   new fingerprint; analyzers whose fingerprint is unchanged keep their version. Unversioned names in new definitions
+   resolve to the new version (§6.2.2), and evolution keeps existing fields at theirs (§6.2.4).
 3. **Superseded versions keep working.** A superseded version stays in `BUILTIN_ANALYZERS` and is built with the
    build's tables: a field indexed with it opens and is queried as before, and only text containing the characters
    whose properties changed can analyze differently from when it was indexed. Reindexing into a collection at the
@@ -37,7 +42,10 @@ build carries one set of Unicode tables and cannot reproduce the output of the p
   releases only assign new characters, which change output only for text that uses them.
 - The drift of a superseded version is bounded and detectable: the build knows which versions are superseded, so a
   later layer can warn about fields still on one or offer a reindex.
-- The fingerprints also catch a chain or table change that skipped its version bump, one night later.
+- The fingerprints also catch a chain or table change that skipped its version bump, in its own PR.
+- The compatibility is one-way: a newer build runs a superseded `es@1` on its tables, but an older build refuses a
+  collection at `es@2` (unsupported, §6.2.2) even when its chain is the same, since it cannot know that the only
+  difference is Unicode data it lacks.
 
 ## Alternatives considered
 
