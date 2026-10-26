@@ -78,6 +78,21 @@ fuzz_target!(|data: &[u8]| {
         // No built-in stacks tokens: query-time analysis is the same (SPEC §6.3.4).
         analyzer.analyze_query(text, &mut query);
         assert_eq!(query, tokens, "{}", a.name);
+        // A reused stream (it held other values' tokens) gives what a fresh one does (ROADMAP 4.4.4).
+        let mut fresh = TokenStream::new();
+        analyzer.analyze(text, &mut fresh);
+        assert_eq!(fresh, tokens, "{}", a.name);
+        if matches!(a.name, "whitespace" | "keyword") {
+            // No normalization: a token is its span, possibly cut by the length guard.
+            for token in &tokens {
+                let span = &text[token.start..token.end];
+                assert!(
+                    span.starts_with(token.text.as_str()),
+                    "{}: {token:?}",
+                    a.name
+                );
+            }
+        }
     }
     let analyzer = Analyzer::builder(StandardTokenizer)
         .char_filter(Driven { control })

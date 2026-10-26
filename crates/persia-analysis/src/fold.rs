@@ -51,7 +51,7 @@ impl FoldingFilter {
     }
 
     /// Writes the folded `text` to the empty `out` and returns `true`, or returns `false` when folding leaves
-    /// `text` unchanged.
+    /// `text` unchanged (`out` may then hold a copy of `text`; the caller clears it).
     fn fold_into(&self, text: &str, out: &mut String) -> bool {
         // ASCII has no decomposition and no folding table entry.
         if text.is_ascii() || self.folds_to_itself(text) {
@@ -66,19 +66,19 @@ impl FoldingFilter {
     /// substring of an NFC text is NFC (its pairs and their order are the text's), so every run comes back as is.
     /// A `Maybe` from the quick check (some combining marks) takes the full path.
     fn folds_to_itself(&self, text: &str) -> bool {
-        is_nfc_quick(text.chars()) == IsNormalized::Yes
-            && text.chars().all(|c| {
-                if c.is_ascii() || self.is_preserved(c) {
-                    return true;
-                }
-                let mut inert = true;
-                decompose_canonical(c, |part| {
-                    inert &= !(self.is_preserved(part)
-                        || fold_letter(part).is_some()
-                        || is_folded_mark(part));
-                });
-                inert
-            })
+        // The per-character test first: it stops at the first accent of a token that folds.
+        text.chars().all(|c| {
+            if c.is_ascii() || self.is_preserved(c) {
+                return true;
+            }
+            let mut inert = true;
+            decompose_canonical(c, |part| {
+                inert &= !(self.is_preserved(part)
+                    || fold_letter(part).is_some()
+                    || is_folded_mark(part));
+            });
+            inert
+        }) && is_nfc_quick(text.chars()) == IsNormalized::Yes
     }
 
     /// [`Self::fold_all_into`] into a new string, or `None` when unchanged.

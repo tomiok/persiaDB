@@ -1,18 +1,28 @@
-//! A reusable token buffer: the zero-allocation fast path of analysis (SPEC §6.3.1, ROADMAP 4.4.4).
+//! A reusable token buffer: the allocation-free fast path of analysis (SPEC §6.3.1, ROADMAP 4.4.4).
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
 use crate::token::Token;
 
+/// Spare strings with more capacity than this (in bytes) are freed rather than kept: 4 times the default token
+/// length limit, so one huge value (a 10 MB `keyword` value) does not stay allocated for the stream's lifetime.
+const MAX_KEPT_STRING_CAPACITY: usize = 4 * crate::DEFAULT_MAX_TOKEN_LEN.get();
+/// At most this many spare strings are kept.
+const MAX_KEPT_STRINGS: usize = 4096;
+/// Cleared token buffers shrink to this many tokens.
+const MAX_KEPT_TOKENS: usize = 4096;
+
 /// The tokens of one analyzed value, in a buffer that keeps its allocations across values.
 ///
 /// Tokenizers append to it and token filters rewrite it ([`Tokenizer`](crate::Tokenizer),
 /// [`TokenFilter`](crate::TokenFilter)). The strings of tokens it drops ([`clear`](Self::clear),
 /// [`retain_mut`](Self::retain_mut)) and of texts it replaces ([`rewrite`](Self::rewrite)) are kept for the next
-/// tokens, so analyzing value after value with one stream allocates only while it grows: once it has held as many
-/// tokens, as long, as a value needs, tokenizing and the filters that rewrite in place or through `rewrite` do not
-/// allocate. Dereferences to the token slice.
+/// tokens, so analyzing value after value with one stream stops growing the stream's own buffers once it has held as
+/// many tokens, as long, as a value needs: tokenizing and filters that rewrite in place or through `rewrite` then
+/// allocate nothing for the stream. A filter may still allocate internally (stemmers and folding do, for the tokens
+/// they change, ROADMAP 4.4.12). What it keeps is bounded: at most 4096 spare strings of up to 1020 bytes, and token
+/// buffers of 4096 tokens once cleared. Dereferences to the token slice.
 ///
 /// ```
 /// use persia_analysis::{StandardTokenizer, TokenStream, Tokenizer};
@@ -57,16 +67,18 @@ impl TokenStream {
         self.tokens.push(token);
     }
 
-    /// Removes every token, keeping the strings for reuse.
+    /// Removes every token, keeping the strings for reuse (within the bounds above).
     pub fn clear(&mut self) {
-        self.spare.extend(self.tokens.drain(..).map(|token| {
-            let mut text = token.text;
-            text.clear();
-            text
-        }));
+        let mut tokens = std::mem::take(&mut self.tokens);
+        for token in tokens.drain(..) {
+            self.recycle(token.text);
+        }
+        tokens.shrink_to(MAX_KEPT_TOKENS);
+        self.tokens = tokens;
+        self.previous.shrink_to(MAX_KEPT_TOKENS);
     }
 
-    /// Keeps the tokens for which `keep` returns `true`, in order; the strings of the others are kept for reuse.
+    /// [`Self::retain_mut`] for a test that needs no mutable access.
     pub fn retain(&mut self, mut keep: impl FnMut(&Token) -> bool) {
         self.retain_mut(|token| keep(token));
     }
@@ -83,35 +95,35 @@ impl TokenStream {
                 kept = kept.saturating_add(1);
             }
         }
-        for token in self.tokens.drain(kept..) {
-            let mut text = token.text;
-            text.clear();
-            self.spare.push(text);
+        while self.tokens.len() > kept {
+            if let Some(token) = self.tokens.pop() {
+                self.recycle(token.text);
+            }
         }
     }
 
     /// Rewrites the text of every token through `write`, which gets the current text and an empty spare string and
-    /// returns whether it wrote a replacement there; the replaced string is kept for reuse. Tokens left empty are
-    /// removed.
+    /// returns whether it wrote a replacement there; the replaced string is kept for reuse. Then every empty token is
+    /// removed, whether `write` emptied it or not (a tokenizer outside this crate may emit one).
     pub fn rewrite(&mut self, mut write: impl FnMut(&str, &mut String) -> bool) {
         let mut scratch = self.spare_string();
-        let mut emptied = false;
+        let mut empty = false;
         for token in &mut self.tokens {
             if write(&token.text, &mut scratch) {
                 std::mem::swap(&mut token.text, &mut scratch);
-                emptied |= token.text.is_empty();
             }
+            empty |= token.text.is_empty();
             scratch.clear();
         }
-        self.spare.push(scratch);
-        if emptied {
+        self.recycle(scratch);
+        if empty {
             self.retain_mut(|token| !token.text.is_empty());
         }
     }
 
     /// Rebuilds the stream from its tokens: `f` gets each token, in order, and the emptied stream to push its
     /// replacements to (none, itself, or several). The token buffers swap, so this does not allocate either once
-    /// the stream has grown.
+    /// the stream has grown. A token `f` neither pushes back nor [`recycle`](Self::recycle)s loses its string.
     pub fn rebuild(&mut self, mut f: impl FnMut(Token, &mut Self)) {
         let mut input = std::mem::take(&mut self.previous);
         std::mem::swap(&mut input, &mut self.tokens);
@@ -121,10 +133,12 @@ impl TokenStream {
         self.previous = input;
     }
 
-    /// Keeps `text`'s allocation for later tokens.
+    /// Keeps `text`'s allocation for later tokens, unless it is very large or enough strings are kept already.
     pub fn recycle(&mut self, mut text: String) {
-        text.clear();
-        self.spare.push(text);
+        if text.capacity() <= MAX_KEPT_STRING_CAPACITY && self.spare.len() < MAX_KEPT_STRINGS {
+            text.clear();
+            self.spare.push(text);
+        }
     }
 
     /// The tokens, as a vector.
@@ -333,6 +347,54 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn rewrite_removes_every_empty_token() {
+        let mut stream = TokenStream::new();
+        stream.push("", 0, 0, 0);
+        stream.push("x", 0, 1, 1);
+        stream.rewrite(|_, _| false);
+        assert_eq!(texts(&stream), ["x"]);
+    }
+
+    #[test]
+    fn retained_buffers_are_bounded() {
+        let mut stream = TokenStream::new();
+        let huge = "x".repeat(10 << 20);
+        stream.push(&huge, 0, huge.len(), 0);
+        for i in 0..10_000u32 {
+            stream.push("ab", 0, 2, i);
+        }
+        stream.clear();
+        assert!(stream.spare.len() <= MAX_KEPT_STRINGS);
+        assert!(
+            stream
+                .spare
+                .iter()
+                .all(|s| s.capacity() <= MAX_KEPT_STRING_CAPACITY)
+        );
+        assert!(stream.tokens.capacity() <= MAX_KEPT_TOKENS);
+    }
+
+    #[test]
+    fn rebuild_pushes_zero_one_or_several_per_token() {
+        let mut stream = TokenStream::new();
+        for (i, t) in ["a", "bb", "ccc"].iter().enumerate() {
+            stream.push(t, 0, t.len(), u32::try_from(i).unwrap());
+        }
+        stream.rebuild(|token, out| match token.text.len() {
+            1 => out.recycle(token.text),
+            2 => out.push_token(token),
+            _ => {
+                out.push("c", token.start, token.end, token.position);
+                out.push("cc", token.start, token.end, token.position);
+                out.recycle(token.text);
+            }
+        });
+        assert_eq!(texts(&stream), ["bb", "c", "cc"]);
+        assert_eq!(stream.previous, []);
+        assert!(stream.spare.iter().all(String::is_empty));
     }
 
     #[test]

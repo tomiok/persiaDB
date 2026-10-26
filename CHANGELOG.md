@@ -8,13 +8,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+- `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
+  `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
+  converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens (within bounds), so
+  analyzing value after value stops growing its buffers once it has grown; stemmers and folding still allocate for the
+  tokens they change (ROADMAP 4.4.12).
+
 ### Added
 - `persia-analysis`: built-in `fr`, `de` and `it` analyzers at version 1 (SPEC §6.3.3): `FrenchStemmer`, `GermanStemmer`
   and `ItalianStemmer` (Snowball 3.1.1, checked against the full Snowball vocabularies; French and Italian remove
   elisions such as `l'` and `nell'`) and `FRENCH_STOPWORDS`, `GERMAN_STOPWORDS`, `ITALIAN_STOPWORDS`. Schemas may name them.
-- `persia-analysis`: `TokenStream`, the reusable token buffer that tokenizers, token filters and `Analyzer::analyze`
-  now take instead of `Vec<Token>`: it keeps the strings of dropped and rewritten tokens, so analyzing value after
-  value allocates only while the stream grows (stemmers and folding still allocate for the tokens they change).
 - `persia-analysis`: `FoldingFilter` skips the allocation for non-ASCII tokens with nothing to fold (a pre-scan, about
   3× faster on such text, same output).
 - `persia-analysis`: a Criterion benchmark of every built-in analyzer and of folding (tokens per second, baselines in

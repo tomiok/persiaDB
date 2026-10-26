@@ -50,8 +50,8 @@ pub(crate) fn push_spans<'a>(spans: impl Iterator<Item = (usize, &'a str)>, out:
 ///
 /// A filter never changes a token's span; a token whose text it empties is removed, and removing a token leaves a
 /// gap in positions. Object safe, so an analyzer can chain any filters behind pointers. Filters that remove tokens
-/// through [`TokenStream::retain_mut`] and rewrite texts in place or through [`TokenStream::rewrite`] keep analysis
-/// free of allocations once the stream has grown (ROADMAP 4.4.4).
+/// through [`TokenStream::retain_mut`] and rewrite texts in place or through [`TokenStream::rewrite`] reuse the
+/// stream's buffers, so they allocate nothing for it once it has grown (ROADMAP 4.4.4).
 pub trait TokenFilter: Send + Sync {
     /// Applies the filter to `tokens`, the output of a tokenizer or of the previous filter.
     fn apply(&self, tokens: &mut TokenStream);

@@ -23,10 +23,18 @@ pub struct LowercaseFilter;
 
 impl TokenFilter for LowercaseFilter {
     fn apply(&self, tokens: &mut TokenStream) {
+        let mut non_ascii = false;
         for token in tokens.iter_mut() {
             if token.text.is_ascii() {
                 token.text.make_ascii_lowercase();
+            } else {
+                non_ascii = true;
             }
+        }
+        if !non_ascii {
+            // Nothing left to rewrite; empty tokens are still removed, as `rewrite` would.
+            tokens.retain(|token| !token.text.is_empty());
+            return;
         }
         tokens.rewrite(|text, out| {
             // Text made only of lowercase letters maps to itself, so it keeps its string.

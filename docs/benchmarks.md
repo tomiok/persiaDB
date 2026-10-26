@@ -39,3 +39,13 @@ Throughput is in values per second (G = 10^9, M = 10^6).
 | Recorded | Commit | `standard` | `whitespace` | `keyword` | `en` | `es` | `pt` |
 |---|---|--:|--:|--:|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 4.4.4 `TokenStream` | 12.9 M | 29.5 M | 27.1 M | 2.46 M | 1.64 M | 1.58 M |
+
+After the 4.4 batch B review (fold pre-scan checks characters before NFC; `fr`, `de`, `it` added in 4.4.10):
+
+| Recorded | `standard` | `whitespace` | `keyword` (values/s) | `en` | `es` | `pt` | `fr` | `de` | `it` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 14.3 M | 28.7 M | 27.7 M | 2.45 M | 1.56 M | 1.59 M | 1.23 M | 2.01 M | 1.41 M |
+
+| Recorded | `fold/ascii` | `fold/spanish` | `fold/non_ascii_unfoldable` |
+|---|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 160 M | 21.0 M | 20.6 M |
