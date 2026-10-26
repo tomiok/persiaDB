@@ -1,7 +1,7 @@
 //! Accent and diacritic folding (SPEC §6.3.2).
 
-use unicode_normalization::UnicodeNormalization;
 use unicode_normalization::char::decompose_canonical;
+use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 use crate::token::{Token, TokenFilter};
 
@@ -52,9 +52,35 @@ impl FoldingFilter {
     /// Folds `text`, or returns `None` when it is unchanged.
     fn fold(&self, text: &str) -> Option<String> {
         // ASCII has no decomposition and no folding table entry.
-        if text.is_ascii() {
+        if text.is_ascii() || self.folds_to_itself(text) {
             return None;
         }
+        self.fold_all(text)
+    }
+
+    /// Whether folding provably leaves `text` unchanged, found without allocating (ROADMAP 4.4.9): `text` is NFC
+    /// and no character outside the preserved set decomposes into a preserved character, a table letter or a folded
+    /// mark. Then each run between preserved characters is recomposed from its own canonical decomposition, and a
+    /// substring of an NFC text is NFC (its pairs and their order are the text's), so every run comes back as is.
+    /// A `Maybe` from the quick check (some combining marks) takes the full path.
+    fn folds_to_itself(&self, text: &str) -> bool {
+        is_nfc_quick(text.chars()) == IsNormalized::Yes
+            && text.chars().all(|c| {
+                if c.is_ascii() || self.is_preserved(c) {
+                    return true;
+                }
+                let mut inert = true;
+                decompose_canonical(c, |part| {
+                    inert &= !(self.is_preserved(part)
+                        || fold_letter(part).is_some()
+                        || is_folded_mark(part));
+                });
+                inert
+            })
+    }
+
+    /// [`Self::fold`] without the pre-scan.
+    fn fold_all(&self, text: &str) -> Option<String> {
         let mut folded = String::with_capacity(text.len());
         // The folded run since the last preserved character, recomposed when one comes or at the end. Preserved
         // characters bypass recomposition, which could rewrite them (U+0344 is not NFC) and break idempotence.
@@ -123,4 +149,81 @@ fn fold_letter(c: char) -> Option<&'static str> {
         'ı' => "i",
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use proptest::prelude::*;
+
+    use super::*;
+
+    fn filters() -> [FoldingFilter; 3] {
+        [
+            FoldingFilter::default(),
+            FoldingFilter::preserving(['ñ']),
+            FoldingFilter::preserving(['ñ', 'Ö', 'ü', 'ł', '\u{344}', 'か']),
+        ]
+    }
+
+    #[test]
+    fn the_pre_scan_takes_the_fast_path_only_when_nothing_changes() {
+        let es = FoldingFilter::preserving(['ñ']);
+        for text in ["日本語", "привет", "año", "가나다", "ελληνικη", "ŧƀɨ"]
+        {
+            assert!(es.folds_to_itself(text), "{text}");
+            assert_eq!(es.fold_all(text), None, "{text}");
+        }
+        // Accents, table letters, decompositions with marks, preserved parts outside the set, non-NFC text.
+        for text in ["é", "ß", "ǖ", "Ñ", "n\u{303}", "\u{1100}\u{1161}", "क़", "Ǣ"] {
+            assert!(!es.folds_to_itself(text), "{text}");
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(2048))]
+
+        /// The pre-scan never changes the result: whenever it skips folding, folding changes nothing.
+        #[test]
+        fn the_pre_scan_agrees_with_full_folding(
+            text in prop_oneof![
+                "[a-zñÑöÖüÜłŁæßéáà\u{300}-\u{36f}\u{344}\u{1100}-\u{1112}\u{1161}-\u{1175}가-갛क़कं़\u{93c}日本ăΣάかが\u{3099} ]{0,16}",
+                any::<String>(),
+            ],
+        ) {
+            for filter in filters() {
+                if filter.folds_to_itself(&text) {
+                    prop_assert_eq!(filter.fold_all(&text), None, "{:?}", filter.preserved());
+                }
+            }
+        }
+    }
+
+    /// Every scalar value (the BMP only without `slow`: minutes in debug otherwise) alone and after a few starters:
+    /// the pre-scan agrees with full folding.
+    #[test]
+    fn the_pre_scan_agrees_on_every_scalar_value() {
+        let last = if cfg!(feature = "slow") {
+            char::MAX
+        } else {
+            '\u{ffff}'
+        };
+        let mut text = String::new();
+        for c in (0..=u32::from(last)).filter_map(char::from_u32) {
+            for before in ["", "a", "ñ", "\u{1100}"] {
+                text.clear();
+                text.push_str(before);
+                text.push(c);
+                for filter in filters() {
+                    if filter.folds_to_itself(&text) {
+                        assert_eq!(
+                            filter.fold_all(&text),
+                            None,
+                            "{text:?} {:?}",
+                            filter.preserved()
+                        );
+                    }
+                }
+            }
+        }
+    }
 }

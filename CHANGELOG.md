@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-analysis`: `FoldingFilter` skips the allocation for non-ASCII tokens with nothing to fold (a pre-scan, about
+  3× faster on such text, same output).
 - `persia-analysis`: a Criterion benchmark of every built-in analyzer and of folding (tokens per second, baselines in
   `docs/benchmarks.md`), and an `analyzers` fuzz target over the built-ins and char filters.
 - `persia-engine`: a stored schema naming an analyzer version this build lacks (written by a newer build, e.g.
