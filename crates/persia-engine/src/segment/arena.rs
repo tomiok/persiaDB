@@ -2,8 +2,8 @@
 //!
 //! Every interned string is appended to one byte buffer and named by a dense `u32` id in insertion order; an
 //! open-addressing table of ids finds an existing string. A segment builder interns every term of a field (and every
-//! document id) here, so indexing a token that was seen before allocates nothing, and a new one at most grows
-//! three vectors.
+//! document id) here, so indexing a token that was seen before allocates nothing, and a new one appends to three
+//! vectors (its bytes, end and hash) and, when the table reaches half full, doubles it.
 
 use persia_format::hash::xxh3_64;
 

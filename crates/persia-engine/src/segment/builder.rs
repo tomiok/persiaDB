@@ -267,8 +267,8 @@ impl SegmentBuilder {
     }
 
     /// Heap bytes the builder holds, for flush thresholds (ROADMAP 5.1.5). Counts capacities, so it tracks
-    /// what the allocator handed out, not just what is filled; it excludes the schema and analyzers, which do not
-    /// grow with the documents.
+    /// what the allocator handed out, not just what is filled, analysis scratch buffers included; it excludes the
+    /// schema and analyzers, which do not grow with the documents.
     pub fn size_in_bytes(&self) -> usize {
         let fields = self.fields.iter().fold(0_usize, |sum, field| {
             sum.saturating_add(match field {
@@ -291,6 +291,7 @@ impl SegmentBuilder {
                     .saturating_mul(size_of::<(u32, usize)>()),
             )
             .saturating_add(self.blob_bytes.capacity())
+            .saturating_add(self.tokens.size_in_bytes())
             .saturating_add(
                 self.occurrences
                     .capacity()
@@ -642,6 +643,18 @@ mod tests {
         // The id is free again, and the builder keeps working.
         b.set_max_position(u32::MAX);
         assert_eq!(b.add(&bad), Ok(1));
+    }
+
+    #[test]
+    fn size_in_bytes_counts_the_analysis_buffers() {
+        let (mut b, t, _) = builder();
+        let text = "many words to analyze ".repeat(200);
+        b.add(&Document::new("a").with(t, Value::String(text)))
+            .unwrap();
+        let (total, tokens) = (b.size_in_bytes(), b.tokens.size_in_bytes());
+        assert!(tokens > 0);
+        b.tokens = TokenStream::new();
+        assert_eq!(b.size_in_bytes(), total - tokens);
     }
 
     #[test]

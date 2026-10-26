@@ -318,7 +318,7 @@ Deps: M1, M3, M4. The heart of the index format.
 - [x] 5.2.3 Positions writer (opt-in per field)
 - [x] 5.2.4 Norms writer (1-byte quantization table; document quantization error bounds)
 - [x] 5.2.5 Columns writer (dictionary-encoded keyword, FOR numeric, roaring sparse)
-- [x] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden segment fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011; a segment inside a container frame is covered by the commit path, M6)
+- [x] 5.2.6 DocStore, IdMap, BlobRefs section writers; golden segment fixture with a `BlobRef` that has non-empty `user_meta` (SPEC §9.1, ADR-0011; a segment inside a container frame is 6.3.8)
 - [x] 5.2.7 Segment footer writer: stats, section table, schema hash (with its `encoding_version` and field count, SPEC §6.2.5), CRC; trailing locator (SPEC §5.1)
 - [x] 5.2.8 `SegmentWriter::finish() -> Bytes/Writer` orchestrating all sections with deterministic output (same input → same bytes)
 - [x] 5.2.9 Decide which `section_kind`s are block-framed (a column in SPEC §5.3) and make TermInfo/Skip offsets into them stream positions (SPEC §5.2)
@@ -377,6 +377,7 @@ Deps: M2, M5.
 - [ ] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
 - [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
 - [ ] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
+- [ ] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)

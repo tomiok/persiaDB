@@ -364,6 +364,12 @@ pub fn numeric_column(stream: &[u8], doc_count: u32) -> BTreeMap<u32, u64> {
     assert_eq!(r.read_u8().unwrap(), 1);
     r.expect_zeros(7).unwrap();
     let presence = bitmap(&mut r);
+    assert!(
+        presence
+            .as_ref()
+            .and_then(RoaringBitmap::max)
+            .is_none_or(|d| d < doc_count)
+    );
     let keys = for_column(&mut r);
     assert!(r.is_empty());
     assert_eq!(keys.len(), doc_count as usize);
@@ -380,6 +386,13 @@ pub fn bool_column(stream: &[u8], doc_count: u32) -> BTreeMap<u32, u64> {
     r.expect_zeros(7).unwrap();
     let presence = bitmap(&mut r);
     let trues = bitmap(&mut r).expect("true bitmap is always serialized");
+    if let Some(p) = &presence {
+        assert!(trues.is_subset(p), "true bits only for present documents");
+    }
+    assert!(
+        trues.max().is_none_or(|d| d < doc_count),
+        "true bits below doc_count"
+    );
     assert!(r.is_empty());
     (0..doc_count)
         .filter(|d| presence.as_ref().is_none_or(|p| p.contains(*d)))

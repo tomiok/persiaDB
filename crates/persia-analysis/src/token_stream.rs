@@ -56,6 +56,45 @@ impl TokenStream {
         Self::default()
     }
 
+    /// Heap bytes the stream keeps between uses (capacities of its token buffers, token texts, spare strings and
+    /// scratch buffers), for callers that account their memory, such as a segment builder's flush threshold.
+    ///
+    /// ```
+    /// use persia_analysis::{StandardTokenizer, TokenStream, Tokenizer};
+    ///
+    /// let mut tokens = TokenStream::new();
+    /// StandardTokenizer.tokenize("some words", &mut tokens);
+    /// assert!(tokens.size_in_bytes() > 0);
+    /// ```
+    pub fn size_in_bytes(&self) -> usize {
+        let strings = |list: &[Token]| {
+            list.iter()
+                .fold(0_usize, |sum, t| sum.saturating_add(t.text.capacity()))
+        };
+        let tokens = self
+            .tokens
+            .capacity()
+            .saturating_add(self.previous.capacity())
+            .saturating_mul(size_of::<Token>());
+        let spare = self
+            .spare
+            .iter()
+            .fold(0_usize, |sum, s| sum.saturating_add(s.capacity()))
+            .saturating_add(self.spare.capacity().saturating_mul(size_of::<String>()));
+        let scratch = self
+            .scratch
+            .chars
+            .capacity()
+            .saturating_add(self.scratch.work.capacity())
+            .saturating_mul(size_of::<char>())
+            .saturating_add(self.scratch.text.capacity());
+        tokens
+            .saturating_add(strings(&self.tokens))
+            .saturating_add(strings(&self.previous))
+            .saturating_add(spare)
+            .saturating_add(scratch)
+    }
+
     /// Appends a token with a copy of `text`, reusing a spare string.
     pub fn push(&mut self, text: &str, start: usize, end: usize, position: u32) {
         let mut owned = self.spare_string();

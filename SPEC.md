@@ -448,8 +448,9 @@ ascending `(field_id, section_kind)`: a field's sections in kind order, field by
 (`field_id` `0xFFFF_FFFF`, §5.3). `min_id`/`max_id` allow routing and pruning by document id. A reader checks the
 locator, bounds `footer_len`, and verifies the CRC before it uses any other footer field. Then each of these is
 corruption:
-- `footer_len` below 98 (the fixed part, two 1-byte ids and the CRC) or above 1 MiB, or a footer start
-  (`len − 8 − footer_len`) that is negative or not a multiple of 8; bytes after `max_id`;
+- `footer_len` below 98 (the 88-byte fixed part, two ids of at least 1 byte with their `u16` lengths, and the
+  CRC) or above 1 MiB, or a footer start (`len − 8 − footer_len`) that is negative or not a multiple of 8; bytes
+  between `max_id` and the CRC (the CRC is the footer's last 4 bytes, so `max_id` must end exactly there);
 - a non-zero reserved byte; `doc_count` outside `1..=2^31`; `schema_field_count` above the current schema's field
   count, or a schema hash other than its hash over that many fields (§6.2.5);
 - `field_stats_count` other than the number of `text` and `keyword` fields below `schema_field_count`, or statistics

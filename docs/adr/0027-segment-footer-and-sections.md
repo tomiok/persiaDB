@@ -58,7 +58,9 @@ statistics and section table of a 1024-field schema, and the TermInfo record had
     blocks. Rows may span blocks, as SPEC §5.2 already allows.
 11. **Builder rules.** A segment has at least one document. Within one segment a duplicate id is rejected; upserts
     across segments are the write path's business (§8.3). A rejected document (invalid, duplicate, segment full, or an
-    internal limit such as positions past `u32::MAX`) leaves the builder exactly as it was. Output is deterministic for
+    internal limit such as positions past `u32::MAX`) leaves the builder's contents exactly as they were: the
+    segment it writes is byte-identical. Spare capacity the attempt allocated is kept (and counted by `size_in_bytes`,
+    which reports allocations, not contents), as `Vec::truncate` keeps it. Output is deterministic for
     the same input, meta, options **and zstd library version**: the compressed sections depend on zstd's output.
 
 ## Consequences

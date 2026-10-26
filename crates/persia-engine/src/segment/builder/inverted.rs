@@ -1,9 +1,9 @@
 //! Term → postings accumulation for one `text` or `keyword` field (ROADMAP 5.1.1).
 //!
 //! Postings are appended to one flat log in docid order, a `(term, doc, tf, positions)` entry per term a document
-//! has, never to a per-term list: a term costs its bytes in the [`Arena`] and nothing else until the writer groups
-//! the log by term with one counting sort (`by_term`). Field lengths (the norms input) are kept per document that
-//! has any (ROADMAP 5.1.1.2).
+//! has, never to a per-term list: a term costs only its [`Arena`] entry (its bytes, an end offset, a hash and a
+//! table slot) until the writer groups the log by term with one counting sort (`by_term`). Field lengths (the norms
+//! input) are kept per document that has any (ROADMAP 5.1.1.2).
 
 use super::super::SegmentError;
 use super::super::arena::Arena;
