@@ -26,6 +26,7 @@ mod decode;
 mod edges;
 mod model;
 mod read;
+mod sections;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
