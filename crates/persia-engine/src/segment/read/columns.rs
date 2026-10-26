@@ -71,7 +71,7 @@ impl Parts<'_, '_> {
         let n_usize = usize::try_from(n).unwrap_or(usize::MAX);
         v.try_reserve_exact(n_usize).map_err(|_| {
             self.stream.error(persia_format::Error::OutOfMemory {
-                bytes: n.checked_mul(8),
+                bytes: n.checked_mul(u64::try_from(size_of::<T>()).unwrap_or(8)),
             })
         })?;
         Ok(v)
@@ -327,10 +327,9 @@ impl KeywordColumn {
                 value_ends.push(usize::try_from(end).map_err(|_| p.bad(at, "a value end"))?);
             }
             let total = value_ends.last().copied().unwrap_or(0);
-            let values =
-                p.r.read_bytes(total)
-                    .map_err(|e| p.stream.error(e))?
-                    .to_vec();
+            let bytes = p.r.read_bytes(total).map_err(|e| p.stream.error(e))?;
+            let mut values = p.vec(u64::try_from(total).unwrap_or(u64::MAX))?;
+            values.extend_from_slice(bytes);
             let mut start = 0;
             let mut prev: Option<&[u8]> = None;
             for &end in &value_ends {

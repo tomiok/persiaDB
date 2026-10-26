@@ -391,7 +391,7 @@ fn block_max_bounds_every_block() {
 }
 
 #[test]
-fn tombstones_out_of_range_are_corruption() {
+fn tombstones_out_of_range_are_rejected() {
     let (schema, _, bytes) = dense(300);
     let seg = open(&schema, &bytes).unwrap();
     let err = seg
@@ -975,6 +975,18 @@ fn shallow_advance_with_falling_targets() {
     }
     assert_eq!(p.next().unwrap(), Some(0));
     assert_eq!(p.freq().unwrap(), 5);
+    // After `advance` moved past the first block, a target in it still gets its bounds (PR #26 review).
+    assert_eq!(p.advance(700).unwrap(), Some(700));
+    for target in [10, 0, 127] {
+        let m = p.shallow_advance(target).unwrap().unwrap();
+        assert_eq!(
+            (m.last_docid, m.max_tf),
+            (127, 5),
+            "target {target} after advance"
+        );
+    }
+    assert_eq!(p.shallow_advance(700).unwrap().unwrap().last_docid, 767);
+    assert_eq!(p.doc(), Some(700));
 }
 
 /// Reader-side list lengths around the 128-docid block: tail only, one full block, full blocks then a tail.
@@ -1044,4 +1056,12 @@ fn ordinals_and_term_infos_are_checked() {
         Err(ReadError::ForeignTermInfo)
     );
     assert!(tags.postings(&red).is_ok());
+    // The same bytes opened twice are two segments: their term infos are not interchangeable.
+    let again = open(&schema, &bytes).unwrap();
+    let again_tags = again.terms(id(&schema, "tag")).unwrap();
+    assert_eq!(again.segment_id(), seg.segment_id());
+    assert_eq!(
+        again_tags.postings(&red).map(drop),
+        Err(ReadError::ForeignTermInfo)
+    );
 }

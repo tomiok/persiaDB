@@ -13,6 +13,8 @@ mod store;
 mod stream;
 mod terms;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use persia_format::checksum::crc32c;
 use persia_format::{BlobRef, ByteSource, Reader};
 use roaring::RoaringBitmap;
@@ -30,6 +32,9 @@ use footer::{Footer, Section};
 use store::BlockCache;
 use stream::Stream;
 use terms::{Lists, TERM_INFO_LEN};
+
+/// The next [`Segment::open`]'s instance token.
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 /// An open segment (SPEC §5): immutable, so it can be shared by any number of readers (`Segment` is `Sync`).
 ///
@@ -67,6 +72,9 @@ pub struct Segment {
     /// Always `Some` once opened (SPEC §5.3 "Presence").
     id_map: Option<fst::Map<ByteSource>>,
     cache: BlockCache,
+    /// Unique per [`Segment::open`] in this process: tells this segment's [`TermInfo`]s from any other's, even
+    /// one with the same segment id.
+    instance: u64,
 }
 
 impl Segment {
@@ -91,6 +99,7 @@ impl Segment {
             footer,
             term_dicts: Vec::new(),
             cache: BlockCache::default(),
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
         };
         segment.check_presence()?;
         segment.check_sections()?;
@@ -197,7 +206,7 @@ impl Segment {
             lists,
             self.doc_count(),
             keyword,
-            (self.segment_id(), id),
+            (self.instance, id),
         ))
     }
 

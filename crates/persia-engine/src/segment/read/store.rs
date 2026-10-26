@@ -171,7 +171,11 @@ pub(super) fn record(
             },
         ));
     }
-    let mut out = vec![0_u8; usize::try_from(len).unwrap_or(0)];
+    let len_usize = usize::try_from(len).unwrap_or(usize::MAX);
+    let mut out = Vec::new();
+    out.try_reserve_exact(len_usize)
+        .map_err(|_| stream.error(persia_format::Error::OutOfMemory { bytes: Some(len) }))?;
+    out.resize(len_usize, 0);
     cache.read(stream, header.saturating_add(start), &mut out)?;
     Ok(out)
 }

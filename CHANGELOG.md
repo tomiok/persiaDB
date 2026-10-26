@@ -14,9 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   segment written before fields were added opens with the evolved schema. `Segment::terms` gives a `TermIndex` (term
   lookup, `range`, `prefix` and automaton `search` enumeration); `Postings` iterates a term's documents with
   `next`, `advance` (skipping blocks through the Skip entries), `freq`, `positions`, `block_max` and
-  `shallow_advance` (block-max WAND), and leaves out `Tombstones`. `norms`, `numeric_column`, `bool_column` and
-  `keyword_column` are typed doc-value readers; `document`, `document_by_id`, `docid_of`, `id_of` and `blob_ref` fetch
-  documents through a small block cache. Corrupt bytes are a `ReadError`, never a panic.
+  `shallow_advance` (block-max WAND), and leaves out deleted documents when given the segment's `Tombstones`
+  (`Segment::tombstones`, then `Postings::with_tombstones`). `norms`, `numeric_column`, `bool_column` and
+  `keyword_column` are typed doc-value readers. `docid_of` finds a docid through the `IdMap` FST; `document`,
+  `document_by_id`, `id_of` and `blob_ref` read records through a small block cache. Corrupt bytes are a `ReadError`, never a panic.
 - `persia-engine`: segments (SPEC §5, ADR-0027). `SegmentBuilder` indexes documents in memory (interned terms, one
   posting log per field, columns, `DocStore` rows and ids; `size_in_bytes` for flush thresholds) and `SegmentWriter`
   writes a deterministic segment: term dictionary (FST), term info, postings, frequencies, skip entries, positions,

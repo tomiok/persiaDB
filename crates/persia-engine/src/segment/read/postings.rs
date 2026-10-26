@@ -149,8 +149,6 @@ pub struct Postings<'s> {
     positions_of: Option<u32>,
     positions: Vec<u32>,
     position_ends: Vec<usize>,
-    /// The block [`Self::shallow_advance`] last stopped at.
-    shallow: u32,
     tombstones: Option<&'s Tombstones>,
 }
 
@@ -191,7 +189,6 @@ impl<'s> Postings<'s> {
             positions_of: None,
             positions: Vec::new(),
             position_ends: Vec::new(),
-            shallow: 0,
             tombstones: None,
         }
     }
@@ -293,9 +290,9 @@ impl<'s> Postings<'s> {
         })
     }
 
-    /// The score bounds of the block that holds the first document at or after `target` (or would: the block's
-    /// last docid is the first at or after `target`), without moving the iterator or decoding docids when the
-    /// list has skip entries; `None` if no document is at or after `target`. For block-max WAND (SPEC §7.3):
+    /// The score bounds of the block that holds the list's first document at or after `target`, wherever the
+    /// iterator is (an earlier block too), without moving it or decoding docids when the list has skip entries;
+    /// `None` if no document is at or after `target`. For block-max WAND (SPEC §7.3):
     /// tombstones are not applied, so the bounds may cover deleted documents.
     ///
     /// # Errors
@@ -358,7 +355,6 @@ impl<'s> Postings<'s> {
         }
         self.cur = i;
         self.state = State::At;
-        self.shallow = self.shallow.max(k);
         Ok(self.doc())
     }
 
@@ -398,7 +394,7 @@ impl<'s> Postings<'s> {
     }
 
     fn shallow_inner(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError> {
-        if self.state == State::Done {
+        if self.lists.is_none() {
             return Ok(None);
         }
         if self.info.skip.is_none() {
@@ -416,19 +412,13 @@ impl<'s> Postings<'s> {
                 min_norm: self.info.min_norm(),
             }));
         }
-        // From the current block, or from where the last call stopped if `target` is past every block before it
-        // (targets may go down between calls; the block for a smaller one must not be skipped).
-        let mut k = self.block.unwrap_or(0);
-        if let Some(before) = self.shallow.checked_sub(1)
-            && self.shallow > k
-            && self.entry(before)?.last_docid < target
-        {
-            k = self.shallow;
-        }
+        // Position-independent: the entries read so far are a prefix from block 0, so binary-search them, and read
+        // further ones only past it.
+        let cached = self.entries.partition_point(|e| e.last_docid < target);
+        let mut k = u32::try_from(cached).unwrap_or(u32::MAX);
         while k < self.block_count {
             let e = self.entry(k)?;
             if e.last_docid >= target {
-                self.shallow = k;
                 return Ok(Some(block_max(&e)));
             }
             k = k.saturating_add(1);
@@ -441,6 +431,19 @@ impl<'s> Postings<'s> {
         let before = u64::from(k).saturating_mul(128);
         let left = u64::from(self.info.df()).saturating_sub(before);
         usize::try_from(left.min(128)).unwrap_or(BLOCK_LEN)
+    }
+
+    /// A failed allocation while reading `kind`: a resource error, not corruption.
+    fn out_of_memory(&self, kind: Which) -> ReadError {
+        let source = persia_format::Error::OutOfMemory { bytes: None };
+        let stream = self.lists.as_ref().map(|l| match kind {
+            Which::Skip => l.skip.as_ref().map_or(l.postings.stream, |s| s.stream),
+            Which::Postings | Which::Freqs | Which::Positions => l.postings.stream,
+        });
+        match stream {
+            Some(s) => s.error(source),
+            None => ReadError::Format(source),
+        }
     }
 
     fn corrupt(&self, kind: Which, position: u64, what: &'static str) -> ReadError {
@@ -470,6 +473,10 @@ impl<'s> Postings<'s> {
         let k = usize::try_from(k).unwrap_or(usize::MAX);
         while self.entries.len() <= k {
             let e = self.read_entry(self.entries.len())?;
+            // At most one entry per 128 docids, but a long list can still need more than the allocator has.
+            if self.entries.try_reserve(1).is_err() {
+                return Err(self.out_of_memory(Which::Skip));
+            }
             self.entries.push(e);
         }
         self.entries

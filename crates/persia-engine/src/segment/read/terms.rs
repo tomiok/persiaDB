@@ -29,8 +29,8 @@ pub struct TermInfo {
     /// Start of the term's `Skip` entries; `None` when `df < 128`.
     pub(super) skip: Option<u64>,
     pub(super) positions: Option<Range<u64>>,
-    /// The segment id and field id of the index that returned it.
-    owner: (u128, u32),
+    /// The segment instance ([`super::Segment`] open) and field id of the index that returned it.
+    owner: (u64, u32),
 }
 
 impl TermInfo {
@@ -77,7 +77,7 @@ struct InfoReader<'s> {
     doc_count: u32,
     keyword: bool,
     lists: Lists<'s>,
-    owner: (u128, u32),
+    owner: (u64, u32),
 }
 
 impl InfoReader<'_> {
@@ -215,7 +215,7 @@ impl<'s> TermIndex<'s> {
         lists: Lists<'s>,
         doc_count: u32,
         keyword: bool,
-        owner: (u128, u32),
+        owner: (u64, u32),
     ) -> Self {
         let count = u64::try_from(dict.len()).unwrap_or(u64::MAX);
         Self {

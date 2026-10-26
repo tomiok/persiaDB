@@ -1,6 +1,6 @@
 //! Reading the logical stream of a block-framed section (SPEC §5.2): whole, or a range at a time through a
-//! [`Cursor`] that keeps the last decoded block, so sequential small reads (postings blocks, skip entries) decode
-//! each framed block once.
+//! [`Cursor`] that keeps the last decoded block, so sequential reads (postings blocks, skip entries, runs that span
+//! blocks) decode each framed block once.
 
 use persia_format::Reader;
 use persia_format::block::BlockReader;
@@ -141,7 +141,12 @@ impl<'s> Cursor<'s> {
             && end.saturating_sub(block_start) <= block_size;
         if !in_one_block {
             self.spill.clear();
-            self.stream.read_range(start, end, &mut self.spill)?;
+            if start < end && end <= self.stream.len() {
+                self.read_spanning(start, end)?;
+            } else {
+                // Empty, or past the stream: `read_range` reports which.
+                self.stream.read_range(start, end, &mut self.spill)?;
+            }
             return Ok(&self.spill);
         }
         let index = u32::try_from(index).unwrap_or(u32::MAX);
@@ -161,6 +166,43 @@ impl<'s> Cursor<'s> {
                 },
             )
         })
+    }
+
+    /// Copies stream bytes `start..end` (several blocks) into `spill` block by block through the cached block, which
+    /// ends up holding the last one: a sequential reader decodes every block once.
+    fn read_spanning(&mut self, start: u64, end: u64) -> Result<(), ReadError> {
+        let block_size = self.stream.block_size();
+        let len = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
+        self.spill.try_reserve_exact(len).map_err(|_| {
+            self.stream.error(persia_format::Error::OutOfMemory {
+                bytes: end.checked_sub(start),
+            })
+        })?;
+        let mut pos = start;
+        while pos < end {
+            let index = pos.checked_div(block_size).unwrap_or(0);
+            let block_start = index.saturating_mul(block_size);
+            let index_u32 = u32::try_from(index).unwrap_or(u32::MAX);
+            if self.block != Some(index_u32) {
+                self.block = None;
+                self.stream.read_block(index_u32, &mut self.buf)?;
+                self.block = Some(index_u32);
+            }
+            let to_pos = end.min(block_start.saturating_add(block_size));
+            let from = usize::try_from(pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            let to = usize::try_from(to_pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            let bytes = self.buf.get(from..to).ok_or_else(|| {
+                self.stream.corrupt(
+                    pos,
+                    SegmentCorruption::Invalid {
+                        what: "a block shorter than its table says",
+                    },
+                )
+            })?;
+            self.spill.extend_from_slice(bytes);
+            pos = to_pos;
+        }
+        Ok(())
     }
 
     /// A [`Reader`] over stream bytes `start..end`, whose offsets are stream positions.
