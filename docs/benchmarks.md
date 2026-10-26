@@ -70,3 +70,16 @@ Documents per second:
 | Recorded | `segment/add` | `segment/finish` |
 |---|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
+
+## `persia-engine` segment reading
+
+`cargo bench -p persia-engine --bench segment -- segment_read`: the segment the building benchmarks write (default
+`WriteOptions`). `open` is `Segment::open` (footer parse and section checks); `term_get` is
+`TermIndex::get` of each of the 4 909 `body` terms; `postings_freq` iterates every `body` posting with `freq`;
+`advance` steps every 64th docid on the `body` terms with `df >= 200`; `positions` iterates every `title` posting with
+its positions; `document` fetches every stored document by docid. Operations per second (opens, lookups, postings,
+`advance` calls, postings, documents):
+
+| Recorded | `open` | `term_get` | `postings_freq` | `advance` | `positions` | `document` |
+|---|--:|--:|--:|--:|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.38 K | 5.34 M | 6.69 M | 4.82 M | 453 K | 434 K |
