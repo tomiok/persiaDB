@@ -3,6 +3,7 @@
 use std::fmt;
 use std::ops::{Deref, DerefMut};
 
+use crate::scratch::Scratch;
 use crate::token::Token;
 
 /// Spare strings with more capacity than this (in bytes) are freed rather than kept: 4 times the default token
@@ -20,8 +21,10 @@ const MAX_KEPT_TOKENS: usize = 4096;
 /// [`retain_mut`](Self::retain_mut)) and of texts it replaces ([`rewrite`](Self::rewrite)) are kept for the next
 /// tokens, so analyzing value after value with one stream stops growing the stream's own buffers once it has held as
 /// many tokens, as long, as a value needs: tokenizing and filters that rewrite in place or through `rewrite` then
-/// allocate nothing for the stream. A filter may still allocate internally (stemmers and folding do, for the tokens
-/// they change, ROADMAP 4.4.12). What it keeps is bounded: at most 4096 spare strings of up to 1020 bytes, and token
+/// allocate nothing for the stream, and the built-in stemmers and folding work in its [`Scratch`] buffers, so every
+/// built-in analyzer stops allocating altogether (ROADMAP 4.4.12; `tests/allocations.rs` counts). Exceptions: a token
+/// holding `Σ` (lowercasing it needs `str::to_lowercase`), long runs of combining marks (the normalization iterators
+/// buffer them), and char filters. What it keeps is bounded: at most 4096 spare strings of up to 1020 bytes, and token
 /// buffers of 4096 tokens once cleared. Dereferences to the token slice.
 ///
 /// ```
@@ -42,6 +45,8 @@ pub struct TokenStream {
     previous: Vec<Token>,
     /// Emptied strings with their capacity, for the next tokens and rewrites.
     spare: Vec<String>,
+    /// Work buffers lent to filters by [`Self::rewrite_with_scratch`].
+    scratch: Scratch,
 }
 
 impl TokenStream {
@@ -106,16 +111,26 @@ impl TokenStream {
     /// returns whether it wrote a replacement there; the replaced string is kept for reuse. Then every empty token is
     /// removed, whether `write` emptied it or not (a tokenizer outside this crate may emit one).
     pub fn rewrite(&mut self, mut write: impl FnMut(&str, &mut String) -> bool) {
-        let mut scratch = self.spare_string();
+        self.rewrite_with_scratch(|text, out, _| write(text, out));
+    }
+
+    /// [`Self::rewrite`], also lending `write` the stream's [`Scratch`] buffers (stemmers and folding work in them),
+    /// so rewriting allocates nothing once they have grown.
+    pub fn rewrite_with_scratch(
+        &mut self,
+        mut write: impl FnMut(&str, &mut String, &mut Scratch) -> bool,
+    ) {
+        let mut out = self.spare_string();
         let mut empty = false;
         for token in &mut self.tokens {
-            if write(&token.text, &mut scratch) {
-                std::mem::swap(&mut token.text, &mut scratch);
+            if write(&token.text, &mut out, &mut self.scratch) {
+                std::mem::swap(&mut token.text, &mut out);
             }
             empty |= token.text.is_empty();
-            scratch.clear();
+            out.clear();
         }
-        self.recycle(scratch);
+        self.scratch.reset();
+        self.recycle(out);
         if empty {
             self.retain_mut(|token| !token.text.is_empty());
         }

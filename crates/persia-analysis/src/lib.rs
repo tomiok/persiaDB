@@ -27,6 +27,7 @@ mod lowercase;
 mod nfkc;
 mod ngram;
 mod registry;
+mod scratch;
 mod standard;
 mod stem;
 mod stop;
@@ -48,6 +49,7 @@ pub use registry::{
     AnalyzerRegistry, BUILTIN_ANALYZERS, BuiltinAnalyzer, DEFAULT_ANALYZER, RegisterError,
     builtin_analyzer, current_builtin_version,
 };
+pub use scratch::Scratch;
 pub use standard::StandardTokenizer;
 pub use stem::{
     EnglishStemmer, FrenchStemmer, GermanStemmer, ItalianStemmer, PortugueseStemmer,

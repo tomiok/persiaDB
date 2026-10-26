@@ -291,7 +291,7 @@ Deps: M0. (Parallel with M2/M3.)
 - [x] 4.4.9 Folding fast path (found in the 4.2 review): `FoldingFilter` allocates for every non-ASCII token even when nothing folds; pre-scan for foldable characters, measured by the 4.4.5 benchmark
 - [x] 4.4.10 Built-in `fr`, `de`, `it` analyzers (found in the PR #17 review): SPEC §6.3 lists them but 4.2.4, 4.3 and 4.4.2 plan only `en`, `es`, `pt`; add their stopword lists and stemmers, or scope them out of §6.3
 - [x] 4.4.11 Unsupported analyzer versions (found in the 4.4 review): a stored schema naming an analyzer version this build lacks (written by a newer build, e.g. `es@2`) is reported as `Corrupt` by the manifest decoder; give it a distinct "unsupported" error class, like an unknown format feature (SPEC §6.2.2, §15)
-- [ ] 4.4.12 Allocation-free stemming and folding (found in the 4.4 batch B review): `StemmerFilter` allocates a `Vec<char>` and the stem for every word it stems, `FoldingFilter` a run buffer for every token it folds; give stemmers a reusable buffer (e.g. `Stemmer::stem_into(&str, &mut String)`), measured by the 4.4.5 benchmark and checked by an allocation test (needs an allocation counter: a dev-only crate such as `dhat`, or an ADR for an `unsafe` counting allocator in tests)
+- [x] 4.4.12 Allocation-free stemming and folding (found in the 4.4 batch B review): `StemmerFilter` allocates a `Vec<char>` and the stem for every word it stems, `FoldingFilter` a run buffer for every token it folds; give stemmers a reusable buffer (e.g. `Stemmer::stem_into(&str, &mut String)`), measured by the 4.4.5 benchmark and checked by an allocation test (needs an allocation counter: a dev-only crate such as `dhat`, or an ADR for an `unsafe` counting allocator in tests)
 
 ---
 

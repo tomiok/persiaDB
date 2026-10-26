@@ -1,9 +1,8 @@
 //! The Snowball Spanish stemmer, as `algorithms/spanish.sbl` of Snowball v3.1.1.
 
-use std::borrow::Cow;
-
-use super::Stemmer;
-use super::word::{Word, finish, r1_r2, rv};
+use super::CharStemmer;
+use super::word::{Word, r1_r2, rv};
+use crate::Scratch;
 
 /// The Snowball Spanish stemmer (SPEC §6.3.2): `canciones` → `cancion`, `rápidamente` → `rapid`,
 /// `diciéndole` → `dic`.
@@ -24,9 +23,9 @@ use super::word::{Word, finish, r1_r2, rv};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SpanishStemmer;
 
-impl Stemmer for SpanishStemmer {
-    fn stem<'a>(&self, word: &'a str) -> Cow<'a, str> {
-        let mut w = Word::new(word);
+impl CharStemmer for SpanishStemmer {
+    fn stem_chars(&self, word: &str, scratch: &mut Scratch) {
+        let mut w = Word::new(&mut scratch.chars, word);
         let pv = rv(w.chars(), is_vowel);
         let (p1, p2) = r1_r2(w.chars(), is_vowel);
         attached_pronoun(&mut w, pv);
@@ -44,7 +43,6 @@ impl Stemmer for SpanishStemmer {
                 other => other,
             };
         }
-        finish(word, w.chars())
     }
 }
 
@@ -56,7 +54,7 @@ fn is_vowel(c: char) -> bool {
 }
 
 /// Enclitic pronouns after a gerund or an infinitive in RV: `diciéndole` → `diciendo`, `comerlo` → `comer`.
-fn attached_pronoun(w: &mut Word, pv: usize) {
+fn attached_pronoun(w: &mut Word<'_>, pv: usize) {
     const PRONOUNS: &[&str] = &[
         "me", "se", "sela", "selo", "selas", "selos", "la", "le", "lo", "las", "les", "los", "nos",
     ];
@@ -163,14 +161,14 @@ const STANDARD: &[(&str, Standard)] = &[
 ];
 
 /// Removes `suffix` if the word ends with it in R2.
-fn delete_in_r2(w: &mut Word, suffix: &str, p2: usize) {
+fn delete_in_r2(w: &mut Word<'_>, suffix: &str, p2: usize) {
     if let Some(start) = w.ends_with(suffix).filter(|&s| s >= p2) {
         w.truncate(start);
     }
 }
 
 /// Removes the longest of `suffixes` the word ends with, if it is in R2; returns which one it removed.
-fn delete_longest_in_r2<'a>(w: &mut Word, suffixes: &[&'a str], p2: usize) -> Option<&'a str> {
+fn delete_longest_in_r2<'a>(w: &mut Word<'_>, suffixes: &[&'a str], p2: usize) -> Option<&'a str> {
     let (suffix, start) = w.longest_suffix(w.len(), suffixes, 0)?;
     (start >= p2).then(|| {
         w.truncate(start);
@@ -179,7 +177,7 @@ fn delete_longest_in_r2<'a>(w: &mut Word, suffixes: &[&'a str], p2: usize) -> Op
 }
 
 /// Noun and adjective suffixes; returns whether one was removed.
-fn standard_suffix(w: &mut Word, p1: usize, p2: usize) -> bool {
+fn standard_suffix(w: &mut Word<'_>, p1: usize, p2: usize) -> bool {
     let Some((rule, start)) = w.longest_rule(STANDARD, 0) else {
         return false;
     };
@@ -223,7 +221,7 @@ fn standard_suffix(w: &mut Word, p1: usize, p2: usize) -> bool {
 }
 
 /// Verb forms beginning with `y` in RV after a `u`; returns whether one was removed.
-fn y_verb_suffix(w: &mut Word, pv: usize) -> bool {
+fn y_verb_suffix(w: &mut Word<'_>, pv: usize) -> bool {
     const SUFFIXES: &[&str] = &[
         "ya", "ye", "yan", "yen", "yeron", "yendo", "yo", "yó", "yas", "yes", "yais", "yamos",
     ];
@@ -344,7 +342,7 @@ const VERB: &[(&str, Verb)] = &[
 ];
 
 /// Other verb suffixes in RV.
-fn verb_suffix(w: &mut Word, pv: usize) {
+fn verb_suffix(w: &mut Word<'_>, pv: usize) {
     let Some((rule, start)) = w.longest_rule(VERB, pv) else {
         return;
     };
@@ -358,7 +356,7 @@ fn verb_suffix(w: &mut Word, pv: usize) {
 }
 
 /// A final vowel or `-os` in RV; after `-e`, also a `u` in RV after a `g`.
-fn residual_suffix(w: &mut Word, pv: usize) {
+fn residual_suffix(w: &mut Word<'_>, pv: usize) {
     let Some((suffix, start)) =
         w.longest_suffix(w.len(), &["os", "a", "o", "á", "í", "ó", "e", "é"], 0)
     else {
