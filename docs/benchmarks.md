@@ -59,3 +59,14 @@ After 4.4.12 (stemmers and folding work in `Scratch` buffers):
 | Recorded | `fold/ascii` | `fold/spanish` | `fold/non_ascii_unfoldable` |
 |---|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 154 M | 22.8 M | 20.5 M |
+
+## `persia-engine` segment building
+
+`cargo bench -p persia-engine --bench segment`: 2 000 synthetic documents (an 8-word `title` with positions, a 120-word
+`body`, a `keyword`, an `f64`; Zipf-like vocabulary of 5 000 words, fixed seed). `add` is `SegmentBuilder::add` for all
+of them (validation, CBOR row, analysis, accumulation); `finish` is `SegmentWriter::finish` on the built segment.
+Documents per second:
+
+| Recorded | `segment/add` | `segment/finish` |
+|---|--:|--:|
+| 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
