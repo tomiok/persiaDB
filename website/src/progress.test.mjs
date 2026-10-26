@@ -40,3 +40,35 @@ test('parseProgress matches the summary and the milestone rows', () => {
 test('a truncated PROGRESS.md fails closed', () => {
 	assert.throws(() => parseProgress('# no table\n'), /summary line/);
 });
+
+test('post-MVP milestone rows stay out of the MVP snapshot', () => {
+	const text = `# Persia DB — Progress
+
+**1/2 leaves done (50%)** · 0 in progress · \`█\` · last snapshot: 2026-10-26
+
+## Milestones
+
+| Milestone | State | Progress | Done | Doing | Leaves | Deps |
+|---|---|---|--:|--:|--:|---|
+| **M0** Bootstrap | ✅ done | \`█\` 100% | 1 | 0 | 1 | — |
+| **M15** Release | ⏳ blocked | \`░\` 0% | 0 | 0 | 1 | M0 |
+
+## Post-MVP
+
+| Milestone | State | Progress | Done | Doing | Leaves | Deps |
+|---|---|---|--:|--:|--:|---|
+| **M16** Embedded SDKs (v1.1) | ⏳ blocked | \`░\` 0% | 0 | 0 | 18 | M15 |
+`;
+	const parsed = parseProgress(text);
+	assert.deepEqual(
+		parsed.milestones.map((ms) => ms.id),
+		['M0', 'M15'],
+	);
+	assert.equal(parsed.done, 1);
+	assert.equal(parsed.total, 2);
+	assert.equal(parsed.inProgress, 0);
+	assert.equal(
+		parsed.milestones.some((ms) => ms.id === 'M16'),
+		false,
+	);
+});

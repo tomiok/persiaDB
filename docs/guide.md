@@ -108,7 +108,7 @@ A few more words that show up in the roadmap and in contributor docs
 | Term | Meaning |
 |---|---|
 | **Leaf** | One ROADMAP checkbox. One leaf is one issue and one pull request. |
-| **Milestone** | `M0` through `M15`. A milestone starts only after the milestones it depends on are done, unless the roadmap says otherwise. |
+| **Milestone** | `M0` through `M15` are the MVP (v1.0). `M16` and later are post-MVP and name a target version. A milestone starts only after the milestones it depends on are done, unless the roadmap says otherwise. |
 | **ADR** | An architecture decision record in [`docs/adr/`](./adr/). The SPEC says what the system does; an ADR says why. |
 | **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback). |
 
@@ -709,7 +709,7 @@ behind a flag.
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
 automation. These are network clients. In-process Go and TypeScript bindings are ADR-0018 and
-[`docs/sdk/`](./sdk/README.md), blocked on M10, with no roadmap leaves yet.
+[`docs/sdk/`](./sdk/README.md). The checkboxes are ROADMAP M16 (target v1.1), blocked on v1.0.
 
 ### M15 — Benchmarks, hardening, v1.0
 
@@ -718,6 +718,8 @@ a regression gate, SIMD and other work driven by profiles, soak and chaos tests,
 and the format 1.0 freeze: open questions closed as ADRs, golden fixtures for every released
 version, a documentation site (embedded, server, cloud, Kubernetes, relaxation tuning, operations),
 and the `v1.0.0` release. This guide is source material for that later site (ROADMAP 15.5.4).
+
+M0–M15 are the MVP. Milestones M16–M30 are post-MVP (v1.1 through v3.0) and are listed in [`ROADMAP.md`](../ROADMAP.md) and on the website milestones page. The progress percentage counts M0–M15 only. In short: v1.1 is embedded SDKs, highlighting, autocomplete, and import (M16–M19); v1.2 is encryption at rest and the Python SDK (M20–M21); v2.0 is multi-tenant mode, Persia Cloud, CDC connectors, and the web dashboard (M22–M25), with multi-tenant before the hosted service because that service is one file per tenant; v2.1–v2.3 are UI components, AI search, and on-device builds (M26–M28); v3.0 is geo and enterprise (M29–M30).
 
 ## Contributing
 

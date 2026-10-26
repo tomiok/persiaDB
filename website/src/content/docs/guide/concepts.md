@@ -27,7 +27,7 @@ A few more words that show up in the roadmap and in contributor docs
 | Term | Meaning |
 |---|---|
 | **Leaf** | One ROADMAP checkbox. One leaf is one issue and one pull request. |
-| **Milestone** | `M0` through `M15`. A milestone starts only after the milestones it depends on are done, unless the roadmap says otherwise. |
+| **Milestone** | `M0` through `M15` are the MVP (v1.0). `M16` and later are post-MVP and name a target version. A milestone starts only after the milestones it depends on are done, unless the roadmap says otherwise. |
 | **ADR** | An architecture decision record in [`docs/adr/`](https://github.com/tomiok/persiaDB/blob/main/docs/adr/). The SPEC says what the system does; an ADR says why. |
 | **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback). |
 

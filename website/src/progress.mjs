@@ -101,7 +101,10 @@ export function parseProgress(text) {
 	const milestones = [];
 	const row =
 		/^\| \*\*(M\d+)\*\* ([^|]+?) \| [^|]*\b(done|in progress|ready|blocked) \| [^|]*\| (\d+) \| (\d+) \| (\d+) \| ([^|]+?) \|$/gm;
-	for (const match of text.matchAll(row)) {
+	// The headline and the first table are M0–M15. A second table under Post-MVP uses the same
+	// row shape; summing it would disagree with the MVP summary line.
+	const mvpText = text.split(/^## Post-MVP$/m)[0];
+	for (const match of mvpText.matchAll(row)) {
 		const id = match[1];
 		const state = /** @type {Milestone['state']} */ (match[3]);
 		if (milestones.some((ms) => ms.id === id)) {
