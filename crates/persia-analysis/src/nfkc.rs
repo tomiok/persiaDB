@@ -2,15 +2,16 @@
 
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfkc_quick};
 
-use crate::token::{Token, TokenFilter};
+use crate::token::TokenFilter;
+use crate::token_stream::TokenStream;
 
 /// Replaces each token's text by its Unicode NFKC normalization (SPEC §6.3.2): compatibility characters become
 /// their plain forms, so `ﬁ`, full-width `Ａ` and `²` match `fi`, `A` and `2`.
 ///
 /// ```
-/// use persia_analysis::{NfkcFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
+/// use persia_analysis::{TokenStream, NfkcFilter, TokenFilter, Tokenizer, WhitespaceTokenizer};
 ///
-/// let mut tokens = Vec::new();
+/// let mut tokens = TokenStream::new();
 /// WhitespaceTokenizer.tokenize("ﬁle Ｗｉｆｉ x²", &mut tokens);
 /// NfkcFilter.apply(&mut tokens);
 /// let texts: Vec<&str> = tokens.iter().map(|t| t.text.as_str()).collect();
@@ -20,14 +21,15 @@ use crate::token::{Token, TokenFilter};
 pub struct NfkcFilter;
 
 impl TokenFilter for NfkcFilter {
-    fn apply(&self, tokens: &mut Vec<Token>) {
-        for token in tokens.iter_mut() {
-            // Most text is already NFKC (all of ASCII is): skip the allocation when the quick check can tell.
-            if is_nfkc_quick(token.text.chars()) != IsNormalized::Yes {
-                token.text = token.text.nfkc().collect();
+    fn apply(&self, tokens: &mut TokenStream) {
+        // Most text is already NFKC (all of ASCII is): nothing is written when the quick check can tell. NFKC never
+        // maps a non-empty string to an empty one, but `rewrite` removes emptied tokens anyway (the filter contract).
+        tokens.rewrite(|text, out| {
+            if is_nfkc_quick(text.chars()) == IsNormalized::Yes {
+                return false;
             }
-        }
-        // NFKC never maps a non-empty string to an empty one, but the filter contract does not rely on it.
-        tokens.retain(|token| !token.text.is_empty());
+            out.extend(text.nfkc());
+            out != text
+        });
     }
 }

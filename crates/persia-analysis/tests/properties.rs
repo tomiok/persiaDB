@@ -4,8 +4,8 @@
 use std::num::NonZeroUsize;
 
 use persia_analysis::{
-    KeywordTokenizer, LengthPolicy, StandardTokenizer, Token, TokenLengthGuard, Tokenizer,
-    WhitespaceTokenizer,
+    KeywordTokenizer, LengthPolicy, StandardTokenizer, Token, TokenLengthGuard, TokenStream,
+    Tokenizer, WhitespaceTokenizer,
 };
 use proptest::prelude::*;
 
@@ -24,9 +24,9 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn tokens_of(tokenizer: &dyn Tokenizer, text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     tokenizer.tokenize(text, &mut tokens);
-    tokens
+    tokens.into_vec()
 }
 
 /// Spans are valid, non-empty, increasing and non-overlapping; texts equal their spans; positions count from 0.
@@ -87,7 +87,7 @@ proptest! {
         let original = tokens_of(&WhitespaceTokenizer, &text);
         let policy = if drop { LengthPolicy::Drop } else { LengthPolicy::Truncate };
         let guard = TokenLengthGuard::new(NonZeroUsize::new(max).unwrap(), policy);
-        let mut tokens = original.clone();
+        let mut tokens = TokenStream::from(original.clone());
         guard.apply(&mut tokens);
 
         let mut kept = tokens.iter().peekable();

@@ -7,8 +7,8 @@ use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::{
-    KeywordTokenizer, LengthPolicy, StandardTokenizer, Token, TokenLengthGuard, Tokenizer,
-    WhitespaceTokenizer,
+    KeywordTokenizer, LengthPolicy, StandardTokenizer, Token, TokenLengthGuard, TokenStream,
+    Tokenizer, WhitespaceTokenizer,
 };
 
 fn check(text: &str, tokens: &[Token]) {
@@ -41,7 +41,7 @@ fuzz_target!(|data: &[u8]| {
     let tokenizers: [&dyn Tokenizer; 3] =
         [&StandardTokenizer, &WhitespaceTokenizer, &KeywordTokenizer];
     for tokenizer in tokenizers {
-        let mut tokens = Vec::new();
+        let mut tokens = TokenStream::new();
         tokenizer.tokenize(text, &mut tokens);
         check(text, &tokens);
         let mut guarded = tokens.clone();

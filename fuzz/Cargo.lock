@@ -109,6 +109,7 @@ dependencies = [
 name = "persia-analysis"
 version = "0.0.0"
 dependencies = [
+ "thiserror",
  "unicode-normalization",
  "unicode-segmentation",
 ]

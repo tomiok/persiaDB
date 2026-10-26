@@ -531,6 +531,7 @@ dependencies = [
 name = "persia-analysis"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "proptest",
  "thiserror",
  "unicode-normalization",

@@ -62,6 +62,11 @@ jobs:
       # Fast suite only (< 2 min, CLAUDE.md); `--features slow` runs nightly (ROADMAP 0.2.3.1).
       # Feature-gated code still compiles in the lint job's `clippy --all-features`.
       - run: cargo test --workspace
+      # ADR-0025: a dependency or toolchain change that moves a built-in analyzer's output must fail its PR, not a
+      # nightly run after the merge. Seconds in release (only persia-analysis is built).
+      - name: Analyzer fingerprints
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo test -p persia-analysis --release --features slow --test unicode_fingerprints
 
   test-windows:
     # ROADMAP 2.3.9: the `cfg(windows)` code of persia-storage (positioned I/O, reserved names, the writer lock,

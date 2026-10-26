@@ -1,9 +1,9 @@
 //! Standard (UAX #29) tokenizer: a table of tricky inputs (ROADMAP 4.1.1.3, SPEC §6.3.1).
 
-use persia_analysis::{StandardTokenizer, Token, Tokenizer};
+use persia_analysis::{StandardTokenizer, Token, TokenStream, Tokenizer};
 
 fn words(text: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     StandardTokenizer.tokenize(text, &mut tokens);
     tokens.into_iter().map(|t| t.text).collect()
 }
@@ -86,7 +86,7 @@ fn tricky_inputs() {
 #[test]
 fn offsets_and_positions() {
     let text = "¿Qué tal, señor?";
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     StandardTokenizer.tokenize(text, &mut tokens);
     let expected = [
         Token {
@@ -116,7 +116,7 @@ fn offsets_and_positions() {
 
 #[test]
 fn appends_and_restarts_positions() {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     StandardTokenizer.tokenize("one two", &mut tokens);
     StandardTokenizer.tokenize("three", &mut tokens);
     let got: Vec<(&str, u32)> = tokens

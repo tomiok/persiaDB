@@ -106,14 +106,14 @@ The schema sketch in SPEC §6.2, illustrative:
 ```
 
 Analyzers are a pipeline: character filters, then a tokenizer, then token filters (SPEC §6.3).
-Built-ins planned for the first cut (ROADMAP 4.4.2) are `standard` (Unicode word boundaries, NFKC,
+Built-ins implemented (ROADMAP 4.4.2) are `standard` (Unicode word boundaries, NFKC,
 lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, and `pt` (stopwords, a
 Snowball-style stemmer, accent folding). SPEC §6.3 also names `fr`, `de`, and `it`; whether those
 three ship in v1 is open (SPEC §18.7). Positions, used for phrases, are opt-in per field
 (SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
 
-Text analysis depends only on the finished bootstrap milestone, so it can start in parallel with the
-rest of the format work (ROADMAP M4). It has not started.
+Those pipelines live in `persia-analysis`. Leaves still open in that milestone are listed in
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Nothing here searches.
 
 ## Durability
 

@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 
 use persia_analysis::{
     DEFAULT_SYNONYM_EXPANSIONS, EdgeNgramFilter, FoldingFilter, LowercaseFilter, NfkcFilter,
-    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, Tokenizer,
+    StandardTokenizer, StopwordFilter, SynonymMap, Token, TokenFilter, TokenStream, Tokenizer,
     WhitespaceTokenizer,
 };
 use proptest::prelude::*;
@@ -26,14 +26,15 @@ fn text() -> impl Strategy<Value = String> {
 }
 
 fn whitespace_tokens(text: &str) -> Vec<Token> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     WhitespaceTokenizer.tokenize(text, &mut tokens);
-    tokens
+    tokens.into_vec()
 }
 
-fn filtered(filter: &dyn TokenFilter, mut tokens: Vec<Token>) -> Vec<Token> {
+fn filtered(filter: &dyn TokenFilter, tokens: Vec<Token>) -> Vec<Token> {
+    let mut tokens = TokenStream::from(tokens);
     filter.apply(&mut tokens);
-    tokens
+    tokens.into_vec()
 }
 
 fn texts(tokens: &[Token]) -> Vec<&str> {
@@ -166,11 +167,11 @@ proptest! {
         query in "[a-c]{1,2}( [a-c]{1,2}){0,10}",
     ) {
         let analyze = |text: &str| {
-            let mut tokens = Vec::new();
+            let mut tokens = TokenStream::new();
             StandardTokenizer.tokenize(text, &mut tokens);
             tokens
         };
-        let map = SynonymMap::new(groups.iter().map(|g| g.iter().map(|t| analyze(t)).collect::<Vec<_>>()));
+        let map = SynonymMap::new(groups.iter().map(|g| g.iter().map(|t| analyze(t).into_vec()).collect::<Vec<_>>()));
         let tokens = analyze(&query);
         let mut previous_end = 0;
         for m in map.find(&tokens) {

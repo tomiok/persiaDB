@@ -1,9 +1,9 @@
 //! Whitespace and keyword tokenizers (ROADMAP 4.1.2, SPEC §6.3.1).
 
-use persia_analysis::{KeywordTokenizer, Token, Tokenizer, WhitespaceTokenizer};
+use persia_analysis::{KeywordTokenizer, Token, TokenStream, Tokenizer, WhitespaceTokenizer};
 
 fn run(tokenizer: &dyn Tokenizer, text: &str) -> Vec<(String, usize, usize, u32)> {
-    let mut tokens = Vec::new();
+    let mut tokens = TokenStream::new();
     tokenizer.tokenize(text, &mut tokens);
     tokens
         .into_iter()

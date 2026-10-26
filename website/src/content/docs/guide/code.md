@@ -1,11 +1,11 @@
 ---
 title: "Code"
-description: "What persia-format actually exports today, with links to the source. The embedded Db API is still a stub."
+description: "What the Persia DB crates export today, with links to the source. The embedded Db API does not exist yet."
 ---
 
 This page quotes code that is on `main`. It does not describe a database you can open.
-`persia-format` is the only crate with an implementation. The others document the job they will
-do and stop there. The `Db::open` sketch on the [embedded API](/guide/embedded-api/) page is
+`persia-format` is the on-disk codec crate. `persia-storage`, `persia-engine`, and `persia-analysis` also export library code, summarized below.
+`persia` does not. The `Db::open` sketch on the [embedded API](/guide/embedded-api/) page is
 illustrative: those methods are not in the tree.
 
 ## Crate layout
@@ -16,20 +16,21 @@ What each file says about itself:
 
 | Crate | Source | What the file says | In the tree |
 |---|---|---|---|
-| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, and frames (encode, decode, scan). The streaming frame encoder (1.7.5) is not written yet. |
+| `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, frames (including the streaming encoder), mmap, `BlobId`, and `BlobRef`. |
 | `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
-| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | Module docs only. |
-| `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | Module docs only. |
-| `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Module docs only. |
+| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | `document`, `manifest`, and `schema`. No segment writer and no query. |
+| `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | The trait, memory, local file, and the single-file container. No S3, GCS, or Azure. |
+| `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` stemmers, and built-in analyzers. |
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | Module docs only. |
 
-`persia-server` and `persia-cli` are empty `main` functions. `persia-proto` is a stub library.
+`persia-server` is an empty `main`. `persia-cli` lists and sweeps temporary and quarantine files; it does not search. `persia-proto` is a stub library.
 The public modules and re-exports of `persia-format` are the list in
-[lib.rs lines 10–34](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs#L10-L34):
+[lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs):
 
 ```rust
 pub mod align;
 pub mod bitpack;
+pub mod blob;
 pub mod block;
 pub mod checksum;
 pub mod checksummed;
@@ -40,18 +41,22 @@ pub mod for_codec;
 pub mod frame;
 pub mod hash;
 pub mod header;
+pub mod mmap;
 pub mod offset;
 pub mod postings;
 pub mod reader;
+pub mod source;
 pub mod superblock;
 pub mod varint;
 pub mod writer;
 pub mod zigzag;
 
 pub use align::ALIGNMENT;
-pub use error::{Corruption, EncodeError, Error, Result, Unsupported};
+pub use blob::{BlobId, BlobRef};
+pub use error::{Corruption, EncodeError, Error, Result, SuperblockField, Unsupported};
 pub use offset::{Len, Offset};
 pub use reader::Reader;
+pub use source::ByteSource;
 pub use writer::Writer;
 ```
 
@@ -135,7 +140,7 @@ pub struct Checksummed<T>(pub T);
 `encode` writes the fields, checksums every byte except the CRC field, and fills that field in.
 `decode` checks the CRC before it interprets the fields
 ([checksummed.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/checksummed.rs#L42-L168)).
-Frames are variable-length and do not use this helper. The frame scanner is roadmap 1.7.
+Frames are variable-length and do not use this helper. Encode, decode, and scan live in `frame.rs`.
 
 ## Block codecs
 

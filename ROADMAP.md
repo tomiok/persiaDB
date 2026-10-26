@@ -285,14 +285,15 @@ Deps: M0. (Parallel with M2/M3.)
 - [x] 4.4.1 `Analyzer` = char filters → tokenizer → token filters; builder + registry by name+version
 - [x] 4.4.2 Built-ins: `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`; SPEC §6.3 lists each one's full chain, its length guard and its folding preserved set (e.g. whether `es` keeps `ñ`, found in the PR #17 review), and whether `en` maps `’` to `'` before stemming (the English stemmer knows only U+0027, found in 4.3)
 - [x] 4.4.3 Analyzer identity/versioning recorded in schema (SPEC §6.3); the schema remembers whether a definition named a version, so evolution binds an unversioned `analyzer` to the current field's version (SPEC §6.2.4)
-- [ ] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
-- [ ] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
-- [ ] 4.4.6 Unicode version bumps (found in the 4.1 review): moving `persia_analysis::UNICODE_VERSION` (unicode-segmentation or toolchain update) bumps the version of every built-in analyzer whose output changes, with a test listing which ones (SPEC §6.3.1)
-- [ ] 4.4.7 Char-filter offset mapping (found in the PR #15 review): a char filter that changes the text records an offset map, and the analyzer maps token spans back to the original field value (SPEC §6.3.1); property: spans stay on char boundaries of the original value, strictly increasing
+- [x] 4.4.4 Zero-allocation fast path (reuse buffers via `TokenStream`)
+- [x] 4.4.5 Benchmark: tokens/sec per analyzer; fuzz: arbitrary UTF-8 never panics
+- [x] 4.4.6 Unicode version bumps (found in the 4.1 review): moving `persia_analysis::UNICODE_VERSION` (unicode-segmentation or toolchain update) bumps the version of every built-in analyzer whose output changes, with a test listing which ones (SPEC §6.3.1)
+- [x] 4.4.7 Char-filter offset mapping (found in the PR #15 review): a char filter that changes the text records an offset map, and the analyzer maps token spans back to the original field value (SPEC §6.3.1); property: spans stay on char boundaries of the original value, their starts and ends never decrease (not strictly increasing: one replacement can yield several tokens, SPEC §6.3.1)
 - [x] 4.4.8 Query-time analysis for fields whose analyzer stacks tokens (found in the 4.2 review): with `edge_ngram`, queries and synonym terms (SPEC §6.3.2) are analyzed without it, or `SynonymMap::find` never matches stacked prefixes; define the query-time analyzer in SPEC §6.3
-- [ ] 4.4.9 Folding fast path (found in the 4.2 review): `FoldingFilter` allocates for every non-ASCII token even when nothing folds; pre-scan for foldable characters, measured by the 4.4.5 benchmark
-- [ ] 4.4.10 Built-in `fr`, `de`, `it` analyzers (found in the PR #17 review): SPEC §6.3 lists them but 4.2.4, 4.3 and 4.4.2 plan only `en`, `es`, `pt`; add their stopword lists and stemmers, or scope them out of §6.3
-- [ ] 4.4.11 Unsupported analyzer versions (found in the 4.4 review): a stored schema naming an analyzer version this build lacks (written by a newer build, e.g. `es@2`) is reported as `Corrupt` by the manifest decoder; give it a distinct "unsupported" error class, like an unknown format feature (SPEC §6.2.2, §15)
+- [x] 4.4.9 Folding fast path (found in the 4.2 review): `FoldingFilter` allocates for every non-ASCII token even when nothing folds; pre-scan for foldable characters, measured by the 4.4.5 benchmark
+- [x] 4.4.10 Built-in `fr`, `de`, `it` analyzers (found in the PR #17 review): SPEC §6.3 lists them but 4.2.4, 4.3 and 4.4.2 plan only `en`, `es`, `pt`; add their stopword lists and stemmers, or scope them out of §6.3
+- [x] 4.4.11 Unsupported analyzer versions (found in the 4.4 review): a stored schema naming an analyzer version this build lacks (written by a newer build, e.g. `es@2`) is reported as `Corrupt` by the manifest decoder; give it a distinct "unsupported" error class, like an unknown format feature (SPEC §6.2.2, §15)
+- [ ] 4.4.12 Allocation-free stemming and folding (found in the 4.4 batch B review): `StemmerFilter` allocates a `Vec<char>` and the stem for every word it stems, `FoldingFilter` a run buffer for every token it folds; give stemmers a reusable buffer (e.g. `Stemmer::stem_into(&str, &mut String)`), measured by the 4.4.5 benchmark and checked by an allocation test (needs an allocation counter: a dev-only crate such as `dhat`, or an ADR for an `unsafe` counting allocator in tests)
 
 ---
 
@@ -1011,8 +1012,9 @@ A UI on `persia-server`: what is indexed, what a query did, and which queries ca
 
 ## 25.3 Relevance
 - [ ] 25.3.1 Edit field boosts, synonyms, and relaxation defaults inside the evolution rules (SPEC §6.2.4)
-- [ ] 25.3.2 Query rules: pin an id, hide an id, or rewrite the query text. SPEC says where the rules are stored and that they run before scoring. Any on-disk change follows the format discipline
-- [ ] 25.3.3 [T] A pin puts that id first, a hide removes it, and a synonym edit changes the next search. Rules do not drop filters (SPEC §7.6)
+- [ ] 25.3.2 ADR and SPEC: where a pin, a hide, or a query rewrite is stored, and when those rules run relative to scoring. They do not drop filters (SPEC §7.6). Any on-disk change follows the format discipline
+- [ ] 25.3.3 The dashboard edits those rules only after 25.3.2, and it does not invent a second layout
+- [ ] 25.3.4 [T] A pin puts that id first, a hide removes it, and a synonym edit changes the next search. The behavior is the one 25.3.2 specified. Rules do not drop filters (SPEC §7.6)
 
 ## 25.4 Analytics
 - [ ] 25.4.1 Record the query text, the hit count, and the relaxation level. The zero-result list is the queries that stayed empty, including after the cascade
@@ -1123,7 +1125,7 @@ Per-document access control, an audit log, SSO, and an on-prem bundle. Tenant is
 ## 30.1 Document access control
 - [ ] 30.1.1 ADR and SPEC: allow and deny principals stored on the document. The request cannot turn the query-time filter off. Embedded mode with no principal stays open, as SPEC §12.3 says, unless the caller passes one
 - [ ] 30.1.2 The filter runs for every search, including relaxed levels (SPEC §7.6). A forbidden id never appears in hits, facets, or suggestions
-- [ ] 30.1.3 [T] Two principals and two documents. A query whose text matches both returns one. With access control on and no principal, nothing matches
+- [ ] 30.1.3 [T] Two principals and two documents. A query whose text matches both returns one. A server request with access control on and no principal matches nothing. Embedded mode with no principal stays open (SPEC §12.3, 30.1.1)
 
 ## 30.2 Audit log
 - [ ] 30.2.1 An append-only log of who did what, to which tenant and collection, and when. A hash chain makes a flipped byte detectable. This log is not the WAL, and compaction does not drop it

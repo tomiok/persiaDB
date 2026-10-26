@@ -12,6 +12,7 @@ unicode-normalization.workspace = true
 unicode-segmentation.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 proptest.workspace = true
 
 [features]
@@ -20,3 +21,7 @@ slow = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "analyzers"
+harness = false

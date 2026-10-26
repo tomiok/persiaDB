@@ -7,11 +7,13 @@ on:
   pull_request:
     paths:
       - 'website/**'
+      - 'PROGRESS.md'
       - '.github/workflows/website.yml'
   push:
     branches: [main]
     paths:
       - 'website/**'
+      - 'PROGRESS.md'
       - '.github/workflows/website.yml'
   workflow_dispatch:
 

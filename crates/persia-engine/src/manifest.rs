@@ -282,7 +282,8 @@ impl Manifest {
     ///
     /// # Errors
     /// [`ManifestError::Corrupt`] if `bytes` break any rule of SPEC §8.7, [`ManifestError::UnsupportedVersion`]
-    /// for an encoding version this build does not read.
+    /// for an encoding version this build does not read, [`ManifestError::UnsupportedAnalyzer`] for a schema naming an
+    /// analyzer version it does not have.
     pub fn decode(bytes: &[u8]) -> Result<Self, ManifestError> {
         codec::decode(bytes)
     }

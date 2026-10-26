@@ -4,6 +4,7 @@ import starlight from '@astrojs/starlight';
 import { satteri } from '@astrojs/markdown-satteri';
 import starlightLlmsTxt from 'starlight-llms-txt';
 import { base, llmsTxtUrl, origin, persiaLlmsTxt, summary } from './src/llms-index.mjs';
+import { progressMarkdownPlugin } from './src/progress-plugin.mjs';
 
 // GitHub Pages project site: https://tomiok.github.io/persiaDB/
 // `site` is the origin; `base` is the repository path (Astro's GitHub Pages guide).
@@ -43,6 +44,7 @@ function withBase(url) {
 
 /** @type {import('@astrojs/markdown-satteri').SatteriProcessorOptions['mdastPlugins']} */
 const prefixBaseLinks = [
+    progressMarkdownPlugin,
     {
         name: 'persia-prefix-base',
         link(node, context) {

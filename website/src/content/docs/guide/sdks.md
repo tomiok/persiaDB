@@ -39,8 +39,8 @@ One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second sear
 
 Prebuilt binaries are how a caller builds without Rust: a checksummed `libpersia.a` for Go, and
 per-platform optional npm dependencies for Node. Until format v1.0 there is no compatibility promise
-(SPEC §15). The first binding release follows a core tag that says the format is unstable
-(ROADMAP 10.5.2).
+(SPEC §15). The first binding release follows the v1.0 tag (M15, then M16). ROADMAP 10.5.2's
+`v0.1.0-alpha` tag is the core's notice that the format is still unstable; it is not the binding cut.
 
 ## The call, once it exists
 

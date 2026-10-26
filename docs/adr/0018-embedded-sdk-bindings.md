@@ -67,12 +67,13 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
 8. **Documents and queries cross the boundary as UTF-8 JSON**, in the shapes SPEC §6.2, §6.4, and §7.1
    already sketch. Go structs and TypeScript values are serialized by the language package. The Rust
    `put_struct` path (ROADMAP 10.1.4) stays inside the Rust crate; the FFI does not grow generics.
-9. **Nothing is published before the core has a release.** The first binding release follows a core tag that
-   itself says the format is unstable (ROADMAP 10.5.2). Until format v1.0 there is no compatibility promise
-   across core versions (SPEC §15), and the ABI major may break on each pre-1.0 release. Three numbers stay
-   distinct: file format, C ABI, language-package semver. See [`docs/sdk/distribution.md`](../sdk/distribution.md).
-10. **No ROADMAP leaves in this decision.** M14 stays the network clients. Binding implementation leaves are
-    added when M10.1 has a Rust API to wrap, as their own leaves, not by renaming 14.3.
+9. **Nothing is published before the core has a release.** The first binding release follows the v1.0 tag
+   (ROADMAP M15, then M16). ROADMAP 10.5.2's `v0.1.0-alpha` tag says the format is unstable; that tag is the
+   core's notice, not the binding cut. Until format v1.0 there is no compatibility promise across core
+   versions (SPEC §15), and the ABI major may break on each pre-1.0 release. Three numbers stay distinct:
+   file format, C ABI, language-package semver. See [`docs/sdk/distribution.md`](../sdk/distribution.md).
+10. **Binding leaves are M16.** M14 stays the network clients. The browser and edge package is M28, after a
+    portable `Storage` backend. This decision does not restate those leaves.
 
 `persia-ffi`, when it is added, depends only on `persia`. That edge is recorded in `ALLOWED`
 (`xtask/src/check_deps.rs`) in the same pull request as the crate. `sdk/node` stays **outside** the Cargo
@@ -90,8 +91,8 @@ workspace so napi's build script does not enter a workspace that forbids `build.
   container already has (`enable_mapped_reads` is opt-in; pread is the default, ADR-0017).
 - The C ABI will need `unsafe` and, later, cbindgen on the allowed list. Both are justified here so the
   implementation PR only has to add them, not re-argue them.
-- TypeScript in the browser is explicitly out of the first release. Edge and browser hosts need a storage
-  backend the roadmap does not contain yet.
+- TypeScript in the browser is explicitly out of the first release. Edge and browser hosts need the
+  portable storage backend M28 builds.
 - SPEC §1.1 and §13 now distinguish the two SDK products. The embedded API they wrap still does not exist.
 
 ## Alternatives considered

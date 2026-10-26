@@ -154,3 +154,10 @@ path = "fuzz_targets/filters.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "analyzers"
+path = "fuzz_targets/analyzers.rs"
+test = false
+doc = false
+bench = false

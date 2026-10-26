@@ -68,10 +68,16 @@ impl Milestone {
             .unwrap_or((self.title.as_str(), ""));
         let mut out = head.replace('"', "'");
         if let Some(target) = rest.strip_prefix("target:") {
-            let target = target.split(')').next().unwrap_or(target).trim();
+            // Mermaid node labels are double-quoted, so a quote in the target would break the graph.
+            let target = target
+                .split(')')
+                .next()
+                .unwrap_or(target)
+                .trim()
+                .replace('"', "'");
             if !target.is_empty() {
                 out.push_str(" (");
-                out.push_str(target);
+                out.push_str(&target);
                 out.push(')');
             }
         }
@@ -494,6 +500,19 @@ fn totals<'a>(milestones: impl IntoIterator<Item = &'a Milestone>) -> (usize, us
     (done, doing, total)
 }
 
+fn doing_lines(milestones: &[Milestone], want: impl Fn(&Milestone) -> bool) -> Vec<String> {
+    milestones
+        .iter()
+        .filter(|ms| want(ms))
+        .flat_map(|ms| {
+            ms.leaves
+                .iter()
+                .filter(|leaf| leaf.status == Status::Doing)
+                .map(move |leaf| format!("- `{}` {} ({})", leaf.id, leaf.text, ms.key))
+        })
+        .collect()
+}
+
 fn milestone_table_row(ms: &Milestone, state: State) -> String {
     let (d, g, t) = (
         ms.count(Status::Done),
@@ -567,7 +586,7 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         out.insert(
             5,
             format!(
-                "MVP (M0–M{MVP_LAST}): the counts above. Post-MVP: **{post_done}/{post_total} leaves done ({})** · {post_doing} in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up.",
+                "MVP (M0–M{MVP_LAST}): the counts above. Post-MVP: **{post_done}/{post_total} leaves done ({})** · {post_doing} in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.",
                 pct(post_done, post_total)
             ),
         );
@@ -613,7 +632,7 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
                 "",
                 "## Post-MVP",
                 "",
-                "Not included in the headline, the graph, the ready-next list, or the burn-up.",
+                "Not included in the headline, the graph, the ready-next list, or the burn-up. In-progress leaves are listed here, not in the MVP list.",
                 "",
                 "| Milestone | State | Progress | Done | Doing | Leaves | Deps |",
                 "|---|---|---|--:|--:|--:|---|",
@@ -623,6 +642,12 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         for ms in milestones.iter().filter(|ms| !is_mvp(ms)) {
             out.push(milestone_table_row(ms, state_of(ms)));
         }
+        out.extend(["", "### In progress (post-MVP)", ""].map(String::from));
+        let post_doing_leaves = doing_lines(milestones, |ms| !is_mvp(ms));
+        if post_doing_leaves.is_empty() {
+            out.push("_Nothing in progress._".into());
+        }
+        out.extend(post_doing_leaves);
         out.extend(["", "### Ready (post-MVP)", ""].map(String::from));
         let post_ready: Vec<String> = milestones
             .iter()
@@ -646,16 +671,19 @@ pub(crate) fn render(milestones: &[Milestone], history: &[Snapshot]) -> String {
         }
     }
 
-    out.extend(["", "## In progress", ""].map(String::from));
-    let doing_leaves: Vec<String> = milestones
-        .iter()
-        .flat_map(|ms| {
-            ms.leaves
-                .iter()
-                .filter(|l| l.status == Status::Doing)
-                .map(move |l| format!("- `{}` {} ({})", l.id, l.text, ms.key))
-        })
-        .collect();
+    out.extend(
+        [
+            "",
+            if post_total == 0 {
+                "## In progress"
+            } else {
+                "## In progress (MVP)"
+            },
+            "",
+        ]
+        .map(String::from),
+    );
+    let doing_leaves = doing_lines(milestones, is_mvp);
     if doing_leaves.is_empty() {
         out.push("_Nothing in progress._".into());
     }
@@ -1084,5 +1112,44 @@ Deps: M15.
         let graph = graph.split("```").next().unwrap();
         assert!(graph.contains("M15"), "{graph}");
         assert!(!graph.contains("M16"), "{graph}");
+    }
+
+    #[test]
+    fn short_title_escapes_quotes_in_the_version_target() {
+        let text = "\
+# M1 — Later (target: v1.1 \"x\")
+Deps: none.
+- [ ] 1.1 Leaf
+";
+        let ms = parse_roadmap(text).unwrap();
+        assert_eq!(ms[0].short_title(), "Later (v1.1 'x')");
+        let out = render(&ms, &[]);
+        let graph = out.split("```mermaid").nth(1).unwrap();
+        let graph = graph.split("```").next().unwrap();
+        assert!(graph.contains("Later (v1.1 'x')"), "{graph}");
+        assert!(!graph.contains("\"x\""), "{graph}");
+    }
+
+    #[test]
+    fn post_mvp_doing_leaves_stay_out_of_the_mvp_in_progress_list() {
+        let text = "\
+# M0 — Bootstrap
+Deps: none.
+- [~] 0.1 Mvp doing
+
+# M16 — Later (target: v1.1)
+Deps: M0.
+- [~] 16.1 Post doing
+";
+        let ms = parse_roadmap(text).unwrap();
+        let out = render(&ms, &[]);
+        let mvp = out.split("## In progress (MVP)").nth(1).unwrap();
+        let mvp = mvp.split("## Ready next").next().unwrap();
+        assert!(mvp.contains("`0.1`"), "{mvp}");
+        assert!(!mvp.contains("`16.1`"), "{mvp}");
+        let post = out.split("### In progress (post-MVP)").nth(1).unwrap();
+        let post = post.split("### Ready (post-MVP)").next().unwrap();
+        assert!(post.contains("`16.1`"), "{post}");
+        assert!(!post.contains("`0.1`"), "{post}");
     }
 }

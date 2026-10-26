@@ -372,10 +372,11 @@ through `pread`.
 
 ## Build
 
-Everyday install, once a release exists:
+Everyday install, once a release exists. The module tag follows the core `v1.0.0` tag (M15, then M16.4),
+not `v0.1.0-alpha` (ROADMAP 10.5.2, the core's notice that the format is still unstable):
 
 ```bash
-go get github.com/tomiok/persiaDB/sdk/persia@v0.1.0-alpha
+go get github.com/tomiok/persiaDB/sdk/persia@v1.0.0
 ```
 
 `go build` needs cgo (`CGO_ENABLED=1`) and a C linker. It does not need Rust, because the module

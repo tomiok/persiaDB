@@ -23,7 +23,7 @@ head:
             "name": "What is Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. Format primitives are done (milestone M1). The storage trait, the memory and local-file backends, and the single-file container are done (M2). Collection schema types are started in persia-engine (M3, in progress). The public persia crate exports no Db and no Collection. Nothing indexes a document or runs a query. Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
+              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. persia-format implements the on-disk codecs. persia-storage implements the Storage trait, memory and local-file backends, and the single-file container. persia-engine implements collection schema, documents, and manifest types. persia-analysis implements tokenizers and built-in analyzers. None of that indexes a document into a segment or runs a query. The public persia crate exports no Db and no Collection. Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
             }
           },
           {
@@ -31,7 +31,7 @@ head:
             "name": "Is Persia DB production ready?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.\n\nPROGRESS.md recorded 130 of 431 roadmap leaves done (30%) on 2026-10-19. That file is the live counter; a number on this page is only that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
+              "text": "No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.\n\nPROGRESS.md is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
             }
           },
           {
@@ -102,9 +102,9 @@ head:
       }
 ---
 
-Persia DB is pre-alpha. These answers describe the repository as of the
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) snapshot on 2026-10-19:
-130 of 431 roadmap leaves done (30%). That file is the live counter.
+Persia DB is pre-alpha. These answers describe the repository as of
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md):
+%%PROGRESS_SUMMARY%%. That file is the live counter.
 [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) wins if a page disagrees with it.
 Planned work is marked as planned. Nothing here is a benchmark.
 
@@ -112,7 +112,7 @@ Planned work is marked as planned. Nothing here is a benchmark.
 
 Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md). When this site and the SPEC disagree, the SPEC wins.
 
-What the repository contains today is library code, not a search you can call. Format primitives are done (milestone M1). The storage trait, the memory and local-file backends, and the single-file container are done (M2). Collection schema types are started in `persia-engine` (M3, in progress). The public `persia` crate exports no `Db` and no `Collection`. Nothing indexes a document or runs a query. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+What the repository contains today is library code, not a search you can call. `persia-format` implements the on-disk codecs. `persia-storage` implements the `Storage` trait, memory and local-file backends, and the single-file container. `persia-engine` implements collection schema, documents, and manifest types. `persia-analysis` implements tokenizers and built-in analyzers. None of that indexes a document into a segment or runs a query. The public `persia` crate exports no `Db` and no `Collection`. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
 What an embedded search database is, and how embedded full-text search in Rust fits this design, is [What is an embedded search database?](/guide/embedded-search/).
 
@@ -120,7 +120,7 @@ What an embedded search database is, and how embedded full-text search in Rust f
 
 No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.
 
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) recorded 130 of 431 roadmap leaves done (30%) on 2026-10-19. That file is the live counter; a number on this page is only that snapshot. For a search feature in production today, use an existing engine. The [comparison page](/guide/comparison/) says which one fits which job, and it is not a benchmark.
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The [comparison page](/guide/comparison/) says which one fits which job, and it is not a benchmark.
 
 ## How is Persia DB different from SQLite FTS5, Tantivy, and Meilisearch?
 
