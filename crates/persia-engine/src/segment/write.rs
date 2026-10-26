@@ -1,6 +1,6 @@
 //! Turns a [`SegmentBuilder`] into the bytes of one segment (SPEC §5.1, §5.3, ROADMAP 5.2).
 
-mod columns;
+pub(super) mod columns;
 mod store;
 mod terms;
 

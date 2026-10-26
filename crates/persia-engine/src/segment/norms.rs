@@ -21,7 +21,6 @@ pub(crate) fn encode(len: u32) -> u8 {
     u8::try_from(code).unwrap_or(u8::MAX)
 }
 
-#[allow(dead_code, reason = "the segment reader decodes norms (ROADMAP 5.3.5)")]
 /// The length a norm byte stands for: the smallest length that encodes to it.
 pub(crate) fn decode(norm: u8) -> u32 {
     let code = u32::from(norm);
@@ -41,7 +40,6 @@ fn int4(x: u32) -> u32 {
     ((x >> shift) & 0x07) | (shift.saturating_add(1) << 3)
 }
 
-#[allow(dead_code, reason = "see `decode`")]
 fn from_int4(c: u32) -> u32 {
     let bits = c & 0x07;
     match (c >> 3).checked_sub(1) {

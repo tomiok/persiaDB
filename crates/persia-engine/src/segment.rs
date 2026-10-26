@@ -27,10 +27,15 @@ mod arena;
 mod builder;
 mod kind;
 mod norms;
+mod read;
 mod write;
 
 pub use builder::{MAX_DOCS, POSITION_GAP, SegmentBuilder};
 pub use kind::{SEGMENT_FIELD, SectionKind};
+pub use read::{
+    BlockMax, BoolColumn, FieldStats, KeywordColumn, Norms, NumericColumn, Postings, ReadError,
+    Segment, SegmentCorruption, TermIndex, TermInfo, TermStream, Tombstones, UnsupportedSegment,
+};
 pub use write::{
     FOOTER_MAGIC, FORMAT_MAJOR, FORMAT_MINOR, MAX_FOOTER_LEN, SegmentMeta, SegmentWriter,
     WriteOptions,
