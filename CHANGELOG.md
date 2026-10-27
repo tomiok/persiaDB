@@ -172,6 +172,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine`: `Postings::positions` decodes only the current document's positions (ROADMAP 5.3.13), reading its
+  block's positions run forward and skipping the packed groups of documents passed over by their width byte, instead
+  of decoding the whole run. Memory now follows one document's term frequency, and the 2^26-positions-per-block limit
+  (a resource error beyond it) is gone.
 - `persia-engine` (breaking): `NumericColumn` and `KeywordColumn` borrow their segment (`NumericColumn<'s>`,
   `KeywordColumn<'s>`) and read numeric keys and keyword ords from their FOR blocks on demand, through the block cache,
   instead of decoding a whole column (8 bytes per document) when opened (ROADMAP 5.3.12). Opening one decodes its

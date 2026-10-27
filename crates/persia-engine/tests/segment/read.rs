@@ -1187,3 +1187,56 @@ fn a_small_cache_stays_within_capacity_and_reads_the_same() {
         assert!(cache.stats().bytes <= capacity);
     }
 }
+
+/// `(doc, positions)` of `term` in field `title`, for the documents `want` picks; the others are passed over.
+fn positions_of(
+    seg: &Segment,
+    schema: &CollectionSchema,
+    term: &str,
+    want: impl Fn(u32) -> bool,
+) -> Vec<(u32, Vec<u32>)> {
+    let terms = seg.terms(id(schema, "title")).unwrap();
+    let info = terms.clone().get(term.as_bytes()).unwrap().unwrap();
+    let mut postings = terms.postings(&info).unwrap();
+    let mut out = Vec::new();
+    while let Some(d) = postings.next().unwrap() {
+        if want(d) {
+            let first = postings.positions().unwrap().to_vec();
+            assert_eq!(postings.positions().unwrap(), first, "asked twice");
+            out.push((d, first));
+        }
+    }
+    out
+}
+
+#[test]
+fn positions_are_read_per_document() {
+    // "alpha" is in every document 2 to 8 times: each block's run has several packed groups and a varint tail.
+    let (schema, _, bytes) = dense(3000);
+    let seg = open(&schema, &bytes).unwrap();
+    let all = positions_of(&seg, &schema, "alpha", |_| true);
+    assert_eq!(all.len(), 3000);
+    for (d, p) in &all {
+        let k = (d % 4 + 1) * 3;
+        let want: Vec<u32> = (0..k).filter(|i| i % 3 != 1).collect();
+        assert_eq!(p, &want, "doc {d}");
+    }
+    for stride in [2, 7, 50, 127, 128, 129, 1000] {
+        let sparse = positions_of(&seg, &schema, "alpha", |d| d % stride == stride - 1);
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|(d, _)| d % stride == stride - 1)
+            .cloned()
+            .collect();
+        assert_eq!(sparse, expected, "stride {stride}");
+    }
+    // Advancing skips whole postings blocks; positions still line up with the document.
+    let terms = seg.terms(id(&schema, "title")).unwrap();
+    let info = terms.clone().get(b"alpha").unwrap().unwrap();
+    let mut postings = terms.postings(&info).unwrap();
+    for target in [5, 300, 301, 2999] {
+        let d = postings.advance(target).unwrap().unwrap();
+        assert_eq!(postings.positions().unwrap(), all[d as usize].1, "doc {d}");
+    }
+    seg.verify().unwrap();
+}
