@@ -385,13 +385,14 @@ fn position_deltas(
 mod tests {
     use super::*;
 
-    /// `run_len` is what `write_run` appends: around the group boundary, at width 0 and 32, and with 5-byte varints.
+    /// `run_len` is what `write_run` appends: around the group boundary, at width 0 (`fill` 0 zeroes every value) and
+    /// 32, and with 5-byte varints.
     #[test]
     fn run_len_matches_write_run() {
         for len in [0, 1, 127, 128, 129, 256, 300] {
             for fill in [0, 1, 300, u32::MAX] {
                 let values: Vec<u32> = (0..len)
-                    .map(|i| if i % 3 == 0 { fill } else { i })
+                    .map(|i| if fill == 0 || i % 3 == 0 { fill } else { i })
                     .collect();
                 let mut w = Writer::new();
                 write_run(&values, &mut w).unwrap();

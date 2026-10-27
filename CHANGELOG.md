@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-format`: `postings::block_len` and `postings::tail_len` give the length of a postings block's encoding
+  without encoding it, and `BlockWriter::drain_output_into` moves the encoded blocks into a `Writer` without
+  allocating a buffer per call (ROADMAP 5.1.7).
 - `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
   block-framed section through an LRU cache of decoded blocks, bounded in bytes, which several segments may share
   (`BlockCache::DEFAULT_CAPACITY`, 8 MiB, for all the segments opened with `Segment::open`, ROADMAP 5.3.15). Term
@@ -183,12 +186,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   generated into the output. Its documentation states the memory a flush needs beyond the builder, for the flush
   threshold of M6; on a 20 000-document segment of 9.6 MB the heap peak above the builder (counting both buffers of
   each reallocation) drops from 43.0 MB to 21.0 MB (`tests/flush_memory.rs`, a counting allocator, ADR-0026).
-  `finish` runs about as fast as before (`segment/finish`: 99.0 K documents/s against 100.3 K, measured together;
-  96.2 K when the lists were encoded twice). Output is byte for byte the same.
-- `persia-format`: `Writer::clear` empties a writer and keeps its buffer. `postings::block_len` and
-  `postings::tail_len` give the length of a postings block's encoding without encoding it, and
-  `BlockWriter::drain_output_into` moves the encoded blocks into a `Writer` without allocating a buffer per call
-  (ROADMAP 5.1.7).
+  `segment/finish`, single runs measured together: 99.0 K documents/s, against 100.3 K before 5.1.6 and 96.2 K when
+  the lists were encoded twice. Output is byte for byte the same.
+- `persia-format`: `Writer::clear` empties a writer and keeps its buffer.
 - `persia-engine` (breaking: new `SegmentError::TermTooLong` variant): a `text` field's tokens are limited to
   `MAX_TERM_LEN` (32 KiB, the `keyword` value limit) whatever the analyzer (ROADMAP 5.4.5, SPEC §5.3.1):
   `SegmentBuilder::add` rejects a document whose analyzer yields a longer token with `SegmentError::TermTooLong`, and
