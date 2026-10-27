@@ -512,7 +512,7 @@ impl<'a> BlockTable<'a> {
     /// `16 + block_size` bytes long for a table [`BlockTable::open`] validated. Under [`BlockReader::reopen`] of bytes
     /// other than those validated it may be any range: reading it stays in bounds and never panics, and a range that
     /// does not fit or a block that fails its CRC is an error, but a change to the table's own CRC or trailer alone is
-    /// not detected (only [`BlockReader::open`] checks them).
+    /// not detected (only [`BlockTable::open`] checks them, and [`BlockReader::open`], which calls it).
     ///
     /// # Errors
     /// [`Error::OutOfBounds`] if `index >= block_count`.

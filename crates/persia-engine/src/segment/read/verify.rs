@@ -94,9 +94,10 @@ impl Segment {
         Ok(())
     }
 
-    /// Validates every block table again in full and checks it against the one open kept for lookups (they differ
-    /// if the bytes changed since, ROADMAP 5.3.10), decodes every block (each checks its CRC), and recomputes every
-    /// raw section's CRC.
+    /// Validates every block table again in full (its CRC and every block end) and compares its geometry (section
+    /// length, stream length, block size and count) with what open kept for lookups (ROADMAP 5.3.10); decodes every
+    /// block (each checks its CRC); recomputes every raw section's CRC. A change since open that keeps the geometry
+    /// is caught by those CRCs, not by the comparison.
     fn verify_checksums(&self) -> Result<(), ReadError> {
         let mut buf = Vec::new();
         for section in &self.footer.sections {
