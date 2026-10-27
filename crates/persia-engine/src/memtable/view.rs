@@ -1,17 +1,18 @@
 //! A point-in-time view of a memtable, searchable like a segment (ROADMAP 6.1.2).
 
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 use super::{Inner, MemField, NONE, read};
 use crate::document::Document;
-use crate::schema::{FieldId, FieldType};
+use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::segment::{BlockMax, FieldStats, ReadError};
-use crate::view::{PostingsIterator, SearchView};
+use crate::view::{NormReader, PostingsIterator, SearchView};
 
 /// What the memtable knew of an id when a view was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdState {
-    /// Its latest operation was a `put`: the live document has this docid.
+    /// Its latest operation was a `put`: the live document has this docid, and older segments' versions of the id
+    /// are hidden (an upsert, SPEC §8.3).
     Live(u32),
     /// Its latest operation was a `delete`: no version of it is live, in the memtable or in older segments
     /// (SPEC §8.3).
@@ -25,6 +26,7 @@ pub enum IdState {
 #[derive(Debug, Clone)]
 pub struct MemtableView {
     shared: Arc<RwLock<Inner>>,
+    schema: Arc<CollectionSchema>,
     /// Documents `0..docs` existed.
     docs: u32,
     /// Operations `1..=version` were applied.
@@ -32,6 +34,8 @@ pub struct MemtableView {
     /// Live statistics by field id, as of `version`.
     stats: Vec<Option<FieldStats>>,
     live: u32,
+    /// Norms by field id, copied out on first use.
+    norms: Vec<OnceLock<Arc<[u8]>>>,
 }
 
 impl MemtableView {
@@ -41,6 +45,8 @@ impl MemtableView {
             version: inner.version(),
             stats: inner.stats.clone(),
             live: inner.live,
+            norms: inner.fields.iter().map(|_| OnceLock::new()).collect(),
+            schema: Arc::clone(&inner.schema),
             shared,
         }
     }
@@ -115,6 +121,8 @@ fn indexed<'i>(
 }
 
 impl SearchView for MemtableView {
+    type Norms<'a> = MemtableNorms;
+
     type Postings<'a>
         = MemtablePostings<'a>
     where
@@ -192,14 +200,23 @@ impl SearchView for MemtableView {
         }))
     }
 
-    fn norm(&self, field: FieldId, docid: u32) -> Result<u8, ReadError> {
-        let inner = read(&self.shared);
-        match indexed(&inner, field, true, "norms")? {
-            MemField::Text { norms, .. } if docid < self.docs => {
-                Ok(norms.get(docid as usize).copied().unwrap_or(0))
-            }
-            _ => Ok(0),
+    fn norms(&self, field: FieldId) -> Result<MemtableNorms, ReadError> {
+        let slot = usize::try_from(field.get())
+            .ok()
+            .and_then(|i| self.norms.get(i));
+        if let Some(norms) = slot.and_then(OnceLock::get) {
+            return Ok(MemtableNorms(Arc::clone(norms)));
         }
+        let inner = read(&self.shared);
+        let copied: Arc<[u8]> = match indexed(&inner, field, true, "norms")? {
+            MemField::Text { norms, .. } => norms.get(..self.docs as usize).unwrap_or(norms).into(),
+            _ => Arc::from([]),
+        };
+        drop(inner);
+        Ok(MemtableNorms(match slot {
+            Some(cell) => Arc::clone(cell.get_or_init(|| copied)),
+            None => copied,
+        }))
     }
 
     fn document(&self, docid: u32) -> Result<Document, ReadError> {
@@ -209,19 +226,22 @@ impl SearchView for MemtableView {
                 doc_count: self.docs,
             });
         }
-        let inner = read(&self.shared);
-        let i = docid as usize;
-        let start = i
-            .checked_sub(1)
-            .and_then(|p| inner.doc_ends.get(p))
-            .copied()
-            .unwrap_or(0);
-        let end = inner.doc_ends.get(i).copied().unwrap_or(start);
-        let bytes = inner.docs.get(start..end).unwrap_or_default();
-        let mut doc = Document::decode(bytes, &inner.schema)
+        // Copy the encoding out; decode without the lock.
+        let bytes = {
+            let inner = read(&self.shared);
+            let i = docid as usize;
+            let start = i
+                .checked_sub(1)
+                .and_then(|p| inner.doc_ends.get(p))
+                .copied()
+                .unwrap_or(0);
+            let end = inner.doc_ends.get(i).copied().unwrap_or(start);
+            inner.docs.get(start..end).unwrap_or_default().to_vec()
+        };
+        let mut doc = Document::decode(&bytes, &self.schema)
             .map_err(|source| ReadError::Document { docid, source })?;
         // As a segment's `DocStore` row: stored fields only (SPEC §6.4.2).
-        for field in inner.schema.fields() {
+        for field in self.schema.fields() {
             if !field.kind().stored() {
                 doc.remove(field.id());
             }
@@ -336,5 +356,15 @@ impl PostingsIterator for MemtablePostings<'_> {
 
     fn shallow_advance(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError> {
         Ok((self.block.last_docid >= target).then_some(self.block))
+    }
+}
+
+/// The norms of one `text` field of a [`MemtableView`], as of the view; shared by every reader of that view.
+#[derive(Debug, Clone)]
+pub struct MemtableNorms(Arc<[u8]>);
+
+impl NormReader for MemtableNorms {
+    fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
+        Ok(self.0.get(docid as usize).copied().unwrap_or(0))
     }
 }

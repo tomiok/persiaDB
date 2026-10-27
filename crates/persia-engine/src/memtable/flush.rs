@@ -1,7 +1,8 @@
 //! When a memtable is flushed into a segment (SPEC §8.2 step 3, ROADMAP 6.1.4).
 //!
 //! A pure decision over the memtable's size and the time of its last write; the caller passes the clock's `now`, so
-//! tests need no sleeps and the engine one clock.
+//! tests need no sleeps and the engine one clock. Writes that never pause for `idle` and stay under the size are
+//! flushed by the auto-commit interval (SPEC §8.2 step 3, ROADMAP 6.3.4), not here.
 
 use std::time::{Duration, Instant};
 

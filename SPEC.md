@@ -1181,6 +1181,8 @@ Rules:
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Fsync | Async` (default `Fsync` at commit).
 2. Op applied to the **memtable** (visible to searches).
 3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object).
+   Writes that never pause for 10 s and stay under the size are flushed by the auto-commit interval (§14
+   `commit_interval`, ROADMAP 6.3.4), which bounds the WAL that recovery replays.
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
 5. WAL chunks fully covered by committed segments are dropped (`wal_start` advances).
 

@@ -8,7 +8,7 @@
 
 use crate::document::Document;
 use crate::schema::FieldId;
-use crate::segment::{BlockMax, FieldStats, Postings, ReadError, Segment, Tombstones};
+use crate::segment::{BlockMax, FieldStats, NormsCursor, Postings, ReadError, Segment, Tombstones};
 
 /// The documents of one term, in docid order, with their frequencies and positions; the interface of
 /// [`Postings`].
@@ -59,17 +59,39 @@ pub trait PostingsIterator {
     fn shallow_advance(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError>;
 }
 
+/// The norm bytes of one `text` field (SPEC §5.3.4), by docid.
+pub trait NormReader {
+    /// The norm byte of `docid`; 0 for a document without tokens in the field (or a docid past the source).
+    ///
+    /// # Errors
+    /// A corruption of the source.
+    fn get(&mut self, docid: u32) -> Result<u8, ReadError>;
+}
+
+impl NormReader for NormsCursor<'_> {
+    fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
+        NormsCursor::get(self, docid)
+    }
+}
+
 /// A searchable set of documents with docids `0..doc_count()`: a segment, or the memtable.
 pub trait SearchView {
+    /// The norms reader of this view.
+    type Norms<'a>: NormReader
+    where
+        Self: 'a;
+
     /// The posting-list iterator of this view.
     type Postings<'a>: PostingsIterator
     where
         Self: 'a;
 
-    /// Every docid is below this; deleted documents included.
+    /// Every docid is below this; deleted documents included (a memtable's replaced versions too), so not the
+    /// BM25 document count, which the collection statistics give (ROADMAP 7.2.1).
     fn doc_count(&self) -> u32;
 
-    /// Whether `docid` is a document a search may return: below [`Self::doc_count`] and not deleted.
+    /// Whether `docid` is a document a search may return: below [`Self::doc_count`] and not deleted. Postings
+    /// already leave deleted documents out; this is for documents reached otherwise (a filter, a sort).
     fn is_live(&self, docid: u32) -> bool;
 
     /// The statistics of a `text` or `keyword` field (SPEC §5.1); `None` for another type or a field the source
@@ -77,8 +99,9 @@ pub trait SearchView {
     /// what the segment it flushes to will count.
     fn field_stats(&self, field: FieldId) -> Option<FieldStats>;
 
-    /// The postings of `term` in a `text` or `keyword` field, deleted documents left out; `None` if no live
-    /// document has the term.
+    /// The postings of `term` in a `text` or `keyword` field, deleted documents left out. `None` when the source
+    /// has no such term; a segment whose tombstones delete every document of a term still gives an iterator, which
+    /// yields none.
     ///
     /// # Errors
     /// [`ReadError::UnknownField`] or [`ReadError::FieldType`] for a field that is not a `text` or `keyword` field
@@ -89,11 +112,12 @@ pub trait SearchView {
         term: &[u8],
     ) -> Result<Option<Self::Postings<'_>>, ReadError>;
 
-    /// The norm byte of `docid` in a `text` field (SPEC §5.3.4); 0 for a document without tokens in it.
+    /// The norms of a `text` field (SPEC §5.3.4), for scoring each candidate document: a reader that keeps what it
+    /// read (a segment's [`NormsCursor`]; the memtable's norms as of the view, copied once per view and field).
     ///
     /// # Errors
-    /// As [`Self::postings`], for a field that is not `text`.
-    fn norm(&self, field: FieldId, docid: u32) -> Result<u8, ReadError>;
+    /// As [`Self::postings`], for a field that is not `text`; a corruption of the source.
+    fn norms(&self, field: FieldId) -> Result<Self::Norms<'_>, ReadError>;
 
     /// Document `docid` as stored: its id, blob reference and stored fields (SPEC §6.4.2).
     ///
@@ -190,6 +214,11 @@ impl<'s> SegmentView<'s> {
 }
 
 impl SearchView for SegmentView<'_> {
+    type Norms<'a>
+        = NormsCursor<'a>
+    where
+        Self: 'a;
+
     type Postings<'a>
         = Postings<'a>
     where
@@ -219,8 +248,8 @@ impl SearchView for SegmentView<'_> {
         }))
     }
 
-    fn norm(&self, field: FieldId, docid: u32) -> Result<u8, ReadError> {
-        self.segment.norms(field)?.get(docid)
+    fn norms(&self, field: FieldId) -> Result<NormsCursor<'_>, ReadError> {
+        Ok(self.segment.norms(field)?.cursor())
     }
 
     fn document(&self, docid: u32) -> Result<Document, ReadError> {

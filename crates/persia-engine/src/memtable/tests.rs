@@ -1,4 +1,5 @@
 use persia_analysis::{Analyzer, WhitespaceTokenizer};
+use proptest::prelude::*;
 
 use super::*;
 use crate::schema::{FieldId, SchemaBuilder, TextOptions};
@@ -74,4 +75,87 @@ fn a_document_failing_mid_index_leaves_nothing() {
     assert_eq!(view.docid_of("bad").unwrap(), Some(1));
     let stats = view.field_stats(t).unwrap();
     assert_eq!((stats.docs_with_field, stats.sum_field_len), (2, 3));
+}
+
+#[derive(Debug, Clone)]
+enum Step {
+    Put(u8, Vec<u8>),
+    /// A put whose `u` value ends with a token over [`MAX_TERM_LEN`] bytes, after new and known terms in `t`.
+    Bad(u8, Vec<u8>),
+    Delete(u8),
+}
+
+const WORDS: [&str; 4] = ["a", "b", "c", "fresh"];
+
+fn words(w: &[u8]) -> String {
+    let w: Vec<&str> = w
+        .iter()
+        .filter_map(|&i| WORDS.get(usize::from(i)).copied())
+        .collect();
+    w.join(" ")
+}
+
+proptest! {
+    /// Failed puts mixed with upserts and deletes leave the memtable as if they never came.
+    #[test]
+    fn failed_puts_change_nothing(steps in prop::collection::vec(
+        prop_oneof![
+            (0..5_u8, prop::collection::vec(0..4_u8, 0..4)).prop_map(|(i, w)| Step::Put(i, w)),
+            (0..7_u8, prop::collection::vec(0..4_u8, 0..4)).prop_map(|(i, w)| Step::Bad(i, w)),
+            (0..5_u8).prop_map(Step::Delete),
+        ],
+        0..24,
+    )) {
+        let (mut mem, t, u) = unguarded();
+        let (mut clean, _, _) = unguarded();
+        let long = "q".repeat(MAX_TERM_LEN + 1);
+        let mut views = Vec::new();
+        for step in &steps {
+            match step {
+                Step::Put(i, w) => {
+                    let doc = Document::new(format!("d{i}"))
+                        .with(t, Value::String(words(w)))
+                        .with(u, Value::String(words(w)));
+                    prop_assert_eq!(mem.put(&doc), clean.put(&doc));
+                }
+                Step::Bad(i, w) => {
+                    let doc = Document::new(format!("d{i}"))
+                        .with(t, Value::String(format!("{} fresh", words(w))))
+                        .with(u, Value::String(format!("{} {long}", words(w))));
+                    let rejected = matches!(
+                        mem.put(&doc),
+                        Err(MemtableError::Segment(SegmentError::TermTooLong { .. }))
+                    );
+                    prop_assert!(rejected);
+                }
+                Step::Delete(i) => {
+                    let id = format!("d{i}");
+                    prop_assert_eq!(mem.delete(&id), clean.delete(&id));
+                }
+            }
+            views.push((mem.view(), clean.view()));
+        }
+        for (a, b) in &views {
+            prop_assert_eq!(a.version(), b.version());
+            prop_assert_eq!(a.doc_count(), b.doc_count());
+            for field in [t, u] {
+                prop_assert_eq!(a.field_stats(field), b.field_stats(field));
+                for term in WORDS.iter().map(|w| w.as_bytes()).chain([long.as_bytes()]) {
+                    prop_assert_eq!(docs(a, field, term), docs(b, field, term));
+                }
+            }
+            for i in 0..7 {
+                let id = format!("d{i}");
+                prop_assert_eq!(a.lookup(&id), b.lookup(&id));
+            }
+        }
+        let (a, b) = (read(&mem.shared), read(&clean.shared));
+        prop_assert_eq!(a.ids.len(), b.ids.len());
+        for (x, y) in a.fields.iter().zip(&b.fields) {
+            let (x, y) = (x.index().unwrap(), y.index().unwrap());
+            prop_assert_eq!(x.inverted.terms.len(), y.inverted.terms.len());
+            prop_assert_eq!(&x.heads, &y.heads);
+            prop_assert_eq!(&x.next, &y.next);
+        }
+    }
 }

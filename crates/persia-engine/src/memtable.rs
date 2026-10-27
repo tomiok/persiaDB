@@ -49,7 +49,7 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
 
 pub use flush::{FlushPolicy, FlushReason};
-pub use view::{IdState, MemtablePostings, MemtableView};
+pub use view::{IdState, MemtableNorms, MemtablePostings, MemtableView};
 
 use crate::document::{Document, DocumentError, FieldSet, MAX_ID_LEN, Value};
 use crate::schema::{CollectionSchema, FieldKind};
@@ -80,7 +80,7 @@ pub enum MemtableError {
 /// The writer of a memtable: applies `put` and `delete` (SPEC §8.1) one at a time and hands out [`MemtableView`]s.
 #[derive(Debug)]
 pub struct Memtable {
-    schema: CollectionSchema,
+    schema: Arc<CollectionSchema>,
     shared: Arc<RwLock<Inner>>,
     tokens: TokenStream,
     occurrences: Vec<(u32, u32)>,
@@ -89,7 +89,7 @@ pub struct Memtable {
 /// What a memtable holds; shared with its views.
 #[derive(Debug)]
 pub(crate) struct Inner {
-    pub(crate) schema: CollectionSchema,
+    pub(crate) schema: Arc<CollectionSchema>,
     /// Indexed by field id.
     pub(crate) fields: Vec<MemField>,
     /// The `FieldSet::All` encoding of each document, by docid: what the flush indexes, and `get` decodes.
@@ -258,8 +258,9 @@ impl Memtable {
             fields.push(memfield);
             stats.push(stat);
         }
+        let schema = Arc::new(schema.clone());
         let inner = Inner {
-            schema: schema.clone(),
+            schema: Arc::clone(&schema),
             fields,
             docs: Vec::new(),
             doc_ends: Vec::new(),
@@ -271,7 +272,7 @@ impl Memtable {
             live: 0,
         };
         Ok(Self {
-            schema: schema.clone(),
+            schema,
             shared: Arc::new(RwLock::new(inner)),
             tokens: TokenStream::new(),
             occurrences: Vec::new(),
@@ -301,16 +302,15 @@ impl Memtable {
             .encode(&inner.schema, FieldSet::All)
             .map_err(SegmentError::from)?;
         let marks = inner.marks();
-        let ids = inner.ids.len();
-        let result = inner.intern(doc.id()).and_then(|id| {
-            inner
-                .index(docid, doc, &mut self.tokens, &mut self.occurrences)
-                .map(|()| id)
-        });
-        let id = match result.and_then(|id| inner.check_postings().map(|()| id)) {
+        // The id is interned last: undoing it would rehash every id (`Arena::truncate`).
+        let result = inner
+            .index(docid, doc, &mut self.tokens, &mut self.occurrences)
+            .and_then(|()| inner.check_postings())
+            .and_then(|()| inner.intern(doc.id()));
+        let id = match result {
             Ok(id) => id,
             Err(e) => {
-                inner.rollback(&marks, ids);
+                inner.rollback(&marks);
                 return Err(e.into());
             }
         };
@@ -375,8 +375,9 @@ impl Memtable {
     }
 }
 
-/// The read lock. A panic in a write cannot leave a view seeing half of it: views stop at the documents and
-/// versions recorded when they were taken, and a write records them last; so a poisoned lock is still read.
+/// The read lock, poisoned or not. A view taken before a write that panicked never sees any of it: it stops at the
+/// documents and versions recorded when it was taken. One taken after may see that write half applied; the writer
+/// then refuses every write ([`MemtableError::Poisoned`]) and the memtable is to be rebuilt from the WAL.
 pub(crate) fn read(lock: &RwLock<Inner>) -> RwLockReadGuard<'_, Inner> {
     lock.read().unwrap_or_else(PoisonError::into_inner)
 }
@@ -467,16 +468,13 @@ impl Inner {
             .collect()
     }
 
-    /// Undoes a document that failed before [`Self::link`]: its postings were never chained.
-    fn rollback(&mut self, marks: &[Option<Mark>], ids: usize) {
+    /// Undoes a document that failed before [`Self::link`] and before its id was interned: its postings were never
+    /// chained.
+    fn rollback(&mut self, marks: &[Option<Mark>]) {
         for (field, mark) in self.fields.iter_mut().zip(marks) {
             if let (Some(index), Some(mark)) = (field.index_mut(), mark) {
                 index.inverted.rollback(mark);
             }
-        }
-        if self.ids.len() > ids {
-            self.ids.truncate(ids);
-            self.latest.truncate(ids);
         }
     }
 

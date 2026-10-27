@@ -3,6 +3,7 @@
 #![allow(
     clippy::unwrap_used,
     clippy::unreachable,
+    clippy::panic,
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
     clippy::single_match_else,
@@ -23,7 +24,7 @@ use persia_engine::schema::{
 use persia_engine::segment::{
     MAX_TERM_LEN, ReadError, Segment, SegmentBuilder, SegmentError, SegmentMeta, SegmentWriter,
 };
-use persia_engine::view::{PostingsIterator, SearchView, SegmentView};
+use persia_engine::view::{NormReader, PostingsIterator, SearchView, SegmentView};
 use persia_format::ByteSource;
 use proptest::prelude::*;
 
@@ -236,7 +237,10 @@ fn assert_matches(schema: &CollectionSchema, f: &Fields, view: &MemtableView, mo
     for (i, &d) in (0_u32..).zip(&live) {
         let s = seg_view.as_ref().unwrap();
         for field in [f.body, f.title] {
-            assert_eq!(view.norm(field, d).unwrap(), s.norm(field, i).unwrap());
+            assert_eq!(
+                view.norms(field).unwrap().get(d).unwrap(),
+                s.norms(field).unwrap().get(i).unwrap()
+            );
         }
         assert_eq!(view.document(d).unwrap(), s.document(i).unwrap());
     }
@@ -244,7 +248,12 @@ fn assert_matches(schema: &CollectionSchema, f: &Fields, view: &MemtableView, mo
         let expected = seg_view.as_ref().and_then(|s| s.docid_of(&id).unwrap());
         assert_eq!(view.docid_of(&id).unwrap().map(to_seg), expected, "{id}");
         let state = view.lookup(&id);
-        if model.deleted.contains(&id) {
+        if let Some(seg_docid) = expected {
+            let Some(IdState::Live(d)) = state else {
+                panic!("{id} is live: {state:?}");
+            };
+            assert_eq!(to_seg(d), seg_docid);
+        } else if model.deleted.contains(&id) {
             assert_eq!(state, Some(IdState::Deleted));
         } else if expected.is_none() {
             assert_eq!(state, None);
@@ -379,13 +388,13 @@ fn field_errors_match_a_segment() {
     let mem_errors = (
         view.postings(f.n, b"1").err(),
         view.postings(unknown, b"1").err(),
-        view.norm(f.tag, 0).err(),
+        view.norms(f.tag).err(),
         view.document(1).err(),
     );
     let seg_errors = (
         seg_view.postings(f.n, b"1").err(),
         seg_view.postings(unknown, b"1").err(),
-        seg_view.norm(f.tag, 0).err(),
+        seg_view.norms(f.tag).err(),
         seg_view.document(1).err(),
     );
     assert_eq!(mem_errors, seg_errors);
@@ -435,6 +444,8 @@ fn readers_see_consistent_views_during_writes() {
     let (schema, f) = schema();
     let mut mem = memtable(&schema);
     let published = Mutex::new(mem.view());
+    // The last operation on each id: the `i` of its live version, or `None` after a delete.
+    let mut last: Vec<Option<Option<u32>>> = vec![None; 150];
     let done = AtomicBool::new(false);
     std::thread::scope(|scope| {
         let readers: Vec<_> = (0..3)
@@ -461,7 +472,9 @@ fn readers_see_consistent_views_during_writes() {
             let id = format!("d{}", i % 150);
             if i % 7 == 6 {
                 mem.delete(&id).unwrap();
+                last[(i % 150) as usize] = Some(None);
             } else {
+                last[(i % 150) as usize] = Some(Some(i));
                 let body = format!("common w{i}");
                 mem.put(&Document::new(id).with(f.body, Value::String(body)))
                     .unwrap();
@@ -475,6 +488,29 @@ fn readers_see_consistent_views_during_writes() {
         }
     });
     check_consistent(&mem.view(), &f);
+    // Only live versions keep their terms; ids whose last operation was a delete read as deleted.
+    let view = mem.view();
+    for (k, op) in last.iter().enumerate() {
+        let id = format!("d{k}");
+        match op {
+            Some(Some(_)) => {
+                let docid = view.docid_of(&id).unwrap();
+                assert!(docid.is_some(), "{id}");
+                assert_eq!(view.lookup(&id), docid.map(IdState::Live));
+            }
+            Some(None) => assert_eq!(view.lookup(&id), Some(IdState::Deleted)),
+            None => assert_eq!(view.lookup(&id), None),
+        }
+    }
+    for i in 0..2000_u32 {
+        let live = last[(i % 150) as usize] == Some(Some(i));
+        let term = format!("w{i}");
+        assert_eq!(
+            view.postings(f.body, term.as_bytes()).unwrap().is_some(),
+            live,
+            "{term}"
+        );
+    }
 }
 
 fn check_consistent(view: &MemtableView, f: &Fields) {
