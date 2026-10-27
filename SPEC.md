@@ -1515,9 +1515,11 @@ Remote readers can open the replica read-only (eventually consistent, lag expose
 Remote reads go through a **block cache** (RAM + local NVMe, LRU/ARC, keyed by `(object, block)`), with:
 range-request coalescing, readahead for sequential sections, request hedging (optional), and singleflight to
 dedup concurrent identical fetches. Segment footers and FSTs are pinned on open.
-Above it, an open segment reads every block-framed section (SPEC §5.2) through a cache of **decoded** blocks keyed by
-`(segment, section, block)`, LRU and bounded in bytes, which any number of segments may share: a block is decompressed
-and its CRC checked once while it stays cached, whatever term lookups, posting lists, columns and document fetches read it.
+Above it, an open segment reads its block-framed sections (SPEC §5.2) through a cache of **decoded** blocks keyed by
+`(segment, section, block)`, LRU and bounded in bytes, which any number of segments may share: once a block is in it,
+term lookups, posting lists, columns and document fetches reuse it without decompressing it or checking its CRC again.
+Readers that miss the same block at the same time may each decode it; one copy is kept. `Norms` does not go through it
+yet (ROADMAP 5.3.14).
 It holds no state of its own on disk.
 
 ---

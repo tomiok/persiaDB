@@ -163,6 +163,8 @@ struct ForColumn<'s> {
     /// Length of the blocks, together.
     data_len: u64,
     last: LastBlock,
+    /// Every value, decoded by [`ForColumn::preload`]; `None` reads block by block.
+    all: Option<Arc<Vec<u64>>>,
 }
 
 impl<'s> ForColumn<'s> {
@@ -197,6 +199,7 @@ impl<'s> ForColumn<'s> {
             data_at,
             data_len,
             last: LastBlock::default(),
+            all: None,
         };
         // The last block's start too: a last end at or below the one before is the ends' fault, not trailing bytes.
         if let Some(last) = blocks.checked_sub(1) {
@@ -266,6 +269,21 @@ impl<'s> ForColumn<'s> {
         })
     }
 
+    /// Decodes every value now, for a reader that jumps between blocks: [`super::Segment::verify`] checks a keyword
+    /// column against each term's postings, and terms come in byte order, not docid order. Costs 8 bytes per value.
+    fn preload(&mut self) -> Result<(), ReadError> {
+        let n = usize::try_from(self.count).unwrap_or(usize::MAX);
+        let mut all = Vec::new();
+        all.try_reserve_exact(n).map_err(|_| {
+            self.stream.error(persia_format::Error::OutOfMemory {
+                bytes: self.count.checked_mul(8),
+            })
+        })?;
+        self.get_range(0..self.count, &mut all)?;
+        self.all = Some(Arc::new(all));
+        Ok(())
+    }
+
     /// Block `b`'s values: the last block read stays decoded, so a scan decodes each block once.
     fn decoded(&self, b: u64) -> Result<Arc<Vec<u64>>, ReadError> {
         if let Some((last, values)) = &*self.last.lock()
@@ -284,6 +302,13 @@ impl<'s> ForColumn<'s> {
         if i >= self.count {
             return Err(self.bad(self.at, "a FOR value past its column"));
         }
+        if let Some(all) = &self.all {
+            let i = usize::try_from(i).unwrap_or(usize::MAX);
+            return all
+                .get(i)
+                .copied()
+                .ok_or_else(|| self.bad(self.at, "a FOR value past its column"));
+        }
         let within = usize::try_from(i % PER_BLOCK).unwrap_or(usize::MAX);
         let values = self.decoded(i / PER_BLOCK)?;
         // `with_block` checked the block holds what its place in the column says.
@@ -297,6 +322,12 @@ impl<'s> ForColumn<'s> {
     fn get_range(&self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
         if range.end > self.count {
             return Err(self.bad(self.at, "a FOR value past its column"));
+        }
+        if let Some(all) = &self.all {
+            let from = usize::try_from(range.start).unwrap_or(usize::MAX);
+            let to = usize::try_from(range.end).unwrap_or(usize::MAX);
+            out.extend_from_slice(all.get(from..to).unwrap_or_default());
+            return Ok(());
         }
         let mut i = range.start;
         while i < range.end {
@@ -506,7 +537,7 @@ impl<'s> KeywordColumn<'s> {
             return Err(p.bad(at, "starts_off"));
         }
         let docs = u64::from(doc_count);
-        let starts = ForColumn::open(&mut p, docs.saturating_add(1), strict)?;
+        let mut starts = ForColumn::open(&mut p, docs.saturating_add(1), strict)?;
         if p.at != ords_off {
             return Err(p.bad(at, "ords_off"));
         }
@@ -514,8 +545,13 @@ impl<'s> KeywordColumn<'s> {
         if starts.get(0)? != 0 {
             return Err(starts.bad(starts.at, "keyword starts that decrease"));
         }
-        let ords = ForColumn::open(&mut p, ord_count, strict)?;
+        let mut ords = ForColumn::open(&mut p, ord_count, strict)?;
         p.finish()?;
+        if strict {
+            // `verify` reads a document's ords once per posting, in term order: decode them once.
+            starts.preload()?;
+            ords.preload()?;
+        }
         let column = Self {
             values,
             value_ends,
@@ -581,9 +617,17 @@ impl<'s> KeywordColumn<'s> {
         let end = starts.get(doc.saturating_add(1))?;
         // A document's ords are distinct values of the dictionary: at most `len` of them.
         if first > end || end > ords.count || end.saturating_sub(first) > self.len() {
-            return Err(starts.bad(starts.at, "keyword starts that decrease"));
+            return Err(starts.bad(starts.at, "keyword starts that decrease, pass the ords, or span more ords than the dictionary holds",
+            ));
         }
         let mut out = Vec::new();
+        // At most `len` values (checked above), but the dictionary may be large: fail cleanly rather than abort.
+        let n = usize::try_from(end.saturating_sub(first)).unwrap_or(usize::MAX);
+        out.try_reserve_exact(n).map_err(|_| {
+            ords.stream.error(persia_format::Error::OutOfMemory {
+                bytes: end.saturating_sub(first).checked_mul(8),
+            })
+        })?;
         ords.get_range(first..end, &mut out)?;
         let increasing = out.windows(2).all(|o| matches!(o, [x, y] if x < y));
         if !increasing || out.last().is_some_and(|&o| o >= self.len()) {

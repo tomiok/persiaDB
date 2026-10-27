@@ -13,8 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   block-framed section through an LRU cache of decoded blocks, bounded in bytes (`BlockCache::DEFAULT_CAPACITY`, 8 MiB,
   per segment opened with `Segment::open`), which several segments may share. Term lookups, posting lists and document
   fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
-  misses. A dropped segment's blocks leave the cache. On the `segment_read` benchmarks: postings with frequencies 6.3x,
-  positions 13x, `advance` 4.3x, document fetches 2.4x and `id_of` lookups 5.6x faster. The default budget is per
+  misses. A dropped segment's blocks leave the cache. On the `segment_read` benchmarks: postings with frequencies 6.4x,
+  positions 13.5x, `advance` 4.4x, document fetches 2.6x, term lookups 1.3x and `id_of` lookups 5.8x faster when
+  blocks are re-read (docs/benchmarks.md, rows measured together). The default budget is per
   segment (the record cache it replaces kept 8 blocks), so a process that opens many segments should share one cache.
 - `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
   validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
@@ -33,7 +34,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; sections that hold nothing;
   and column values no document can hold (a NaN, infinite or `-0.0` `f64`, a `datetime` out of range, ROADMAP 5.4.4).
   Not checked: stored `text` values against the postings (that needs re-analysis). It decodes every block; it reads
-  numeric keys and keyword ords from their FOR blocks as it checks them, so its memory grows with the segment size only.
+  numeric keys from their FOR blocks as it checks them, and decodes each keyword column's starts and ords once (8
+  bytes per document and per ord), so its memory grows with the segment size times the number of keyword fields.
   `Segment::sections` lists the section table with each block-framed section's stream size.
 - `persia-engine`: the segment reader (SPEC §5, ROADMAP 5.3). `Segment::open` checks the footer, section table, padding,
   section presence, every block table and raw CRC, and the schema hash at the field count the segment records, so a
@@ -183,8 +185,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   instead of decoding a whole column (8 bytes per document) when opened (ROADMAP 5.3.12). Opening one decodes its
   presence bitmap and, for a keyword column, its dictionary. So `NumericColumn::key`/`get` and `KeywordColumn::ords`/
   `values` return a `Result` (a corrupt FOR block is reported when one of its values is read), and `ords`/`values`
-  return a `Vec`. Each column keeps its last decoded FOR block, so a scan decodes each block once; a full scan is
-  still slower than indexing the old `Vec` (30 M against 491 M numeric keys/s, `segment_columns`; ROADMAP 5.3.16).
+  return a `Vec`. Each FOR stream keeps its last decoded block (a numeric column has one stream, a keyword column
+  two: starts and ords), so a scan decodes each block once; a full scan is still slower than indexing the old `Vec` (30 M against 491 M numeric keys/s, `segment_columns`; ROADMAP 5.3.16).
 - `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
   `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
   converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens, within bounds (at most

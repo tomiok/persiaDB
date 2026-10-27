@@ -1263,8 +1263,9 @@ fn shuffled(n: u32, seed: u64) -> Vec<u32> {
     v
 }
 
-/// Adds `alpha beta` `k` times to every third document's title, so lists reach full blocks whose positions runs
-/// hold several packed groups (SPEC §5.3.3) as well as the varint tail.
+/// Adds `alpha beta` to the title of every third document `i`, `k + i % 5` times (`k` plus up to four more, so
+/// frequencies vary), so lists reach full blocks whose positions runs hold several packed groups (SPEC §5.3.3) as well
+/// as the varint tail.
 fn heavy_titles(schema: &CollectionSchema, docs: &mut [Document], k: usize) {
     let title = id(schema, "title");
     for (i, d) in docs.iter_mut().enumerate() {

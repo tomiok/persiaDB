@@ -47,9 +47,11 @@ impl Segment {
     /// It does not analyze stored `text` values again to compare them with the postings.
     ///
     /// It decodes every block once or more, and holds 4 bytes per document for one `text`/`keyword` field at a time,
-    /// plus each column field's presence bitmaps and keyword dictionary; numeric keys and keyword ords are read from
-    /// their FOR blocks as they are checked (ROADMAP 5.3.12). The document count is bounded by the input (open checked
-    /// that the record arrays hold 8 bytes per document), so memory is linear in the segment size.
+    /// plus each column field's presence bitmaps and keyword dictionary, and each keyword column's starts and ords
+    /// decoded (8 bytes per document and per ord: they are read in term order, which jumps between FOR blocks); numeric
+    /// keys are read from their FOR blocks as they are checked (ROADMAP 5.3.12). The document count is bounded by the
+    /// input (open checked that the record arrays hold 8 bytes per document), so memory is linear in the segment size
+    /// times the number of keyword fields.
     ///
     /// ```
     /// # use persia_analysis::AnalyzerRegistry;
