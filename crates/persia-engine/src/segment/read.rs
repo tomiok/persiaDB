@@ -351,7 +351,7 @@ impl Segment {
     ///
     /// # Errors
     /// As [`Self::norms`].
-    pub fn numeric_column(&self, field: FieldId) -> Result<NumericColumn, ReadError> {
+    pub fn numeric_column(&self, field: FieldId) -> Result<NumericColumn<'_>, ReadError> {
         let f = self.field(field)?;
         let ty = f.field_type();
         if !matches!(ty, FieldType::I64 | FieldType::F64 | FieldType::Datetime) {
@@ -384,7 +384,7 @@ impl Segment {
     ///
     /// # Errors
     /// As [`Self::norms`].
-    pub fn keyword_column(&self, field: FieldId) -> Result<KeywordColumn, ReadError> {
+    pub fn keyword_column(&self, field: FieldId) -> Result<KeywordColumn<'_>, ReadError> {
         let f = self.field(field)?;
         if f.field_type() != FieldType::Keyword {
             return Err(type_error(field, f.field_type(), "keyword column"));

@@ -30,9 +30,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   statistics against the term frequencies; keyword columns against the postings; stored values against the columns;
   the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; sections that hold nothing;
   and column values no document can hold (a NaN, infinite or `-0.0` `f64`, a `datetime` out of range, ROADMAP 5.4.4).
-  Not checked: stored `text` values against the postings (that needs re-analysis). It decodes every block and holds
-  the decoded columns of all column fields at once (8 bytes per document each), so its memory grows with the segment
-  size times the number of column fields.
+  Not checked: stored `text` values against the postings (that needs re-analysis). It decodes every block; it reads
+  numeric keys and keyword ords from their FOR blocks as it checks them, so its memory grows with the segment size only.
   `Segment::sections` lists the section table with each block-framed section's stream size.
 - `persia-engine`: the segment reader (SPEC §5, ROADMAP 5.3). `Segment::open` checks the footer, section table, padding,
   section presence, every block table and raw CRC, and the schema hash at the field count the segment records, so a
@@ -173,6 +172,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine` (breaking): `NumericColumn` and `KeywordColumn` borrow their segment (`NumericColumn<'s>`,
+  `KeywordColumn<'s>`) and read numeric keys and keyword ords from their FOR blocks on demand, through the block cache,
+  instead of decoding a whole column (8 bytes per document) when opened (ROADMAP 5.3.12). Opening one decodes its
+  presence bitmap and, for a keyword column, its dictionary. So `NumericColumn::key`/`get` and `KeywordColumn::ords`/
+  `values` return a `Result` (a corrupt FOR block is reported when one of its values is read), and `ords`/`values`
+  return a `Vec`.
 - `persia-analysis` (breaking): `Tokenizer::tokenize`, `TokenFilter::apply`, `Analyzer::analyze`/`analyze_query` and
   `TokenLengthGuard::apply` take a `TokenStream` instead of `Vec<Token>`, and `SynonymMap::new` takes any term that
   converts into `Vec<Token>`. `TokenStream` keeps the strings of dropped and rewritten tokens, within bounds (at most

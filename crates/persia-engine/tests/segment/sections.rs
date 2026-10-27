@@ -1570,6 +1570,43 @@ fn multi_block_for_column_rules() {
     run_all(&schema, &bytes, &cases);
 }
 
+#[test]
+fn numeric_columns_read_one_for_block_at_a_time() {
+    use SectionKind::Columns;
+    let (schema, bytes) = two_for_blocks();
+    let qty = id(&schema, "qty");
+    let mut s = Seg::parse(&bytes);
+    // header 8, presence len 8 (0), count 8, ends at 24 and 32, blocks from 40: the second block's width byte.
+    s.edit_stream(Columns, qty.get(), |b| {
+        let width_at = 40 + le_u64(b, 24) as usize + 12;
+        b[width_at] = 65;
+    });
+    let seg = open(&schema, &s.to_bytes()).unwrap();
+    let col = seg.numeric_column(qty).unwrap();
+    assert_eq!(
+        col.get(1023).unwrap(),
+        Some(Value::I64(1023 * 3)),
+        "the first block reads"
+    );
+    let err = col.key(1024).unwrap_err();
+    assert!(err.is_corruption(), "{err:?}");
+    assert!(seg.verify().unwrap_err().is_corruption());
+
+    // The column reads through the segment's block cache: its stream is one framed block, decoded once.
+    let cache = std::sync::Arc::new(persia_engine::segment::BlockCache::new(1 << 20));
+    let seg = persia_engine::segment::Segment::open_with_cache(
+        persia_format::ByteSource::new(bytes.clone().into()),
+        &schema,
+        std::sync::Arc::clone(&cache),
+    )
+    .unwrap();
+    let before = cache.stats().misses;
+    let col = seg.numeric_column(qty).unwrap();
+    assert_eq!(col.get(1099).unwrap(), Some(Value::I64(1099 * 3)));
+    assert_eq!(col.get(5).unwrap(), Some(Value::I64(15)));
+    assert!(cache.stats().misses - before <= 1, "{:?}", cache.stats());
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Record arrays and raw sections (SPEC §5.3.6, §5.3.1, §5.3 "Framing").
 // ---------------------------------------------------------------------------------------------------------------

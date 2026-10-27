@@ -500,8 +500,8 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
                 }
             }
             for d in 0..=n {
-                let _ = col.ords(d).len();
-                let _ = col.values(d).count();
+                let _ = col.ords(d).map(|o| o.len());
+                let _ = col.values(d).map(|v| v.len());
             }
         }
     }

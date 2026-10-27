@@ -193,6 +193,30 @@ impl<'s> Stream<'s> {
         Ok(())
     }
 
+    /// Calls `f` on a [`Reader`] over stream bytes `start..end` (its offsets are stream positions): borrowed from the
+    /// cached block when they lie in one, copied otherwise.
+    pub(super) fn with_reader<T>(
+        &self,
+        start: u64,
+        end: u64,
+        f: impl FnOnce(&mut Reader<'_>) -> Result<T, ReadError>,
+    ) -> Result<T, ReadError> {
+        let block_size = self.block_size();
+        let index = start.checked_div(block_size).unwrap_or(0);
+        let block_start = index.saturating_mul(block_size);
+        let in_one_block =
+            start < end && end <= self.len() && end.saturating_sub(block_start) <= block_size;
+        if in_one_block {
+            let block = self.block(u32::try_from(index).unwrap_or(u32::MAX))?;
+            let bytes =
+                slice_of(&block, block_start, start, end).ok_or_else(|| short(self, start))?;
+            return f(&mut Reader::with_base_offset(bytes, start));
+        }
+        let mut bytes = Vec::new();
+        self.read_range(start, end, &mut bytes)?;
+        f(&mut Reader::with_base_offset(&bytes, start))
+    }
+
     /// The `u64` at stream position `at`.
     pub(super) fn u64_at(&self, at: u64) -> Result<u64, ReadError> {
         let mut bytes = [0_u8; 8];

@@ -98,13 +98,14 @@ pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack,
                 out.terms
                     .insert(fid.get(), read_index(&seg.terms(fid)?, false)?);
                 let col = seg.keyword_column(fid)?;
-                let values = (0..n)
-                    .filter_map(|d| {
-                        let v: Vec<Vec<u8>> = col.values(d).map(<[u8]>::to_vec).collect();
-                        assert_eq!(v.len(), col.ords(d).len());
-                        (!v.is_empty()).then_some((d, v))
-                    })
-                    .collect();
+                let mut values = BTreeMap::new();
+                for d in 0..n {
+                    let v: Vec<Vec<u8>> = col.values(d)?.into_iter().map(<[u8]>::to_vec).collect();
+                    assert_eq!(v.len(), col.ords(d)?.len());
+                    if !v.is_empty() {
+                        values.insert(d, v);
+                    }
+                }
                 out.keywords.insert(fid.get(), values);
             }
             FieldKind::Stored => {}
@@ -119,8 +120,8 @@ pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack,
                 let col = seg.numeric_column(fid)?;
                 let mut values = BTreeMap::new();
                 for d in 0..n {
-                    if let Some(key) = col.key(d) {
-                        let typed = col.get(d).unwrap();
+                    if let Some(key) = col.key(d)? {
+                        let typed = col.get(d)?.unwrap();
                         let typed_key = match (field.field_type(), typed) {
                             (FieldType::F64, Value::F64(v)) => f64_to_key(v),
                             (FieldType::I64, Value::I64(v))
@@ -521,7 +522,10 @@ fn term_enumeration() {
     assert_eq!(seg.norms(title).unwrap().get(0), 0);
     assert_eq!(seg.bool_column(id(&schema, "flag")).unwrap().get(0), None);
     assert_eq!(
-        seg.numeric_column(id(&schema, "price")).unwrap().get(0),
+        seg.numeric_column(id(&schema, "price"))
+            .unwrap()
+            .get(0)
+            .unwrap(),
         None
     );
     assert_eq!(seg.blob_ref(0).unwrap(), None);
