@@ -319,11 +319,56 @@ fn bench_records_over_many_blocks(c: &mut Criterion) {
     group.finish();
 }
 
+/// Documents of the column benchmark: f64 keys span the whole key range, so FOR blocks are wide (64 bits) and many
+/// cross a framed block.
+const COLUMN_DOCS: u32 = 50_000;
+
+/// Every document's numeric key, then its keyword ords, read through the lazy column readers (ROADMAP 5.3.12).
+fn bench_columns(c: &mut Criterion) {
+    let schema = schema();
+    let price = schema.field("price").unwrap().id();
+    let brand = schema.field("brand").unwrap().id();
+    let registry = AnalyzerRegistry::builtin();
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let docs: Vec<Document> = (0..COLUMN_DOCS)
+        .map(|i| {
+            #[allow(clippy::cast_precision_loss)]
+            let p = (rng.next() % 1_000_000_007) as f64 / 7.0 - 7e7;
+            Document::new(format!("doc-{i:08}"))
+                .with(price, Value::F64(p))
+                .with(brand, Value::String(format!("brand-{}", rng.next() % 500)))
+        })
+        .collect();
+    let built = build(&schema, &registry, &docs);
+    let bytes = SegmentWriter::new(&built, META).finish().unwrap();
+    let seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+
+    let mut group = c.benchmark_group("segment_columns");
+    group.throughput(Throughput::Elements(u64::from(COLUMN_DOCS)));
+    group.bench_function("numeric_key_scan", |b| {
+        let col = seg.numeric_column(price).unwrap();
+        b.iter(|| {
+            for d in 0..COLUMN_DOCS {
+                black_box(col.key(d).unwrap());
+            }
+        });
+    });
+    group.bench_function("keyword_ords_scan", |b| {
+        let col = seg.keyword_column(brand).unwrap();
+        b.iter(|| {
+            for d in 0..COLUMN_DOCS {
+                black_box(col.ords(d).unwrap());
+            }
+        });
+    });
+    group.finish();
+}
 criterion_group!(
     benches,
     bench,
     bench_read,
     bench_open_large_dict,
-    bench_records_over_many_blocks
+    bench_records_over_many_blocks,
+    bench_columns
 );
 criterion_main!(benches);

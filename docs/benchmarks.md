@@ -83,6 +83,7 @@ its positions; `document` fetches every stored document by docid. Operations per
 | Recorded | `open` | `term_get` | `postings_freq` | `advance` | `positions` | `document` |
 |---|--:|--:|--:|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.38 K | 5.34 M | 6.69 M | 4.82 M | 453 K | 434 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; shared block cache (ROADMAP 5.3.11), positions per document (5.3.13) | 2.03 K | 5.16 M | 45.8 M | 21.2 M | 6.32 M | 1.19 M |
 
 ## `persia-engine` segment opening and record lookups
 
@@ -95,3 +96,17 @@ its positions; `document` fetches every stored document by docid. Operations per
 | Recorded | `segment_open/large_dict` | `segment_records/id_of_1000` |
 |---|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.26 M | 407 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; shared block cache (ROADMAP 5.3.11) | 2.26 M | 2.22 M |
+
+## `persia-engine` column scans
+
+`cargo bench -p persia-engine --bench segment -- segment_columns`: a 50 000-document segment (default `WriteOptions`)
+whose `f64` keys span the key range (64-bit FOR blocks, many crossing a framed block). `numeric_key_scan` reads every
+document's key with `NumericColumn::key`; `keyword_ords_scan` every document's ords with `KeywordColumn::ords`.
+Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: before them a column was a decoded
+`Vec` of 8 bytes per document (first row, measured on the parent commit); now one FOR block per column stays decoded.
+
+| Recorded | `numeric_key_scan` | `keyword_ords_scan` |
+|---|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M |

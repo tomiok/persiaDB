@@ -4,6 +4,7 @@
 //! value O(1)), so a reader's memory does not grow with the document count.
 
 use core::ops::Range;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use persia_format::for_codec::{ForBlock, key_to_f64, key_to_i64};
 use roaring::RoaringBitmap;
@@ -144,6 +145,9 @@ fn bad(stream: &Stream<'_>, position: u64, what: &'static str) -> ReadError {
 /// Values per FOR block (SPEC §5.2.1).
 const PER_BLOCK: u64 = 1024;
 
+/// Bytes of the largest FOR block: 13 header bytes and 1024 values of 64 bits (SPEC §5.2.1).
+const MAX_FOR_BLOCK_LEN: u64 = 13 + 8 * 1024;
+
 /// A FOR column (SPEC §5.3.5) whose blocks are decoded when a value is asked for. Opening it reads its count and
 /// last block end; a block's end, count and contents are checked whenever it is read.
 #[derive(Debug, Clone)]
@@ -158,6 +162,7 @@ struct ForColumn<'s> {
     data_at: u64,
     /// Length of the blocks, together.
     data_len: u64,
+    last: LastBlock,
 }
 
 impl<'s> ForColumn<'s> {
@@ -191,6 +196,7 @@ impl<'s> ForColumn<'s> {
             ends_at,
             data_at,
             data_len,
+            last: LastBlock::default(),
         };
         // The last block's start too: a last end at or below the one before is the ends' fault, not trailing bytes.
         if let Some(last) = blocks.checked_sub(1) {
@@ -228,6 +234,10 @@ impl<'s> ForColumn<'s> {
         if start >= end || end > self.data_len {
             return Err(self.bad(end_at, "FOR block ends that do not increase"));
         }
+        // The longest a block can be (SPEC §5.2.1): its header and 1024 values of 64 bits, checked before it is read.
+        if end.saturating_sub(start) > MAX_FOR_BLOCK_LEN {
+            return Err(self.bad(end_at, "a FOR block longer than any block can be"));
+        }
         // Both are at most data_len, and data_at + data_len is in the stream (checked at open).
         Ok(self.data_at.saturating_add(start)..self.data_at.saturating_add(end))
     }
@@ -256,17 +266,31 @@ impl<'s> ForColumn<'s> {
         })
     }
 
+    /// Block `b`'s values: the last block read stays decoded, so a scan decodes each block once.
+    fn decoded(&self, b: u64) -> Result<Arc<Vec<u64>>, ReadError> {
+        if let Some((last, values)) = &*self.last.lock()
+            && *last == b
+        {
+            return Ok(Arc::clone(values));
+        }
+        let values =
+            Arc::new(self.with_block(b, |block, _| Ok(block.iter().collect::<Vec<u64>>()))?);
+        *self.last.lock() = Some((b, Arc::clone(&values)));
+        Ok(values)
+    }
+
     /// Value `i`, which must be below the count.
     fn get(&self, i: u64) -> Result<u64, ReadError> {
         if i >= self.count {
             return Err(self.bad(self.at, "a FOR value past its column"));
         }
         let within = usize::try_from(i % PER_BLOCK).unwrap_or(usize::MAX);
-        self.with_block(i / PER_BLOCK, |block, at| {
-            block
-                .get(within)
-                .ok_or_else(|| self.bad(at, "a FOR block count"))
-        })
+        let values = self.decoded(i / PER_BLOCK)?;
+        // `with_block` checked the block holds what its place in the column says.
+        values
+            .get(within)
+            .copied()
+            .ok_or_else(|| self.bad(self.at, "a FOR block count"))
     }
 
     /// Values `range` appended to `out`; the range must be within the count.
@@ -279,15 +303,30 @@ impl<'s> ForColumn<'s> {
             let b = i / PER_BLOCK;
             let block_start = b.saturating_mul(PER_BLOCK);
             let to = range.end.min(block_start.saturating_add(PER_BLOCK));
-            self.with_block(b, |block, _| {
-                let from = usize::try_from(i.saturating_sub(block_start)).unwrap_or(usize::MAX);
-                let upto = usize::try_from(to.saturating_sub(block_start)).unwrap_or(usize::MAX);
-                out.extend((from..upto).filter_map(|j| block.get(j)));
-                Ok(())
-            })?;
+            let values = self.decoded(b)?;
+            let from = usize::try_from(i.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            let upto = usize::try_from(to.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            out.extend_from_slice(values.get(from..upto).unwrap_or_default());
             i = to;
         }
         Ok(())
+    }
+}
+
+/// The last FOR block a [`ForColumn`] decoded. A clone starts empty.
+#[derive(Debug, Default)]
+struct LastBlock(Mutex<Option<(u64, Arc<Vec<u64>>)>>);
+
+impl LastBlock {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, Arc<Vec<u64>>)>> {
+        // Only ever replaced whole: a panic elsewhere cannot leave it half-written.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for LastBlock {
+    fn clone(&self) -> Self {
+        Self::default()
     }
 }
 

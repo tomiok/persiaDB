@@ -212,8 +212,25 @@ impl<'s> Stream<'s> {
                 slice_of(&block, block_start, start, end).ok_or_else(|| short(self, start))?;
             return f(&mut Reader::with_base_offset(bytes, start));
         }
+        // Across blocks: copied block by block through the cache, so each block is still decoded once.
+        let len = end
+            .checked_sub(start)
+            .filter(|_| end <= self.len())
+            .ok_or_else(|| {
+                self.corrupt(
+                    start,
+                    SegmentCorruption::Invalid {
+                        what: "a range past the end of its stream",
+                    },
+                )
+            })?;
+        let len_usize = usize::try_from(len).unwrap_or(usize::MAX);
         let mut bytes = Vec::new();
-        self.read_range(start, end, &mut bytes)?;
+        bytes
+            .try_reserve_exact(len_usize)
+            .map_err(|_| self.error(persia_format::Error::OutOfMemory { bytes: Some(len) }))?;
+        bytes.resize(len_usize, 0);
+        self.read_into(start, &mut bytes)?;
         f(&mut Reader::with_base_offset(&bytes, start))
     }
 

@@ -117,6 +117,9 @@ impl Segment {
     /// block table of every block-framed section, the CRC of the raw ones, and the shape of the FSTs and record
     /// arrays. Blocks are checked when they are decoded.
     ///
+    /// The segment gets its own [`BlockCache`] of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB): a process that opens many
+    /// segments should share one through [`Self::open_with_cache`], which bounds them all.
+    ///
     /// # Errors
     /// [`ReadError::Unsupported`] for another format major version, unknown `incompat_flags` or schema encoding
     /// version; a corruption ([`ReadError::is_corruption`]) for anything else that breaks a rule of SPEC §5.1 or

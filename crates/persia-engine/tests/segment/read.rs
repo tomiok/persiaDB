@@ -1240,3 +1240,375 @@ fn positions_are_read_per_document() {
     }
     seg.verify().unwrap();
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lazy reads equal eager ones (ROADMAP 5.3.11-5.3.13): positions decoded one document at a time with documents
+// skipped, FOR columns read in any docid order, and the shared block cache's byte bound, under random access.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A deterministic shuffle (xorshift64*, seeded by proptest) of `0..n`.
+fn shuffled(n: u32, seed: u64) -> Vec<u32> {
+    let mut state = seed | 1;
+    let mut next = || {
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        state.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    };
+    let mut v: Vec<u32> = (0..n).collect();
+    for i in (1..v.len()).rev() {
+        let j = (next() % (i as u64 + 1)) as usize;
+        v.swap(i, j);
+    }
+    v
+}
+
+/// Adds `alpha beta` `k` times to every third document's title, so lists reach full blocks whose positions runs
+/// hold several packed groups (SPEC §5.3.3) as well as the varint tail.
+fn heavy_titles(schema: &CollectionSchema, docs: &mut [Document], k: usize) {
+    let title = id(schema, "title");
+    for (i, d) in docs.iter_mut().enumerate() {
+        if i % 3 != 0 {
+            continue;
+        }
+        let mut values = match d.get(title) {
+            Some(Value::String(s)) => vec![s.clone()],
+            Some(Value::Strings(v)) => v.clone(),
+            _ => Vec::new(),
+        };
+        values.push("alpha beta ".repeat(k + i % 5));
+        d.insert(title, Value::Strings(values));
+    }
+}
+
+/// `(doc, tf, positions)` of every posting of every `title` term, read sequentially, positions of every document.
+type FullRead = Vec<(Vec<u8>, Vec<(u32, u32, Vec<u32>)>)>;
+
+fn full_title_read(seg: &Segment, schema: &CollectionSchema) -> FullRead {
+    let terms = seg.terms(id(schema, "title")).unwrap();
+    let mut out = Vec::new();
+    let mut stream = terms.range(Bound::Unbounded, Bound::Unbounded);
+    while let Some(next) = stream.next() {
+        let (term, info) = next.unwrap();
+        let mut p = terms.postings(&info).unwrap();
+        let mut list = Vec::new();
+        while let Some(d) = p.next().unwrap() {
+            let tf = p.freq().unwrap();
+            list.push((d, tf, p.positions().unwrap().to_vec()));
+        }
+        out.push((term.to_vec(), list));
+    }
+    out
+}
+
+/// A segment over `docs`, read through a cache of `capacity` bytes of its own.
+fn open_cached(
+    schema: &CollectionSchema,
+    bytes: &[u8],
+    capacity: u64,
+) -> (Segment, Arc<BlockCache>) {
+    let cache = Arc::new(BlockCache::new(capacity));
+    let seg = Segment::open_with_cache(
+        ByteSource::new(bytes.to_vec().into()),
+        schema,
+        Arc::clone(&cache),
+    )
+    .unwrap();
+    (seg, cache)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: if cfg!(feature = "slow") { 256 } else { 16 }, ..ProptestConfig::default() })]
+
+    /// Positions read for an arbitrary subset of documents, reached by `next` (some tombstoned) or `advance`, with
+    /// `shallow_advance` in between and some asked for twice, equal those of a full sequential read; so do the
+    /// documents and frequencies the iterator stops on (SPEC §5.3.3, ROADMAP 5.3.13).
+    #[test]
+    fn positions_with_skipped_documents_equal_a_full_read(
+        docs in prop::collection::vec(arb_doc(schema()), 1..400),
+        heavy in proptest::option::of(1_usize..10),
+        block_size in prop::sample::select(vec![1_u32, 61, 4096]),
+        capacity in prop::sample::select(vec![0_u64, 1500, BlockCache::DEFAULT_CAPACITY]),
+        steps in prop::collection::vec((0_u8..4, 0_u32..300, any::<bool>()), 1..64),
+        deleted in prop::collection::btree_set(0_u32..400, 0..120),
+    ) {
+        let schema = schema();
+        let mut docs = with_ids(docs);
+        if let Some(k) = heavy {
+            heavy_titles(&schema, &mut docs, k);
+        }
+        let bytes = build(&schema, &docs, WriteOptions { block_size, ..WriteOptions::default() });
+        let full = full_title_read(&open(&schema, &bytes).unwrap(), &schema);
+
+        let (seg, cache) = open_cached(&schema, &bytes, capacity);
+        let n = seg.doc_count();
+        let deleted: RoaringBitmap = deleted.into_iter().filter(|&d| d < n).collect();
+        let tombstones = seg.tombstones(deleted.clone()).unwrap();
+        let terms = seg.terms(id(&schema, "title")).unwrap();
+        let mut k = 0_usize;
+        for (term, list) in &full {
+            let info = terms.clone().get(term).unwrap().unwrap();
+            let live: Vec<&(u32, u32, Vec<u32>)> =
+                list.iter().filter(|e| !deleted.contains(e.0)).collect();
+            let mut p = terms.postings(&info).unwrap().with_tombstones(&tombstones);
+            let mut i = 0_usize;
+            let mut cur = p.next().unwrap();
+            loop {
+                prop_assert_eq!(cur, live.get(i).map(|e| e.0), "term {:?}", term);
+                let Some(d) = cur else { break };
+                let (op, jump, read) = steps[k % steps.len()];
+                k += 1;
+                let (_, tf, positions) = live[i];
+                if read {
+                    prop_assert_eq!(p.positions().unwrap(), positions.as_slice(), "doc {}", d);
+                    prop_assert_eq!(p.freq().unwrap(), *tf);
+                }
+                match op {
+                    0 => {
+                        cur = p.next().unwrap();
+                        i += 1;
+                    }
+                    1 => {
+                        let target = d.saturating_add(1).saturating_add(jump);
+                        cur = p.advance(target).unwrap();
+                        i += live[i..].iter().position(|e| e.0 >= target).unwrap_or(live.len() - i);
+                    }
+                    2 => {
+                        // Block-max lookups do not move the iterator, nor its positions.
+                        p.shallow_advance(d.saturating_add(jump)).unwrap();
+                        prop_assert_eq!(p.doc(), Some(d));
+                        prop_assert_eq!(p.positions().unwrap(), positions.as_slice(), "doc {}", d);
+                        cur = p.next().unwrap();
+                        i += 1;
+                    }
+                    _ => {
+                        // Frequencies only: the block's run is entered later, past this document.
+                        prop_assert_eq!(p.freq().unwrap(), *tf);
+                        cur = p.next().unwrap();
+                        i += 1;
+                    }
+                }
+            }
+            prop_assert_eq!(p.positions().unwrap(), &[] as &[u32]);
+        }
+        prop_assert!(cache.stats().bytes <= capacity);
+    }
+}
+
+proptest! {
+    // Fewer cases: each builds and reads a segment of up to 2200 documents.
+    #![proptest_config(ProptestConfig { cases: if cfg!(feature = "slow") { 128 } else { 8 }, ..ProptestConfig::default() })]
+
+    /// Keyword `ords`/`values` and numeric `key`/`get` read in an arbitrary docid order (each docid twice, docids
+    /// past the segment too) equal a sequential read, which equals the model (SPEC §5.3.5, ROADMAP 5.3.12). The
+    /// documents repeat a few random ones up to 2200 times, so columns span up to three FOR blocks; with `many_tags`
+    /// the keyword ords do too.
+    #[test]
+    fn columns_in_any_docid_order_equal_a_sequential_read(
+        base in prop::collection::vec(arb_doc(schema()), 1..40),
+        n in 1_usize..2200,
+        block_size in prop::sample::select(vec![509_u32, 4096, 16 * 1024]), // 509: a FOR block spans several frames
+        capacity in prop::sample::select(vec![0_u64, 3000, BlockCache::DEFAULT_CAPACITY]),
+        seed in any::<u64>(),
+        many_tags in any::<bool>(),
+    ) {
+        let schema = schema();
+        let mut docs = with_ids((0..n).map(|i| base[i % base.len()].clone()).collect());
+        if many_tags {
+            more_tags(&schema, &mut docs);
+        }
+        let bytes = build(&schema, &docs, WriteOptions { block_size, ..WriteOptions::default() });
+        let want = expected(&schema, &docs);
+        let n = u32::try_from(n).unwrap();
+        let tag = id(&schema, "tag");
+        let numeric: Vec<_> = ["price", "qty", "at"].iter().map(|f| id(&schema, f)).collect();
+
+        // Sequential, through the default cache.
+        let seg = open(&schema, &bytes).unwrap();
+        let col = seg.keyword_column(tag).unwrap();
+        let seq_ords: Vec<Vec<u64>> = (0..n + 2).map(|d| col.ords(d).unwrap()).collect();
+        let seq_values: Vec<Vec<Vec<u8>>> = (0..n + 2)
+            .map(|d| col.values(d).unwrap().into_iter().map(<[u8]>::to_vec).collect())
+            .collect();
+        let model_values: Vec<Vec<Vec<u8>>> = (0..n + 2)
+            .map(|d| want.keywords[&tag.get()].get(&d).cloned().unwrap_or_default())
+            .collect();
+        prop_assert_eq!(&seq_values, &model_values);
+        let mut seq_keys = Vec::new();
+        for &f in &numeric {
+            let col = seg.numeric_column(f).unwrap();
+            let keys: Vec<Option<u64>> = (0..n + 2).map(|d| col.key(d).unwrap()).collect();
+            let model: Vec<Option<u64>> =
+                (0..n + 2).map(|d| want.columns[&f.get()].get(&d).copied()).collect();
+            prop_assert_eq!(&keys, &model, "field {}", f.get());
+            let gets: Vec<Option<Value>> = (0..n + 2).map(|d| col.get(d).unwrap()).collect();
+            seq_keys.push((keys, gets));
+        }
+
+        // Shuffled (up to 700 docids, plus the FOR block boundaries and docids past the segment), each twice, through
+        // a cache of `capacity`, with the columns opened again.
+        let (seg, cache) = open_cached(&schema, &bytes, capacity);
+        let mut order: Vec<u32> = shuffled(n + 2, seed).into_iter().take(700).collect();
+        order.extend([0, 1023, 1024, 1025, 2047, 2048, n - 1, n, n + 1].into_iter().filter(|&d| d < n + 2));
+        let again = shuffled(u32::try_from(order.len()).unwrap(), seed.rotate_left(17));
+        order.extend(again.into_iter().map(|j| order[j as usize]).collect::<Vec<_>>());
+        let col = seg.keyword_column(tag).unwrap();
+        let cols: Vec<_> = numeric.iter().map(|&f| seg.numeric_column(f).unwrap()).collect();
+        for &d in &order {
+            let i = d as usize;
+            prop_assert_eq!(&col.ords(d).unwrap(), &seq_ords[i], "ords of {}", d);
+            let values: Vec<Vec<u8>> = col.values(d).unwrap().into_iter().map(<[u8]>::to_vec).collect();
+            prop_assert_eq!(&values, &seq_values[i], "values of {}", d);
+            for (c, (keys, gets)) in cols.iter().zip(&seq_keys) {
+                prop_assert_eq!(c.key(d).unwrap(), keys[i], "key of {}", d);
+                prop_assert_eq!(c.has_value(d), keys[i].is_some(), "has_value of {}", d);
+                let got = c.get(d).unwrap();
+                // f64 values compare by key: -0.0 and NaN payloads stay exact.
+                prop_assert_eq!(got.as_ref().map(value_key), gets[i].as_ref().map(value_key), "get of {}", d);
+            }
+            prop_assert!(cache.stats().bytes <= capacity);
+        }
+    }
+}
+
+/// A typed numeric value's order-preserving key.
+fn value_key(v: &Value) -> u64 {
+    match *v {
+        Value::I64(x) | Value::Datetime(x) => i64_to_key(x),
+        Value::F64(x) => f64_to_key(x),
+        ref other => panic!("not numeric: {other:?}"),
+    }
+}
+
+/// One read of [`cache_capacity_holds_across_two_segments`], as comparable output.
+#[derive(Debug, PartialEq)]
+enum Got {
+    Keys(Vec<Option<u64>>),
+    Ords(Vec<u64>),
+    List(Vec<(u32, u32, Vec<u32>)>),
+    Doc(Document),
+}
+
+/// Read `op` with argument `arg` from `seg`.
+fn read_op(seg: &Segment, schema: &CollectionSchema, op: u8, arg: u32) -> Got {
+    let n = seg.doc_count();
+    match op {
+        0 => Got::Keys(
+            ["price", "qty", "at"]
+                .iter()
+                .map(|f| {
+                    seg.numeric_column(id(schema, f))
+                        .unwrap()
+                        .key(arg % (n + 1))
+                        .unwrap()
+                })
+                .collect(),
+        ),
+        1 => Got::Ords(
+            seg.keyword_column(id(schema, "tag"))
+                .unwrap()
+                .ords(arg % (n + 1))
+                .unwrap(),
+        ),
+        2 | 3 => {
+            let field = id(schema, if op == 2 { "title" } else { "tag" });
+            let terms = seg.terms(field).unwrap();
+            if terms.is_empty() {
+                return Got::List(Vec::new());
+            }
+            let ordinal = u64::from(arg) % terms.len();
+            let mut stream = terms.range(Bound::Unbounded, Bound::Unbounded);
+            let mut info = None;
+            for _ in 0..=ordinal {
+                info = Some(stream.next().unwrap().unwrap().1);
+            }
+            let mut p = terms.postings(&info.unwrap()).unwrap();
+            let mut out = Vec::new();
+            // Starts at an argument-picked docid, and reads every other document's positions.
+            let mut cur = p.advance(arg % (n + 1)).unwrap();
+            while let Some(d) = cur {
+                let tf = p.freq().unwrap();
+                let pos = if d % 2 == 0 {
+                    p.positions().unwrap().to_vec()
+                } else {
+                    Vec::new()
+                };
+                out.push((d, tf, pos));
+                cur = p.next().unwrap();
+            }
+            Got::List(out)
+        }
+        _ => Got::Doc(seg.document(arg % n).unwrap()),
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: if cfg!(feature = "slow") { 256 } else { 24 }, ..ProptestConfig::default() })]
+
+    /// Two segments reading through one shared [`BlockCache`] in a random interleaving: after every read the cache
+    /// holds at most its capacity, every read equals the same read through a segment with a cache of its own, and
+    /// dropping both segments empties the cache (SPEC §10.6, ROADMAP 5.3.11).
+    #[test]
+    fn cache_capacity_holds_across_two_segments(
+        docs_a in prop::collection::vec(arb_doc(schema()), 1..300),
+        docs_b in prop::collection::vec(arb_doc(schema()), 1..300),
+        heavy in 1_usize..6,
+        capacity in prop::sample::select(vec![0_u64, 1, 700, 4096, 32 * 1024]),
+        ops in prop::collection::vec((any::<bool>(), 0_u8..5, any::<u32>()), 1..150),
+    ) {
+        let schema = schema();
+        let mut docs_a = with_ids(docs_a);
+        heavy_titles(&schema, &mut docs_a, heavy);
+        let docs_b = with_ids(docs_b);
+        // Small blocks: many cached entries, so eviction runs often.
+        let opts = WriteOptions { block_size: 61, ..WriteOptions::default() };
+        let bytes = [build(&schema, &docs_a, opts), build(&schema, &docs_b, WriteOptions::default())];
+        let reference = [open(&schema, &bytes[0]).unwrap(), open(&schema, &bytes[1]).unwrap()];
+
+        let cache = Arc::new(BlockCache::new(capacity));
+        let shared: Vec<Segment> = bytes
+            .iter()
+            .map(|b| Segment::open_with_cache(ByteSource::new(b.clone().into()), &schema, Arc::clone(&cache)).unwrap())
+            .collect();
+        let mut reads = 0_u64;
+        for (which, op, arg) in ops {
+            let s = usize::from(which);
+            let got = read_op(&shared[s], &schema, op, arg);
+            prop_assert_eq!(&got, &read_op(&reference[s], &schema, op, arg), "segment {} op {} arg {}", s, op, arg);
+            let stats = cache.stats();
+            prop_assert!(stats.bytes <= capacity, "{:?} over {}", stats, capacity);
+            if capacity == 0 {
+                prop_assert_eq!(stats.blocks, 0);
+            }
+            prop_assert!(stats.hits + stats.misses >= reads);
+            reads = stats.hits + stats.misses;
+        }
+        let mut shared = shared;
+        let b = shared.pop().unwrap();
+        let a = shared.pop().unwrap();
+        drop(a);
+        prop_assert!(cache.stats().bytes <= capacity);
+        drop(b);
+        let stats = cache.stats();
+        prop_assert_eq!((stats.blocks, stats.bytes), (0, 0), "{:?}", stats);
+    }
+}
+
+/// Gives documents 0, 1, 2 or 3 more tags (cycling by docid): the ords column passes 1024 values, and documents'
+/// ords straddle its FOR block boundaries.
+fn more_tags(schema: &CollectionSchema, docs: &mut [Document]) {
+    let tag = id(schema, "tag");
+    for (i, d) in docs.iter_mut().enumerate() {
+        let mut values = match d.get(tag) {
+            Some(Value::Strings(v)) => v.clone(),
+            Some(Value::String(s)) => vec![s.clone()],
+            _ => Vec::new(),
+        };
+        values.extend(
+            ["blue", "green", "red"][..i % 4]
+                .iter()
+                .map(|s| (*s).to_owned()),
+        );
+        d.insert(tag, Value::Strings(values));
+    }
+}

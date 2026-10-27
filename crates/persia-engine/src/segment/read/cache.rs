@@ -271,6 +271,34 @@ mod tests {
     }
 
     #[test]
+    fn two_readers_missing_one_block_keep_one_copy() {
+        let cache = BlockCache::new(1 << 10);
+        // Both readers are inside `decode` at once: both missed.
+        let barrier = std::sync::Barrier::new(2);
+        let blocks: Vec<Arc<Vec<u8>>> = std::thread::scope(|s| {
+            let read = || {
+                cache
+                    .get(0, (SectionKind::Postings, 1, 0), || {
+                        barrier.wait();
+                        Ok::<_, ()>(vec![7; 100])
+                    })
+                    .unwrap()
+            };
+            let a = s.spawn(read);
+            let b = s.spawn(read);
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(*blocks[0], *blocks[1]);
+        let stats = cache.stats();
+        assert_eq!((stats.misses, stats.blocks), (2, 1));
+        assert_eq!(stats.bytes, u64::try_from(blocks[0].capacity()).unwrap());
+        assert!(
+            Arc::ptr_eq(&get(&cache, 0, 0, 100), &blocks[0])
+                || Arc::ptr_eq(&get(&cache, 0, 0, 100), &blocks[1])
+        );
+    }
+
+    #[test]
     fn a_decode_error_is_not_cached() {
         let cache = BlockCache::new(1 << 10);
         let key = (SectionKind::Postings, 1, 0);

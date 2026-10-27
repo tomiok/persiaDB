@@ -929,7 +929,8 @@ impl PositionsRun {
     ) -> Result<(), ReadError> {
         let stream = cursor.stream;
         if start < self.next {
-            // An earlier document of the block: read the run again from its start.
+            // Defensive: `Postings` only moves forward within a block, so this does not happen today. If it did, the
+            // run would be read again from its start.
             let (block, range, total) = (self.block, self.range.clone(), self.total);
             self.start(block.unwrap_or(0), range, total);
         }
