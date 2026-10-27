@@ -30,6 +30,7 @@ mod fst_damage;
 mod golden;
 mod model;
 mod read;
+mod scale;
 mod sections;
 
 use std::collections::BTreeMap;
