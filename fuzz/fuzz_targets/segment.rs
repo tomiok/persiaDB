@@ -1,15 +1,18 @@
 //! Fuzz the segment reader (ROADMAP 5.3; SPEC §5.1–§5.3.6, §16.1): no input makes `Segment::open` or any read of
 //! an opened segment panic. Damage must come back as an `Err` (CLAUDE.md "Safety & errors").
 //!
-//! Raw bytes almost never get past the footer and section CRCs, so the input picks one of two modes by its first
-//! byte:
-//! - even: the rest is opened as a segment, as it is;
-//! - odd: the rest is a list of edits to the decoded streams of the block-framed sections of one fixed, valid
+//! Raw bytes almost never get past the footer and section CRCs, so the input picks a mode by its first byte (mod 4):
+//! - 0: the rest is opened as a segment, as it is;
+//! - 1: the rest is a list of edits to the decoded streams of the block-framed sections of one fixed, valid
 //!   segment (built once). Each edited section is re-framed (`Compression::None`, same block size), the sections are
 //!   laid out again and the footer is rewritten with their offsets and lengths, its CRC and the locator. So every
-//!   CRC holds and only the semantic checks of SPEC §5.3 stand between the edits and the reader's decoders.
+//!   CRC holds and only the semantic checks of SPEC §5.3 stand between the edits and the reader's decoders;
+//! - 2: edits to the raw sections (the TermDict and IdMap FSTs): their entries (keys, values, entries added,
+//!   removed or swapped), rebuilt as a valid FST, or their payload bytes; the payload CRC is recomputed;
+//! - 3: edits to the footer body (bytes, small deltas to `u64` fields, insertions, truncation) after the layout,
+//!   with its CRC and length recomputed: the footer rules of SPEC §5.1 alone stand between them and the reader.
 //!
-//! In both modes an opened segment is read completely: every term with its postings, frequencies and positions,
+//! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
 //! `advance` and `shallow_advance` to a few targets, norms, columns, every document, id and blob reference, then
 //! `Segment::verify`. Errors are ignored; the only failure is a panic (or a hang).
 #![no_main]
@@ -159,6 +162,9 @@ fn le_u16(b: &[u8], at: usize) -> u16 {
     u16::from_le_bytes(b[at..at + 2].try_into().expect("2 bytes"))
 }
 
+/// The `(key, value)` entries of an FST, in key order.
+type Entries = Vec<(Vec<u8>, u64)>;
+
 /// The fixed segment, split into its footer body (without CRC and locator) and its sections in table order
 /// (SPEC §5.1). Only the harness's own, valid bytes are parsed here.
 struct Fixed {
@@ -167,6 +173,8 @@ struct Fixed {
     sections: Vec<Vec<u8>>,
     /// Indices into `sections` of the block-framed ones, with their decoded stream and block size.
     framed: Vec<(usize, Vec<u8>, u32)>,
+    /// Indices into `sections` of the raw ones (the FSTs), with their entries.
+    raw: Vec<(usize, Entries)>,
 }
 
 impl Fixed {
@@ -198,6 +206,7 @@ impl Fixed {
         let body = bytes[n - 8 - footer_len..n - 12].to_vec();
         let mut sections = Vec::new();
         let mut framed = Vec::new();
+        let mut raw = Vec::new();
         for i in 0..le_u32(&body, 84) as usize {
             let e = entry(&body, i);
             let kind = SectionKind::from_code(le_u16(&body, e)).expect("known kind");
@@ -209,6 +218,15 @@ impl Fixed {
                 let mut stream = Vec::new();
                 r.read_range(0, r.len(), &mut stream).expect("readable");
                 framed.push((i, stream, r.block_size()));
+            } else {
+                let payload = section[..section.len() - 4].to_vec();
+                let map = fst::Map::new(payload).expect("valid FST");
+                let mut entries = Vec::new();
+                let mut s = fst::IntoStreamer::into_stream(&map);
+                while let Some((k, v)) = fst::Streamer::next(&mut s) {
+                    entries.push((k.to_vec(), v));
+                }
+                raw.push((i, entries));
             }
             sections.push(section);
         }
@@ -217,7 +235,95 @@ impl Fixed {
             body,
             sections,
             framed,
+            raw,
         }
+    }
+
+    /// The segment with its raw sections (TermDict and IdMap FSTs) edited, each payload CRC recomputed: as FST
+    /// entries (key bytes, values, entries added or removed, rebuilt as a valid FST), or as payload bytes. `None` if
+    /// no edit changed anything.
+    fn edited_raw(&self, edits: &[u8]) -> Option<Vec<u8>> {
+        let mut maps: BTreeMap<usize, BTreeMap<Vec<u8>, u64>> = BTreeMap::new();
+        let mut bytes: BTreeMap<usize, Vec<(usize, u8)>> = BTreeMap::new();
+        for e in edits.as_chunks::<EDIT_LEN>().0.iter().take(MAX_EDITS) {
+            let which = usize::from(e[0]) % self.raw.len();
+            let entries = maps
+                .entry(which)
+                .or_insert_with(|| self.raw[which].1.iter().cloned().collect());
+            let index = usize::from(e[1]) | usize::from(e[2]) << 8;
+            let value = e[5];
+            let key = entries.keys().nth(index % entries.len().max(1)).cloned();
+            match (e[3] % 6, key) {
+                // A value: small (a near-valid ordinal or docid) or with high bits.
+                (0, Some(k)) => {
+                    entries.insert(k, u64::from(value) | u64::from(e[4]) << 32);
+                }
+                (1, Some(k)) => {
+                    entries.remove(&k);
+                }
+                // A new key next to an existing one.
+                (2, Some(mut k)) => {
+                    k.push(value);
+                    entries.insert(k, u64::from(e[4]));
+                }
+                (3, Some(k)) if !k.is_empty() => {
+                    let v = entries.remove(&k).unwrap_or(0);
+                    let mut k = k;
+                    let at = usize::from(e[4]) % k.len();
+                    k[at] = value;
+                    entries.insert(k, v);
+                }
+                // Two keys swap values (an IdMap mapping two ids to each other's docids).
+                (4, Some(k)) => {
+                    let other = entries
+                        .keys()
+                        .nth(usize::from(e[4]) % entries.len())
+                        .cloned();
+                    if let Some(o) = other {
+                        let (a, b) = (entries[&k], entries[&o]);
+                        entries.insert(k, b);
+                        entries.insert(o, a);
+                    }
+                }
+                // A payload byte, on top of the rebuilt FST: the FST decoder sees damage behind a valid CRC.
+                _ => bytes
+                    .entry(which)
+                    .or_default()
+                    .push((index | usize::from(e[4]) << 16, value)),
+            }
+        }
+        let mut sections = self.sections.clone();
+        let mut changed = false;
+        for (which, (index, original)) in self.raw.iter().enumerate() {
+            let entries = maps.remove(&which);
+            let patches = bytes.remove(&which).unwrap_or_default();
+            let rebuilt = entries.as_ref().is_some_and(|m| {
+                !m.iter()
+                    .map(|(k, v)| (k.clone(), *v))
+                    .eq(original.iter().cloned())
+            });
+            if !rebuilt && patches.is_empty() {
+                continue;
+            }
+            let mut payload = match &entries {
+                Some(m) if rebuilt => fst::Map::from_iter(m.iter().map(|(k, v)| (k.clone(), *v)))
+                    .expect("sorted keys")
+                    .into_fst()
+                    .into_inner(),
+                _ => sections[*index][..sections[*index].len() - 4].to_vec(),
+            };
+            for (at, value) in patches {
+                if !payload.is_empty() {
+                    let at = at % payload.len();
+                    payload[at] ^= value.max(1);
+                }
+            }
+            let crc = crc32c(&payload);
+            payload.extend_from_slice(&crc.to_le_bytes());
+            changed |= payload != sections[*index];
+            sections[*index] = payload;
+        }
+        changed.then(|| self.layout(&sections, &[]))
     }
 
     /// The segment with `edits` applied (see the module docs); `None` if no edit changed anything.
@@ -250,12 +356,14 @@ impl Fixed {
             w.write(&stream).expect("write");
             sections[*index] = w.finish().expect("finish");
         }
-        changed.then(|| self.layout(&sections))
+        changed.then(|| self.layout(&sections, &[]))
     }
 
     /// Lays `sections` out (8-aligned, zero padding), then the footer with their offsets and lengths, its CRC and
-    /// the locator (SPEC §5.1).
-    fn layout(&self, sections: &[Vec<u8>]) -> Vec<u8> {
+    /// the locator (SPEC §5.1). `footer_edits` (records of [`EDIT_LEN`] bytes: footer offset `u16` LE, operation,
+    /// byte) then change the footer body, offsets and statistics included, before its CRC is computed: every footer
+    /// rule of SPEC §5.1 stands alone between them and the reader.
+    fn layout(&self, sections: &[Vec<u8>], footer_edits: &[u8]) -> Vec<u8> {
         let pad = |out: &mut Vec<u8>| out.resize(out.len().next_multiple_of(8), 0);
         let mut body = self.body.clone();
         let mut out = Vec::new();
@@ -265,6 +373,27 @@ impl Fixed {
             body[e + 8..e + 16].copy_from_slice(&(out.len() as u64).to_le_bytes());
             body[e + 16..e + 24].copy_from_slice(&(s.len() as u64).to_le_bytes());
             out.extend_from_slice(s);
+        }
+        for e in footer_edits
+            .as_chunks::<EDIT_LEN>()
+            .0
+            .iter()
+            .take(MAX_EDITS)
+        {
+            let at = (usize::from(e[1]) | usize::from(e[2]) << 8) % (body.len() + 1);
+            let value = e[4];
+            match e[3] % 5 {
+                0 if at < body.len() => body[at] = value,
+                1 if at < body.len() => body[at] ^= value.max(1),
+                // A small signed delta at a u64 field: offsets, lengths and sums stay near-valid.
+                2 if at + 8 <= body.len() => {
+                    let v = u64::from_le_bytes(body[at..at + 8].try_into().expect("8 bytes"));
+                    let v = v.wrapping_add(i64::from(value as i8) as u64);
+                    body[at..at + 8].copy_from_slice(&v.to_le_bytes());
+                }
+                3 => body.truncate(at),
+                _ => body.insert(at, value),
+            }
         }
         pad(&mut out);
         out.extend_from_slice(&body);
@@ -393,13 +522,17 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let fixed = fixed();
-    let bytes = if mode % 2 == 0 {
-        rest.to_vec()
-    } else {
-        match fixed.edited(rest) {
+    let bytes = match mode % 4 {
+        0 => rest.to_vec(),
+        1 => match fixed.edited(rest) {
             Some(bytes) => bytes,
             None => return,
-        }
+        },
+        2 => match fixed.edited_raw(rest) {
+            Some(bytes) => bytes,
+            None => return,
+        },
+        _ => fixed.layout(&fixed.sections, rest),
     };
     if let Ok(seg) = Segment::open(ByteSource::new(bytes.into()), &fixed.schema) {
         read_all(&seg, &fixed.schema);

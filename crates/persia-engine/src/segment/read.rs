@@ -8,6 +8,7 @@
 mod columns;
 mod error;
 mod footer;
+mod fst_check;
 mod postings;
 mod store;
 mod stream;
@@ -610,13 +611,38 @@ impl Segment {
                 }
                 continue;
             }
-            raw_payload(self.source.as_slice(), section)?;
+            let raw = raw_payload(self.source.as_slice(), section)?;
+            // `fst` does not validate what it reads: check the structure first (SPEC §5.3.1, `fst_check`).
+            let shape = fst_check::check(raw).map_err(|d| ReadError::Section {
+                kind,
+                field,
+                position: u64::try_from(d.at).unwrap_or(u64::MAX),
+                reason: SegmentCorruption::Fst,
+            })?;
+            // Bound the stream below: a small DAG can hold astronomically many keys. An `IdMap` stream stops by
+            // itself after `doc_count + 1` keys (its values are distinct and below `doc_count`); a `TermDict` must
+            // have one `TermInfo` record per key, checked now with the error the `TermInfo` check would give.
+            if kind == SectionKind::IdMap {
+                if usize::try_from(shape.longest_path).map_or(true, |l| l > MAX_ID_LEN) {
+                    return Err(fst_error(SegmentCorruption::Fst));
+                }
+            } else {
+                let infos = self.stream(SectionKind::TermInfo, field)?.map(|s| s.len());
+                if shape.keys.checked_mul(TERM_INFO_LEN) != infos {
+                    return Err(ReadError::Section {
+                        kind: SectionKind::TermInfo,
+                        field,
+                        position: 0,
+                        reason: SegmentCorruption::Fst,
+                    });
+                }
+            }
             let range = section.range.start..section.range.end.saturating_sub(4);
             let payload = self.bytes(&Section { kind, field, range })?;
             let map = fst::Map::new(payload).map_err(|_| fst_error(SegmentCorruption::Fst))?;
             check_fst_values(&map, kind, doc_count).map_err(fst_error)?;
             if kind == SectionKind::IdMap {
-                if u64::try_from(map.len()).ok() != Some(u64::from(doc_count)) {
+                if shape.keys != u64::from(doc_count) {
                     return Err(fst_error(SegmentCorruption::Fst));
                 }
                 self.id_map = Some(map);
@@ -672,7 +698,8 @@ fn type_error(field: FieldId, field_type: FieldType, what: &'static str) -> Read
 }
 
 /// Walks an FST once (SPEC §5.3.1, §5.3.6): a `TermDict` maps each term to its rank, an `IdMap` each id to a distinct
-/// docid below `doc_count`. The walk also reaches every node a later lookup or range scan can.
+/// docid below `doc_count`. `fst_check` has validated its structure and
+/// key count, so the walk ends and cannot panic.
 fn check_fst_values(
     map: &fst::Map<ByteSource>,
     kind: SectionKind,

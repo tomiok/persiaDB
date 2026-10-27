@@ -604,7 +604,11 @@ tombstone sidecars (SPEC §8.3).
 
 **Framing** (ROADMAP 5.2.9, ADR-0027). A *block* section is block-framed (§5.2): offsets into it are stream positions.
 A *raw* section is its payload followed by a `u32` CRC32C of the payload: the two FSTs, which are read whole and used
-in place. Any other `section_kind` is corruption (a new kind needs an `incompat_flags` bit), and so is a kind under a
+in place. A CRC proves only that the bytes are the ones written, so a reader checks an FST's structure before using
+it: header version 3, the root address on the last node byte, every node reachable from the root inside the payload
+and past the 16-byte header, every transition pointing below its node (no cycles) or to the empty node, packed sizes
+of at most 8 bytes, transitions in strictly increasing byte order (with a consistent index), output sums that fit a
+`u64`, and a key count equal to the keys the nodes hold. Anything else is corruption. Any other `section_kind` is corruption (a new kind needs an `incompat_flags` bit), and so is a kind under a
 field of the wrong type, two sections with the same `(section_kind, field_id)`, or a `field_id` at or above
 `schema_field_count` (other than `0xFFFF_FFFF` for the segment-level kinds 9–12, which use nothing else).
 
