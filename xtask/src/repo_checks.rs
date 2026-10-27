@@ -1,6 +1,6 @@
 //! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming,
-//! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files) and
-//! digest-pinned docker-compose images.
+//! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files),
+//! digest-pinned docker-compose images, and dependencies pinned to the version a module was audited against.
 
 #[cfg(test)]
 mod tests {
@@ -275,6 +275,51 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "unsafe_code relaxed outside UNSAFE_ALLOWED: {offenders:#?}"
+        );
+    }
+
+    // --- Audited dependencies (ROADMAP 5.4.6) ---
+
+    /// The `fst` version `crates/persia-engine/src/segment/read/fst_check.rs` was audited against. Change it only
+    /// after the re-audit that module's "Bumping `fst`" section lists.
+    const FST_AUDITED: &str = "0.4.7";
+
+    fn locked_versions(lockfile: &str, name: &str) -> Vec<String> {
+        get(&read_toml(lockfile), &["package"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["name"].as_str() == Some(name))
+            .map(|p| p["version"].as_str().unwrap().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn fst_is_the_audited_version() {
+        let how = "re-audit segment/read/fst_check.rs (its \"Bumping `fst`\" section) before changing FST_AUDITED";
+        let pin = format!("={FST_AUDITED}");
+        for (manifest, path) in [
+            ("Cargo.toml", &["workspace", "dependencies", "fst"][..]),
+            ("fuzz/Cargo.toml", &["dependencies", "fst"][..]),
+        ] {
+            let table = read_toml(manifest);
+            let req = get(&table, path).as_str().unwrap();
+            assert_eq!(req, pin, "{manifest}: {how}");
+        }
+        for lockfile in ["Cargo.lock", "fuzz/Cargo.lock"] {
+            assert_eq!(
+                locked_versions(lockfile, "fst"),
+                [FST_AUDITED],
+                "{lockfile}: {how}"
+            );
+        }
+        let module = std::fs::read_to_string(
+            root().join("crates/persia-engine/src/segment/read/fst_check.rs"),
+        )
+        .unwrap();
+        assert!(
+            module.contains(&format!("audited against `fst` {FST_AUDITED}")),
+            "fst_check.rs does not name the audited version {FST_AUDITED}"
         );
     }
 

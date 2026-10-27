@@ -32,6 +32,23 @@
 //!
 //! A stream's cost is the total length of the keys it yields, which a small graph can make huge (many keys sharing a
 //! long suffix): [`check`] bounds the longest path by the caller's `max_path` (SPEC §5.3.1, §5.3.6).
+//!
+//! # Bumping `fst`
+//!
+//! This module is audited against `fst` 0.4.7, and the workspace pins `fst = "=0.4.7"` for that reason
+//! (`cargo test -p xtask` fails if the pin, either lockfile or this sentence names another version, ROADMAP 5.4.6).
+//! A bump means, against the new version's source:
+//! 1. Diff `raw/node.rs`, `bytes.rs`, `raw/mod.rs` (`Fst::new`, the header and footer, `VERSION`, `EMPTY_ADDRESS`) and
+//!    `raw/build.rs` (node layout, which the downward walk assumes) with 0.4.7; carry every change into [`check`]
+//!    and the argument above.
+//! 2. Re-read the paths the engine takes: `Map::new`, `Map::get`, `Map::len`, `Map::stream`, `Map::range` bounds,
+//!    and `Map::search` with an automaton and range bounds (`TermIndex`, `Segment::docid_of`, `read.rs`); any new
+//!    read of node bytes, any new arithmetic on addresses or outputs, or any new `unwrap`/index must be covered by
+//!    what [`check`] verifies.
+//! 3. Run the tests of this module and the `segment` tests, then fuzz the `segment` target (`just fuzz segment`) and
+//!    the section decoders long enough to cover the FST mutations.
+//! 4. Update the version in this section, the pin in `Cargo.toml` and `fuzz/Cargo.toml`, and `FST_AUDITED` in
+//!    `xtask/src/repo_checks.rs`, in one PR that states what the diff changed.
 
 use std::cmp::max;
 
