@@ -13,10 +13,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   block-framed section through an LRU cache of decoded blocks, bounded in bytes (`BlockCache::DEFAULT_CAPACITY`, 8 MiB,
   per segment opened with `Segment::open`), which several segments may share. Term lookups, posting lists and document
   fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
-  misses. A dropped segment's blocks leave the cache. On the `segment_read` benchmarks: postings with frequencies 6.4x,
-  positions 13.5x, `advance` 4.4x, document fetches 2.6x, term lookups 1.3x and `id_of` lookups 5.8x faster when
-  blocks are re-read (docs/benchmarks.md, rows measured together). The default budget is per
-  segment (the record cache it replaces kept 8 blocks), so a process that opens many segments should share one cache.
+  misses. A dropped segment's blocks leave the cache. When blocks are re-read (docs/benchmarks.md, rows measured
+  together), `segment_read` runs postings with frequencies 6.4x, `advance` 4.4x, document fetches 2.6x and term lookups
+  1.3x faster, and `segment_records/id_of_1000` 5.8x; positions 13.5x, together with the per-document decoding of
+  ROADMAP 5.3.13 (the benchmark does not separate the two). The default budget is per segment (the record cache it
+  replaces kept 8 blocks), so a process that opens many segments should share one cache.
 - `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
   validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
   checking the table CRC and block ends again (blocks are still checked when decoded, so other bytes cannot cause a
