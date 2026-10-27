@@ -9,3 +9,4 @@ pub mod memtable;
 pub mod schema;
 pub mod segment;
 pub mod view;
+pub mod wal;

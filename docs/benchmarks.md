@@ -155,3 +155,14 @@ Documents and postings per second.
 | Recorded | `memtable/put` | `memtable/postings_freq` | `segment/add`, same run |
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
+
+## `persia-engine` WAL
+
+`cargo bench -p persia-engine --bench wal`: 2 000 encoded documents of about 40 words. `append_buffered` writes them one
+`Buffered` record at a time through `WalWriter` (chunks rotate at 1 MiB) and syncs once; `append_batch_fsync` is one
+`append_batch` with `Fsync`; `replay` reopens the container and replays every chunk into a memtable (decoding each
+document and indexing it). The log is a `SimFile`, so no time is spent in a real sync. Document bytes per second.
+
+| Recorded | `append_buffered` | `append_batch_fsync` | `replay` |
+|---|--:|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.2) | 356 MiB/s | 462 MiB/s | 66.1 MiB/s |

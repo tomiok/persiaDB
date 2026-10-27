@@ -1186,6 +1186,63 @@ Rules:
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
 5. WAL chunks fully covered by committed segments are dropped (`wal_start` advances).
 
+#### 8.2.1 WAL chunks (ADR-0028)
+The WAL is one ordered log of operations for the whole database (single writer, §8.4), stored as **chunks**: locally
+each chunk is the payload of one `WalChunk` frame (§4.4), remotely one object (`wal/<seq:020>.wal`, §10.4; M12).
+Operations are in log order: chunk order, then record order within a chunk.
+```
+0   4  magic          bytes "PWAL" (0x50 0x57 0x41 0x4C)
+4   4  version        u32 = 1
+8   4  record_count   u32  (≥ 1)
+12  ..  records, record_count times:
+          4  body_len    u32  (≥ 3)
+          ..  body:
+                1  op          1 = put, 2 = delete
+                1  name_len    u8, then name_len bytes: the collection name (§6.2.1 rule)
+                ..  payload    the rest of the body:
+                                 put    the document's encoding with every field (§6.4.2, `FieldSet::All`)
+                                 delete the document id, 1..=512 bytes of UTF-8 (§6.4.1)
+          4  crc32c      u32  over body_len and body
+```
+A chunk is at most 64 MiB (the bomb limit its readers pass, §4.4), holds no bytes after its last record, and a put
+payload is at most the document limit (16 MiB, §6.4.2). Reading: magic, `version` (0 is corruption; above 1 is
+unsupported), then each record's CRC before its body. Anything else that does not hold is corruption: an unknown
+`op` (a new op is a new `version`), a name that breaks the rule, an id out of range. A put's document is decoded
+during replay, against its collection's schema (below), and a document that does not decode is corruption too.
+The per-record CRC is redundant inside a frame, whose own CRC covers it, but not in a remote object.
+
+**Writing** (group commit). The writer encodes records into an in-memory chunk and writes it out (one frame) when
+it reaches the target size (default 1 MiB; rotation) or at a sync point; a record that does not fit the 64 MiB limit
+next to the buffered ones closes the chunk first. Durability is chosen per call (default `Fsync`):
+- `Buffered`: the record stays in the in-memory chunk until the next write-out. A crash loses it.
+- `Async`: before the call returns, the in-memory chunk is written to the file, not synced. It survives the process
+  dying (the next read-write open syncs what it reads, §4.5.1), not the OS or the machine failing.
+- `Fsync`: the chunk is written and synced before the call returns. One sync covers every record written since the
+  last one, `Buffered` and `Async` ones included, and a batch of records (`put_batch`) takes one sync; chunks may
+  still rotate inside it, so a crash may keep a prefix of a batch.
+A commit writes and syncs the in-memory chunk before its Manifest (§4.5 step 1). A failed write or sync stops the
+writer, like the container it writes to (§4.5): the records it held are lost or not, and only a reopen tells.
+
+**`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection whose memtable has
+not been flushed since; with no such chunk, the end of the log. A flush covers every record of its collection written
+so far. Chunks from `wal_start` on may therefore hold records already in committed segments (of another collection's
+chunk, or of the same chunk); replaying them is harmless (below).
+
+**Schemas and collections.** A put is encoded with its collection's schema when it is written. A schema change is
+committed (§8.7.2) before any record that uses it; since an evolved schema decodes the encodings of every earlier
+version (§6.4.2), replay decodes every record with the schema of the manifest it starts from. A commit that drops a
+collection flushes every memtable first, so its `wal_start` is the end of the log and no record of the dropped
+collection, or of an earlier collection of the same name, is ever replayed. Replay treats a record of a collection
+the manifest lacks as corruption.
+
+**Replay** (§8.6) reads the chunks from `wal_start` in log order, the committed ones (`wal_start..log_end`) and the
+ones recovery found after `log_end`, and applies each record to its collection's memtable: put as an upsert, delete
+as a delete (§8.3). The chunks are whole frames that passed validation, so a torn write never reaches replay: an
+invalid chunk or record stops it with corruption, at the first invalid byte, and the open fails. Replay is
+idempotent: by id, the state after a put or delete depends only on the last operation on that id, so applying a
+suffix of the log again, to a fresh memtable or on top of segments that already hold some of it, gives the same
+documents.
+
 ### 8.3 Upserts and deletes
 Upsert = tombstone for the previous docid (looked up via `IdMap` across segments newest-first) + insert into memtable.
 Delete = tombstone only. Tombstones are the only mutable-looking state; they live in per-segment **tombstone sidecars**
@@ -1219,7 +1276,7 @@ Merges run in background threads, are crash-safe (new segment + new manifest com
 Obsolete segments are deleted only after no snapshot references them (reference counting / epoch).
 
 ### 8.6 Recovery
-On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs)
+On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs, §8.2.1)
 → ready. Frames in `wal_start..log_end` were committed: an invalid one there is corruption, never truncated, and
 so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).

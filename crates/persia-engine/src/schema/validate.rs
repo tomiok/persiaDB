@@ -47,19 +47,23 @@ pub(super) fn build(
 }
 
 fn check_collection_name(name: &str) -> Result<(), SchemaError> {
-    let problem = name_problem(name).or_else(|| {
+    collection_name_problem(name).map_or(Ok(()), |problem| {
+        Err(SchemaError::CollectionName {
+            name: name.to_owned(),
+            problem,
+        })
+    })
+}
+
+/// What is wrong with collection name `name`, if anything; WAL records name collections too (SPEC §8.2.1).
+pub(crate) fn collection_name_problem(name: &str) -> Option<NameProblem> {
+    name_problem(name).or_else(|| {
         let mut bytes = name.bytes();
         let ok = bytes.next().is_some_and(|b| b.is_ascii_lowercase())
             && bytes
                 .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
         (!ok).then_some(NameProblem::InvalidChars {
             pattern: COLLECTION_PATTERN,
-        })
-    });
-    problem.map_or(Ok(()), |problem| {
-        Err(SchemaError::CollectionName {
-            name: name.to_owned(),
-            problem,
         })
     })
 }
