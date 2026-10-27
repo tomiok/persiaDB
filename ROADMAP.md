@@ -346,13 +346,14 @@ Deps: M1, M3, M4. The heart of the index format.
 - [x] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data; also the rules that span a whole section, which lookups do not check (found in 5.3): the `skip_off` chain and the end of the last skip region, TermInfo `max_tf`/`min_norm` equal to the extremes of their skip entries and norms, writers' minimal bit widths, a Skip section only when some df ≥ 128, `IdList` ids equal to the `DocStore` rows' ids; un-ignore `sections::skip_entries_not_back_to_back_are_corruption`
 - [x] 5.4.2 `persia inspect segment` (CLI): footer, sections, sizes, per-field stats
 - [x] 5.4.3 `persia dump segment --field f --term t` debugging output
-- [~] 5.4.4 Column value ranges in `Segment::verify` (found in the 5.4 review): an `f64` key that decodes to NaN or `-0.0` and a `datetime` key outside the SPEC §6.4.1 range are corruption (SPEC §5.2.1), but only a stored field catches them now (against its row); check the key of every document that holds a value (a document without one holds an unspecified key, SPEC §5.3.5)
+- [x] 5.4.4 Column value ranges in `Segment::verify` (found in the 5.4 review): an `f64` key that decodes to NaN or `-0.0` and a `datetime` key outside the SPEC §6.4.1 range are corruption (SPEC §5.2.1), but only a stored field catches them now (against its row); check the key of every document that holds a value (a document without one holds an unspecified key, SPEC §5.3.5)
+- [ ] 5.4.5 A maximum term length for `text` fields (found in the 5.5 review): `TermDict` paths are bounded for keyword fields (`MAX_KEYWORD_LEN`) and the `IdMap` (`MAX_ID_LEN`), but a text term is bounded only by the document size (the token length guard is configurable, and a registered analyzer may omit it), so a crafted text `TermDict` sharing one long suffix across all its keys passes the structural check and makes the open-time stream cost keys × path length. Decide a SPEC-wide term cap (e.g. 32 KiB, enforced by the builder and checked at open) or a walk-cost budget, then bound text `TermDict`s in `Segment::max_key_len`
 
 ## 5.5 Tests
-- [~] 5.5.1 Property: build segment from random docs → read back every doc/term/posting/column exactly equals the model
-- [~] 5.5.2 Golden segment fixtures (+ determinism test)
-- [~] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open (the `segment` target, added in 5.3, opens raw bytes and edited block-framed sections with valid CRCs; still missing: edits to the raw FST sections)
-- [~] 5.5.4 Large-doc / empty-collection / single-doc / 2^20-doc edge-case tests
+- [x] 5.5.1 Property: build segment from random docs → read back every doc/term/posting/column exactly equals the model
+- [x] 5.5.2 Golden segment fixtures (+ determinism test)
+- [x] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open (the `segment` target, added in 5.3, opens raw bytes and edited block-framed sections with valid CRCs; still missing: edits to the raw FST sections)
+- [x] 5.5.4 Large-doc / empty-collection / single-doc / 2^20-doc edge-case tests
 - [x] 5.5.5 Bench: build throughput, term lookup, postings decode, doc fetch
 
 ---
