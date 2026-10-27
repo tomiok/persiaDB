@@ -4,6 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
+use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, FieldSet, Value};
@@ -11,7 +12,8 @@ use persia_engine::schema::{
     CollectionSchema, FieldKind, FieldType, KeywordOptions, SchemaBuilder,
 };
 use persia_engine::segment::{
-    ReadError, Segment, SegmentCorruption, TermIndex, Tombstones, UnsupportedSegment, WriteOptions,
+    BlockCache, CacheStats, ReadError, Segment, SegmentCorruption, TermIndex, Tombstones,
+    UnsupportedSegment, WriteOptions,
 };
 use persia_format::checksum::crc32c;
 use persia_format::for_codec::{f64_to_key, i64_to_key};
@@ -1107,4 +1109,77 @@ fn ordinals_and_term_infos_are_checked() {
         again_tags.postings(&red).map(drop),
         Err(ReadError::ForeignTermInfo)
     );
+}
+
+/// Every document and frequency of `term`'s list in field `tag`.
+fn list_of(seg: &Segment, tag: persia_engine::schema::FieldId, term: &str) -> Vec<(u32, u32)> {
+    let terms = seg.terms(tag).unwrap();
+    let info = terms.clone().get(term.as_bytes()).unwrap().unwrap();
+    let mut postings = terms.postings(&info).unwrap();
+    let mut out = Vec::new();
+    while let Some(d) = postings.next().unwrap() {
+        out.push((d, postings.freq().unwrap()));
+    }
+    out
+}
+
+#[test]
+fn decoded_blocks_are_shared_across_lookups_and_iterators() {
+    let (schema, docs, bytes) = dense(3000);
+    let tag = id(&schema, "tag");
+    let cache = Arc::new(BlockCache::new(64 << 20));
+    let source = || ByteSource::new(bytes.clone().into());
+    let seg = Segment::open_with_cache(source(), &schema, Arc::clone(&cache)).unwrap();
+    let first = list_of(&seg, tag, "all");
+    assert_eq!(first, model_list(&docs, &schema, "all"));
+    let before = cache.stats();
+    assert!(before.misses > 0);
+    // A new `terms()` and a new iterator: every block they read is cached already.
+    assert_eq!(list_of(&seg, tag, "all"), first);
+    let after = cache.stats();
+    assert_eq!(after.misses, before.misses, "nothing decoded again");
+    assert!(after.hits > before.hits);
+
+    // A second segment shares the cache under its own keys; dropping it evicts only its blocks.
+    let other = Segment::open_with_cache(source(), &schema, Arc::clone(&cache)).unwrap();
+    assert_eq!(list_of(&other, tag, "all"), first);
+    assert!(cache.stats().misses > after.misses);
+    drop(other);
+    assert_eq!(cache.stats().blocks, after.blocks);
+    drop(seg);
+    assert_eq!(
+        cache.stats(),
+        CacheStats {
+            blocks: 0,
+            bytes: 0,
+            ..cache.stats()
+        }
+    );
+}
+
+#[test]
+fn a_small_cache_stays_within_capacity_and_reads_the_same() {
+    let (schema, docs, bytes) = dense(3000);
+    let tag = id(&schema, "tag");
+    for capacity in [0, 997, 4000] {
+        let cache = Arc::new(BlockCache::new(capacity));
+        let seg = Segment::open_with_cache(
+            ByteSource::new(bytes.clone().into()),
+            &schema,
+            Arc::clone(&cache),
+        )
+        .unwrap();
+        for term in ["all", "half", "third", "rare", "sparse"] {
+            assert_eq!(
+                list_of(&seg, tag, term),
+                model_list(&docs, &schema, term),
+                "{capacity} {term}"
+            );
+            assert!(cache.stats().bytes <= capacity);
+        }
+        for d in 0..seg.doc_count() {
+            assert_eq!(seg.document(d).unwrap(), docs[d as usize].clone());
+        }
+        assert!(cache.stats().bytes <= capacity);
+    }
 }

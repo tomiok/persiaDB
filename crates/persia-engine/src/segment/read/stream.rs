@@ -1,11 +1,14 @@
-//! Reading the logical stream of a block-framed section (SPEC §5.2): whole, or a range at a time through a
-//! [`Cursor`] that keeps the last decoded block, so sequential reads (postings blocks, skip entries, runs that span
-//! blocks) decode each framed block once.
+//! Reading the logical stream of a block-framed section (SPEC §5.2): whole, a block at a time through the segment's
+//! [`BlockCache`] (ROADMAP 5.3.11), or a range at a time through a [`Cursor`] that keeps the last block it read, so
+//! sequential reads (postings blocks, skip entries, runs that span blocks) look each block up once.
+
+use std::sync::Arc;
 
 use persia_format::Reader;
 use persia_format::block::{BlockReader, ValidatedTable};
 
 use super::super::SectionKind;
+use super::cache::BlockCache;
 use super::error::{ReadError, SegmentCorruption};
 
 /// A block-framed section whose block table was validated when the segment was opened.
@@ -14,6 +17,8 @@ pub(super) struct Stream<'s> {
     pub(super) kind: SectionKind,
     pub(super) field: u32,
     blocks: BlockReader<'s>,
+    /// The cache its blocks go through, and the segment instance they are keyed by; `None` decodes every read.
+    cache: Option<(&'s BlockCache, u64)>,
 }
 
 impl<'s> Stream<'s> {
@@ -33,6 +38,7 @@ impl<'s> Stream<'s> {
             kind,
             field,
             blocks,
+            cache: None,
         })
     }
 
@@ -54,7 +60,16 @@ impl<'s> Stream<'s> {
             kind,
             field,
             blocks,
+            cache: None,
         })
+    }
+
+    /// The same stream, its blocks read through `cache` under segment instance `segment`.
+    pub(super) fn cached(self, cache: &'s BlockCache, segment: u64) -> Self {
+        Self {
+            cache: Some((cache, segment)),
+            ..self
+        }
     }
 
     /// What [`Stream::open`] validated, for [`Stream::reopen`].
@@ -124,12 +139,65 @@ impl<'s> Stream<'s> {
         Ok(out)
     }
 
-    /// Block `index`, decoded into `out` (cleared first).
+    /// Block `index`, decoded into `out` (cleared first), bypassing the cache.
     pub(super) fn read_block(&self, index: u32, out: &mut Vec<u8>) -> Result<(), ReadError> {
         out.clear();
         self.blocks
             .read_block(index, out)
             .map_err(|e| self.error(e))
+    }
+
+    /// Block `index`, from the cache when it holds it.
+    pub(super) fn block(&self, index: u32) -> Result<Arc<Vec<u8>>, ReadError> {
+        let decode = || {
+            let mut buf = Vec::new();
+            self.read_block(index, &mut buf)?;
+            Ok(buf)
+        };
+        match self.cache {
+            Some((cache, segment)) => cache.get(segment, (self.kind, self.field, index), decode),
+            None => decode().map(Arc::new),
+        }
+    }
+
+    /// Fills `out` with the stream bytes from `start`, block by block through the cache.
+    pub(super) fn read_into(&self, start: u64, out: &mut [u8]) -> Result<(), ReadError> {
+        let end = start
+            .checked_add(u64::try_from(out.len()).unwrap_or(u64::MAX))
+            .filter(|&e| e <= self.len())
+            .ok_or_else(|| {
+                self.corrupt(
+                    start,
+                    SegmentCorruption::Invalid {
+                        what: "a range past the end of its stream",
+                    },
+                )
+            })?;
+        let block_size = self.block_size();
+        let mut pos = start;
+        let mut written = 0_usize;
+        while pos < end {
+            let index = pos.checked_div(block_size).unwrap_or(0);
+            let block_start = index.saturating_mul(block_size);
+            let block = self.block(u32::try_from(index).unwrap_or(u32::MAX))?;
+            let to_pos = end.min(block_start.saturating_add(block_size));
+            let bytes =
+                slice_of(&block, block_start, pos, to_pos).ok_or_else(|| short(self, pos))?;
+            let next = written.saturating_add(bytes.len());
+            out.get_mut(written..next)
+                .ok_or_else(|| short(self, pos))?
+                .copy_from_slice(bytes);
+            written = next;
+            pos = to_pos;
+        }
+        Ok(())
+    }
+
+    /// The `u64` at stream position `at`.
+    pub(super) fn u64_at(&self, at: u64) -> Result<u64, ReadError> {
+        let mut bytes = [0_u8; 8];
+        self.read_into(at, &mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
     }
 
     /// Number of framed blocks.
@@ -143,12 +211,27 @@ impl<'s> Stream<'s> {
     }
 }
 
-/// Reads ranges of one stream, keeping the last decoded block.
+/// Stream bytes `from..to` of a decoded block that starts at stream position `block_start`.
+fn slice_of(block: &[u8], block_start: u64, from: u64, to: u64) -> Option<&[u8]> {
+    let from = usize::try_from(from.checked_sub(block_start)?).ok()?;
+    let to = usize::try_from(to.checked_sub(block_start)?).ok()?;
+    block.get(from..to)
+}
+
+fn short(stream: &Stream<'_>, position: u64) -> ReadError {
+    stream.corrupt(
+        position,
+        SegmentCorruption::Invalid {
+            what: "a block shorter than its table says",
+        },
+    )
+}
+
+/// Reads ranges of one stream, keeping the last block it read.
 #[derive(Debug, Clone)]
 pub(super) struct Cursor<'s> {
     pub(super) stream: Stream<'s>,
-    block: Option<u32>,
-    buf: Vec<u8>,
+    block: Option<(u32, Arc<Vec<u8>>)>,
     spill: Vec<u8>,
 }
 
@@ -157,12 +240,20 @@ impl<'s> Cursor<'s> {
         Self {
             stream,
             block: None,
-            buf: Vec::new(),
             spill: Vec::new(),
         }
     }
 
-    /// Stream bytes `start..end`, from the cached block when they lie in one block.
+    /// Block `index`, kept until another is read.
+    fn load(&mut self, index: u32) -> Result<&[u8], ReadError> {
+        if self.block.as_ref().is_none_or(|(i, _)| *i != index) {
+            self.block = None;
+            self.block = Some((index, self.stream.block(index)?));
+        }
+        Ok(self.block.as_ref().map_or(&[][..], |(_, b)| b.as_slice()))
+    }
+
+    /// Stream bytes `start..end`, from the kept block when they lie in one block.
     pub(super) fn read(&mut self, start: u64, end: u64) -> Result<&[u8], ReadError> {
         let block_size = self.stream.block_size();
         let index = start.checked_div(block_size).unwrap_or(0);
@@ -180,27 +271,14 @@ impl<'s> Cursor<'s> {
             }
             return Ok(&self.spill);
         }
-        let index = u32::try_from(index).unwrap_or(u32::MAX);
-        if self.block != Some(index) {
-            self.block = None;
-            self.stream.read_block(index, &mut self.buf)?;
-            self.block = Some(index);
-        }
+        let stream = self.stream;
+        let block = self.load(u32::try_from(index).unwrap_or(u32::MAX))?;
         // start..end lies in the block, which holds block_size bytes (or the stream's rest).
-        let from = usize::try_from(start.saturating_sub(block_start)).unwrap_or(usize::MAX);
-        let to = usize::try_from(end.saturating_sub(block_start)).unwrap_or(usize::MAX);
-        self.buf.get(from..to).ok_or_else(|| {
-            self.stream.corrupt(
-                start,
-                SegmentCorruption::Invalid {
-                    what: "a block shorter than its table says",
-                },
-            )
-        })
+        slice_of(block, block_start, start, end).ok_or_else(|| short(&stream, start))
     }
 
-    /// Copies stream bytes `start..end` (several blocks) into `spill` block by block through the cached block, which
-    /// ends up holding the last one: a sequential reader decodes every block once.
+    /// Copies stream bytes `start..end` (several blocks) into `spill` block by block through the kept block, which
+    /// ends up holding the last one: a sequential reader looks every block up once.
     fn read_spanning(&mut self, start: u64, end: u64) -> Result<(), ReadError> {
         let block_size = self.stream.block_size();
         let len = usize::try_from(end.saturating_sub(start)).unwrap_or(usize::MAX);
@@ -209,27 +287,16 @@ impl<'s> Cursor<'s> {
                 bytes: end.checked_sub(start),
             })
         })?;
+        let stream = self.stream;
         let mut pos = start;
         while pos < end {
             let index = pos.checked_div(block_size).unwrap_or(0);
             let block_start = index.saturating_mul(block_size);
-            let index_u32 = u32::try_from(index).unwrap_or(u32::MAX);
-            if self.block != Some(index_u32) {
-                self.block = None;
-                self.stream.read_block(index_u32, &mut self.buf)?;
-                self.block = Some(index_u32);
-            }
             let to_pos = end.min(block_start.saturating_add(block_size));
-            let from = usize::try_from(pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
-            let to = usize::try_from(to_pos.saturating_sub(block_start)).unwrap_or(usize::MAX);
-            let bytes = self.buf.get(from..to).ok_or_else(|| {
-                self.stream.corrupt(
-                    pos,
-                    SegmentCorruption::Invalid {
-                        what: "a block shorter than its table says",
-                    },
-                )
-            })?;
+            self.load(u32::try_from(index).unwrap_or(u32::MAX))?;
+            let block = self.block.as_ref().map_or(&[][..], |(_, b)| b.as_slice());
+            let bytes =
+                slice_of(block, block_start, pos, to_pos).ok_or_else(|| short(&stream, pos))?;
             self.spill.extend_from_slice(bytes);
             pos = to_pos;
         }

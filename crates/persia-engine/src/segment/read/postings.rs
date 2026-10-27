@@ -158,7 +158,7 @@ pub struct Postings<'s> {
 impl<'s> Postings<'s> {
     pub(super) fn new(
         info: TermInfo,
-        lists: Option<Lists<'s>>,
+        lists: Option<&Lists<'s>>,
         doc_count: u32,
         keyword: bool,
     ) -> Self {

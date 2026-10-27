@@ -212,7 +212,7 @@ impl<'s> TermIndex<'s> {
     pub(super) fn new(
         dict: &'s fst::Map<ByteSource>,
         info: Stream<'s>,
-        lists: Lists<'s>,
+        lists: &Lists<'s>,
         doc_count: u32,
         keyword: bool,
         owner: (u64, u32),
@@ -225,7 +225,7 @@ impl<'s> TermIndex<'s> {
                 count,
                 doc_count,
                 keyword,
-                lists,
+                lists: *lists,
                 owner,
             }),
         }
@@ -279,7 +279,7 @@ impl<'s> TermIndex<'s> {
         match &self.infos {
             Some(i) if i.owner == info.owner => Ok(Postings::new(
                 info.clone(),
-                Some(i.lists),
+                Some(&i.lists),
                 i.doc_count,
                 i.keyword,
             )),

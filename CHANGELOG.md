@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
+  block-framed section through an LRU cache of decoded blocks, bounded in bytes (`BlockCache::DEFAULT_CAPACITY`, 8 MiB,
+  per segment opened with `Segment::open`), which several segments may share. Term lookups, posting lists and document
+  fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
+  misses. A dropped segment's blocks leave the cache.
 - `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
   validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
   checking the table CRC and block ends again (blocks are still checked when decoded, so other bytes cannot cause a

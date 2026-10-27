@@ -5,6 +5,7 @@
 // Offsets and lengths come from disk: arithmetic must be checked or explicitly wrapping (ROADMAP 5.3.9).
 #![deny(clippy::arithmetic_side_effects)]
 
+mod cache;
 mod columns;
 mod error;
 mod footer;
@@ -15,12 +16,14 @@ mod stream;
 mod terms;
 mod verify;
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use persia_format::checksum::crc32c;
 use persia_format::{BlobRef, ByteSource, Reader};
 use roaring::RoaringBitmap;
 
+pub use cache::{BlockCache, CacheStats};
 pub use columns::{BoolColumn, KeywordColumn, Norms, NumericColumn};
 pub use error::{ReadError, SegmentCorruption, UnsupportedSegment};
 pub use footer::FieldStats;
@@ -31,7 +34,6 @@ use super::kind::{SEGMENT_FIELD, SectionKind};
 use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN, MAX_KEYWORD_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind, FieldType};
 use footer::{Footer, Section};
-use store::BlockCache;
 use stream::Stream;
 use terms::{Lists, TERM_INFO_LEN};
 
@@ -99,7 +101,8 @@ pub struct Segment {
     term_dicts: Vec<(u32, fst::Map<ByteSource>)>,
     /// Always `Some` once opened (SPEC §5.3 "Presence").
     id_map: Option<fst::Map<ByteSource>>,
-    cache: BlockCache,
+    /// Decoded blocks of every block-framed section (ROADMAP 5.3.11).
+    cache: Arc<BlockCache>,
     /// Unique per [`Segment::open`] in this process: tells this segment's [`TermInfo`]s from any other's, even
     /// one with the same segment id.
     instance: u64,
@@ -119,6 +122,44 @@ impl Segment {
     /// version; a corruption ([`ReadError::is_corruption`]) for anything else that breaks a rule of SPEC §5.1 or
     /// §5.3, including a schema hash other than `schema`'s.
     pub fn open(source: ByteSource, schema: &CollectionSchema) -> Result<Self, ReadError> {
+        Self::open_with_cache(source, schema, Arc::new(BlockCache::default()))
+    }
+
+    /// As [`Self::open`], reading blocks through `cache` (SPEC §10.6, ROADMAP 5.3.11), which may be shared with other
+    /// segments: it then bounds the decoded bytes all of them keep. The segment's blocks leave it when the segment
+    /// is dropped.
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::{Document, Value};
+    /// # use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// # use persia_engine::segment::{BlockCache, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # use std::sync::Arc;
+    /// # let schema = SchemaBuilder::new("notes").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// # let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("n1").with(body, Value::String("Hello, world".into())))?;
+    /// # let meta = SegmentMeta { segment_id: 7, created_at: 0, merge_generation: 0 };
+    /// # let bytes = SegmentWriter::new(&builder, meta).finish()?;
+    /// let cache = Arc::new(BlockCache::new(64 << 20));
+    /// let segment = Segment::open_with_cache(ByteSource::new(bytes.into()), &schema, Arc::clone(&cache))?;
+    /// segment.terms(body)?.get(b"hello")?.ok_or("no term")?;
+    /// let misses = cache.stats().misses;
+    /// segment.terms(body)?.get(b"hello")?; // its TermInfo block is cached now
+    /// assert_eq!(cache.stats().misses, misses);
+    /// drop(segment);
+    /// assert_eq!(cache.stats().blocks, 0);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::open`].
+    pub fn open_with_cache(
+        source: ByteSource,
+        schema: &CollectionSchema,
+        cache: Arc<BlockCache>,
+    ) -> Result<Self, ReadError> {
         let footer = footer::parse(source.as_slice(), source.base_offset(), schema)?;
         let mut segment = Self {
             id_map: None,
@@ -126,7 +167,7 @@ impl Segment {
             schema: schema.clone(),
             footer,
             term_dicts: Vec::new(),
-            cache: BlockCache::default(),
+            cache,
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
         };
         segment.check_presence()?;
@@ -284,7 +325,7 @@ impl Segment {
         Ok(TermIndex::new(
             dict,
             need(SectionKind::TermInfo)?,
-            lists,
+            &lists,
             self.doc_count(),
             keyword,
             (self.instance, id),
@@ -487,7 +528,7 @@ impl Segment {
             _ => MAX_DOCUMENT_LEN,
         };
         let max = u64::try_from(max).unwrap_or(u64::MAX);
-        store::record(&stream, self.doc_count(), docid, max, &self.cache)
+        store::record(&stream, self.doc_count(), docid, max)
     }
 
     /// A field of the schema.
@@ -523,10 +564,11 @@ impl Segment {
             .source
             .base_offset()
             .saturating_add(section.range.start);
-        match section.table {
-            Some(table) => Stream::reopen(kind, field, bytes, base, table).map(Some),
-            None => Stream::open(kind, field, bytes, base).map(Some),
-        }
+        let stream = match section.table {
+            Some(table) => Stream::reopen(kind, field, bytes, base, table)?,
+            None => Stream::open(kind, field, bytes, base)?,
+        };
+        Ok(Some(stream.cached(&self.cache, self.instance)))
     }
 
     /// The block-framed `section`, its block table validated in full (whatever [`Section::table`] holds).
@@ -658,7 +700,7 @@ impl Segment {
                         }
                     }
                     SectionKind::DocStore | SectionKind::IdList | SectionKind::BlobRefs => {
-                        store::check_records(&stream, doc_count, &self.cache)?;
+                        store::check_records(&stream, doc_count)?;
                     }
                     _ => {}
                 }
@@ -708,6 +750,12 @@ impl Segment {
             }
         }
         Ok(())
+    }
+}
+
+impl Drop for Segment {
+    fn drop(&mut self) {
+        self.cache.evict_segment(self.instance);
     }
 }
 

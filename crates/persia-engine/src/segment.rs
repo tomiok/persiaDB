@@ -33,9 +33,9 @@ mod write;
 pub use builder::{MAX_DOCS, POSITION_GAP, SegmentBuilder};
 pub use kind::{SEGMENT_FIELD, SectionKind};
 pub use read::{
-    BlockMax, BoolColumn, FieldStats, KeywordColumn, Norms, NumericColumn, Postings, ReadError,
-    SectionInfo, Segment, SegmentCorruption, StreamInfo, TermIndex, TermInfo, TermStream,
-    Tombstones, UnsupportedSegment,
+    BlockCache, BlockMax, BoolColumn, CacheStats, FieldStats, KeywordColumn, Norms, NumericColumn,
+    Postings, ReadError, SectionInfo, Segment, SegmentCorruption, StreamInfo, TermIndex, TermInfo,
+    TermStream, Tombstones, UnsupportedSegment,
 };
 pub use write::{
     FOOTER_MAGIC, FORMAT_MAJOR, FORMAT_MINOR, MAX_FOOTER_LEN, SegmentMeta, SegmentWriter,
