@@ -146,10 +146,11 @@ pub struct Postings<'s> {
     /// The block whose frequencies `tfs` holds.
     tfs_of: Option<u32>,
     tfs: [u32; BLOCK_LEN],
-    /// The block whose positions `positions` holds; `position_ends[i]` ends document `i`'s.
-    positions_of: Option<u32>,
+    /// The current block's positions run, read as far as the documents asked for.
+    run: PositionsRun,
+    /// The positions of document `positions_at = (block, index)`.
+    positions_at: Option<(u32, usize)>,
     positions: Vec<u32>,
-    position_ends: Vec<usize>,
     tombstones: Option<&'s Tombstones>,
     /// Also check what only [`super::Segment::verify`] checks: minimal bit widths (SPEC §5.2.1).
     strict: bool,
@@ -158,7 +159,7 @@ pub struct Postings<'s> {
 impl<'s> Postings<'s> {
     pub(super) fn new(
         info: TermInfo,
-        lists: Option<Lists<'s>>,
+        lists: Option<&Lists<'s>>,
         doc_count: u32,
         keyword: bool,
     ) -> Self {
@@ -189,9 +190,9 @@ impl<'s> Postings<'s> {
             state,
             tfs_of: None,
             tfs: [0; BLOCK_LEN],
-            positions_of: None,
+            run: PositionsRun::default(),
+            positions_at: None,
             positions: Vec::new(),
-            position_ends: Vec::new(),
             tombstones: None,
             strict: false,
         }
@@ -275,12 +276,7 @@ impl<'s> Postings<'s> {
             self.state = State::Done;
             return Err(e);
         }
-        let start = match self.cur.checked_sub(1) {
-            Some(prev) => self.position_ends.get(prev).copied().unwrap_or(0),
-            None => 0,
-        };
-        let end = self.position_ends.get(self.cur).copied().unwrap_or(0);
-        Ok(self.positions.get(start..end).unwrap_or_default())
+        Ok(&self.positions)
     }
 
     /// The score bounds of the current document's block; `None` when not on a document.
@@ -623,7 +619,7 @@ impl<'s> Postings<'s> {
     fn load_block(&mut self, k: u32) -> Result<(), ReadError> {
         self.block = None;
         self.tfs_of = None;
-        self.positions_of = None;
+        self.positions_at = None;
         let ext = self.extent(k)?;
         let n = self.count_in(k);
         let lists = self
@@ -742,89 +738,235 @@ impl<'s> Postings<'s> {
         Ok(())
     }
 
-    /// Decodes the current block's positions run (SPEC §5.3.3).
+    /// Decodes the current document's positions (SPEC §5.3.3), reading its block's run only as far as that
+    /// document's (ROADMAP 5.3.13).
     fn load_positions(&mut self) -> Result<(), ReadError> {
         let Some(k) = self.block else {
             return Ok(());
         };
-        if self.positions_of == Some(k) {
+        if self.positions_at == Some((k, self.cur)) {
             return Ok(());
         }
+        self.positions_at = None;
+        self.positions.clear();
         self.load_freqs()?;
-        let ext = self.extent(k)?;
-        let Some(range) = ext.positions else {
-            return Ok(());
-        };
+        if self.run.block != Some(k) {
+            let ext = self.extent(k)?;
+            let Some(range) = ext.positions else {
+                return Ok(());
+            };
+            let tfs = self.tfs.get(..self.len).unwrap_or_default();
+            let total = tfs
+                .iter()
+                .fold(0_u64, |s, &t| s.saturating_add(u64::from(t)));
+            let stream = self
+                .lists
+                .as_ref()
+                .and_then(|l| l.positions.as_ref())
+                .ok_or_else(|| missing(Which::Positions))?
+                .stream;
+            // Every value costs at least one byte per 128 (a packed group of width 0): a bound before reading.
+            let bytes = range.end.saturating_sub(range.start);
+            if total > bytes.saturating_mul(128)
+                || total > self.info.ttf()
+                || bytes > max_run_len(total)
+            {
+                return Err(stream.corrupt(
+                    range.start,
+                    SegmentCorruption::Invalid {
+                        what: "a positions run whose length does not fit its frequencies",
+                    },
+                ));
+            }
+            self.run.start(k, range, total);
+        }
         let tfs = self.tfs.get(..self.len).unwrap_or_default();
-        let total = tfs
+        let start = tfs
+            .get(..self.cur)
+            .unwrap_or_default()
             .iter()
             .fold(0_u64, |s, &t| s.saturating_add(u64::from(t)));
-        let lists = self
+        let tf = tfs.get(self.cur).copied().unwrap_or(0);
+        let cursor = self
             .lists
             .as_mut()
+            .and_then(|l| l.positions.as_mut())
             .ok_or_else(|| missing(Which::Positions))?;
-        let cursor = lists
-            .positions
-            .as_mut()
-            .ok_or_else(|| missing(Which::Positions))?;
+        self.run
+            .read_doc(cursor, start, tf, self.strict, &mut self.positions)?;
+        self.positions_at = Some((k, self.cur));
+        Ok(())
+    }
+}
+
+/// The positions run of one postings block (SPEC §5.3.3), read a document at a time (ROADMAP 5.3.13). Documents come
+/// in docid order, so the run is read forward: a packed group no asked-for document needs is skipped by its width
+/// byte, unpacked only with `strict`. Memory holds one group and one document's positions.
+#[derive(Debug)]
+struct PositionsRun {
+    /// The block whose run this is.
+    block: Option<u32>,
+    range: Range<u64>,
+    /// Values in the run (the block's `Σ tf`).
+    total: u64,
+    /// The next value to read, and where it (or its group) starts once `group` is used up.
+    next: u64,
+    at: u64,
+    /// The unpacked group `values` holds.
+    group: Option<u64>,
+    values: [u32; BLOCK_LEN],
+}
+
+impl Default for PositionsRun {
+    fn default() -> Self {
+        Self {
+            block: None,
+            range: 0..0,
+            total: 0,
+            next: 0,
+            at: 0,
+            group: None,
+            values: [0; BLOCK_LEN],
+        }
+    }
+}
+
+/// Values per packed group, as a `u64`.
+const GROUP: u64 = 128;
+
+impl PositionsRun {
+    /// Starts reading block `block`'s run of `total` values, at `range`.
+    fn start(&mut self, block: u32, range: Range<u64>, total: u64) {
+        self.block = Some(block);
+        self.at = range.start;
+        self.range = range;
+        self.total = total;
+        self.next = 0;
+        self.group = None;
+    }
+
+    /// Values held in packed groups; the rest are varints.
+    fn packed(&self) -> u64 {
+        (self.total / GROUP).saturating_mul(GROUP)
+    }
+
+    /// The run ends before the value it is asked for.
+    fn short(&self, stream: &Stream<'_>) -> ReadError {
+        stream.corrupt(
+            self.at,
+            SegmentCorruption::Invalid {
+                what: "a positions run shorter than its frequencies",
+            },
+        )
+    }
+
+    /// The width and end of the packed group at `at`, which must lie in the run.
+    fn group_at(&self, cursor: &mut Cursor<'_>) -> Result<(BitWidth, u64), ReadError> {
         let stream = cursor.stream;
-        // Every value costs at least one byte per 128 (a packed group of width 0): a bound before allocating.
-        let bytes = range.end.saturating_sub(range.start);
-        if total > bytes.saturating_mul(128)
-            || total > self.info.ttf()
-            || bytes > max_run_len(total)
-        {
-            return Err(stream.corrupt(
-                range.start,
-                SegmentCorruption::Invalid {
-                    what: "a positions run whose length does not fit its frequencies",
-                },
-            ));
+        if self.at >= self.range.end {
+            return Err(self.short(&stream));
         }
-        if total > MAX_BLOCK_POSITIONS {
-            // A valid segment may hold such a block, but this reader decodes a block's positions at once.
-            return Err(stream.error(persia_format::Error::OutOfMemory {
-                bytes: total.checked_mul(4),
-            }));
+        let width = cursor
+            .reader(self.at, self.at.saturating_add(1))?
+            .read_bit_width()
+            .map_err(|e| stream.error(e))?;
+        let len = u64::try_from(width.packed_len()).unwrap_or(u64::MAX);
+        let end = self.at.saturating_add(1).saturating_add(len);
+        if end > self.range.end {
+            return Err(self.short(&stream));
         }
-        let total_usize = usize::try_from(total).unwrap_or(usize::MAX);
-        self.positions.clear();
-        self.positions.try_reserve_exact(total_usize).map_err(|_| {
-            stream.error(persia_format::Error::OutOfMemory {
-                bytes: total.checked_mul(4),
-            })
-        })?;
-        self.positions.resize(total_usize, 0);
-        let mut r = cursor.reader(range.start, range.end)?;
-        if let Some(at) =
-            read_run_into(&mut r, &mut self.positions, self.strict).map_err(|e| stream.error(e))?
-        {
-            return Err(not_minimal(stream, at));
-        }
-        if !r.is_empty() {
-            return Err(stream.corrupt(r.offset(), SegmentCorruption::TrailingBytes));
-        }
-        // Per document: the first position as is, then deltas.
-        self.position_ends.clear();
-        let mut at = 0_usize;
-        for &tf in tfs {
-            let end = at.saturating_add(usize::try_from(tf).unwrap_or(usize::MAX));
-            let mut position = 0_u32;
-            for p in self.positions.get_mut(at..end).unwrap_or_default() {
-                position = position.checked_add(*p).ok_or_else(|| {
-                    stream.corrupt(
-                        range.start,
-                        SegmentCorruption::Invalid {
-                            what: "a position above u32::MAX",
-                        },
-                    )
-                })?;
-                *p = position;
+        Ok((width, end))
+    }
+
+    /// Moves past the packed group at `at` without unpacking it.
+    fn skip_group(&mut self, cursor: &mut Cursor<'_>) -> Result<(), ReadError> {
+        let (_, end) = self.group_at(cursor)?;
+        self.at = end;
+        self.next = self.next.saturating_add(GROUP);
+        Ok(())
+    }
+
+    /// Value `next`, then moves past it.
+    fn value(&mut self, cursor: &mut Cursor<'_>, strict: bool) -> Result<u32, ReadError> {
+        let stream = cursor.stream;
+        let i = self.next;
+        if i < self.packed() {
+            let g = i / GROUP;
+            if self.group != Some(g) {
+                let (width, end) = self.group_at(cursor)?;
+                let mut r = cursor.reader(self.at.saturating_add(1), end)?;
+                r.read_packed_block(width, &mut self.values)
+                    .map_err(|e| stream.error(e))?;
+                if strict && width != BitWidth::of(&self.values) {
+                    return Err(not_minimal(stream, self.at));
+                }
+                self.at = end;
+                self.group = Some(g);
             }
-            self.position_ends.push(end);
-            at = end;
+            self.next = i.saturating_add(1);
+            let slot = usize::try_from(i % GROUP).unwrap_or(BLOCK_LEN);
+            return Ok(self.values.get(slot).copied().unwrap_or(0));
         }
-        self.positions_of = Some(k);
+        if self.at >= self.range.end {
+            return Err(self.short(&stream));
+        }
+        let end = self.range.end.min(self.at.saturating_add(5));
+        let mut r = cursor.reader(self.at, end)?;
+        let v = r.read_varint_u32().map_err(|e| stream.error(e))?;
+        self.at = r.offset();
+        self.next = i.saturating_add(1);
+        Ok(v)
+    }
+
+    /// The `tf` positions of the document whose values start at `start` into `out`: the first as is, then deltas.
+    fn read_doc(
+        &mut self,
+        cursor: &mut Cursor<'_>,
+        start: u64,
+        tf: u32,
+        strict: bool,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError> {
+        let stream = cursor.stream;
+        if start < self.next {
+            // Defensive: `Postings` only moves forward within a block, so this does not happen today. If it did, the
+            // run would be read again from its start.
+            let (block, range, total) = (self.block, self.range.clone(), self.total);
+            self.start(block.unwrap_or(0), range, total);
+        }
+        while self.next < start {
+            let whole_group = self.next < self.packed()
+                && self.next.is_multiple_of(GROUP)
+                && start >= self.next.saturating_add(GROUP);
+            if whole_group && !strict {
+                self.skip_group(cursor)?;
+            } else {
+                self.value(cursor, strict)?;
+            }
+        }
+        out.clear();
+        let mut position = 0_u32;
+        for _ in 0..tf {
+            let delta = self.value(cursor, strict)?;
+            position = position.checked_add(delta).ok_or_else(|| {
+                stream.corrupt(
+                    self.range.start,
+                    SegmentCorruption::Invalid {
+                        what: "a position above u32::MAX",
+                    },
+                )
+            })?;
+            // Grown as values are decoded, so memory follows what the run holds, not what `tf` claims.
+            if out.len() == out.capacity() && out.try_reserve(BLOCK_LEN).is_err() {
+                return Err(stream.error(persia_format::Error::OutOfMemory {
+                    bytes: u64::from(tf).checked_mul(4),
+                }));
+            }
+            out.push(position);
+        }
+        if self.next == self.total && self.at != self.range.end {
+            return Err(stream.corrupt(self.at, SegmentCorruption::TrailingBytes));
+        }
         Ok(())
     }
 }
@@ -906,8 +1048,6 @@ fn missing(which: Which) -> ReadError {
 
 /// Most docids in a tail block.
 const MAX_TAIL: u64 = 127;
-/// Most positions this reader decodes for one postings block (256 MiB of `u32`).
-const MAX_BLOCK_POSITIONS: u64 = 1 << 26;
 
 /// The longest a run of `n` values can be (SPEC §5.3.2): a width byte and 512 bytes per 128-group, then a varint of
 /// at most 5 bytes per value.

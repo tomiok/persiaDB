@@ -14,12 +14,13 @@
 //!
 //! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
 //! `advance` and `shallow_advance` to a few targets, norms, columns, every document, id and blob reference, then
-//! `Segment::verify`. Errors are ignored; the only failure is a panic (or a hang).
+//! `Segment::verify`; half the inputs are read through a 4 KiB block cache, and positions are also read for every
+//! 7th document only. Errors are ignored; the only failure is a panic (or a hang).
 #![no_main]
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::AnalyzerRegistry;
@@ -28,8 +29,8 @@ use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::segment::{
-    ReadError, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter, TermIndex,
-    WriteOptions,
+    BlockCache, ReadError, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter,
+    TermIndex, WriteOptions,
 };
 use persia_format::block::{BlockReader, BlockWriter, Compression};
 use persia_format::checksum::crc32c;
@@ -442,6 +443,15 @@ fn read_terms(terms: &mut TermIndex<'_>, doc_count: u32) -> Result<(), ReadError
             let _ = postings.block_max();
             read += 1;
         }
+        // Positions of every 7th document only: the run is skipped group by group (ROADMAP 5.3.13).
+        let mut postings = terms.postings(info)?;
+        let mut read = 0_usize;
+        while postings.next()?.is_some() && read < MAX_POSTINGS {
+            if read % 7 == 6 {
+                let _ = postings.positions()?.len();
+            }
+            read += 1;
+        }
         let mut postings = terms.postings(info)?;
         for target in [
             0,
@@ -500,8 +510,8 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
                 }
             }
             for d in 0..=n {
-                let _ = col.ords(d).len();
-                let _ = col.values(d).count();
+                let _ = col.ords(d).map(|o| o.len());
+                let _ = col.values(d).map(|v| v.len());
             }
         }
     }
@@ -536,7 +546,14 @@ fuzz_target!(|data: &[u8]| {
         },
         _ => fixed.layout(&fixed.sections, rest),
     };
-    if let Ok(seg) = Segment::open(ByteSource::new(bytes.into()), &fixed.schema) {
+    // Half the inputs read through a tiny cache, so blocks are evicted and decoded again (ROADMAP 5.3.11).
+    let opened = if bytes.len() % 2 == 0 {
+        Segment::open(ByteSource::new(bytes.into()), &fixed.schema)
+    } else {
+        let cache = Arc::new(BlockCache::new(4096));
+        Segment::open_with_cache(ByteSource::new(bytes.into()), &fixed.schema, cache)
+    };
+    if let Ok(seg) = opened {
         read_all(&seg, &fixed.schema);
     }
 });

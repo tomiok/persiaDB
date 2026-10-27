@@ -14,10 +14,10 @@ use crate::document::{MAX_DATETIME, MIN_DATETIME, Value};
 use crate::schema::{Field, FieldType};
 
 /// A column field's doc values, decoded with the writers' rules checked too.
-enum Column {
-    Numeric(NumericColumn),
+enum Column<'s> {
+    Numeric(NumericColumn<'s>),
     Bool(BoolColumn),
-    Keyword(KeywordColumn),
+    Keyword(KeywordColumn<'s>),
 }
 
 /// What a term's posting list holds, to compare with its `TermInfo`.
@@ -47,9 +47,11 @@ impl Segment {
     /// It does not analyze stored `text` values again to compare them with the postings.
     ///
     /// It decodes every block once or more, and holds 4 bytes per document for one `text`/`keyword` field at a time,
-    /// plus the decoded columns of every column field (8 bytes per document each, and a keyword column's values and
-    /// ords). The document count is bounded by the input (open checked that the record arrays hold 8 bytes per
-    /// document), so memory is linear in the segment size times the number of column fields.
+    /// plus each column field's presence bitmaps and keyword dictionary, and each keyword column's starts and ords
+    /// decoded (8 bytes per document and per ord: they are read in term order, which jumps between FOR blocks); numeric
+    /// keys are read from their FOR blocks as they are checked (ROADMAP 5.3.12). The document count is bounded by the
+    /// input (open checked that the record arrays hold 8 bytes per document), so memory is linear in the segment size
+    /// times the number of keyword fields.
     ///
     /// ```
     /// # use persia_analysis::AnalyzerRegistry;
@@ -124,7 +126,7 @@ impl Segment {
     }
 
     /// The column of `field`, if it is a column field; a section must hold at least one value (SPEC §5.3).
-    fn verified_column(&self, field: &Field) -> Result<Option<Column>, ReadError> {
+    fn verified_column(&self, field: &Field) -> Result<Option<Column<'_>>, ReadError> {
         let id = field.id().get();
         let stream = self.stream(SectionKind::Columns, id)?;
         let present = stream.is_some();
@@ -133,7 +135,11 @@ impl Segment {
             ty @ (FieldType::I64 | FieldType::F64 | FieldType::Datetime) => {
                 let c = NumericColumn::read(stream, ty, n, true)?;
                 let any = (0..n).any(|d| c.has_value(d));
-                if (0..n).any(|d| c.get(d).is_some_and(|v| !in_range(&v))) {
+                let mut out_of_range = false;
+                for d in 0..n {
+                    out_of_range |= c.get(d)?.is_some_and(|v| !in_range(&v));
+                }
+                if out_of_range {
                     return Err(invalid(
                         SectionKind::Columns,
                         id,
@@ -151,7 +157,10 @@ impl Segment {
             }
             FieldType::Keyword => {
                 let c = KeywordColumn::read(stream, n, true)?;
-                let any = (0..n).any(|d| !c.ords(d).is_empty());
+                let mut any = false;
+                for d in 0..n {
+                    any |= !c.ords(d)?.is_empty();
+                }
                 (Column::Keyword(c), any)
             }
             FieldType::Text | FieldType::Stored => return Ok(None),
@@ -164,7 +173,7 @@ impl Segment {
 
     /// The `DocStore`, `IdList`, `IdMap` and `BlobRefs` agree document by document, stored values equal the
     /// columns, and the footer's id range is the ids'.
-    fn verify_documents(&self, columns: &[(&Field, Column)]) -> Result<(), ReadError> {
+    fn verify_documents(&self, columns: &[(&Field, Column<'_>)]) -> Result<(), ReadError> {
         let mut range: Option<(String, String)> = None;
         let mut any_blob = false;
         for d in 0..self.doc_count() {
@@ -214,7 +223,7 @@ impl Segment {
                 ));
             }
             for (field, column) in columns {
-                if field.kind().stored() && !stored_matches(doc.get(field.id()), column, d) {
+                if field.kind().stored() && !stored_matches(doc.get(field.id()), column, d)? {
                     return Err(invalid(
                         SectionKind::Columns,
                         field.id().get(),
@@ -247,7 +256,7 @@ impl Segment {
     fn verify_terms(
         &self,
         field: &Field,
-        keyword: Option<&KeywordColumn>,
+        keyword: Option<&KeywordColumn<'_>>,
     ) -> Result<(), ReadError> {
         let id = field.id();
         let fid = id.get();
@@ -302,9 +311,10 @@ impl Segment {
             }
         }
         if let Some(col) = keyword {
-            let ords = (0..self.doc_count()).fold(0_u64, |s, d| {
-                s.saturating_add(u64::try_from(col.ords(d).len()).unwrap_or(u64::MAX))
-            });
+            let mut ords = 0_u64;
+            for d in 0..self.doc_count() {
+                ords = ords.saturating_add(u64::try_from(col.ords(d)?.len()).unwrap_or(u64::MAX));
+            }
             if col.len() != index.len() || ords != postings {
                 return Err(invalid(
                     SectionKind::Columns,
@@ -352,7 +362,7 @@ struct Totals {
 fn walk_terms(
     index: &TermIndex<'_>,
     norms: Option<&Norms>,
-    keyword: Option<&KeywordColumn>,
+    keyword: Option<&KeywordColumn<'_>>,
     lens: &mut [u32],
 ) -> Result<Totals, ReadError> {
     let fid = index.field();
@@ -408,7 +418,7 @@ fn verify_list(
     index: &TermIndex<'_>,
     info: &TermInfo,
     norms: Option<&Norms>,
-    keyword: Option<&KeywordColumn>,
+    keyword: Option<&KeywordColumn<'_>>,
     lens: &mut [u32],
 ) -> Result<ListStats, ReadError> {
     let fid = index.field();
@@ -442,7 +452,7 @@ fn verify_list(
             *len = len.saturating_add(tf);
         }
         if let Some(col) = keyword
-            && col.ords(d).binary_search(&info.ordinal()).is_err()
+            && col.ords(d)?.binary_search(&info.ordinal()).is_err()
         {
             return Err(invalid(
                 SectionKind::Columns,
@@ -480,20 +490,24 @@ fn entries_end(skip_off: u64, df: u32) -> u64 {
 }
 
 /// Whether a stored value is what `column` holds for `docid` (a keyword column holds the distinct values, sorted).
-fn stored_matches(value: Option<&Value>, column: &Column, docid: u32) -> bool {
+fn stored_matches(
+    value: Option<&Value>,
+    column: &Column<'_>,
+    docid: u32,
+) -> Result<bool, ReadError> {
     match column {
-        Column::Numeric(c) => value == c.get(docid).as_ref(),
-        Column::Bool(c) => value == c.get(docid).map(Value::Bool).as_ref(),
+        Column::Numeric(c) => Ok(value == c.get(docid)?.as_ref()),
+        Column::Bool(c) => Ok(value == c.get(docid).map(Value::Bool).as_ref()),
         Column::Keyword(c) => {
             let mut values: Vec<&[u8]> = match value {
                 None => Vec::new(),
                 Some(Value::String(s)) => vec![s.as_bytes()],
                 Some(Value::Strings(list)) => list.iter().map(String::as_bytes).collect(),
-                Some(_) => return false,
+                Some(_) => return Ok(false),
             };
             values.sort_unstable();
             values.dedup();
-            values.into_iter().eq(c.values(docid))
+            Ok(values == c.values(docid)?)
         }
     }
 }

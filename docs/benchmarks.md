@@ -83,6 +83,13 @@ its positions; `document` fetches every stored document by docid. Operations per
 | Recorded | `open` | `term_get` | `postings_freq` | `advance` | `positions` | `document` |
 |---|--:|--:|--:|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.38 K | 5.34 M | 6.69 M | 4.82 M | 453 K | 434 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; parent commit of ROADMAP 5.3.11 (609e833), measured with the next row | 2.03 K | 5.37 M | 7.27 M | 4.97 M | 485 K | 488 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; per-segment block cache (ROADMAP 5.3.11), positions per document (5.3.13) | 2.02 K | 6.83 M | 46.6 M | 21.7 M | 6.56 M | 1.26 M |
+
+Compare rows measured together: runs on different days differ by 10–20 % on this machine. `open` did not change with
+ROADMAP 5.3.11 (2.03 K and 2.02 K in the same session); the 2.38 K of 2026-10-26 is the earlier session, not a
+regression. The segment in these benchmarks is small, so after the first pass almost every block is cached: the
+gains are those of re-reading, and a first read of a block costs what it did before.
 
 ## `persia-engine` segment opening and record lookups
 
@@ -95,3 +102,18 @@ its positions; `document` fetches every stored document by docid. Operations per
 | Recorded | `segment_open/large_dict` | `segment_records/id_of_1000` |
 |---|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.26 M | 407 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; parent commit of ROADMAP 5.3.11 (609e833), measured with the next row | (not run) | 399 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; per-segment block cache (ROADMAP 5.3.11) | (not run) | 2.30 M |
+
+## `persia-engine` column scans
+
+`cargo bench -p persia-engine --bench segment -- segment_columns`: a 50 000-document segment (default `WriteOptions`)
+whose `f64` keys span the key range (64-bit FOR blocks, many crossing a framed block). `numeric_key_scan` reads every
+document's key with `NumericColumn::key`; `keyword_ords_scan` every document's ords with `KeywordColumn::ords`.
+Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: before them a column was a decoded
+`Vec` of 8 bytes per document (first row, measured on the parent commit); now one block per FOR stream (one for a numeric column, two for a keyword column) stays decoded.
+
+| Recorded | `numeric_key_scan` | `keyword_ords_scan` |
+|---|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M |

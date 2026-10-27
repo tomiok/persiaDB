@@ -1,8 +1,12 @@
-//! Typed readers of `Norms` and `Columns` (SPEC §5.3.4, §5.3.5; ROADMAP 5.3.5). Each decodes and validates its
-//! whole section when it is opened, then answers per document in O(1).
+//! Typed readers of `Norms` and `Columns` (SPEC §5.3.4, §5.3.5; ROADMAP 5.3.5, 5.3.12). Norms, bool bitmaps,
+//! presence bitmaps and a keyword column's dictionary are decoded when the reader is opened; numeric keys and keyword
+//! ords stay in their FOR blocks, read one block at a time through the segment's block cache (SPEC §5.2.1 makes any
+//! value O(1)), so a reader's memory does not grow with the document count.
 
-use persia_format::Reader;
-use persia_format::for_codec::{VALUES_PER_BLOCK, key_to_f64, key_to_i64};
+use core::ops::Range;
+use std::sync::{Arc, Mutex, PoisonError};
+
+use persia_format::for_codec::{ForBlock, key_to_f64, key_to_i64};
 use roaring::RoaringBitmap;
 
 use super::super::norms;
@@ -53,58 +57,67 @@ impl Norms {
     }
 }
 
-/// Reads the parts of a `Columns` stream, mapping errors to its section.
-struct Parts<'a, 's> {
-    r: Reader<'a>,
+/// Reads the parts of a `Columns` stream in order from a stream position, mapping errors to its section.
+struct Parts<'s> {
     stream: Stream<'s>,
-    /// Also check what only [`super::Segment::verify`] checks: FOR blocks at their true minimum and minimal width.
-    strict: bool,
+    at: u64,
 }
 
-impl Parts<'_, '_> {
-    fn bad(&self, position: u64, what: &'static str) -> ReadError {
-        self.stream
-            .corrupt(position, SegmentCorruption::Invalid { what })
+impl<'s> Parts<'s> {
+    fn new(stream: Stream<'s>) -> Self {
+        Self { stream, at: 0 }
     }
 
-    /// An empty vector with room for `n` values: sized by the stream, so it fails cleanly rather than aborting.
-    fn vec<T>(&self, n: u64) -> Result<Vec<T>, ReadError> {
-        let mut v = Vec::new();
-        let n_usize = usize::try_from(n).unwrap_or(usize::MAX);
-        v.try_reserve_exact(n_usize).map_err(|_| {
-            self.stream.error(persia_format::Error::OutOfMemory {
-                bytes: n.checked_mul(u64::try_from(size_of::<T>()).unwrap_or(8)),
-            })
-        })?;
-        Ok(v)
+    fn bad(&self, position: u64, what: &'static str) -> ReadError {
+        bad(&self.stream, position, what)
+    }
+
+    /// The position `len` bytes on, which must be in the stream.
+    fn skip(&mut self, len: u64) -> Result<u64, ReadError> {
+        let at = self.at;
+        self.at = at
+            .checked_add(len)
+            .filter(|&e| e <= self.stream.len())
+            .ok_or_else(|| self.bad(at, "a column part past the end of its stream"))?;
+        Ok(at)
     }
 
     fn u64(&mut self) -> Result<u64, ReadError> {
-        self.r.read_u64().map_err(|e| self.stream.error(e))
+        let at = self.skip(8)?;
+        self.stream.u64_at(at)
+    }
+
+    fn bytes(&mut self, len: u64) -> Result<Vec<u8>, ReadError> {
+        let at = self.skip(len)?;
+        let mut out = Vec::new();
+        self.stream.read_range(at, self.at, &mut out)?;
+        Ok(out)
     }
 
     /// The tag byte and its 7 zero bytes.
     fn header(&mut self, tag: u8) -> Result<(), ReadError> {
-        let at = self.r.offset();
-        let got = self.r.read_u8().map_err(|e| self.stream.error(e))?;
-        if got != tag {
-            return Err(self.bad(at, "a column tag other than the field type's"));
-        }
-        self.r.expect_zeros(7).map_err(|e| self.stream.error(e))
+        let at = self.skip(8)?;
+        let stream = self.stream;
+        stream.with_reader(at, self.at, |r| {
+            let got = r.read_u8().map_err(|e| stream.error(e))?;
+            if got != tag {
+                return Err(bad(&stream, at, "a column tag other than the field type's"));
+            }
+            r.expect_zeros(7).map_err(|e| stream.error(e))
+        })
     }
 
     /// A length-prefixed roaring bitmap; `None` for length 0. Its docids must be below `doc_count`.
     fn bitmap(&mut self, doc_count: u32) -> Result<Option<RoaringBitmap>, ReadError> {
-        let at = self.r.offset();
+        let at = self.at;
         let len = self.u64()?;
         if len == 0 {
             return Ok(None);
         }
-        let len = usize::try_from(len).map_err(|_| self.bad(at, "a bitmap length"))?;
-        let bytes = self.r.read_bytes(len).map_err(|e| self.stream.error(e))?;
-        let bitmap = RoaringBitmap::deserialize_from(bytes)
+        let bytes = self.bytes(len)?;
+        let bitmap = RoaringBitmap::deserialize_from(bytes.as_slice())
             .map_err(|_| self.bad(at, "a bitmap that does not deserialize"))?;
-        if bitmap.serialized_size() != len {
+        if u64::try_from(bitmap.serialized_size()).ok() != Some(len) {
             return Err(self.bad(at, "bytes after a bitmap"));
         }
         if bitmap.max().is_some_and(|d| d >= doc_count) {
@@ -113,98 +126,255 @@ impl Parts<'_, '_> {
         Ok(Some(bitmap))
     }
 
-    /// A FOR column of exactly `count` values (SPEC §5.3.5).
-    fn for_column(&mut self, count: u64) -> Result<Vec<u64>, ReadError> {
-        let at = self.r.offset();
-        if self.u64()? != count {
-            return Err(self.bad(at, "a FOR column count"));
-        }
-        let per_block = u64::try_from(VALUES_PER_BLOCK).unwrap_or(1024);
-        let blocks = count.div_ceil(per_block);
-        // Each block end takes 8 bytes and each block at least 13: a bound before allocating.
-        let remaining = u64::try_from(self.r.remaining()).unwrap_or(u64::MAX);
-        if blocks.saturating_mul(21) > remaining {
-            return Err(self.bad(at, "a FOR column longer than its stream"));
-        }
-        let mut ends = self.vec(blocks)?;
-        for _ in 0..blocks {
-            ends.push(self.u64()?);
-        }
-        let data_at = self.r.offset();
-        let mut values = self.vec(count)?;
-        let mut start = 0_u64;
-        for (i, &end) in ends.iter().enumerate() {
-            let len = end
-                .checked_sub(start)
-                .filter(|&l| l > 0)
-                .and_then(|l| usize::try_from(l).ok())
-                .ok_or_else(|| self.bad(data_at, "FOR block ends that do not increase"))?;
-            let block_at = self.r.offset();
-            let mut br = self.r.sub_reader(len).map_err(|e| self.stream.error(e))?;
-            let block = br.read_for_block().map_err(|e| self.stream.error(e))?;
-            if !br.is_empty() {
-                return Err(self.bad(block_at, "bytes after a FOR block"));
-            }
-            let index = u64::try_from(i).unwrap_or(u64::MAX);
-            let expected = count
-                .saturating_sub(index.saturating_mul(per_block))
-                .min(per_block);
-            if u64::try_from(block.len()).ok() != Some(expected) {
-                return Err(self.bad(block_at, "a FOR block count"));
-            }
-            if self.strict && !minimal(&block) {
-                return Err(self.bad(
-                    block_at,
-                    "a FOR block whose minimum or width is not minimal",
-                ));
-            }
-            values.extend(block.iter());
-            start = end;
-        }
-        Ok(values)
-    }
-
+    /// The stream must end here.
     fn finish(&self) -> Result<(), ReadError> {
-        if self.r.is_empty() {
+        if self.at == self.stream.len() {
             Ok(())
         } else {
             Err(self
                 .stream
-                .corrupt(self.r.offset(), SegmentCorruption::TrailingBytes))
+                .corrupt(self.at, SegmentCorruption::TrailingBytes))
         }
     }
 }
 
-/// Decodes `stream` and hands its parts to `f`.
-fn parse<T>(
-    stream: Stream<'_>,
-    strict: bool,
-    f: impl FnOnce(&mut Parts<'_, '_>) -> Result<T, ReadError>,
-) -> Result<T, ReadError> {
-    let bytes = stream.read_all()?;
-    let mut parts = Parts {
-        r: Reader::new(&bytes),
-        stream,
-        strict,
-    };
-    let out = f(&mut parts)?;
-    parts.finish()?;
-    Ok(out)
+fn bad(stream: &Stream<'_>, position: u64, what: &'static str) -> ReadError {
+    stream.corrupt(position, SegmentCorruption::Invalid { what })
 }
 
-/// The values of an `i64`, `f64` or `datetime` field (SPEC §5.3.5).
+/// Values per FOR block (SPEC §5.2.1).
+const PER_BLOCK: u64 = 1024;
+
+/// Bytes of the largest FOR block: 13 header bytes and 1024 values of 64 bits (SPEC §5.2.1).
+const MAX_FOR_BLOCK_LEN: u64 = 13 + 8 * 1024;
+
+/// A FOR column (SPEC §5.3.5) whose blocks are decoded when a value is asked for. Opening it reads its count and
+/// last block end; a block's end, count and contents are checked whenever it is read.
 #[derive(Debug, Clone)]
-pub struct NumericColumn {
+struct ForColumn<'s> {
+    stream: Stream<'s>,
+    /// Where the column starts (its count), for errors.
+    at: u64,
+    count: u64,
+    /// Stream position of the first block end.
+    ends_at: u64,
+    /// Stream position of the first block.
+    data_at: u64,
+    /// Length of the blocks, together.
+    data_len: u64,
+    last: LastBlock,
+    /// Every value, decoded by [`ForColumn::preload`]; `None` reads block by block.
+    all: Option<Arc<Vec<u64>>>,
+}
+
+impl<'s> ForColumn<'s> {
+    /// The FOR column at the parts' position, which must hold exactly `count` values; the parts move past it. With
+    /// `strict`, every block is read now and must use its true minimum and the minimal width (what only
+    /// [`super::Segment::verify`] checks).
+    fn open(parts: &mut Parts<'s>, count: u64, strict: bool) -> Result<Self, ReadError> {
+        let at = parts.at;
+        if parts.u64()? != count {
+            return Err(parts.bad(at, "a FOR column count"));
+        }
+        let blocks = count.div_ceil(PER_BLOCK);
+        let ends_at = parts.at;
+        let too_long = |p: &Parts<'_>| p.bad(at, "a FOR column longer than its stream");
+        let ends_len = blocks.checked_mul(8).ok_or_else(|| too_long(parts))?;
+        parts.skip(ends_len).map_err(|_| too_long(parts))?;
+        let data_at = parts.at;
+        let data_len = match ends_len.checked_sub(8) {
+            Some(last) => parts.stream.u64_at(ends_at.saturating_add(last))?,
+            None => 0,
+        };
+        // Every block takes at least its 13 header bytes.
+        if data_len < blocks.saturating_mul(13) {
+            return Err(parts.bad(ends_at, "FOR block ends that do not increase"));
+        }
+        parts.skip(data_len).map_err(|_| too_long(parts))?;
+        let column = Self {
+            stream: parts.stream,
+            at,
+            count,
+            ends_at,
+            data_at,
+            data_len,
+            last: LastBlock::default(),
+            all: None,
+        };
+        // The last block's start too: a last end at or below the one before is the ends' fault, not trailing bytes.
+        if let Some(last) = blocks.checked_sub(1) {
+            column.block_range(last)?;
+        }
+        if strict {
+            for b in 0..blocks {
+                column.with_block(b, |block, at| {
+                    if minimal(block) {
+                        Ok(())
+                    } else {
+                        Err(column.bad(at, "a FOR block whose minimum or width is not minimal"))
+                    }
+                })?;
+            }
+        }
+        Ok(column)
+    }
+
+    fn bad(&self, position: u64, what: &'static str) -> ReadError {
+        bad(&self.stream, position, what)
+    }
+
+    /// Where block `b` lies in the stream.
+    fn block_range(&self, b: u64) -> Result<Range<u64>, ReadError> {
+        let end_at = b
+            .checked_mul(8)
+            .and_then(|o| o.checked_add(self.ends_at))
+            .ok_or_else(|| self.bad(self.at, "a FOR block past its column"))?;
+        let end = self.stream.u64_at(end_at)?;
+        let start = match end_at.checked_sub(8).filter(|_| b > 0) {
+            Some(at) => self.stream.u64_at(at)?,
+            None => 0,
+        };
+        if start >= end || end > self.data_len {
+            return Err(self.bad(end_at, "FOR block ends that do not increase"));
+        }
+        // The longest a block can be (SPEC §5.2.1): its header and 1024 values of 64 bits, checked before it is read.
+        if end.saturating_sub(start) > MAX_FOR_BLOCK_LEN {
+            return Err(self.bad(end_at, "a FOR block longer than any block can be"));
+        }
+        // Both are at most data_len, and data_at + data_len is in the stream (checked at open).
+        Ok(self.data_at.saturating_add(start)..self.data_at.saturating_add(end))
+    }
+
+    /// Calls `f` on block `b`, after checking it holds what its place in the column says, and its position.
+    fn with_block<T>(
+        &self,
+        b: u64,
+        f: impl FnOnce(&ForBlock<'_>, u64) -> Result<T, ReadError>,
+    ) -> Result<T, ReadError> {
+        let range = self.block_range(b)?;
+        let expected = self
+            .count
+            .saturating_sub(b.saturating_mul(PER_BLOCK))
+            .min(PER_BLOCK);
+        let stream = self.stream;
+        stream.with_reader(range.start, range.end, |r| {
+            let block = r.read_for_block().map_err(|e| stream.error(e))?;
+            if !r.is_empty() {
+                return Err(bad(&stream, range.start, "bytes after a FOR block"));
+            }
+            if u64::try_from(block.len()).ok() != Some(expected) {
+                return Err(bad(&stream, range.start, "a FOR block count"));
+            }
+            f(&block, range.start)
+        })
+    }
+
+    /// Decodes every value now, for a reader that jumps between blocks: [`super::Segment::verify`] checks a keyword
+    /// column against each term's postings, and terms come in byte order, not docid order. Costs 8 bytes per value.
+    fn preload(&mut self) -> Result<(), ReadError> {
+        let n = usize::try_from(self.count).unwrap_or(usize::MAX);
+        let mut all = Vec::new();
+        all.try_reserve_exact(n).map_err(|_| {
+            self.stream.error(persia_format::Error::OutOfMemory {
+                bytes: self.count.checked_mul(8),
+            })
+        })?;
+        self.get_range(0..self.count, &mut all)?;
+        self.all = Some(Arc::new(all));
+        Ok(())
+    }
+
+    /// Block `b`'s values: the last block read stays decoded, so a scan decodes each block once.
+    fn decoded(&self, b: u64) -> Result<Arc<Vec<u64>>, ReadError> {
+        if let Some((last, values)) = &*self.last.lock()
+            && *last == b
+        {
+            return Ok(Arc::clone(values));
+        }
+        let values =
+            Arc::new(self.with_block(b, |block, _| Ok(block.iter().collect::<Vec<u64>>()))?);
+        *self.last.lock() = Some((b, Arc::clone(&values)));
+        Ok(values)
+    }
+
+    /// Value `i`, which must be below the count.
+    fn get(&self, i: u64) -> Result<u64, ReadError> {
+        if i >= self.count {
+            return Err(self.bad(self.at, "a FOR value past its column"));
+        }
+        if let Some(all) = &self.all {
+            let i = usize::try_from(i).unwrap_or(usize::MAX);
+            return all
+                .get(i)
+                .copied()
+                .ok_or_else(|| self.bad(self.at, "a FOR value past its column"));
+        }
+        let within = usize::try_from(i % PER_BLOCK).unwrap_or(usize::MAX);
+        let values = self.decoded(i / PER_BLOCK)?;
+        // `with_block` checked the block holds what its place in the column says.
+        values
+            .get(within)
+            .copied()
+            .ok_or_else(|| self.bad(self.at, "a FOR block count"))
+    }
+
+    /// Values `range` appended to `out`; the range must be within the count.
+    fn get_range(&self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
+        if range.end > self.count {
+            return Err(self.bad(self.at, "a FOR value past its column"));
+        }
+        if let Some(all) = &self.all {
+            let from = usize::try_from(range.start).unwrap_or(usize::MAX);
+            let to = usize::try_from(range.end).unwrap_or(usize::MAX);
+            out.extend_from_slice(all.get(from..to).unwrap_or_default());
+            return Ok(());
+        }
+        let mut i = range.start;
+        while i < range.end {
+            let b = i / PER_BLOCK;
+            let block_start = b.saturating_mul(PER_BLOCK);
+            let to = range.end.min(block_start.saturating_add(PER_BLOCK));
+            let values = self.decoded(b)?;
+            let from = usize::try_from(i.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            let upto = usize::try_from(to.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            out.extend_from_slice(values.get(from..upto).unwrap_or_default());
+            i = to;
+        }
+        Ok(())
+    }
+}
+
+/// The last FOR block a [`ForColumn`] decoded. A clone starts empty.
+#[derive(Debug, Default)]
+struct LastBlock(Mutex<Option<(u64, Arc<Vec<u64>>)>>);
+
+impl LastBlock {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<(u64, Arc<Vec<u64>>)>> {
+        // Only ever replaced whole: a panic elsewhere cannot leave it half-written.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Clone for LastBlock {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+/// The values of an `i64`, `f64` or `datetime` field (SPEC §5.3.5), read from their FOR blocks on demand.
+#[derive(Debug, Clone)]
+pub struct NumericColumn<'s> {
     field_type: FieldType,
+    doc_count: u32,
     /// `None`: every document has a value.
     presence: Option<RoaringBitmap>,
-    /// One order-preserving key per document; empty when no document has a value.
-    keys: Vec<u64>,
+    /// One order-preserving key per document; `None` when no document has a value.
+    keys: Option<ForColumn<'s>>,
 }
 
-impl NumericColumn {
+impl<'s> NumericColumn<'s> {
     pub(super) fn read(
-        stream: Option<Stream<'_>>,
+        stream: Option<Stream<'s>>,
         field_type: FieldType,
         doc_count: u32,
         strict: bool,
@@ -212,47 +382,51 @@ impl NumericColumn {
         let Some(stream) = stream else {
             return Ok(Self {
                 field_type,
+                doc_count,
                 presence: Some(RoaringBitmap::new()),
-                keys: Vec::new(),
+                keys: None,
             });
         };
-        parse(stream, strict, |p| {
-            p.header(TAG_NUMERIC)?;
-            let presence = p.bitmap(doc_count)?;
-            let keys = p.for_column(u64::from(doc_count))?;
-            Ok(Self {
-                field_type,
-                presence,
-                keys,
-            })
+        let mut p = Parts::new(stream);
+        p.header(TAG_NUMERIC)?;
+        let presence = p.bitmap(doc_count)?;
+        let keys = ForColumn::open(&mut p, u64::from(doc_count), strict)?;
+        p.finish()?;
+        Ok(Self {
+            field_type,
+            doc_count,
+            presence,
+            keys: Some(keys),
         })
     }
 
     /// Whether `docid` has a value.
     pub fn has_value(&self, docid: u32) -> bool {
         let present = self.presence.as_ref().is_none_or(|p| p.contains(docid));
-        present && usize::try_from(docid).is_ok_and(|d| d < self.keys.len())
+        present && docid < self.doc_count && self.keys.is_some()
     }
 
     /// `docid`'s order-preserving key (SPEC §5.2.1): unsigned order is value order, for range filters and sorting.
-    pub fn key(&self, docid: u32) -> Option<u64> {
-        if !self.has_value(docid) {
-            return None;
+    ///
+    /// # Errors
+    /// A corruption if the FOR block that holds it is.
+    pub fn key(&self, docid: u32) -> Result<Option<u64>, ReadError> {
+        match &self.keys {
+            Some(keys) if self.has_value(docid) => keys.get(u64::from(docid)).map(Some),
+            _ => Ok(None),
         }
-        usize::try_from(docid)
-            .ok()
-            .and_then(|d| self.keys.get(d))
-            .copied()
     }
 
     /// `docid`'s value, typed as the field.
-    pub fn get(&self, docid: u32) -> Option<Value> {
-        let key = self.key(docid)?;
-        Some(match self.field_type {
+    ///
+    /// # Errors
+    /// As [`Self::key`].
+    pub fn get(&self, docid: u32) -> Result<Option<Value>, ReadError> {
+        Ok(self.key(docid)?.map(|key| match self.field_type {
             FieldType::F64 => Value::F64(key_to_f64(key)),
             FieldType::Datetime => Value::Datetime(key_to_i64(key)),
             _ => Value::I64(key_to_i64(key)),
-        })
+        }))
     }
 }
 
@@ -274,21 +448,21 @@ impl BoolColumn {
                 doc_count,
             });
         };
-        parse(stream, false, |p| {
-            p.header(TAG_BOOL)?;
-            let presence = p.bitmap(doc_count)?;
-            let at = p.r.offset();
-            let trues = p
-                .bitmap(doc_count)?
-                .ok_or_else(|| p.bad(at, "a bool column without its true bitmap"))?;
-            if presence.as_ref().is_some_and(|pr| !trues.is_subset(pr)) {
-                return Err(p.bad(at, "a true value for a document without one"));
-            }
-            Ok(Self {
-                presence,
-                trues,
-                doc_count,
-            })
+        let mut p = Parts::new(stream);
+        p.header(TAG_BOOL)?;
+        let presence = p.bitmap(doc_count)?;
+        let at = p.at;
+        let trues = p
+            .bitmap(doc_count)?
+            .ok_or_else(|| p.bad(at, "a bool column without its true bitmap"))?;
+        if presence.as_ref().is_some_and(|pr| !trues.is_subset(pr)) {
+            return Err(p.bad(at, "a true value for a document without one"));
+        }
+        p.finish()?;
+        Ok(Self {
+            presence,
+            trues,
+            doc_count,
         })
     }
 
@@ -305,94 +479,90 @@ impl BoolColumn {
     }
 }
 
-/// The values of a `keyword` field as doc values (SPEC §5.3.5): a dictionary, and per document the ordinals of
-/// its distinct values, ascending.
+/// The values of a `keyword` field as doc values (SPEC §5.3.5): a dictionary, decoded when the column is opened, and
+/// per document the ordinals of its distinct values, ascending, read from their FOR blocks on demand.
 #[derive(Debug, Clone, Default)]
-pub struct KeywordColumn {
+pub struct KeywordColumn<'s> {
     /// The values, back to back; value `i` ends at `value_ends[i]`.
     values: Vec<u8>,
     value_ends: Vec<usize>,
-    /// `doc_count + 1` starts into `ords`.
-    starts: Vec<u64>,
-    ords: Vec<u64>,
+    /// `doc_count + 1` starts into `ords`, and the ords; `None` when no document has a value.
+    lists: Option<(ForColumn<'s>, ForColumn<'s>)>,
 }
 
-impl KeywordColumn {
+impl<'s> KeywordColumn<'s> {
     pub(super) fn read(
-        stream: Option<Stream<'_>>,
+        stream: Option<Stream<'s>>,
         doc_count: u32,
         strict: bool,
     ) -> Result<Self, ReadError> {
         let Some(stream) = stream else {
             return Ok(Self::default());
         };
-        parse(stream, strict, |p| {
-            p.header(TAG_KEYWORD)?;
-            let starts_off = p.u64()?;
-            let ords_off = p.u64()?;
-            let at = p.r.offset();
-            let count = p.u64()?;
-            let remaining = u64::try_from(p.r.remaining()).unwrap_or(u64::MAX);
-            if count == 0 || count.saturating_mul(8) > remaining {
-                return Err(p.bad(at, "a keyword dictionary count"));
+        let mut p = Parts::new(stream);
+        p.header(TAG_KEYWORD)?;
+        let starts_off = p.u64()?;
+        let ords_off = p.u64()?;
+        let at = p.at;
+        let count = p.u64()?;
+        let remaining = stream.len().saturating_sub(p.at);
+        if count == 0 || count.saturating_mul(8) > remaining {
+            return Err(p.bad(at, "a keyword dictionary count"));
+        }
+        let ends = p.bytes(count.saturating_mul(8))?;
+        let mut value_ends = Vec::new();
+        value_ends
+            .try_reserve_exact(ends.len() / 8)
+            .map_err(|_| stream.error(persia_format::Error::OutOfMemory { bytes: None }))?;
+        for end in ends.as_chunks::<8>().0 {
+            let end =
+                usize::try_from(u64::from_le_bytes(*end)).map_err(|_| p.bad(at, "a value end"))?;
+            value_ends.push(end);
+        }
+        let total = value_ends.last().copied().unwrap_or(0);
+        let values = p.bytes(u64::try_from(total).unwrap_or(u64::MAX))?;
+        let mut start = 0;
+        let mut prev: Option<&[u8]> = None;
+        for &end in &value_ends {
+            let value = values
+                .get(start..end)
+                .ok_or_else(|| p.bad(at, "keyword value ends that decrease"))?;
+            if prev.is_some_and(|prev| prev >= value) {
+                return Err(p.bad(at, "keyword values not strictly increasing"));
             }
-            let mut value_ends = p.vec(count)?;
-            for _ in 0..count {
-                let end = p.u64()?;
-                value_ends.push(usize::try_from(end).map_err(|_| p.bad(at, "a value end"))?);
+            prev = Some(value);
+            start = end;
+        }
+        if p.at != starts_off {
+            return Err(p.bad(at, "starts_off"));
+        }
+        let docs = u64::from(doc_count);
+        let mut starts = ForColumn::open(&mut p, docs.saturating_add(1), strict)?;
+        if p.at != ords_off {
+            return Err(p.bad(at, "ords_off"));
+        }
+        let ord_count = starts.get(docs)?;
+        if starts.get(0)? != 0 {
+            return Err(starts.bad(starts.at, "keyword starts that decrease"));
+        }
+        let mut ords = ForColumn::open(&mut p, ord_count, strict)?;
+        p.finish()?;
+        if strict {
+            // `verify` reads a document's ords once per posting, in term order: decode them once.
+            starts.preload()?;
+            ords.preload()?;
+        }
+        let column = Self {
+            values,
+            value_ends,
+            lists: Some((starts, ords)),
+        };
+        if strict {
+            for d in 0..doc_count {
+                column.ords(d)?;
             }
-            let total = value_ends.last().copied().unwrap_or(0);
-            let bytes = p.r.read_bytes(total).map_err(|e| p.stream.error(e))?;
-            let mut values = p.vec(u64::try_from(total).unwrap_or(u64::MAX))?;
-            values.extend_from_slice(bytes);
-            let mut start = 0;
-            let mut prev: Option<&[u8]> = None;
-            for &end in &value_ends {
-                let value = values
-                    .get(start..end)
-                    .ok_or_else(|| p.bad(at, "keyword value ends that decrease"))?;
-                if prev.is_some_and(|prev| prev >= value) {
-                    return Err(p.bad(at, "keyword values not strictly increasing"));
-                }
-                prev = Some(value);
-                start = end;
-            }
-            if p.r.offset() != starts_off {
-                return Err(p.bad(at, "starts_off"));
-            }
-            let starts = p.for_column(u64::from(doc_count).saturating_add(1))?;
-            if p.r.offset() != ords_off {
-                return Err(p.bad(at, "ords_off"));
-            }
-            let ords_at = p.r.offset();
-            let ord_count = starts.last().copied().unwrap_or(0);
-            let ords = p.for_column(ord_count)?;
-            if starts.first() != Some(&0) || starts.windows(2).any(|w| matches!(w, [a, b] if a > b))
-            {
-                return Err(p.bad(ords_at, "keyword starts that decrease"));
-            }
-            for w in starts.windows(2) {
-                let [a, b] = w else { continue };
-                let doc_ords = usize::try_from(*a)
-                    .ok()
-                    .zip(usize::try_from(*b).ok())
-                    .and_then(|(a, b)| ords.get(a..b))
-                    .unwrap_or_default();
-                let increasing = doc_ords.windows(2).all(|o| matches!(o, [x, y] if x < y));
-                if !increasing || doc_ords.last().is_some_and(|&o| o >= count) {
-                    return Err(p.bad(
-                        ords_at,
-                        "a document's ords not increasing or past the dictionary",
-                    ));
-                }
-            }
-            Ok(Self {
-                values,
-                value_ends,
-                starts,
-                ords,
-            })
-        })
+        }
+        Ok(column)
     }
 
     /// Number of distinct values.
@@ -430,27 +600,60 @@ impl KeywordColumn {
         None
     }
 
-    /// The ordinals of `docid`'s distinct values, ascending; empty for a document without one.
-    pub fn ords(&self, docid: u32) -> &[u64] {
-        let i = usize::try_from(docid).unwrap_or(usize::MAX);
-        let range = self
-            .starts
-            .get(i)
-            .zip(self.starts.get(i.saturating_add(1)))
-            .and_then(|(&a, &b)| usize::try_from(a).ok().zip(usize::try_from(b).ok()));
-        range
-            .and_then(|(a, b)| self.ords.get(a..b))
-            .unwrap_or_default()
+    /// The ordinals of `docid`'s distinct values, ascending; empty for a document without one (or a docid past the
+    /// segment).
+    ///
+    /// # Errors
+    /// A corruption if the FOR blocks that hold them are, or if they do not increase or pass the dictionary.
+    pub fn ords(&self, docid: u32) -> Result<Vec<u64>, ReadError> {
+        let Some((starts, ords)) = &self.lists else {
+            return Ok(Vec::new());
+        };
+        let doc = u64::from(docid);
+        if doc >= starts.count.saturating_sub(1) {
+            return Ok(Vec::new());
+        }
+        let first = starts.get(doc)?;
+        let end = starts.get(doc.saturating_add(1))?;
+        // A document's ords are distinct values of the dictionary: at most `len` of them.
+        if first > end || end > ords.count || end.saturating_sub(first) > self.len() {
+            return Err(starts.bad(starts.at, "keyword starts that decrease, pass the ords, or span more ords than the dictionary holds",
+            ));
+        }
+        let mut out = Vec::new();
+        // At most `len` values (checked above), but the dictionary may be large: fail cleanly rather than abort.
+        let n = usize::try_from(end.saturating_sub(first)).unwrap_or(usize::MAX);
+        out.try_reserve_exact(n).map_err(|_| {
+            ords.stream.error(persia_format::Error::OutOfMemory {
+                bytes: end.saturating_sub(first).checked_mul(8),
+            })
+        })?;
+        ords.get_range(first..end, &mut out)?;
+        let increasing = out.windows(2).all(|o| matches!(o, [x, y] if x < y));
+        if !increasing || out.last().is_some_and(|&o| o >= self.len()) {
+            return Err(ords.bad(
+                ords.at,
+                "a document's ords not increasing or past the dictionary",
+            ));
+        }
+        Ok(out)
     }
 
     /// `docid`'s distinct values, ascending.
-    pub fn values(&self, docid: u32) -> impl Iterator<Item = &[u8]> {
-        self.ords(docid).iter().filter_map(|&o| self.value(o))
+    ///
+    /// # Errors
+    /// As [`Self::ords`].
+    pub fn values(&self, docid: u32) -> Result<Vec<&[u8]>, ReadError> {
+        Ok(self
+            .ords(docid)?
+            .into_iter()
+            .filter_map(|o| self.value(o))
+            .collect())
     }
 }
 
 /// Whether `block` holds its true minimum and the bit length of its largest offset (SPEC §5.2.1: what writers do).
-fn minimal(block: &persia_format::for_codec::ForBlock<'_>) -> bool {
+fn minimal(block: &ForBlock<'_>) -> bool {
     let (min, max) = block
         .iter()
         .fold((u64::MAX, 0), |(lo, hi), k| (lo.min(k), hi.max(k)));

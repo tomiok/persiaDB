@@ -1570,6 +1570,43 @@ fn multi_block_for_column_rules() {
     run_all(&schema, &bytes, &cases);
 }
 
+#[test]
+fn numeric_columns_read_one_for_block_at_a_time() {
+    use SectionKind::Columns;
+    let (schema, bytes) = two_for_blocks();
+    let qty = id(&schema, "qty");
+    let mut s = Seg::parse(&bytes);
+    // header 8, presence len 8 (0), count 8, ends at 24 and 32, blocks from 40: the second block's width byte.
+    s.edit_stream(Columns, qty.get(), |b| {
+        let width_at = 40 + le_u64(b, 24) as usize + 12;
+        b[width_at] = 65;
+    });
+    let seg = open(&schema, &s.to_bytes()).unwrap();
+    let col = seg.numeric_column(qty).unwrap();
+    assert_eq!(
+        col.get(1023).unwrap(),
+        Some(Value::I64(1023 * 3)),
+        "the first block reads"
+    );
+    let err = col.key(1024).unwrap_err();
+    assert!(err.is_corruption(), "{err:?}");
+    assert!(seg.verify().unwrap_err().is_corruption());
+
+    // The column reads through the segment's block cache: its stream is one framed block, decoded once.
+    let cache = std::sync::Arc::new(persia_engine::segment::BlockCache::new(1 << 20));
+    let seg = persia_engine::segment::Segment::open_with_cache(
+        persia_format::ByteSource::new(bytes.clone().into()),
+        &schema,
+        std::sync::Arc::clone(&cache),
+    )
+    .unwrap();
+    let before = cache.stats().misses;
+    let col = seg.numeric_column(qty).unwrap();
+    assert_eq!(col.get(1099).unwrap(), Some(Value::I64(1099 * 3)));
+    assert_eq!(col.get(5).unwrap(), Some(Value::I64(15)));
+    assert!(cache.stats().misses - before <= 1, "{:?}", cache.stats());
+}
+
 // ---------------------------------------------------------------------------------------------------------------
 // Record arrays and raw sections (SPEC §5.3.6, §5.3.1, §5.3 "Framing").
 // ---------------------------------------------------------------------------------------------------------------
@@ -3037,4 +3074,332 @@ proptest::proptest! {
         let verified = open(&schema, &bytes).and_then(|s| s.verify());
         proptest::prop_assert!(verified.is_ok(), "{:?}", verified);
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Lazy column and positions reads (ROADMAP 5.3.12, 5.3.13): a corruption a lazy reader only meets in a later FOR
+// block or a later packed group is still an error when that part is read, and `verify` reaches the parts no
+// lookup reads.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// 1100 documents with only `tag`: the keyword starts (1101 values) span two FOR blocks (1024 + 77).
+fn keyword_over_two_for_blocks() -> (CollectionSchema, Vec<u8>) {
+    let schema = schema();
+    let tag = id(&schema, "tag");
+    let docs: Vec<Document> = (0..1100)
+        .map(|i| {
+            let mut tags = vec!["all".to_owned()];
+            if i % 2 == 0 {
+                tags.push("half".to_owned());
+            }
+            if i % 37 == 0 {
+                tags.push("zrare".to_owned());
+            }
+            Document::new(format!("k{i:05}")).with(tag, Value::Strings(tags))
+        })
+        .collect();
+    (
+        schema.clone(),
+        build(&schema, &docs, WriteOptions::default()),
+    )
+}
+
+/// SPEC §5.3.5: starts never decrease. The broken pair lies in the second FOR block (or straddles the boundary),
+/// so opening the column (which reads `starts[0]` and `starts[doc_count]`) cannot see it; `ords` of that
+/// document must.
+#[test]
+fn keyword_starts_decreasing_in_a_later_for_block_only() {
+    use SectionKind::Columns;
+    let (schema, bytes) = keyword_over_two_for_blocks();
+    let tag = id(&schema, "tag").get();
+    let decrease_at = |i: usize| {
+        move |s: &mut Seg| {
+            edit_keyword(s, tag, |col| {
+                assert_eq!(col.starts.len(), 1101);
+                assert!(col.starts[i - 1] > 0);
+                col.starts[i] = col.starts[i - 1] - 1;
+            });
+        }
+    };
+    let cases = vec![
+        case(
+            "a start inside the second FOR block below the one before",
+            At::Read,
+            Columns,
+            invalid("keyword starts that decrease"),
+            decrease_at(1050),
+        ),
+        case(
+            "the second FOR block's first start below the first block's last",
+            At::Read,
+            Columns,
+            invalid("keyword starts that decrease"),
+            decrease_at(1024),
+        ),
+        case(
+            "the second-to-last start below the one before",
+            At::Read,
+            Columns,
+            invalid("keyword starts that decrease"),
+            decrease_at(1099),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+
+    // Read directly: only the documents whose ords span the broken pair fail, and as corruption.
+    let mut s = Seg::parse(&bytes);
+    decrease_at(1050)(&mut s);
+    let edited = s.to_bytes();
+    let seg = open(&schema, &edited).unwrap();
+    let col = seg.keyword_column(id(&schema, "tag")).unwrap();
+    for d in [1049, 1050] {
+        let err = col.ords(d).unwrap_err();
+        assert!(err.is_corruption(), "doc {d}: {err:?}");
+        let err = col.values(d).unwrap_err();
+        assert!(err.is_corruption(), "doc {d}: {err:?}");
+    }
+    assert!(seg.verify().unwrap_err().is_corruption());
+}
+
+/// Removes the end of `title`'s alpha first-block positions run, from the middle of its packed group `group` up to
+/// the start of its second block's run, and moves every later run and block start back by as much: block 0's run is
+/// now too short for its frequencies, and nothing else changes. Returns the stream positions of the run's start
+/// and of the group's width byte.
+fn truncate_alpha_run(s: &mut Seg, title: u32, group: usize) -> (usize, usize) {
+    use SectionKind::{Positions, Skip, TermInfo};
+    let start0 = term_u64(s, title, "alpha", ti::POSITIONS) as usize;
+    let e1 = skip_at(s, title, "alpha", 1, sk::POSITIONS);
+    let start1 = le_u64(&s.stream(Skip, title), e1) as usize;
+    let stream = s.stream(Positions, title);
+    let mut at = start0;
+    for _ in 0..group {
+        at += 1 + BitWidth::new(stream[at]).unwrap().packed_len();
+    }
+    let group_len = BitWidth::new(stream[at]).unwrap().packed_len();
+    assert!(group_len > 2, "the group must have bytes to cut");
+    let cut = at + 1 + group_len / 2;
+    assert!(cut < start1, "the group is in block 0's run");
+    let removed = (start1 - cut) as u64;
+    s.edit_stream(Positions, title, |b| {
+        b.drain(cut..start1);
+    });
+    let shift = |b: &mut Vec<u8>, len: usize, off: usize| {
+        for at in (0..b.len() / len).map(|r| r * len + off) {
+            let v = le_u64(b, at);
+            if v >= start1 as u64 {
+                put_u64(b, at, v - removed);
+            }
+        }
+    };
+    s.edit_stream(TermInfo, title, |b| shift(b, ti::LEN, ti::POSITIONS));
+    s.edit_stream(Skip, title, |b| shift(b, sk::LEN, sk::POSITIONS));
+    (start0, at)
+}
+
+/// SPEC §5.3.3: a block's positions run holds `Σ tf` values. alpha's first block (128 documents, tf 2, 4, 6, 8
+/// cycling: 640 values, five packed groups) is cut in the middle of group 2 (values 256..383). A reader that asks
+/// only for a document in that group, having skipped the earlier groups by their width bytes, must still find the
+/// run too short.
+#[test]
+fn positions_run_truncated_in_a_middle_group() {
+    use SectionKind::Positions;
+    let (schema, bytes) = fixture();
+    let title = id(&schema, "title").get();
+    let cases = vec![case(
+        "a positions run that ends inside its third packed group",
+        At::Read,
+        Positions,
+        invalid("positions run shorter than its frequencies"),
+        move |s: &mut Seg| {
+            truncate_alpha_run(s, title, 2);
+        },
+    )];
+    run_all(&schema, &bytes, &cases);
+
+    let mut s = Seg::parse(&bytes);
+    let (start0, _) = truncate_alpha_run(&mut s, title, 2);
+    assert_eq!(start0, 0, "alpha's run starts the stream");
+    let edited = s.to_bytes();
+    let seg = open(&schema, &edited).unwrap();
+    let terms = seg.terms(id(&schema, "title")).unwrap();
+    let info = terms.clone().get(b"alpha").unwrap().unwrap();
+    // Doc 60's values start at 300 (Σ over docs 0..60 of 2 * (d % 4 + 1)): group 2.
+    let first_value = |d: u32| (0..d).map(|i| 2 * (i % 4 + 1)).sum::<u32>();
+    assert!((256..384).contains(&first_value(60)));
+    let is_short = |e: &ReadError| {
+        e.is_corruption()
+            && matches!(e, ReadError::Section { kind: Positions, reason: SegmentCorruption::Invalid { what }, .. }
+                if what.contains("positions run shorter than its frequencies"))
+    };
+
+    // 1) advance straight to it.
+    let mut p = terms.postings(&info).unwrap();
+    assert_eq!(p.advance(60).unwrap(), Some(60));
+    let err = p.positions().unwrap_err();
+    assert!(is_short(&err), "{err:?}");
+
+    // 2) next() over the earlier documents without asking for their positions (frequencies read).
+    let mut p = terms.postings(&info).unwrap();
+    while let Some(d) = p.next().unwrap() {
+        p.freq().unwrap();
+        if d == 60 {
+            break;
+        }
+    }
+    let err = p.positions().unwrap_err();
+    assert!(is_short(&err), "{err:?}");
+
+    // 3) the earlier documents tombstoned: the iterator never stops on them.
+    let tombstones = seg.tombstones((0..60).collect()).unwrap();
+    let mut p = terms.postings(&info).unwrap().with_tombstones(&tombstones);
+    assert_eq!(p.next().unwrap(), Some(60));
+    let err = p.positions().unwrap_err();
+    assert!(is_short(&err), "{err:?}");
+
+    // 4) the last document of the block, past every group.
+    let mut p = terms.postings(&info).unwrap();
+    assert_eq!(p.advance(127).unwrap(), Some(127));
+    assert!(p.positions().unwrap_err().is_corruption());
+
+    assert!(seg.verify().unwrap_err().is_corruption());
+}
+
+/// 2100 documents whose `qty` and `price` are present on even docids below 1024 and on every docid from 2048: their
+/// key columns have three FOR blocks, and no present document reads the second (docids 1024..2047).
+fn sparse_over_three_for_blocks() -> (CollectionSchema, Vec<u8>) {
+    let schema = schema();
+    let (qty, price) = (id(&schema, "qty"), id(&schema, "price"));
+    let docs: Vec<Document> = (0..2100_i32)
+        .map(|i| {
+            let mut d = Document::new(format!("s{i:05}"));
+            if (i < 1024 && i % 2 == 0) || i >= 2048 {
+                d.insert(qty, Value::I64(i64::from(i) * 7 - 5000));
+                d.insert(price, Value::F64(f64::from(i) * 0.25));
+            }
+            d
+        })
+        .collect();
+    (
+        schema.clone(),
+        build(&schema, &docs, WriteOptions::default()),
+    )
+}
+
+/// Re-encodes a numeric column's FOR block `index` as `f` writes it (from its values); the other blocks are
+/// written as a writer does and the block ends recomputed.
+fn edit_numeric_for_block(s: &mut Seg, field: u32, index: usize, f: impl Fn(&[u64], &mut Writer)) {
+    s.edit_stream(SectionKind::Columns, field, |b| {
+        let mut r = Reader::new(b);
+        let header = r.read_bytes(8).unwrap().to_vec();
+        let presence = read_bitmap(&mut r);
+        assert!(presence.is_some(), "the column must be sparse");
+        let keys = read_for(&mut r);
+        assert!(r.is_empty());
+        let blocks: Vec<&[u64]> = keys.chunks(1024).collect();
+        assert!(index < blocks.len());
+        let mut data = Writer::new();
+        let mut ends = Vec::new();
+        for (i, block) in blocks.iter().enumerate() {
+            if i == index {
+                f(block, &mut data);
+            } else {
+                data.write_for_block(block).unwrap();
+            }
+            ends.push(data.len() as u64);
+        }
+        let mut w = Writer::new();
+        w.write_bytes(&header);
+        write_bitmap(&mut w, presence.as_deref());
+        w.write_u64(keys.len() as u64);
+        for e in ends {
+            w.write_u64(e);
+        }
+        w.write_bytes(data.as_slice());
+        *b = w.into_inner();
+    });
+}
+
+/// SPEC §5.2.1, §5.3.5: every FOR block of a column is well formed and minimal, including blocks that hold only the
+/// placeholders of documents without a value. A lazy lookup never reads such a block, so only `Segment::verify` can
+/// find it (ROADMAP 5.4.1).
+#[test]
+fn a_for_block_no_present_document_reads_fails_verify() {
+    use SectionKind::Columns;
+    let (schema, bytes) = sparse_over_three_for_blocks();
+    let qty = id(&schema, "qty").get();
+    let price = id(&schema, "price").get();
+    let bad_width = |field: u32| {
+        move |s: &mut Seg| {
+            edit_numeric_for_block(s, field, 1, |v, w| {
+                let mut t = Writer::new();
+                t.write_for_block(v).unwrap();
+                let mut t = t.into_inner();
+                t[12] = 65; // min u64, count u32, then the width byte (SPEC §5.2.1)
+                w.write_bytes(&t);
+            });
+        }
+    };
+    let wider = |field: u32| {
+        move |s: &mut Seg| {
+            edit_numeric_for_block(s, field, 1, |v, w| {
+                let min = *v.iter().min().unwrap();
+                let offsets: Vec<u64> = v.iter().map(|k| k - min).collect();
+                let width = 64 - offsets.iter().max().unwrap().leading_zeros();
+                assert!(width < 64);
+                raw_for_block(w, min, width as u8 + 1, &offsets);
+            });
+        }
+    };
+    let cases = vec![
+        case(
+            "an undecodable FOR block of absent qty values",
+            At::Verify,
+            Columns,
+            any(),
+            bad_width(qty),
+        ),
+        case(
+            "an undecodable FOR block of absent price values",
+            At::Verify,
+            Columns,
+            any(),
+            bad_width(price),
+        ),
+        case(
+            "a FOR block of absent qty values packed wider than minimal",
+            At::Verify,
+            Columns,
+            invalid("minimum or width is not minimal"),
+            wider(qty),
+        ),
+        case(
+            "a FOR block of absent price values packed wider than minimal",
+            At::Verify,
+            Columns,
+            invalid("minimum or width is not minimal"),
+            wider(price),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+
+    // Read directly: every present value still reads, then verify fails.
+    let mut s = Seg::parse(&bytes);
+    bad_width(qty)(&mut s);
+    let seg = open(&schema, &s.to_bytes()).unwrap();
+    let col = seg.numeric_column(id(&schema, "qty")).unwrap();
+    for d in [0, 1022, 2048, 2099] {
+        assert_eq!(
+            col.get(d).unwrap(),
+            Some(Value::I64(i64::from(d) * 7 - 5000))
+        );
+    }
+    for d in [1, 1024, 1500, 2047] {
+        assert_eq!(col.key(d).unwrap(), None);
+    }
+    let err = seg.verify().unwrap_err();
+    assert!(
+        err.is_corruption()
+            && matches!(err, ReadError::Section { kind: Columns, field, .. } if field == qty),
+        "{err:?}"
+    );
 }

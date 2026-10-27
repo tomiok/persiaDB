@@ -367,7 +367,13 @@ fn documents_without_values() {
     assert_eq!((title.docs_with_field, title.sum_field_len), (0, 0));
     assert!(seg.terms(id(&schema, "title")).unwrap().is_empty());
     assert_eq!(seg.norms(id(&schema, "title")).unwrap().get(199), 0);
-    assert_eq!(seg.numeric_column(id(&schema, "qty")).unwrap().key(0), None);
+    assert_eq!(
+        seg.numeric_column(id(&schema, "qty"))
+            .unwrap()
+            .key(0)
+            .unwrap(),
+        None
+    );
     assert_eq!(seg.bool_column(id(&schema, "flag")).unwrap().get(0), None);
 
     // One document with every value among valueless ones, first and last in docid order.
@@ -713,7 +719,10 @@ fn check_many(n: u32) {
     for d in [65_535, 65_536, 65_537, n - 1] {
         assert_eq!(flags.get(d).is_some(), d % 5 != 0, "docid {d}");
         assert_eq!(nums.has_value(d), d % 3 != 0, "docid {d}");
-        assert_eq!(nums.get(d).as_ref(), docs[d as usize].get(id(&schema, "n")));
+        assert_eq!(
+            nums.get(d).unwrap().as_ref(),
+            docs[d as usize].get(id(&schema, "n"))
+        );
     }
     let trues_high = flags.trues().iter().filter(|&d| d >= 65_536).count();
     assert!(trues_high > 0);
