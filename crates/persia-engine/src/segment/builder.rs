@@ -560,6 +560,114 @@ mod tests {
         assert!(seg.terms(t).unwrap().get(b"ok").unwrap().is_none());
     }
 
+    /// A document whose too-long token is in the second value of its last `text` field, after another text field,
+    /// a keyword, a numeric column, a stored row and a blob reference were indexed, is rolled back completely: the
+    /// segment is byte-identical to one built without it, and its id can be added again (SPEC §5.3.1, ROADMAP
+    /// 5.4.5).
+    #[test]
+    fn a_too_long_token_in_a_later_value_rolls_the_whole_document_back() {
+        use crate::segment::{SegmentMeta, SegmentWriter};
+        use persia_analysis::WhitespaceTokenizer;
+        use persia_format::{BlobId, BlobRef};
+        let schema = SchemaBuilder::new("c")
+            .field(
+                "t",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .field("k", FieldKind::Keyword(KeywordOptions::default()))
+            .field("n", FieldKind::I64 { stored: true })
+            .field(
+                "u",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .build()
+            .unwrap();
+        let field_id = |name: &str| schema.field(name).unwrap().id();
+        let (first, kw, num, last) = (field_id("t"), field_id("k"), field_id("n"), field_id("u"));
+        let unguarded = || {
+            let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+            for field in [first, last] {
+                match &mut builder.fields[field.get() as usize] {
+                    FieldBuilder::Text { analyzer, .. } => {
+                        *analyzer = Arc::new(Analyzer::builder(WhitespaceTokenizer).build());
+                    }
+                    _ => panic!("a text field"),
+                }
+            }
+            builder
+        };
+        let doc = |id: &str, i: i64| {
+            Document::new(id)
+                .with(first, Value::String(format!("common {id}")))
+                .with(kw, Value::String(format!("k-{id}")))
+                .with(num, Value::I64(i))
+                .with(
+                    last,
+                    Value::Strings(vec![format!("first {id}"), "second".into()]),
+                )
+        };
+        let long = "q".repeat(MAX_TERM_LEN + 1);
+        let mut bad = doc("bad", 99).with(
+            last,
+            Value::Strings(vec![
+                "fresh words".into(),
+                format!("more fresh {long} after"),
+            ]),
+        );
+        let blob = BlobRef::new(
+            BlobId::from_bytes([7; 32]),
+            10,
+            "text/plain",
+            1 << 20,
+            std::collections::BTreeMap::default(),
+        );
+        bad.set_blob_ref(Some(blob.unwrap()));
+        assert_eq!(
+            bad.fields().last().map(|(id, _)| id),
+            Some(last),
+            "field u is indexed last"
+        );
+
+        let mut rejected = unguarded();
+        let mut clean = unguarded();
+        rejected.add(&doc("a", 1)).unwrap();
+        clean.add(&doc("a", 1)).unwrap();
+        let size = rejected.size_in_bytes();
+        assert_eq!(
+            rejected.add(&bad),
+            Err(SegmentError::TermTooLong {
+                field: last,
+                len: MAX_TERM_LEN + 1
+            })
+        );
+        assert_eq!(rejected.doc_count(), 1);
+        assert!(
+            rejected.size_in_bytes() >= size,
+            "only spare capacity may grow"
+        );
+        // The id is free again, and the next document gets docid 1.
+        for builder in [&mut rejected, &mut clean] {
+            assert_eq!(builder.add(&doc("bad", 2)).unwrap(), 1);
+            assert_eq!(builder.add(&doc("c", 3)).unwrap(), 2);
+        }
+        let meta = SegmentMeta {
+            segment_id: 9,
+            created_at: 1,
+            merge_generation: 0,
+        };
+        assert_eq!(
+            SegmentWriter::new(&rejected, meta).finish().unwrap(),
+            SegmentWriter::new(&clean, meta).finish().unwrap(),
+            "the rejected document left something behind"
+        );
+    }
+
     /// No built-in analyzer stacks tokens and a schema can only name built-ins, so this swaps the analyzer in:
     /// stacked tokens (edge n-grams, and equal tokens at one position) count in `tf` and the field length, their
     /// positions repeat (delta 0, SPEC §5.3.3), and the writer accepts them.

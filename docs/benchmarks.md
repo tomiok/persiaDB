@@ -93,6 +93,14 @@ ROADMAP 5.3.11 (2.03 K and 2.02 K in the same session); the 2.38 K of 2026-10-26
 regression. The segment in these benchmarks is small, so after the first pass almost every block is cached: the
 gains are those of re-reading, and a first read of a block costs what it did before.
 
+`segment_read/norms_get` reads every document's `body` norm with `Norms::get`, `norms_cursor` through `Norms::cursor`
+(ROADMAP 5.3.14, 5.3.16), in norms per second. Since 5.3.14 norms are read through the block cache: `get` costs one
+cache lookup, the cursor one per framed block.
+
+| Recorded | `norms_get` | `norms_cursor` |
+|---|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 9.84 M | 1.20 G |
+
 ## `persia-engine` segment opening and record lookups
 
 `cargo bench -p persia-engine --bench segment -- "segment_open|segment_records"`. `segment_open/large_dict` is

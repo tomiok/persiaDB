@@ -1688,3 +1688,56 @@ fn more_tags(schema: &CollectionSchema, docs: &mut [Document]) {
         d.insert(tag, Value::Strings(values));
     }
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: if cfg!(feature = "slow") { 256 } else { 32 }, ..ProptestConfig::default() })]
+
+    /// Norms equal the model of the documents' field lengths (SPEC §5.3.4: exact below 40 tokens, otherwise rounded
+    /// down by less than 12.5 %; 0 without the field or tokens, and past `doc_count`), read a block at a time
+    /// (ROADMAP 5.3.14) by `get` and by one cursor (ROADMAP 5.3.16) in a random docid order, at block sizes that
+    /// put a block edge anywhere.
+    #[test]
+    fn norms_equal_the_model_in_any_docid_order(
+        lengths in prop::collection::vec(proptest::option::of(prop_oneof![3 => 0_u32..45, 1 => 45_u32..400]), 1..700),
+        block_size in prop::sample::select(vec![1_u32, 2, 61, 128, 4096]),
+        order in prop::collection::vec(any::<prop::sample::Index>(), 0..1500),
+    ) {
+        let schema = schema();
+        let title = id(&schema, "title");
+        let docs: Vec<Document> = lengths
+            .iter()
+            .enumerate()
+            .map(|(i, len)| {
+                let d = Document::new(format!("d{i:05}"));
+                match len {
+                    Some(n) => d.with(title, Value::String("w ".repeat(*n as usize))),
+                    None => d,
+                }
+            })
+            .collect();
+        let bytes = build(&schema, &docs, WriteOptions { block_size, ..WriteOptions::default() });
+        let seg = open(&schema, &bytes).unwrap();
+        let n = seg.doc_count();
+        let norms = seg.norms(title).unwrap();
+        let model = |d: u32| lengths.get(d as usize).copied().flatten().unwrap_or(0);
+        let mut docids: Vec<u32> = order.iter().map(|i| i.index(n as usize + 2) as u32).collect();
+        docids.extend([n, n + 1, u32::MAX, 0, n - 1]);
+        let mut cursor = norms.cursor();
+        for d in docids {
+            let want = model(d);
+            let (norm, length) = (norms.get(d).unwrap(), norms.length(d).unwrap());
+            prop_assert_eq!(cursor.get(d).unwrap(), norm, "cursor norm of {}", d);
+            prop_assert_eq!(cursor.length(d).unwrap(), length, "cursor length of {}", d);
+            if want < 40 {
+                prop_assert_eq!(length, want, "length of {}", d);
+            } else {
+                prop_assert!(length <= want && u64::from(length) * 8 > u64::from(want) * 7, "length {} of {} for {}", length, d, want);
+            }
+            prop_assert_eq!(norm == 0, want == 0, "norm of {}", d);
+        }
+        // Norms order like lengths (a monotone quantization).
+        let mut by_len: Vec<(u32, u8)> = (0..n).map(|d| (model(d), norms.get(d).unwrap())).collect();
+        by_len.sort_unstable();
+        prop_assert!(by_len.windows(2).all(|w| w[0].1 <= w[1].1));
+    }
+}

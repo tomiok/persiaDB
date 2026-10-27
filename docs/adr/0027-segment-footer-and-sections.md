@@ -1,6 +1,6 @@
 # ADR-0027: Segment footer, section kinds and section encodings
 
-- Status: proposed
+- Status: proposed (decision 12 added 2026-10-27, ROADMAP 5.4.5)
 - Date: 2026-10-26
 - Related: SPEC §5.1, §5.2, §5.3 (§5.3.1–§5.3.6), §6.2.5, §15; ROADMAP 5.1, 5.2 (5.2.1–5.2.9)
 
@@ -62,6 +62,13 @@ statistics and section table of a 1024-field schema, and the TermInfo record had
     segment it writes is byte-identical. Spare capacity the attempt allocated is kept (and counted by `size_in_bytes`,
     which reports allocations, not contents), as `Vec::truncate` keeps it. Output is deterministic for
     the same input, meta, options **and zstd library version**: the compressed sections depend on zstd's output.
+12. **Term length** (amended in place for ROADMAP 5.4.5, before any release, SPEC §15). No `TermDict` term is longer
+    than 32 KiB (`MAX_TERM_LEN`), in a `text` field as in a `keyword` one: the builder rejects a document whose
+    analyzer yields a longer token, and a reader treats a longer FST path as corruption. Without it a `text`
+    dictionary sharing one long suffix across many keys passes the structural check, and walking it at open costs
+    keys × path length. The layout does not change and no writer of format 1.0 could break the rule (schemas name
+    only built-in analyzers, which all cut tokens at 255 bytes), so the version stays 1.0. A later feature that
+    lets a schema name an analyzer without a length guard keeps this rule; raising the limit is a format change.
 
 ## Consequences
 

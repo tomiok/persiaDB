@@ -144,18 +144,19 @@ impl Inverted {
         let too_many = || SegmentError::TooLarge { what: "postings" };
         u32::try_from(self.postings.len()).map_err(|_| too_many())?;
         let order = self.terms.sorted_ids();
-        let mut rank = vec![0_usize; order.len()];
-        for (r, &id) in order.iter().enumerate() {
+        // Term ids are u32, so ranks are: 12 bytes per term in all, with `order` and `starts`.
+        let mut rank = vec![0_u32; order.len()];
+        for (r, &id) in (0_u32..).zip(&order) {
             if let Some(slot) = rank.get_mut(id as usize) {
                 *slot = r;
             }
         }
-        // Counting sort by rank; stable, so each term keeps docid order.
-        let mut starts = vec![0_usize; order.len().saturating_add(1)];
+        // Counting sort by rank; stable, so each term keeps docid order. Every count fits: checked above.
+        let mut starts = vec![0_u32; order.len().saturating_add(1)];
         for p in &self.postings {
             if let Some(c) = rank
                 .get(p.term as usize)
-                .and_then(|&r| starts.get_mut(r.saturating_add(1)))
+                .and_then(|&r| starts.get_mut((r as usize).saturating_add(1)))
             {
                 *c = c.saturating_add(1);
             }
@@ -166,23 +167,26 @@ impl Inverted {
                 *s = s.saturating_add(prev);
             }
         }
-        let mut next = starts.clone();
+        // `starts[r]` is the next free slot of rank `r` while placing; it ends as rank `r + 1`'s start, so shifting
+        // by one restores the starts, without a second array.
         let mut index = vec![0_u32; self.postings.len()];
-        // Every index fits: checked above.
         for (i, p) in (0_u32..).zip(&self.postings) {
-            let Some(n) = rank.get(p.term as usize).and_then(|&r| next.get_mut(r)) else {
+            let Some(n) = rank
+                .get(p.term as usize)
+                .and_then(|&r| starts.get_mut(r as usize))
+            else {
                 continue;
             };
-            if let Some(slot) = index.get_mut(*n) {
+            if let Some(slot) = index.get_mut(*n as usize) {
                 *slot = i;
             }
             *n = n.saturating_add(1);
         }
-        // Term ids are u32, so ranks are.
-        let rank = rank
-            .into_iter()
-            .map(|r| u32::try_from(r).unwrap_or(u32::MAX))
-            .collect();
+        let terms = order.len();
+        starts.copy_within(..terms, 1);
+        if let Some(first) = starts.first_mut() {
+            *first = 0;
+        }
         Ok(Grouped {
             order,
             rank,
@@ -222,18 +226,17 @@ pub(crate) struct Grouped<'a> {
     rank: Vec<u32>,
     postings: &'a [Posting],
     index: Vec<u32>,
-    starts: Vec<usize>,
+    starts: Vec<u32>,
 }
 
 impl<'a> Grouped<'a> {
     /// The indices of the postings of the term of rank `rank`.
     fn indices(&self, rank: usize) -> &[u32] {
-        let start = self.starts.get(rank).copied().unwrap_or(0);
+        let start = self.starts.get(rank).map_or(0, |&s| s as usize);
         let end = self
             .starts
             .get(rank.saturating_add(1))
-            .copied()
-            .unwrap_or(start);
+            .map_or(start, |&e| e as usize);
         self.index.get(start..end).unwrap_or_default()
     }
 

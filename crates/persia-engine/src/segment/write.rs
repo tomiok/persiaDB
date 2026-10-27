@@ -106,10 +106,11 @@ impl<'a> SegmentWriter<'a> {
     ///
     /// Every section is written straight into the returned buffer as it is encoded, never held whole on its own
     /// (ROADMAP 5.1.6). Besides the builder ([`SegmentBuilder::size_in_bytes`]), a flush then needs at most: the
-    /// segment bytes (up to twice their length while the buffer grows); for the `text` or `keyword` field with the
-    /// most postings (`p` of them, `t` terms, `n` documents) `4p + 20t` for its postings grouped by term, `n` for its
-    /// norms and `40 / 128` bytes per posting for its `Skip` entries; `8n` for the sorted ids; and about 4 MiB for a
-    /// block in progress and a zstd context. The memory threshold of a flush (SPEC §8.2) can count on that bound
+    /// segment bytes (a growing buffer: up to twice their length, three times while an allocator that copies on
+    /// reallocation holds the old buffer too); for the `text` or `keyword` field with the most postings (`p` of them,
+    /// `t` terms, `n` documents) `4p + 12t` for its postings grouped by term, `n` for its norms and `40 / 128` bytes
+    /// per posting for its `Skip` entries; `8n` for the sorted ids; and about 4 MiB for a block in progress, a zstd
+    /// context and an FST builder's node registry. The memory threshold of a flush (SPEC §8.2) can count on that bound
     /// (`tests/flush_memory.rs` checks it). The lists are encoded twice (once to learn where each starts), which
     /// makes a flush about 20 % slower than holding them would.
     ///

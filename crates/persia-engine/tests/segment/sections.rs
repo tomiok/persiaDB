@@ -3435,3 +3435,524 @@ fn a_for_block_no_present_document_reads_fails_verify() {
         "{err:?}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Cursors over damaged FOR blocks (ROADMAP 5.3.16): a cursor reports a corrupt block as the random-access reader
+// does, and stays usable for the other blocks.
+// ---------------------------------------------------------------------------------------------------------------
+
+const CURSOR_DOCS: u32 = 2600;
+
+/// Writes a damaged FOR block in place of one holding `values`.
+type BadBlock = fn(&[u64], &mut Writer);
+/// Whether a corruption is the expected one.
+type WantRef<'a> = &'a dyn Fn(&SegmentCorruption) -> bool;
+/// Whether reading a docid must fail.
+type Fails<'a> = &'a dyn Fn(u32) -> bool;
+/// Damages the stored blocks of a section.
+type Damage = Box<dyn Fn(&mut Vec<Vec<u8>>)>;
+
+/// 2600 documents: a dense `qty` (three FOR blocks) and a multi-valued `tag` (starts over three FOR blocks, ords
+/// over four).
+fn columns_over_many_for_blocks() -> (CollectionSchema, Vec<u8>) {
+    let schema = schema();
+    let (qty, tag) = (id(&schema, "qty"), id(&schema, "tag"));
+    let docs: Vec<Document> = (0..CURSOR_DOCS)
+        .map(|i| {
+            let mut tags = vec!["all".to_owned()];
+            if i % 2 == 0 {
+                tags.push("half".to_owned());
+            }
+            if i % 37 == 0 {
+                tags.push("zrare".to_owned());
+            }
+            Document::new(format!("c{i:05}"))
+                .with(qty, Value::I64(i64::from(i) * 3 - 1000))
+                .with(tag, Value::Strings(tags))
+        })
+        .collect();
+    (
+        schema.clone(),
+        build(&schema, &docs, WriteOptions::default()),
+    )
+}
+
+/// A FOR column (as `write_for`) whose block `index` is written by `bad` instead.
+fn write_for_with_bad_block(
+    w: &mut Writer,
+    values: &[u64],
+    index: usize,
+    bad: fn(&[u64], &mut Writer),
+) {
+    let blocks: Vec<&[u64]> = values.chunks(1024).collect();
+    assert!(index < blocks.len());
+    w.write_u64(values.len() as u64);
+    let mut data = Writer::new();
+    let mut ends = Vec::new();
+    for (i, b) in blocks.iter().enumerate() {
+        if i == index {
+            bad(b, &mut data);
+        } else {
+            data.write_for_block(b).unwrap();
+        }
+        ends.push(data.len() as u64);
+    }
+    for e in ends {
+        w.write_u64(e);
+    }
+    w.write_bytes(data.as_slice());
+}
+
+/// The block re-encoded with a width byte of 65 (SPEC §5.2.1: at most 64).
+fn width_65(values: &[u64], w: &mut Writer) {
+    let mut t = Writer::new();
+    t.write_for_block(values).unwrap();
+    let mut t = t.into_inner();
+    t[12] = 65;
+    w.write_bytes(&t);
+}
+
+/// A block of the same count whose minimum is `u64::MAX - 5` at width 3: one offset in the middle is 7, so that
+/// value passes `u64::MAX` (the overflow check must find the largest offset wherever it is).
+fn overflowing(values: &[u64], w: &mut Writer) {
+    let mut offsets: Vec<u64> = (0..values.len() as u64).map(|i| i % 6).collect();
+    offsets[values.len() / 2] = 7;
+    raw_for_block(w, u64::MAX - 5, 3, &offsets);
+}
+
+/// Whether `err` is a corruption of field `field`'s `Columns` section.
+fn columns_corruption(err: &ReadError, field: u32) -> bool {
+    err.is_corruption()
+        && matches!(err, ReadError::Section { kind: SectionKind::Columns, field: f, .. } if *f == field)
+}
+
+/// Docids scrambled, re-read, and the FOR block edges, ending back in the first block.
+fn scrambled_docids() -> Vec<u32> {
+    let mut state = 0x5eed_u64;
+    let mut order: Vec<u32> = (0..CURSOR_DOCS).collect();
+    for i in (1..order.len()).rev() {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        order.swap(i, (state >> 33) as usize % (i + 1));
+    }
+    order.extend([1023, 1024, 1500, 1500, 2047, 2048, 1023, 2599, 0, 1024, 0]);
+    order
+}
+
+#[test]
+fn numeric_cursor_reports_a_bad_for_block_and_reads_the_others() {
+    use SectionKind::Columns;
+    let (schema, bytes) = columns_over_many_for_blocks();
+    let qty = id(&schema, "qty");
+    let edit = |bad: fn(&[u64], &mut Writer)| {
+        let mut s = Seg::parse(&bytes);
+        s.edit_stream(Columns, qty.get(), |b| {
+            let mut r = Reader::new(b);
+            let header = r.read_bytes(8).unwrap().to_vec();
+            assert_eq!(read_bitmap(&mut r), None, "qty is dense");
+            let keys = read_for(&mut r);
+            assert!(r.is_empty());
+            let mut w = Writer::new();
+            w.write_bytes(&header);
+            w.write_u64(0);
+            write_for_with_bad_block(&mut w, &keys, 1, bad);
+            *b = w.into_inner();
+        });
+        s.to_bytes()
+    };
+    let overflow = |c: &SegmentCorruption| {
+        matches!(
+            c,
+            SegmentCorruption::Format(Corruption::ValueOverflow { bits: 64 })
+        )
+    };
+    let bad_width = |c: &SegmentCorruption| {
+        matches!(
+            c,
+            SegmentCorruption::Format(Corruption::InvalidBitWidth { width: 65, .. })
+        )
+    };
+    let damages: [(&str, BadBlock, WantRef<'_>); 2] = [
+        ("width 65", width_65, &bad_width),
+        ("overflow", overflowing, &overflow),
+    ];
+    for (name, bad, want) in damages {
+        let edited = edit(bad);
+        // Opening the segment and the column reads no middle block.
+        let seg = open(&schema, &edited).unwrap();
+        let col = seg.numeric_column(qty).unwrap();
+        let mut cursor = col.cursor();
+        for d in scrambled_docids() {
+            let expected = i64::from(d) * 3 - 1000;
+            let (by_cursor, by_get) = (cursor.get(d), col.get(d));
+            if (1024..2048).contains(&d) {
+                for err in [by_cursor.unwrap_err(), by_get.unwrap_err()] {
+                    assert!(
+                        columns_corruption(&err, qty.get()),
+                        "{name}, doc {d}: {err:?}"
+                    );
+                    let ReadError::Section { reason, .. } = &err else {
+                        unreachable!()
+                    };
+                    assert!(want(reason), "{name}, doc {d}: {err:?}");
+                }
+            } else {
+                assert_eq!(
+                    by_cursor.unwrap(),
+                    Some(Value::I64(expected)),
+                    "{name}, doc {d}"
+                );
+                assert_eq!(
+                    by_get.unwrap(),
+                    Some(Value::I64(expected)),
+                    "{name}, doc {d}"
+                );
+            }
+        }
+        assert_eq!(
+            cursor.key(CURSOR_DOCS).unwrap(),
+            None,
+            "{name}: past the segment"
+        );
+        assert!(seg.verify().unwrap_err().is_corruption(), "{name}");
+    }
+}
+
+#[test]
+fn keyword_cursor_reports_bad_starts_or_ords_blocks_and_reads_the_others() {
+    use SectionKind::Columns;
+    let (schema, bytes) = columns_over_many_for_blocks();
+    let tag = id(&schema, "tag");
+    let clean = KeywordCol::decode(&Seg::parse(&bytes).stream(Columns, tag.get()));
+    assert_eq!(clean.starts.len(), CURSOR_DOCS as usize + 1);
+    assert!(clean.ords.len() > 3 * 1024, "ords span four FOR blocks");
+    let seg = open(&schema, &bytes).unwrap();
+    let col = seg.keyword_column(tag).unwrap();
+    let model: Vec<Vec<u64>> = (0..CURSOR_DOCS).map(|d| col.ords(d).unwrap()).collect();
+    for (d, ords) in model.iter().enumerate() {
+        let (a, b) = (clean.starts[d] as usize, clean.starts[d + 1] as usize);
+        assert_eq!(
+            *ords,
+            clean.ords[a..b],
+            "the model is the stream's, doc {d}"
+        );
+    }
+
+    // (what, bad starts block?, damage, docs that must fail)
+    let in_bad_ords = |d: u32| {
+        let (a, b) = (clean.starts[d as usize], clean.starts[d as usize + 1]);
+        a < b && a < 2048 && b > 1024
+    };
+    let reads_bad_starts = |d: u32| (1023..2048).contains(&d);
+    let cases: [(&str, bool, BadBlock, Fails<'_>); 4] = [
+        ("ords width 65", false, width_65, &in_bad_ords),
+        ("ords overflow", false, overflowing, &in_bad_ords),
+        ("starts width 65", true, width_65, &reads_bad_starts),
+        ("starts overflow", true, overflowing, &reads_bad_starts),
+    ];
+    for (name, starts_bad, bad, fails) in cases {
+        let mut s = Seg::parse(&bytes);
+        s.edit_stream(Columns, tag.get(), |b| {
+            let col = KeywordCol::decode(b);
+            let mut w = Writer::new();
+            w.write_u8(3);
+            w.write_zeros(7);
+            w.write_u64(0);
+            w.write_u64(0);
+            w.write_u64(col.values.len() as u64);
+            let mut end = 0;
+            for v in &col.values {
+                end += v.len() as u64;
+                w.write_u64(end);
+            }
+            for v in &col.values {
+                w.write_bytes(v);
+            }
+            let starts_off = w.len() as u64;
+            if starts_bad {
+                write_for_with_bad_block(&mut w, &col.starts, 1, bad);
+            } else {
+                write_for(&mut w, &col.starts);
+            }
+            let ords_off = w.len() as u64;
+            if starts_bad {
+                write_for(&mut w, &col.ords);
+            } else {
+                write_for_with_bad_block(&mut w, &col.ords, 1, bad);
+            }
+            let mut out = w.into_inner();
+            put_u64(&mut out, 8, starts_off);
+            put_u64(&mut out, 16, ords_off);
+            *b = out;
+        });
+        let damaged = s.to_bytes();
+        let seg = open(&schema, &damaged).unwrap();
+        // Opening the column reads starts[0] and starts[doc_count] only: the first and last blocks.
+        let col = seg.keyword_column(tag).unwrap();
+        let mut cursor = col.cursor();
+        assert!((0..CURSOR_DOCS).any(fails) && (0..CURSOR_DOCS).any(|d| !fails(d)));
+        for d in scrambled_docids() {
+            let by_get = col.ords(d);
+            let by_cursor = cursor.ords(d).map(<[u64]>::to_vec);
+            if fails(d) {
+                for err in [by_cursor.unwrap_err(), by_get.unwrap_err()] {
+                    assert!(
+                        columns_corruption(&err, tag.get()),
+                        "{name}, doc {d}: {err:?}"
+                    );
+                }
+            } else {
+                assert_eq!(by_cursor.unwrap(), model[d as usize], "{name}, doc {d}");
+                assert_eq!(by_get.unwrap(), model[d as usize], "{name}, doc {d}");
+            }
+        }
+        assert!(cursor.ords(CURSOR_DOCS).unwrap().is_empty(), "{name}");
+        assert!(seg.verify().unwrap_err().is_corruption(), "{name}");
+    }
+}
+
+/// The middle term of a field's `TermDict` padded with `z` to `len` bytes, keeping its ordinal; it must still sort
+/// before the next term. Returns the padded term.
+fn pad_middle_term(s: &mut Seg, field: u32, len: usize) -> Vec<u8> {
+    let mut padded = Vec::new();
+    s.edit_raw(SectionKind::TermDict, field, |p| {
+        let mut entries = fst_entries(p.clone());
+        assert!(entries.len() >= 3, "a first, a middle and a last term");
+        let keys: Vec<Vec<u8>> = entries.keys().cloned().collect();
+        let mid = keys.len() / 2;
+        let ordinal = entries.remove(&keys[mid]).unwrap();
+        padded.clone_from(&keys[mid]);
+        padded.resize(len, b'z');
+        assert!(
+            keys[mid - 1] < padded && padded < keys[mid + 1],
+            "the padded term keeps its place"
+        );
+        entries.insert(padded.clone(), ordinal);
+        *p = fst_bytes(&entries);
+    });
+    padded
+}
+
+/// SPEC §5.3.1, ROADMAP 5.4.5: the 32 KiB term bound holds wherever the long term sits, not only for the last key
+/// (whose path the FST walk reaches last): exactly `MAX_TERM_LEN` opens and reads back, one more is a corrupt
+/// `TermDict` at open, for a `text` and a `keyword` field.
+#[test]
+fn a_term_longer_than_max_term_len_in_the_middle_of_a_term_dict() {
+    use SectionKind::TermDict;
+    let (schema, bytes) = fixture();
+    for name in ["title", "tag"] {
+        let field = id(&schema, name);
+        let mut s = Seg::parse(&bytes);
+        let longest = pad_middle_term(&mut s, field.get(), MAX_TERM_LEN);
+        let seg = open(&schema, &s.to_bytes()).unwrap();
+        let mut terms = seg.terms(field).unwrap();
+        let info = terms.get(&longest).unwrap();
+        assert!(
+            info.is_some_and(|i| i.df() > 0),
+            "{name}: the longest term reads back"
+        );
+    }
+    let middle = |field: u32| move |s: &mut Seg| drop(pad_middle_term(s, field, MAX_TERM_LEN + 1));
+    let cases = vec![
+        case(
+            "a text TermDict whose middle key is one byte longer than MAX_TERM_LEN",
+            At::Open,
+            TermDict,
+            fst_err(),
+            middle(id(&schema, "title").get()),
+        ),
+        case(
+            "a keyword TermDict whose middle key is one byte longer than MAX_TERM_LEN",
+            At::Open,
+            TermDict,
+            fst_err(),
+            middle(id(&schema, "tag").get()),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Damaged Norms blocks (ROADMAP 5.3.14): norms are read a framed block at a time, so a damaged block fails the
+// reads that reach it, through `Norms::get` and a cursor alike, and nothing else: not the open, not `norms`, not the
+// other blocks.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Splits a block-framed section (SPEC §5.2) into its stored blocks, hands them to `f`, and lays them out again
+/// with the same trailer (`total_len`, `block_size`, `block_count`), new ends and a valid table CRC.
+fn edit_framed_blocks(
+    s: &mut Seg,
+    kind: SectionKind,
+    field: u32,
+    f: impl FnOnce(&mut Vec<Vec<u8>>),
+) {
+    let bytes = &s.section(kind, field).bytes;
+    let n = bytes.len();
+    let trailer = bytes[n - 24..n - 4].to_vec(); // total_len, block_size, block_count, reserved
+    let count = le_u32(bytes, n - 12) as usize;
+    let ends_at = n - 24 - 8 * count;
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for i in 0..count {
+        let end = le_u64(bytes, ends_at + 8 * i) as usize;
+        blocks.push(bytes[start..end].to_vec());
+        start = end;
+    }
+    assert_eq!(start, ends_at);
+    f(&mut blocks);
+    let mut out: Vec<u8> = blocks.concat();
+    let mut table = Vec::new();
+    let mut end = 0_u64;
+    for b in &blocks {
+        end += b.len() as u64;
+        table.extend_from_slice(&end.to_le_bytes());
+    }
+    table.extend_from_slice(&trailer);
+    let crc = crc32c(&table);
+    table.extend_from_slice(&crc.to_le_bytes());
+    out.extend_from_slice(&table);
+    s.section_mut(kind, field).bytes = out;
+}
+
+/// A stored block (16-byte header, `Codec::None` payload) rewritten to hold `payload`, with consistent lengths
+/// and a valid CRC: only its length disagrees with the table.
+fn reblock(block: &[u8], payload: &[u8]) -> Vec<u8> {
+    let mut b = block[..16].to_vec();
+    put_u32(&mut b, 8, payload.len() as u32); // uncompressed_len
+    put_u32(&mut b, 12, payload.len() as u32); // stored_len
+    b.extend_from_slice(payload);
+    let crc = crc32c(&b[4..]);
+    put_u32(&mut b, 0, crc);
+    b
+}
+
+#[test]
+fn a_damaged_norms_block_fails_only_the_reads_that_reach_it() {
+    use SectionKind::Norms;
+    const BLOCK: u32 = 61;
+    let schema = schema();
+    let title = id(&schema, "title");
+    let docs: Vec<Document> = (0..DOCS)
+        .map(|i| {
+            let words = "alpha beta alpha ".repeat((i % 4) as usize + 1);
+            Document::new(format!("n{i:04}")).with(title, Value::String(words))
+        })
+        .collect();
+    let options = WriteOptions {
+        block_size: BLOCK,
+        ..WriteOptions::default()
+    };
+    let bytes = build(&schema, &docs, options);
+    let blocks = DOCS.div_ceil(BLOCK) as usize; // 5: the last holds 56 norms
+    let clean: Vec<u8> = {
+        let seg = open(&schema, &bytes).unwrap();
+        let norms = seg.norms(title).unwrap();
+        // "alpha beta alpha " repeated (i % 4) + 1 times: 3, 6, 9 or 12 tokens, exact below 40 (SPEC §5.3.4).
+        assert!((0..DOCS).all(|d| norms.length(d).unwrap() == 3 * (d % 4 + 1)));
+        (0..DOCS).map(|d| norms.get(d).unwrap()).collect()
+    };
+
+    let middle = 2;
+    let last = blocks - 1;
+    let damages: Vec<(&str, usize, Damage)> = vec![
+        (
+            "a payload byte flipped (CRC)",
+            middle,
+            Box::new(move |b: &mut Vec<Vec<u8>>| b[middle][16 + 7] ^= 0x10),
+        ),
+        (
+            "a header byte flipped (CRC)",
+            middle,
+            Box::new(move |b: &mut Vec<Vec<u8>>| b[middle][9] ^= 0x01),
+        ),
+        (
+            "a block cut short by 5 bytes",
+            middle,
+            Box::new(move |b: &mut Vec<Vec<u8>>| {
+                let len = b[middle].len();
+                b[middle].truncate(len - 5);
+            }),
+        ),
+        (
+            "a valid block one byte shorter than its table says",
+            middle,
+            Box::new(move |b: &mut Vec<Vec<u8>>| {
+                let p = b[middle][16..b[middle].len() - 1].to_vec();
+                b[middle] = reblock(&b[middle], &p);
+            }),
+        ),
+        (
+            "a valid last block one byte shorter than its table says",
+            last,
+            Box::new(move |b: &mut Vec<Vec<u8>>| {
+                let p = b[last][16..b[last].len() - 1].to_vec();
+                b[last] = reblock(&b[last], &p);
+            }),
+        ),
+        (
+            "a last block that is only a header",
+            last,
+            Box::new(move |b: &mut Vec<Vec<u8>>| b[last] = reblock(&b[last], &[])),
+        ),
+    ];
+    let norms_corruption = |e: &ReadError| {
+        e.is_corruption()
+            && matches!(e, ReadError::Section { kind: Norms, field, .. } | ReadError::Block { kind: Norms, field, .. } if *field == title.get())
+    };
+    for (name, bad_block, damage) in damages {
+        let mut s = Seg::parse(&bytes);
+        edit_framed_blocks(&mut s, Norms, title.get(), |b| {
+            assert_eq!(b.len(), blocks);
+            damage(b);
+        });
+        let edited = s.to_bytes();
+        let seg = open(&schema, &edited).unwrap_or_else(|e| panic!("{name}: open failed: {e}"));
+        let norms = seg
+            .norms(title)
+            .unwrap_or_else(|e| panic!("{name}: norms failed: {e}"));
+        let bad = |d: u32| d as usize / BLOCK as usize == bad_block;
+        // In order, then scrambled with one cursor, crossing into and out of the bad block repeatedly.
+        let mut order: Vec<u32> = (0..DOCS).collect();
+        order.extend((0..DOCS).map(|i| (i * 113) % DOCS));
+        order.extend([DOCS - 1, DOCS, u32::MAX, 0]);
+        let mut cursor = norms.cursor();
+        for d in order {
+            let (by_get, by_cursor) = (norms.get(d), cursor.get(d));
+            if d < DOCS && bad(d) {
+                for err in [by_get.unwrap_err(), by_cursor.unwrap_err()] {
+                    assert!(norms_corruption(&err), "{name}, doc {d}: {err:?}");
+                }
+                assert!(
+                    norms.length(d).is_err() && cursor.length(d).is_err(),
+                    "{name}, doc {d}"
+                );
+            } else {
+                let want = clean.get(d as usize).copied().unwrap_or(0);
+                assert_eq!(by_get.unwrap(), want, "{name}, doc {d}");
+                assert_eq!(by_cursor.unwrap(), want, "{name}, doc {d}");
+            }
+        }
+        // A fresh cursor whose first read fails reads the other blocks afterwards.
+        let mut fresh = norms.cursor();
+        let first_bad = bad_block as u32 * BLOCK;
+        assert!(fresh.get(first_bad).is_err(), "{name}");
+        assert_eq!(fresh.get(0).unwrap(), clean[0], "{name}");
+        assert!(
+            fresh.get(first_bad).is_err(),
+            "{name}: the error is not forgotten"
+        );
+        assert!(seg.verify().unwrap_err().is_corruption(), "{name}");
+    }
+
+    // A block longer than any block can be (16 + block_size) breaks the block table itself (SPEC §5.2), which open
+    // checks: a corrupt Norms section at open, not a panic.
+    let mut s = Seg::parse(&bytes);
+    edit_framed_blocks(&mut s, Norms, title.get(), |b| {
+        let mut p = b[middle][16..].to_vec();
+        p.push(3);
+        b[middle] = reblock(&b[middle], &p);
+    });
+    let err = open(&schema, &s.to_bytes()).unwrap_err();
+    assert!(norms_corruption(&err), "{err:?}");
+}

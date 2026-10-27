@@ -13,7 +13,7 @@ use roaring::RoaringBitmap;
 use super::super::norms;
 use super::super::write::columns::{TAG_BOOL, TAG_KEYWORD, TAG_NUMERIC};
 use super::error::{ReadError, SegmentCorruption};
-use super::stream::{Cursor, Stream};
+use super::stream::Stream;
 use crate::document::Value;
 use crate::schema::FieldType;
 
@@ -68,7 +68,8 @@ impl<'s> Norms<'s> {
     /// A reader that keeps the last block it read: for scoring many documents, in docid order or close to it.
     pub fn cursor(&self) -> NormsCursor<'s> {
         NormsCursor {
-            cursor: self.stream.map(Cursor::new),
+            stream: self.stream,
+            block: None,
         }
     }
 }
@@ -76,7 +77,9 @@ impl<'s> Norms<'s> {
 /// Reads [`Norms`] keeping the last block it read, so a scan looks each block up in the cache once (ROADMAP 5.3.16).
 #[derive(Debug, Clone)]
 pub struct NormsCursor<'s> {
-    cursor: Option<Cursor<'s>>,
+    stream: Option<Stream<'s>>,
+    /// The kept block and the stream position of its first byte.
+    block: Option<(u64, Arc<Vec<u8>>)>,
 }
 
 impl NormsCursor<'_> {
@@ -84,20 +87,41 @@ impl NormsCursor<'_> {
     ///
     /// # Errors
     /// As [`Norms::get`].
+    #[inline]
     pub fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
-        let Some(cursor) = &mut self.cursor else {
+        // The hot path of scoring: the norm is in the kept block.
+        let at = u64::from(docid);
+        if let Some((start, block)) = &self.block
+            && let Some(&norm) = at
+                .checked_sub(*start)
+                .and_then(|i| usize::try_from(i).ok())
+                .and_then(|i| block.get(i))
+        {
+            return Ok(norm);
+        }
+        self.get_slow(at)
+    }
+
+    #[inline(never)]
+    fn get_slow(&mut self, at: u64) -> Result<u8, ReadError> {
+        let Some(stream) = self.stream else {
             return Ok(0);
         };
-        let at = u64::from(docid);
-        if at >= cursor.stream.len() {
+        if at >= stream.len() {
             return Ok(0);
         }
-        let stream = cursor.stream;
-        cursor
-            .read(at, at.saturating_add(1))?
-            .first()
+        self.block = None;
+        let index = at.checked_div(stream.block_size()).unwrap_or(0);
+        let start = index.saturating_mul(stream.block_size());
+        let block = stream.block(u32::try_from(index).unwrap_or(u32::MAX))?;
+        let norm = at
+            .checked_sub(start)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| block.get(i))
             .copied()
-            .ok_or_else(|| bad(&stream, at, "a block shorter than its table says"))
+            .ok_or_else(|| bad(&stream, at, "a block shorter than its table says"))?;
+        self.block = Some((start, block));
+        Ok(norm)
     }
 
     /// As [`Norms::length`].
@@ -967,4 +991,181 @@ fn minimal(block: &ForBlock<'_>) -> bool {
         .fold((u64::MAX, 0), |(lo, hi), k| (lo.min(k), hi.max(k)));
     let width = u8::try_from(max.wrapping_sub(min).bit_width()).unwrap_or(u8::MAX);
     min == block.min() && width == block.width()
+}
+
+#[cfg(test)]
+mod tests {
+    //! Cursors over columns opened strictly (ROADMAP 5.3.16): `Segment::verify` opens keyword columns with every
+    //! value preloaded, a path no public reader reaches, so it is checked here against the documents.
+    #![allow(
+        clippy::unwrap_used,
+        clippy::indexing_slicing,
+        clippy::arithmetic_side_effects,
+        clippy::cast_possible_truncation,
+        clippy::too_many_lines
+    )]
+
+    use std::collections::BTreeSet;
+
+    use persia_analysis::AnalyzerRegistry;
+    use persia_format::ByteSource;
+    use persia_format::for_codec::{f64_to_key, i64_to_key};
+
+    use super::*;
+    use crate::document::Document;
+    use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+    use crate::segment::{SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+
+    const DOCS: u32 = 2600;
+
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state >> 33
+    }
+
+    /// Per document: the `i64` value (some absent), the `f64` value (always), the keyword values (0..=3, with
+    /// duplicates). Three FOR blocks of keys, of starts, and at least three of ords.
+    fn documents() -> Vec<(Option<i64>, f64, Vec<String>)> {
+        let mut state = 0x00c0_ffee;
+        (0..DOCS)
+            .map(|i| {
+                let n = (!lcg(&mut state).is_multiple_of(5))
+                    .then(|| lcg(&mut state).cast_signed() - (1 << 30));
+                // Never -0.0, which documents store as 0.0.
+                let f = f64::from(i) * -0.5 - 1.0;
+                let k = (0..lcg(&mut state) % 4)
+                    .map(|_| format!("v{:02}", lcg(&mut state) % 40))
+                    .collect();
+                (n, f, k)
+            })
+            .collect()
+    }
+
+    /// Docids in a scrambled order, the FOR block edges and docids past the segment, each twice.
+    fn order() -> Vec<u32> {
+        let mut state = 99;
+        let mut order: Vec<u32> = (0..DOCS + 3).collect();
+        for i in (1..order.len()).rev() {
+            order.swap(i, (lcg(&mut state) as usize) % (i + 1));
+        }
+        order.extend([1023, 1024, 1025, 2047, 2048, 2049, DOCS - 1, DOCS, u32::MAX]);
+        let again: Vec<u32> = order.iter().rev().copied().collect();
+        order.extend(again);
+        order
+    }
+
+    #[test]
+    fn cursors_over_strict_and_preloaded_columns_equal_the_documents() {
+        let schema = SchemaBuilder::new("c")
+            .field("n", FieldKind::I64 { stored: false })
+            .field("f", FieldKind::F64 { stored: false })
+            .field("k", FieldKind::Keyword(KeywordOptions::default()))
+            .build()
+            .unwrap();
+        let fid = |name: &str| schema.field(name).unwrap().id();
+        let (n, f, k) = (fid("n"), fid("f"), fid("k"));
+        let docs = documents();
+        let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (i, (nv, fv, kv)) in docs.iter().enumerate() {
+            let mut d = Document::new(format!("d{i:05}")).with(f, Value::F64(*fv));
+            if let Some(nv) = nv {
+                d = d.with(n, Value::I64(*nv));
+            }
+            if !kv.is_empty() {
+                d = d.with(k, Value::Strings(kv.clone()));
+            }
+            builder.add(&d).unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&builder, meta).finish().unwrap();
+        let seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+        let stream =
+            |field: crate::schema::FieldId| seg.stream(SectionKind::Columns, field.get()).unwrap();
+
+        // Keyword: the lazy column (what queries open) and the preloaded one (what `verify` opens).
+        let lazy = seg.keyword_column(k).unwrap();
+        let strict = KeywordColumn::read(stream(k), DOCS, true).unwrap();
+        let (starts, ords) = strict.lists.as_ref().unwrap();
+        assert!(
+            starts.all.is_some() && ords.all.is_some(),
+            "the strict column is preloaded"
+        );
+        assert!(
+            ords.count.div_ceil(PER_BLOCK) >= 3,
+            "ords span three FOR blocks"
+        );
+        let expected_ords = |d: u32| -> Vec<u64> {
+            let Some((_, _, values)) = docs.get(d as usize) else {
+                return Vec::new();
+            };
+            let distinct: BTreeSet<&[u8]> = values.iter().map(String::as_bytes).collect();
+            distinct.into_iter().map(|v| lazy.ord(v).unwrap()).collect()
+        };
+        let (mut lazy_cursor, mut strict_cursor) = (lazy.cursor(), strict.cursor());
+
+        // Numeric: lazily and strictly opened (strict checks every block's minimality; it does not preload).
+        let numeric = [(n, FieldType::I64), (f, FieldType::F64)];
+        let opened: Vec<_> = numeric
+            .iter()
+            .map(|&(field, ty)| {
+                (
+                    seg.numeric_column(field).unwrap(),
+                    NumericColumn::read(stream(field), ty, DOCS, true).unwrap(),
+                )
+            })
+            .collect();
+        let mut cursors: Vec<_> = opened
+            .iter()
+            .map(|(l, s)| (l.cursor(), s.cursor()))
+            .collect();
+        let expected_key = |field: usize, d: u32| -> Option<u64> {
+            let (nv, fv, _) = docs.get(d as usize)?;
+            if field == 0 {
+                nv.map(i64_to_key)
+            } else {
+                Some(f64_to_key(*fv))
+            }
+        };
+
+        for d in order() {
+            let want = expected_ords(d);
+            assert_eq!(
+                lazy_cursor.ords(d).unwrap(),
+                want.as_slice(),
+                "lazy cursor, doc {d}"
+            );
+            assert_eq!(
+                strict_cursor.ords(d).unwrap(),
+                want.as_slice(),
+                "preloaded cursor, doc {d}"
+            );
+            assert_eq!(strict.ords(d).unwrap(), want, "preloaded column, doc {d}");
+            assert_eq!(lazy.ords(d).unwrap(), want, "lazy column, doc {d}");
+            for (i, ((lc, sc), (lazy, strict))) in cursors.iter_mut().zip(&opened).enumerate() {
+                let want = expected_key(i, d);
+                assert_eq!(lc.key(d).unwrap(), want, "field {i} lazy cursor, doc {d}");
+                assert_eq!(sc.key(d).unwrap(), want, "field {i} strict cursor, doc {d}");
+                assert_eq!(lazy.key(d).unwrap(), want, "field {i} lazy, doc {d}");
+                assert_eq!(strict.key(d).unwrap(), want, "field {i} strict, doc {d}");
+            }
+        }
+        // The values behind the ords are the documents' own.
+        for d in [0, 1500, DOCS - 1] {
+            let mut want: Vec<&[u8]> = docs[d as usize].2.iter().map(String::as_bytes).collect();
+            want.sort_unstable();
+            want.dedup();
+            let ords = strict_cursor.ords(d).unwrap().to_vec();
+            let got: Vec<&[u8]> = ords
+                .iter()
+                .map(|&o| strict_cursor.column().value(o).unwrap())
+                .collect();
+            assert_eq!(got, want, "doc {d}");
+        }
+    }
 }

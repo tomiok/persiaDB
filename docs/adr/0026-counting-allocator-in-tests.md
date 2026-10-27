@@ -2,7 +2,8 @@
 
 - Status: proposed
 - Date: 2026-10-26
-- Related: ROADMAP 4.4.4, 4.4.12; CLAUDE.md "Coding rules" (the unsafe policy); ADR-0010 (the mmap unsafe boundary)
+- Related: ROADMAP 4.4.4, 4.4.12, 5.1.6; CLAUDE.md "Coding rules" (the unsafe policy); ADR-0010 (the mmap unsafe
+  boundary)
 
 ## Context
 
@@ -19,7 +20,8 @@ every call to `System` unchanged and counts `alloc`, `alloc_zeroed` and `realloc
 thread-local `Cell` (it never allocates, and `try_with` tolerates thread teardown). Counting per thread keeps the
 parallel tests of that binary from disturbing each other. The file `allow`s `unsafe_code`, every `unsafe` block has a
 `SAFETY` comment, and the file is listed in `UNSAFE_ALLOWED`. Other crates that need allocation tests copy the
-pattern into their own test file and list it here.
+pattern into their own test file and list it here. Listed: `crates/persia-engine/tests/flush_memory.rs` (ROADMAP
+5.1.6), which tracks live bytes and their peak the same way to check the memory bound of a segment flush.
 
 ## Consequences
 
