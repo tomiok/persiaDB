@@ -130,6 +130,7 @@ impl Segment {
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
         };
         segment.check_presence()?;
+        segment.validate_tables()?;
         segment.check_sections()?;
         Ok(segment)
     }
@@ -252,7 +253,7 @@ impl Segment {
     ///
     /// # Errors
     /// [`ReadError::UnknownField`] or [`ReadError::FieldType`] for a field that is not a `text` or `keyword`
-    /// field of the schema; a corruption if a block table fails (checked again on each call).
+    /// field of the schema.
     pub fn terms(&self, field: FieldId) -> Result<TermIndex<'_>, ReadError> {
         let f = self.field(field)?;
         let keyword = match f.field_type() {
@@ -522,7 +523,37 @@ impl Segment {
             .source
             .base_offset()
             .saturating_add(section.range.start);
-        Stream::open(kind, field, bytes, base).map(Some)
+        match section.table {
+            Some(table) => Stream::reopen(kind, field, bytes, base, table).map(Some),
+            None => Stream::open(kind, field, bytes, base).map(Some),
+        }
+    }
+
+    /// The block-framed `section`, its block table validated in full (whatever [`Section::table`] holds).
+    fn open_stream(&self, section: &Section) -> Result<Stream<'_>, ReadError> {
+        let bytes = section_slice(self.source.as_slice(), section);
+        let base = self
+            .source
+            .base_offset()
+            .saturating_add(section.range.start);
+        Stream::open(section.kind, section.field, bytes, base)
+    }
+
+    /// Validates every block table once (ROADMAP 5.3.10) and keeps what it found, so every later [`Self::stream`]
+    /// costs O(1) instead of a CRC over the whole table.
+    fn validate_tables(&mut self) -> Result<(), ReadError> {
+        let mut tables = Vec::with_capacity(self.footer.sections.len());
+        for section in &self.footer.sections {
+            tables.push(if section.kind.is_block_framed() {
+                Some(self.open_stream(section)?.validated())
+            } else {
+                None
+            });
+        }
+        for (section, table) in self.footer.sections.iter_mut().zip(tables) {
+            section.table = table;
+        }
+        Ok(())
     }
 
     /// SPEC §5.3 "Presence", and the field statistics against it.
@@ -659,7 +690,12 @@ impl Segment {
                 }
             }
             let range = section.range.start..section.range.end.saturating_sub(4);
-            let payload = self.bytes(&Section { kind, field, range })?;
+            let payload = self.bytes(&Section {
+                kind,
+                field,
+                range,
+                table: None,
+            })?;
             let map = fst::Map::new(payload).map_err(|_| fst_error(SegmentCorruption::Fst))?;
             check_fst_values(&map, kind, doc_count).map_err(fst_error)?;
             if kind == SectionKind::IdMap {

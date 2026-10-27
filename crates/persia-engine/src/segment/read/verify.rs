@@ -99,9 +99,17 @@ impl Segment {
         let mut buf = Vec::new();
         for section in &self.footer.sections {
             if section.kind.is_block_framed() {
-                let stream = self
-                    .stream(section.kind, section.field)?
-                    .ok_or_else(|| self.presence_error(section.kind, section.field, false))?;
+                // The whole table again (its CRC and every block end), not what open kept: the bytes may have
+                // changed since (a mapped file), and lookups reopen the table without checking it (ROADMAP 5.3.10).
+                let stream = self.open_stream(section)?;
+                if Some(stream.validated()) != section.table {
+                    return Err(invalid(
+                        section.kind,
+                        section.field,
+                        0,
+                        "a block table other than the one validated when the segment was opened",
+                    ));
+                }
                 for i in 0..stream.block_count() {
                     stream.read_block(i, &mut buf)?;
                 }
@@ -503,5 +511,52 @@ fn in_range(value: &Value) -> bool {
         Value::F64(v) => v.is_finite() && !(v == 0.0 && v.is_sign_negative()),
         Value::Datetime(t) => (MIN_DATETIME..=MAX_DATETIME).contains(&t),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
+    use persia_analysis::AnalyzerRegistry;
+    use persia_format::ByteSource;
+
+    use super::*;
+    use crate::document::Document;
+    use crate::schema::SchemaBuilder;
+    use crate::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
+
+    /// `verify` checks every block table again in full and compares it with what open kept for the lookups
+    /// (ROADMAP 5.3.10): a kept table that no longer matches the bytes (as when a mapped file changed) is reported.
+    #[test]
+    fn a_kept_block_table_other_than_the_bytes_is_corruption() {
+        let schema = SchemaBuilder::new("c").build().unwrap();
+        let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for i in 0..50 {
+            builder.add(&Document::new(format!("doc-{i}"))).unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&builder, meta).finish().unwrap();
+        let mut seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+        seg.verify().unwrap();
+        // DocStore and IdList: block-framed, different lengths.
+        let framed: Vec<usize> = (0..seg.footer.sections.len())
+            .filter(|&i| seg.footer.sections[i].kind.is_block_framed())
+            .collect();
+        let (a, b) = (framed[0], framed[1]);
+        let (ta, tb) = (seg.footer.sections[a].table, seg.footer.sections[b].table);
+        assert_ne!(ta, tb);
+        seg.footer.sections[a].table = tb;
+        let err = seg.verify().unwrap_err();
+        assert!(err.is_corruption(), "{err:?}");
+        assert!(
+            matches!(&err, ReadError::Section { reason: SegmentCorruption::Invalid { what }, .. }
+                if what.contains("other than the one validated")),
+            "{err:?}"
+        );
     }
 }

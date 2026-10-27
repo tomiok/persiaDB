@@ -39,6 +39,9 @@ pub(super) struct Section {
     pub(super) kind: SectionKind,
     pub(super) field: u32,
     pub(super) range: Range<u64>,
+    /// For a block-framed section, its block table as [`Segment::open`](super::Segment::open) validated it
+    /// (ROADMAP 5.3.10): later readers reopen it in O(1).
+    pub(super) table: Option<persia_format::block::ValidatedTable>,
 }
 
 /// A parsed, validated footer.
@@ -340,6 +343,7 @@ impl Layout<'_> {
                 kind,
                 field,
                 range: offset..section_end,
+                table: None,
             });
             end = section_end;
         }
