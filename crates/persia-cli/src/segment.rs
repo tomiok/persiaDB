@@ -30,6 +30,25 @@ pub fn open(path: &Path, schema_path: &Path) -> Result<(Segment, CollectionSchem
 /// [`Segment::verify`], whose error comes after the report (so an operator still sees what the segment holds).
 pub fn inspect(out: &mut dyn Write, path: &Path, schema_path: &Path, verify: bool) -> Result<()> {
     let (seg, schema, size) = open(path, schema_path)?;
+    let report = write_report(out, &seg, &schema, size);
+    if !verify {
+        return report;
+    }
+    // Even when the report could not be written (a closed pipe), a corrupt segment must fail the command.
+    seg.verify()
+        .with_context(|| format!("verifying the segment {}", path.display()))?;
+    report?;
+    writeln!(out, "\nverify            ok")?;
+    Ok(())
+}
+
+/// The footer, the section table and the per-field statistics.
+fn write_report(
+    out: &mut dyn Write,
+    seg: &Segment,
+    schema: &CollectionSchema,
+    size: usize,
+) -> Result<()> {
     let (min_id, max_id) = seg.id_range();
     let rows = [
         ("segment_id", format!("{:032x}", seg.segment_id())),
@@ -68,7 +87,7 @@ pub fn inspect(out: &mut dyn Write, path: &Path, schema_path: &Path, verify: boo
         "kind", "field", "offset", "len", "stream_len", "blocks", "block"
     )?;
     for s in &sections {
-        write_section(out, s, &schema)?;
+        write_section(out, s, schema)?;
     }
 
     let count = usize::try_from(seg.schema_field_count()).unwrap_or(usize::MAX);
@@ -80,12 +99,7 @@ pub fn inspect(out: &mut dyn Write, path: &Path, schema_path: &Path, verify: boo
         "field", "type", "docs", "sum_field_len", "avg_len", "terms", "bytes"
     )?;
     for f in fields {
-        write_field(out, &seg, f, &sections)?;
-    }
-    if verify {
-        seg.verify()
-            .with_context(|| format!("verifying the segment {}", path.display()))?;
-        writeln!(out, "\nverify            ok")?;
+        write_field(out, seg, f, &sections)?;
     }
     Ok(())
 }
@@ -306,7 +320,46 @@ fn escaped_bytes(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+
     use super::*;
+
+    /// A writer whose reader is gone.
+    struct ClosedPipe;
+
+    impl Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::ErrorKind::BrokenPipe.into())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `inspect --verify` verifies even when the report cannot be written: a corrupt segment is a verify error, a
+    /// sound one gives back the write error (which the binary treats as success).
+    #[test]
+    fn verify_runs_when_the_report_cannot_be_written() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/segment/v1.0");
+        let schema = dir.join("basic.schema.json");
+        let sound = inspect(&mut ClosedPipe, &dir.join("basic.pseg"), &schema, true).unwrap_err();
+        let io = sound
+            .downcast_ref::<std::io::Error>()
+            .map(std::io::Error::kind);
+        assert_eq!(io, Some(std::io::ErrorKind::BrokenPipe), "{sound:#}");
+
+        let mut bytes = std::fs::read(dir.join("basic.pseg")).unwrap();
+        bytes[10568 + 20] ^= 0x01; // a payload byte of title's Positions block
+        let tmp = tempfile::tempdir().unwrap();
+        let damaged = tmp.path().join("damaged.pseg");
+        std::fs::write(&damaged, &bytes).unwrap();
+        let err = inspect(&mut ClosedPipe, &damaged, &schema, true).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("verifying the segment"),
+            "{err:#}"
+        );
+    }
 
     #[test]
     fn escaping_is_one_line_and_unambiguous() {

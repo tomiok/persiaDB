@@ -10,16 +10,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `persia` CLI: `persia inspect segment <file> --schema <schema.json> [--verify]` prints a segment's footer, its
-  sections with their sizes (on disk, uncompressed, blocks) and per-field statistics, and with `--verify` checks the
-  whole segment (ROADMAP 5.4.2). `persia dump segment <file> --schema <schema.json> --field <f> [--term <t>]` lists a
-  field's terms with `df`, `ttf` and `max_tf`, or one term's postings block by block: docid, id, frequency and positions
-  (ROADMAP 5.4.3). The CLI now depends on `persia-engine` and `persia-format` (ADR-0020, amended).
+  sections with their sizes (on disk, uncompressed, blocks) and per-field statistics, and with `--verify` runs
+  `Segment::verify` and fails if the segment is corrupt (see its entry for what it checks and its memory cost; ROADMAP
+  5.4.2). `persia dump segment <file> --schema <schema.json> --field <f> [--term <t>]` lists a field's terms with
+  `df`, `ttf` and `max_tf`, or one term's postings block by block: docid, id, frequency and positions (ROADMAP 5.4.3). The CLI now depends on `persia-engine` and `persia-format` (ADR-0020, amended).
 - `persia-engine`: `Segment::verify` (ROADMAP 5.4.1) reads a whole segment and checks what no lookup can: every block
   and raw CRC; each term's `df`, `ttf`, `max_tf` and `min_norm` against its list and each Skip entry's bounds against
   its block; the `skip_off` chain and the end of the Skip section; minimal bit widths and FOR minimums; norms and field
   statistics against the term frequencies; keyword columns against the postings; stored values against the columns;
   the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; and sections that hold
-  nothing. `Segment::sections` lists the section table with each block-framed section's stream size.
+  nothing. Not checked: stored `text` values against the postings (that needs re-analysis), and the range of column
+  values (ROADMAP 5.4.4). It decodes every block and holds the decoded columns of all column fields at once (8 bytes
+  per document each), so its memory grows with the segment size times the number of column fields.
+  `Segment::sections` lists the section table with each block-framed section's stream size.
 - `persia-engine`: the segment reader (SPEC §5, ROADMAP 5.3). `Segment::open` checks the footer, section table, padding,
   section presence, every block table and raw CRC, and the schema hash at the field count the segment records, so a
   segment written before fields were added opens with the evolved schema. `Segment::terms` gives a `TermIndex` (term

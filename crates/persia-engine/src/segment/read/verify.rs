@@ -129,10 +129,11 @@ impl Segment {
                 let any = (0..n).any(|d| c.get(d).is_some());
                 (Column::Bool(c), any)
             }
-            FieldType::Keyword => (
-                Column::Keyword(KeywordColumn::read(stream, n, true)?),
-                present,
-            ),
+            FieldType::Keyword => {
+                let c = KeywordColumn::read(stream, n, true)?;
+                let any = (0..n).any(|d| !c.ords(d).is_empty());
+                (Column::Keyword(c), any)
+            }
             FieldType::Text | FieldType::Stored => return Ok(None),
         };
         if present && !any {

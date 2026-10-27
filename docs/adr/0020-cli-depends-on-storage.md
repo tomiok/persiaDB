@@ -15,8 +15,8 @@ the facade would mean `persia-engine` and `persia` re-exporting storage internal
 
 ## Decision
 
-`persia-cli` may depend on `persia` and on `persia-storage`. Later commands that dump or verify the on-disk format
-may add `persia-format` by amending this ADR. The library crates' layering is unchanged: `persia` still reaches
+`persia-cli` may depend on `persia`, `persia-storage`, and (since the amendment below) `persia-engine` and
+`persia-format`. Any further internal dependency needs another amendment. The library crates' layering is unchanged: `persia` still reaches
 storage only through the engine and the blob store, and what users import from `persia` does not grow.
 
 ## Amendment (2026-10-26): segment commands
@@ -24,7 +24,8 @@ storage only through the engine and the blob store, and what users import from `
 `persia inspect segment` and `persia dump segment` (ROADMAP 5.4.2, 5.4.3) read one segment file with the engine's
 segment reader (`persia_engine::segment::Segment`, which takes a `persia_format::ByteSource`). A segment on its own is
 not something the embedded `Db` API exposes, nor should it. So `persia-cli` may also depend on `persia-engine` and
-`persia-format`, as this ADR anticipated for format tools. The rule is the same as for storage: these are operator
+`persia-format`. The original decision anticipated `persia-format` for format tools; `persia-engine` is new, because
+the segment reader lives there. The rule is the same as for storage: these are operator
 commands on the on-disk format, and anything user-facing still goes through `persia`.
 
 ## Consequences

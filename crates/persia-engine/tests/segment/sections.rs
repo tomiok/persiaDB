@@ -2004,7 +2004,8 @@ fn bytes_before_the_first_list_are_corruption() {
 
 // ---------------------------------------------------------------------------------------------------------------
 // The rest of `Segment::verify` (ROADMAP 5.4.1): rules no lookup checks, broken in otherwise consistent segments.
-// `read_back` ends with `verify`, so these are `At::Read` cases.
+// The verify-only cases are `At::Verify`: open and every lookup succeed, and only `Segment::verify` (which `read_back`
+// runs last) fails.
 // ---------------------------------------------------------------------------------------------------------------
 
 /// Re-packs the 128-group whose width byte is at stream position `width_at` one bit wider (16 more bytes, all
@@ -2308,6 +2309,22 @@ fn keyword_column_matches_postings() {
         .collect();
     let bytes = build(&schema, &docs, WriteOptions::default());
     let k = k.get();
+
+    // A column whose documents all have no value, next to terms that have postings: it holds nothing (SPEC §5.3
+    // "Presence"), which `verify` reports before comparing it with the postings.
+    let mut s = Seg::parse(&bytes);
+    s.edit_stream(Columns, k, |b| {
+        let mut col = KeywordCol::decode(b);
+        col.ords.clear();
+        col.starts.iter_mut().for_each(|x| *x = 0);
+        *b = col.encode();
+    });
+    let err = open(&schema, &s.to_bytes()).unwrap().verify().unwrap_err();
+    assert!(
+        matches!(err, ReadError::Corrupt { reason: SegmentCorruption::Presence { kind, field, present: true }, .. }
+            if kind == Columns.code() && field == k),
+        "{err:?}"
+    );
     let cases = vec![
         case(
             "a keyword column without a value its postings have",

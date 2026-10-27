@@ -6,6 +6,7 @@ use core::ops::Range;
 
 use persia_format::Reader;
 use persia_format::bitpack::{BLOCK_LEN, BitWidth};
+use persia_format::delta;
 use persia_format::postings::advance_to;
 use roaring::RoaringBitmap;
 
@@ -652,7 +653,9 @@ impl<'s> Postings<'s> {
             let header = r
                 .read_postings_block(ext.prev, &mut self.docs)
                 .map_err(|e| stream.error(e))?;
-            if self.strict && header.width != BitWidth::of(&gaps(&self.docs, ext.prev)) {
+            if self.strict
+                && gaps(&self.docs, ext.prev).is_none_or(|g| header.width != BitWidth::of(&g))
+            {
                 return Err(not_minimal(stream, ext.postings.start));
             }
         } else {
@@ -865,16 +868,12 @@ fn read_run_into(
     Ok(wide)
 }
 
-/// The delta-coding gaps of a full postings block that follows `prev` (SPEC §5.2.1); the block decoded, so its
-/// docids increase.
-fn gaps(docs: &[u32; BLOCK_LEN], prev: Option<u32>) -> [u32; BLOCK_LEN] {
-    let mut out = [0; BLOCK_LEN];
-    let mut next = prev.map_or(0, |p| p.wrapping_add(1));
-    for (gap, &d) in out.iter_mut().zip(docs) {
-        *gap = d.wrapping_sub(next);
-        next = d.wrapping_add(1);
-    }
-    out
+/// The delta-coding gaps of a full postings block that follows `prev` (SPEC §5.2.1), as the writer computes them;
+/// `None` if the docids do not increase (the block decoded, so they do).
+fn gaps(docs: &[u32; BLOCK_LEN], prev: Option<u32>) -> Option<[u32; BLOCK_LEN]> {
+    let mut out = *docs;
+    delta::encode_in_place(&mut out, prev).ok()?;
+    Some(out)
 }
 
 /// A writer packs every group at the bit length of its largest value (SPEC §5.2.1).
