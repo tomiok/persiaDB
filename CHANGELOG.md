@@ -15,7 +15,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`IdState::Deleted`). `Memtable::view` gives a `MemtableView`: one writer, any number of readers, each view seeing
   exactly the writes before it (MVCC), never holding the lock across a search. `FlushPolicy` is the size/idle trigger
   (64 MiB / 10 s, SPEC §8.2) as a pure function of the size, the last write and an injected `now`. Bench:
-  `memtable/put` 78.9 K documents/s, `memtable/postings_freqs` 45.4 M postings/s (docs/benchmarks.md).
+  `memtable/put` 78.9 K documents/s, `memtable/postings_freq` 45.4 M postings/s (docs/benchmarks.md).
 - `persia-engine`: the `view` module's `PostingsIterator` and `SearchView` traits (ROADMAP 6.1.2): postings, norms,
   field statistics, documents and id lookup over a `SegmentView` (a segment and its tombstones) or a `MemtableView`;
   norms come through a `NormReader` (a segment's `NormsCursor`, or the memtable's norms copied once per view),

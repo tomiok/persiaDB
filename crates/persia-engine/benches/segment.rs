@@ -448,7 +448,7 @@ fn bench_memtable(c: &mut Criterion) {
     let terms = all_terms(&seg, body);
     let view = fill().view();
     group.throughput(Throughput::Elements(total_df(&terms)));
-    group.bench_function("postings_freqs", |b| {
+    group.bench_function("postings_freq", |b| {
         b.iter(|| {
             let mut sum = 0_u64;
             for (term, _) in &terms {

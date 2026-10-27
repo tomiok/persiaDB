@@ -148,10 +148,10 @@ Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: be
 
 `cargo bench -p persia-engine --bench segment -- memtable`: the 2 000 documents of the segment building benchmarks.
 `put` is `Memtable::put` for all of them (validation, the full CBOR encoding, analysis, accumulation, the per-term
-chains, under the write lock), the counterpart of `segment/add`; `postings_freqs` reads every `body` term's postings
-through a `MemtableView` (copied out under the read lock) with frequencies, as `segment_read/postings_freqs` does.
+chains, under the write lock), the counterpart of `segment/add`; `postings_freq` reads every `body` term's postings
+through a `MemtableView` (copied out under the read lock) with frequencies, as `segment_read/postings_freq` does.
 Documents and postings per second.
 
-| Recorded | `memtable/put` | `memtable/postings_freqs` | `segment/add`, same run |
+| Recorded | `memtable/put` | `memtable/postings_freq` | `segment/add`, same run |
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
