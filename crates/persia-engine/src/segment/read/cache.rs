@@ -92,15 +92,17 @@ pub struct CacheStats {
 
 /// A least-recently-used cache of decoded section blocks (SPEC §10.6), bounded in bytes.
 ///
-/// Every open [`super::Segment`] reads its block-framed sections through one, which keeps at most its capacity of
-/// decoded blocks for all the segments that use it: the process-wide [`BlockCache::shared`] (of
-/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it another. A database or server
-/// opens all its segments with one cache sized by its configuration (ROADMAP 10.2.5, 11.4.7). Blocks are decoded
-/// outside the lock, so readers of other blocks do not wait; two readers that miss the same block at once may both
-/// decode it, and one copy is kept.
+/// Every open [`super::Segment`] reads its block-framed sections through one, which keeps at most its capacity, in
+/// decoded bytes, for all the segments that use it: the process-wide [`BlockCache::shared`] (of
+/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it another. The embedded database
+/// and the server are to open all their segments with one cache sized by their configuration (planned: ROADMAP
+/// 10.2.5, 11.4.7). Blocks are decoded outside the lock, so readers of other blocks do not wait; two readers that
+/// miss the same block at once may both decode it, and one copy is kept.
 ///
-/// The capacity bounds what the cache keeps, not what readers hold: a block handed out stays alive while a reader
-/// uses it (a cursor keeps one), even after the cache evicts it.
+/// The capacity bounds what the cache keeps, not what readers hold. A reader keeps the framed block it is reading in
+/// each stream it reads (a posting list up to four: postings, frequencies, skip entries and positions; a norms cursor
+/// one), and that block stays alive after the cache evicts it. Column cursors keep decoded FOR blocks of their own (at
+/// most 8 KiB each) outside the cache.
 ///
 /// ```
 /// use std::sync::Arc;

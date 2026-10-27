@@ -1522,8 +1522,9 @@ Above it, an open segment reads its block-framed sections (SPEC §5.2) through a
 segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, norms, columns and
 document fetches reuse it without decompressing it or checking its CRC again. Readers that miss the same block at the
 same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
-(8 MiB, `BlockCache::shared`); the embedded API and the server open all their segments with one cache sized by their
-configuration (ROADMAP 10.2.5, 11.4.7).
+(8 MiB, `BlockCache::shared`); the embedded API and the server are to open all their segments with one cache sized
+by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
+the block it is reading in each stream it reads, also after the cache evicts it.
 It holds no state of its own on disk.
 
 ---

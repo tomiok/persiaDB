@@ -193,7 +193,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   segment they wrote changes. ADR-0027 records the rule (decision 12).
 - `persia-engine`: `Segment::open` reads through one process-wide cache, `BlockCache::shared` (8 MiB), instead of an
   8 MiB cache per segment, so however many segments a process opens, the cache keeps at most 8 MiB of decoded blocks
-  for all of them (ROADMAP 5.3.15; a block a reader or cursor still holds outlives its eviction, one per cursor); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
+  for all of them (ROADMAP 5.3.15; a block a reader is reading outlives its eviction: up to four per posting list,
+  one per norms cursor); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
 - `persia-engine` (breaking): `Segment::norms` returns `Norms<'_>`, which reads the `Norms` section a framed block at a
   time through the segment's block cache (ROADMAP 5.3.14) instead of copying and re-checking all `doc_count` bytes on
   each call. `Norms::get` and `Norms::length` return a `Result`: a corrupt block is reported when a norm in it is read.
