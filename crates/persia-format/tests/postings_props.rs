@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use persia_format::bitpack::BLOCK_LEN;
-use persia_format::postings::advance_to;
+use persia_format::postings::{advance_to, block_len, tail_len};
 use persia_format::{Reader, Writer};
 use proptest::prelude::*;
 
@@ -58,6 +58,29 @@ proptest! {
         }
         prop_assert!(r.is_empty());
         prop_assert_eq!(decoded, docids);
+    }
+
+    /// `block_len` and `tail_len` are what the writers append, and fail where they do: once with each block after
+    /// the previous one's last docid (as a list is written), once with a random `prev` below, inside or past the
+    /// list, so the errors are exercised too.
+    #[test]
+    fn lengths_match_the_encoding(docids in posting_list(), random in proptest::option::of(any::<u32>())) {
+        let (blocks, tail) = docids.as_chunks::<BLOCK_LEN>();
+        let tail = if tail.is_empty() { &docids[..docids.len().min(BLOCK_LEN)] } else { tail };
+        for chained in [true, false] {
+            let mut prev = if chained { None } else { random };
+            for block in blocks {
+                let mut w = Writer::new();
+                let written = w.write_postings_block(block, prev).map(|()| w.len());
+                prop_assert_eq!(block_len(block, prev), written);
+                if chained {
+                    prev = block.last().copied();
+                }
+            }
+            let mut w = Writer::new();
+            let written = w.write_postings_tail(tail, prev).map(|()| w.len());
+            prop_assert_eq!(tail_len(tail, prev), written);
+        }
     }
 
     #[test]

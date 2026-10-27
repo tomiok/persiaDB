@@ -98,6 +98,14 @@ impl Writer {
         self.buf.clear();
     }
 
+    /// Appends the bytes written so far to `dst` and removes them, keeping the buffer's capacity; the offset does not
+    /// move, so later output continues where the drained bytes end.
+    pub(crate) fn drain_into(&mut self, dst: &mut Self) {
+        dst.write_bytes(&self.buf);
+        self.base = self.offset();
+        self.buf.clear();
+    }
+
     /// Appends raw bytes.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);

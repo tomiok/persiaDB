@@ -1,6 +1,6 @@
 //! Repository invariants checked as tests (`cargo test -p xtask`): toolchain pinning, fuzz target naming,
-//! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files) and
-//! digest-pinned docker-compose images.
+//! `.gitignore`/`.gitattributes` behavior (verified through git itself rather than by parsing the files),
+//! digest-pinned docker-compose images, and dependencies pinned to the version a module was audited against.
 
 #[cfg(test)]
 mod tests {
@@ -275,6 +275,70 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "unsafe_code relaxed outside UNSAFE_ALLOWED: {offenders:#?}"
+        );
+    }
+
+    // --- Audited dependencies (ROADMAP 5.4.6) ---
+
+    /// The `fst` version `crates/persia-engine/src/segment/read/fst_check.rs` was audited against. Change it only
+    /// after the re-audit that module's "Bumping `fst`" section lists.
+    const FST_AUDITED: &str = "0.4.7";
+
+    /// Its crates.io checksum: a `[patch]` that keeps the version number but swaps the source fails the check.
+    const FST_AUDITED_CHECKSUM: &str =
+        "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a";
+
+    /// `(version, source, checksum)` of every locked package called `name`.
+    fn locked(lockfile: &str, name: &str) -> Vec<[String; 3]> {
+        let field = |p: &toml::Value, key: &str| {
+            p.get(key).and_then(|v| v.as_str()).unwrap_or("").to_owned()
+        };
+        get(&read_toml(lockfile), &["package"])
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|p| p["name"].as_str() == Some(name))
+            .map(|p| {
+                [
+                    field(p, "version"),
+                    field(p, "source"),
+                    field(p, "checksum"),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn fst_is_the_audited_version() {
+        let how = "re-audit segment/read/fst_check.rs (its \"Bumping `fst`\" section) before changing FST_AUDITED";
+        let pin = format!("={FST_AUDITED}");
+        for (manifest, path) in [
+            ("Cargo.toml", &["workspace", "dependencies", "fst"][..]),
+            ("fuzz/Cargo.toml", &["dependencies", "fst"][..]),
+        ] {
+            let table = read_toml(manifest);
+            let req = get(&table, path).as_str();
+            assert_eq!(req, Some(pin.as_str()), "{manifest}: {how}");
+        }
+        let audited = [
+            FST_AUDITED.to_owned(),
+            "registry+https://github.com/rust-lang/crates.io-index".to_owned(),
+            FST_AUDITED_CHECKSUM.to_owned(),
+        ];
+        for lockfile in ["Cargo.lock", "fuzz/Cargo.lock"] {
+            assert_eq!(
+                locked(lockfile, "fst"),
+                std::slice::from_ref(&audited),
+                "{lockfile}: {how}"
+            );
+        }
+        let module = std::fs::read_to_string(
+            root().join("crates/persia-engine/src/segment/read/fst_check.rs"),
+        )
+        .unwrap();
+        assert!(
+            module.contains(&format!("audited against `fst` {FST_AUDITED}")),
+            "fst_check.rs does not name the audited version {FST_AUDITED}"
         );
     }
 

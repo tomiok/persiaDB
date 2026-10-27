@@ -25,7 +25,8 @@ persia-proto = { path = "crates/persia-proto" }
 persia-testutil = { path = "crates/persia-testutil" }
 # Libraries
 # Exact: segment/read/fst_check.rs re-implements this version's node parser to prove `fst` cannot panic on a payload
-# it accepts; a bump means re-auditing that module against the new code.
+# it accepts; a bump means re-auditing that module against the new code (its "Bumping `fst`" section; FST_AUDITED in
+# xtask/src/repo_checks.rs fails the build until then, ROADMAP 5.4.6).
 fst = "=0.4.7"
 roaring = "0.11.5"
 # No default features: the `legacy` decoder (pre-1.0 zstd frames) is attack surface Persia never needs (ADR-0005).

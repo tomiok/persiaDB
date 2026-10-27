@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-format`: `postings::block_len` and `postings::tail_len` give the length of a postings block's encoding
+  without encoding it, and `BlockWriter::drain_output_into` moves the encoded blocks into a `Writer` without
+  allocating a buffer per call (ROADMAP 5.1.7).
 - `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
   block-framed section through an LRU cache of decoded blocks, bounded in bytes, which several segments may share
   (`BlockCache::DEFAULT_CAPACITY`, 8 MiB, for all the segments opened with `Segment::open`, ROADMAP 5.3.15). Term
@@ -178,12 +181,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia-engine`: `SegmentWriter::finish` writes every section straight into the segment buffer as it encodes it,
   instead of holding each section and copying it in (ROADMAP 5.1.6): postings are grouped by term as 4-byte indices,
-  term lists are encoded in one pass that measures them (writing the `TermInfo` records) and one per stream that writes
-  them, FOR columns and FSTs are generated into the output. Its documentation states the memory a flush needs beyond
-  the builder, for the flush threshold of M6; on a 20 000-document segment of 9.6 MB the heap peak above the builder
-  (counting both buffers of each reallocation) drops from 43.0 MB to 21.0 MB (`tests/flush_memory.rs`, a counting
-  allocator, ADR-0026). Encoding the lists twice makes `finish` about 18 % slower
-  (`segment/finish`: 82.7 K documents/s, from 100.5 K). Output is byte for byte the same.
+  term lists are measured in one pass from their bit widths and varint lengths, without encoding them (writing the
+  `TermInfo` records, ROADMAP 5.1.7), and encoded in one pass per stream that writes them, FOR columns and FSTs are
+  generated into the output. Its documentation states the memory a flush needs beyond the builder, for the flush
+  threshold of M6; on a 20 000-document segment of 9.6 MB the heap peak above the builder (counting both buffers of
+  each reallocation) drops from 43.0 MB to 21.0 MB (`tests/flush_memory.rs`, a counting allocator, ADR-0026).
+  `segment/finish`, single runs measured together: 99.0 K documents/s, against 100.3 K before 5.1.6 and 96.2 K when
+  the lists were encoded twice. Output is byte for byte the same.
 - `persia-format`: `Writer::clear` empties a writer and keeps its buffer.
 - `persia-engine` (breaking: new `SegmentError::TermTooLong` variant): a `text` field's tokens are limited to
   `MAX_TERM_LEN` (32 KiB, the `keyword` value limit) whatever the analyzer (ROADMAP 5.4.5, SPEC §5.3.1):
