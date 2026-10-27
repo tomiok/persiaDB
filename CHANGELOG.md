@@ -10,14 +10,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
-  block-framed section through an LRU cache of decoded blocks, bounded in bytes (`BlockCache::DEFAULT_CAPACITY`, 8 MiB,
-  per segment opened with `Segment::open`), which several segments may share. Term lookups, posting lists and document
-  fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
+  block-framed section through an LRU cache of decoded blocks, bounded in bytes, which several segments may share
+  (`BlockCache::DEFAULT_CAPACITY`, 8 MiB, for all the segments opened with `Segment::open`, ROADMAP 5.3.15). Term
+  lookups, posting lists and document fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
   misses. A dropped segment's blocks leave the cache. When blocks are re-read (docs/benchmarks.md, rows measured
   together), `segment_read` runs postings with frequencies 6.4x, `advance` 4.4x, document fetches 2.6x and term lookups
   1.3x faster, and `segment_records/id_of_1000` 5.8x; positions 13.5x, together with the per-document decoding of
-  ROADMAP 5.3.13 (the benchmark does not separate the two). The default budget is per segment (the record cache it
-  replaces kept 8 blocks), so a process that opens many segments should share one cache.
+  ROADMAP 5.3.13 (the benchmark does not separate the two). The record cache it replaces kept 8 blocks per segment.
 - `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
   validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
   checking the table CRC and block ends again (blocks are still checked when decoded, so other bytes cannot cause a
@@ -177,6 +176,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine`: `Segment::open` reads through one process-wide cache, `BlockCache::shared` (8 MiB), instead of an
+  8 MiB cache per segment, so a process that opens many segments keeps at most 8 MiB of decoded blocks for all of them
+  (ROADMAP 5.3.15); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
 - `persia-engine` (breaking): `Segment::norms` returns `Norms<'_>`, which reads the `Norms` section a framed block at a
   time through the segment's block cache (ROADMAP 5.3.14) instead of copying and re-checking all `doc_count` bytes on
   each call. `Norms::get` and `Norms::length` return a `Result`: a corrupt block is reported when a norm in it is read.

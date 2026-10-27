@@ -1190,6 +1190,24 @@ fn a_small_cache_stays_within_capacity_and_reads_the_same() {
     }
 }
 
+/// Segments opened with `Segment::open` share the process-wide cache (ROADMAP 5.3.15), which bounds them together.
+#[test]
+fn segments_opened_alone_share_the_process_cache() {
+    let (schema, docs, bytes) = dense(3000);
+    let a = open(&schema, &bytes).unwrap();
+    let b = open(&schema, &bytes).unwrap();
+    assert!(Arc::ptr_eq(a.cache(), b.cache()));
+    assert!(Arc::ptr_eq(a.cache(), &BlockCache::shared()));
+    for seg in [&a, &b] {
+        for d in 0..seg.doc_count() {
+            assert_eq!(seg.document(d).unwrap(), docs[d as usize]);
+        }
+        assert!(BlockCache::shared().stats().bytes <= BlockCache::DEFAULT_CAPACITY);
+    }
+    let (own, _) = open_cached(&schema, &bytes, 1 << 20);
+    assert!(!Arc::ptr_eq(own.cache(), a.cache()));
+}
+
 /// Norms read one framed block at a time through the segment's cache (ROADMAP 5.3.14): a second reader decodes
 /// nothing, and a damaged block fails the reads that reach it, not the open or `norms`.
 #[test]
@@ -1604,7 +1622,7 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: if cfg!(feature = "slow") { 256 } else { 24 }, ..ProptestConfig::default() })]
 
     /// Two segments reading through one shared [`BlockCache`] in a random interleaving: after every read the cache
-    /// holds at most its capacity, every read equals the same read through a segment with a cache of its own, and
+    /// holds at most its capacity, every read equals the same read through a segment opened with `Segment::open`, and
     /// dropping both segments empties the cache (SPEC §10.6, ROADMAP 5.3.11).
     #[test]
     fn cache_capacity_holds_across_two_segments(

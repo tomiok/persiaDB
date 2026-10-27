@@ -119,15 +119,15 @@ impl Segment {
     /// block table of every block-framed section, the CRC of the raw ones, and the shape of the FSTs and record
     /// arrays. Blocks are checked when they are decoded.
     ///
-    /// The segment gets its own [`BlockCache`] of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB): a process that opens many
-    /// segments should share one through [`Self::open_with_cache`], which bounds them all.
+    /// The segment reads its blocks through the process-wide [`BlockCache::shared`] (8 MiB for all the segments opened
+    /// this way, ROADMAP 5.3.15); [`Self::open_with_cache`] takes a cache of another size.
     ///
     /// # Errors
     /// [`ReadError::Unsupported`] for another format major version, unknown `incompat_flags` or schema encoding
     /// version; a corruption ([`ReadError::is_corruption`]) for anything else that breaks a rule of SPEC §5.1 or
     /// §5.3, including a schema hash other than `schema`'s.
     pub fn open(source: ByteSource, schema: &CollectionSchema) -> Result<Self, ReadError> {
-        Self::open_with_cache(source, schema, Arc::new(BlockCache::default()))
+        Self::open_with_cache(source, schema, BlockCache::shared())
     }
 
     /// As [`Self::open`], reading blocks through `cache` (SPEC §10.6, ROADMAP 5.3.11), which may be shared with other
@@ -179,6 +179,11 @@ impl Segment {
         segment.validate_tables()?;
         segment.check_sections()?;
         Ok(segment)
+    }
+
+    /// The cache the segment reads its blocks through.
+    pub fn cache(&self) -> &Arc<BlockCache> {
+        &self.cache
     }
 
     /// The segment's id (SPEC §5.1).

@@ -554,6 +554,7 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.2.2 Read-your-writes guarantees documented and tested
 - [ ] 10.2.3 Background threads lifecycle (flush, merge) and clean shutdown
 - [ ] 10.2.4 Read handles use mapped reads where the container is on a local disk (`Container::enable_mapped_reads_if_local`, ADR-0021; found in 2.3.10): on by default, `OpenOptions` can force `pread`; never on the writer's handle (a live mapping blocks tail truncation on Windows, ADR-0017)
+- [ ] 10.2.5 One block cache per `Db` (found in 5.3.15): every segment the database opens reads through one `BlockCache` (SPEC §10.6) of `OpenOptions` size (default from 15.2.4), not the 8 MiB process-wide `BlockCache::shared`; its stats exposed for metrics
 
 ## 10.3 Docs & examples
 - [ ] 10.3.1 Rustdoc with doctests for every public item
@@ -599,6 +600,7 @@ Deps: M10.
 - [ ] 11.4.4 Metrics (Prometheus) + tracing/OTel (SPEC §12.4)
 - [ ] 11.4.5 AuthN: API keys/bearer, TLS (rustls), optional mTLS
 - [ ] 11.4.6 Limits: max message size, concurrent requests, per-request deadlines
+- [ ] 11.4.7 Block cache size in the server config (found in 5.3.15): one `BlockCache` (SPEC §10.6) for all the server's segments, sized by a flag (default from 15.2.4), hit and miss counters in the metrics of 11.4.4
 
 ## 11.5 Packaging
 - [ ] 11.5.1 Multi-stage Dockerfile: distroless, non-root, read-only rootfs

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::super::SectionKind;
 
@@ -92,9 +92,10 @@ pub struct CacheStats {
 
 /// A least-recently-used cache of decoded section blocks (SPEC §10.6), bounded in bytes.
 ///
-/// Every open [`super::Segment`] reads its block-framed sections through one: its own (of
-/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it a shared one, which bounds
-/// the decoded bytes of all the segments that use it. Blocks are decoded outside the lock, so readers of other blocks
+/// Every open [`super::Segment`] reads its block-framed sections through one, which bounds the decoded bytes of all
+/// the segments that use it: the process-wide [`BlockCache::shared`] (of [`BlockCache::DEFAULT_CAPACITY`]) unless
+/// [`super::Segment::open_with_cache`] gives it another. A database or server opens all its segments with one cache
+/// sized by its configuration (ROADMAP 5.3.15). Blocks are decoded outside the lock, so readers of other blocks
 /// do not wait; two readers that miss the same block at once may both decode it, and one copy is kept.
 ///
 /// ```
@@ -120,8 +121,23 @@ impl Default for BlockCache {
 }
 
 impl BlockCache {
-    /// The capacity of the cache a segment opened with [`super::Segment::open`] gets: 8 MiB.
+    /// The capacity of [`BlockCache::shared`], which segments opened with [`super::Segment::open`] share: 8 MiB.
     pub const DEFAULT_CAPACITY: u64 = 8 << 20;
+
+    /// The cache of [`BlockCache::DEFAULT_CAPACITY`] that every segment opened with [`super::Segment::open`] in this
+    /// process shares, so however many segments it opens, they keep at most that many decoded bytes together.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use persia_engine::segment::BlockCache;
+    ///
+    /// assert!(Arc::ptr_eq(&BlockCache::shared(), &BlockCache::shared()));
+    /// assert_eq!(BlockCache::shared().capacity(), BlockCache::DEFAULT_CAPACITY);
+    /// ```
+    pub fn shared() -> Arc<Self> {
+        static SHARED: OnceLock<Arc<BlockCache>> = OnceLock::new();
+        Arc::clone(SHARED.get_or_init(|| Arc::new(Self::default())))
+    }
 
     /// A cache that keeps at most `capacity` decoded bytes. A block larger than that is decoded on each read.
     pub fn new(capacity: u64) -> Self {
