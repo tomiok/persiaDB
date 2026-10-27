@@ -83,3 +83,15 @@ its positions; `document` fetches every stored document by docid. Operations per
 | Recorded | `open` | `term_get` | `postings_freq` | `advance` | `positions` | `document` |
 |---|--:|--:|--:|--:|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.38 K | 5.34 M | 6.69 M | 4.82 M | 453 K | 434 K |
+
+## `persia-engine` segment opening and record lookups
+
+`cargo bench -p persia-engine --bench segment -- "segment_open|segment_records"`. `segment_open/large_dict` is
+`Segment::open` of a segment with one `keyword` field holding a distinct value per document (200 000 documents): a
+`TermDict` of 200 000 terms and an `IdMap` of as many ids, both checked node by node (`fst_check`) and walked once.
+`segment_records/id_of_1000` is 1 000 `Segment::id_of` lookups spread over a 50 000-document segment of 1 KiB blocks
+(ROADMAP 5.3.10: a lookup's cost must not grow with the section's block count). Terms per second, lookups per second:
+
+| Recorded | `segment_open/large_dict` | `segment_records/id_of_1000` |
+|---|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 2.26 M | 407 K |

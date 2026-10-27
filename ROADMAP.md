@@ -348,11 +348,12 @@ Deps: M1, M3, M4. The heart of the index format.
 - [x] 5.4.3 `persia dump segment --field f --term t` debugging output
 - [x] 5.4.4 Column value ranges in `Segment::verify` (found in the 5.4 review): an `f64` key that decodes to NaN or `-0.0` and a `datetime` key outside the SPEC §6.4.1 range are corruption (SPEC §5.2.1), but only a stored field catches them now (against its row); check the key of every document that holds a value (a document without one holds an unspecified key, SPEC §5.3.5)
 - [ ] 5.4.5 A maximum term length for `text` fields (found in the 5.5 review): `TermDict` paths are bounded for keyword fields (`MAX_KEYWORD_LEN`) and the `IdMap` (`MAX_ID_LEN`), but a text term is bounded only by the document size (the token length guard is configurable, and a registered analyzer may omit it), so a crafted text `TermDict` sharing one long suffix across all its keys passes the structural check and makes the open-time stream cost keys × path length. Decide a SPEC-wide term cap (e.g. 32 KiB, enforced by the builder and checked at open) or a walk-cost budget, then bound text `TermDict`s in `Segment::max_key_len`
+- [ ] 5.4.6 Re-audit `segment/read/fst_check.rs` on every `fst` version bump (found in the 5.5 review): it re-implements fst 0.4.7's node parser to prove fst cannot panic, loop or overflow on a payload it accepts, and `fst` is pinned to `=0.4.7` for that reason; a bump compares the parser and the paths the engine uses (`get`, streams, range and automaton search) with the new code, re-runs the `fst_check` tests and fuzzes `segment`
 
 ## 5.5 Tests
 - [x] 5.5.1 Property: build segment from random docs → read back every doc/term/posting/column exactly equals the model
 - [x] 5.5.2 Golden segment fixtures (+ determinism test)
-- [x] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open (the `segment` target, added in 5.3, opens raw bytes and edited block-framed sections with valid CRCs; still missing: edits to the raw FST sections)
+- [x] 5.5.3 Fuzz targets: footer parser, each section decoder, term dict, postings block decoder, full-segment open (the `segment` target opens raw bytes, and edits with valid CRCs to the block-framed sections, the raw FST sections and the footer)
 - [x] 5.5.4 Large-doc / empty-collection / single-doc / 2^20-doc edge-case tests
 - [x] 5.5.5 Bench: build throughput, term lookup, postings decode, doc fetch
 

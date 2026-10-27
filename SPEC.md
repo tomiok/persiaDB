@@ -580,8 +580,9 @@ the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sig
 otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
 bit pattern round-trips exactly. Writers never key `-0.0`, NaN or an infinity in an `f64` column, nor a
 `datetime` outside its §6.4.1 range: a document holds none of them (§6.4.1). A document's key that
-decodes to one is corruption, which a full verification of the segment reports (a document without a value holds an
-unspecified key, §5.3.5, which is not checked).
+decodes to one is corruption. A reader that decodes one value at a time need not check it; a check of the whole segment
+(every column read in full, as `persia inspect segment --verify` does) must report it. A document without a value
+holds an unspecified key (§5.3.5), which is not checked.
 
 ### 5.3 Sections (per segment)
 | Section | `section_kind` | Per | Framed | Content | Encoding |

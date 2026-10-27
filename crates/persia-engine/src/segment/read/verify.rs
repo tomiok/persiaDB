@@ -94,7 +94,9 @@ impl Segment {
         Ok(())
     }
 
-    /// Decodes every block (each checks its CRC) and recomputes every raw section's CRC.
+    /// Validates every block table again in full and checks it against the one open kept for lookups (they differ
+    /// if the bytes changed since, ROADMAP 5.3.10), decodes every block (each checks its CRC), and recomputes every
+    /// raw section's CRC.
     fn verify_checksums(&self) -> Result<(), ReadError> {
         let mut buf = Vec::new();
         for section in &self.footer.sections {

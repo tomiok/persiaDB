@@ -509,8 +509,10 @@ impl<'a> BlockTable<'a> {
     }
 
     /// Where block `index` is stored, relative to the section start (e.g. for a range request). At most
-    /// `16 + block_size` bytes long for a table [`BlockTable::open`] validated; under [`BlockReader::reopen`] of
-    /// bytes other than those validated, any range (decoding it then fails).
+    /// `16 + block_size` bytes long for a table [`BlockTable::open`] validated. Under [`BlockReader::reopen`] of bytes
+    /// other than those validated it may be any range: reading it stays in bounds and never panics, and a range that
+    /// does not fit or a block that fails its CRC is an error, but a change to the table's own CRC or trailer alone is
+    /// not detected (only [`BlockReader::open`] checks them).
     ///
     /// # Errors
     /// [`Error::OutOfBounds`] if `index >= block_count`.
@@ -752,8 +754,10 @@ impl<'a> BlockReader<'a> {
     /// Decodes block `index` and appends its bytes to `out`.
     ///
     /// # Errors
-    /// [`Error::OutOfBounds`] if `index >= block_count`; otherwise as [`BlockTable::decode_block`]. On error
-    /// `out` is left as it was.
+    /// [`Error::OutOfBounds`] if `index >= block_count`; [`Error::CorruptBlock`] with
+    /// [`Corruption::InvalidBlockEnd`] if the block's range does not fit the section (possible only after
+    /// [`BlockReader::reopen`] of other bytes); otherwise as [`BlockTable::decode_block`]. On error `out` is left as
+    /// it was.
     pub fn read_block(&self, index: u32, out: &mut Vec<u8>) -> Result<()> {
         let range = self.table.block_range(index)?;
         // `open` checked that every range fits the section; after `reopen` on other bytes one may not, which is
