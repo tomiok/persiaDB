@@ -26,9 +26,12 @@ assume about the records it reads.
    and syncs, and one sync covers everything written before it (group commit). A batch takes one sync.
    The default is `Fsync`, matching "durability is non-negotiable" (CLAUDE.md pillar 5); `Buffered` and `Async` are
    opt-ins for bulk loads. A chunk is written out at 1 MiB (rotation) or at a sync point, and never exceeds 64 MiB.
-4. **`wal_start` per collection.** The writer remembers, per collection with unflushed records, the oldest chunk
-   holding one; `wal_start` is the oldest of those, or the end of the log. A flush of one collection does not move
-   it past chunks that also hold its records if another collection still needs them.
+4. **`wal_start` per collection, with flush cuts.** The writer remembers, per collection, the chunks holding its
+   records not yet covered by a committed flush; `wal_start` is the oldest of those, or the end of the log. A flush
+   covers the records logged before the point its memtable stopped taking writes (a `WalMark`), not every record so
+   far, so records logged while a flush runs keep their chunk. A commit takes `wal_start` only after syncing the
+   buffered records (`commit_point`), so none lands after the Manifest (a buffered record of a dropped collection
+   would otherwise be replayed after the drop).
 5. **Idempotent replay instead of skipping flushed records.** Chunks from `wal_start` on may hold records already in
    committed segments. Replay applies them again: puts are upserts and deletes are deletes, so by id only the last
    operation counts, and the visible documents are the same. Skipping them would need a per-collection "flushed up
@@ -39,16 +42,23 @@ assume about the records it reads.
    collection first flushes every memtable, so the drop's commit has `wal_start` at the end of the log and no record
    of the dropped (or a recreated) collection is replayed; a record for a collection the manifest lacks is
    corruption.
+   Records that replay could not apply would fail every later open, so only operations replay can apply are logged:
+   collection committed, memtable accepting (SPEC §8.2.1 "What may be logged"; enforced by the write path, ROADMAP
+   6.3.9).
 7. **No torn records.** A chunk is a whole frame that passed its CRC, so a crash leaves no partial chunk for replay
    to cut: an invalid chunk or record means a writer bug or damage and fails the open (§8.6). Torn tails are the
    container's business (§4.4). Replay stops at the first invalid byte and reports its offset.
+   The chunk header (magic, `version`, `record_count`) has no CRC of its own. Locally the frame CRC covers it; in a
+   remote object a damaged `count` still shows as trailing bytes or a short chunk, and a damaged `version` reads as
+   unsupported rather than corrupt, as for the manifest (SPEC §8.7). Accepted: the remote WAL (M12) relies on the
+   object store's checksums and may add a header CRC as version 2 before v1.0 if they prove insufficient.
 8. **Golden fixtures** live in `tests/fixtures/wal/v1/`, written by an engine test with
    `PERSIA_WRITE_WAL_FIXTURES=1` when missing, never overwritten (as ADR-0024 does for manifests).
 
 ## Consequences
 
-- An open replays up to one auto-commit interval of records per collection, some of them already flushed; the
-  memtable may need to flush during replay (ROADMAP 6.6.1).
+- An open replays up to one auto-commit interval of records per collection, some of them already flushed; a
+  replayed memtable may pass its threshold and must flush during replay (ROADMAP 6.6.5).
 - A drop costs a flush of every collection.
 - A schema change costs a commit before the first record that uses it.
 - The remote WAL (M12) reuses the chunk encoding; only the object naming and `wal_start` as a `seq` differ.

@@ -55,4 +55,4 @@ pub use chunk::{
     WalOp, WalRecord, decode_chunk, encode_chunk,
 };
 pub use replay::{Replay, ReplayError, ReplaySummary, replay_container};
-pub use writer::{DEFAULT_CHUNK_TARGET, Durability, WalLog, WalWriteError, WalWriter};
+pub use writer::{DEFAULT_CHUNK_TARGET, Durability, WalLog, WalMark, WalWriteError, WalWriter};

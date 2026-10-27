@@ -29,6 +29,8 @@
 //! 10. Replay errors (SPEC §8.2.1): a record of a collection the memtables lack is `UnknownCollection` (corruption),
 //!     a put that does not decode with its schema is `Document`, a bad chunk is `Chunk`, each at the record's
 //!     offset; records before the error stay applied.
+//! 11. A flush covers only the records before its `WalMark`; a commit that takes `wal_start` from `commit_point` keeps
+//!     buffered records of a collection it drops out of replay (SPEC §8.2.1).
 
 #![allow(
     clippy::unwrap_used,
@@ -308,7 +310,7 @@ fn write_history(history: &[Vec<Op>], committed: usize) -> (SimFile, Vec<u64>, u
         wal.append_batch(&records, Durability::Fsync).unwrap();
         ends.push(wal.log().end());
         if i + 1 == committed {
-            let wal_start = wal.wal_start();
+            let wal_start = wal.commit_point().unwrap();
             let manifest = wal
                 .log_mut()
                 .append(FrameKind::Manifest, b"manifest", Compression::None)
@@ -1174,29 +1176,29 @@ fn wal_start_tracks_the_oldest_unflushed_collection() {
     append_ops(&mut wal, &[delete("notes", "c")], Durability::Fsync); // chunk C: notes
     assert_eq!(wal.wal_start(), chunk_a);
 
-    wal.flushed("notes");
+    wal.flushed("notes", wal.mark());
     assert_eq!(wal.wal_start(), chunk_b, "tasks' oldest chunk");
     let chunk_d = end(&wal);
     append_ops(&mut wal, &[delete("notes", "d")], Durability::Fsync); // chunk D: notes
     assert_eq!(wal.wal_start(), chunk_b);
-    wal.flushed("tasks");
+    wal.flushed("tasks", wal.mark());
     assert_eq!(
         wal.wal_start(),
         chunk_d,
         "notes' oldest chunk since its flush"
     );
-    wal.flushed("ghost");
+    wal.flushed("ghost", wal.mark());
     assert_eq!(wal.wal_start(), chunk_d);
-    wal.flushed("notes");
+    wal.flushed("notes", wal.mark());
     assert_eq!(wal.wal_start(), end(&wal));
 
     // A record buffered before a flush is covered by it, even if written out later with another collection's.
     append_ops(&mut wal, &[delete("notes", "e")], Durability::Buffered);
-    wal.flushed("notes");
+    wal.flushed("notes", wal.mark());
     let chunk_e = end(&wal);
     append_ops(&mut wal, &[delete("tasks", "b")], Durability::Fsync);
     assert_eq!(wal.wal_start(), chunk_e);
-    wal.flushed("tasks");
+    wal.flushed("tasks", wal.mark());
     assert_eq!(wal.wal_start(), end(&wal));
     assert!(chunk_c > chunk_b && chunk_b > chunk_a);
 }
@@ -1225,7 +1227,7 @@ fn resume_keeps_wal_start_at_the_replayed_chunks() {
     assert_eq!(wal.wal_start(), a);
     append_ops(&mut wal, &[delete("notes", "n1")], Durability::Fsync);
     assert_eq!(wal.wal_start(), a);
-    wal.flushed("notes");
+    wal.flushed("notes", wal.mark());
     assert_eq!(wal.wal_start(), b);
 
     // Commit with wal_start at B: the next open replays from B only.
@@ -1318,7 +1320,7 @@ proptest! {
                     prop_assert_eq!(file.bytes(), file.durable_bytes());
                 }
                 WriterOp::Flushed(collection) => {
-                    wal.flushed(COLLECTIONS[collection]);
+                    wal.flushed(COLLECTIONS[collection], wal.mark());
                     first_unflushed[collection] = None;
                 }
             }
@@ -1553,4 +1555,110 @@ fn replay_stops_at_a_corrupt_record_keeping_earlier_ones() {
     let err = result.unwrap_err();
     assert!(!err.is_corruption(), "{err}");
     assert_eq!(applied, 0);
+}
+
+// ---- Review follow-ups: flush cuts, commit points, records replay cannot apply ----
+
+#[test]
+fn a_flush_covers_only_the_records_before_its_mark() {
+    let mut wal = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap());
+    wal.append(
+        &WalRecord::delete("notes", "n1").unwrap(),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let frozen = wal.mark();
+    wal.append(
+        &WalRecord::delete("notes", "n2").unwrap(),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let second = wal.log().frames()[1].offset;
+    // "n2" was logged while the flush ran: its chunk stays needed.
+    wal.flushed("notes", frozen);
+    assert_eq!(wal.wal_start(), second);
+    wal.flushed("notes", wal.mark());
+    assert_eq!(wal.wal_start(), wal.log().end());
+}
+
+/// Drops "tasks" while one of its records is buffered: every memtable is flushed, then the commit is made with the
+/// `wal_start` from `commit_point` (or, wrongly, from `wal_start` without a sync). Returns the reopened container.
+fn drop_with_a_buffered_record(use_commit_point: bool) -> Container<SimFile> {
+    let file = SimFile::new();
+    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap());
+    wal.append(
+        &WalRecord::delete("tasks", "t1").unwrap(),
+        Durability::Buffered,
+    )
+    .unwrap();
+    wal.flushed("notes", wal.mark());
+    wal.flushed("tasks", wal.mark());
+    let wal_start = if use_commit_point {
+        wal.commit_point().unwrap()
+    } else {
+        wal.wal_start()
+    };
+    let manifest = wal
+        .log_mut()
+        .append(
+            FrameKind::Manifest,
+            b"manifest without tasks",
+            Compression::None,
+        )
+        .unwrap();
+    wal.log_mut()
+        .commit(Commit {
+            manifest,
+            wal_start,
+            fence_token: 0,
+        })
+        .unwrap();
+    wal.sync().unwrap();
+    drop(wal);
+    Container::open_on(file.crash(CrashLoss::All), Mode::ReadWrite).unwrap()
+}
+
+#[test]
+fn a_commit_point_keeps_buffered_records_of_a_dropped_collection_out_of_replay() {
+    let notes_only = || {
+        let mut m = memtables();
+        m.remove("tasks");
+        m
+    };
+    let container = drop_with_a_buffered_record(true);
+    let summary = replay_container(&container, &mut notes_only()).unwrap();
+    assert_eq!(summary.records, 0);
+    // Without the sync, the buffered chunk lands after the Manifest and every later replay fails.
+    let container = drop_with_a_buffered_record(false);
+    let err = replay_container(&container, &mut notes_only()).unwrap_err();
+    assert!(
+        matches!(err, ReplayError::UnknownCollection { ref collection, .. } if collection == "tasks"),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_mark_taken_right_after_resume_covers_the_replayed_chunks_only() {
+    let mut first = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap());
+    first
+        .append(
+            &WalRecord::delete("notes", "n1").unwrap(),
+            Durability::Fsync,
+        )
+        .unwrap();
+    let replayed = first.log().frames()[0].offset;
+    let mut wal = WalWriter::resume(
+        first.into_log(),
+        BTreeMap::from([("notes".into(), replayed)]),
+    );
+    let m = wal.mark();
+    wal.append(
+        &WalRecord::delete("notes", "n2").unwrap(),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let new = wal.log().frames()[1].offset;
+    assert_eq!(wal.wal_start(), replayed);
+    wal.flushed("notes", m);
+    assert_eq!(wal.wal_start(), new);
 }

@@ -1178,7 +1178,8 @@ Rules:
 `put(doc)` (upsert by id), `delete(id)`, `put_batch`, `commit()`/auto-commit policy, `get(id)`.
 
 ### 8.2 Flow
-1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Fsync | Async` (default `Fsync` at commit).
+1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
+   (§8.2.1); a commit syncs whatever is still buffered.
 2. Op applied to the **memtable** (visible to searches).
 3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object).
    Writes that never pause for 10 s and stay under the size are flushed by the auto-commit interval (§14
@@ -1220,13 +1221,22 @@ next to the buffered ones closes the chunk first. Durability is chosen per call 
 - `Fsync`: the chunk is written and synced before the call returns. One sync covers every record written since the
   last one, `Buffered` and `Async` ones included, and a batch of records (`put_batch`) takes one sync; chunks may
   still rotate inside it, so a crash may keep a prefix of a batch.
-A commit writes and syncs the in-memory chunk before its Manifest (§4.5 step 1). A failed write or sync stops the
+A commit writes and syncs the in-memory chunk before its Manifest (§4.5 step 1), and only then takes its
+`wal_start`, so no record written before the commit lands after it. A failed write or sync stops the
 writer, like the container it writes to (§4.5): the records it held are lost or not, and only a reopen tells.
 
-**`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection whose memtable has
-not been flushed since; with no such chunk, the end of the log. A flush covers every record of its collection written
-so far. Chunks from `wal_start` on may therefore hold records already in committed segments (of another collection's
-chunk, or of the same chunk); replaying them is harmless (below).
+**What may be logged.** Replay must be able to apply every record, or every later open fails. A record is
+logged only for an operation that replay can apply: its collection is in the committed manifest (a created
+collection's commit completes before its first record), and its collection's memtable accepts it (a put's
+document validates and indexes: a docid left, no term over the limit a custom analyzer could emit). The write path guarantees this
+before acknowledging (ROADMAP 6.3.9); the WAL itself checks only the record's framing.
+
+**`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection not yet covered by
+a committed flush; with no such chunk, the end of the log. A flush starts from a point in the log (when its memtable
+stops taking writes) and covers the records of its collection logged before that point; records logged while the
+flush runs keep holding `wal_start` back. The writer counts a flush once its segment is written, before the commit
+that publishes it takes its `wal_start`; if that commit fails, the writer stops (§4.5), so nothing builds on it. Chunks from `wal_start` on may therefore hold records already in committed
+segments (of another collection's chunk, or of the same chunk); replaying them is harmless (below).
 
 **Schemas and collections.** A put is encoded with its collection's schema when it is written. A schema change is
 committed (§8.7.2) before any record that uses it; since an evolved schema decodes the encodings of every earlier

@@ -65,7 +65,8 @@ pub enum RecordError {
 
 impl<'a> WalRecord<'a> {
     /// A put of `document`, the [`crate::document::Document::encode`] of a document with [`FieldSet::All`] for
-    /// `collection`'s schema. Its contents are checked when it is replayed.
+    /// `collection`'s schema. The decoder checks only its length; replay decodes and indexes it, so log only a
+    /// document the collection's memtable accepted (SPEC §8.2.1): one it rejects fails every later open.
     ///
     /// [`FieldSet::All`]: crate::document::FieldSet::All
     ///
@@ -224,6 +225,11 @@ impl ChunkBuilder {
                 .len()
                 .checked_add(record.encoded_len())
                 .is_some_and(|len| len <= MAX_CHUNK_LEN)
+    }
+
+    /// Whether `record` fits an empty chunk.
+    pub(super) fn fits_empty(record: &WalRecord<'_>) -> bool {
+        HEADER_LEN.saturating_add(record.encoded_len()) <= MAX_CHUNK_LEN
     }
 
     /// Appends `record`, or changes nothing.
@@ -409,9 +415,11 @@ impl<'a> ChunkRecords<'a> {
         if len < MIN_BODY_LEN {
             return Err(corrupt(start, WalCorruption::BodyLen { len: body_len }));
         }
-        // The chunk is at most 64 MiB, so none of these overflow.
+        // `start` lies inside the chunk (at most 64 MiB), but `len` is stored: up to `u32::MAX`.
         let body_start = start + 4;
-        let crc_at = body_start + len;
+        let crc_at = body_start
+            .checked_add(len)
+            .ok_or_else(|| eof(self.bytes.len()))?;
         let stored = u32_at(self.bytes, crc_at).ok_or_else(|| eof(self.bytes.len()))?;
         let covered = self
             .bytes

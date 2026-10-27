@@ -174,7 +174,7 @@ pub fn replay_container<F: ContainerFile>(
         if frame.kind != FrameKind::WalChunk {
             continue;
         }
-        let chunk = container.read_frame(frame.offset, MAX_CHUNK_LEN)?;
+        let chunk = container.read_frame_source(frame.offset, MAX_CHUNK_LEN)?;
         replay.chunk(frame.offset, &chunk.payload)?;
     }
     Ok(replay.finish())
