@@ -30,12 +30,12 @@ mod norms;
 mod read;
 mod write;
 
-pub use builder::{MAX_DOCS, POSITION_GAP, SegmentBuilder};
+pub use builder::{MAX_DOCS, MAX_TERM_LEN, POSITION_GAP, SegmentBuilder};
 pub use kind::{SEGMENT_FIELD, SectionKind};
 pub use read::{
-    BlockCache, BlockMax, BoolColumn, CacheStats, FieldStats, KeywordColumn, Norms, NumericColumn,
-    Postings, ReadError, SectionInfo, Segment, SegmentCorruption, StreamInfo, TermIndex, TermInfo,
-    TermStream, Tombstones, UnsupportedSegment,
+    BlockCache, BlockMax, BoolColumn, CacheStats, FieldStats, KeywordColumn, KeywordCursor, Norms,
+    NormsCursor, NumericColumn, NumericCursor, Postings, ReadError, SectionInfo, Segment,
+    SegmentCorruption, StreamInfo, TermIndex, TermInfo, TermStream, Tombstones, UnsupportedSegment,
 };
 pub use write::{
     FOOTER_MAGIC, FORMAT_MAJOR, FORMAT_MINOR, MAX_FOOTER_LEN, SegmentMeta, SegmentWriter,
@@ -43,6 +43,7 @@ pub use write::{
 };
 
 use crate::document::DocumentError;
+use crate::schema::FieldId;
 
 /// Why a segment could not be built or written.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -73,6 +74,15 @@ pub enum SegmentError {
     /// A segment needs at least one document.
     #[error("segment has no documents")]
     Empty,
+    /// The analyzer of a `text` field produced a token longer than [`MAX_TERM_LEN`] bytes (SPEC §5.3.1); the document
+    /// is rejected.
+    #[error("field {field}: a token of {len} bytes, at most {MAX_TERM_LEN}")]
+    TermTooLong {
+        /// The field.
+        field: FieldId,
+        /// The token's length in bytes.
+        len: usize,
+    },
     /// An internal count or offset would overflow: the builder holds more than a segment can address.
     #[error("too many {what} for one segment")]
     TooLarge {

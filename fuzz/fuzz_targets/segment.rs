@@ -13,8 +13,8 @@
 //!   with its CRC and length recomputed: the footer rules of SPEC §5.1 alone stand between them and the reader.
 //!
 //! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
-//! `advance` and `shallow_advance` to a few targets, norms, columns, every document, id and blob reference, then
-//! `Segment::verify`; half the inputs are read through a 4 KiB block cache, and positions are also read for every
+//! `advance` and `shallow_advance` to a few targets, norms, columns (directly and through cursors), every document,
+//! id and blob reference, then `Segment::verify`; half the inputs are read through a 4 KiB block cache, and positions are also read for every
 //! 7th document only. Errors are ignored; the only failure is a panic (or a hang).
 #![no_main]
 
@@ -487,14 +487,17 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
         if let Ok(mut terms) = seg.terms(fid) {
             let _ = read_terms(&mut terms, n);
         }
+        // Each reader also through a cursor, in reverse so it moves back across blocks.
         if let Ok(norms) = seg.norms(fid) {
+            let mut cursor = norms.cursor();
             for d in 0..=n {
-                let _ = (norms.get(d), norms.length(d));
+                let _ = (norms.get(d), norms.length(d), cursor.length(n - d));
             }
         }
         if let Ok(col) = seg.numeric_column(fid) {
+            let mut cursor = col.cursor();
             for d in 0..=n {
-                let _ = (col.has_value(d), col.key(d), col.get(d));
+                let _ = (col.has_value(d), col.key(d), col.get(d), cursor.get(n - d));
             }
         }
         if let Ok(col) = seg.bool_column(fid) {
@@ -509,8 +512,10 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
                     let _ = col.ord(v);
                 }
             }
+            let mut cursor = col.cursor();
             for d in 0..=n {
                 let _ = col.ords(d).map(|o| o.len());
+                let _ = cursor.ords(n - d).map(<[u64]>::len);
                 let _ = col.values(d).map(|v| v.len());
             }
         }

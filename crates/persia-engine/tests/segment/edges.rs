@@ -879,3 +879,54 @@ fn zstd_level_changes_only_compressed_sections() {
         }
     }
 }
+
+/// The streamed writer (ROADMAP 5.1.6) at the list and column edges: lists of 127, 128 and 129 postings (one tail
+/// block; one full block with a Skip entry; a full block and a one-posting tail) and document counts at the FOR
+/// block edges (a keyword `starts` column of 1025 values holds a one-value second block). Each segment decodes to
+/// its model, opens and verifies; with a 1-byte block size every framed section is cut into many blocks.
+#[test]
+fn writer_edges_of_lists_and_columns_round_trip() {
+    let schema = schema();
+    let s = &schema;
+    for n in [1_u32, 127, 128, 129, 1023, 1024, 1025] {
+        let docs: Vec<Document> = (0..n)
+            .map(|i| {
+                let mut d = Document::new(format!("d{i:05}"))
+                    .with(
+                        id(s, "title"),
+                        Value::String(format!("all w{} w{}", i % 7, i % 129)),
+                    )
+                    .with(id(s, "qty"), Value::I64(i64::from(i) - 500));
+                if i % 3 != 1 {
+                    let tags = vec!["every".to_owned(), format!("k{}", i % 5), format!("z{i}")];
+                    d = d.with(id(s, "tag"), Value::Strings(tags));
+                }
+                if i % 2 == 0 {
+                    d = d.with(id(s, "flag"), Value::Bool(i % 4 == 0));
+                }
+                d
+            })
+            .collect();
+        for block_size in [1_u32, 509, 64 << 10] {
+            let options = WriteOptions {
+                block_size,
+                ..WriteOptions::default()
+            };
+            let bytes = build(&schema, &docs, options);
+            check(&schema, &docs, &bytes);
+            let seg = persia_engine::segment::Segment::open(
+                persia_format::ByteSource::new(bytes.into()),
+                &schema,
+            )
+            .unwrap();
+            seg.verify().unwrap();
+            let all = seg
+                .terms(id(s, "title"))
+                .unwrap()
+                .get(b"all")
+                .unwrap()
+                .unwrap();
+            assert_eq!(all.df(), n, "n {n} block_size {block_size}");
+        }
+    }
+}

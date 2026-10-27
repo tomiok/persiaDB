@@ -56,14 +56,23 @@ fn postings(c: &mut Criterion) {
 fn for_blocks(c: &mut Criterion) {
     let mut group = c.benchmark_group("for_block");
     group.throughput(Throughput::Elements(for_codec::VALUES_PER_BLOCK as u64));
-    for width in [7_u32, 20, 64] {
+    for width in [7_u32, 20, 63, 64] {
         let mut next = lcg(u64::from(width));
         let mask = u64::MAX >> (64 - width);
-        let keys: Vec<u64> = (0..for_codec::VALUES_PER_BLOCK)
-            .map(|_| 1_000 + (next() & mask))
+        // `lcg` yields 48 bits: two draws fill 64. The first two keys span the whole mask, so the block encodes at
+        // exactly `width` bits (checked below).
+        let base = if width == 64 { 0 } else { 1_000 };
+        let mut keys: Vec<u64> = (0..for_codec::VALUES_PER_BLOCK)
+            .map(|_| base + (((next() << 32) ^ next()) & mask))
             .collect();
+        (keys[0], keys[1]) = (base, base + mask);
         let mut w = Writer::new();
         w.write_for_block(&keys).unwrap();
+        assert_eq!(
+            u32::from(w.as_slice()[12]),
+            width,
+            "the block's encoded width"
+        );
         let bytes = w.into_inner();
         let mut pick = lcg(99);
         let indices: Vec<usize> = (0..for_codec::VALUES_PER_BLOCK)
@@ -76,6 +85,21 @@ fn for_blocks(c: &mut Criterion) {
                 black_box(block.iter().fold(0_u64, u64::wrapping_add))
             });
         });
+        group.bench_with_input(
+            BenchmarkId::new("decode_into", width),
+            &bytes,
+            |b, bytes| {
+                let mut out = Vec::with_capacity(for_codec::VALUES_PER_BLOCK);
+                b.iter(|| {
+                    out.clear();
+                    Reader::new(black_box(bytes))
+                        .read_for_block()
+                        .unwrap()
+                        .decode_into(&mut out);
+                    black_box(out.last().copied())
+                });
+            },
+        );
         group.bench_with_input(BenchmarkId::new("get_random", width), &bytes, |b, bytes| {
             let block = Reader::new(bytes).read_for_block().unwrap();
             b.iter(|| {

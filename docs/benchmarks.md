@@ -18,6 +18,10 @@ Throughput is in values per second (G = 10^9, M = 10^6).
 | `postings_block/decode` (unpack + delta + checks) | mean docid step 2 / 64 / 4096 | 778 / 693 / 680 M |
 | `for_block/iter` (1024 values, includes block validation) | width 7 / 20 / 64 | 341 / 343 / 352 M |
 | `for_block/get_random` (1024 random lookups) | width 7 / 20 / 64 | 242 / 262 / 262 M |
+| `for_block/decode_into` (1024 values, includes block validation; 2026-10-27, ROADMAP 5.3.16) | width 7 / 20 / 63 / 64 | 755 / 739 / 722 M / 3.49 G |
+
+The `iter` and `get_random` rows were recorded when the keys held only 48 random bits, so their width-64 case
+encoded at width 48. Since 2026-10-27 every case encodes at its labelled width, as the `decode_into` row was measured.
 
 ## `persia-analysis` analyzers
 
@@ -70,6 +74,7 @@ Documents per second:
 | Recorded | `segment/add` | `segment/finish` |
 |---|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; sections streamed into the segment, lists encoded twice (ROADMAP 5.1.6; the parent commit measured 100.5 K) | | 82.7 K |
 
 ## `persia-engine` segment reading
 
@@ -91,6 +96,14 @@ ROADMAP 5.3.11 (2.03 K and 2.02 K in the same session); the 2.38 K of 2026-10-26
 regression. The segment in these benchmarks is small, so after the first pass almost every block is cached: the
 gains are those of re-reading, and a first read of a block costs what it did before.
 
+`segment_read/norms_get` reads every document's `body` norm with `Norms::get`, `norms_cursor` through `Norms::cursor`
+(ROADMAP 5.3.14, 5.3.16), in norms per second. Since 5.3.14 norms are read through the block cache: `get` costs one
+cache lookup, the cursor one per framed block.
+
+| Recorded | `norms_get` | `norms_cursor` |
+|---|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 9.84 M | 1.20 G |
+
 ## `persia-engine` segment opening and record lookups
 
 `cargo bench -p persia-engine --bench segment -- "segment_open|segment_records"`. `segment_open/large_dict` is
@@ -110,10 +123,14 @@ gains are those of re-reading, and a first read of a block costs what it did bef
 `cargo bench -p persia-engine --bench segment -- segment_columns`: a 50 000-document segment (default `WriteOptions`)
 whose `f64` keys span the key range (64-bit FOR blocks, many crossing a framed block). `numeric_key_scan` reads every
 document's key with `NumericColumn::key`; `keyword_ords_scan` every document's ords with `KeywordColumn::ords`.
+`numeric_key_cursor` and `keyword_ords_cursor` read the same through `NumericColumn::cursor` and
+`KeywordColumn::cursor` (ROADMAP 5.3.16), which keep their decoded FOR blocks to themselves and unpack a block with
+`ForBlock::decode_into`.
 Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: before them a column was a decoded
 `Vec` of 8 bytes per document (first row, measured on the parent commit); now one block per FOR stream (one for a numeric column, two for a keyword column) stays decoded.
 
-| Recorded | `numeric_key_scan` | `keyword_ords_scan` |
-|---|--:|--:|
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M |
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M |
+| Recorded | `numeric_key_scan` | `keyword_ords_scan` | `numeric_key_cursor` | `keyword_ords_cursor` |
+|---|--:|--:|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M | | |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M | | |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; cursors (ROADMAP 5.3.16) | 31.9 M | 10.8 M | 214 M | 59.5 M |

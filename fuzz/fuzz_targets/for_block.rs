@@ -1,5 +1,5 @@
 //! Fuzz FOR block decoding (ROADMAP 1.2.4): arbitrary bytes never panic, a failed read moves nothing, accepted
-//! blocks give the same values by `get` and `iter`, and re-encoding them decodes to the same values (and to
+//! blocks give the same values by `get`, `iter` and `decode_into`, and re-encoding them decodes to the same values (and to
 //! the same bytes when the block was canonical: true minimum, minimal width).
 #![no_main]
 
@@ -25,6 +25,13 @@ fuzz_target!(|data: &[u8]| {
             assert!(v >= block.min());
         }
         assert_eq!(block.get(values.len()), None);
+        let mut decoded = vec![1];
+        block.decode_into(&mut decoded);
+        assert_eq!(
+            decoded.get(1..),
+            Some(values.as_slice()),
+            "decode_into disagrees with iter"
+        );
 
         let mut w = Writer::new();
         w.write_for_block(&values)

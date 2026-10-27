@@ -107,7 +107,8 @@ fn reference_for(bytes: &[u8], start: u64) -> Result<Decoded, Error> {
     })
 }
 
-/// Reads with the crate at absolute offset `base + skip`, checking atomicity and that `get`/`iter` agree.
+/// Reads with the crate at absolute offset `base + skip`, checking atomicity and that `get`, `iter` and `decode_into`
+/// agree.
 fn library_for(bytes: &[u8], base: u64, skip: usize) -> Result<Decoded, Error> {
     let mut r = Reader::with_base_offset(bytes, base);
     r.skip(skip).unwrap();
@@ -119,6 +120,9 @@ fn library_for(bytes: &[u8], base: u64, skip: usize) -> Result<Decoded, Error> {
             assert_eq!(block.get(usize::MAX), None);
             let values: Vec<u64> = block.iter().collect();
             assert_eq!(values.len(), len);
+            let mut decoded = Vec::new();
+            block.decode_into(&mut decoded);
+            assert_eq!(decoded, values, "decode_into disagrees with iter");
             for (i, &v) in values.iter().enumerate() {
                 assert_eq!(block.get(i), Some(v), "get({i}) disagrees with iter");
                 assert!(v >= block.min());
@@ -475,4 +479,128 @@ fn golden_width_64_is_plain_little_endian() {
         expected.extend(k.to_le_bytes());
     }
     assert_eq!(bytes, expected);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// ROADMAP 5.3.16: `decode_into` unpacks whole 64-bit words, and the overflow check uses the largest raw value
+// (`max_raw`) instead of checking every value. Both must agree with the SPEC reference wherever the largest raw
+// sits and however full the last word is.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// A block of `raws` from `min` at `width`, packed by hand (`raw_at` is the inverse).
+fn pack_raws(min: u64, width: u8, raws: &[u64]) -> Vec<u8> {
+    let w = usize::from(width);
+    let mut bytes = Vec::new();
+    bytes.extend(min.to_le_bytes());
+    bytes.extend((raws.len() as u32).to_le_bytes());
+    bytes.push(width);
+    let mut packed = vec![0_u8; (raws.len() * w).div_ceil(8)];
+    for (i, &raw) in raws.iter().enumerate() {
+        for b in 0..w {
+            if raw >> b & 1 == 1 {
+                let bit = i * w + b;
+                packed[bit / 8] |= 1 << (bit % 8);
+            }
+        }
+    }
+    bytes.extend(packed);
+    bytes
+}
+
+/// Counts whose `count·width` bits end inside, or exactly at the end of, a 64-bit word, and any other.
+fn word_edge_counts() -> impl Strategy<Value = usize> {
+    prop_oneof![
+        3 => proptest::sample::select(vec![1_usize, 7, 8, 9, 63, 64, 65, 127, 128, 129, 1023, 1024]),
+        1 => 1_usize..=VALUES_PER_BLOCK,
+    ]
+}
+
+/// `(width, raws, min)` with `min` within a few of `u64::MAX - max(raws)`: both sides of the overflow edge, with
+/// the largest raw anywhere (not only at the end) and often below the width's mask.
+fn near_overflow() -> impl Strategy<Value = (u8, Vec<u64>, u64)> {
+    (1..=MAX_WIDTH, word_edge_counts())
+        .prop_flat_map(|(w, n)| {
+            let mask = u64::MAX >> (64 - u32::from(w));
+            let raw = prop_oneof![
+                0..=mask,
+                Just(mask),
+                Just(0),
+                (0..=mask).prop_map(|x| x >> 1)
+            ];
+            (Just(w), proptest::collection::vec(raw, n), -3_i64..=3)
+        })
+        .prop_map(|(w, raws, delta)| {
+            let top = raws.iter().copied().max().unwrap();
+            let min = (u64::MAX - top).saturating_add_signed(delta);
+            (w, raws, min)
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(feature = "slow") { 4096 } else { 256 },
+        ..ProptestConfig::default()
+    })]
+
+    /// Accepted and rejected exactly as the SPEC reference says (it checks every value for overflow); on accept,
+    /// `decode_into` appends `iter`'s values after what the output held (`library_for` checks `decode_into == iter`
+    /// and `get`).
+    #[test]
+    fn overflow_edge_matches_the_spec_reference((w, raws, min) in near_overflow()) {
+        let bytes = pack_raws(min, w, &raws);
+        let expected = reference_for(&bytes, 1 << 50);
+        let overflows = raws.iter().any(|&r| min.checked_add(r).is_none());
+        prop_assert_eq!(
+            expected.is_err(),
+            overflows,
+            "the reference disagrees with a per-value check"
+        );
+        prop_assert_eq!(library_for(&bytes, 1 << 50, 0), expected);
+        if !overflows {
+            let block = Reader::new(&bytes).read_for_block().unwrap();
+            let mut out = vec![3, 1, 4];
+            block.decode_into(&mut out);
+            prop_assert_eq!(&out[..3], &[3, 1, 4]);
+            let keys: Vec<u64> = raws.iter().map(|&r| min + r).collect();
+            prop_assert_eq!(&out[3..], keys.as_slice());
+        }
+    }
+}
+
+/// Every width and every count 1..=1024: `decode_into` equals `iter` and `get` (which read bit windows, not
+/// words) with random raws and the widest value last. Nightly only: 66 560 blocks.
+#[cfg(feature = "slow")]
+#[test]
+fn decode_into_equals_iter_for_every_width_and_count() {
+    let mut state = 0x0bad_5eed_u64;
+    let mut next = || {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        state ^ (state >> 31)
+    };
+    for w in 0..=MAX_WIDTH {
+        let mask = if w == 0 {
+            0
+        } else {
+            u64::MAX >> (64 - u32::from(w))
+        };
+        for count in 1..=VALUES_PER_BLOCK {
+            let mut raws: Vec<u64> = (0..count).map(|_| next() & mask).collect();
+            raws[count - 1] = mask;
+            let min = u64::MAX - mask;
+            let bytes = pack_raws(min, w, &raws);
+            let block = Reader::new(&bytes).read_for_block().unwrap();
+            let mut out = vec![9];
+            block.decode_into(&mut out);
+            let keys: Vec<u64> = raws.iter().map(|&r| min + r).collect();
+            assert_eq!(&out[1..], keys.as_slice(), "width {w} count {count}");
+            assert_eq!(
+                block.iter().collect::<Vec<_>>(),
+                keys,
+                "width {w} count {count}"
+            );
+            assert_eq!(block.get(count - 1), Some(u64::MAX));
+        }
+    }
 }

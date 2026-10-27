@@ -16,7 +16,7 @@ use persia_format::for_codec::{f64_to_key, i64_to_key};
 use super::SegmentError;
 use super::arena::Arena;
 use crate::document::{Document, FieldSet, Value};
-use crate::schema::{CollectionSchema, FieldKind};
+use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use inverted::Inverted;
 
 /// Most documents in one segment (SPEC §5.4): docids are `0..2^31`.
@@ -25,6 +25,10 @@ pub const MAX_DOCS: u32 = 1 << 31;
 /// Positions between two values of a multi-valued `text` field, so a phrase never matches across values
 /// (SPEC §5.3.3).
 pub const POSITION_GAP: u32 = 100;
+
+/// Longest term of a `TermDict`, in bytes (SPEC §5.3.1): a `keyword` value's limit, and the most a `text` field's
+/// token may hold, whatever its analyzer (one without a length guard, §6.3.1, may emit longer ones).
+pub const MAX_TERM_LEN: usize = crate::document::MAX_KEYWORD_LEN;
 
 /// What a builder accumulates for one field.
 #[derive(Debug)]
@@ -173,9 +177,10 @@ impl SegmentBuilder {
     ///
     /// # Errors
     /// [`SegmentError::Document`] for a document `schema` rejects, [`SegmentError::DuplicateId`] for an id already
-    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents, [`SegmentError::TooLarge`] when the document would
-    /// overflow an internal index (a position past `u32::MAX`, more than `u32::MAX` terms). The builder is then as it
-    /// was (only spare capacity may have grown, so [`Self::size_in_bytes`] can too).
+    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents, [`SegmentError::TermTooLong`] when a `text` field's
+    /// analyzer yields a token longer than [`MAX_TERM_LEN`] bytes (SPEC §5.3.1), [`SegmentError::TooLarge`] when the
+    /// document would overflow an internal index (a position past `u32::MAX`, more than `u32::MAX` terms). The
+    /// builder is then as it was (only spare capacity may have grown, so [`Self::size_in_bytes`] can too).
     pub fn add(&mut self, doc: &Document) -> Result<u32, SegmentError> {
         let docid = self.doc_count();
         if docid >= self.max_docs {
@@ -222,7 +227,7 @@ impl SegmentBuilder {
                 (FieldBuilder::Text { analyzer, inverted }, Value::String(s)) => {
                     index_text(
                         analyzer,
-                        inverted,
+                        (field, inverted),
                         docid,
                         [s.as_str()],
                         self.max_position,
@@ -234,7 +239,7 @@ impl SegmentBuilder {
                     let values = list.iter().map(String::as_str);
                     index_text(
                         analyzer,
-                        inverted,
+                        (field, inverted),
                         docid,
                         values,
                         self.max_position,
@@ -370,10 +375,11 @@ enum FieldMark {
 }
 
 /// Indexes the values of one `text` field of document `docid` (SPEC §5.3.3: value `i + 1` starts
-/// [`POSITION_GAP`] positions after the end of value `i`).
+/// [`POSITION_GAP`] positions after the end of value `i`); a token longer than [`MAX_TERM_LEN`] rejects
+/// the document (SPEC §5.3.1).
 fn index_text<'a>(
     analyzer: &Analyzer,
-    inverted: &mut Inverted,
+    (field, inverted): (FieldId, &mut Inverted),
     docid: u32,
     values: impl IntoIterator<Item = &'a str>,
     max_position: u32,
@@ -393,6 +399,12 @@ fn index_text<'a>(
                 .ok()
                 .filter(|&p| p <= max_position)
                 .ok_or_else(overflow)?;
+            if token.text.len() > MAX_TERM_LEN {
+                return Err(SegmentError::TermTooLong {
+                    field,
+                    len: token.text.len(),
+                });
+            }
             let (term, _) = inverted.intern(token.text.as_bytes())?;
             occurrences.push((term, position));
             end = end.max(u64::from(token.position).saturating_add(1));
@@ -430,11 +442,7 @@ mod tests {
     use super::*;
     use crate::schema::{KeywordOptions, SchemaBuilder, TextOptions};
 
-    fn builder() -> (
-        SegmentBuilder,
-        crate::schema::FieldId,
-        crate::schema::FieldId,
-    ) {
+    fn builder() -> (SegmentBuilder, FieldId, FieldId) {
         let schema = SchemaBuilder::new("c")
             .field(
                 "t",
@@ -512,6 +520,155 @@ mod tests {
         }
     }
 
+    /// An analyzer without a length guard may yield any token: one longer than [`MAX_TERM_LEN`] rejects its
+    /// document and leaves the builder as it was; one of exactly that length is indexed (SPEC §5.3.1, ROADMAP 5.4.5).
+    #[test]
+    fn tokens_longer_than_max_term_len_reject_the_document() {
+        use crate::segment::{Segment, SegmentMeta, SegmentWriter};
+        use persia_analysis::WhitespaceTokenizer;
+        let (mut b, t, _) = builder();
+        match &mut b.fields[t.get() as usize] {
+            FieldBuilder::Text { analyzer, .. } => {
+                *analyzer = Arc::new(Analyzer::builder(WhitespaceTokenizer).build());
+            }
+            _ => panic!("t is a text field"),
+        }
+        b.add(&Document::new("a").with(t, Value::String("short".into())))
+            .unwrap();
+        let long = format!("x {}", "y".repeat(MAX_TERM_LEN + 1));
+        assert_eq!(
+            b.add(&Document::new("b").with(t, Value::Strings(vec!["ok".into(), long]))),
+            Err(SegmentError::TermTooLong {
+                field: t,
+                len: MAX_TERM_LEN + 1
+            })
+        );
+        assert_eq!(b.doc_count(), 1);
+        let longest = "y".repeat(MAX_TERM_LEN);
+        b.add(&Document::new("c").with(t, Value::String(longest.clone())))
+            .unwrap();
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&b, meta).finish().unwrap();
+        let seg = Segment::open(persia_format::ByteSource::new(bytes.into()), &b.schema).unwrap();
+        let info = seg.terms(t).unwrap().get(longest.as_bytes()).unwrap();
+        assert_eq!(info.map(|i| i.df()), Some(1));
+        // The rejected document left nothing behind.
+        assert_eq!(seg.doc_count(), 2);
+        assert!(seg.terms(t).unwrap().get(b"ok").unwrap().is_none());
+    }
+
+    /// A document whose too-long token is in the second value of its last `text` field, after another text field,
+    /// a keyword, a numeric column, a stored row and a blob reference were indexed, is rolled back completely: the
+    /// segment is byte-identical to one built without it, and its id can be added again (SPEC §5.3.1, ROADMAP
+    /// 5.4.5).
+    #[test]
+    fn a_too_long_token_in_a_later_value_rolls_the_whole_document_back() {
+        use crate::segment::{SegmentMeta, SegmentWriter};
+        use persia_analysis::WhitespaceTokenizer;
+        use persia_format::{BlobId, BlobRef};
+        let schema = SchemaBuilder::new("c")
+            .field(
+                "t",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .field("k", FieldKind::Keyword(KeywordOptions::default()))
+            .field("n", FieldKind::I64 { stored: true })
+            .field(
+                "u",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .build()
+            .unwrap();
+        let field_id = |name: &str| schema.field(name).unwrap().id();
+        let (first, kw, num, last) = (field_id("t"), field_id("k"), field_id("n"), field_id("u"));
+        let unguarded = || {
+            let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+            for field in [first, last] {
+                match &mut builder.fields[field.get() as usize] {
+                    FieldBuilder::Text { analyzer, .. } => {
+                        *analyzer = Arc::new(Analyzer::builder(WhitespaceTokenizer).build());
+                    }
+                    _ => panic!("a text field"),
+                }
+            }
+            builder
+        };
+        let doc = |id: &str, i: i64| {
+            Document::new(id)
+                .with(first, Value::String(format!("common {id}")))
+                .with(kw, Value::String(format!("k-{id}")))
+                .with(num, Value::I64(i))
+                .with(
+                    last,
+                    Value::Strings(vec![format!("first {id}"), "second".into()]),
+                )
+        };
+        let long = "q".repeat(MAX_TERM_LEN + 1);
+        let mut bad = doc("bad", 99).with(
+            last,
+            Value::Strings(vec![
+                "fresh words".into(),
+                format!("more fresh {long} after"),
+            ]),
+        );
+        let blob = BlobRef::new(
+            BlobId::from_bytes([7; 32]),
+            10,
+            "text/plain",
+            1 << 20,
+            std::collections::BTreeMap::default(),
+        );
+        bad.set_blob_ref(Some(blob.unwrap()));
+        assert_eq!(
+            bad.fields().last().map(|(id, _)| id),
+            Some(last),
+            "field u is indexed last"
+        );
+
+        let mut rejected = unguarded();
+        let mut clean = unguarded();
+        rejected.add(&doc("a", 1)).unwrap();
+        clean.add(&doc("a", 1)).unwrap();
+        let size = rejected.size_in_bytes();
+        assert_eq!(
+            rejected.add(&bad),
+            Err(SegmentError::TermTooLong {
+                field: last,
+                len: MAX_TERM_LEN + 1
+            })
+        );
+        assert_eq!(rejected.doc_count(), 1);
+        assert!(
+            rejected.size_in_bytes() >= size,
+            "only spare capacity may grow"
+        );
+        // The id is free again, and the next document gets docid 1.
+        for builder in [&mut rejected, &mut clean] {
+            assert_eq!(builder.add(&doc("bad", 2)).unwrap(), 1);
+            assert_eq!(builder.add(&doc("c", 3)).unwrap(), 2);
+        }
+        let meta = SegmentMeta {
+            segment_id: 9,
+            created_at: 1,
+            merge_generation: 0,
+        };
+        assert_eq!(
+            SegmentWriter::new(&rejected, meta).finish().unwrap(),
+            SegmentWriter::new(&clean, meta).finish().unwrap(),
+            "the rejected document left something behind"
+        );
+    }
+
     /// No built-in analyzer stacks tokens and a schema can only name built-ins, so this swaps the analyzer in:
     /// stacked tokens (edge n-grams, and equal tokens at one position) count in `tf` and the field length, their
     /// positions repeat (delta 0, SPEC §5.3.3), and the writer accepts them.
@@ -540,12 +697,13 @@ mod tests {
         let FieldBuilder::Text { inverted, .. } = &b.fields[t.get() as usize] else {
             panic!("t is a text field")
         };
-        let g = inverted.by_term();
+        let g = inverted.by_term().unwrap();
         let got: Vec<(&[u8], u32, &[u32])> = g
             .order
             .iter()
-            .zip(&g.postings)
-            .map(|(&id, p)| (inverted.terms.key(id), p.tf, inverted.positions_of(p)))
+            .enumerate()
+            .flat_map(|(r, &id)| g.postings_of(r).map(move |p| (id, p)))
+            .map(|(id, p)| (inverted.terms.key(id), p.tf, inverted.positions_of(p)))
             .collect();
         // Value 0: a ab abc abcd @0, a ab @1 (each twice); end 2. Value 1 starts at 102: a @102 (twice).
         assert_eq!(
@@ -579,7 +737,7 @@ mod tests {
         let many = vec!["x"; 3];
         index_text(
             &analyzer,
-            &mut inverted,
+            (t, &mut inverted),
             0,
             many,
             u32::MAX,
@@ -668,12 +826,13 @@ mod tests {
         let FieldBuilder::Keyword { inverted } = &b.fields[k.get() as usize] else {
             panic!("k is a keyword field")
         };
-        let g = inverted.by_term();
+        let g = inverted.by_term().unwrap();
         let terms: Vec<(&[u8], u32)> = g
             .order
             .iter()
-            .zip(&g.postings)
-            .map(|(&id, p)| (inverted.terms.key(id), p.tf))
+            .enumerate()
+            .flat_map(|(r, &id)| g.postings_of(r).map(move |p| (id, p)))
+            .map(|(id, p)| (inverted.terms.key(id), p.tf))
             .collect();
         assert_eq!(terms, [(&b""[..], 1), (b"B", 2), (b"a", 1)]);
         assert_eq!((inverted.sum_len, inverted.docs_with_field()), (4, 1));

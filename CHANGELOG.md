@@ -10,14 +10,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
-  block-framed section through an LRU cache of decoded blocks, bounded in bytes (`BlockCache::DEFAULT_CAPACITY`, 8 MiB,
-  per segment opened with `Segment::open`), which several segments may share. Term lookups, posting lists and document
-  fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
-  misses. A dropped segment's blocks leave the cache. When blocks are re-read (docs/benchmarks.md, rows measured
-  together), `segment_read` runs postings with frequencies 6.4x, `advance` 4.4x, document fetches 2.6x and term lookups
+  block-framed section through an LRU cache of decoded blocks, bounded in bytes, which several segments may share
+  (`BlockCache::DEFAULT_CAPACITY`, 8 MiB, for all the segments opened with `Segment::open`, ROADMAP 5.3.15). Term
+  lookups, posting lists and document fetches no longer decode and re-check the CRC of a block another reader
+  decoded; `BlockCache::stats` reports hits and misses. A dropped segment's blocks leave the cache. When blocks are
+  re-read (docs/benchmarks.md, rows measured together), `segment_read` runs postings with frequencies 6.4x, `advance` 4.4x, document fetches 2.6x and term lookups
   1.3x faster, and `segment_records/id_of_1000` 5.8x; positions 13.5x, together with the per-document decoding of
-  ROADMAP 5.3.13 (the benchmark does not separate the two). The default budget is per segment (the record cache it
-  replaces kept 8 blocks), so a process that opens many segments should share one cache.
+  ROADMAP 5.3.13 (the benchmark does not separate the two). The record cache it replaces kept 8 blocks per segment.
 - `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
   validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
   checking the table CRC and block ends again (blocks are still checked when decoded, so other bytes cannot cause a
@@ -177,6 +176,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine`: `SegmentWriter::finish` writes every section straight into the segment buffer as it encodes it,
+  instead of holding each section and copying it in (ROADMAP 5.1.6): postings are grouped by term as 4-byte indices,
+  term lists are encoded in one pass that measures them (writing the `TermInfo` records) and one per stream that writes
+  them, FOR columns and FSTs are generated into the output. Its documentation states the memory a flush needs beyond
+  the builder, for the flush threshold of M6; on a 20 000-document segment of 9.6 MB the heap peak above the builder
+  (counting both buffers of each reallocation) drops from 43.0 MB to 21.0 MB (`tests/flush_memory.rs`, a counting
+  allocator, ADR-0026). Encoding the lists twice makes `finish` about 18 % slower
+  (`segment/finish`: 82.7 K documents/s, from 100.5 K). Output is byte for byte the same.
+- `persia-format`: `Writer::clear` empties a writer and keeps its buffer.
+- `persia-engine` (breaking: new `SegmentError::TermTooLong` variant): a `text` field's tokens are limited to
+  `MAX_TERM_LEN` (32 KiB, the `keyword` value limit) whatever the analyzer (ROADMAP 5.4.5, SPEC §5.3.1):
+  `SegmentBuilder::add` rejects a document whose analyzer yields a longer token with `SegmentError::TermTooLong`, and
+  `Segment::open` treats a `TermDict` path longer than that as corruption in a `text` field as in a `keyword` one, so
+  the cost of walking any term dictionary at open is bounded. The built-in analyzers cut tokens at 255 bytes, so no
+  segment they wrote changes. ADR-0027 records the rule (decision 12).
+- `persia-engine`: `Segment::open` reads through one process-wide cache, `BlockCache::shared` (8 MiB), instead of an
+  8 MiB cache per segment, so however many segments a process opens, the cache keeps at most 8 MiB of decoded blocks
+  for all of them (ROADMAP 5.3.15; a block a reader is reading outlives its eviction: up to four per posting list,
+  one per norms cursor); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
+- `persia-engine` (breaking): `Segment::norms` returns `Norms<'_>`, which reads the `Norms` section a framed block at a
+  time through the segment's block cache (ROADMAP 5.3.14) instead of copying and re-checking all `doc_count` bytes on
+  each call. `Norms::get` and `Norms::length` return a `Result`: a corrupt block is reported when a norm in it is read.
+- `persia-engine`: `NumericColumn::cursor`, `KeywordColumn::cursor` and `Norms::cursor` (ROADMAP 5.3.16) return
+  readers for scans (`NumericCursor`, `KeywordCursor`, `NormsCursor`) that keep the block they last decoded to
+  themselves: no lock and no allocation per value, and `KeywordCursor::ords` returns a slice of a buffer it reuses.
+  Scanning every document of `segment_columns` (docs/benchmarks.md): 214 M numeric keys/s (`NumericColumn::key`: 32 M)
+  and 59.5 M keyword ord lists/s (`KeywordColumn::ords`: 10.8 M); `NormsCursor` 1.2 G norms/s, where `Norms::get`, one
+  cache lookup per call, reads 9.8 M/s (`segment_read/norms_*`): scoring should read norms through a cursor.
+- `persia-format`: `ForBlock::decode_into` unpacks a whole FOR block into a `Vec`, about twice as fast as `iter`
+  (`for_block/decode_into`), and `read_for_block` checks a block whose values may overflow with the same unpacker.
 - `persia-engine`: `Postings::positions` decodes only the current document's positions (ROADMAP 5.3.13), reading its
   block's positions run forward and skipping the packed groups of documents passed over by their width byte, instead
   of decoding the whole run. Memory now follows one document's term frequency, and the 2^26-positions-per-block limit
@@ -211,8 +240,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `Segment::open` checks the structure of each `TermDict` and `IdMap` FST before the `fst` crate reads
   it, so a crafted FST behind a valid CRC is a corruption error instead of a panic or an endless stream (SPEC §5.3).
   An `IdMap` or `keyword` `TermDict` with a path longer than the longest id or keyword value is corruption too, so a
-  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6). Not yet for a `text` field's `TermDict`, whose
-  terms have no length bound (ROADMAP 5.4.5): a crafted one cannot make open panic, but it can still make it slow.
+  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6); a `text` field's `TermDict` too since its terms
+  have a length bound (ROADMAP 5.4.5, see Changed).
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 

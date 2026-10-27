@@ -624,9 +624,10 @@ field of the wrong type, two sections with the same `(section_kind, field_id)`, 
 #### 5.3.1 Term dictionary
 `TermDict` is an FST (the `fst` crate's map format, version 3) whose keys are the field's terms (UTF-8 bytes, in byte
 order) and whose value is the term's ordinal: its rank in that order. A `keyword` field's terms are its values, so no
-path of its FST is longer than the longest keyword value (32 KiB, §6.4.1); a longer one is corruption. A `text` field's
-terms are analyzer tokens, which no rule bounds yet (a registered analyzer need not apply the length guard of §6.3.1). `TermInfo` is the stream of one 56-byte record
-per term, record `i` at position `56·i`:
+path of its FST is longer than the longest keyword value (32 KiB, §6.4.1). A `text` field's terms are analyzer tokens,
+bounded by the same 32 KiB: a builder rejects a document whose analyzer yields a longer token (an analyzer need not
+apply the length guard of §6.3.1, and the guard's limit is the analyzer's). In any `TermDict`, a path longer than
+32 KiB is corruption. `TermInfo` is the stream of one 56-byte record per term, record `i` at position `56·i`:
 ```
 0   8  postings_off   u64  start of the term's list in Postings
 8   8  freqs_off      u64  start of its frequencies in Freqs
@@ -915,7 +916,8 @@ deletion). Positions are unaffected.
 **Max token length.** A length guard bounds token texts in bytes of UTF-8 (default 255): `truncate` (default) keeps
 the longest prefix that fits and ends on a character boundary (a token whose first character does not fit is
 dropped); `drop` removes the token. Kept tokens keep their span and position. Which built-in analyzers apply the
-guard, and with which limit, is part of their definition (§6.3.3).
+guard, and with which limit, is part of their definition (§6.3.3). Whatever the guard, a field cannot index a token longer
+than 32 KiB: the document is rejected (§5.3.1).
 
 #### 6.3.2 Token filters
 A token filter rewrites, removes or adds tokens; it never changes a token's span, and never fails or panics. A filter
@@ -1517,9 +1519,12 @@ range-request coalescing, readahead for sequential sections, request hedging (op
 dedup concurrent identical fetches. Segment footers and FSTs are pinned on open.
 Above it, an open segment reads its block-framed sections (SPEC §5.2) through a cache of **decoded** blocks keyed by
 `(open segment, section, block)`, LRU and bounded in bytes, which any number of segments may share (each opening of a
-segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, columns and
+segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, norms, columns and
 document fetches reuse it without decompressing it or checking its CRC again. Readers that miss the same block at the
-same time may each decode it; one copy is kept. `Norms` does not go through it yet (ROADMAP 5.3.14).
+same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
+(8 MiB, `BlockCache::shared`); the embedded API and the server are to open all their segments with one cache sized
+by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
+the block it is reading in each stream it reads, also after the cache evicts it.
 It holds no state of its own on disk.
 
 ---

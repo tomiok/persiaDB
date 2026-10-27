@@ -323,7 +323,8 @@ fn bench_records_over_many_blocks(c: &mut Criterion) {
 /// cross a framed block.
 const COLUMN_DOCS: u32 = 50_000;
 
-/// Every document's numeric key, then its keyword ords, read through the lazy column readers (ROADMAP 5.3.12).
+/// Every document's numeric key, then its keyword ords, read through the lazy column readers (ROADMAP 5.3.12), by
+/// docid and through a cursor (ROADMAP 5.3.16).
 fn bench_columns(c: &mut Criterion) {
     let schema = schema();
     let price = schema.field("price").unwrap().id();
@@ -361,12 +362,62 @@ fn bench_columns(c: &mut Criterion) {
             }
         });
     });
+    group.bench_function("numeric_key_cursor", |b| {
+        let col = seg.numeric_column(price).unwrap();
+        b.iter(|| {
+            let mut cursor = col.cursor();
+            for d in 0..COLUMN_DOCS {
+                black_box(cursor.key(d).unwrap());
+            }
+        });
+    });
+    group.bench_function("keyword_ords_cursor", |b| {
+        let col = seg.keyword_column(brand).unwrap();
+        b.iter(|| {
+            let mut cursor = col.cursor();
+            for d in 0..COLUMN_DOCS {
+                black_box(cursor.ords(d).unwrap());
+            }
+        });
+    });
     group.finish();
 }
+/// Every document's `body` norm, as scoring reads them (ROADMAP 5.3.14, 5.3.16).
+fn bench_norms(c: &mut Criterion) {
+    let schema = schema();
+    let registry = AnalyzerRegistry::builtin();
+    let built = build(&schema, &registry, &documents(&schema));
+    let bytes = SegmentWriter::new(&built, META).finish().unwrap();
+    let seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+    let body = schema.field("body").unwrap().id();
+    let n = seg.doc_count();
+    let mut group = c.benchmark_group("segment_read");
+    group.throughput(Throughput::Elements(u64::from(n)));
+    group.bench_function("norms_get", |b| {
+        let norms = seg.norms(body).unwrap();
+        b.iter(|| {
+            for d in 0..n {
+                black_box(norms.get(d).unwrap());
+            }
+        });
+    });
+    group.bench_function("norms_cursor", |b| {
+        let norms = seg.norms(body).unwrap();
+        b.iter(|| {
+            let mut cursor = norms.cursor();
+            for d in 0..n {
+                black_box(cursor.get(d).unwrap());
+            }
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
     bench_read,
+    bench_norms,
     bench_open_large_dict,
     bench_records_over_many_blocks,
     bench_columns

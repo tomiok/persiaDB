@@ -331,11 +331,11 @@ impl Segment {
             return Err(stats_error());
         }
         if let Some(norms) = &norms {
-            let docids = 0..self.doc_count();
-            if let Some((d, _)) = docids
-                .zip(&lens)
-                .find(|&(d, &len)| norms.get(d) != norms::encode(len))
-            {
+            let mut norms = norms.cursor();
+            for (d, &len) in (0..self.doc_count()).zip(&lens) {
+                if norms.get(d)? == norms::encode(len) {
+                    continue;
+                }
                 return Err(invalid(
                     SectionKind::Norms,
                     fid,
@@ -361,7 +361,7 @@ struct Totals {
 /// Checks every term of `index` against its list and the `skip_off` chain, adding the frequencies to `lens`.
 fn walk_terms(
     index: &TermIndex<'_>,
-    norms: Option<&Norms>,
+    norms: Option<&Norms<'_>>,
     keyword: Option<&KeywordColumn<'_>>,
     lens: &mut [u32],
 ) -> Result<Totals, ReadError> {
@@ -417,12 +417,13 @@ fn walk_terms(
 fn verify_list(
     index: &TermIndex<'_>,
     info: &TermInfo,
-    norms: Option<&Norms>,
+    norms: Option<&Norms<'_>>,
     keyword: Option<&KeywordColumn<'_>>,
     lens: &mut [u32],
 ) -> Result<ListStats, ReadError> {
     let fid = index.field();
     let mut p = index.postings(info)?.strict();
+    let mut norms = norms.map(Norms::cursor);
     let block_len = u32::try_from(BLOCK_LEN).unwrap_or(128);
     let mut list = ListStats {
         df: 0,
@@ -437,7 +438,10 @@ fn verify_list(
         if info.positions.is_some() {
             p.positions()?;
         }
-        let norm = norms.map_or(0, |n| n.get(d));
+        let norm = match &mut norms {
+            Some(n) => n.get(d)?,
+            None => 0,
+        };
         if list.df.is_multiple_of(block_len) {
             bounds = p.block_max();
             (block_max_tf, block_min_norm) = (0, u8::MAX);

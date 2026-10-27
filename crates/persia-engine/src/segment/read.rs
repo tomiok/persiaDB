@@ -24,14 +24,17 @@ use persia_format::{BlobRef, ByteSource, Reader};
 use roaring::RoaringBitmap;
 
 pub use cache::{BlockCache, CacheStats};
-pub use columns::{BoolColumn, KeywordColumn, Norms, NumericColumn};
+pub use columns::{
+    BoolColumn, KeywordColumn, KeywordCursor, Norms, NormsCursor, NumericColumn, NumericCursor,
+};
 pub use error::{ReadError, SegmentCorruption, UnsupportedSegment};
 pub use footer::FieldStats;
 pub use postings::{BlockMax, Postings, Tombstones};
 pub use terms::{TermIndex, TermInfo, TermStream};
 
+use super::MAX_TERM_LEN;
 use super::kind::{SEGMENT_FIELD, SectionKind};
-use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN, MAX_KEYWORD_LEN};
+use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind, FieldType};
 use footer::{Footer, Section};
 use stream::Stream;
@@ -117,20 +120,20 @@ impl Segment {
     /// block table of every block-framed section, the CRC of the raw ones, and the shape of the FSTs and record
     /// arrays. Blocks are checked when they are decoded.
     ///
-    /// The segment gets its own [`BlockCache`] of [`BlockCache::DEFAULT_CAPACITY`] (8 MiB): a process that opens many
-    /// segments should share one through [`Self::open_with_cache`], which bounds them all.
+    /// The segment reads its blocks through the process-wide [`BlockCache::shared`] (8 MiB for all the segments opened
+    /// this way, ROADMAP 5.3.15); [`Self::open_with_cache`] takes a cache of another size.
     ///
     /// # Errors
     /// [`ReadError::Unsupported`] for another format major version, unknown `incompat_flags` or schema encoding
     /// version; a corruption ([`ReadError::is_corruption`]) for anything else that breaks a rule of SPEC §5.1 or
     /// §5.3, including a schema hash other than `schema`'s.
     pub fn open(source: ByteSource, schema: &CollectionSchema) -> Result<Self, ReadError> {
-        Self::open_with_cache(source, schema, Arc::new(BlockCache::default()))
+        Self::open_with_cache(source, schema, BlockCache::shared())
     }
 
     /// As [`Self::open`], reading blocks through `cache` (SPEC §10.6, ROADMAP 5.3.11), which may be shared with other
-    /// segments: it then bounds the decoded bytes all of them keep. The segment's blocks leave it when the segment
-    /// is dropped.
+    /// segments: it then keeps at most its capacity, in decoded bytes, for all of them. The segment's blocks leave it
+    /// when the segment is dropped.
     ///
     /// ```
     /// # use persia_analysis::AnalyzerRegistry;
@@ -177,6 +180,11 @@ impl Segment {
         segment.validate_tables()?;
         segment.check_sections()?;
         Ok(segment)
+    }
+
+    /// The cache the segment reads its blocks through.
+    pub fn cache(&self) -> &Arc<BlockCache> {
+        &self.cache
     }
 
     /// The segment's id (SPEC §5.1).
@@ -339,7 +347,7 @@ impl Segment {
     ///
     /// # Errors
     /// As [`Self::terms`], for a field that is not `text`; a corruption if the section is.
-    pub fn norms(&self, field: FieldId) -> Result<Norms, ReadError> {
+    pub fn norms(&self, field: FieldId) -> Result<Norms<'_>, ReadError> {
         let f = self.field(field)?;
         if f.field_type() != FieldType::Text {
             return Err(type_error(field, f.field_type(), "norms"));
@@ -655,23 +663,13 @@ impl Segment {
     }
 
     /// The longest key the FST of `(kind, field)` can hold, which bounds its longest path (SPEC §5.3.1, §5.3.6):
-    /// an id's length for the `IdMap`, a keyword value's for a `keyword` field's `TermDict` (its terms are its
-    /// values). A `text` field's terms are analyzer tokens, which SPEC does not bound yet (a registered analyzer
-    /// need not apply the length guard of §6.3.1), so its paths are not bounded here.
-    fn max_key_len(&self, kind: SectionKind, field: u32) -> u64 {
-        let keyword = || {
-            self.schema
-                .fields()
-                .iter()
-                .find(|f| f.id().get() == field)
-                .is_some_and(|f| matches!(f.kind(), FieldKind::Keyword(_)))
-        };
+    /// an id's length for the `IdMap`, [`MAX_TERM_LEN`] for a `TermDict`, whether its field is `keyword` (its terms
+    /// are its values) or `text` (the builder rejects longer tokens, ROADMAP 5.4.5).
+    fn max_key_len(kind: SectionKind) -> u64 {
         let len = if kind == SectionKind::IdMap {
             MAX_ID_LEN
-        } else if keyword() {
-            MAX_KEYWORD_LEN
         } else {
-            return u64::MAX;
+            MAX_TERM_LEN
         };
         u64::try_from(len).unwrap_or(u64::MAX)
     }
@@ -712,14 +710,13 @@ impl Segment {
             let raw = raw_payload(self.source.as_slice(), section)?;
             // `fst` does not validate what it reads: check the structure first (SPEC §5.3 "Framing", `fst_check`),
             // and bound the key length, which bounds what a stream over the keys costs (SPEC §5.3.1, §5.3.6).
-            let shape = fst_check::check(raw, self.max_key_len(kind, field)).map_err(|d| {
-                ReadError::Section {
+            let shape =
+                fst_check::check(raw, Self::max_key_len(kind)).map_err(|d| ReadError::Section {
                     kind,
                     field,
                     position: u64::try_from(d.at).unwrap_or(u64::MAX),
                     reason: SegmentCorruption::Fst,
-                }
-            })?;
+                })?;
             // Bound the key count too: a small DAG can hold astronomically many keys. An `IdMap` stream stops by
             // itself after `doc_count + 1` keys (its values are distinct and below `doc_count`); a `TermDict` must
             // have one `TermInfo` record per key, checked now with the error the `TermInfo` check would give.

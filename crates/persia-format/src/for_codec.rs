@@ -162,9 +162,7 @@ impl<'a> Reader<'a> {
             packed,
         };
         // Only a minimum near the top of the range can overflow; then every value must be checked.
-        if min.checked_add(block.mask()).is_none()
-            && block.raws().any(|raw| min.checked_add(raw).is_none())
-        {
+        if min.checked_add(block.mask()).is_none() && min.checked_add(block.max_raw()).is_none() {
             return Err(Error::Corrupt {
                 offset: start,
                 reason: Corruption::ValueOverflow { bits: u64::BITS },
@@ -208,11 +206,69 @@ impl ForBlock<'_> {
     /// All keys, in order.
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         // Validated when the block was read: min + raw does not overflow.
-        self.raws().map(|raw| self.min.wrapping_add(raw))
+        (0..self.len()).map(|i| self.min.wrapping_add(self.raw(i)))
     }
 
-    fn raws(&self) -> impl Iterator<Item = u64> + '_ {
-        (0..self.len()).map(|i| self.raw(i))
+    /// Appends every key to `out`, in order: what [`Self::iter`] yields, unpacked in one pass (for a reader that
+    /// keeps a decoded block, ROADMAP 5.3.16).
+    pub fn decode_into(&self, out: &mut Vec<u64>) {
+        let start = out.len();
+        out.resize(start.saturating_add(self.len()), 0);
+        let keys = out.get_mut(start..).unwrap_or_default();
+        self.unpack(keys);
+        // Validated when the block was read: min + raw does not overflow.
+        let min = self.min;
+        for k in keys {
+            *k = min.wrapping_add(*k);
+        }
+    }
+
+    /// The largest raw value.
+    fn max_raw(&self) -> u64 {
+        let mut raws = [0_u64; VALUES_PER_BLOCK];
+        let raws = raws.get_mut(..self.len()).unwrap_or_default();
+        self.unpack(raws);
+        raws.iter().copied().max().unwrap_or(0)
+    }
+
+    /// Writes the raw values into `out`, which holds `len` of them.
+    fn unpack(&self, out: &mut [u64]) {
+        let width = u64::from(self.width);
+        if width == 0 {
+            out.fill(0);
+            return;
+        }
+        if width == 64 {
+            let (whole, _) = self.packed.as_chunks::<8>();
+            for (o, c) in out.iter_mut().zip(whole) {
+                *o = u64::from_le_bytes(*c);
+            }
+            return;
+        }
+        // The packed bits as little-endian words, zero-padded by one: a value spans at most two of them.
+        let mut words = [0_u64; VALUES_PER_BLOCK + 1];
+        let (whole, rest) = self.packed.as_chunks::<8>();
+        for (w, c) in words.iter_mut().zip(whole) {
+            *w = u64::from_le_bytes(*c);
+        }
+        if let Some(w) = words.get_mut(whole.len()) {
+            let mut last = [0_u8; 8];
+            for (dst, &b) in last.iter_mut().zip(rest) {
+                *dst = b;
+            }
+            *w = u64::from_le_bytes(last);
+        }
+        let mask = self.mask();
+        for (i, o) in out.iter_mut().enumerate() {
+            // i < 1024 and width <= 64: below 2^17, so the word index is at most 1024.
+            let bit = crate::error::to_u64(i).wrapping_mul(width);
+            let at = usize::try_from(bit >> 6).unwrap_or(usize::MAX);
+            let shift = bit & 63;
+            let lo = words.get(at).copied().unwrap_or(0) >> shift;
+            // `<< 1 << (63 - shift)` is `<< (64 - shift)`, and 0 when the value starts on a word boundary.
+            let hi = (words.get(at.wrapping_add(1)).copied().unwrap_or(0) << 1) << (63 ^ shift);
+            *o = (lo | hi) & mask;
+        }
     }
 
     /// The `width` bits of value `index`; `index < len`, so they are inside `packed`.
@@ -441,6 +497,188 @@ mod tests {
         assert_eq!(f64_to_key(-0.0), (1 << 63) - 1);
         for (&v, &k) in values.iter().zip(&keys) {
             assert_eq!(key_to_f64(k).to_bits(), v.to_bits());
+        }
+    }
+
+    // ROADMAP 5.3.16: `decode_into` and the overflow check through `max_raw` unpack whole 64-bit words; the last
+    // word of a block is usually partial. These tests pin both against `get`/`iter` (bit-window reads) and a
+    // per-value overflow check, at every width. Sizes shrink under Miri (`just miri` runs the lib tests).
+
+    /// Widths to sweep: all of them natively, the word-boundary ones under Miri.
+    fn widths() -> Vec<u32> {
+        if cfg!(miri) {
+            vec![0, 1, 7, 13, 33, 63, 64]
+        } else {
+            (0..=64).collect()
+        }
+    }
+
+    /// Counts around the 64-value boundary (where `count·width` fills whole words) and the block size.
+    fn counts() -> &'static [usize] {
+        if cfg!(miri) {
+            &[1, 8, 63, 65]
+        } else {
+            &[1, 2, 7, 8, 9, 63, 64, 65, 127, 128, 129, 1023, 1024]
+        }
+    }
+
+    fn mask_of(width: u32) -> u64 {
+        if width == 0 {
+            0
+        } else {
+            u64::MAX >> (64 - width)
+        }
+    }
+
+    fn lcg(state: &mut u64) -> u64 {
+        *state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        *state ^ (*state >> 29)
+    }
+
+    /// A FOR block packed bit by bit from the SPEC §5.2.1 table, independent of the writer: value `i` at stream
+    /// bits `[i·w, (i+1)·w)`, LSB first.
+    fn pack(min: u64, width: u32, raws: &[u64]) -> Vec<u8> {
+        let w = width as usize;
+        let mut out = Vec::new();
+        out.extend_from_slice(&min.to_le_bytes());
+        out.extend_from_slice(&u32::try_from(raws.len()).unwrap().to_le_bytes());
+        out.push(u8::try_from(width).unwrap());
+        let mut packed = vec![0_u8; (raws.len() * w).div_ceil(8)];
+        for (i, &raw) in raws.iter().enumerate() {
+            for b in 0..w {
+                if raw >> b & 1 == 1 {
+                    let bit = i * w + b;
+                    packed[bit / 8] |= 1 << (bit % 8);
+                }
+            }
+        }
+        out.extend_from_slice(&packed);
+        out
+    }
+
+    /// `count` raw values below `mask`, with `mask` itself at the last index (the partial last word carries the
+    /// widest value) and 0 at the first.
+    fn raws(width: u32, count: usize, seed: u64) -> Vec<u64> {
+        let mask = mask_of(width);
+        let mut state = seed ^ (u64::from(width) << 32) ^ count as u64;
+        let mut raws: Vec<u64> = (0..count).map(|_| lcg(&mut state) & mask).collect();
+        raws[0] = 0;
+        raws[count - 1] = mask;
+        raws
+    }
+
+    #[test]
+    fn decode_into_appends_what_iter_yields_at_every_width_and_count() {
+        for width in widths() {
+            let mask = mask_of(width);
+            for &count in counts() {
+                let raws = raws(width, count, 0x5eed);
+                let mins = if cfg!(miri) {
+                    vec![u64::MAX - mask]
+                } else {
+                    vec![0, 0x0123_4567_89ab_cdef & !mask, u64::MAX - mask]
+                };
+                for min in mins {
+                    let bytes = pack(min, width, &raws);
+                    let mut r = Reader::new(&bytes);
+                    let block = r.read_for_block().unwrap();
+                    assert!(r.is_empty());
+                    let keys: Vec<u64> = raws.iter().map(|&x| min + x).collect();
+                    let ctx = format!("width {width} count {count} min {min:#x}");
+                    assert_eq!(block.iter().collect::<Vec<_>>(), keys, "iter, {ctx}");
+                    // Existing contents stay in front; nothing is appended past the block's values.
+                    let mut out = vec![0xdead_beef, u64::MAX];
+                    block.decode_into(&mut out);
+                    assert_eq!(out[..2], [0xdead_beef, u64::MAX], "prefix, {ctx}");
+                    assert_eq!(&out[2..], keys.as_slice(), "decode_into, {ctx}");
+                    // Decoding twice appends twice: no state is kept between calls.
+                    block.decode_into(&mut out);
+                    assert_eq!(out.len(), 2 + 2 * count, "{ctx}");
+                    assert_eq!(
+                        &out[2 + count..],
+                        keys.as_slice(),
+                        "second decode_into, {ctx}"
+                    );
+                    assert_eq!(block.max_raw(), mask, "max_raw, {ctx}");
+                    for (i, &k) in keys.iter().enumerate() {
+                        assert_eq!(block.get(i), Some(k), "get({i}), {ctx}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// `max_raw` finds the largest raw value wherever it sits (first, in a middle word, at a word boundary, last),
+    /// so the overflow check built on it accepts `min = u64::MAX - max_raw` and rejects one more, as a per-value
+    /// check would, including when the largest raw is below the width's mask.
+    #[test]
+    fn overflow_check_finds_the_largest_raw_anywhere() {
+        let mut state = 7_u64;
+        // Under Miri, one count with a partial last word and one inside the first word.
+        let counts: &[usize] = if cfg!(miri) { &[1, 65] } else { counts() };
+        for width in widths().into_iter().filter(|&w| w > 0) {
+            let mask = mask_of(width);
+            for &count in counts {
+                // The largest raw: the mask, or a smaller value (min + mask then overflows
+                // while min + max does not, the case that needs `max_raw` at all).
+                for top in [mask, mask >> 1 | 1, (mask >> 1).max(1) + 1]
+                    .into_iter()
+                    .filter(|&t| t <= mask)
+                {
+                    let places = if cfg!(miri) {
+                        vec![0, count - 1]
+                    } else {
+                        vec![0, count / 2, count - 1, 63, 64]
+                    };
+                    for at in places.into_iter().filter(|&a| a < count) {
+                        let mut raws: Vec<u64> =
+                            (0..count).map(|_| lcg(&mut state) % top).collect();
+                        raws[at] = top;
+                        for (min, fits) in [(u64::MAX - top, true), (u64::MAX - top + 1, false)] {
+                            let fits_per_value = raws.iter().all(|&x| min.checked_add(x).is_some());
+                            assert_eq!(fits, fits_per_value);
+                            let bytes = pack(min, width, &raws);
+                            let mut r = Reader::with_base_offset(&bytes, 1 << 33);
+                            let got = r.read_for_block();
+                            let ctx = format!(
+                                "width {width} count {count} top {top:#x} at {at} min {min:#x}"
+                            );
+                            if fits {
+                                let block = got.unwrap_or_else(|e| panic!("{ctx}: {e}"));
+                                assert_eq!(block.max_raw(), top, "{ctx}");
+                                let mut out = Vec::new();
+                                block.decode_into(&mut out);
+                                assert_eq!(out[at], u64::MAX, "{ctx}");
+                                assert_eq!(out, block.iter().collect::<Vec<_>>(), "{ctx}");
+                            } else {
+                                assert_eq!(
+                                    got.map(|b| b.len()),
+                                    Err(corrupt(1 << 33, Corruption::ValueOverflow { bits: 64 })),
+                                    "{ctx}"
+                                );
+                                assert_eq!(r.position(), 0, "{ctx}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Width 0 holds no packed bits: every value is `min`, even `u64::MAX`, and `max_raw` is 0.
+    #[test]
+    fn width_zero_at_the_top_of_u64() {
+        for &count in counts() {
+            let bytes = pack(u64::MAX, 0, &vec![0; count]);
+            assert_eq!(bytes.len(), 13);
+            let block = Reader::new(&bytes).read_for_block().unwrap();
+            assert_eq!(block.max_raw(), 0);
+            let mut out = vec![1];
+            block.decode_into(&mut out);
+            assert_eq!(out.len(), count + 1);
+            assert!(out[1..].iter().all(|&k| k == u64::MAX));
         }
     }
 }
