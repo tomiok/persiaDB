@@ -1,6 +1,6 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
 //! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3);
-//! opening a segment with a large term dictionary.
+//! opening a segment with a large term dictionary; the memtable: `put` and postings through a view (ROADMAP 6.1).
 //! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
@@ -12,12 +12,14 @@ use std::ops::Bound;
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
+use persia_engine::memtable::Memtable;
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::segment::{
     Segment, SegmentBuilder, SegmentMeta, SegmentWriter, TermInfo, WriteOptions,
 };
+use persia_engine::view::{PostingsIterator, SearchView};
 use persia_format::ByteSource;
 
 const DOCS: u64 = 2_000;
@@ -413,6 +415,54 @@ fn bench_norms(c: &mut Criterion) {
     group.finish();
 }
 
+/// The memtable over the same documents (ROADMAP 6.1): `put` for all of them (as `segment/add`, plus the per-term
+/// chains and the full document encoding), and every `body` term's postings read through a view (copied out under
+/// the read lock, then iterated with frequencies).
+fn bench_memtable(c: &mut Criterion) {
+    let schema = schema();
+    let registry = AnalyzerRegistry::builtin();
+    let docs = documents(&schema);
+    let fill = || {
+        let mut mem = Memtable::new(&schema, &registry).unwrap();
+        for d in &docs {
+            mem.put(d).unwrap();
+        }
+        mem
+    };
+
+    let mut group = c.benchmark_group("memtable");
+    group.throughput(Throughput::Elements(DOCS));
+    group.bench_function("put", |b| b.iter(|| black_box(fill())));
+
+    let seg = Segment::open(
+        ByteSource::new(
+            SegmentWriter::new(&build(&schema, &registry, &docs), META)
+                .finish()
+                .unwrap()
+                .into(),
+        ),
+        &schema,
+    )
+    .unwrap();
+    let body = schema.field("body").unwrap().id();
+    let terms = all_terms(&seg, body);
+    let view = fill().view();
+    group.throughput(Throughput::Elements(total_df(&terms)));
+    group.bench_function("postings_freq", |b| {
+        b.iter(|| {
+            let mut sum = 0_u64;
+            for (term, _) in &terms {
+                let mut p = view.postings(body, term).unwrap().unwrap();
+                while p.next().unwrap().is_some() {
+                    sum += u64::from(p.freq().unwrap());
+                }
+            }
+            black_box(sum)
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
@@ -420,6 +470,7 @@ criterion_group!(
     bench_norms,
     bench_open_large_dict,
     bench_records_over_many_blocks,
-    bench_columns
+    bench_columns,
+    bench_memtable
 );
 criterion_main!(benches);

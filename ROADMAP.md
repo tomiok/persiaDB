@@ -367,10 +367,12 @@ Deps: M1, M3, M4. The heart of the index format.
 Deps: M2, M5.
 
 ## 6.1 Memtable
-- [ ] 6.1.1 Mutable in-memory index structure (concurrent reads, single writer)
-- [ ] 6.1.2 Searchable view implementing the same iterator traits as a segment
-- [ ] 6.1.3 Upsert/delete semantics inside memtable (replace within same buffer)
-- [ ] 6.1.4 Size/age flush triggers
+- [x] 6.1.1 Mutable in-memory index structure (concurrent reads, single writer)
+- [x] 6.1.2 Searchable view implementing the same iterator traits as a segment
+- [x] 6.1.3 Upsert/delete semantics inside memtable (replace within same buffer)
+- [x] 6.1.4 Size/age flush triggers
+- [ ] 6.1.5 `SearchView` parity for queries: term enumeration (prefix, range, automaton) and column access over segments and the memtable, for 7.1 `Prefix`/`Fuzzy` and 7.4.5 filters (found in 6.1.2)
+- [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
 
 ## 6.2 WAL (SPEC §8.2)
 - [ ] 6.2.1 WAL record format: op (put/delete), collection id, payload, checksum
@@ -384,7 +386,7 @@ Deps: M2, M5.
 - [ ] 6.3.1 Memtable → segment (uses M5 writer) → storage frame/object
 - [ ] 6.3.2 Manifest build + commit protocol (local, SPEC §4.5)
 - [ ] 6.3.3 Atomic snapshot publication to readers (`ArcSwap`-style) with `seq`
-- [ ] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`)
+- [ ] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`); the interval flushes a memtable whose writes never pause long enough for the idle trigger (SPEC §8.2 step 3, found in 6.1.4)
 - [ ] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
 - [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
 - [ ] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)

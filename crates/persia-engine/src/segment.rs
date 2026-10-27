@@ -23,10 +23,10 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
-mod arena;
-mod builder;
+pub(crate) mod arena;
+pub(crate) mod builder;
 mod kind;
-mod norms;
+pub(crate) mod norms;
 mod read;
 mod write;
 

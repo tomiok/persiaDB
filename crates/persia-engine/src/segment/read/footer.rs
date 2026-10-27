@@ -25,7 +25,7 @@ const MAX_ID_LEN: usize = 512;
 const MAX_DOC_COUNT: u32 = 1 << 31;
 
 /// Statistics of one `text` or `keyword` field (SPEC §5.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FieldStats {
     /// Documents with at least one token (`text`) or value (`keyword`) in the field.
     pub docs_with_field: u32,

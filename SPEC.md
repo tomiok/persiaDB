@@ -1181,6 +1181,8 @@ Rules:
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Fsync | Async` (default `Fsync` at commit).
 2. Op applied to the **memtable** (visible to searches).
 3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object).
+   Writes that never pause for 10 s and stay under the size are flushed by the auto-commit interval (§14
+   `commit_interval`, ROADMAP 6.3.4), which bounds the WAL that recovery replays.
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
 5. WAL chunks fully covered by committed segments are dropped (`wal_start` advances).
 
@@ -1188,6 +1190,9 @@ Rules:
 Upsert = tombstone for the previous docid (looked up via `IdMap` across segments newest-first) + insert into memtable.
 Delete = tombstone only. Tombstones are the only mutable-looking state; they live in per-segment **tombstone sidecars**
 (versioned, referenced by the manifest), never inside the immutable segment bytes.
+Inside the memtable an upsert replaces in place: the new version gets the next memtable docid and the earlier one is
+marked dead, so no search sees it and the flush leaves it out. A delete marks the memtable's version dead and is
+recorded even for an id the memtable lacks, so it hides the id in older segments until its tombstone is committed.
 
 Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2, see SPEC §18.3):
 - One sidecar per `(segment_id, version)`; `version` is a `u64`: 1 for a segment's first sidecar, one more per rewrite
@@ -1203,6 +1208,10 @@ Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2,
 ### 8.4 Concurrency
 - **Single writer** per database/shard (file lock locally; lease remotely, SPEC §11.3). Opening a second writer fails fast.
 - Any number of readers; readers see a consistent manifest snapshot (MVCC by manifest `seq`).
+- The memtable has one writer too. A reader's memtable view holds exactly the operations applied before it was
+  taken (docids and operations are numbered, and a replaced or deleted document records the operation that ended it),
+  and a later write never changes what the view returns. Readers take the memtable's lock only while copying data
+  out, never for a whole search.
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.

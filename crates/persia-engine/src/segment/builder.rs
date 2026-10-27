@@ -377,7 +377,7 @@ enum FieldMark {
 /// Indexes the values of one `text` field of document `docid` (SPEC §5.3.3: value `i + 1` starts
 /// [`POSITION_GAP`] positions after the end of value `i`); a token longer than [`MAX_TERM_LEN`] rejects
 /// the document (SPEC §5.3.1).
-fn index_text<'a>(
+pub(crate) fn index_text<'a>(
     analyzer: &Analyzer,
     (field, inverted): (FieldId, &mut Inverted),
     docid: u32,
@@ -418,7 +418,7 @@ fn index_text<'a>(
 }
 
 /// Indexes the values of one `keyword` field of document `docid`: each value is one term, as is.
-fn index_keywords<'a>(
+pub(crate) fn index_keywords<'a>(
     inverted: &mut Inverted,
     docid: u32,
     values: impl IntoIterator<Item = &'a str>,

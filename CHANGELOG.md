@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the memtable (ROADMAP 6.1, SPEC §8.2–§8.4). `Memtable` indexes `put`s and `delete`s in memory
+  with the segment builder's analysis, so it has the terms, positions and norms of the segment it will flush to. An
+  upsert replaces the earlier version inside the memtable; a delete is recorded even for an id the memtable lacks
+  (`IdState::Deleted`). `Memtable::view` gives a `MemtableView`: one writer, any number of readers, each view seeing
+  exactly the writes before it (MVCC), never holding the lock across a search. `FlushPolicy` is the size/idle trigger
+  (64 MiB / 10 s, SPEC §8.2) as a pure function of the size, the last write and an injected `now`. Bench:
+  `memtable/put` 78.9 K documents/s, `memtable/postings_freq` 45.4 M postings/s (docs/benchmarks.md).
+- `persia-engine`: the `view` module's `PostingsIterator` and `SearchView` traits (ROADMAP 6.1.2): postings, norms,
+  field statistics, documents and id lookup over a `SegmentView` (a segment and its tombstones) or a `MemtableView`;
+  norms come through a `NormReader` (a segment's `NormsCursor`, or the memtable's norms copied once per view),
+  deleted documents left out, so the query engine treats the memtable as one more segment. `FieldStats` is `Default`.
 - `persia-format`: `postings::block_len` and `postings::tail_len` give the length of a postings block's encoding
   without encoding it, and `BlockWriter::drain_output_into` moves the encoded blocks into a `Writer` without
   allocating a buffer per call (ROADMAP 5.1.7).
