@@ -27,6 +27,7 @@ mod corrupt;
 mod decode;
 mod edges;
 mod fst_damage;
+mod golden;
 mod model;
 mod read;
 mod sections;
