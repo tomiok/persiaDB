@@ -69,8 +69,16 @@ fn read_index(terms: &TermIndex<'_>, positions: bool) -> Result<Index, ReadError
     Ok(index)
 }
 
-/// Reads everything; an `Err` as soon as anything is corrupt.
+/// Reads everything, then checks the whole-segment rules too (`Segment::verify`, ROADMAP 5.4.1); an `Err` as soon
+/// as anything is corrupt.
 pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, ReadError> {
+    let out = read_lookups(schema, bytes)?;
+    open(schema, bytes)?.verify()?;
+    Ok(out)
+}
+
+/// Reads everything through the lookups alone (no `verify`): what a query path checks.
+pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, ReadError> {
     let seg = open(schema, bytes)?;
     let n = seg.doc_count();
     let mut out = ReadBack::default();
@@ -128,7 +136,7 @@ pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, Re
     for d in 0..n {
         out.docs.push(seg.document(d)?);
         let doc_id = seg.id_of(d)?;
-        assert_eq!(seg.docid_of(&doc_id)?, Some(d));
+        // `Segment::verify` (in `read_back`) checks that the IdMap maps the id back to `d`.
         out.ids.push(doc_id);
         out.blobs.push(seg.blob_ref(d)?);
     }
@@ -256,6 +264,39 @@ fn golden_segment_reads_as_its_documents() {
     let schema = schema();
     let stored = std::fs::read(fixture_path()).unwrap();
     check_reads(&schema, &golden_docs(&schema), &stored);
+}
+
+/// `Segment::sections` is the section table (SPEC §5.1) as `decode` parses it independently: kinds, fields, offsets,
+/// lengths, and for each block-framed section its stream length, block count and block size.
+#[test]
+fn section_table_matches_the_decoder() {
+    let schema = schema();
+    let stored = std::fs::read(fixture_path()).unwrap();
+    let seg = open(&schema, &stored).unwrap();
+    let sections = seg.sections().unwrap();
+    let decoded = super::decode::parse(&stored);
+    assert_eq!(sections.len(), decoded.sections.len());
+    let mut end = 0;
+    for s in &sections {
+        assert!(s.offset >= end && s.offset % 8 == 0, "{s:?}");
+        end = s.offset + s.len;
+        let section = &stored[s.offset as usize..end as usize];
+        assert!(
+            decoded.sections.contains_key(&(s.kind.code(), s.field)),
+            "{s:?}"
+        );
+        match s.stream {
+            Some(st) => {
+                assert!(s.kind.is_block_framed());
+                let r = persia_format::block::BlockReader::open(section, 0).unwrap();
+                assert_eq!(
+                    (st.len, st.block_count, st.block_size),
+                    (r.len(), r.block_count(), r.block_size())
+                );
+            }
+            None => assert!(!s.kind.is_block_framed(), "{s:?}"),
+        }
+    }
 }
 
 /// `n` documents with tags at different densities: lists of many full blocks, a tail, and single blocks.
@@ -555,6 +596,8 @@ fn schema_hash_is_checked_at_the_recorded_field_count() {
     assert!(seg.terms(added).unwrap().is_empty());
     assert_eq!(seg.field_stats(added), None);
     assert!(seg.keyword_column(added).unwrap().is_empty());
+    // The whole-segment rules hold with the evolved schema too: only the first `schema_field_count` fields count.
+    seg.verify().unwrap();
 
     let other = SchemaBuilder::new("other").build().unwrap();
     let err = open(&other, &bytes).unwrap_err();

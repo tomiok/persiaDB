@@ -5,8 +5,15 @@
 //! piped: `<action>\t<kind>\t<state>\t<path>`, with `action` `found`, `removed` or `kept`, `kind` `temporary` or
 //! `quarantine`, and `state` `free`, `in-use` or `unknown` (whether a live writer holds the file's lock). Control
 //! characters in a path are escaped (`\t`, `\n`, `\u{1b}`). A sweep that fails part-way still prints what it removed.
+//!
+//! Segment commands (ROADMAP 5.4.2, 5.4.3) read one segment file with the schema it was written with: `inspect
+//! segment` prints its footer, sections and per-field statistics, and `dump segment` a field's terms or one term's
+//! postings (module `segment`).
 #![forbid(unsafe_code)]
 
+mod segment;
+
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -30,6 +37,12 @@ enum Command {
     /// A local object store (a directory, `file://`).
     #[command(subcommand)]
     Store(StoreCommand),
+    /// Prints the structure of an on-disk object.
+    #[command(subcommand)]
+    Inspect(InspectCommand),
+    /// Prints the content of an on-disk object, for debugging.
+    #[command(subcommand)]
+    Dump(DumpCommand),
 }
 
 #[derive(Debug, Subcommand)]
@@ -50,6 +63,39 @@ enum ContainerCommand {
         /// them first.
         #[arg(long)]
         quarantine: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum InspectCommand {
+    /// A segment file (SPEC §5): footer, sections with their sizes, and per-field statistics.
+    Segment {
+        /// The segment file.
+        path: PathBuf,
+        /// The collection schema (JSON) the segment was written with.
+        #[arg(long)]
+        schema: PathBuf,
+        /// Also check the whole segment (every CRC, and the rules no lookup checks), and fail if it is corrupt.
+        #[arg(long)]
+        verify: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DumpCommand {
+    /// A field of a segment file: its terms, or with `--term` that term's postings.
+    Segment {
+        /// The segment file.
+        path: PathBuf,
+        /// The collection schema (JSON) the segment was written with.
+        #[arg(long)]
+        schema: PathBuf,
+        /// A `text` or `keyword` field.
+        #[arg(long)]
+        field: String,
+        /// A term, as indexed (after analysis: e.g. lowercased and stemmed for an English `text` field).
+        #[arg(long)]
+        term: Option<String>,
     },
 }
 
@@ -84,6 +130,17 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Inspect(InspectCommand::Segment {
+            path,
+            schema,
+            verify,
+        }) => to_stdout(|out| segment::inspect(out, &path, &schema, verify))?,
+        Command::Dump(DumpCommand::Segment {
+            path,
+            schema,
+            field,
+            term,
+        }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
         Command::Container(ContainerCommand::Files { path }) => {
             if !path.is_file() {
                 bail!("{} is not a container file", path.display());
@@ -115,6 +172,24 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs `f` on a buffered, locked stdout. A closed pipe (`persia dump segment ... | head`) ends the output early
+/// without an error.
+fn to_stdout(f: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    let result = f(&mut out).and_then(|()| out.flush().map_err(Into::into));
+    match result {
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        other => other,
+    }
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn container_files(path: &Path) -> Result<Vec<SideFile>> {

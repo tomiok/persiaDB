@@ -12,6 +12,7 @@ mod postings;
 mod store;
 mod stream;
 mod terms;
+mod verify;
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -32,6 +33,32 @@ use footer::{Footer, Section};
 use store::BlockCache;
 use stream::Stream;
 use terms::{Lists, TERM_INFO_LEN};
+
+/// One entry of a segment's section table (SPEC §5.1), from [`Segment::sections`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SectionInfo {
+    /// The section's kind.
+    pub kind: SectionKind,
+    /// Its field id ([`SEGMENT_FIELD`] for a segment-level section).
+    pub field: u32,
+    /// Where it starts, relative to the segment start.
+    pub offset: u64,
+    /// Its length on disk, block table or CRC included.
+    pub len: u64,
+    /// For a block-framed section, its logical stream (SPEC §5.2); `None` for a raw one.
+    pub stream: Option<StreamInfo>,
+}
+
+/// The logical stream of a block-framed section (SPEC §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StreamInfo {
+    /// Uncompressed length.
+    pub len: u64,
+    /// Number of framed blocks.
+    pub block_count: u32,
+    /// Uncompressed bytes per block (the last may hold fewer).
+    pub block_size: u32,
+}
 
 /// The next [`Segment::open`]'s instance token.
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
@@ -147,6 +174,58 @@ impl Segment {
         (&self.footer.min_id, &self.footer.max_id)
     }
 
+    /// The section table (SPEC §5.1), in segment order, with each block-framed section's stream size: for tools
+    /// such as `persia inspect segment`.
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::Document;
+    /// # use persia_engine::schema::SchemaBuilder;
+    /// # use persia_engine::segment::{SEGMENT_FIELD, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # let schema = SchemaBuilder::new("c").build()?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("d1"))?;
+    /// # let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// # let bytes = SegmentWriter::new(&builder, meta).finish()?;
+    /// let segment = Segment::open(ByteSource::new(bytes.into()), &schema)?;
+    /// let kinds: Vec<_> = segment.sections()?.iter().map(|s| (s.kind, s.field, s.stream.is_some())).collect();
+    /// assert_eq!(kinds, [
+    ///     (SectionKind::DocStore, SEGMENT_FIELD, true),
+    ///     (SectionKind::IdMap, SEGMENT_FIELD, false), // raw: an FST
+    ///     (SectionKind::IdList, SEGMENT_FIELD, true),
+    /// ]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// A corruption if a block table no longer reads (it was checked at open).
+    pub fn sections(&self) -> Result<Vec<SectionInfo>, ReadError> {
+        self.footer
+            .sections
+            .iter()
+            .map(|s| {
+                let stream = if s.kind.is_block_framed() {
+                    self.stream(s.kind, s.field)?.map(|st| StreamInfo {
+                        len: st.len(),
+                        block_count: st.block_count(),
+                        // At most 1 MiB (SPEC §5.2), checked when the table was opened.
+                        block_size: u32::try_from(st.block_size()).unwrap_or(u32::MAX),
+                    })
+                } else {
+                    None
+                };
+                Ok(SectionInfo {
+                    kind: s.kind,
+                    field: s.field,
+                    offset: s.range.start,
+                    len: s.range.end.saturating_sub(s.range.start),
+                    stream,
+                })
+            })
+            .collect()
+    }
+
     /// The statistics of a `text` or `keyword` field (SPEC §5.1); `None` for another type or a field added after
     /// the segment was written.
     pub fn field_stats(&self, field: FieldId) -> Option<FieldStats> {
@@ -239,6 +318,7 @@ impl Segment {
             self.stream(SectionKind::Columns, field.get())?,
             ty,
             self.doc_count(),
+            false,
         )
     }
 
@@ -269,6 +349,7 @@ impl Segment {
         KeywordColumn::read(
             self.stream(SectionKind::Columns, field.get())?,
             self.doc_count(),
+            false,
         )
     }
 
@@ -529,22 +610,7 @@ impl Segment {
                 }
                 continue;
             }
-            let bytes = section_slice(self.source.as_slice(), section);
-            let Some((payload, stored)) = bytes.split_last_chunk::<4>() else {
-                return Err(fst_error(SegmentCorruption::Invalid {
-                    what: "a raw section shorter than its CRC",
-                }));
-            };
-            let stored = u32::from_le_bytes(*stored);
-            let computed = crc32c(payload);
-            if stored != computed {
-                return Err(ReadError::Section {
-                    kind,
-                    field,
-                    position: u64::try_from(payload.len()).unwrap_or(u64::MAX),
-                    reason: SegmentCorruption::RawChecksum { stored, computed },
-                });
-            }
+            raw_payload(self.source.as_slice(), section)?;
             let range = section.range.start..section.range.end.saturating_sub(4);
             let payload = self.bytes(&Section { kind, field, range })?;
             let map = fst::Map::new(payload).map_err(|_| fst_error(SegmentCorruption::Fst))?;
@@ -569,6 +635,32 @@ fn section_slice<'a>(segment: &'a [u8], section: &Section) -> &'a [u8] {
         .zip(usize::try_from(section.range.end).ok())
         .and_then(|(s, e)| segment.get(s..e))
         .unwrap_or_default()
+}
+
+/// The payload of a raw section, after checking its CRC (SPEC §5.3 "Framing").
+fn raw_payload<'a>(segment: &'a [u8], section: &Section) -> Result<&'a [u8], ReadError> {
+    let (kind, field) = (section.kind, section.field);
+    let Some((payload, stored)) = section_slice(segment, section).split_last_chunk::<4>() else {
+        return Err(ReadError::Section {
+            kind,
+            field,
+            position: 0,
+            reason: SegmentCorruption::Invalid {
+                what: "a raw section shorter than its CRC",
+            },
+        });
+    };
+    let stored = u32::from_le_bytes(*stored);
+    let computed = crc32c(payload);
+    if stored != computed {
+        return Err(ReadError::Section {
+            kind,
+            field,
+            position: u64::try_from(payload.len()).unwrap_or(u64::MAX),
+            reason: SegmentCorruption::RawChecksum { stored, computed },
+        });
+    }
+    Ok(payload)
 }
 
 fn type_error(field: FieldId, field_type: FieldType, what: &'static str) -> ReadError {

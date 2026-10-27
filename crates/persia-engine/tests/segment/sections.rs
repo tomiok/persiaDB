@@ -12,17 +12,18 @@
 use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use persia_engine::document::{Document, Value};
+use persia_engine::document::{Document, FieldSet, Value};
 use persia_engine::schema::CollectionSchema;
 use persia_engine::segment::{
     ReadError, SEGMENT_FIELD, SectionKind, SegmentCorruption, WriteOptions,
 };
+use persia_format::bitpack::BitWidth;
 use persia_format::block::{BlockReader, BlockWriter, Compression};
 use persia_format::checksum::crc32c;
 use persia_format::{Corruption, Reader, Writer};
 use roaring::RoaringBitmap;
 
-use super::read::{open, read_back};
+use super::read::{open, read_back, read_lookups};
 use super::{blob, build, id, schema};
 
 // ---------------------------------------------------------------------------------------------------------------
@@ -494,6 +495,9 @@ enum At {
     Open,
     /// `Segment::open` succeeds, reading everything back fails.
     Read,
+    /// `Segment::open` and every lookup succeed: only `Segment::verify` fails (a rule the query path does not
+    /// check, e.g. a non-minimal width another writer could produce).
+    Verify,
 }
 
 type Edit = Box<dyn Fn(&mut Seg)>;
@@ -552,9 +556,10 @@ fn run(schema: &CollectionSchema, bytes: &[u8], c: &Case) -> Result<(), String> 
     assert_ne!(edited, bytes, "{}: the edit changed nothing", c.name);
     let outcome = catch_unwind(AssertUnwindSafe(|| {
         let opened = open(schema, &edited).map(drop);
-        (opened, read_back(schema, &edited).map(drop))
+        let lookups = read_lookups(schema, &edited).map(drop);
+        (opened, lookups, read_back(schema, &edited).map(drop))
     }));
-    let (opened, read) = match outcome {
+    let (opened, lookups, read) = match outcome {
         Ok(r) => r,
         Err(p) => {
             let msg = p
@@ -565,11 +570,22 @@ fn run(schema: &CollectionSchema, bytes: &[u8], c: &Case) -> Result<(), String> 
             return Err(format!("panicked: {msg}"));
         }
     };
-    let err = match (c.at, opened, read) {
-        (At::Open, Ok(()), _) => return Err("opened".into()),
-        (At::Open, Err(e), _) | (At::Read, Ok(()), Err(e)) => e,
-        (At::Read, Err(e), _) => return Err(format!("expected open to succeed, got {e}")),
-        (At::Read, Ok(()), Ok(())) => return Err("read back without an error".into()),
+    let err = match (c.at, opened, lookups, read) {
+        (At::Open, Ok(()), _, _) => return Err("opened".into()),
+        (At::Open, Err(e), _, _)
+        | (At::Read, Ok(()), _, Err(e))
+        | (At::Verify, Ok(()), Ok(()), Err(e)) => e,
+        (At::Read | At::Verify, Err(e), _, _) => {
+            return Err(format!("expected open to succeed, got {e}"));
+        }
+        (At::Verify, Ok(()), Err(e), _) => {
+            return Err(format!(
+                "expected the lookups to succeed (only verify checks this), got {e}"
+            ));
+        }
+        (At::Read | At::Verify, Ok(()), _, Ok(())) => {
+            return Err("read back without an error".into());
+        }
     };
     if !err.is_corruption() {
         return Err(format!("not a corruption: {err:?}"));
@@ -1917,7 +1933,6 @@ fn raw_section_rules() {
 /// §5.3.1: "the `skip_off` of each term with df ≥ 128 is where the previous such term's entries end". A 40-byte
 /// gap between `all`'s and `half`'s entries, with `half`'s `skip_off` moved past it, is otherwise consistent.
 #[test]
-#[ignore = "ROADMAP 5.4.1: the skip_off chain spans every term, so Segment::verify checks it, not a lookup"]
 fn skip_entries_not_back_to_back_are_corruption() {
     use SectionKind::{Skip, TermInfo};
     let (schema, bytes) = fixture();
@@ -1925,7 +1940,7 @@ fn skip_entries_not_back_to_back_are_corruption() {
     let cases = vec![
         case(
             "a gap between two terms' Skip entries",
-            At::Read,
+            At::Verify,
             Skip,
             any(),
             move |s: &mut Seg| {
@@ -1941,7 +1956,7 @@ fn skip_entries_not_back_to_back_are_corruption() {
         ),
         case(
             "bytes after the last term's Skip entries",
-            At::Read,
+            At::Verify,
             Skip,
             any(),
             move |s: &mut Seg| {
@@ -1985,4 +2000,945 @@ fn bytes_before_the_first_list_are_corruption() {
         },
     )];
     run_all(&schema, &bytes, &cases);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The rest of `Segment::verify` (ROADMAP 5.4.1): rules no lookup checks, broken in otherwise consistent segments.
+// The verify-only cases are `At::Verify`: open and every lookup succeed, and only `Segment::verify` (which `read_back`
+// runs last) fails.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Re-packs the 128-group whose width byte is at stream position `width_at` one bit wider (16 more bytes, all
+/// zero: the group held only zeros), then moves every later list or block start (field `ti_off` of the TermInfo
+/// records, `sk_off` of the Skip entries) past them: only the width is wrong.
+fn widen_zero_group(
+    s: &mut Seg,
+    kind: SectionKind,
+    field: u32,
+    width_at: usize,
+    ti_off: usize,
+    sk_off: usize,
+) {
+    s.edit_stream(kind, field, |b| {
+        assert_eq!(b[width_at], 0, "the group must be packed at width 0");
+        b[width_at] = 1;
+        let after = width_at + 1;
+        b.splice(after..after, [0_u8; 16]);
+    });
+    let shift = |b: &mut Vec<u8>, len: usize, off: usize| {
+        for at in (0..b.len() / len).map(|r| r * len + off) {
+            let v = le_u64(b, at);
+            if v > width_at as u64 {
+                put_u64(b, at, v + 16);
+            }
+        }
+    };
+    s.edit_stream(SectionKind::TermInfo, field, |b| shift(b, ti::LEN, ti_off));
+    s.edit_stream(SectionKind::Skip, field, |b| shift(b, sk::LEN, sk_off));
+}
+
+/// A FOR block of `offsets` from `min`, packed at `width` bits whether or not that is minimal (SPEC §5.2.1).
+fn raw_for_block(w: &mut Writer, min: u64, width: u8, offsets: &[u64]) {
+    w.write_u64(min);
+    w.write_u32(offsets.len() as u32);
+    w.write_u8(width);
+    let mut bytes = vec![0_u8; (offsets.len() * usize::from(width)).div_ceil(8)];
+    for (i, &v) in offsets.iter().enumerate() {
+        for bit in 0..usize::from(width) {
+            if v >> bit & 1 == 1 {
+                let at = i * usize::from(width) + bit;
+                bytes[at / 8] |= 1 << (at % 8);
+            }
+        }
+    }
+    w.write_bytes(&bytes);
+}
+
+#[test]
+fn whole_list_rules() {
+    use SectionKind::{Columns, Freqs, Norms, Postings, Skip, TermInfo};
+    let (schema, bytes) = fixture();
+    let tag = id(&schema, "tag").get();
+    let title = id(&schema, "title").get();
+    let qty = id(&schema, "qty").get();
+    let at = id(&schema, "at").get();
+    let cases = vec![
+        case(
+            "a TermInfo max_tf above every frequency of the list",
+            At::Verify,
+            TermInfo,
+            invalid("other than its list's"),
+            move |s: &mut Seg| {
+                let at = ti_at(s, tag, "all", ti::MAX_TF);
+                s.edit_stream(TermInfo, tag, |b| put_u32(b, at, 2));
+            },
+        ),
+        case(
+            "a TermInfo min_norm below every norm of the list",
+            At::Verify,
+            TermInfo,
+            invalid("other than its list's"),
+            move |s: &mut Seg| {
+                let at = ti_at(s, title, "alpha", ti::MIN_NORM);
+                s.edit_stream(TermInfo, title, |b| {
+                    assert!(b[at] > 0);
+                    b[at] -= 1;
+                });
+            },
+        ),
+        case(
+            "a Skip entry min_norm above its block's",
+            At::Verify,
+            Skip,
+            invalid("skip entry bounds other than its block's"),
+            move |s: &mut Seg| {
+                let off = term_u64(s, title, "alpha", ti::SKIP) as usize;
+                s.edit_stream(Skip, title, |b| b[off + 32] += 1);
+            },
+        ),
+        case(
+            "a norm other than the field length",
+            At::Verify,
+            Norms,
+            invalid("a norm other than its document's field length"),
+            // Doc 3 has the longest title (12 tokens): a larger norm moves no minimum.
+            move |s: &mut Seg| s.edit_stream(Norms, title, |b| b[3] += 1),
+        ),
+        case(
+            "a full postings block packed wider than its gaps need",
+            At::Verify,
+            Postings,
+            invalid("bit width other than the minimal"),
+            // `all`'s first block is docids 0..128: gaps of 0, width 0, after its 4-byte last_docid.
+            move |s: &mut Seg| widen_zero_group(s, Postings, tag, 4, ti::POSTINGS, sk::POSTINGS),
+        ),
+        case(
+            "a frequency group packed wider than its values need",
+            At::Verify,
+            Freqs,
+            invalid("bit width other than the minimal"),
+            // `all` has tf 1 everywhere: stored as 0, width 0.
+            move |s: &mut Seg| widen_zero_group(s, Freqs, tag, 0, ti::FREQS, sk::FREQS),
+        ),
+        case(
+            "a FOR block below its true minimum",
+            At::Verify,
+            Columns,
+            invalid("FOR block whose minimum or width is not minimal"),
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, qty, |b| {
+                    let mut r = Reader::new(b);
+                    r.skip(8).unwrap();
+                    assert_eq!(read_bitmap(&mut r), None);
+                    let keys = read_for(&mut r);
+                    let min = *keys.iter().min().unwrap() - 1;
+                    let offsets: Vec<u64> = keys.iter().map(|k| k - min).collect();
+                    let mut block = Writer::new();
+                    raw_for_block(&mut block, min, 9, &offsets);
+                    let mut w = Writer::new();
+                    w.write_bytes(&b[..16]);
+                    w.write_u64(keys.len() as u64);
+                    w.write_u64(block.len() as u64);
+                    w.write_bytes(block.as_slice());
+                    *b = w.into_inner();
+                });
+            },
+        ),
+        case(
+            "a FOR block wider than its values need",
+            At::Verify,
+            Columns,
+            invalid("FOR block whose minimum or width is not minimal"),
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, qty, |b| {
+                    let mut r = Reader::new(b);
+                    r.skip(8).unwrap();
+                    assert_eq!(read_bitmap(&mut r), None);
+                    let keys = read_for(&mut r);
+                    let min = *keys.iter().min().unwrap();
+                    let offsets: Vec<u64> = keys.iter().map(|k| k - min).collect();
+                    let mut block = Writer::new();
+                    raw_for_block(&mut block, min, 10, &offsets);
+                    let mut w = Writer::new();
+                    w.write_bytes(&b[..16]);
+                    w.write_u64(keys.len() as u64);
+                    w.write_u64(block.len() as u64);
+                    w.write_bytes(block.as_slice());
+                    *b = w.into_inner();
+                });
+            },
+        ),
+        case(
+            "a stored value other than the column's",
+            At::Verify,
+            Columns,
+            invalid("a column value other than the document's stored one"),
+            // `at` is stored; give doc 1 doc 2's key (minimum and width unchanged).
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, at, |b| {
+                    let mut r = Reader::new(b);
+                    r.skip(8).unwrap();
+                    let presence = read_bitmap(&mut r).unwrap();
+                    let mut keys = read_for(&mut r);
+                    keys[1] = keys[2];
+                    let mut w = Writer::new();
+                    w.write_bytes(&b[..8]);
+                    write_bitmap(&mut w, Some(&presence));
+                    write_for(&mut w, &keys);
+                    *b = w.into_inner();
+                });
+            },
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+}
+
+#[test]
+fn whole_segment_id_rules() {
+    use SectionKind::{BlobRefs, IdList, IdMap};
+    let (schema, bytes) = fixture();
+    let cases = vec![
+        case(
+            "an IdList id other than the row's (with the IdMap to match)",
+            At::Verify,
+            IdList,
+            invalid("an id other than its DocStore row's"),
+            |s: &mut Seg| {
+                edit_records(s, IdList, |r| r[5] = b"d0005x".to_vec());
+                s.edit_raw(IdMap, SEGMENT_FIELD, |p| {
+                    let mut entries = fst_entries(p.clone());
+                    entries.remove(b"d0005".as_slice());
+                    entries.insert(b"d0005x".to_vec(), 5);
+                    *p = fst_bytes(&entries);
+                });
+            },
+        ),
+        case(
+            "an IdMap that swaps two documents",
+            At::Verify,
+            IdMap,
+            invalid("an id mapped to a docid other than its IdList position"),
+            |s: &mut Seg| {
+                s.edit_raw(IdMap, SEGMENT_FIELD, |p| {
+                    let mut entries = fst_entries(p.clone());
+                    entries.insert(b"d0005".to_vec(), 6);
+                    entries.insert(b"d0006".to_vec(), 5);
+                    *p = fst_bytes(&entries);
+                });
+            },
+        ),
+        case(
+            "a document whose blob reference is only in its row",
+            At::Verify,
+            BlobRefs,
+            invalid("a blob reference other than"),
+            |s: &mut Seg| edit_records(s, BlobRefs, |r| r[1].clear()),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+}
+
+/// Footer values that only the documents can contradict: a `ReadError::Corrupt` from `verify`, after a clean open.
+#[test]
+fn whole_segment_footer_rules() {
+    let (schema, bytes) = fixture();
+    let title = id(&schema, "title").get();
+    let verify = |edit: &dyn Fn(&mut Vec<u8>)| {
+        let mut s = Seg::parse(&bytes);
+        edit(&mut s.body);
+        let edited = s.to_bytes();
+        let seg = open(&schema, &edited).unwrap();
+        seg.verify().unwrap_err()
+    };
+    let stats_at = |body: &[u8]| {
+        (0..le_u32(body, 80) as usize)
+            .map(|i| 88 + 16 * i)
+            .find(|&at| le_u32(body, at) == title)
+            .unwrap()
+    };
+    for (what, off) in [("docs_with_field", 4), ("sum_field_len", 8)] {
+        let err = verify(&|body| {
+            let at = stats_at(body) + off;
+            body[at] -= 1;
+        });
+        assert!(
+            matches!(err, ReadError::Corrupt { reason: SegmentCorruption::FieldStats { field }, .. } if field == title),
+            "{what}: {err:?}"
+        );
+    }
+    for (what, which) in [("min_id", 0), ("max_id", 1)] {
+        let err = verify(&|body| {
+            let mut at = Seg::entry(body, le_u32(body, 84) as usize);
+            if which == 1 {
+                at += 2 + usize::from(le_u16(body, at));
+            }
+            assert_eq!(body[at + 2], b'd');
+            body[at + 2] = if which == 0 { b'c' } else { b'e' };
+        });
+        assert!(
+            matches!(err, ReadError::Corrupt { reason: SegmentCorruption::Invalid { what: w }, .. } if w.contains("min_id or max_id")),
+            "{what}: {err:?}"
+        );
+    }
+    open(&schema, &bytes).unwrap().verify().unwrap();
+}
+
+/// A keyword column against the postings, in a field that is not stored (a stored one fails against the rows first).
+#[test]
+fn keyword_column_matches_postings() {
+    use SectionKind::Columns;
+    let schema = persia_engine::schema::SchemaBuilder::new("k")
+        .field(
+            "k",
+            persia_engine::schema::FieldKind::Keyword(persia_engine::schema::KeywordOptions {
+                facet: false,
+                stored: false,
+            }),
+        )
+        .build()
+        .unwrap();
+    let k = id(&schema, "k");
+    let docs: Vec<Document> = (0..DOCS)
+        .map(|i| {
+            let mut v = vec!["all".to_owned()];
+            if i % 37 == 0 {
+                v.push("zrare".to_owned());
+            }
+            Document::new(format!("d{i:04}")).with(k, Value::Strings(v))
+        })
+        .collect();
+    let bytes = build(&schema, &docs, WriteOptions::default());
+    let k = k.get();
+
+    // A column whose documents all have no value, next to terms that have postings: it holds nothing (SPEC §5.3
+    // "Presence"), which `verify` reports before comparing it with the postings.
+    let mut s = Seg::parse(&bytes);
+    s.edit_stream(Columns, k, |b| {
+        let mut col = KeywordCol::decode(b);
+        col.ords.clear();
+        col.starts.iter_mut().for_each(|x| *x = 0);
+        *b = col.encode();
+    });
+    let err = open(&schema, &s.to_bytes()).unwrap().verify().unwrap_err();
+    assert!(
+        matches!(err, ReadError::Corrupt { reason: SegmentCorruption::Presence { kind, field, present: true }, .. }
+            if kind == Columns.code() && field == k),
+        "{err:?}"
+    );
+    let cases = vec![
+        case(
+            "a keyword column without a value its postings have",
+            At::Verify,
+            Columns,
+            invalid("keyword ords other than the field's postings"),
+            // Doc 0 has `all` and `zrare` (ords 0, 1): drop `zrare` from its ords.
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, k, |b| {
+                    let mut col = KeywordCol::decode(b);
+                    assert_eq!(&col.ords[..2], &[0, 1]);
+                    col.ords.remove(1);
+                    for start in &mut col.starts[1..] {
+                        *start -= 1;
+                    }
+                    *b = col.encode();
+                });
+            },
+        ),
+        case(
+            "a keyword column with a value its postings lack",
+            At::Verify,
+            Columns,
+            invalid("keyword ords other than the field's postings"),
+            // Doc 1 has only `all`: give it `zrare` too.
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, k, |b| {
+                    let mut col = KeywordCol::decode(b);
+                    assert_eq!(&col.starts[1..3], &[2, 3]);
+                    col.ords.insert(3, 1);
+                    for start in &mut col.starts[2..] {
+                        *start += 1;
+                    }
+                    *b = col.encode();
+                });
+            },
+        ),
+        case(
+            "a keyword value moved to another document",
+            At::Verify,
+            Columns,
+            invalid("keyword ords other than the field's postings"),
+            // `zrare` from doc 0 to doc 1: the same number of ords.
+            move |s: &mut Seg| {
+                s.edit_stream(Columns, k, |b| {
+                    let mut col = KeywordCol::decode(b);
+                    col.ords.remove(1);
+                    col.ords.insert(2, 1);
+                    col.starts[1] -= 1;
+                    *b = col.encode();
+                });
+            },
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+    read_back(&schema, &bytes).unwrap();
+}
+
+/// Adds a block-framed section holding `stream` (16 KiB blocks, uncompressed) at its place in table order.
+fn insert_section(s: &mut Seg, kind: SectionKind, field: u32, stream: &[u8]) {
+    let mut w = BlockWriter::new(16 * 1024, Compression::None).unwrap();
+    w.write(stream).unwrap();
+    let i = s
+        .sections
+        .iter()
+        .position(|x| (x.field, x.kind) > (field, kind))
+        .unwrap_or(s.sections.len());
+    let e = Seg::entry(&s.body, i);
+    let mut entry = [0_u8; 24];
+    entry[..2].copy_from_slice(&kind.code().to_le_bytes());
+    entry[4..8].copy_from_slice(&field.to_le_bytes());
+    s.body.splice(e..e, entry);
+    let count = le_u32(&s.body, 84);
+    put_u32(&mut s.body, 84, count + 1);
+    s.sections.insert(
+        i,
+        Sec {
+            kind,
+            field,
+            bytes: w.finish().unwrap(),
+        },
+    );
+}
+
+/// SPEC §5.3 "Presence": a section that would hold nothing is left out. `verify` finds the sections whose content
+/// says they hold nothing; a lookup reads them as empty.
+#[test]
+fn sections_that_hold_nothing_are_corruption() {
+    use SectionKind::{BlobRefs, Columns, Skip};
+    let schema = schema();
+    let tag = id(&schema, "tag");
+    let qty = id(&schema, "qty");
+    // No blob, no qty, and every df below 128: none of BlobRefs, qty's Columns or tag's Skip.
+    let docs: Vec<Document> = (0..10)
+        .map(|i| Document::new(format!("d{i}")).with(tag, Value::String("x".into())))
+        .collect();
+    let bytes = build(&schema, &docs, WriteOptions::default());
+    let presence = |kind: SectionKind, field: u32, stream: Vec<u8>| {
+        let mut s = Seg::parse(&bytes);
+        insert_section(&mut s, kind, field, &stream);
+        let edited = s.to_bytes();
+        let seg = open(&schema, &edited).unwrap();
+        let err = seg.verify().unwrap_err();
+        assert!(
+            matches!(err, ReadError::Corrupt { reason: SegmentCorruption::Presence { kind: k, field: f, present: true }, .. }
+                if k == kind.code() && f == field),
+            "{kind:?}: {err:?}"
+        );
+    };
+    presence(Skip, tag.get(), vec![0; 40]);
+    presence(Skip, tag.get(), Vec::new());
+    presence(
+        BlobRefs,
+        SEGMENT_FIELD,
+        write_records(&vec![Vec::new(); 10]),
+    );
+    let mut column = Writer::new();
+    column.write_u8(1);
+    column.write_zeros(7);
+    write_bitmap(&mut column, Some(&serialize(&RoaringBitmap::new())));
+    write_for(&mut column, &[0; 10]);
+    presence(Columns, qty.get(), column.into_inner());
+    open(&schema, &bytes).unwrap().verify().unwrap();
+}
+
+/// `verify` on its own (nothing read before it, but open) decodes every block: a flipped payload byte of any
+/// block-framed section is a corruption.
+#[test]
+fn verify_alone_checks_every_block() {
+    let (schema, bytes) = fixture();
+    let seg = Seg::parse(&bytes);
+    for (i, sec) in seg.sections.iter().enumerate() {
+        if !sec.kind.is_block_framed() || BlockReader::open(&sec.bytes, 0).unwrap().is_empty() {
+            continue;
+        }
+        let mut edited = seg.clone();
+        edited.sections[i].bytes[16] ^= 0x40;
+        let edited = edited.to_bytes();
+        // Open reads the record arrays' ends, so a DocStore, IdList or BlobRefs flip may fail there.
+        let err = open(&schema, &edited).and_then(|s| s.verify()).unwrap_err();
+        assert!(err.is_corruption(), "{:?}: {err:?}", sec.kind);
+    }
+    // The CRC pass runs first, in table order: body's Postings before qty's Columns (a lower field id), which the
+    // column checks would reach first.
+    let (body, qty) = (id(&schema, "body").get(), id(&schema, "qty").get());
+    assert!(body < qty);
+    let mut edited = seg.clone();
+    for (kind, field) in [(SectionKind::Postings, body), (SectionKind::Columns, qty)] {
+        let i = edited
+            .sections
+            .iter()
+            .position(|s| (s.kind, s.field) == (kind, field))
+            .unwrap();
+        edited.sections[i].bytes[16] ^= 0x40;
+    }
+    let err = open(&schema, &edited.to_bytes())
+        .unwrap()
+        .verify()
+        .unwrap_err();
+    assert!(
+        matches!(err, ReadError::Block { kind: SectionKind::Postings, field, .. } if field == body),
+        "{err:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// More `Segment::verify` rules (ROADMAP 5.4.1), each broken alone: the ones a lookup leaves to `verify`.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// Re-packs the 128-group whose width byte is at stream position `width_at` one bit wider (16 more bytes, the
+/// same values), then moves every later list or block start past them, as [`widen_zero_group`] does for a group
+/// of any width: only the width is wrong (SPEC §5.2.1, §5.3.2).
+fn widen_group(
+    s: &mut Seg,
+    kind: SectionKind,
+    field: u32,
+    width_at: usize,
+    ti_off: usize,
+    sk_off: usize,
+) {
+    s.edit_stream(kind, field, |b| {
+        let width = BitWidth::new(b[width_at]).unwrap();
+        let wider = BitWidth::new(width.get() + 1).unwrap();
+        let end = width_at + 1 + width.packed_len();
+        let mut values = [0_u32; 128];
+        Reader::new(&b[width_at + 1..end])
+            .read_packed_block(width, &mut values)
+            .unwrap();
+        assert_eq!(
+            BitWidth::of(&values),
+            width,
+            "the group must be packed at its minimal width"
+        );
+        let mut w = Writer::new();
+        w.write_bit_width(wider);
+        w.write_packed_block(&values, wider).unwrap();
+        b.splice(width_at..end, w.into_inner());
+    });
+    let shift = |b: &mut Vec<u8>, len: usize, off: usize| {
+        for at in (0..b.len() / len).map(|r| r * len + off) {
+            let v = le_u64(b, at);
+            if v > width_at as u64 {
+                put_u64(b, at, v + 16);
+            }
+        }
+    };
+    s.edit_stream(SectionKind::TermInfo, field, |b| shift(b, ti::LEN, ti_off));
+    s.edit_stream(SectionKind::Skip, field, |b| shift(b, sk::LEN, sk_off));
+}
+
+/// Re-encodes `field`'s DocStore row of `doc` as `f` makes it, with every field written, stored or not.
+fn edit_row(s: &mut Seg, schema: &CollectionSchema, doc: usize, f: impl FnOnce(&mut Document)) {
+    edit_records(s, SectionKind::DocStore, |r| {
+        let mut d = Document::decode(&r[doc], schema).unwrap();
+        f(&mut d);
+        r[doc] = d.encode(schema, FieldSet::All).unwrap();
+    });
+}
+
+fn deserialize(bytes: &[u8]) -> RoaringBitmap {
+    RoaringBitmap::deserialize_from(bytes).unwrap()
+}
+
+#[test]
+fn verify_only_rules() {
+    use SectionKind::{Columns, DocStore, Positions, Skip};
+    let (schema, bytes) = fixture();
+    let title = id(&schema, "title").get();
+    let tag = id(&schema, "tag").get();
+    let flag = id(&schema, "flag").get();
+    let qty = id(&schema, "qty");
+    let row_schema = schema.clone();
+    let cases = vec![
+        case(
+            "a positions group packed wider than its deltas need",
+            At::Verify,
+            Positions,
+            invalid("bit width other than the minimal"),
+            // alpha's first block: 128 documents of tf 2..8, so its run starts with a packed group of deltas
+            // 0, 2, 1, 2, ... (width 2). alpha is title's first term, so the run starts the stream.
+            move |s: &mut Seg| {
+                assert_eq!(term_u64(s, title, "alpha", ti::POSITIONS), 0);
+                assert_eq!(s.stream(Positions, title)[0], 2);
+                widen_group(s, Positions, title, 0, ti::POSITIONS, sk::POSITIONS);
+            },
+        ),
+        case(
+            "a positions group of a later block packed wider",
+            At::Verify,
+            Positions,
+            invalid("bit width other than the minimal"),
+            // alpha's second block, from its Skip entry 1.
+            move |s: &mut Seg| {
+                let e1 = skip_at(s, title, "alpha", 1, sk::POSITIONS);
+                let at = le_u64(&s.stream(Skip, title), e1) as usize;
+                assert!(at > 0);
+                widen_group(s, Positions, title, at, ti::POSITIONS, sk::POSITIONS);
+            },
+        ),
+        case(
+            "a stored keyword value moved to another document in the column",
+            At::Verify,
+            Columns,
+            invalid("a column value other than the document's stored one"),
+            // Doc 0 has all, half, zrare (ords 0, 1, 2) and doc 1 only all: move zrare to doc 1. The postings
+            // disagree too, but the stored rows are checked first.
+            move |s: &mut Seg| {
+                edit_keyword(s, tag, |col| {
+                    assert_eq!(col.values[2], b"zrare");
+                    assert_eq!(
+                        (&col.ords[..4], &col.starts[..3]),
+                        (&[0, 1, 2, 0][..], &[0, 3, 4][..])
+                    );
+                    col.ords.remove(2);
+                    col.ords.insert(3, 2);
+                    col.starts[1] = 2;
+                });
+            },
+        ),
+        case(
+            "a stored keyword value renamed in the column dictionary",
+            At::Verify,
+            Columns,
+            invalid("a column value other than the document's stored one"),
+            move |s: &mut Seg| {
+                edit_keyword(s, tag, |col| {
+                    assert_eq!(col.values[2], b"zrare");
+                    col.values[2] = b"zrarf".to_vec();
+                });
+            },
+        ),
+        case(
+            "a stored true read as false from the bool column",
+            At::Verify,
+            Columns,
+            invalid("a column value other than the document's stored one"),
+            // flag: doc 0 is true (0 % 6 == 0).
+            move |s: &mut Seg| {
+                edit_bool(s, flag, |_, trues| {
+                    let mut t = deserialize(trues.as_deref().unwrap());
+                    assert!(t.remove(0));
+                    *trues = Some(serialize(&t));
+                });
+            },
+        ),
+        case(
+            "a bool column value where the document stores none",
+            At::Verify,
+            Columns,
+            invalid("a column value other than the document's stored one"),
+            // flag: doc 1 has none (1 % 3 != 0); give it false.
+            move |s: &mut Seg| {
+                edit_bool(s, flag, |presence, _| {
+                    let mut p = deserialize(presence.as_deref().unwrap());
+                    assert!(p.insert(1));
+                    *presence = Some(serialize(&p));
+                });
+            },
+        ),
+        case(
+            "a DocStore row with a field that is not stored",
+            At::Verify,
+            DocStore,
+            invalid("a row with a field that is not stored"),
+            // qty is not stored; doc 2's value is 2 - 150, as in its column.
+            move |s: &mut Seg| {
+                edit_row(s, &row_schema, 2, |d| {
+                    d.insert(qty, Value::I64(-148));
+                });
+            },
+        ),
+        case(
+            "a gap between two terms' Skip entries",
+            At::Verify,
+            Skip,
+            invalid("a skip_off other than where the previous term's entries end"),
+            move |s: &mut Seg| {
+                let at = ti_at(s, tag, "half", ti::SKIP);
+                let off = term_u64(s, tag, "half", ti::SKIP) as usize;
+                s.edit_stream(Skip, tag, |b| {
+                    let gap = b[..sk::LEN].to_vec();
+                    b.splice(off..off, gap);
+                });
+                s.edit_stream(SectionKind::TermInfo, tag, |b| {
+                    put_u64(b, at, (off + sk::LEN) as u64);
+                });
+            },
+        ),
+        case(
+            "bytes after the last term's Skip entries",
+            At::Verify,
+            Skip,
+            invalid("bytes after the last term's Skip entries"),
+            move |s: &mut Seg| s.edit_stream(Skip, tag, |b| b.extend_from_slice(&[0; sk::LEN])),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+}
+
+/// A keyword column whose dictionary is not the field's terms, in a field that is not stored (so the rows do not
+/// catch it first): `zrare` renamed `zrarf`, the column still consistent on its own.
+#[test]
+fn keyword_dictionary_matches_terms() {
+    let schema = persia_engine::schema::SchemaBuilder::new("k")
+        .field(
+            "k",
+            persia_engine::schema::FieldKind::Keyword(persia_engine::schema::KeywordOptions {
+                facet: false,
+                stored: false,
+            }),
+        )
+        .build()
+        .unwrap();
+    let k = id(&schema, "k");
+    let docs: Vec<Document> = (0..DOCS)
+        .map(|i| {
+            let mut v = vec!["all".to_owned()];
+            if i % 37 == 0 {
+                v.push("zrare".to_owned());
+            }
+            Document::new(format!("d{i:04}")).with(k, Value::Strings(v))
+        })
+        .collect();
+    let bytes = build(&schema, &docs, WriteOptions::default());
+    let k = k.get();
+    let cases = vec![case(
+        "a keyword dictionary value other than its term",
+        At::Verify,
+        SectionKind::Columns,
+        invalid("a keyword dictionary other than the field's terms"),
+        move |s: &mut Seg| {
+            edit_keyword(s, k, |col| {
+                assert_eq!(col.values[1], b"zrare");
+                col.values[1] = b"zrarf".to_vec();
+            });
+        },
+    )];
+    run_all(&schema, &bytes, &cases);
+}
+
+/// Skip entry bounds that stay within the term's (so a lookup accepts them) but are not their block's: title
+/// `alpha` in 300 documents, tf 1 (field length 1) in docs 0..256 and tf 2 (length 2) after, so blocks 0 and 1 have
+/// `max_tf` 1 and block 2 `min_norm` 2, while the term has `max_tf` 2 and `min_norm` 1 (SPEC §5.3.2).
+#[test]
+fn skip_bounds_within_the_terms_are_still_their_blocks() {
+    use SectionKind::{Skip, TermInfo};
+    let schema = schema();
+    let title = id(&schema, "title");
+    let docs: Vec<Document> = (0..DOCS)
+        .map(|i| {
+            let words = if i < 256 { "alpha" } else { "alpha alpha" };
+            Document::new(format!("d{i:04}")).with(title, Value::String(words.into()))
+        })
+        .collect();
+    let bytes = build(&schema, &docs, WriteOptions::default());
+    let title = title.get();
+    let term =
+        |s: &Seg, off: usize| le_u32(&s.stream(TermInfo, title), ti_at(s, title, "alpha", off));
+    let entry = |s: &Seg, k: usize, off: usize| {
+        le_u32(&s.stream(Skip, title), skip_at(s, title, "alpha", k, off))
+    };
+    let s = Seg::parse(&bytes);
+    assert_eq!(
+        (term(&s, ti::MAX_TF), term(&s, ti::MIN_NORM) & 0xFF),
+        (2, 1)
+    );
+    assert_eq!(
+        (0..3).map(|k| entry(&s, k, sk::MAX_TF)).collect::<Vec<_>>(),
+        [1, 1, 2]
+    );
+    assert_eq!(
+        (0..3).map(|k| entry(&s, k, 32) & 0xFF).collect::<Vec<_>>(),
+        [1, 1, 2]
+    );
+    let raise_max_tf = |k: usize| {
+        move |s: &mut Seg| {
+            let at = skip_at(s, title, "alpha", k, sk::MAX_TF);
+            s.edit_stream(Skip, title, |b| put_u32(b, at, 2));
+        }
+    };
+    let cases = vec![
+        case(
+            "a first Skip entry max_tf above its block's, at the term's",
+            At::Verify,
+            Skip,
+            invalid("skip entry bounds other than its block's"),
+            raise_max_tf(0),
+        ),
+        case(
+            "a middle Skip entry max_tf above its block's, at the term's",
+            At::Verify,
+            Skip,
+            invalid("skip entry bounds other than its block's"),
+            raise_max_tf(1),
+        ),
+        case(
+            "a last Skip entry min_norm below its block's, at the term's",
+            At::Verify,
+            Skip,
+            invalid("skip entry bounds other than its block's"),
+            move |s: &mut Seg| {
+                let at = skip_at(s, title, "alpha", 2, 32);
+                s.edit_stream(Skip, title, |b| b[at] = 1);
+            },
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+    read_back(&schema, &bytes).unwrap();
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// No false positives (ROADMAP 5.4.1): every segment the writer produces passes `verify`.
+// ---------------------------------------------------------------------------------------------------------------
+
+/// `n` documents of every shape a rule talks about, from a seeded xorshift: multi-valued text with empty values and
+/// repeated words (positions, `POSITION_GAP`), stemmed and stop words, keyword lists with duplicates, the empty
+/// string and the empty list, a keyword dictionary and ords of more than 1024 entries, sparse and dense columns
+/// with extremes and -0.0, sparse bools, stored-only values and blobs.
+fn many_docs(schema: &CollectionSchema, n: u32, seed: u64) -> Vec<Document> {
+    const WORDS: &[&str] = &[
+        "alpha",
+        "beta",
+        "the",
+        "running",
+        "runs",
+        "Ünïcode",
+        "x",
+        "of",
+        "",
+    ];
+    let mut x = seed | 1;
+    let mut next = move || {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        x
+    };
+    let f = |name| id(schema, name);
+    (0..n)
+        .map(|i| {
+            let mut d = Document::new(format!("{:x}-{i}", next() % 4096));
+            let words = |r: u64| -> String {
+                (0..r % 7)
+                    .map(|k| WORDS[((r >> (8 + 4 * k)) % WORDS.len() as u64) as usize])
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
+            match next() % 4 {
+                0 => {}
+                1 => {
+                    let r = next();
+                    d.insert(f("title"), Value::String(words(r)));
+                }
+                _ => {
+                    let values = (0..next() % 4).map(|_| words(next())).collect();
+                    d.insert(f("title"), Value::Strings(values));
+                }
+            }
+            if next() % 3 != 0 {
+                let r = next();
+                d.insert(f("body"), Value::String(words(r)));
+            }
+            let tags: Vec<String> = (0..next() % 5)
+                .map(|_| match next() % 6 {
+                    0 => String::new(),
+                    1 => "all".to_owned(),
+                    2 => "Red".to_owned(),
+                    _ => format!("t{}", next() % u64::from(n)),
+                })
+                .collect();
+            if next() % 5 != 0 {
+                d.insert(f("tag"), Value::Strings(tags));
+            }
+            match next() % 4 {
+                0 => {}
+                1 => {
+                    d.insert(f("price"), Value::F64(-0.0));
+                }
+                _ => {
+                    let v = [f64::MIN, -1.5, 0.0, 1e-300, f64::MAX][(next() % 5) as usize];
+                    d.insert(f("price"), Value::F64(v));
+                }
+            }
+            let q = [i64::MIN, -1, 0, 1, i64::MAX, i64::from(i)][(next() % 6) as usize];
+            d.insert(f("qty"), Value::I64(q));
+            if next() % 7 != 0 {
+                d.insert(
+                    f("at"),
+                    Value::Datetime(1_600_000_000_000_000 + i64::from(i)),
+                );
+            }
+            if next() % 3 == 0 {
+                d.insert(f("flag"), Value::Bool(next() % 2 == 0));
+            }
+            if next() % 2 == 0 {
+                d.insert(
+                    f("raw"),
+                    Value::Json(serde_json::json!({ "i": i, "s": "ü" })),
+                );
+            }
+            if next() % 11 == 0 {
+                d.set_blob_ref(Some(blob((next() % 256) as u8)));
+            }
+            d
+        })
+        .collect()
+}
+
+/// Around the FOR block length (1024 keys; 1025 keyword starts at 1024 documents) and the postings block length,
+/// at block sizes that make every record and list span blocks.
+#[test]
+fn verify_accepts_written_segments() {
+    let schema = schema();
+    for (n, block_sizes) in [
+        (1_u32, &[1_u32, 16 * 1024][..]),
+        (127, &[1, 61]),
+        (128, &[61]),
+        (1023, &[61, 16 * 1024]),
+        (1024, &[1, 61, 16 * 1024]),
+        (1025, &[61, 16 * 1024]),
+        (2100, &[997, 16 * 1024]),
+    ] {
+        for &block_size in block_sizes {
+            let seed = u64::from(n) * 31 + u64::from(block_size);
+            let docs = many_docs(&schema, n, seed);
+            let bytes = build(
+                &schema,
+                &docs,
+                WriteOptions {
+                    block_size,
+                    ..WriteOptions::default()
+                },
+            );
+            if let Err(e) = open(&schema, &bytes).and_then(|s| s.verify()) {
+                panic!("{n} docs, block size {block_size}, seed {seed}: {e:?}");
+            }
+        }
+    }
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: if cfg!(feature = "slow") { 64 } else { 4 }, ..proptest::prelude::ProptestConfig::default() })]
+
+    /// Random documents over several FOR blocks and many postings blocks pass `verify` (the smaller segments of
+    /// `read::reader_matches_model` and `segment_matches_model` run it too).
+    #[test]
+    fn verify_accepts_random_segments_over_several_for_blocks(
+        docs in proptest::collection::vec(super::arb_doc(schema()), 1025..2200),
+        block_size in proptest::sample::select(vec![61_u32, 4096, 16 * 1024]),
+    ) {
+        let schema = schema();
+        let docs = super::with_ids(docs);
+        let bytes = build(&schema, &docs, WriteOptions { block_size, ..WriteOptions::default() });
+        let verified = open(&schema, &bytes).and_then(|s| s.verify());
+        proptest::prop_assert!(verified.is_ok(), "{:?}", verified);
+    }
 }

@@ -57,6 +57,8 @@ impl Norms {
 struct Parts<'a, 's> {
     r: Reader<'a>,
     stream: Stream<'s>,
+    /// Also check what only [`super::Segment::verify`] checks: FOR blocks at their true minimum and minimal width.
+    strict: bool,
 }
 
 impl Parts<'_, '_> {
@@ -150,6 +152,12 @@ impl Parts<'_, '_> {
             if u64::try_from(block.len()).ok() != Some(expected) {
                 return Err(self.bad(block_at, "a FOR block count"));
             }
+            if self.strict && !minimal(&block) {
+                return Err(self.bad(
+                    block_at,
+                    "a FOR block whose minimum or width is not minimal",
+                ));
+            }
             values.extend(block.iter());
             start = end;
         }
@@ -170,12 +178,14 @@ impl Parts<'_, '_> {
 /// Decodes `stream` and hands its parts to `f`.
 fn parse<T>(
     stream: Stream<'_>,
+    strict: bool,
     f: impl FnOnce(&mut Parts<'_, '_>) -> Result<T, ReadError>,
 ) -> Result<T, ReadError> {
     let bytes = stream.read_all()?;
     let mut parts = Parts {
         r: Reader::new(&bytes),
         stream,
+        strict,
     };
     let out = f(&mut parts)?;
     parts.finish()?;
@@ -197,6 +207,7 @@ impl NumericColumn {
         stream: Option<Stream<'_>>,
         field_type: FieldType,
         doc_count: u32,
+        strict: bool,
     ) -> Result<Self, ReadError> {
         let Some(stream) = stream else {
             return Ok(Self {
@@ -205,7 +216,7 @@ impl NumericColumn {
                 keys: Vec::new(),
             });
         };
-        parse(stream, |p| {
+        parse(stream, strict, |p| {
             p.header(TAG_NUMERIC)?;
             let presence = p.bitmap(doc_count)?;
             let keys = p.for_column(u64::from(doc_count))?;
@@ -263,7 +274,7 @@ impl BoolColumn {
                 doc_count,
             });
         };
-        parse(stream, |p| {
+        parse(stream, false, |p| {
             p.header(TAG_BOOL)?;
             let presence = p.bitmap(doc_count)?;
             let at = p.r.offset();
@@ -307,11 +318,15 @@ pub struct KeywordColumn {
 }
 
 impl KeywordColumn {
-    pub(super) fn read(stream: Option<Stream<'_>>, doc_count: u32) -> Result<Self, ReadError> {
+    pub(super) fn read(
+        stream: Option<Stream<'_>>,
+        doc_count: u32,
+        strict: bool,
+    ) -> Result<Self, ReadError> {
         let Some(stream) = stream else {
             return Ok(Self::default());
         };
-        parse(stream, |p| {
+        parse(stream, strict, |p| {
             p.header(TAG_KEYWORD)?;
             let starts_off = p.u64()?;
             let ords_off = p.u64()?;
@@ -432,4 +447,13 @@ impl KeywordColumn {
     pub fn values(&self, docid: u32) -> impl Iterator<Item = &[u8]> {
         self.ords(docid).iter().filter_map(|&o| self.value(o))
     }
+}
+
+/// Whether `block` holds its true minimum and the bit length of its largest offset (SPEC §5.2.1: what writers do).
+fn minimal(block: &persia_format::for_codec::ForBlock<'_>) -> bool {
+    let (min, max) = block
+        .iter()
+        .fold((u64::MAX, 0), |(lo, hi), k| (lo.min(k), hi.max(k)));
+    let width = u8::try_from(max.wrapping_sub(min).bit_width()).unwrap_or(u8::MAX);
+    min == block.min() && width == block.width()
 }

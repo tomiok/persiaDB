@@ -2,7 +2,8 @@
 
 - Status: proposed
 - Date: 2026-10-17
-- Related: CLAUDE.md "Architecture"; `xtask/src/check_deps.rs` (`ALLOWED`); ADR-0019; ROADMAP 2.3.8, 2.4.19
+- Related: CLAUDE.md "Architecture"; `xtask/src/check_deps.rs` (`ALLOWED`); ADR-0019; ROADMAP 2.3.8, 2.4.19, 5.4.2, 5.4.3
+- Amended: 2026-10-26, `persia-engine` and `persia-format` for the segment commands (below)
 
 ## Context
 
@@ -14,15 +15,24 @@ the facade would mean `persia-engine` and `persia` re-exporting storage internal
 
 ## Decision
 
-`persia-cli` may depend on `persia` and on `persia-storage`. Later commands that dump or verify the on-disk format
-may add `persia-format` by amending this ADR. The library crates' layering is unchanged: `persia` still reaches
+`persia-cli` may depend on `persia`, `persia-storage`, and (since the amendment below) `persia-engine` and
+`persia-format`. Any further internal dependency needs another amendment. The library crates' layering is unchanged: `persia` still reaches
 storage only through the engine and the blob store, and what users import from `persia` does not grow.
+
+## Amendment (2026-10-26): segment commands
+
+`persia inspect segment` and `persia dump segment` (ROADMAP 5.4.2, 5.4.3) read one segment file with the engine's
+segment reader (`persia_engine::segment::Segment`, which takes a `persia_format::ByteSource`). A segment on its own is
+not something the embedded `Db` API exposes, nor should it. So `persia-cli` may also depend on `persia-engine` and
+`persia-format`. The original decision anticipated `persia-format` for format tools; `persia-engine` is new, because
+the segment reader lives there. The rule is the same as for storage: these are operator
+commands on the on-disk format, and anything user-facing still goes through `persia`.
 
 ## Consequences
 
 - Maintenance commands call the storage layer directly, with its own error types; the CLI turns them into messages.
-- The CLI binary is the only crate above the engine that sees `persia-storage`; a new user-facing API must still go
-  through `persia`.
+- The CLI binary is the only crate above the engine that sees `persia-storage`, `persia-engine` and `persia-format`
+  directly; a new user-facing API must still go through `persia`.
 
 ## Alternatives considered
 

@@ -231,6 +231,11 @@ impl<'s> TermIndex<'s> {
         }
     }
 
+    /// The field id this index belongs to.
+    pub(super) fn field(&self) -> u32 {
+        self.infos.as_ref().map_or(u32::MAX, |i| i.owner.1)
+    }
+
     /// Number of distinct terms.
     pub fn len(&self) -> u64 {
         self.infos.as_ref().map_or(0, |i| i.count)

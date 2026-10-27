@@ -5,12 +5,13 @@
 use core::ops::Range;
 
 use persia_format::Reader;
-use persia_format::bitpack::BLOCK_LEN;
+use persia_format::bitpack::{BLOCK_LEN, BitWidth};
+use persia_format::delta;
 use persia_format::postings::advance_to;
 use roaring::RoaringBitmap;
 
 use super::error::{ReadError, SegmentCorruption};
-use super::stream::Cursor;
+use super::stream::{Cursor, Stream};
 use super::terms::{Lists, SKIP_ENTRY_LEN, TermInfo};
 
 /// The deleted documents of one segment (SPEC §8.3): left out of every [`Postings`] they are applied to.
@@ -150,6 +151,8 @@ pub struct Postings<'s> {
     positions: Vec<u32>,
     position_ends: Vec<usize>,
     tombstones: Option<&'s Tombstones>,
+    /// Also check what only [`super::Segment::verify`] checks: minimal bit widths (SPEC §5.2.1).
+    strict: bool,
 }
 
 impl<'s> Postings<'s> {
@@ -190,6 +193,7 @@ impl<'s> Postings<'s> {
             positions: Vec::new(),
             position_ends: Vec::new(),
             tombstones: None,
+            strict: false,
         }
     }
 
@@ -197,6 +201,12 @@ impl<'s> Postings<'s> {
     #[must_use]
     pub fn with_tombstones(mut self, tombstones: &'s Tombstones) -> Self {
         self.tombstones = Some(tombstones);
+        self
+    }
+
+    /// Also checks that every bit-packed group uses the minimal width (for [`super::Segment::verify`]).
+    pub(super) fn strict(mut self) -> Self {
+        self.strict = true;
         self
     }
 
@@ -640,8 +650,14 @@ impl<'s> Postings<'s> {
             .postings
             .reader(ext.postings.start, ext.postings.end)?;
         if n == BLOCK_LEN {
-            r.read_postings_block(ext.prev, &mut self.docs)
+            let header = r
+                .read_postings_block(ext.prev, &mut self.docs)
                 .map_err(|e| stream.error(e))?;
+            if self.strict
+                && gaps(&self.docs, ext.prev).is_none_or(|g| header.width != BitWidth::of(&g))
+            {
+                return Err(not_minimal(stream, ext.postings.start));
+            }
         } else {
             let got = r
                 .read_postings_tail(ext.prev, &mut self.docs)
@@ -703,7 +719,9 @@ impl<'s> Postings<'s> {
         }
         let mut r = lists.freqs.reader(ext.freqs.start, ext.freqs.end)?;
         let tfs = self.tfs.get_mut(..n).unwrap_or_default();
-        read_run_into(&mut r, tfs).map_err(|e| stream.error(e))?;
+        if let Some(at) = read_run_into(&mut r, tfs, self.strict).map_err(|e| stream.error(e))? {
+            return Err(not_minimal(stream, at));
+        }
         if !r.is_empty() {
             return Err(stream.corrupt(r.offset(), SegmentCorruption::TrailingBytes));
         }
@@ -778,7 +796,11 @@ impl<'s> Postings<'s> {
         })?;
         self.positions.resize(total_usize, 0);
         let mut r = cursor.reader(range.start, range.end)?;
-        read_run_into(&mut r, &mut self.positions).map_err(|e| stream.error(e))?;
+        if let Some(at) =
+            read_run_into(&mut r, &mut self.positions, self.strict).map_err(|e| stream.error(e))?
+        {
+            return Err(not_minimal(stream, at));
+        }
         if !r.is_empty() {
             return Err(stream.corrupt(r.offset(), SegmentCorruption::TrailingBytes));
         }
@@ -823,17 +845,45 @@ fn block_max(e: &SkipEntry) -> BlockMax {
     }
 }
 
-/// Reads a run of `out.len()` values (SPEC §5.3.2): bit-packed 128-groups, then the rest as varints.
-fn read_run_into(r: &mut Reader<'_>, out: &mut [u32]) -> persia_format::Result<()> {
+/// Reads a run of `out.len()` values (SPEC §5.3.2): bit-packed 128-groups, then the rest as varints. With `strict`,
+/// returns the position of the first group packed wider than its values need.
+fn read_run_into(
+    r: &mut Reader<'_>,
+    out: &mut [u32],
+    strict: bool,
+) -> persia_format::Result<Option<u64>> {
     let (groups, rest) = out.as_chunks_mut::<BLOCK_LEN>();
+    let mut wide = None;
     for group in groups {
+        let at = r.offset();
         let width = r.read_bit_width()?;
         r.read_packed_block(width, group)?;
+        if strict && wide.is_none() && width != BitWidth::of(group) {
+            wide = Some(at);
+        }
     }
     for v in rest {
         *v = r.read_varint_u32()?;
     }
-    Ok(())
+    Ok(wide)
+}
+
+/// The delta-coding gaps of a full postings block that follows `prev` (SPEC §5.2.1), as the writer computes them;
+/// `None` if the docids do not increase (the block decoded, so they do).
+fn gaps(docs: &[u32; BLOCK_LEN], prev: Option<u32>) -> Option<[u32; BLOCK_LEN]> {
+    let mut out = *docs;
+    delta::encode_in_place(&mut out, prev).ok()?;
+    Some(out)
+}
+
+/// A writer packs every group at the bit length of its largest value (SPEC §5.2.1).
+fn not_minimal(stream: Stream<'_>, position: u64) -> ReadError {
+    stream.corrupt(
+        position,
+        SegmentCorruption::Invalid {
+            what: "a bit width other than the minimal",
+        },
+    )
 }
 
 /// A posting list without the section it needs: only an iterator of an empty index has none.

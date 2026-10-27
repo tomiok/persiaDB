@@ -267,6 +267,9 @@ fn check(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
             "kind {kind} is always present"
         );
     }
+    // No false positives: every segment the writer produces passes `verify` (ROADMAP 5.4.1), so every shape the
+    // tests here build (edges included) is checked against the whole-segment rules too.
+    read::open(schema, bytes).unwrap().verify().unwrap();
 }
 
 const WORDS: &[&str] = &[
@@ -526,6 +529,27 @@ fn golden_segment() {
     if bytes != stored {
         eprintln!("note: {} differs only in compressed bytes", path.display());
     }
+    // Its schema, for tools that open the fixture without this test's code (the `persia` CLI tests).
+    let schema_path = path.with_extension("schema.json");
+    if std::env::var_os("PERSIA_WRITE_SEGMENT_FIXTURES").is_some() && !schema_path.exists() {
+        std::fs::write(&schema_path, schema.to_json().unwrap() + "\n").unwrap();
+    }
+    let json = std::fs::read_to_string(&schema_path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e} (PERSIA_WRITE_SEGMENT_FIXTURES=1 writes it)",
+            schema_path.display()
+        )
+    });
+    assert_eq!(
+        CollectionSchema::from_json(&json).unwrap().hash(),
+        schema.hash()
+    );
+    let segment = persia_engine::segment::Segment::open(
+        persia_format::ByteSource::new(stored.clone().into()),
+        &schema,
+    )
+    .unwrap();
+    segment.verify().unwrap();
     let f = decode::parse(&stored);
     assert!(
         f.sections.contains_key(&(5, id(&schema, "title").get())),

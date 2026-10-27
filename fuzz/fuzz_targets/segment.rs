@@ -10,8 +10,8 @@
 //!   CRC holds and only the semantic checks of SPEC §5.3 stand between the edits and the reader's decoders.
 //!
 //! In both modes an opened segment is read completely: every term with its postings, frequencies and positions,
-//! `advance` and `shallow_advance` to a few targets, norms, columns, every document, id and blob reference. Errors
-//! are ignored; the only failure is a panic (or a hang).
+//! `advance` and `shallow_advance` to a few targets, norms, columns, every document, id and blob reference, then
+//! `Segment::verify`. Errors are ignored; the only failure is a panic (or a hang).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -382,6 +382,10 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
         let _ = seg.blob_ref(d);
     }
     let _ = seg.docid_of("no-such-doc");
+    // Every whole-segment rule (ROADMAP 5.4.1). Its memory is bounded by the input: open checked that the record
+    // arrays hold 8 bytes per document.
+    let _ = seg.verify();
+    let _ = seg.sections();
 }
 
 fuzz_target!(|data: &[u8]| {

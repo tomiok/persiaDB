@@ -571,6 +571,8 @@ dependencies = [
  "anyhow",
  "clap",
  "persia",
+ "persia-engine",
+ "persia-format",
  "persia-storage",
  "tempfile",
 ]

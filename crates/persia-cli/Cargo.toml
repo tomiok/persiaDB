@@ -12,8 +12,10 @@ path = "src/main.rs"
 
 [dependencies]
 persia.workspace = true
-# ADR-0020: maintenance commands call the storage layer directly.
+# ADR-0020: maintenance commands call the storage layer, segment commands the segment reader, directly.
 persia-storage.workspace = true
+persia-engine.workspace = true
+persia-format.workspace = true
 clap.workspace = true
 anyhow.workspace = true
 

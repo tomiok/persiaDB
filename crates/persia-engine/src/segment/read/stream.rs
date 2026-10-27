@@ -106,6 +106,11 @@ impl<'s> Stream<'s> {
             .map_err(|e| self.error(e))
     }
 
+    /// Number of framed blocks.
+    pub(super) fn block_count(&self) -> u32 {
+        self.blocks.block_count()
+    }
+
     /// Uncompressed bytes per block.
     pub(super) fn block_size(&self) -> u64 {
         u64::from(self.blocks.block_size())
