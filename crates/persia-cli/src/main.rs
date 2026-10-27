@@ -13,6 +13,7 @@
 
 mod segment;
 
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -133,16 +134,13 @@ fn run(cli: Cli) -> Result<()> {
             path,
             schema,
             verify,
-        }) => print!("{}", segment::inspect(&path, &schema, verify)?),
+        }) => to_stdout(|out| segment::inspect(out, &path, &schema, verify))?,
         Command::Dump(DumpCommand::Segment {
             path,
             schema,
             field,
             term,
-        }) => print!(
-            "{}",
-            segment::dump(&path, &schema, &field, term.as_deref())?
-        ),
+        }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
         Command::Container(ContainerCommand::Files { path }) => {
             if !path.is_file() {
                 bail!("{} is not a container file", path.display());
@@ -174,6 +172,24 @@ fn run(cli: Cli) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Runs `f` on a buffered, locked stdout. A closed pipe (`persia dump segment ... | head`) ends the output early
+/// without an error.
+fn to_stdout(f: impl FnOnce(&mut dyn Write) -> Result<()>) -> Result<()> {
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    let result = f(&mut out).and_then(|()| out.flush().map_err(Into::into));
+    match result {
+        Err(e) if is_broken_pipe(&e) => Ok(()),
+        other => other,
+    }
+}
+
+fn is_broken_pipe(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| {
+        c.downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+    })
 }
 
 fn container_files(path: &Path) -> Result<Vec<SideFile>> {

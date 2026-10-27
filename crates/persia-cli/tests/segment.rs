@@ -118,16 +118,21 @@ fn inspect_verify_finds_damage_that_open_does_not() {
         s(&schema),
     ]));
     assert_eq!(value(&out, "doc_count"), "300");
-    let err = stderr(&persia(&[
+    let failed = persia(&[
         "inspect",
         "segment",
         s(&seg),
         "--schema",
         s(&schema),
         "--verify",
-    ]));
+    ]);
+    let err = stderr(&failed);
     assert!(err.contains("verifying the segment"), "{err}");
     assert!(err.contains("Positions"), "{err}");
+    // The report still comes first, then the error.
+    let report = String::from_utf8(failed.stdout).unwrap();
+    assert_eq!(value(&report, "doc_count"), "300");
+    assert!(!report.contains("\nverify "), "{report}");
 }
 
 #[test]

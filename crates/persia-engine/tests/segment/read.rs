@@ -69,8 +69,16 @@ fn read_index(terms: &TermIndex<'_>, positions: bool) -> Result<Index, ReadError
     Ok(index)
 }
 
-/// Reads everything; an `Err` as soon as anything is corrupt.
+/// Reads everything, then checks the whole-segment rules too (`Segment::verify`, ROADMAP 5.4.1); an `Err` as soon
+/// as anything is corrupt.
 pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, ReadError> {
+    let out = read_lookups(schema, bytes)?;
+    open(schema, bytes)?.verify()?;
+    Ok(out)
+}
+
+/// Reads everything through the lookups alone (no `verify`): what a query path checks.
+pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, ReadError> {
     let seg = open(schema, bytes)?;
     let n = seg.doc_count();
     let mut out = ReadBack::default();
@@ -128,12 +136,10 @@ pub fn read_back(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack, Re
     for d in 0..n {
         out.docs.push(seg.document(d)?);
         let doc_id = seg.id_of(d)?;
-        // `Segment::verify` (below) checks that the IdMap maps the id back to `d`.
+        // `Segment::verify` (in `read_back`) checks that the IdMap maps the id back to `d`.
         out.ids.push(doc_id);
         out.blobs.push(seg.blob_ref(d)?);
     }
-    // Everything read back: the whole-segment rules must hold too (ROADMAP 5.4.1).
-    seg.verify()?;
     Ok(out)
 }
 
@@ -590,6 +596,8 @@ fn schema_hash_is_checked_at_the_recorded_field_count() {
     assert!(seg.terms(added).unwrap().is_empty());
     assert_eq!(seg.field_stats(added), None);
     assert!(seg.keyword_column(added).unwrap().is_empty());
+    // The whole-segment rules hold with the evolved schema too: only the first `schema_field_count` fields count.
+    seg.verify().unwrap();
 
     let other = SchemaBuilder::new("other").build().unwrap();
     let err = open(&other, &bytes).unwrap_err();

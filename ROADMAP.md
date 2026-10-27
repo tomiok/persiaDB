@@ -343,9 +343,10 @@ Deps: M1, M3, M4. The heart of the index format.
 - [ ] 5.3.13 Positions per document (found in the 5.3 review): `Postings::positions` decodes a block's whole positions run (capped at 2^26 values, a resource error beyond); decode only the current document's positions, on demand, so memory stays proportional to one document's term frequency
 
 ## 5.4 Verification & tooling
-- [~] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data; also the rules that span a whole section, which lookups do not check (found in 5.3): the `skip_off` chain and the end of the last skip region, TermInfo `max_tf`/`min_norm` equal to the extremes of their skip entries and norms, writers' minimal bit widths, a Skip section only when some df ≥ 128, `IdList` ids equal to the `DocStore` rows' ids; un-ignore `sections::skip_entries_not_back_to_back_are_corruption`
-- [~] 5.4.2 `persia inspect segment` (CLI): footer, sections, sizes, per-field stats
-- [~] 5.4.3 `persia dump segment --field f --term t` debugging output
+- [x] 5.4.1 `Segment::verify()`: recompute all block CRCs, cross-check stats vs data; also the rules that span a whole section, which lookups do not check (found in 5.3): the `skip_off` chain and the end of the last skip region, TermInfo `max_tf`/`min_norm` equal to the extremes of their skip entries and norms, writers' minimal bit widths, a Skip section only when some df ≥ 128, `IdList` ids equal to the `DocStore` rows' ids; un-ignore `sections::skip_entries_not_back_to_back_are_corruption`
+- [x] 5.4.2 `persia inspect segment` (CLI): footer, sections, sizes, per-field stats
+- [x] 5.4.3 `persia dump segment --field f --term t` debugging output
+- [ ] 5.4.4 Column value ranges in `Segment::verify` (found in the 5.4 review): an `f64` key that decodes to NaN or `-0.0` and a `datetime` key outside the SPEC §6.4.1 range are corruption (SPEC §5.2.1), but only a stored field catches them now (against its row); check every column key
 
 ## 5.5 Tests
 - [ ] 5.5.1 Property: build segment from random docs → read back every doc/term/posting/column exactly equals the model

@@ -267,6 +267,9 @@ fn check(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
             "kind {kind} is always present"
         );
     }
+    // No false positives: every segment the writer produces passes `verify` (ROADMAP 5.4.1), so every shape the
+    // tests here build (edges included) is checked against the whole-segment rules too.
+    read::open(schema, bytes).unwrap().verify().unwrap();
 }
 
 const WORDS: &[&str] = &[

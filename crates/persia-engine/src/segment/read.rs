@@ -177,6 +177,27 @@ impl Segment {
     /// The section table (SPEC §5.1), in segment order, with each block-framed section's stream size: for tools
     /// such as `persia inspect segment`.
     ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::Document;
+    /// # use persia_engine::schema::SchemaBuilder;
+    /// # use persia_engine::segment::{SEGMENT_FIELD, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # let schema = SchemaBuilder::new("c").build()?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("d1"))?;
+    /// # let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// # let bytes = SegmentWriter::new(&builder, meta).finish()?;
+    /// let segment = Segment::open(ByteSource::new(bytes.into()), &schema)?;
+    /// let kinds: Vec<_> = segment.sections()?.iter().map(|s| (s.kind, s.field, s.stream.is_some())).collect();
+    /// assert_eq!(kinds, [
+    ///     (SectionKind::DocStore, SEGMENT_FIELD, true),
+    ///     (SectionKind::IdMap, SEGMENT_FIELD, false), // raw: an FST
+    ///     (SectionKind::IdList, SEGMENT_FIELD, true),
+    /// ]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
     /// A corruption if a block table no longer reads (it was checked at open).
     pub fn sections(&self) -> Result<Vec<SectionInfo>, ReadError> {
@@ -188,6 +209,7 @@ impl Segment {
                     self.stream(s.kind, s.field)?.map(|st| StreamInfo {
                         len: st.len(),
                         block_count: st.block_count(),
+                        // At most 1 MiB (SPEC §5.2), checked when the table was opened.
                         block_size: u32::try_from(st.block_size()).unwrap_or(u32::MAX),
                     })
                 } else {

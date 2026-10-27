@@ -39,11 +39,34 @@ impl Segment {
     /// - the minimal bit width of every bit-packed group and FOR block (and the FOR blocks' true minimum);
     /// - per field: the norms and the field statistics against the term frequencies, a keyword column against
     ///   the term dictionary and postings, and stored values against the columns;
-    /// - per document: the `IdList`, `IdMap`, `BlobRefs` and `DocStore` agree, and `min_id`/`max_id` are the
-    ///   smallest and largest id.
+    /// - per document: the `IdList`, `IdMap`, `BlobRefs` and `DocStore` agree, a row holds only stored fields of
+    ///   the segment's schema, and `min_id`/`max_id` are the smallest and largest id;
+    /// - sections that hold nothing (SPEC §5.3 "Presence").
     ///
-    /// It decodes every block once or more, and holds 4 bytes per document for one field at a time, plus the
-    /// decoded columns of the column fields.
+    /// It does not analyze stored `text` values again to compare them with the postings, nor check the range of
+    /// column values (ROADMAP 5.4.4).
+    ///
+    /// It decodes every block once or more, and holds 4 bytes per document for one `text`/`keyword` field at a time,
+    /// plus the decoded columns of every column field (8 bytes per document each, and a keyword column's values and
+    /// ords). The document count is bounded by the input (open checked that the record arrays hold 8 bytes per
+    /// document), so memory is linear in the segment size times the number of column fields.
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::{Document, Value};
+    /// # use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// # use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # let schema = SchemaBuilder::new("notes").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// # let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("n1").with(body, Value::String("Hello, world".into())))?;
+    /// # let meta = SegmentMeta { segment_id: 7, created_at: 0, merge_generation: 0 };
+    /// let bytes = SegmentWriter::new(&builder, meta).finish()?;
+    /// let segment = Segment::open(ByteSource::new(bytes.into()), &schema)?;
+    /// segment.verify()?; // what a writer produces always passes
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     /// A corruption ([`ReadError::is_corruption`]) for the first rule found broken; a [`ReadError::Block`] that is
@@ -153,10 +176,13 @@ impl Segment {
                 ));
             }
             any_blob |= blob.is_some();
+            // A field added after the segment was written has no value in it (SPEC §6.2.5).
             let unstored = doc.fields().any(|(f, _)| {
-                self.schema
-                    .field_by_id(f)
-                    .is_none_or(|f| !f.kind().stored())
+                f.get() >= self.footer.schema_field_count
+                    || self
+                        .schema
+                        .field_by_id(f)
+                        .is_none_or(|f| !f.kind().stored())
             });
             if unstored {
                 return Err(invalid(

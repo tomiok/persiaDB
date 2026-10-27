@@ -2,10 +2,10 @@
 //! read with the collection schema it was written with (a JSON definition, SPEC §6.2), since a segment does not hold
 //! its schema, only its hash.
 //!
-//! The output is for people: `key  value` lines and aligned tables. Terms and ids are printed with their control
-//! characters escaped, so each stays on one line.
+//! The output is for people: `key  value` lines and aligned tables, written as it is produced. Terms are quoted and
+//! ids and names escaped as Rust `Debug` escapes them, so each stays on one line and none is ambiguous.
 
-use std::fmt::Write as _;
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
@@ -13,26 +13,24 @@ use persia_engine::schema::{CollectionSchema, Field, FieldType};
 use persia_engine::segment::{SEGMENT_FIELD, SectionInfo, Segment};
 use persia_format::ByteSource;
 
-/// Opens the segment file `path` with the schema in `schema_path`.
-pub fn open(path: &Path, schema_path: &Path) -> Result<(Segment, CollectionSchema)> {
+/// Opens the segment file `path` with the schema in `schema_path`; also returns the file's size.
+pub fn open(path: &Path, schema_path: &Path) -> Result<(Segment, CollectionSchema, usize)> {
     let json = std::fs::read_to_string(schema_path)
         .with_context(|| format!("reading the schema {}", schema_path.display()))?;
     let schema = CollectionSchema::from_json(&json)
         .with_context(|| format!("parsing the schema {}", schema_path.display()))?;
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+    let size = bytes.len();
     let segment = Segment::open(ByteSource::new(bytes.into()), &schema)
         .with_context(|| format!("opening the segment {}", path.display()))?;
-    Ok((segment, schema))
+    Ok((segment, schema, size))
 }
 
-/// The footer, the section table and per-field statistics; with `verify`, then [`Segment::verify`].
-pub fn inspect(path: &Path, schema_path: &Path, verify: bool) -> Result<String> {
-    let (seg, schema) = open(path, schema_path)?;
-    let mut out = String::new();
+/// Writes the footer, the section table and per-field statistics to `out`; with `verify`, then runs
+/// [`Segment::verify`], whose error comes after the report (so an operator still sees what the segment holds).
+pub fn inspect(out: &mut dyn Write, path: &Path, schema_path: &Path, verify: bool) -> Result<()> {
+    let (seg, schema, size) = open(path, schema_path)?;
     let (min_id, max_id) = seg.id_range();
-    let size = std::fs::metadata(path)
-        .with_context(|| format!("reading {}", path.display()))?
-        .len();
     let rows = [
         ("segment_id", format!("{:032x}", seg.segment_id())),
         ("format", format!("1.{}", seg.format_minor())),
@@ -70,7 +68,7 @@ pub fn inspect(path: &Path, schema_path: &Path, verify: bool) -> Result<String> 
         "kind", "field", "offset", "len", "stream_len", "blocks", "block"
     )?;
     for s in &sections {
-        write_section(&mut out, s, &schema)?;
+        write_section(out, s, &schema)?;
     }
 
     let count = usize::try_from(seg.schema_field_count()).unwrap_or(usize::MAX);
@@ -82,17 +80,17 @@ pub fn inspect(path: &Path, schema_path: &Path, verify: bool) -> Result<String> 
         "field", "type", "docs", "sum_field_len", "avg_len", "terms", "bytes"
     )?;
     for f in fields {
-        write_field(&mut out, &seg, f, &sections)?;
+        write_field(out, &seg, f, &sections)?;
     }
     if verify {
         seg.verify()
             .with_context(|| format!("verifying the segment {}", path.display()))?;
         writeln!(out, "\nverify            ok")?;
     }
-    Ok(out)
+    Ok(())
 }
 
-fn write_section(out: &mut String, s: &SectionInfo, schema: &CollectionSchema) -> Result<()> {
+fn write_section(out: &mut dyn Write, s: &SectionInfo, schema: &CollectionSchema) -> Result<()> {
     let field = field_label(s.field, schema);
     let (stream_len, blocks, block) = match s.stream {
         Some(st) => (
@@ -118,7 +116,12 @@ fn write_section(out: &mut String, s: &SectionInfo, schema: &CollectionSchema) -
 
 /// One field's line: documents with it, field lengths and terms for `text`/`keyword`, documents with a value for
 /// a column field, and the bytes of its sections.
-fn write_field(out: &mut String, seg: &Segment, f: &Field, sections: &[SectionInfo]) -> Result<()> {
+fn write_field(
+    out: &mut dyn Write,
+    seg: &Segment,
+    f: &Field,
+    sections: &[SectionInfo],
+) -> Result<()> {
     let id = f.id();
     let bytes: u64 = sections
         .iter()
@@ -173,15 +176,16 @@ fn write_field(out: &mut String, seg: &Segment, f: &Field, sections: &[SectionIn
     Ok(())
 }
 
-/// The terms of `field_name` with their statistics, or with `term` that term's postings: per document its docid,
+/// Writes to `out` the terms of `field_name` with their statistics, or with `term` that term's postings: per document its docid,
 /// id, frequency and positions (when the field records them), grouped by postings block.
 pub fn dump(
+    out: &mut dyn Write,
     path: &Path,
     schema_path: &Path,
     field_name: &str,
     term: Option<&str>,
-) -> Result<String> {
-    let (seg, schema) = open(path, schema_path)?;
+) -> Result<()> {
+    let (seg, schema, _) = open(path, schema_path)?;
     let Some(field) = schema.field(field_name) else {
         bail!("the schema has no field {}", escaped(field_name));
     };
@@ -193,7 +197,6 @@ pub fn dump(
         );
     }
     let mut terms = seg.terms(field.id())?;
-    let mut out = String::new();
     let Some(term) = term else {
         writeln!(
             out,
@@ -212,7 +215,7 @@ pub fn dump(
                 info.max_tf()
             )?;
         }
-        return Ok(out);
+        return Ok(());
     };
     let Some(info) = terms.get(term.as_bytes())? else {
         bail!(
@@ -264,7 +267,7 @@ pub fn dump(
             escaped(&id)
         )?;
     }
-    Ok(out)
+    Ok(())
 }
 
 /// A term in double quotes, escaped (so an empty term or one with spaces reads as one).
@@ -287,17 +290,10 @@ fn field_label(field: u32, schema: &CollectionSchema) -> String {
         .map_or_else(|| format!("#{field}"), |f| escaped(f.name()))
 }
 
-/// `s` with its control characters escaped, so it stays one line (and one table cell).
+/// `s` as Rust escapes it in `Debug` (control and format characters, backslashes and quotes), so it stays one line
+/// and one table cell, and two strings never print the same.
 fn escaped(s: &str) -> String {
-    let mut out = String::new();
-    for c in s.chars() {
-        if c.is_control() {
-            out.extend(c.escape_default());
-        } else {
-            out.push(c);
-        }
-    }
-    out
+    s.escape_debug().to_string()
 }
 
 /// As [`escaped`], for bytes that should be UTF-8 (terms and ids, SPEC §5.3.1); others bytes as `\x..`.
@@ -305,5 +301,19 @@ fn escaped_bytes(bytes: &[u8]) -> String {
     match std::str::from_utf8(bytes) {
         Ok(s) => escaped(s),
         Err(_) => bytes.escape_ascii().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escaping_is_one_line_and_unambiguous() {
+        assert_ne!(escaped("a\\nb"), escaped("a\nb"));
+        assert!(!escaped("a\nb\u{202e}").contains(['\n', '\u{202e}']));
+        assert_eq!(escaped("doc-1"), "doc-1");
+        assert_eq!(quoted(b""), "\"\"");
+        assert_eq!(quoted(b"\xff"), "b\"\\xff\"");
     }
 }
