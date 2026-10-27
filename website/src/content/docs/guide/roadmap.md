@@ -20,7 +20,7 @@ That percentage is M0–M15 only. Milestones after v1.0 are at the end of this p
 
 ## M0 — Project bootstrap
 
-Done. The Cargo workspace and stub crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo deny`,
+Done. The Cargo workspace and its crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo deny`,
 Miri on `persia-format`), the `justfile`, repo tooling in Rust (`cargo xtask`, ADR-0003), issue
 templates, and the documentation scaffolding: this repository's rules, the ADR process, ADR-0001 and
 ADR-0002, and [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md). No dependencies.
@@ -50,15 +50,15 @@ rules), document validation, JSON and CBOR, and the manifest model. Segment writ
 
 ## M4 — Text analysis
 
-Depends on M0. Its state is the table above. `persia-analysis` implements Unicode and whitespace
-tokenizers, NFKC, lowercasing, accent folding, English, Spanish, and Portuguese stopword lists and
+Done. Depends on M0. `persia-analysis` implements Unicode and whitespace
+tokenizers, NFKC, lowercasing, accent folding, English, Spanish, Portuguese, French, German, and Italian stopword lists and
 stemmers, synonyms, edge n-grams, and the named analyzer pipelines (`standard`, `keyword`,
-`whitespace`, `en`, `es`, `pt`). [`PROGRESS.md`](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md)
-lists the leaves, including the ones still open. Segment writing (M5) waits on this milestone.
+`whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`). Segment writing (M5) needs this milestone.
+Its state is the table above.
 
 ## M5 — Segment writer and reader
 
-Depends on M1, M3, and M4. The in-memory index builder and every section writer and reader: term
+Depends on M1, M3, and M4. Its state is the table above. The in-memory index builder and every section writer and reader: term
 dictionary, postings, positions, norms, columns, stored documents, ids, blob references, and the
 footer. Includes `verify`, inspect and dump commands, property tests against a model, golden
 segments, and fuzz targets. This is the heart of the index format. Query (M7) can start from a

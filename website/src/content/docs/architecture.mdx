@@ -11,8 +11,9 @@ import WinButton from '../../components/WinButton.astro';
 
 Persia is a library you open on a file, plus a server that embeds the same engine.
 That library shape is an [embedded search database](/guide/embedded-search/): full-text search in the application process, stored in a file.
-The engine is synchronous. It talks to disks and object storage only through a `Storage` trait
-that does not exist yet. Async belongs in the cloud backends and in the server.
+The engine is synchronous. It talks to disks and object storage only through the `Storage` trait.
+Async belongs in the cloud backends and in the server. Memory and local-file backends exist.
+S3, GCS, and Azure do not.
 
 <ArchitectureDiagram />
 
@@ -27,8 +28,9 @@ that does not exist yet. Async belongs in the cloud backends and in the server.
 ## Storage and segments
 
 A segment is one byte string: sections, then a footer. Locally it is a frame payload. Remotely it is
-one object. The bytes match. Codecs on a block are `None` and `Zstd`. The container and the backends
-are still ahead of the code.
+one object. The bytes match. Codecs on a block are `None` and `Zstd`. The local container, the block
+codecs, and the memory and file backends exist. `persia-engine` can build and read one segment.
+S3, GCS, and Azure backends do not (M12). Nothing runs a query over that segment.
 
 <StorageDiagram />
 

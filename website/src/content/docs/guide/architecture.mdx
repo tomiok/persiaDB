@@ -6,7 +6,7 @@ description: "How Persia DB crates are layered in Rust, from persia-format up to
 import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
 
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
-`persia-format`, `persia-storage`, `persia-engine` (schema, documents, and manifests), and `persia-analysis` contain library code.
+`persia-format`, `persia-storage`, `persia-engine` (schema, documents, manifests, and a segment builder, writer, and reader), and `persia-analysis` contain library code.
 `persia` exports no `Db`. `persia-server` is an empty `main`. `persia-blob` and `persia-proto` are module docs only.
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
@@ -28,13 +28,13 @@ Three rules shape the rest of the design:
 |---|---|---|
 | `persia-format` | Encodings, checksums, frames, block codecs. No I/O policy. | Implemented (M1) |
 | `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Memory, local file, and the container are implemented (M2). Cloud is M12. |
-| `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Library code exists. Open leaves are in PROGRESS.md (M4). |
-| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Schema, documents, and manifests exist (M3). Segments and query do not (M5–M8). |
+| `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). It does not search. |
+| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Schema, documents, and manifests exist (M3). A segment builder, writer, and reader exist (M5). Query, the WAL, and relaxation do not (M6–M8). |
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | No API yet (M9) |
-| `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10) |
+| `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10). The crate exports no types. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Empty `main` (M11, M13) |
-| `persia-cli` | Sweep temporary and quarantine files. `inspect`, `dump`, `verify`, `compact`, and `bench` are later. | Sweep commands exist. The rest is M10. |
+| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `compact`, `bench`, import, and search are later. | Sweep, inspect, and dump exist. The rest is M10. |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. The public facade orders blob writes before the document commit so the engine never has

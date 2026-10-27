@@ -1,5 +1,8 @@
 ---
 import AsciiFigure from './AsciiFigure.astro';
+import { storageDiagramCaption } from '../layers.mjs';
+
+const storageStatus = storageDiagramCaption();
 
 const diagram = `
 ╔═ storage ════════════════════════════════════════════════════════╗ 
@@ -28,5 +31,5 @@ const diagram = `
     The same segment bytes in a local frame and in object storage
         (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#5-segment-format">SPEC §5</a>,
         <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#10-storage-abstraction-and-cloud-backends">§10</a>).
-        Deleted ids are not a section. The container, the block header, and the backends are not built yet.
+        Deleted ids are not a section. {storageStatus}
 </AsciiFigure>

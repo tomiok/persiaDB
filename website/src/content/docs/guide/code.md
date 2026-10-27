@@ -18,12 +18,12 @@ What each file says about itself:
 |---|---|---|---|
 | `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, frames (including the streaming encoder), mmap, `BlobId`, and `BlobRef`. |
 | `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
-| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | `document`, `manifest`, and `schema`. No segment writer and no query. |
+| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | `document`, `manifest`, `schema`, and `segment` (builder, writer, reader). No WAL and no query. |
 | `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | The trait, memory, local file, and the single-file container. No S3, GCS, or Azure. |
-| `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` stemmers, and built-in analyzers. |
+| `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` / `fr` / `de` / `it` stemmers, and built-in analyzers. |
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | Module docs only. |
 
-`persia-server` is an empty `main`. `persia-cli` lists and sweeps temporary and quarantine files; it does not search. `persia-proto` is a stub library.
+`persia-server` is an empty `main`. `persia-cli` lists and sweeps temporary and quarantine files, and it inspects and dumps one segment (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not search. `persia-proto` is a stub library.
 The public modules and re-exports of `persia-format` are the list in
 [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs):
 
@@ -61,8 +61,8 @@ pub use writer::Writer;
 ```
 
 Integer codecs (`delta`, `bitpack`, `postings`, `for_codec`), varints, zigzag, and the
-bounds-checked `Reader` / `Writer` live in those modules. They are library primitives. They are
-not wired into a segment writer (that is roadmap M5).
+bounds-checked `Reader` / `Writer` live in those modules. They are library primitives. Segment
+writers in `persia-engine` use them (M5). There is still no query.
 
 ## Checksums
 

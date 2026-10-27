@@ -35,7 +35,7 @@ allowed libraries.
 ## What works today
 
 The workspace exists, CI runs, and `persia-format` implements the byte-level primitives that later
-layers will build on (ROADMAP M0, and most of M1):
+layers build on (ROADMAP M0 and M1, both done):
 
 - Bounds-checked little-endian readers and writers, canonical LEB128 varints, zigzag signed integers,
   and checked offset and length types (SPEC §4.1).
@@ -52,7 +52,7 @@ layers will build on (ROADMAP M0, and most of M1):
   (SPEC §4.4, [ADR-0009](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0009-frame-validation-and-scan-end.md), ROADMAP 1.7).
   The memory-map reader and `BlobId` / `BlobRef` are in the same crate.
 
-Those pieces are library code. `persia-storage` implements the `Storage` trait, memory and local-file backends, and the single-file container (open, append, commit, recover, compact). `persia-engine` implements collection schema, documents, and manifests. `persia-analysis` implements tokenizers and built-in analyzers. None of that opens a database, indexes a document into a segment, or answers a query. Segments, the document write path, and search are still ahead (see [Getting started](/guide/getting-started/) and [Milestones](/guide/roadmap/)).
+Those pieces are library code. `persia-storage` implements the `Storage` trait, memory and local-file backends, and the single-file container (open, append, commit, recover, compact). `persia-engine` implements collection schema, documents, manifests, and a segment builder, writer, and reader. `persia-analysis` implements tokenizers and built-in analyzers. None of that opens a database or answers a query. The document write path (WAL, memtable, index commit) and search are not implemented (see [Getting started](/guide/getting-started/) and [Milestones](/guide/roadmap/)).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 

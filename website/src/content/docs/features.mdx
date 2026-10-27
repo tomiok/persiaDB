@@ -16,15 +16,17 @@ builds it. The long form, including the schema sketch and the relaxation JSON, i
 | Open a file and search | Planned (M10) |
 | Full-text search, filters, facets, sort | Planned (M7) |
 | Zero-results relaxation | Planned (M8), on by default in the design |
-| Schema, documents, analyzers | Planned (M3, M4). Text analysis is ready to start. |
-| Crash-safe commit and recovery | Planned (M2, M6) |
+| Schema and documents | Done as library code (M3). Not reachable through `Db`. |
+| Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. They do not run a query. |
+| Segment writer and reader | Library code in `persia-engine` (M5). The leaf count is on the [roadmap](/roadmap/). Nothing searches the segment. |
+| Crash-safe commit and recovery | Container commit is done (M2). Document WAL and index commit are planned (M6). |
 | Blob storage | Planned (M9) |
 | gRPC and HTTP server | Planned (M11) |
 | S3, GCS, Azure, replication | Planned (M12) |
 | Kubernetes and sharding | Planned (M13) |
 | Embedded Go and TypeScript bindings | Planned (after M10). Design only. |
 | Rust and Go network SDKs | Planned (M14) |
-| Integer codecs and `None` / `Zstd` block codecs | Done, as library code in `persia-format` (M1, except leaf 1.4.4) |
+| Integer codecs and `None` / `Zstd` block codecs | Done, as library code in `persia-format` (M1) |
 
 ## Zero-results relaxation
 

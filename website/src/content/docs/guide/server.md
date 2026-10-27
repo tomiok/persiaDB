@@ -8,9 +8,9 @@ Cloud backends (M12) and distribution (M13) come after the server. SDKs (M14) fo
 
 ## Server
 
-gRPC is the primary API; HTTP/JSON mirrors it for tooling. Both track `persia.proto`
-(SPEC §12.1–§12.2). Generated Rust code is committed; building the project does not need `protoc`
-(ADR-0003). The service sketch in the SPEC is illustrative:
+gRPC is the primary API; HTTP/JSON mirrors it for tooling. Both are specified to track `persia.proto`
+(SPEC §12.1–§12.2). Generated Rust code is specified to be committed so a build does not need `protoc`
+(ADR-0003). That code is not in the tree: `persia-proto` is module docs only (M11). The service sketch in the SPEC is illustrative:
 
 ```proto
 service Persia {

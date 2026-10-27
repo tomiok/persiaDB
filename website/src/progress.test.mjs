@@ -32,7 +32,9 @@ test('parseProgress matches the summary and the milestone rows', () => {
 	const table = milestoneTableMarkdown();
 	assert.match(table, /\| \*\*M0\*\* /);
 	assert.match(table, /\| \*\*M4\*\* /);
-	assert.match(table, new RegExp(`In progress, ${parsed.milestones.find((ms) => ms.id === 'M4')?.done}/`));
+	const m4 = parsed.milestones.find((ms) => ms.id === 'M4');
+	assert.ok(m4);
+	assert.match(table, new RegExp(`Tokenizers, stemmers, analyzers \\| M0 \\| (Done|In progress|Ready|Blocked), ${m4.done}/${m4.leaves} \\|`));
 	assert.equal(table.includes(MILESTONE_TABLE_TOKEN), false);
 	assert.equal(table.includes('|'), true);
 });

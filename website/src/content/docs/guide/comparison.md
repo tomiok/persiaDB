@@ -23,7 +23,7 @@ When this page and the SPEC disagree, the SPEC wins.
 | What you store | Planned: one `<name>.persia` file, plus an optional `<name>.persia.blobs` pack. | The FTS5 index lives in the SQLite database file. | A directory of segment files. | The server's own data directory. |
 | How you query | Planned: a collection API, BM25F, filters, and facets. | SQL `MATCH`, with a `bm25()` ranking function. | Queries against a schema declared in code. | JSON over HTTP. Typo tolerance is on by default. |
 | Object storage | Planned: the same segment bytes locally or in S3, GCS, or Azure Blob. | A local database file. | A directory the library writes. | You run the server. |
-| Today | Pre-alpha. Codecs, local storage, schema types, and text analysis exist as library code. It does not search. | Part of SQLite. | A released library. | A released server. |
+| Today | Pre-alpha. Codecs, local storage, schema types, text analysis, and a segment writer exist as library code. It does not search. | Part of SQLite. | A released library. | A released server. |
 
 ## Persia DB
 
@@ -34,8 +34,8 @@ and on the [overview](/guide/overview/). It is not what the crate does today.
 [What is an embedded search database?](/guide/embedded-search/) defines that in-process, single-file shape,
 and separates it from running a search server.
 
-What the repository implements today is on-disk codecs, local storage, schema and document types, and text analysis.
-There is no `Db::open`, no segment writer, and no query.
+What the repository implements today is on-disk codecs, local storage, schema and document types, text analysis, and a segment writer and reader.
+There is no `Db::open` and no query. Building one segment is not a database.
 The [getting started](/guide/getting-started/) page separates that library code from the illustrative API.
 The first release a caller can use is `v0.1` (roadmap M10). The format stays unstable until `v1.0` (M15).
 Counts on the [roadmap](/roadmap/) are read from PROGRESS.md when the site is built.

@@ -1,53 +1,23 @@
 ---
 import AsciiFigure from './AsciiFigure.astro';
+import { layerDiagram } from '../layers.mjs';
 
 interface Props {
     hero?: boolean;
 }
 
 const { hero = false } = Astro.props;
-
-const diagram = `
-╔═ layers ═════════════════════════════════════════════════════════╗ 
-║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
-║       ┃ persia-server, Rust SDK, Go SDK                  ┃       ║░
-║       ┃ planned                                          ┃       ║░
-║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
-║                                ▼                                 ║░
-║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
-║       ┃ persia · Db and Collection                       ┃       ║░
-║       ┃ stub · no methods yet                            ┃       ║░
-║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
-║                                ▼                                 ║░
-║ ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓ ║░
-║ ┃ engine           ┃  ┃ blob             ┃  ┃ analysis         ┃ ║░
-║ ┃ segments, query  ┃  ┃ chunks, dedup    ┃  ┃ tokenizers       ┃ ║░
-║ ┃ planned          ┃  ┃ planned          ┃  ┃ stub · M4        ┃ ║░
-║ ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛ ║░
-║                                ▼                                 ║░
-║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
-║       ┃ persia-storage                                   ┃       ║░
-║       ┃ memory, file, s3, gcs, azure                     ┃       ║░
-║       ┃ planned                                          ┃       ║░
-║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
-║                                ▼                                 ║░
-║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░
-║       ┃ persia-format                                    ┃       ║░
-║       ┃ encodings, checksums, codecs                     ┃       ║░
-║       ┃ in progress · code exists                        ┃       ║░
-║       ┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛       ║░
-╚══════════════════════════════════════════════════════════════════╝░
- ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
-`.slice(1, -1);
+const layer = layerDiagram();
 ---
 
 <AsciiFigure
     label="Crate layers"
-    diagram={diagram}
+    diagram={layer.diagram}
     hero={hero}
-    accent={['persia-format', 'encodings, checksums', 'in progress']}
+    accent={layer.accent}
+    accentAlt={layer.accentAlt}
 >
     Layers from <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview">SPEC §3</a>.
-        Only <code>persia-format</code> has real code today. The other crates are workspace stubs.
-        Arrows point down: each layer is used by the one above it.
+    {layer.caption}
+    Arrows point down: each layer is used by the one above it.
 </AsciiFigure>

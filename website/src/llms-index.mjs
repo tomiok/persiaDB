@@ -9,6 +9,8 @@ import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from '
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { llmsStatusParagraph } from './layers.mjs';
+
 const here = path.dirname(fileURLToPath(import.meta.url));
 const docsDir = path.join(here, 'content/docs');
 
@@ -157,12 +159,9 @@ export function renderLlmsTxt() {
 	const sections = [
 		'# Persia DB',
 		`> ${summary}`,
-		[
-			'Pre-alpha. Nothing in the repository opens a database, indexes a document, or runs a search.',
-			'`Db::open`, `put`, `commit`, and `search` in these pages are illustrative, from SPEC.md, and are not in the crate.',
-			'SPEC.md wins if a page disagrees with it. PROGRESS.md is the live roadmap counter.',
-			`The same pages, concatenated as Markdown, are [llms-full.txt](${llmsFullUrl}).`,
-		].join(' '),
+		[llmsStatusParagraph(), `The same pages, concatenated as Markdown, are [llms-full.txt](${llmsFullUrl}).`].join(
+			' ',
+		),
 		['## Docs', docs.map(linkLine).join('\n')].join('\n\n'),
 		['## Guide', guide.map(linkLine).join('\n')].join('\n\n'),
 	];

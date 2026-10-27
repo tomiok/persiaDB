@@ -56,9 +56,10 @@ does not shrink the block. The zstd level is a writer choice and is not stored.
 `compress` / `decompress` for those two codecs is done (ROADMAP 1.4). The on-disk block
 header, the block table, and random-access reads are implemented (ROADMAP 1.5, SPEC §5.2).
 
-Integer codecs that will sit *inside* blocks (delta-coded doc ids, bit-packing, postings blocks,
-frame-of-reference for numbers) are implemented and tested (ROADMAP 1.2, ADR-0004). They are not
-wired into a segment writer yet (that is M5).
+Integer codecs that sit inside blocks (delta-coded doc ids, bit-packing, postings blocks,
+frame-of-reference for numbers) are implemented and tested (ROADMAP 1.2, ADR-0004). Segment section
+writers in `persia-engine` use them (M5). The leaf count is on the [roadmap](/roadmap/). Nothing
+searches the segment.
 
 ## One storage interface, several backends
 

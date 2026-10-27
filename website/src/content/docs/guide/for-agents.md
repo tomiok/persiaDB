@@ -13,16 +13,17 @@ Machine-readable copies of these pages: [llms.txt](/llms.txt) and [llms-full.txt
 Pre-alpha. %%PROGRESS_SUMMARY%%.
 The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Do not treat a number on an older page as newer than that file.
 
-Nothing works end to end. You cannot put a document or search.
+Nothing works end to end. You cannot open a database or search.
 Opening a container file is implemented in `persia-storage`; that is not `Db::open`, and it does not search.
+`SegmentBuilder` and `SegmentWriter` in `persia-engine` can write one segment's bytes. That is not `put` or `commit`, and nothing searches it.
 The on-disk format is unstable until v1.0 (SPEC §15).
 
 | Question | Answer |
 |---|---|
 | Usable database API? | No. `persia` exports no types. |
 | Published on crates.io? | No. `publish = false`. |
-| CLI? | File sweep only (`container` / `store` `files` and `sweep`). Not inspect, dump, verify, compact, or search. |
-| Working library code? | `persia-format` codecs (header, superblock, checksums, integer codecs, block compression, block framing, frames, mmap, `BlobId`). `persia-storage`: memory, local file, and the single-file container. `persia-engine`: schema, documents, and manifests. `persia-analysis`: tokenizers and built-in analyzers. |
+| CLI? | File sweep (`container` / `store` `files` and `sweep`), plus `inspect segment` and `dump segment` (`--verify` on inspect). Not compact, import, or search. |
+| Working library code? | `persia-format` codecs (header, superblock, checksums, integer codecs, block compression, block framing, frames, mmap, `BlobId`). `persia-storage`: memory, local file, and the single-file container. `persia-engine`: schema, documents, manifests, and a segment builder, writer, and reader. `persia-analysis`: tokenizers and built-in analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`). |
 | Next work? | The ready-next list in PROGRESS.md. |
 | First callable release? | `v0.1`, ROADMAP M10. Blocked on the write path, query, relaxation, and blobs. |
 
@@ -57,4 +58,4 @@ Code that only needs the byte codecs can use `persia-format` (`Header`, `Reader`
 Each guide page has a `description` in its frontmatter and stable headings.
 [llms.txt](/llms.txt) is the index. [llms-full.txt](/llms-full.txt) is the pages in Markdown.
 Prefer those, plus SPEC.md, over guessing from the crate names.
-`persia-engine`, `persia-storage`, and `persia-analysis` export the library code named above. `persia-blob` and `persia-proto` are module docs only.
+`persia-engine`, `persia-storage`, and `persia-analysis` export the library code named above, including the segment builder. `persia-blob` and `persia-proto` are module docs only.

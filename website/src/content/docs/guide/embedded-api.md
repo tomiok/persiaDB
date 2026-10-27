@@ -39,7 +39,8 @@ Embedded mode has no authentication and no config file. Knobs, once they exist, 
 with defaults: memtable size, commit interval, fsync policy, merge threads, search threads, cache
 sizes, block size, blob chunk size, and the `relax.*` settings (SPEC §14).
 
-The `persia` command-line tool (`inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import,
-a one-shot search, and a small bench) is part of the same milestone (ROADMAP 10.4). The binary in
-the tree today is a stub. The `v0.1.0-alpha` tag is specified to say, in the release itself, that
+The `persia` command-line tool's later commands (`compact`, `stats`, JSONL import,
+a one-shot search, and a small bench) are part of the same milestone (ROADMAP 10.4) and are not in the binary.
+`persia inspect segment` and `persia dump segment` are, and `--verify` checks the segment. File-sweep commands exist too.
+None of that is `Db::open`. The `v0.1.0-alpha` tag is specified to say, in the release itself, that
 the format is still unstable (ROADMAP 10.5.2).

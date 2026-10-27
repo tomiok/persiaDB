@@ -1,5 +1,8 @@
 ---
 import AsciiFigure from './AsciiFigure.astro';
+import { queryPathCaption } from '../layers.mjs';
+
+const queryStatus = queryPathCaption();
 
 const diagram = `
 ╔═ query ══════════════════════════════════════════════════════════╗ 
@@ -38,5 +41,5 @@ const diagram = `
 >
     Planned query path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#7-search">SPEC §7</a>).
         Step 4 is the branch into zero-results relaxation. Filters stay strict unless the caller opts in.
-        The response names the level and what changed. Milestones M7 and M8.
+        The response names the level and what changed. {queryStatus}
 </AsciiFigure>

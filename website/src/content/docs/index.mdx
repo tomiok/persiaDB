@@ -51,10 +51,10 @@ import WinButton from '../../components/WinButton.astro';
 | Property | What it means | Status |
 |---|---|---|
 | Zero friction | `Db::open("app.persia")` just works. No daemon and no config file for the embedded library. | Planned (M10) |
-| Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | Format codecs and text analysis exist. Scoring and query execution do not. |
+| Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | Format codecs, text analysis, and a segment writer exist. Scoring and query execution do not. |
 | Never zero results | A query that matches nothing is relaxed step by step, and the response says what changed. | Planned (M8) |
-| Cloud-native | Immutable segments. The same bytes locally and in object storage. Stateless query nodes. | Planned (M12, M13) |
-| Correctness, then speed | Checksums, crash-safe commits, and fuzzed parsers come before performance claims. | Checksums, fuzzed parsers, and the container commit exist. A document index does not. |
+| Cloud-native | Immutable segments. The same bytes locally and in object storage. Stateless query nodes. | Segment bytes can be written (M5). Object storage and query nodes are planned (M12, M13). |
+| Correctness, then speed | Checksums, crash-safe commits, and fuzzed parsers come before performance claims. | Checksums, fuzzed parsers, the container commit, and segment read/write exist. There is no document write path and no query. |
 
 The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) (draft v0.1).
 When this site and the SPEC disagree, the SPEC wins.

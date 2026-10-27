@@ -3,24 +3,26 @@ title: "Feature reference"
 description: "Reference for Persia DB search, BM25F ranking, the zero-results cascade, schema, durability, and blobs. Each item is planned or done."
 ---
 
-Everything in this section is **planned** unless a paragraph says a primitive is already in
-`persia-format`. You cannot call these APIs today.
+Search, ranking, relaxation, the document write path, blobs, and the server are **planned**.
+Schema, analyzers, the container commit, and segment bytes exist as library code.
+You cannot call `Db` or `search` today.
 
 | Capability | Status | Defined in |
 |---|---|---|
 | Open a file and search | Planned (M10) | SPEC §8, §10.2 |
 | Full-text search, filters, facets, sort | Planned (M7) | SPEC §7 |
 | Zero-results relaxation | Planned (M8) | SPEC §7.6 |
-| Schema and documents | Planned (M3) | SPEC §6 |
-| Analyzers (`standard`, `en`, `es`, `pt`, …) | Planned (M4); milestone is ready to start | SPEC §6.3 |
-| Crash-safe commit and recovery | Planned (M2, M6) | SPEC §4.5, §8.6 |
+| Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
+| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). They do not run inside a query. | SPEC §6.3 |
+| Segment writer and reader | Library code in `persia-engine` (M5). The leaf count is on the [roadmap](/roadmap/). Nothing searches the segment. | SPEC §5 |
+| Crash-safe commit and recovery | Container commit is done (M2). The document write path is planned (M6). | SPEC §4.5, §8.6 |
 | Blob storage | Planned (M9) | SPEC §9 |
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
 | Embedded Go and TypeScript bindings | Planned (after M10). Design only. | SPEC §13.1, [Embedded SDKs](/guide/sdks/) |
 | Rust and Go network SDKs | Planned (M14) | SPEC §13.2 |
-| Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1, except 1.4.4) | SPEC §4.1, §5.2 |
+| Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1) | SPEC §4.1, §5.2 |
 
 ## Search and ranking
 
@@ -106,14 +108,12 @@ The schema sketch in SPEC §6.2, illustrative:
 ```
 
 Analyzers are a pipeline: character filters, then a tokenizer, then token filters (SPEC §6.3).
-Built-ins implemented (ROADMAP 4.4.2) are `standard` (Unicode word boundaries, NFKC,
-lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, and `pt` (stopwords, a
-Snowball-style stemmer, accent folding). SPEC §6.3 also names `fr`, `de`, and `it`; whether those
-three ship in v1 is open (SPEC §18.7). Positions, used for phrases, are opt-in per field
+Built-ins implemented (ROADMAP 4.4.2 and 4.4.10) are `standard` (Unicode word boundaries, NFKC,
+lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, `pt`, `fr`, `de`, and `it`
+(stopwords, a Snowball-style stemmer, accent folding). Positions, used for phrases, are opt-in per field
 (SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
 
-Those pipelines live in `persia-analysis`. Leaves still open in that milestone are listed in
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Nothing here searches.
+Those pipelines live in `persia-analysis` (M4). Nothing here searches.
 
 ## Durability
 
@@ -138,8 +138,9 @@ run in the background, and publish through the same commit protocol (SPEC §8.5)
 local file is reclaimed by rewriting live data into a new file and atomically replacing the old one
 (SPEC §4.6).
 
-None of this I/O exists yet. The rules above are the contract the storage and engine milestones
-(M2, M6) have to meet, including crash injection at every step of the commit.
+The single-file container commit in `persia-storage` follows that superblock order (M2) and is
+crash-tested. It does not store a document. The WAL, memtable, flush, index commit, and merge
+above are not built (M6). You cannot store a searchable document and recover it.
 
 ## Blobs
 

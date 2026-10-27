@@ -1,6 +1,6 @@
 ---
 title: "Getting started with PersiaDB"
-description: "Getting started with PersiaDB, a Rust search library aimed at embedded full-text search. The embedded Db API is planned. Format-layer codecs, storage, schema, and analysis are what you can call today. Nothing runs a query."
+description: "Getting started with PersiaDB, a Rust search library aimed at embedded full-text search. The embedded Db API is planned. Format codecs, storage, schema, analysis, and a segment writer are what you can call today. Nothing runs a query."
 head:
   - tag: title
     content: "Getting started with PersiaDB: a Rust search library"
@@ -13,8 +13,8 @@ head:
 Getting started with PersiaDB means separating this Rust search library's design from the code you can call.
 The design is embedded full-text search in Rust: a library in your process, one file, ranked results, and no search daemon.
 That embedded `Db` API is planned (roadmap M10) and is not in the crate.
-What you can call today starts with the format-layer codecs in `persia-format`, plus the storage, schema, and analysis libraries below.
-Nothing indexes a document or runs a query.
+What you can call today starts with the format-layer codecs in `persia-format`, plus the storage, schema, analysis, and segment libraries below.
+Nothing opens a database or runs a query. A segment builder can write one segment's bytes. That is not `Db::open`.
 
 [What is an embedded search database?](/guide/embedded-search/) defines that in-process shape.
 The [comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch, and it is not a benchmark.
@@ -31,7 +31,7 @@ The crates are not published (`publish = false` in the workspace). There is no c
 
 `persia-server` is an empty `main` function. No gRPC or HTTP server runs.
 
-`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It does not inspect an index, dump documents, verify segments, compact, import, or search.
+`persia-cli` lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not compact, import, or search.
 
 `persia-format` encodes and decodes on-disk bytes. It does not open a file as a database. A git dependency, for code that wants those codecs:
 
@@ -58,7 +58,7 @@ assert_eq!(decoded.access(), Access::ReadWrite);
 
 Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, frames (including the streaming encoder), the memory-map reader, and `BlobId` / `BlobRef`. The public module list is [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs). The [code](/guide/code/) page quotes exports from that file.
 
-`persia-storage` implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container: create, open, append, commit, recover, and compact. That commit is the container file, not an index of documents. `persia-engine` implements collection schema, document validation, and manifest types. It does not build a segment or answer a query. `persia-analysis` implements tokenizers, filters, English, Spanish, and Portuguese stemmers, and the built-in analyzers `standard`, `keyword`, `whitespace`, `en`, `es`, and `pt`. It does not search. `persia-blob` exports no API.
+`persia-storage` implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container: create, open, append, commit, recover, and compact. That commit is the container file, not an index of documents. `persia-engine` implements collection schema, document validation, manifest types, and a segment builder, writer, and reader. It does not answer a query, and there is no WAL or memtable. `persia-analysis` implements tokenizers, filters, stemmers for English, Spanish, Portuguese, French, German, and Italian, and the built-in analyzers `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, and `it`. It does not search. `persia-blob` exports no API.
 
 Those crates are in the same git repository and are unpublished the same way. Depending on them does not give you `Db::open`.
 
@@ -84,7 +84,7 @@ let results = products.search("runing")?;
 let relaxation = &results.relaxation;
 ```
 
-The collection schema in SPEC §6.2, as JSON. This is the design, not a parser that exists:
+The collection schema in SPEC §6.2, as JSON. `CollectionSchema::from_json` in `persia-engine` parses a schema. The block below is the SPEC sketch, and it does not open a database:
 
 ```json
 {
@@ -136,7 +136,7 @@ The response is specified to carry what happened. This object is from SPEC §7.6
 
 ### Command line
 
-**Planned (ROADMAP 10.4), except the file-sweep commands above.** The `persia` binary is specified to grow `inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary in the tree does none of those.
+**Partly in the tree.** `persia inspect segment` and `persia dump segment` read one segment file, and `--verify` checks it. Still planned (ROADMAP 10.4): `compact`, `stats`, JSONL import, a one-shot search, and a small bench. The binary does none of those.
 
 ## Common questions
 
@@ -144,11 +144,11 @@ The [FAQ](/guide/faq/) answers the same kind of question for status, how this di
 
 ### Can I add Persia to a Rust project today?
 
-Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs, and on `persia-storage`, `persia-engine`, and `persia-analysis` for the container, schema types, and analyzers. None of those dependencies give you `Db::open`.
+Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs, and on `persia-storage`, `persia-engine`, and `persia-analysis` for the container, schema types, analyzers, and a segment builder. None of those dependencies give you `Db::open`.
 
 ### How do I open a database, index, and search?
 
-You don't, yet, through `Db::open`. Those calls are the illustrative block on this page. A lower-level container open exists in `persia-storage`. It does not index or search. The milestone that is supposed to ship the embedded API is M10 (`v0.1`). It waits on the document write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
+You don't, yet, through `Db::open`. Those calls are the illustrative block on this page. A lower-level container open exists in `persia-storage`. That open does not index or search. A segment builder can write one segment's bytes, and nothing queries it. The milestone that is supposed to ship the embedded API is M10 (`v0.1`). It waits on the document write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
 
 ### How do I read which relaxation was applied?
 
