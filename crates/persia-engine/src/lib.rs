@@ -5,5 +5,7 @@
 
 pub mod document;
 pub mod manifest;
+pub mod memtable;
 pub mod schema;
 pub mod segment;
+pub mod view;

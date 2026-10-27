@@ -29,6 +29,13 @@ pub(crate) struct Mark {
     sum_len: u64,
 }
 
+impl Mark {
+    /// The number of postings at the mark: where the postings added since start.
+    pub(crate) fn postings(&self) -> usize {
+        self.postings
+    }
+}
+
 /// The inverted index of one field, as documents arrive.
 #[derive(Debug)]
 pub(crate) struct Inverted {

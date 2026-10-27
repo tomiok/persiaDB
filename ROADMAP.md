@@ -367,10 +367,11 @@ Deps: M1, M3, M4. The heart of the index format.
 Deps: M2, M5.
 
 ## 6.1 Memtable
-- [ ] 6.1.1 Mutable in-memory index structure (concurrent reads, single writer)
-- [ ] 6.1.2 Searchable view implementing the same iterator traits as a segment
-- [ ] 6.1.3 Upsert/delete semantics inside memtable (replace within same buffer)
-- [ ] 6.1.4 Size/age flush triggers
+- [~] 6.1.1 Mutable in-memory index structure (concurrent reads, single writer)
+- [~] 6.1.2 Searchable view implementing the same iterator traits as a segment
+- [~] 6.1.3 Upsert/delete semantics inside memtable (replace within same buffer)
+- [~] 6.1.4 Size/age flush triggers
+- [ ] 6.1.5 `SearchView` parity for queries: term enumeration (prefix, range, automaton) and column access over segments and the memtable, for 7.1 `Prefix`/`Fuzzy` and 7.4.5 filters (found in 6.1.2)
 
 ## 6.2 WAL (SPEC §8.2)
 - [ ] 6.2.1 WAL record format: op (put/delete), collection id, payload, checksum

@@ -143,3 +143,15 @@ Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: be
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M | | |
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M | | |
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; cursors (ROADMAP 5.3.16) | 31.9 M | 10.8 M | 214 M | 59.5 M |
+
+## `persia-engine` memtable
+
+`cargo bench -p persia-engine --bench segment -- memtable`: the 2 000 documents of the segment building benchmarks.
+`put` is `Memtable::put` for all of them (validation, the full CBOR encoding, analysis, accumulation, the per-term
+chains, under the write lock), the counterpart of `segment/add`; `postings_freqs` reads every `body` term's postings
+through a `MemtableView` (copied out under the read lock) with frequencies, as `segment_read/postings_freqs` does.
+Documents and postings per second.
+
+| Recorded | `memtable/put` | `memtable/postings_freqs` | `segment/add`, same run |
+|---|--:|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
