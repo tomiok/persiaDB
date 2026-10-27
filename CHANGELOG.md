@@ -12,8 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `BlockCache` and `Segment::open_with_cache` (ROADMAP 5.3.11, SPEC §10.6). A segment reads every
   block-framed section through an LRU cache of decoded blocks, bounded in bytes, which several segments may share
   (`BlockCache::DEFAULT_CAPACITY`, 8 MiB, for all the segments opened with `Segment::open`, ROADMAP 5.3.15). Term
-  lookups, posting lists and document fetches no longer decode and re-check the CRC of a block another reader decoded; `BlockCache::stats` reports hits and
-  misses. A dropped segment's blocks leave the cache. When blocks are re-read (docs/benchmarks.md, rows measured
+  lookups, posting lists and document fetches no longer decode and re-check the CRC of a block another reader
+  decoded; `BlockCache::stats` reports hits and misses. A dropped segment's blocks leave the cache. When blocks are re-read (docs/benchmarks.md, rows measured
   together), `segment_read` runs postings with frequencies 6.4x, `advance` 4.4x, document fetches 2.6x and term lookups
   1.3x faster, and `segment_records/id_of_1000` 5.8x; positions 13.5x, together with the per-document decoding of
   ROADMAP 5.3.13 (the benchmark does not separate the two). The record cache it replaces kept 8 blocks per segment.
@@ -176,6 +176,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine`: `SegmentWriter::finish` writes every section straight into the segment buffer as it encodes it,
+  instead of holding each section and copying it in (ROADMAP 5.1.6): postings are grouped by term as 4-byte indices,
+  term lists are encoded in one pass that measures them (writing the `TermInfo` records) and one per stream that writes
+  them, FOR columns and FSTs are generated into the output. Its documentation states the memory a flush needs beyond
+  the builder, for the flush threshold of M6; on a 20 000-document segment of 8.4 MB the peak above the builder drops
+  from 28.6 MB to 10.3 MB (`tests/flush_memory.rs`). Encoding the lists twice makes `finish` about 18 % slower
+  (`segment/finish`: 82.7 K documents/s, from 100.5 K). Output is byte for byte the same.
+- `persia-format`: `Writer::clear` empties a writer and keeps its buffer.
 - `persia-engine`: a `text` field's tokens are limited to `MAX_TERM_LEN` (32 KiB, the `keyword` value limit) whatever
   the analyzer (ROADMAP 5.4.5, SPEC §5.3.1): `SegmentBuilder::add` rejects a document whose analyzer yields a longer
   token with `SegmentError::TermTooLong`, and `Segment::open` treats a `TermDict` path longer than that as corruption

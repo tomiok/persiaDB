@@ -588,12 +588,13 @@ mod tests {
         let FieldBuilder::Text { inverted, .. } = &b.fields[t.get() as usize] else {
             panic!("t is a text field")
         };
-        let g = inverted.by_term();
+        let g = inverted.by_term().unwrap();
         let got: Vec<(&[u8], u32, &[u32])> = g
             .order
             .iter()
-            .zip(&g.postings)
-            .map(|(&id, p)| (inverted.terms.key(id), p.tf, inverted.positions_of(p)))
+            .enumerate()
+            .flat_map(|(r, &id)| g.postings_of(r).map(move |p| (id, p)))
+            .map(|(id, p)| (inverted.terms.key(id), p.tf, inverted.positions_of(p)))
             .collect();
         // Value 0: a ab abc abcd @0, a ab @1 (each twice); end 2. Value 1 starts at 102: a @102 (twice).
         assert_eq!(
@@ -716,12 +717,13 @@ mod tests {
         let FieldBuilder::Keyword { inverted } = &b.fields[k.get() as usize] else {
             panic!("k is a keyword field")
         };
-        let g = inverted.by_term();
+        let g = inverted.by_term().unwrap();
         let terms: Vec<(&[u8], u32)> = g
             .order
             .iter()
-            .zip(&g.postings)
-            .map(|(&id, p)| (inverted.terms.key(id), p.tf))
+            .enumerate()
+            .flat_map(|(r, &id)| g.postings_of(r).map(move |p| (id, p)))
+            .map(|(id, p)| (inverted.terms.key(id), p.tf))
             .collect();
         assert_eq!(terms, [(&b""[..], 1), (b"B", 2), (b"a", 1)]);
         assert_eq!((inverted.sum_len, inverted.docs_with_field()), (4, 1));

@@ -6,12 +6,12 @@ mod terms;
 
 use persia_format::Writer;
 use persia_format::block::{BlockWriter, Compression, DEFAULT_BLOCK_SIZE};
-use persia_format::checksum::crc32c;
+use persia_format::checksum::{Crc32c, crc32c};
 use persia_format::compress::DEFAULT_ZSTD_LEVEL;
 
-use super::builder::inverted::{Grouped, Inverted};
+use super::builder::inverted::Inverted;
 use super::builder::{FieldBuilder, SegmentBuilder};
-use super::kind::{SEGMENT_FIELD, SectionKind};
+use super::kind::SectionKind;
 use super::{SegmentError, norms};
 use crate::schema::{FieldType, SchemaHash};
 
@@ -104,6 +104,15 @@ impl<'a> SegmentWriter<'a> {
 
     /// The segment's bytes.
     ///
+    /// Every section is written straight into the returned buffer as it is encoded, never held whole on its own
+    /// (ROADMAP 5.1.6). Besides the builder ([`SegmentBuilder::size_in_bytes`]), a flush then needs at most: the
+    /// segment bytes (up to twice their length while the buffer grows); for the `text` or `keyword` field with the
+    /// most postings (`p` of them, `t` terms, `n` documents) `4p + 20t` for its postings grouped by term, `n` for its
+    /// norms and `40 / 128` bytes per posting for its `Skip` entries; `8n` for the sorted ids; and about 4 MiB for a
+    /// block in progress and a zstd context. The memory threshold of a flush (SPEC §8.2) can count on that bound
+    /// (`tests/flush_memory.rs` checks it). The lists are encoded twice (once to learn where each starts), which
+    /// makes a flush about 20 % slower than holding them would.
+    ///
     /// # Errors
     /// [`SegmentError::Empty`] for a builder without documents, [`SegmentError::Encode`] for invalid options,
     /// [`SegmentError::TooLarge`] when the footer or a section would exceed what the format addresses.
@@ -125,51 +134,43 @@ impl<'a> SegmentWriter<'a> {
                         continue;
                     }
                     let norms = dense_norms(inverted, doc_count);
-                    let grouped = inverted.by_term();
-                    let t = terms::write_terms(inverted, &grouped, Some(&norms), options)?;
-                    out.push_terms(id, &t)?;
-                    out.push_framed(SectionKind::Norms, id, &norms, options)?;
+                    let grouped = inverted.by_term()?;
+                    terms::write_terms(&mut out, id, inverted, &grouped, Some(&norms), options)?;
+                    out.framed(SectionKind::Norms, id, Compression::None, options, |s| {
+                        s.put(&norms)
+                    })?;
                 }
                 FieldBuilder::Keyword { inverted } => {
                     stats.push(field_stats(id, inverted));
                     if inverted.postings.is_empty() {
                         continue;
                     }
-                    let grouped = inverted.by_term();
-                    let t = terms::write_terms(inverted, &grouped, None, options)?;
-                    out.push_terms(id, &t)?;
-                    let column = columns::keyword(inverted, &grouped, doc_count)?;
-                    out.push_framed(SectionKind::Columns, id, &column, options)?;
+                    let grouped = inverted.by_term()?;
+                    terms::write_terms(&mut out, id, inverted, &grouped, None, options)?;
+                    out.framed(SectionKind::Columns, id, Compression::None, options, |s| {
+                        columns::keyword(inverted, &grouped, doc_count, s)
+                    })?;
                 }
                 FieldBuilder::Column(column) => {
                     if column.values.is_empty() {
                         continue;
                     }
-                    let bytes = if field.field_type() == FieldType::Bool {
-                        columns::boolean(column, doc_count)?
-                    } else {
-                        columns::numeric(column, doc_count)?
-                    };
-                    out.push_framed(SectionKind::Columns, id, &bytes, options)?;
+                    out.framed(SectionKind::Columns, id, Compression::None, options, |s| {
+                        if field.field_type() == FieldType::Bool {
+                            columns::boolean(column, doc_count, s)
+                        } else {
+                            columns::numeric(column, doc_count, s)
+                        }
+                    })?;
                 }
                 FieldBuilder::Stored => {}
             }
         }
-        out.push(
-            SectionKind::DocStore,
-            SEGMENT_FIELD,
-            &store::doc_store(b, options)?,
-        )?;
+        store::doc_store(b, &mut out, options)?;
         let ids = b.ids.sorted_ids();
-        out.push(SectionKind::IdMap, SEGMENT_FIELD, &store::id_map(b, &ids)?)?;
-        out.push(
-            SectionKind::IdList,
-            SEGMENT_FIELD,
-            &store::id_list(b, options)?,
-        )?;
-        if let Some(blobs) = store::blob_refs(b, options)? {
-            out.push(SectionKind::BlobRefs, SEGMENT_FIELD, &blobs)?;
-        }
+        store::id_map(b, &ids, &mut out)?;
+        store::id_list(b, &mut out, options)?;
+        store::blob_refs(b, &mut out, options)?;
         out.align();
         let min_id = ids.first().map_or(&[][..], |&id| b.ids.key(id));
         let max_id = ids.last().map_or(&[][..], |&id| b.ids.key(id));
@@ -207,16 +208,72 @@ fn dense_norms(inverted: &Inverted, doc_count: u32) -> Vec<u8> {
     norms
 }
 
-/// A raw (not block-framed) section: its bytes, then their CRC32C (SPEC §5.3).
-fn raw_section(mut bytes: Vec<u8>) -> Vec<u8> {
-    let crc = crc32c(&bytes);
-    bytes.extend_from_slice(&crc.to_le_bytes());
-    bytes
+/// Where the bytes of a section's stream go (ROADMAP 5.1.6): into the segment, as they are encoded.
+pub(super) trait Sink {
+    /// Appends `bytes` to the stream.
+    fn put(&mut self, bytes: &[u8]) -> Result<(), SegmentError>;
+}
+
+impl Sink for Writer {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), SegmentError> {
+        self.write_bytes(bytes);
+        Ok(())
+    }
+}
+
+/// A block-framed section being written into the segment: each block moves to the segment when it fills.
+#[derive(Debug)]
+pub(super) struct Framed<'o> {
+    blocks: BlockWriter,
+    /// Uncompressed bytes per block: `put` feeds the writer this much at a time, so at most one encoded block waits.
+    block_size: usize,
+    out: &'o mut Writer,
+}
+
+impl Framed<'_> {
+    /// The stream position of the next byte.
+    pub(super) fn position(&self) -> u64 {
+        self.blocks.position()
+    }
+
+    fn drain(&mut self) {
+        let done = self.blocks.take_output();
+        self.out.write_bytes(&done);
+    }
+}
+
+impl Sink for Framed<'_> {
+    fn put(&mut self, bytes: &[u8]) -> Result<(), SegmentError> {
+        for chunk in bytes.chunks(self.block_size.max(1)) {
+            self.blocks.write(chunk)?;
+            self.drain();
+        }
+        Ok(())
+    }
+}
+
+/// A raw section's payload being written into the segment, its CRC32C computed as it goes (SPEC §5.3 "Framing").
+#[derive(Debug)]
+pub(super) struct Raw<'o> {
+    out: &'o mut Writer,
+    crc: Crc32c,
+}
+
+impl std::io::Write for Raw<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.out.write_bytes(buf);
+        self.crc.update(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 /// The segment being assembled: sections in table order, each 8-aligned.
 #[derive(Debug, Default)]
-struct Sections {
+pub(super) struct Sections {
     bytes: Writer,
     table: Vec<Entry>,
 }
@@ -231,43 +288,72 @@ impl Sections {
         self.bytes.write_zeros(pad);
     }
 
-    fn push(&mut self, kind: SectionKind, field: u32, section: &[u8]) -> Result<(), SegmentError> {
-        let too_large = || SegmentError::TooLarge { what: "segment" };
-        self.align();
-        self.table.push(Entry {
-            kind,
-            field,
-            offset: u64::try_from(self.bytes.len()).map_err(|_| too_large())?,
-            len: u64::try_from(section.len()).map_err(|_| too_large())?,
-        });
-        self.bytes.write_bytes(section);
-        Ok(())
-    }
-
-    fn push_framed(
+    /// Writes section `(kind, field)`: `write` puts its bytes after the previous section's.
+    fn section<T>(
         &mut self,
         kind: SectionKind,
         field: u32,
-        stream: &[u8],
-        options: WriteOptions,
-    ) -> Result<(), SegmentError> {
-        let mut w = BlockWriter::new(options.block_size, Compression::None)?;
-        w.write(stream)?;
-        self.push(kind, field, &w.finish()?)
+        write: impl FnOnce(&mut Writer) -> Result<T, SegmentError>,
+    ) -> Result<T, SegmentError> {
+        let too_large = || SegmentError::TooLarge { what: "segment" };
+        self.align();
+        let start = self.bytes.len();
+        let t = write(&mut self.bytes)?;
+        let len = self.bytes.len().saturating_sub(start);
+        self.table.push(Entry {
+            kind,
+            field,
+            offset: u64::try_from(start).map_err(|_| too_large())?,
+            len: u64::try_from(len).map_err(|_| too_large())?,
+        });
+        Ok(t)
     }
 
-    fn push_terms(&mut self, field: u32, t: &terms::TermSections) -> Result<(), SegmentError> {
-        self.push(SectionKind::TermDict, field, &t.dict)?;
-        self.push(SectionKind::TermInfo, field, &t.info)?;
-        self.push(SectionKind::Postings, field, &t.postings)?;
-        self.push(SectionKind::Freqs, field, &t.freqs)?;
-        if let Some(skip) = &t.skip {
-            self.push(SectionKind::Skip, field, skip)?;
-        }
-        if let Some(positions) = &t.positions {
-            self.push(SectionKind::Positions, field, positions)?;
-        }
-        Ok(())
+    /// Writes the block-framed section `(kind, field)`, whose stream `write` puts.
+    pub(super) fn framed<T>(
+        &mut self,
+        kind: SectionKind,
+        field: u32,
+        compression: Compression,
+        options: WriteOptions,
+        write: impl FnOnce(&mut Framed<'_>) -> Result<T, SegmentError>,
+    ) -> Result<T, SegmentError> {
+        let blocks = BlockWriter::new(options.block_size, compression)?;
+        self.section(kind, field, |out| {
+            let block_size = usize::try_from(options.block_size).unwrap_or(usize::MAX);
+            let mut framed = Framed {
+                blocks,
+                block_size,
+                out,
+            };
+            let t = write(&mut framed)?;
+            let Framed { blocks, out, .. } = framed;
+            out.write_bytes(&blocks.finish()?);
+            Ok(t)
+        })
+    }
+
+    /// Writes the raw section `(kind, field)`: the FST `build` fills, then its CRC (SPEC §5.3.1, §5.3.6).
+    pub(super) fn fst(
+        &mut self,
+        kind: SectionKind,
+        field: u32,
+        build: impl FnOnce(&mut fst::MapBuilder<&mut Raw<'_>>) -> Result<(), SegmentError>,
+    ) -> Result<(), SegmentError> {
+        // Writing into a `Vec` cannot fail, so `fst` fails only on keys out of order, which `build` reports.
+        let internal = |_| SegmentError::Internal { what: "an FST" };
+        self.section(kind, field, |out| {
+            let mut raw = Raw {
+                out,
+                crc: Crc32c::new(),
+            };
+            let mut map = fst::MapBuilder::new(&mut raw).map_err(internal)?;
+            build(&mut map)?;
+            map.finish().map_err(internal)?;
+            let crc = raw.crc.finish();
+            raw.out.write_u32(crc);
+            Ok(())
+        })
     }
 }
 

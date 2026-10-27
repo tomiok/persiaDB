@@ -138,8 +138,11 @@ impl Inverted {
         positions.get(start..end).unwrap_or_default()
     }
 
-    /// The postings grouped by term, terms in ascending byte order.
-    pub(crate) fn by_term(&self) -> Grouped {
+    /// The postings grouped by term, terms in ascending byte order: indices into [`Self::postings`], 4 bytes per
+    /// posting (ROADMAP 5.1.6).
+    pub(crate) fn by_term(&self) -> Result<Grouped<'_>, SegmentError> {
+        let too_many = || SegmentError::TooLarge { what: "postings" };
+        u32::try_from(self.postings.len()).map_err(|_| too_many())?;
         let order = self.terms.sorted_ids();
         let mut rank = vec![0_usize; order.len()];
         for (r, &id) in order.iter().enumerate() {
@@ -164,29 +167,29 @@ impl Inverted {
             }
         }
         let mut next = starts.clone();
-        let mut sorted = vec![
-            Posting {
-                term: 0,
-                doc: 0,
-                tf: 0,
-                pos_start: 0
-            };
-            self.postings.len()
-        ];
-        for p in &self.postings {
+        let mut index = vec![0_u32; self.postings.len()];
+        // Every index fits: checked above.
+        for (i, p) in (0_u32..).zip(&self.postings) {
             let Some(n) = rank.get(p.term as usize).and_then(|&r| next.get_mut(r)) else {
                 continue;
             };
-            if let Some(slot) = sorted.get_mut(*n) {
-                *slot = *p;
+            if let Some(slot) = index.get_mut(*n) {
+                *slot = i;
             }
             *n = n.saturating_add(1);
         }
-        Grouped {
+        // Term ids are u32, so ranks are.
+        let rank = rank
+            .into_iter()
+            .map(|r| u32::try_from(r).unwrap_or(u32::MAX))
+            .collect();
+        Ok(Grouped {
             order,
-            postings: sorted,
+            rank,
+            postings: &self.postings,
+            index,
             starts,
-        }
+        })
     }
 
     pub(crate) fn size_in_bytes(&self) -> usize {
@@ -211,24 +214,45 @@ impl Inverted {
 }
 
 /// Postings grouped by term: `order[r]` is the term id of rank `r` (ascending bytes), whose postings are
-/// `postings[starts[r]..starts[r + 1]]`, in docid order.
+/// `postings[index[i]]` for `i` in `starts[r]..starts[r + 1]`, in docid order.
 #[derive(Debug)]
-pub(crate) struct Grouped {
+pub(crate) struct Grouped<'a> {
     pub(crate) order: Vec<u32>,
-    pub(crate) postings: Vec<Posting>,
-    pub(crate) starts: Vec<usize>,
+    /// `rank[id]`: the rank of term id `id`.
+    rank: Vec<u32>,
+    postings: &'a [Posting],
+    index: Vec<u32>,
+    starts: Vec<usize>,
 }
 
-impl Grouped {
-    /// The postings of the term of rank `rank`.
-    pub(crate) fn postings_of(&self, rank: usize) -> &[Posting] {
+impl<'a> Grouped<'a> {
+    /// The indices of the postings of the term of rank `rank`.
+    fn indices(&self, rank: usize) -> &[u32] {
         let start = self.starts.get(rank).copied().unwrap_or(0);
         let end = self
             .starts
             .get(rank.saturating_add(1))
             .copied()
             .unwrap_or(start);
-        self.postings.get(start..end).unwrap_or_default()
+        self.index.get(start..end).unwrap_or_default()
+    }
+
+    /// The rank of term id `term`.
+    pub(crate) fn rank_of(&self, term: u32) -> Option<u32> {
+        self.rank.get(term as usize).copied()
+    }
+
+    /// Number of postings (the df) of the term of rank `rank`.
+    pub(crate) fn df_of(&self, rank: usize) -> usize {
+        self.indices(rank).len()
+    }
+
+    /// The postings of the term of rank `rank`, in docid order.
+    pub(crate) fn postings_of(&self, rank: usize) -> impl Iterator<Item = &'a Posting> + '_ {
+        let postings = self.postings;
+        self.indices(rank)
+            .iter()
+            .filter_map(move |&i| postings.get(i as usize))
     }
 }
 
@@ -254,12 +278,15 @@ mod tests {
         assert_eq!(inv.lengths, [(0, 3), (2, 2)]);
         assert_eq!((inv.sum_len, inv.docs_with_field()), (5, 2));
 
-        let g = inv.by_term();
-        let (order, sorted, starts) = (&g.order, &g.postings, &g.starts);
-        let terms: Vec<&[u8]> = order.iter().map(|&id| inv.terms.key(id)).collect();
+        let g = inv.by_term().unwrap();
+        let terms: Vec<&[u8]> = g.order.iter().map(|&id| inv.terms.key(id)).collect();
         assert_eq!(terms, [b"a", b"b", b"c"]);
-        assert_eq!(*starts, [0, 2, 3, 4]);
-        assert_eq!(g.postings_of(1).len(), 1);
+        assert_eq!(g.starts, [0, 2, 3, 4]);
+        assert_eq!(
+            (g.df_of(0), g.df_of(1), g.df_of(2), g.df_of(3)),
+            (2, 1, 1, 0)
+        );
+        let sorted: Vec<&Posting> = (0..3).flat_map(|r| g.postings_of(r)).collect();
         let docs: Vec<(u32, u32)> = sorted.iter().map(|p| (p.doc, p.tf)).collect();
         assert_eq!(docs, [(0, 1), (2, 1), (0, 2), (2, 1)]);
         let positions: Vec<&[u32]> = sorted.iter().map(|p| inv.positions_of(p)).collect();
@@ -270,10 +297,11 @@ mod tests {
     fn without_positions() {
         let mut inv = Inverted::new(false);
         add(&mut inv, 0, &["x", "x"]);
-        let sorted = inv.by_term().postings;
+        let g = inv.by_term().unwrap();
+        let sorted: Vec<&Posting> = g.postings_of(0).collect();
         assert_eq!(sorted.len(), 1);
         assert_eq!(sorted[0].tf, 2);
-        assert_eq!(inv.positions_of(&sorted[0]), [0_u32; 0]);
+        assert_eq!(inv.positions_of(sorted[0]), [0_u32; 0]);
         assert!(inv.size_in_bytes() > 0);
     }
 }

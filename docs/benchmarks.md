@@ -71,6 +71,7 @@ Documents per second:
 | Recorded | `segment/add` | `segment/finish` |
 |---|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; sections streamed into the segment, lists encoded twice (ROADMAP 5.1.6; the parent commit measured 100.5 K) | | 82.7 K |
 
 ## `persia-engine` segment reading
 

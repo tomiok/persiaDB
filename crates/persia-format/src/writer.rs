@@ -83,6 +83,21 @@ impl Writer {
         self.buf
     }
 
+    /// Removes the bytes written so far, keeping the buffer's capacity and the base offset: a scratch writer reused
+    /// for many small encodings allocates once.
+    ///
+    /// ```
+    /// use persia_format::Writer;
+    ///
+    /// let mut w = Writer::with_base_offset(8);
+    /// w.write_u32(7);
+    /// w.clear();
+    /// assert_eq!((w.len(), w.offset()), (0, 8));
+    /// ```
+    pub fn clear(&mut self) {
+        self.buf.clear();
+    }
+
     /// Appends raw bytes.
     pub fn write_bytes(&mut self, bytes: &[u8]) {
         self.buf.extend_from_slice(bytes);
