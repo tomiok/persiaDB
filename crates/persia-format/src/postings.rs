@@ -17,6 +17,7 @@ use crate::bitpack::{BLOCK_LEN, BitWidth};
 use crate::delta;
 use crate::error::{Corruption, EncodeError, Error, Result, to_u64};
 use crate::reader::Reader;
+use crate::varint;
 use crate::writer::Writer;
 
 /// Most docids a tail block can hold; a list of `n` docids has a tail of `n % 128`.
@@ -84,6 +85,41 @@ impl Writer {
         }
         Ok(())
     }
+}
+
+/// Bytes [`Writer::write_postings_block`] appends for `docids` after `prev`, computed from the gaps' bit width
+/// without packing them: a writer that lays out offsets before it writes (a term's `TermInfo` before its postings)
+/// measures blocks this way.
+///
+/// # Errors
+/// As [`Writer::write_postings_block`].
+pub fn block_len(docids: &[u32; BLOCK_LEN], prev: Option<u32>) -> Result<usize, EncodeError> {
+    let mut gaps = *docids;
+    delta::encode_in_place(&mut gaps, prev)?;
+    // At most 5 + 512: cannot overflow.
+    Ok(BlockHeader::LEN.wrapping_add(BitWidth::of(&gaps).packed_len()))
+}
+
+/// Bytes [`Writer::write_postings_tail`] appends for `docids` after `prev`, computed from the gaps' varint lengths.
+///
+/// # Errors
+/// As [`Writer::write_postings_tail`].
+pub fn tail_len(docids: &[u32], prev: Option<u32>) -> Result<usize, EncodeError> {
+    if !(1..=MAX_TAIL_LEN).contains(&docids.len()) {
+        return Err(EncodeError::InvalidLen {
+            len: docids.len(),
+            min: 1,
+            max: MAX_TAIL_LEN,
+        });
+    }
+    let mut gaps = [0_u32; MAX_TAIL_LEN];
+    let gaps = gaps.get_mut(..docids.len()).unwrap_or_default();
+    gaps.copy_from_slice(docids);
+    delta::encode_in_place(gaps, prev)?;
+    // At most 1 + 127 · 5: cannot overflow.
+    Ok(gaps.iter().fold(1_usize, |len, &gap| {
+        len.wrapping_add(varint::encoded_len(u64::from(gap)))
+    }))
 }
 
 impl Reader<'_> {

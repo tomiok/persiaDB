@@ -5,6 +5,7 @@ use persia_format::EncodeError;
 use persia_format::Writer;
 use persia_format::bitpack::{BLOCK_LEN, BitWidth};
 use persia_format::block::Compression;
+use persia_format::{postings, varint};
 
 use super::super::SegmentError;
 use super::super::builder::inverted::{Grouped, Inverted, Posting};
@@ -39,8 +40,9 @@ enum List {
 /// `norms` is the field's `Norms` array (a `text` field), for `min_norm`.
 ///
 /// Sections are written in segment order, each straight into the segment (ROADMAP 5.1.6): the `TermDict` from the
-/// terms alone; then one pass encodes every list to learn where each starts, writing the `TermInfo` records and
-/// keeping the `Skip` entries (40 bytes per 128 postings); then one pass per stream encodes it again and writes it.
+/// terms alone; then one pass measures every list to learn where each starts (from bit widths and varint lengths,
+/// ROADMAP 5.1.7), writing the `TermInfo` records and keeping the `Skip` entries (40 bytes per 128 postings); then one
+/// pass per stream encodes it and writes it.
 pub(super) fn write_terms(
     out: &mut Sections,
     field: u32,
@@ -106,6 +108,8 @@ struct Encoder<'a> {
     inverted: &'a Inverted,
     /// The block's postings.
     block: Vec<Posting>,
+    /// Their docids.
+    docids: Vec<u32>,
     values: Vec<u32>,
     w: Writer,
 }
@@ -115,6 +119,7 @@ impl<'a> Encoder<'a> {
         Self {
             inverted,
             block: Vec::with_capacity(BLOCK_LEN),
+            docids: Vec::with_capacity(BLOCK_LEN),
             values: Vec::with_capacity(BLOCK_LEN),
             w: Writer::new(),
         }
@@ -135,6 +140,8 @@ impl<'a> Encoder<'a> {
             let Some(last) = self.block.last().map(|p| p.doc) else {
                 return Ok(());
             };
+            self.docids.clear();
+            self.docids.extend(self.block.iter().map(|p| p.doc));
             f(self, prev)?;
             prev = Some(last);
         }
@@ -144,7 +151,7 @@ impl<'a> Encoder<'a> {
     fn encode(&mut self, list: List, prev: Option<u32>) -> Result<(), SegmentError> {
         self.w.clear();
         match list {
-            List::Postings => write_docids(&self.block, prev, &mut self.w)?,
+            List::Postings => write_docids(&self.docids, prev, &mut self.w)?,
             List::Freqs => {
                 self.values.clear();
                 self.values
@@ -159,13 +166,32 @@ impl<'a> Encoder<'a> {
         Ok(())
     }
 
-    /// The length of `list`'s encoding of the current block.
+    /// The length of `list`'s encoding of the current block, from bit widths and varint lengths: the `TermInfo` pass
+    /// learns every offset without encoding a list (ROADMAP 5.1.7).
     fn encoded_len(&mut self, list: List, prev: Option<u32>) -> Result<u64, SegmentError> {
-        self.encode(list, prev)?;
-        u64::try_from(self.w.len()).map_err(|_| SegmentError::TooLarge { what: "postings" })
+        let len = match list {
+            List::Postings => {
+                if let Ok(full) = <&[u32; BLOCK_LEN]>::try_from(self.docids.as_slice()) {
+                    postings::block_len(full, prev)?
+                } else {
+                    postings::tail_len(&self.docids, prev)?
+                }
+            }
+            List::Freqs => {
+                self.values.clear();
+                self.values
+                    .extend(self.block.iter().map(|p| p.tf.saturating_sub(1)));
+                run_len(&self.values)?
+            }
+            List::Positions => {
+                position_deltas(self.inverted, &self.block, &mut self.values)?;
+                run_len(&self.values)?
+            }
+        };
+        u64::try_from(len).map_err(|_| SegmentError::TooLarge { what: "postings" })
     }
 
-    /// Writes every term's `TermInfo` record to `info`, from a pass that encodes every list to learn its offsets;
+    /// Writes every term's `TermInfo` record to `info`, from a pass that measures every list to learn its offsets;
     /// returns the `Skip` entries and where the lists end.
     fn term_infos(
         &mut self,
@@ -294,13 +320,11 @@ pub(super) fn fst_error(index: usize) -> SegmentError {
 }
 
 /// A full postings block or the tail block (SPEC §5.2.1).
-fn write_docids(block: &[Posting], prev: Option<u32>, w: &mut Writer) -> Result<(), EncodeError> {
-    if let Ok(full) = <&[Posting; BLOCK_LEN]>::try_from(block) {
-        let docids = full.map(|p| p.doc);
-        w.write_postings_block(&docids, prev)
+fn write_docids(docids: &[u32], prev: Option<u32>, w: &mut Writer) -> Result<(), EncodeError> {
+    if let Ok(full) = <&[u32; BLOCK_LEN]>::try_from(docids) {
+        w.write_postings_block(full, prev)
     } else {
-        let docids: Vec<u32> = block.iter().map(|p| p.doc).collect();
-        w.write_postings_tail(&docids, prev)
+        w.write_postings_tail(docids, prev)
     }
 }
 
@@ -316,6 +340,17 @@ pub(super) fn write_run(values: &[u32], w: &mut Writer) -> Result<(), EncodeErro
         w.write_varint_u32(v);
     }
     Ok(())
+}
+
+/// The bytes [`write_run`] appends for `values`, without encoding them.
+fn run_len(values: &[u32]) -> Result<usize, SegmentError> {
+    let (groups, rest) = values.as_chunks::<BLOCK_LEN>();
+    let packed = groups.iter().map(|g| 1 + BitWidth::of(g).packed_len());
+    let varints = rest.iter().map(|&v| varint::encoded_len(u64::from(v)));
+    packed
+        .chain(varints)
+        .try_fold(0_usize, usize::checked_add)
+        .ok_or(SegmentError::TooLarge { what: "postings" })
 }
 
 /// The positions of a block's postings as the `Positions` run stores them: per document, its first position,

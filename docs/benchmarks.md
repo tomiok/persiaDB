@@ -75,6 +75,9 @@ Documents per second:
 |---|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; sections streamed into the segment, lists encoded twice (ROADMAP 5.1.6; the parent commit measured 100.5 K) | | 82.7 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; parent commit of ROADMAP 5.1.6 (2f88fd0^), measured with the next two rows | | 100.3 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; ROADMAP 5.1.6 with its review follow-ups (5da4c6d) | | 96.2 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lists measured from bit widths, blocks drained without allocating (ROADMAP 5.1.7) | | 99.0 K |
 
 ## `persia-engine` segment reading
 

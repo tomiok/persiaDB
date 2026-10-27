@@ -273,8 +273,14 @@ impl BlockWriter {
         std::mem::replace(&mut self.out, next).into_inner()
     }
 
+    /// Appends the section bytes encoded so far (whole blocks only) to `dst`, like [`BlockWriter::take_output`]
+    /// without allocating a buffer per call: a caller that drains after every write moves each block once.
+    pub fn drain_output_into(&mut self, dst: &mut Writer) {
+        self.out.drain_into(dst);
+    }
+
     /// Emits the last, partial block and the block table, and returns the section bytes not yet taken by
-    /// [`BlockWriter::take_output`].
+    /// [`BlockWriter::take_output`] or [`BlockWriter::drain_output_into`].
     ///
     /// # Errors
     /// As [`BlockWriter::write`], including an earlier `write` error.
@@ -1054,6 +1060,17 @@ mod tests {
         }
         streamed.extend(w.finish().unwrap());
         assert_eq!(streamed, whole);
+
+        // Draining into a writer as it is produced, too; the writer's offset is the section's.
+        let mut w = BlockWriter::new(7, Compression::None).unwrap();
+        let mut drained = Writer::new();
+        for piece in data.chunks(30) {
+            w.write(piece).unwrap();
+            w.drain_output_into(&mut drained);
+            w.drain_output_into(&mut drained);
+        }
+        drained.write_bytes(&w.finish().unwrap());
+        assert_eq!(drained.as_slice(), whole);
     }
 
     /// `reopen` with what `open` validated reads exactly what `open` does; given other bytes (a table edited after

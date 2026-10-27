@@ -238,8 +238,7 @@ impl Framed<'_> {
     }
 
     fn drain(&mut self) {
-        let done = self.blocks.take_output();
-        self.out.write_bytes(&done);
+        self.blocks.drain_output_into(self.out);
     }
 }
 
