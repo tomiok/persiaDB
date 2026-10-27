@@ -28,7 +28,7 @@ pub use postings::{BlockMax, Postings, Tombstones};
 pub use terms::{TermIndex, TermInfo, TermStream};
 
 use super::kind::{SEGMENT_FIELD, SectionKind};
-use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN};
+use crate::document::{Document, MAX_DOCUMENT_LEN, MAX_ID_LEN, MAX_KEYWORD_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind, FieldType};
 use footer::{Footer, Section};
 use store::BlockCache;
@@ -578,6 +578,28 @@ impl Segment {
         Ok(())
     }
 
+    /// The longest key the FST of `(kind, field)` can hold, which bounds its longest path (SPEC §5.3.1, §5.3.6):
+    /// an id's length for the `IdMap`, a keyword value's for a `keyword` field's `TermDict` (its terms are its
+    /// values). A `text` field's terms are analyzer tokens, which SPEC does not bound yet (a registered analyzer
+    /// need not apply the length guard of §6.3.1), so its paths are not bounded here.
+    fn max_key_len(&self, kind: SectionKind, field: u32) -> u64 {
+        let keyword = || {
+            self.schema
+                .fields()
+                .iter()
+                .find(|f| f.id().get() == field)
+                .is_some_and(|f| matches!(f.kind(), FieldKind::Keyword(_)))
+        };
+        let len = if kind == SectionKind::IdMap {
+            MAX_ID_LEN
+        } else if keyword() {
+            MAX_KEYWORD_LEN
+        } else {
+            return u64::MAX;
+        };
+        u64::try_from(len).unwrap_or(u64::MAX)
+    }
+
     /// Every block table and raw CRC; the FSTs and the record arrays' shape.
     fn check_sections(&mut self) -> Result<(), ReadError> {
         let doc_count = self.doc_count();
@@ -612,21 +634,20 @@ impl Segment {
                 continue;
             }
             let raw = raw_payload(self.source.as_slice(), section)?;
-            // `fst` does not validate what it reads: check the structure first (SPEC §5.3.1, `fst_check`).
-            let shape = fst_check::check(raw).map_err(|d| ReadError::Section {
-                kind,
-                field,
-                position: u64::try_from(d.at).unwrap_or(u64::MAX),
-                reason: SegmentCorruption::Fst,
+            // `fst` does not validate what it reads: check the structure first (SPEC §5.3 "Framing", `fst_check`),
+            // and bound the key length, which bounds what a stream over the keys costs (SPEC §5.3.1, §5.3.6).
+            let shape = fst_check::check(raw, self.max_key_len(kind, field)).map_err(|d| {
+                ReadError::Section {
+                    kind,
+                    field,
+                    position: u64::try_from(d.at).unwrap_or(u64::MAX),
+                    reason: SegmentCorruption::Fst,
+                }
             })?;
-            // Bound the stream below: a small DAG can hold astronomically many keys. An `IdMap` stream stops by
+            // Bound the key count too: a small DAG can hold astronomically many keys. An `IdMap` stream stops by
             // itself after `doc_count + 1` keys (its values are distinct and below `doc_count`); a `TermDict` must
             // have one `TermInfo` record per key, checked now with the error the `TermInfo` check would give.
-            if kind == SectionKind::IdMap {
-                if usize::try_from(shape.longest_path).map_or(true, |l| l > MAX_ID_LEN) {
-                    return Err(fst_error(SegmentCorruption::Fst));
-                }
-            } else {
+            if kind != SectionKind::IdMap {
                 let infos = self.stream(SectionKind::TermInfo, field)?.map(|s| s.len());
                 if shape.keys.checked_mul(TERM_INFO_LEN) != infos {
                     return Err(ReadError::Section {

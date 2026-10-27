@@ -1,25 +1,37 @@
-//! Structural check of an FST payload (`TermDict`, `IdMap`; SPEC §5.3.1, §5.3.6) before the `fst` crate touches it.
+//! Structural check of an FST payload (`TermDict`, `IdMap`; SPEC §5.3 "Framing", §5.3.1, §5.3.6) before the `fst`
+//! crate touches it.
 //!
 //! `fst` 0.4.7 trusts its input: `fst::Map::new` checks the header and little else (it never checks the root
 //! address unless it is 0, nor the checksum), and its node parser (`raw/node.rs`) indexes, slices, subtracts and
 //! unpacks without bounds checks. A payload with a valid section CRC but crafted bytes makes it panic, and a
-//! transition pointing back up the graph makes a stream run forever. So [`check`] parses the payload itself, with
-//! checked arithmetic and `get`, the way `fst` will, and rejects anything `fst` could not read safely.
+//! transition address that wraps around (`end - delta`) points back up the graph, so a stream could run forever. So
+//! [`check`] parses the payload itself, with checked arithmetic and `get`, the way `fst` will, and rejects anything
+//! `fst` could not read safely (SPEC §5.3 "Framing").
 //!
-//! Why `fst` cannot panic afterwards (SPEC §5.3.1): every `fst` operation the reader uses (`Map::get`, `Map::len`,
-//! `Map::stream`, `Map::search` with an automaton and range bounds, as `TermIndex` and `Segment::docid_of` do) starts
-//! at the root and only ever moves to `Transition::addr` of a node it already parsed, or to `EMPTY_ADDRESS`, which
-//! `fst` turns into an empty final node without reading bytes. Those addresses are computed from the same bytes with
-//! the same formulas as here, so the set of nodes `fst` can reach is exactly the set [`check`] visited. For each of
-//! them [`check`] verified that every byte any `Node` method reads (`Node::new`: state, sizes, transition count,
-//! final output, `end_addr`; then `find_input` with or without the 256-byte index, `transition(i)`,
-//! `transition_addr(i)`, `input`, `output` for `i < len()`) lies in the node's span `[end, addr]`, inside the
-//! payload; that every packed size `unpack_uint` asserts on is in `1..=8`; that no subtraction `fst` performs
-//! (`end - delta`, `end - 1`, the backward offsets from `addr`) underflows; and that no sum of outputs along any path
-//! (`Output::cat`, done by `get` and by every stream step) overflows a `u64`. Transitions point strictly below the
-//! node's first byte, so the graph is acyclic and every stream ends; the stream's `inp.pop().unwrap()` holds because
-//! no node below the root shares its address. Out-of-range index values (`>= len()`) mean "no transition" in `fst`
-//! too, and `Transitions` only calls `transition(i)` for `i < len()`.
+//! The writer (`fst::MapBuilder`) lays nodes out back to back from the end of the 16-byte header to the root, the
+//! last one, and every transition points at the last byte (the state byte) of a node written before. [`check`]
+//! requires exactly that: it walks the nodes down from the root, each node's first byte following the previous
+//! node's last, until it reaches the header, so it parses every node once without following transitions; then it
+//! goes back up the nodes (by ascending address, children first) to check every transition target and add up keys,
+//! output sums and path lengths.
+//!
+//! Why `fst` cannot panic afterwards: every `fst` operation the reader uses (`Map::get`, `Map::len`, `Map::stream`,
+//! `Map::search` with an automaton and range bounds, as `TermIndex` and `Segment::docid_of` do) starts at the root
+//! and only ever moves to `Transition::addr` of a node it already parsed, or to `EMPTY_ADDRESS`, which `fst` turns
+//! into an empty final node without reading bytes. Those addresses are computed from the same bytes with the same
+//! formulas as here, and each is the address of a node [`check`] parsed. For each node [`check`] verified that every
+//! byte any `Node` method reads (`Node::new`: state, sizes, transition count, final output, `end_addr`; then
+//! `find_input` with or without the 256-byte index, `transition(i)`, `transition_addr(i)`, `input`, `output` for
+//! `i < len()`) lies in the node's span `[end, addr]`, inside the payload; that every packed size `unpack_uint`
+//! asserts on is in `1..=8`; that no subtraction `fst` performs (`end - delta`, `end - 1`, the backward offsets from
+//! `addr`) underflows; and that no sum of outputs along any path (`Output::cat`, done by `get` and by every stream
+//! step) overflows a `u64`. Transitions point strictly below the node's first byte, so the graph is acyclic and every
+//! stream ends; the stream's `inp.pop().unwrap()` holds because no node below the root shares its address.
+//! Out-of-range index values (`>= len()`) mean "no transition" in `fst` too, and `Transitions` only calls
+//! `transition(i)` for `i < len()`.
+//!
+//! A stream's cost is the total length of the keys it yields, which a small graph can make huge (many keys sharing a
+//! long suffix): [`check`] bounds the longest path by the caller's `max_path` (SPEC §5.3.1, §5.3.6).
 
 use std::cmp::max;
 
@@ -59,12 +71,13 @@ fn damage<T>(what: &'static str, at: usize) -> Result<T> {
     Err(FstDamage { what, at })
 }
 
-/// Checks that `data`, an FST payload, is one `fst` 0.4.7 can open and read without panicking or looping, and that
-/// its footer's key count is right. Linear in the payload size (each reachable node is parsed twice).
+/// Checks that `data`, an FST payload, is one `fst` 0.4.7 can open and read without panicking or looping, that its
+/// footer's key count is right, and that no path from the root is longer than `max_path`. Linear in the payload
+/// size: one pass down the nodes, one back up.
 ///
 /// # Errors
 /// An [`FstDamage`] naming the first broken rule.
-pub(super) fn check(data: &[u8]) -> Result<FstShape> {
+pub(super) fn check(data: &[u8], max_path: u64) -> Result<FstShape> {
     let len = data.len();
     let Some(footer) = len.checked_sub(FOOTER_LEN).filter(|&f| f >= HEADER_LEN) else {
         return damage("an FST shorter than its header and footer", 0);
@@ -97,54 +110,8 @@ pub(super) fn check(data: &[u8]) -> Result<FstShape> {
     if footer.checked_sub(1) != Some(root) {
         return damage("an FST root address other than the last node byte", root_at);
     }
-
-    let reachable = reachable(data, root)?;
-    let mut sums: Vec<Sums> = Vec::with_capacity(reachable.len());
-    // Ascending addresses: every transition points lower, so its target's sums are already known.
-    for &addr in &reachable {
-        let node = Node::parse(data, addr)?;
-        let mut s = Sums {
-            keys: u64::from(node.is_final),
-            max_output: node.final_output,
-            longest_path: 0,
-        };
-        for i in 0..node.ntrans {
-            let t = node.transition(i)?;
-            let child = if t.target == EMPTY_ADDRESS {
-                Sums::EMPTY_FINAL
-            } else {
-                reachable
-                    .binary_search(&t.target)
-                    .ok()
-                    .and_then(|j| sums.get(j))
-                    .copied()
-                    .ok_or(FstDamage {
-                        what: "an FST transition to an unvisited node",
-                        at: addr,
-                    })?
-            };
-            let overflow = |what| FstDamage { what, at: addr };
-            s.keys = s
-                .keys
-                .checked_add(child.keys)
-                .ok_or(overflow("an FST with more than 2^64 keys"))?;
-            let output = t
-                .output
-                .checked_add(child.max_output)
-                .ok_or(overflow("an FST output sum that overflows"))?;
-            s.max_output = max(s.max_output, output);
-            let path = child
-                .longest_path
-                .checked_add(1)
-                .ok_or(overflow("an FST path that overflows"))?;
-            s.longest_path = max(s.longest_path, path);
-        }
-        sums.push(s);
-    }
-    // The root has the highest address, so it is last.
-    let Some(total) = sums.last() else {
-        return damage("an FST without a root node", root);
-    };
+    let nodes = NodeSet::down_from(data, root)?;
+    let total = nodes.sums(data, max_path)?;
     if total.keys != keys {
         return damage("an FST key count other than the keys it holds", footer);
     }
@@ -171,35 +138,115 @@ impl Sums {
     };
 }
 
-/// Every node reachable from `root` (not the empty node), each parsed and checked once, by ascending address.
-fn reachable(data: &[u8], root: usize) -> Result<Vec<usize>> {
-    let mut seen = vec![false; data.len()];
-    let mut todo = vec![root];
-    if let Some(s) = seen.get_mut(root) {
-        *s = true;
-    }
-    while let Some(addr) = todo.pop() {
-        let node = Node::parse(data, addr)?;
-        for i in 0..node.ntrans {
-            let target = node.transition(i)?.target;
-            if target == EMPTY_ADDRESS {
-                continue;
+/// The addresses of the nodes' state bytes, one bit per payload byte.
+struct NodeSet {
+    bits: Vec<u64>,
+    /// How many nodes there are.
+    count: usize,
+}
+
+impl NodeSet {
+    /// Parses and checks every node, from the root down to the header, each starting right after the one below.
+    fn down_from(data: &[u8], root: usize) -> Result<Self> {
+        let mut bits = vec![0_u64; data.len().div_ceil(64)];
+        let mut count = 0_usize;
+        let mut addr = root;
+        loop {
+            let node = Node::parse(data, addr)?;
+            node.check_inputs(addr)?;
+            count = count.saturating_add(1);
+            if let Some(word) = bits.get_mut(addr / 64) {
+                *word |= bit(addr);
             }
-            match seen.get_mut(target) {
-                Some(s) if !*s => {
-                    *s = true;
-                    todo.push(target);
-                }
-                Some(_) => {}
-                None => return damage("an FST transition past its end", addr),
+            if node.end == HEADER_LEN {
+                return Ok(Self { bits, count });
             }
+            // `Node::parse` checked `end >= HEADER_LEN`, so this is a node byte: the last of the node below.
+            addr = sub(node.end, 1, addr)?;
         }
     }
-    Ok(seen
-        .iter()
-        .enumerate()
-        .filter_map(|(addr, &s)| s.then_some(addr))
-        .collect())
+
+    /// The root's sums, going up the nodes: every transition points lower, so its target's are already known.
+    fn sums(&self, data: &[u8], max_path: u64) -> Result<Sums> {
+        // `sums[r]` is the node of rank `r` (by address); `rank_base[w]` the rank of the first node in word `w`.
+        let mut sums: Vec<Sums> = Vec::with_capacity(self.count);
+        let mut rank_base: Vec<usize> = Vec::with_capacity(self.bits.len());
+        for (w, &word) in self.bits.iter().enumerate() {
+            rank_base.push(sums.len());
+            let mut rest = word;
+            while rest != 0 {
+                let addr = add(mul(w, 64, 0)?, rest.trailing_zeros() as usize, 0)?;
+                rest &= rest.wrapping_sub(1);
+                let node = Node::parse(data, addr)?;
+                sums.push(self.node_sums(&node, addr, &sums, &rank_base, max_path)?);
+            }
+        }
+        match sums.last() {
+            Some(&s) => Ok(s),
+            None => damage("an FST without a root node", 0),
+        }
+    }
+
+    fn node_sums(
+        &self,
+        node: &Node<'_>,
+        addr: usize,
+        sums: &[Sums],
+        rank_base: &[usize],
+        max_path: u64,
+    ) -> Result<Sums> {
+        let mut s = Sums {
+            keys: u64::from(node.is_final),
+            max_output: node.final_output,
+            longest_path: 0,
+        };
+        for i in 0..node.ntrans {
+            let t = node.transition(i)?;
+            let child = if t.target == EMPTY_ADDRESS {
+                Sums::EMPTY_FINAL
+            } else {
+                self.rank(t.target, rank_base)
+                    .and_then(|r| sums.get(r))
+                    .copied()
+                    .ok_or(FstDamage {
+                        what: "an FST transition to a byte that is not a node's last",
+                        at: addr,
+                    })?
+            };
+            let overflow = |what| FstDamage { what, at: addr };
+            s.keys = s
+                .keys
+                .checked_add(child.keys)
+                .ok_or(overflow("an FST with more than 2^64 keys"))?;
+            let output = t
+                .output
+                .checked_add(child.max_output)
+                .ok_or(overflow("an FST output sum that overflows"))?;
+            s.max_output = max(s.max_output, output);
+            let path = child.longest_path.saturating_add(1);
+            if path > max_path {
+                return damage("an FST path longer than its keys can be", addr);
+            }
+            s.longest_path = max(s.longest_path, path);
+        }
+        Ok(s)
+    }
+
+    /// The rank of the node at `addr` (how many nodes lie below it), if a node ends there and was ranked already.
+    fn rank(&self, addr: usize, rank_base: &[usize]) -> Option<usize> {
+        let word = *self.bits.get(addr / 64)?;
+        let b = bit(addr);
+        if word & b == 0 {
+            return None;
+        }
+        let below = (word & b.wrapping_sub(1)).count_ones() as usize;
+        rank_base.get(addr / 64)?.checked_add(below)
+    }
+}
+
+/// `addr`'s bit in its word of a [`NodeSet`].
+fn bit(addr: usize) -> u64 {
+    1_u64.wrapping_shl(u32::try_from(addr % 64).unwrap_or(0))
 }
 
 /// A node's encoding (`fst::raw::node::State`), by the two high bits of its state byte.
@@ -239,7 +286,7 @@ struct Trans {
 }
 
 impl<'a> Node<'a> {
-    /// Parses the node whose state byte is at `addr`, as `fst::raw::node::Node::new` does.
+    /// Parses the node whose state byte is at `addr`, as `fst::raw::node::Node::new` does: constant time.
     fn parse(data: &'a [u8], addr: usize) -> Result<Self> {
         let Some(&state) = data.get(addr) else {
             return damage("an FST node past its end", addr);
@@ -313,52 +360,53 @@ impl<'a> Node<'a> {
         if self.is_final && self.osize > 0 {
             self.final_output = uint(data, self.end, self.osize)?;
         }
-        // Not needed by `fst` to stay in bounds, but a stream relies on it for byte order, and `get` (through the
-        // index) and a stream must agree on the transitions.
-        let mut previous = None;
-        for i in 0..ntrans {
-            let input = self.input(i)?;
-            if previous.is_some_and(|p| p >= input) {
-                return damage("FST transitions out of byte order", addr);
-            }
-            previous = Some(input);
-        }
-        if index_len > 0 {
-            self.check_index(inputs_end, addr)?;
-        }
         Ok(())
     }
 
-    /// The index maps each input byte to its transition, any value `>= ntrans` meaning none.
-    fn check_index(&self, inputs_end: usize, addr: usize) -> Result<()> {
+    /// Not needed by `fst` to stay in bounds, but a stream relies on it for byte order, and `get` (through the
+    /// index) and a stream must agree on the transitions: an `AnyTrans` node's inputs strictly increase with the
+    /// transition number, and its index (if any) maps each input byte to its transition and every other byte to a
+    /// value `>= ntrans`. `O(ntrans + 256)`.
+    fn check_inputs(&self, addr: usize) -> Result<()> {
+        let Kind::AnyTrans {
+            inputs_end,
+            deltas_end,
+        } = self.kind
+        else {
+            return Ok(());
+        };
+        // Transition `i`'s input is at `inputs_end - 1 - i`: increasing inputs are decreasing bytes.
+        let Some(inputs) = self.data.get(deltas_end..inputs_end) else {
+            return damage("an FST node past its end", addr);
+        };
+        if inputs.windows(2).any(|w| w.first() <= w.get(1)) {
+            return damage("FST transitions out of byte order", addr);
+        }
+        if self.ntrans <= INDEX_THRESHOLD {
+            return Ok(());
+        }
         let Some(index) = self.data.get(inputs_end..add(inputs_end, INDEX_LEN, addr)?) else {
             return damage("an FST node past its end", addr);
         };
-        for (b, &i) in (0..=u8::MAX).zip(index) {
+        let mut present = [false; 256];
+        for &b in inputs {
+            if let Some(p) = present.get_mut(usize::from(b)) {
+                *p = true;
+            }
+        }
+        for (b, (&i, &has)) in (0..=u8::MAX).zip(index.iter().zip(&present)) {
             let i = usize::from(i);
             let consistent = if i < self.ntrans {
-                self.input(i)? == b
+                // The transition `fst` takes for `b` must have input `b`.
+                inputs.iter().rev().nth(i) == Some(&b)
             } else {
-                // No transition may have this input.
-                (0..self.ntrans).try_fold(true, |ok, j| Ok(ok && self.input(j)? != b))?
+                !has
             };
             if !consistent {
                 return damage("an FST index that disagrees with the inputs", addr);
             }
         }
         Ok(())
-    }
-
-    /// Input byte of transition `i` of an `AnyTrans` node.
-    fn input(&self, i: usize) -> Result<u8> {
-        let Kind::AnyTrans { inputs_end, .. } = self.kind else {
-            return damage("an FST input read from a single-transition node", self.end);
-        };
-        let at = sub(inputs_end, add(i, 1, self.end)?, self.end)?;
-        match self.data.get(at) {
-            Some(&b) => Ok(b),
-            None => damage("an FST node past its end", at),
-        }
     }
 
     /// Transition `i < ntrans`, as `fst`'s `transition(i)` computes it, with its target checked.
@@ -468,6 +516,11 @@ mod tests {
     use fst::{Automaton, IntoStreamer, MapBuilder, Streamer};
 
     use super::*;
+
+    /// [`super::check`] without a path bound.
+    fn check(data: &[u8]) -> Result<FstShape> {
+        super::check(data, u64::MAX)
+    }
 
     fn build<K: AsRef<[u8]>>(entries: impl IntoIterator<Item = (K, u64)>) -> Vec<u8> {
         let mut b = MapBuilder::memory();
@@ -738,5 +791,144 @@ mod tests {
         }
         assert!(changed);
         assert!(check(&bumped).is_err());
+    }
+
+    /// Wraps `body` (the nodes, from address 16) into an FST whose root is its last byte and holding `keys` keys.
+    fn wrap(body: &[u8], keys: u64) -> Vec<u8> {
+        let mut d = Vec::new();
+        d.extend_from_slice(&VERSION.to_le_bytes());
+        d.extend_from_slice(&0_u64.to_le_bytes());
+        d.extend_from_slice(body);
+        let root = d.len() - 1;
+        d.extend_from_slice(&keys.to_le_bytes());
+        d.extend_from_slice(&(root as u64).to_le_bytes());
+        d.extend_from_slice(&0_u32.to_le_bytes());
+        d
+    }
+
+    /// A root `AnyTrans` node, as `fst` writes it, with one transition per input (in this order) to the empty final
+    /// node, no outputs, and the index `fst` writes when there are more than 32 transitions unless one is given.
+    fn any_trans(inputs: &[u8], index: Option<&[u8; 256]>) -> Vec<u8> {
+        let n = inputs.len();
+        let mut body = vec![0_u8; n]; // address deltas: 0 is the empty node
+        body.extend(inputs.iter().rev());
+        if n > INDEX_THRESHOLD {
+            let index = index.copied().unwrap_or_else(|| {
+                let mut ix = [u8::MAX; 256];
+                for (i, &b) in inputs.iter().enumerate() {
+                    ix[usize::from(b)] = i as u8;
+                }
+                ix
+            });
+            body.extend_from_slice(&index);
+        }
+        body.push(0x10); // tsize 1, osize 0
+        if n > 63 {
+            body.push(if n == 256 { 1 } else { n as u8 });
+            body.push(0);
+        } else {
+            body.push(n as u8);
+        }
+        wrap(&body, n as u64)
+    }
+
+    #[test]
+    fn hand_built_any_trans_nodes_pass() {
+        let forty: Vec<u8> = (0..40).map(|b| b * 5).collect();
+        let all: Vec<u8> = (0..=u8::MAX).collect();
+        for inputs in [&b"abc"[..], &forty, &all] {
+            let d = any_trans(inputs, None);
+            assert_eq!(check(&d).map(|s| s.keys), Ok(inputs.len() as u64));
+            assert_eq!(exercise(&d), inputs.len());
+        }
+    }
+
+    #[test]
+    fn transitions_out_of_order_are_rejected_even_with_a_consistent_index() {
+        // `any_trans` builds the index from the inputs as given, so it agrees with them.
+        let mut swapped: Vec<u8> = (0..40).map(|b| b * 5).collect();
+        swapped.swap(3, 4);
+        let mut duplicate: Vec<u8> = (0..40).map(|b| b * 5).collect();
+        duplicate[4] = duplicate[3];
+        for inputs in [&swapped[..], &duplicate[..], &b"ba"[..], &b"aa"[..]] {
+            let d = any_trans(inputs, None);
+            assert_eq!(
+                check(&d).map_err(|e| e.what),
+                Err("FST transitions out of byte order"),
+                "{inputs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_that_disagrees_with_the_inputs_is_rejected() {
+        let forty: Vec<u8> = (0..40).map(|b| b * 5).collect();
+        let index = |inputs: &[u8]| {
+            let mut ix = [u8::MAX; 256];
+            for (i, &b) in inputs.iter().enumerate() {
+                ix[usize::from(b)] = i as u8;
+            }
+            ix
+        };
+        let all: Vec<u8> = (0..=u8::MAX).collect();
+        let mut cases = Vec::new();
+        // A present input whose entry says "none" (>= ntrans): `get` would miss a key the stream yields.
+        let mut ix = index(&forty);
+        ix[10] = 200;
+        cases.push((forty.clone(), ix));
+        // An absent byte whose entry names a transition.
+        let mut ix = index(&forty);
+        ix[11] = 2;
+        cases.push((forty.clone(), ix));
+        // 256 transitions: every entry names one; two swapped.
+        let mut ix = index(&all);
+        ix.swap(7, 9);
+        cases.push((all.clone(), ix));
+        for (inputs, ix) in cases {
+            let d = any_trans(&inputs, Some(&ix));
+            assert_eq!(
+                check(&d).map_err(|e| e.what),
+                Err("an FST index that disagrees with the inputs")
+            );
+        }
+    }
+
+    #[test]
+    fn paths_longer_than_the_bound_are_rejected() {
+        // 16 x 16 two-byte prefixes sharing one long suffix: 256 keys, a short FST, but a stream yields 256 times
+        // the suffix (the reviewer's 2.5 MB version takes about an hour to stream).
+        let suffix = vec![b'x'; 5000];
+        let mut keys = Vec::new();
+        for a in b'a'..b'a' + 16 {
+            for b in b'a'..b'a' + 16 {
+                let mut k = vec![a, b];
+                k.extend_from_slice(&suffix);
+                keys.push(k);
+            }
+        }
+        let d = build(keys.iter().map(|k| (k, 0)));
+        assert!(d.len() < 6000, "{}", d.len());
+        let shape = check(&d).unwrap();
+        assert_eq!((shape.keys, shape.longest_path), (256, 5002));
+        assert!(super::check(&d, 5002).is_ok());
+        assert_eq!(
+            super::check(&d, 5001).map_err(|e| e.what),
+            Err("an FST path longer than its keys can be")
+        );
+    }
+
+    #[test]
+    fn nodes_must_fill_the_payload() {
+        // A spare byte between the header and the first node, or bytes that are not a node below the root.
+        let ok = one_trans(&[1]);
+        let mut gap = ok[..HEADER_LEN].to_vec();
+        gap.push(0);
+        gap.extend_from_slice(&ok[HEADER_LEN..]);
+        let root = (gap.len() - 21) as u64;
+        let n = gap.len();
+        gap[n - 12..n - 4].copy_from_slice(&root.to_le_bytes());
+        assert!(check(&gap).is_err());
+        // A transition into the middle of a node (the leaf's count byte, 17).
+        assert!(check(&one_trans(&[2])).is_err());
     }
 }

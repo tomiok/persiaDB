@@ -185,6 +185,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`KeyDefect::PathTooLong`) instead of an I/O error.
 - `persia-engine`: `Segment::open` checks the structure of each `TermDict` and `IdMap` FST before the `fst` crate reads
   it, so a crafted FST behind a valid CRC is a corruption error instead of a panic or an endless stream (SPEC §5.3).
+  An `IdMap` or `keyword` `TermDict` with a path longer than the longest id or keyword value is corruption too, so a
+  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6).
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
