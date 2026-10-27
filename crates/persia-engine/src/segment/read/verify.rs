@@ -10,7 +10,7 @@ use super::super::norms;
 use super::columns::{BoolColumn, KeywordColumn, Norms, NumericColumn};
 use super::terms::{SKIP_ENTRY_LEN, TERM_INFO_LEN, TermIndex, TermInfo};
 use super::{ReadError, Segment, SegmentCorruption, raw_payload};
-use crate::document::Value;
+use crate::document::{MAX_DATETIME, MIN_DATETIME, Value};
 use crate::schema::{Field, FieldType};
 
 /// A column field's doc values, decoded with the writers' rules checked too.
@@ -41,10 +41,10 @@ impl Segment {
     ///   the term dictionary and postings, and stored values against the columns;
     /// - per document: the `IdList`, `IdMap`, `BlobRefs` and `DocStore` agree, a row holds only stored fields of
     ///   the segment's schema, and `min_id`/`max_id` are the smallest and largest id;
-    /// - sections that hold nothing (SPEC §5.3 "Presence").
+    /// - sections that hold nothing (SPEC §5.3 "Presence");
+    /// - column values a document can hold: no NaN, infinite or `-0.0` `f64`, no `datetime` out of range.
     ///
-    /// It does not analyze stored `text` values again to compare them with the postings, nor check the range of
-    /// column values (ROADMAP 5.4.4).
+    /// It does not analyze stored `text` values again to compare them with the postings.
     ///
     /// It decodes every block once or more, and holds 4 bytes per document for one `text`/`keyword` field at a time,
     /// plus the decoded columns of every column field (8 bytes per document each, and a keyword column's values and
@@ -122,6 +122,15 @@ impl Segment {
             ty @ (FieldType::I64 | FieldType::F64 | FieldType::Datetime) => {
                 let c = NumericColumn::read(stream, ty, n, true)?;
                 let any = (0..n).any(|d| c.has_value(d));
+                if (0..n).any(|d| c.get(d).is_some_and(|v| !in_range(&v))) {
+                    return Err(invalid(
+                        SectionKind::Columns,
+                        id,
+                        // The section has no single position for a document's key (FOR blocks are bit-packed).
+                        0,
+                        "a column value no document can hold",
+                    ));
+                }
                 (Column::Numeric(c), any)
             }
             FieldType::Bool => {
@@ -484,5 +493,15 @@ fn invalid(kind: SectionKind, field: u32, position: u64, what: &'static str) -> 
         field,
         position,
         reason: SegmentCorruption::Invalid { what },
+    }
+}
+
+/// Whether a numeric column value is one a document can hold (SPEC §5.2.1, §6.4.1): a finite `f64` other than `-0.0`,
+/// a `datetime` in its range; any `i64`.
+fn in_range(value: &Value) -> bool {
+    match *value {
+        Value::F64(v) => v.is_finite() && !(v == 0.0 && v.is_sign_negative()),
+        Value::Datetime(t) => (MIN_DATETIME..=MAX_DATETIME).contains(&t),
+        _ => true,
     }
 }

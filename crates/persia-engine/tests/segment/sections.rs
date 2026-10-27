@@ -2193,6 +2193,102 @@ fn whole_list_rules() {
     run_all(&schema, &bytes, &cases);
 }
 
+/// SPEC §5.2.1: a document's column key that decodes to a value no document can hold (§6.4.1) is corruption, which
+/// only `verify` checks (a lookup returns the value).
+#[test]
+fn column_values_no_document_can_hold() {
+    use SectionKind::Columns;
+    use persia_format::for_codec::{f64_to_key, i64_to_key};
+    let (schema, bytes) = fixture();
+    let price = id(&schema, "price").get();
+    let at = id(&schema, "at").get();
+    // Sets `doc`'s key in the sparse column of `field` (both have a presence bitmap), re-encoded minimally.
+    let set_key = move |field: u32, doc: usize, key: u64| {
+        move |s: &mut Seg| {
+            s.edit_stream(Columns, field, |b| {
+                let mut r = Reader::new(b);
+                r.skip(8).unwrap();
+                let presence = read_bitmap(&mut r).unwrap();
+                let mut keys = read_for(&mut r);
+                keys[doc] = key;
+                let mut w = Writer::new();
+                w.write_bytes(&b[..8]);
+                write_bitmap(&mut w, Some(&presence));
+                write_for(&mut w, &keys);
+                *b = w.into_inner();
+            });
+        }
+    };
+    let want = || invalid("a column value no document can hold");
+    // Doc 0 has a price, doc 1 an `at`.
+    let cases = vec![
+        case(
+            "a NaN f64",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(price, 0, f64_to_key(f64::NAN)),
+        ),
+        case(
+            "-0.0",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(price, 0, f64_to_key(-0.0)),
+        ),
+        case(
+            "+inf",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(price, 0, f64_to_key(f64::INFINITY)),
+        ),
+        case(
+            "-inf",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(price, 0, f64_to_key(f64::NEG_INFINITY)),
+        ),
+        case(
+            "a datetime before year 0",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(at, 1, i64_to_key(persia_engine::document::MIN_DATETIME - 1)),
+        ),
+        case(
+            "a datetime after year 9999",
+            At::Verify,
+            Columns,
+            want(),
+            set_key(at, 1, i64_to_key(persia_engine::document::MAX_DATETIME + 1)),
+        ),
+    ];
+    run_all(&schema, &bytes, &cases);
+    // The ends of the ranges are values a document can hold: the range check passes, and only the comparison with
+    // the stored value (`at` and `price` are stored) fails.
+    let subnormal = f64::from_bits(1);
+    let accepted = [
+        (at, 1, i64_to_key(persia_engine::document::MAX_DATETIME)),
+        (at, 1, i64_to_key(persia_engine::document::MIN_DATETIME)),
+        (price, 2, f64_to_key(0.0)),
+        (price, 2, f64_to_key(f64::MAX)),
+        (price, 2, f64_to_key(f64::MIN)),
+        (price, 2, f64_to_key(subnormal)),
+        (price, 2, f64_to_key(-subnormal)),
+    ];
+    for (field, doc, key) in accepted {
+        let mut s = Seg::parse(&bytes);
+        set_key(field, doc, key)(&mut s);
+        let edited = s.to_bytes();
+        let err = read_back(&schema, &edited).unwrap_err();
+        assert!(
+            matches!(&err, ReadError::Section { reason: SegmentCorruption::Invalid { what }, .. } if what.contains("stored one")),
+            "key {key:#x} of field {field}: only the stored value differs: {err:?}"
+        );
+    }
+}
 #[test]
 fn whole_segment_id_rules() {
     use SectionKind::{BlobRefs, IdList, IdMap};

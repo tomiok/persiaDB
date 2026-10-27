@@ -162,6 +162,7 @@ dependencies = [
 name = "persia-fuzz"
 version = "0.0.0"
 dependencies = [
+ "fst",
  "libfuzzer-sys",
  "persia-analysis",
  "persia-engine",

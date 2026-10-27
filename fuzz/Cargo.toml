@@ -16,6 +16,8 @@ persia-format = { path = "../crates/persia-format" }
 persia-storage = { path = "../crates/persia-storage" }
 persia-engine = { path = "../crates/persia-engine" }
 persia-analysis = { path = "../crates/persia-analysis" }
+# Same version as the workspace: the `segment` target rebuilds edited TermDict and IdMap FSTs.
+fst = "=0.4.7"
 # Same version and features as the workspace, to build the fixed segment of the `segment` target.
 serde_json = { version = "1.0.151", features = ["float_roundtrip"] }
 # Same version and features as the workspace (no `legacy`), to read a frame's declared size in the fuzz harness.

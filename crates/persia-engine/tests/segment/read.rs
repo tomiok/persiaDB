@@ -144,7 +144,7 @@ pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack,
 }
 
 /// What [`read_back`] must return for `docs`, from the model.
-fn expected(schema: &CollectionSchema, docs: &[Document]) -> ReadBack {
+pub fn expected(schema: &CollectionSchema, docs: &[Document]) -> ReadBack {
     let registry = AnalyzerRegistry::builtin();
     let n = docs.len() as u32;
     let mut out = ReadBack::default();
@@ -202,7 +202,7 @@ fn expected(schema: &CollectionSchema, docs: &[Document]) -> ReadBack {
     out
 }
 
-fn check_reads(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
+pub fn check_reads(schema: &CollectionSchema, docs: &[Document], bytes: &[u8]) {
     let got = read_back(schema, bytes).unwrap();
     let want = expected(schema, docs);
     assert_eq!(got.terms, want.terms);

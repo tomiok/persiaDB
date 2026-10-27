@@ -18,10 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and raw CRC; each term's `df`, `ttf`, `max_tf` and `min_norm` against its list and each Skip entry's bounds against
   its block; the `skip_off` chain and the end of the Skip section; minimal bit widths and FOR minimums; norms and field
   statistics against the term frequencies; keyword columns against the postings; stored values against the columns;
-  the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; and sections that hold
-  nothing. Not checked: stored `text` values against the postings (that needs re-analysis), and the range of column
-  values (ROADMAP 5.4.4). It decodes every block and holds the decoded columns of all column fields at once (8 bytes
-  per document each), so its memory grows with the segment size times the number of column fields.
+  the `IdList`, `IdMap`, `BlobRefs` and `DocStore` against each other; `min_id`/`max_id`; sections that hold nothing;
+  and column values no document can hold (a NaN, infinite or `-0.0` `f64`, a `datetime` out of range, ROADMAP 5.4.4).
+  Not checked: stored `text` values against the postings (that needs re-analysis). It decodes every block and holds
+  the decoded columns of all column fields at once (8 bytes per document each), so its memory grows with the segment
+  size times the number of column fields.
   `Segment::sections` lists the section table with each block-framed section's stream size.
 - `persia-engine`: the segment reader (SPEC §5, ROADMAP 5.3). `Segment::open` checks the footer, section table, padding,
   section presence, every block table and raw CRC, and the schema hash at the field count the segment records, so a
@@ -182,6 +183,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   are no longer locked out while a writer is open (SPEC §4.5.1).
 - `persia-storage`: a local-backend object whose path is longer than `PATH_MAX` allows (1023 bytes on macOS and the BSDs, 4095 on Linux) is `InvalidInput`
   (`KeyDefect::PathTooLong`) instead of an I/O error.
+- `persia-engine`: `Segment::open` checks the structure of each `TermDict` and `IdMap` FST before the `fst` crate reads
+  it, so a crafted FST behind a valid CRC is a corruption error instead of a panic or an endless stream (SPEC §5.3).
+  An `IdMap` or `keyword` `TermDict` with a path longer than the longest id or keyword value is corruption too, so a
+  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6).
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 

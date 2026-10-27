@@ -578,7 +578,10 @@ Writers use the true minimum and the minimal width.
 **Order-preserving keys.** Signed and floating-point columns are stored as `u64` keys whose unsigned order is
 the value order. `i64`: flip the sign bit. `f64` (the IEEE-754 bits): if the sign bit is clear, set it;
 otherwise invert all bits. This matches `f64::total_cmp` (`-0.0 < +0.0`, and NaNs sort at the ends), and every
-bit pattern round-trips exactly. Writers never key `-0.0` or NaN: a document holds neither in an `f64` field (§6.4.1).
+bit pattern round-trips exactly. Writers never key `-0.0`, NaN or an infinity in an `f64` column, nor a
+`datetime` outside its §6.4.1 range: a document holds none of them (§6.4.1). A document's key that
+decodes to one is corruption, which a full verification of the segment reports (a document without a value holds an
+unspecified key, §5.3.5, which is not checked).
 
 ### 5.3 Sections (per segment)
 | Section | `section_kind` | Per | Framed | Content | Encoding |
@@ -601,7 +604,12 @@ tombstone sidecars (SPEC §8.3).
 
 **Framing** (ROADMAP 5.2.9, ADR-0027). A *block* section is block-framed (§5.2): offsets into it are stream positions.
 A *raw* section is its payload followed by a `u32` CRC32C of the payload: the two FSTs, which are read whole and used
-in place. Any other `section_kind` is corruption (a new kind needs an `incompat_flags` bit), and so is a kind under a
+in place. A CRC proves only that the bytes are the ones written, so a reader checks an FST's structure before using
+it: header version 3; nodes laid out back to back from the end of the 16-byte header to the root, whose last byte is
+the one before the footer; packed sizes of at most 8 bytes; every transition pointing to the last byte of a node below
+its own, or to the empty node (so no cycles); transitions in strictly increasing byte order, with an index (when
+present) that agrees with them; output sums that fit a `u64` along every path; and a key count equal to the keys the
+nodes hold. Anything else is corruption, as is a path longer than the longest key of §5.3.1 and §5.3.6. Any other `section_kind` is corruption (a new kind needs an `incompat_flags` bit), and so is a kind under a
 field of the wrong type, two sections with the same `(section_kind, field_id)`, or a `field_id` at or above
 `schema_field_count` (other than `0xFFFF_FFFF` for the segment-level kinds 9–12, which use nothing else).
 
@@ -614,7 +622,9 @@ field of the wrong type, two sections with the same `(section_kind, field_id)`, 
 
 #### 5.3.1 Term dictionary
 `TermDict` is an FST (the `fst` crate's map format, version 3) whose keys are the field's terms (UTF-8 bytes, in byte
-order) and whose value is the term's ordinal: its rank in that order. `TermInfo` is the stream of one 56-byte record
+order) and whose value is the term's ordinal: its rank in that order. A `keyword` field's terms are its values, so no
+path of its FST is longer than the longest keyword value (32 KiB, §6.4.1); a longer one is corruption. A `text` field's
+terms are analyzer tokens, which no rule bounds yet (a registered analyzer need not apply the length guard of §6.3.1). `TermInfo` is the stream of one 56-byte record
 per term, record `i` at position `56·i`:
 ```
 0   8  postings_off   u64  start of the term's list in Postings
@@ -700,7 +710,7 @@ back to back: record `d` spans `[end[d−1], end[d])` (`end[−1] = 0`). `DocSto
 each has `doc_count` records, in docid order. A record may span blocks (§5.2). Ends that decrease, or a last end
 other than the stream length minus `8·n`, are corruption, and so is an empty `IdList` record or a non-empty `BlobRefs`
 record that is not exactly one `BlobRef` encoding. `IdMap` is an FST from each id to its
-docid; a segment holds an id at most once (the builder rejects a duplicate; how the write path handles an upsert of a document not yet flushed is open, ROADMAP 6).
+docid; no path of it is longer than the longest id (512 bytes, §6.4.1), and a segment holds an id at most once (the builder rejects a duplicate; how the write path handles an upsert of a document not yet flushed is open, ROADMAP 6).
 
 ### 5.4 Internal doc ids
 `docid` is a segment-local `u32`, dense `0..doc_count`. Segments MUST NOT exceed `2^31` docs.

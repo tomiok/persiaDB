@@ -1,9 +1,11 @@
-//! Segments (SPEC §5, ROADMAP 5.1–5.3). Writer: every segment written is decoded by a strict, independent decoder
+//! Segments (SPEC §5, ROADMAP 5.1–5.5). Writer: every segment written is decoded by a strict, independent decoder
 //! (`decode`) and compared with a naive model of its documents (`model`); determinism; the golden segment.
 //! Reader (`read`, `corrupt`): everything reads back as the model; iteration, enumeration, footer rules, damage.
 //!
-//! The golden file `tests/fixtures/segment/v1.0/basic.pseg` pins the bytes of format 1.0: it is never regenerated
-//! once released (SPEC §15); `PERSIA_WRITE_SEGMENT_FIXTURES=1` writes it when it is missing.
+//! The golden files `tests/fixtures/segment/v1.0/basic.pseg` (every section in one block) and `multiblock.pseg`
+//! (`golden`: sections over many blocks, two FOR blocks) pin the bytes of format 1.0: they are never regenerated once
+//! released (SPEC §15); `PERSIA_WRITE_SEGMENT_FIXTURES=1` writes one when it is missing. Both read with
+//! `basic.schema.json`.
 
 #![allow(
     clippy::unwrap_used,
@@ -24,8 +26,11 @@
 mod corrupt;
 mod decode;
 mod edges;
+mod fst_damage;
+mod golden;
 mod model;
 mod read;
+mod scale;
 mod sections;
 
 use std::collections::BTreeMap;

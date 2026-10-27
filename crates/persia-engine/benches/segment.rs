@@ -1,5 +1,6 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
-//! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3).
+//! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3);
+//! opening a segment with a large term dictionary.
 //! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
@@ -242,5 +243,37 @@ fn bench_read(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench, bench_read);
+/// Distinct keyword values in the large-dictionary segment.
+const LARGE_TERMS: u64 = 200_000;
+
+/// `Segment::open` of a segment whose cost is its term dictionary: one `keyword` field with a distinct value per
+/// document, so a `TermDict` of 200 000 terms, which open checks node by node before using it (`fst_check`, SPEC §5.3
+/// "Framing") and then walks once for its values.
+fn bench_open_large_dict(c: &mut Criterion) {
+    let schema = SchemaBuilder::new("dict")
+        .field("sku", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let sku = schema.field("sku").unwrap().id();
+    let registry = AnalyzerRegistry::builtin();
+    let mut rng = Rng(0x5EED_D1C7);
+    let docs: Vec<Document> = (0..LARGE_TERMS)
+        .map(|i| {
+            let value = format!("{}-{}-{i}", rng.word(), rng.word());
+            Document::new(format!("d{i}")).with(sku, Value::String(value))
+        })
+        .collect();
+    let built = build(&schema, &registry, &docs);
+    let source = ByteSource::new(SegmentWriter::new(&built, META).finish().unwrap().into());
+    let seg = Segment::open(source.clone(), &schema).unwrap();
+    assert_eq!(seg.terms(sku).unwrap().len(), LARGE_TERMS);
+
+    let mut group = c.benchmark_group("segment_open");
+    group.throughput(Throughput::Elements(LARGE_TERMS));
+    group.bench_function("large_dict", |b| {
+        b.iter(|| black_box(Segment::open(source.clone(), &schema).unwrap()));
+    });
+    group.finish();
+}
+criterion_group!(benches, bench, bench_read, bench_open_large_dict);
 criterion_main!(benches);
