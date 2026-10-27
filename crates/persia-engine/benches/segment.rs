@@ -248,9 +248,9 @@ fn bench_read(c: &mut Criterion) {
 /// Distinct keyword values in the large-dictionary segment.
 const LARGE_TERMS: u64 = 200_000;
 
-/// `Segment::open` of a segment whose cost is its term dictionary: one `keyword` field with a distinct value per
-/// document, so a `TermDict` of 200 000 terms, which open checks node by node before using it (`fst_check`, SPEC §5.3
-/// "Framing") and then walks once for its values.
+/// `Segment::open` of a segment whose cost is its two FSTs: one `keyword` field with a distinct value per document, so a
+/// `TermDict` of 200 000 terms and an `IdMap` of as many ids (every segment has one, SPEC §5.3.6). Open
+/// checks each node by node before using it (`fst_check`, SPEC §5.3 "Framing"), then walks it once for its values.
 fn bench_open_large_dict(c: &mut Criterion) {
     let schema = SchemaBuilder::new("dict")
         .field("sku", FieldKind::Keyword(KeywordOptions::default()))

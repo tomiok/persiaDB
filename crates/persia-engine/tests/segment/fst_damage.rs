@@ -75,8 +75,10 @@ fn structural_damage_is_an_fst_corruption() {
         assert_fst_corruption(&set(0, 2), &format!("{kind:?} version"));
         // The root's state byte: every encoding of a node, pointing anywhere its bytes say.
         for v in 0..=u8::MAX {
-            // Whatever open does with it, neither it nor a full read panics.
-            let _ = read_back(&schema(), &damaged(&bytes, range, |p| p[root_at - 1] = v));
+            // Whatever open does with it, neither it nor a full read panics, and what it rejects is a corruption.
+            if let Err(e) = read_back(&schema(), &damaged(&bytes, range, |p| p[root_at - 1] = v)) {
+                assert!(e.is_corruption(), "{kind:?} root state byte {v}: {e}");
+            }
         }
     }
 }

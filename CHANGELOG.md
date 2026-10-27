@@ -191,7 +191,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `Segment::open` checks the structure of each `TermDict` and `IdMap` FST before the `fst` crate reads
   it, so a crafted FST behind a valid CRC is a corruption error instead of a panic or an endless stream (SPEC §5.3).
   An `IdMap` or `keyword` `TermDict` with a path longer than the longest id or keyword value is corruption too, so a
-  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6).
+  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6). Not yet for a `text` field's `TermDict`, whose
+  terms have no length bound (ROADMAP 5.4.5): a crafted one cannot make open panic, but it can still make it slow.
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
