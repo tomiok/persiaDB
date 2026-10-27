@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-format`: `BlockReader::validated` and `BlockReader::reopen` (ROADMAP 5.3.10): a reader keeps what `open`
+  validated (a `Copy` `ValidatedTable`) and rebuilds the reader of the same, immutable section bytes in O(1), without
+  checking the table CRC and block ends again (blocks are still checked when decoded, so other bytes cannot cause a
+  panic). `Segment::open` validates every block table once; lookups no longer cost a pass over the table (record
+  lookups in a 50k-document segment of 1 KiB blocks: 2x faster, bench `segment_records/id_of_1000`).
 - `persia` CLI: `persia inspect segment <file> --schema <schema.json> [--verify]` prints a segment's footer, its
   sections with their sizes (on disk, uncompressed, blocks) and per-field statistics, and with `--verify` runs
   `Segment::verify` and fails if the segment is corrupt (see its entry for what it checks and its memory cost; ROADMAP

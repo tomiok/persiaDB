@@ -3,7 +3,7 @@
 //! blocks) decode each framed block once.
 
 use persia_format::Reader;
-use persia_format::block::BlockReader;
+use persia_format::block::{BlockReader, ValidatedTable};
 
 use super::super::SectionKind;
 use super::error::{ReadError, SegmentCorruption};
@@ -34,6 +34,32 @@ impl<'s> Stream<'s> {
             field,
             blocks,
         })
+    }
+
+    /// Rebuilds the reader of `bytes`, whose block table [`Stream::open`] validated as `table` (ROADMAP 5.3.10).
+    pub(super) fn reopen(
+        kind: SectionKind,
+        field: u32,
+        bytes: &'s [u8],
+        base: u64,
+        table: ValidatedTable,
+    ) -> Result<Self, ReadError> {
+        let blocks =
+            BlockReader::reopen(bytes, base, table).map_err(|source| ReadError::Block {
+                kind,
+                field,
+                source,
+            })?;
+        Ok(Self {
+            kind,
+            field,
+            blocks,
+        })
+    }
+
+    /// What [`Stream::open`] validated, for [`Stream::reopen`].
+    pub(super) fn validated(&self) -> ValidatedTable {
+        self.blocks.validated()
     }
 
     /// Length of the stream.

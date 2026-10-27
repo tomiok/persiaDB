@@ -620,6 +620,15 @@ impl<'a> BlockTable<'a> {
     }
 }
 
+/// The facts of a block table that [`BlockReader::open`] validated, from [`BlockReader::validated`], for
+/// [`BlockReader::reopen`] (SPEC §5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ValidatedTable {
+    total_len: u64,
+    block_size: u32,
+    block_count: u32,
+}
+
 /// Random access to the blocks of a block-framed section held in memory or mapped (SPEC §5.2): a
 /// [`BlockTable`] plus the section's bytes.
 ///
@@ -639,6 +648,56 @@ impl<'a> BlockReader<'a> {
     pub fn open(section: &'a [u8], base: u64) -> Result<Self> {
         let table = BlockTable::open(section, to_u64(section.len()), base)?;
         Ok(Self { table, section })
+    }
+
+    /// What [`BlockReader::open`] validated, without the borrow: kept next to immutable section bytes, it lets
+    /// [`BlockReader::reopen`] rebuild the reader in O(1) instead of checking the table CRC and every block end
+    /// again (a segment reopens its sections on every lookup).
+    pub const fn validated(&self) -> ValidatedTable {
+        ValidatedTable {
+            total_len: self.table.total_len,
+            block_size: self.table.block_size,
+            block_count: self.table.block_count,
+        }
+    }
+
+    /// The reader of `section`, which [`BlockReader::open`] validated as `table` and which has not changed since:
+    /// O(1), no table CRC or block-end check.
+    ///
+    /// Blocks are still checked when decoded (their CRC, and their header against the table). Given other bytes, the
+    /// reader cannot read out of bounds or panic either: a block range that does not fit the section is an error
+    /// when the block is read, whatever the table's bytes say now.
+    ///
+    /// # Errors
+    /// [`Error::InvalidInputLen`] if `section` is shorter than the table `table` describes.
+    pub fn reopen(section: &'a [u8], base: u64, table: ValidatedTable) -> Result<Self> {
+        let table_len = u64::from(table.block_count)
+            .saturating_mul(to_u64(END_LEN))
+            .saturating_add(to_u64(TABLE_TRAILER_LEN));
+        let ends_len = usize::try_from(table.block_count)
+            .ok()
+            .and_then(|n| n.checked_mul(END_LEN));
+        let start = usize::try_from(table_len)
+            .ok()
+            .and_then(|len| section.len().checked_sub(len));
+        let ends = start
+            .zip(ends_len)
+            .and_then(|(s, n)| section.get(s..s.checked_add(n)?))
+            .ok_or(Error::InvalidInputLen {
+                len: to_u64(section.len()),
+                min: table_len,
+                max: u64::MAX,
+            })?;
+        Ok(Self {
+            table: BlockTable {
+                ends,
+                base,
+                total_len: table.total_len,
+                block_size: table.block_size,
+                block_count: table.block_count,
+            },
+            section,
+        })
     }
 
     /// The validated block table.
@@ -971,6 +1030,54 @@ mod tests {
         assert_eq!(streamed, whole);
     }
 
+    /// `reopen` with what `open` validated reads exactly what `open` does; given other bytes (a table edited after
+    /// validation) it may fail, but never panics or reads out of bounds; a section too short for the table is an
+    /// error.
+    #[test]
+    fn reopen_reads_as_open_and_survives_other_bytes() {
+        let data: Vec<u8> = (0..=255).cycle().take(1000).collect();
+        // Miri cannot run zstd (C behind FFI), and is slow: uncompressed blocks only, every 7th byte flipped.
+        let (compressions, step): (&[Compression], usize) = if cfg!(miri) {
+            (&[Compression::None], 7)
+        } else {
+            (&[Compression::None, Compression::Zstd { level: 3 }], 1)
+        };
+        for &compression in compressions {
+            let bytes = section(64, compression, &data);
+            let opened = BlockReader::open(&bytes, 7).unwrap();
+            let v = opened.validated();
+            let again = BlockReader::reopen(&bytes, 7, v).unwrap();
+            assert_eq!(read_all(&again).unwrap(), data);
+            assert_eq!(
+                (again.len(), again.block_count(), again.block_size()),
+                (opened.len(), opened.block_count(), opened.block_size())
+            );
+            for i in 0..opened.block_count() {
+                assert_eq!(
+                    again.block_range(i).unwrap(),
+                    opened.block_range(i).unwrap()
+                );
+            }
+            for at in (0..bytes.len()).step_by(step) {
+                let mut edited = bytes.clone();
+                edited[at] ^= 0x5a;
+                if let Ok(r) = BlockReader::reopen(&edited, 0, v) {
+                    let _ = read_all(&r);
+                }
+            }
+            assert!(matches!(
+                BlockReader::reopen(&bytes[..10], 0, v),
+                Err(Error::InvalidInputLen { .. })
+            ));
+            // Another section's table, longer than these bytes' blocks: errors, not panics.
+            let other = BlockReader::open(&section(8, Compression::None, &data), 0)
+                .unwrap()
+                .validated();
+            if let Ok(r) = BlockReader::reopen(&bytes, 0, other) {
+                assert!(read_all(&r).is_err());
+            }
+        }
+    }
     #[test]
     fn read_range_spans_blocks() {
         let data: Vec<u8> = (0..100).collect();

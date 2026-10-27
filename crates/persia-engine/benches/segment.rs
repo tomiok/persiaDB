@@ -15,7 +15,9 @@ use persia_engine::document::{Document, Value};
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
-use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter, TermInfo};
+use persia_engine::segment::{
+    Segment, SegmentBuilder, SegmentMeta, SegmentWriter, TermInfo, WriteOptions,
+};
 use persia_format::ByteSource;
 
 const DOCS: u64 = 2_000;
@@ -275,5 +277,51 @@ fn bench_open_large_dict(c: &mut Criterion) {
     });
     group.finish();
 }
-criterion_group!(benches, bench, bench_read, bench_open_large_dict);
+/// Documents in [`bench_records_over_many_blocks`]: at 1 KiB blocks, record arrays of thousands of blocks.
+const MANY_BLOCK_DOCS: u32 = 50_000;
+
+/// Record lookups in sections of many blocks (ROADMAP 5.3.10): each `id_of` reads one record, so its cost must not
+/// grow with the section's block count (it did while every lookup re-validated the whole block table).
+fn bench_records_over_many_blocks(c: &mut Criterion) {
+    let schema = SchemaBuilder::new("ids")
+        .field("sku", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let sku = schema.field("sku").unwrap().id();
+    let registry = AnalyzerRegistry::builtin();
+    let docs: Vec<Document> = (0..MANY_BLOCK_DOCS)
+        .map(|i| {
+            Document::new(format!("doc-{i:08}")).with(sku, Value::String(format!("s{}", i % 97)))
+        })
+        .collect();
+    let built = build(&schema, &registry, &docs);
+    let options = WriteOptions {
+        block_size: 1024,
+        ..WriteOptions::default()
+    };
+    let bytes = SegmentWriter::new(&built, META)
+        .with_options(options)
+        .finish()
+        .unwrap();
+    let seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+
+    let mut group = c.benchmark_group("segment_records");
+    group.throughput(Throughput::Elements(1000));
+    group.bench_function("id_of_1000", |b| {
+        b.iter(|| {
+            for d in (0..MANY_BLOCK_DOCS).step_by((MANY_BLOCK_DOCS / 1000) as usize) {
+                black_box(seg.id_of(d).unwrap());
+            }
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench,
+    bench_read,
+    bench_open_large_dict,
+    bench_records_over_many_blocks
+);
 criterion_main!(benches);
