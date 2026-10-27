@@ -122,11 +122,12 @@ impl Segment {
             ty @ (FieldType::I64 | FieldType::F64 | FieldType::Datetime) => {
                 let c = NumericColumn::read(stream, ty, n, true)?;
                 let any = (0..n).any(|d| c.has_value(d));
-                if let Some(d) = (0..n).find(|&d| c.get(d).is_some_and(|v| !in_range(&v))) {
+                if (0..n).any(|d| c.get(d).is_some_and(|v| !in_range(&v))) {
                     return Err(invalid(
                         SectionKind::Columns,
                         id,
-                        u64::from(d),
+                        // The section has no single position for a document's key (FOR blocks are bit-packed).
+                        0,
                         "a column value no document can hold",
                     ));
                 }

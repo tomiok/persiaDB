@@ -35,7 +35,9 @@ use persia_format::block::{BlockReader, BlockWriter, Compression};
 use persia_format::checksum::crc32c;
 use persia_format::{BlobId, BlobRef, ByteSource};
 
-/// One record of mode B: section selector, stream offset (`u24` LE), operation, byte.
+/// One edit record of modes 1–3 (see the module docs): mode 1 reads section selector, stream offset (`u24` LE),
+/// operation, byte; mode 2 section selector, entry index (`u16` LE), operation, two bytes; mode 3 ignores the first
+/// byte and reads footer offset (`u16` LE), operation, byte.
 const EDIT_LEN: usize = 6;
 /// Edits applied per input at most, so an execution stays fast.
 const MAX_EDITS: usize = 64;

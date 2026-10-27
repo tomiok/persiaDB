@@ -2266,15 +2266,28 @@ fn column_values_no_document_can_hold() {
         ),
     ];
     run_all(&schema, &bytes, &cases);
-    // The ends of the ranges are values a document can hold.
-    let mut s = Seg::parse(&bytes);
-    set_key(at, 1, i64_to_key(persia_engine::document::MAX_DATETIME))(&mut s);
-    let edited = s.to_bytes();
-    let err = read_back(&schema, &edited).unwrap_err();
-    assert!(
-        matches!(&err, ReadError::Section { reason: SegmentCorruption::Invalid { what }, .. } if what.contains("stored one")),
-        "only the stored value differs: {err:?}"
-    );
+    // The ends of the ranges are values a document can hold: the range check passes, and only the comparison with
+    // the stored value (`at` and `price` are stored) fails.
+    let subnormal = f64::from_bits(1);
+    let accepted = [
+        (at, 1, i64_to_key(persia_engine::document::MAX_DATETIME)),
+        (at, 1, i64_to_key(persia_engine::document::MIN_DATETIME)),
+        (price, 2, f64_to_key(0.0)),
+        (price, 2, f64_to_key(f64::MAX)),
+        (price, 2, f64_to_key(f64::MIN)),
+        (price, 2, f64_to_key(subnormal)),
+        (price, 2, f64_to_key(-subnormal)),
+    ];
+    for (field, doc, key) in accepted {
+        let mut s = Seg::parse(&bytes);
+        set_key(field, doc, key)(&mut s);
+        let edited = s.to_bytes();
+        let err = read_back(&schema, &edited).unwrap_err();
+        assert!(
+            matches!(&err, ReadError::Section { reason: SegmentCorruption::Invalid { what }, .. } if what.contains("stored one")),
+            "key {key:#x} of field {field}: only the stored value differs: {err:?}"
+        );
+    }
 }
 #[test]
 fn whole_segment_id_rules() {
