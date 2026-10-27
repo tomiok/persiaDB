@@ -16,7 +16,7 @@ use persia_format::for_codec::{f64_to_key, i64_to_key};
 use super::SegmentError;
 use super::arena::Arena;
 use crate::document::{Document, FieldSet, Value};
-use crate::schema::{CollectionSchema, FieldKind};
+use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use inverted::Inverted;
 
 /// Most documents in one segment (SPEC §5.4): docids are `0..2^31`.
@@ -25,6 +25,10 @@ pub const MAX_DOCS: u32 = 1 << 31;
 /// Positions between two values of a multi-valued `text` field, so a phrase never matches across values
 /// (SPEC §5.3.3).
 pub const POSITION_GAP: u32 = 100;
+
+/// Longest term of a `TermDict`, in bytes (SPEC §5.3.1): a `keyword` value's limit, and the most a `text` field's
+/// token may hold, whatever its analyzer (one without a length guard, §6.3.1, may emit longer ones).
+pub const MAX_TERM_LEN: usize = crate::document::MAX_KEYWORD_LEN;
 
 /// What a builder accumulates for one field.
 #[derive(Debug)]
@@ -222,7 +226,7 @@ impl SegmentBuilder {
                 (FieldBuilder::Text { analyzer, inverted }, Value::String(s)) => {
                     index_text(
                         analyzer,
-                        inverted,
+                        (field, inverted),
                         docid,
                         [s.as_str()],
                         self.max_position,
@@ -234,7 +238,7 @@ impl SegmentBuilder {
                     let values = list.iter().map(String::as_str);
                     index_text(
                         analyzer,
-                        inverted,
+                        (field, inverted),
                         docid,
                         values,
                         self.max_position,
@@ -370,10 +374,11 @@ enum FieldMark {
 }
 
 /// Indexes the values of one `text` field of document `docid` (SPEC §5.3.3: value `i + 1` starts
-/// [`POSITION_GAP`] positions after the end of value `i`).
+/// [`POSITION_GAP`] positions after the end of value `i`); a token longer than [`MAX_TERM_LEN`] rejects
+/// the document (SPEC §5.3.1).
 fn index_text<'a>(
     analyzer: &Analyzer,
-    inverted: &mut Inverted,
+    (field, inverted): (FieldId, &mut Inverted),
     docid: u32,
     values: impl IntoIterator<Item = &'a str>,
     max_position: u32,
@@ -393,6 +398,12 @@ fn index_text<'a>(
                 .ok()
                 .filter(|&p| p <= max_position)
                 .ok_or_else(overflow)?;
+            if token.text.len() > MAX_TERM_LEN {
+                return Err(SegmentError::TermTooLong {
+                    field,
+                    len: token.text.len(),
+                });
+            }
             let (term, _) = inverted.intern(token.text.as_bytes())?;
             occurrences.push((term, position));
             end = end.max(u64::from(token.position).saturating_add(1));
@@ -430,11 +441,7 @@ mod tests {
     use super::*;
     use crate::schema::{KeywordOptions, SchemaBuilder, TextOptions};
 
-    fn builder() -> (
-        SegmentBuilder,
-        crate::schema::FieldId,
-        crate::schema::FieldId,
-    ) {
+    fn builder() -> (SegmentBuilder, FieldId, FieldId) {
         let schema = SchemaBuilder::new("c")
             .field(
                 "t",
@@ -512,6 +519,47 @@ mod tests {
         }
     }
 
+    /// An analyzer without a length guard may yield any token: one longer than [`MAX_TERM_LEN`] rejects its
+    /// document and leaves the builder as it was; one of exactly that length is indexed (SPEC §5.3.1, ROADMAP 5.4.5).
+    #[test]
+    fn tokens_longer_than_max_term_len_reject_the_document() {
+        use crate::segment::{Segment, SegmentMeta, SegmentWriter};
+        use persia_analysis::WhitespaceTokenizer;
+        let (mut b, t, _) = builder();
+        match &mut b.fields[t.get() as usize] {
+            FieldBuilder::Text { analyzer, .. } => {
+                *analyzer = Arc::new(Analyzer::builder(WhitespaceTokenizer).build());
+            }
+            _ => panic!("t is a text field"),
+        }
+        b.add(&Document::new("a").with(t, Value::String("short".into())))
+            .unwrap();
+        let long = format!("x {}", "y".repeat(MAX_TERM_LEN + 1));
+        assert_eq!(
+            b.add(&Document::new("b").with(t, Value::Strings(vec!["ok".into(), long]))),
+            Err(SegmentError::TermTooLong {
+                field: t,
+                len: MAX_TERM_LEN + 1
+            })
+        );
+        assert_eq!(b.doc_count(), 1);
+        let longest = "y".repeat(MAX_TERM_LEN);
+        b.add(&Document::new("c").with(t, Value::String(longest.clone())))
+            .unwrap();
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&b, meta).finish().unwrap();
+        let seg = Segment::open(persia_format::ByteSource::new(bytes.into()), &b.schema).unwrap();
+        let info = seg.terms(t).unwrap().get(longest.as_bytes()).unwrap();
+        assert_eq!(info.map(|i| i.df()), Some(1));
+        // The rejected document left nothing behind.
+        assert_eq!(seg.doc_count(), 2);
+        assert!(seg.terms(t).unwrap().get(b"ok").unwrap().is_none());
+    }
+
     /// No built-in analyzer stacks tokens and a schema can only name built-ins, so this swaps the analyzer in:
     /// stacked tokens (edge n-grams, and equal tokens at one position) count in `tf` and the field length, their
     /// positions repeat (delta 0, SPEC §5.3.3), and the writer accepts them.
@@ -579,7 +627,7 @@ mod tests {
         let many = vec!["x"; 3];
         index_text(
             &analyzer,
-            &mut inverted,
+            (t, &mut inverted),
             0,
             many,
             u32::MAX,

@@ -15,7 +15,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use persia_engine::document::{Document, FieldSet, Value};
 use persia_engine::schema::CollectionSchema;
 use persia_engine::segment::{
-    ReadError, SEGMENT_FIELD, SectionKind, SegmentCorruption, WriteOptions,
+    MAX_TERM_LEN, ReadError, SEGMENT_FIELD, SectionKind, SegmentCorruption, WriteOptions,
 };
 use persia_format::bitpack::BitWidth;
 use persia_format::block::{BlockReader, BlockWriter, Compression};
@@ -1844,6 +1844,24 @@ fn raw_section_rules() {
             });
         }
     };
+    // The last term of a field padded to `len` bytes: still in order, with its ordinal.
+    let long_last = |field: u32, len: usize| {
+        move |s: &mut Seg| {
+            s.edit_raw(TermDict, field, |p| {
+                let mut entries = fst_entries(p.clone());
+                let (mut last, ordinal) = entries.pop_last().unwrap();
+                last.resize(len, b'z');
+                entries.insert(last, ordinal);
+                *p = fst_bytes(&entries);
+            });
+        }
+    };
+    // SPEC §5.3.1: no term is longer than 32 KiB, in a `text` field too (ROADMAP 5.4.5).
+    for field in [title, tag] {
+        let mut s = Seg::parse(&bytes);
+        long_last(field, MAX_TERM_LEN)(&mut s);
+        open(&schema, &s.to_bytes()).unwrap();
+    }
     let cases = vec![
         case(
             "a TermDict that is not an FST (version 99)",
@@ -1888,6 +1906,20 @@ fn raw_section_rules() {
                     *p = fst_bytes(&entries);
                 });
             },
+        ),
+        case(
+            "a text TermDict key one byte longer than MAX_TERM_LEN",
+            At::Open,
+            TermDict,
+            fst_err(),
+            long_last(title, MAX_TERM_LEN + 1),
+        ),
+        case(
+            "a keyword TermDict key one byte longer than MAX_TERM_LEN",
+            At::Open,
+            TermDict,
+            fst_err(),
+            long_last(tag, MAX_TERM_LEN + 1),
         ),
         case(
             "an IdMap that is not an FST",

@@ -176,6 +176,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine`: a `text` field's tokens are limited to `MAX_TERM_LEN` (32 KiB, the `keyword` value limit) whatever
+  the analyzer (ROADMAP 5.4.5, SPEC §5.3.1): `SegmentBuilder::add` rejects a document whose analyzer yields a longer
+  token with `SegmentError::TermTooLong`, and `Segment::open` treats a `TermDict` path longer than that as corruption
+  in a `text` field as in a `keyword` one, so the cost of walking any term dictionary at open is bounded. The
+  built-in analyzers cut tokens at 255 bytes, so no segment they wrote changes.
 - `persia-engine`: `Segment::open` reads through one process-wide cache, `BlockCache::shared` (8 MiB), instead of an
   8 MiB cache per segment, so a process that opens many segments keeps at most 8 MiB of decoded blocks for all of them
   (ROADMAP 5.3.15); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
