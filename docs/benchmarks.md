@@ -75,9 +75,12 @@ Documents per second:
 |---|--:|--:|
 | 2026-10-26, rustc 1.99.0, AMD Ryzen 5 3600, Linux | 68.7 K | 98.9 K |
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; sections streamed into the segment, lists encoded twice (ROADMAP 5.1.6; the parent commit measured 100.5 K) | | 82.7 K |
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; parent commit of ROADMAP 5.1.6 (2f88fd0^), measured with the next two rows | | 100.3 K |
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; ROADMAP 5.1.6 with its review follow-ups (5da4c6d) | | 96.2 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; before ROADMAP 5.1.6 (its parent on the branch squashed into b185ab1), measured with the next two rows | | 100.3 K |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; main at b185ab1 (ROADMAP 5.1.6 with its review follow-ups) | | 96.2 K |
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lists measured from bit widths, blocks drained without allocating (ROADMAP 5.1.7) | | 99.0 K |
+
+The 18 % that ROADMAP 5.1.6 cost in its own run (82.7 K) mostly did not reproduce: measured together, 5.1.6 with its
+review follow-ups was 4 % slower than its parent, and ROADMAP 5.1.7 brings it within run-to-run noise of it.
 
 ## `persia-engine` segment reading
 

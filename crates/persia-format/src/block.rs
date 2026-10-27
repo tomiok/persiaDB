@@ -162,7 +162,8 @@ impl Default for Compression {
 /// Builds a block-framed section from a byte stream written in pieces of any size (SPEC §5.2).
 ///
 /// It buffers at most one block of input, plus the encoded section until the caller takes it: call
-/// [`BlockWriter::take_output`] to drain the bytes encoded so far (e.g. to stream them to storage), and
+/// [`BlockWriter::take_output`] (or [`BlockWriter::drain_output_into`], into a buffer it keeps) to drain the bytes
+/// encoded so far (e.g. to stream them to storage), and
 /// [`BlockWriter::finish`] for the rest, block table included. The concatenation is the section.
 ///
 /// ```
@@ -1071,6 +1072,7 @@ mod tests {
         }
         drained.write_bytes(&w.finish().unwrap());
         assert_eq!(drained.as_slice(), whole);
+        assert_eq!(drained.offset(), whole.len() as u64);
     }
 
     /// `reopen` with what `open` validated reads exactly what `open` does; given other bytes (a table edited after

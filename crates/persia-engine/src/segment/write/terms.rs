@@ -140,28 +140,36 @@ impl<'a> Encoder<'a> {
             let Some(last) = self.block.last().map(|p| p.doc) else {
                 return Ok(());
             };
-            self.docids.clear();
-            self.docids.extend(self.block.iter().map(|p| p.doc));
             f(self, prev)?;
             prev = Some(last);
         }
     }
 
-    /// Encodes `list` of the current block into `w` (cleared first).
-    fn encode(&mut self, list: List, prev: Option<u32>) -> Result<(), SegmentError> {
-        self.w.clear();
+    /// Fills the values `list` stores for the current block: `docids` for postings, `values` for the runs. Encoding
+    /// and measuring both start here, so they cannot disagree on what they encode.
+    fn fill(&mut self, list: List) -> Result<(), SegmentError> {
         match list {
-            List::Postings => write_docids(&self.docids, prev, &mut self.w)?,
+            List::Postings => {
+                self.docids.clear();
+                self.docids.extend(self.block.iter().map(|p| p.doc));
+            }
             List::Freqs => {
                 self.values.clear();
                 self.values
                     .extend(self.block.iter().map(|p| p.tf.saturating_sub(1)));
-                write_run(&self.values, &mut self.w)?;
             }
-            List::Positions => {
-                position_deltas(self.inverted, &self.block, &mut self.values)?;
-                write_run(&self.values, &mut self.w)?;
-            }
+            List::Positions => position_deltas(self.inverted, &self.block, &mut self.values)?,
+        }
+        Ok(())
+    }
+
+    /// Encodes `list` of the current block into `w` (cleared first).
+    fn encode(&mut self, list: List, prev: Option<u32>) -> Result<(), SegmentError> {
+        self.fill(list)?;
+        self.w.clear();
+        match list {
+            List::Postings => write_docids(&self.docids, prev, &mut self.w)?,
+            List::Freqs | List::Positions => write_run(&self.values, &mut self.w)?,
         }
         Ok(())
     }
@@ -169,6 +177,7 @@ impl<'a> Encoder<'a> {
     /// The length of `list`'s encoding of the current block, from bit widths and varint lengths: the `TermInfo` pass
     /// learns every offset without encoding a list (ROADMAP 5.1.7).
     fn encoded_len(&mut self, list: List, prev: Option<u32>) -> Result<u64, SegmentError> {
+        self.fill(list)?;
         let len = match list {
             List::Postings => {
                 if let Ok(full) = <&[u32; BLOCK_LEN]>::try_from(self.docids.as_slice()) {
@@ -177,16 +186,7 @@ impl<'a> Encoder<'a> {
                     postings::tail_len(&self.docids, prev)?
                 }
             }
-            List::Freqs => {
-                self.values.clear();
-                self.values
-                    .extend(self.block.iter().map(|p| p.tf.saturating_sub(1)));
-                run_len(&self.values)?
-            }
-            List::Positions => {
-                position_deltas(self.inverted, &self.block, &mut self.values)?;
-                run_len(&self.values)?
-            }
+            List::Freqs | List::Positions => run_len(&self.values)?,
         };
         u64::try_from(len).map_err(|_| SegmentError::TooLarge { what: "postings" })
     }
@@ -379,4 +379,28 @@ fn position_deltas(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `run_len` is what `write_run` appends: around the group boundary, at width 0 and 32, and with 5-byte varints.
+    #[test]
+    fn run_len_matches_write_run() {
+        for len in [0, 1, 127, 128, 129, 256, 300] {
+            for fill in [0, 1, 300, u32::MAX] {
+                let values: Vec<u32> = (0..len)
+                    .map(|i| if i % 3 == 0 { fill } else { i })
+                    .collect();
+                let mut w = Writer::new();
+                write_run(&values, &mut w).unwrap();
+                assert_eq!(
+                    run_len(&values).unwrap(),
+                    w.len(),
+                    "{len} values, fill {fill}"
+                );
+            }
+        }
+    }
 }

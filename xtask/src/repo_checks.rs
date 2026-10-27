@@ -284,13 +284,27 @@ mod tests {
     /// after the re-audit that module's "Bumping `fst`" section lists.
     const FST_AUDITED: &str = "0.4.7";
 
-    fn locked_versions(lockfile: &str, name: &str) -> Vec<String> {
+    /// Its crates.io checksum: a `[patch]` that keeps the version number but swaps the source fails the check.
+    const FST_AUDITED_CHECKSUM: &str =
+        "7ab85b9b05e3978cc9a9cf8fea7f01b494e1a09ed3037e16ba39edc7a29eb61a";
+
+    /// `(version, source, checksum)` of every locked package called `name`.
+    fn locked(lockfile: &str, name: &str) -> Vec<[String; 3]> {
+        let field = |p: &toml::Value, key: &str| {
+            p.get(key).and_then(|v| v.as_str()).unwrap_or("").to_owned()
+        };
         get(&read_toml(lockfile), &["package"])
             .as_array()
             .unwrap()
             .iter()
             .filter(|p| p["name"].as_str() == Some(name))
-            .map(|p| p["version"].as_str().unwrap().to_owned())
+            .map(|p| {
+                [
+                    field(p, "version"),
+                    field(p, "source"),
+                    field(p, "checksum"),
+                ]
+            })
             .collect()
     }
 
@@ -303,13 +317,18 @@ mod tests {
             ("fuzz/Cargo.toml", &["dependencies", "fst"][..]),
         ] {
             let table = read_toml(manifest);
-            let req = get(&table, path).as_str().unwrap();
-            assert_eq!(req, pin, "{manifest}: {how}");
+            let req = get(&table, path).as_str();
+            assert_eq!(req, Some(pin.as_str()), "{manifest}: {how}");
         }
+        let audited = [
+            FST_AUDITED.to_owned(),
+            "registry+https://github.com/rust-lang/crates.io-index".to_owned(),
+            FST_AUDITED_CHECKSUM.to_owned(),
+        ];
         for lockfile in ["Cargo.lock", "fuzz/Cargo.lock"] {
             assert_eq!(
-                locked_versions(lockfile, "fst"),
-                [FST_AUDITED],
+                locked(lockfile, "fst"),
+                std::slice::from_ref(&audited),
                 "{lockfile}: {how}"
             );
         }
