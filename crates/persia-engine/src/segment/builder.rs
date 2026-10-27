@@ -177,9 +177,10 @@ impl SegmentBuilder {
     ///
     /// # Errors
     /// [`SegmentError::Document`] for a document `schema` rejects, [`SegmentError::DuplicateId`] for an id already
-    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents, [`SegmentError::TooLarge`] when the document would
-    /// overflow an internal index (a position past `u32::MAX`, more than `u32::MAX` terms). The builder is then as it
-    /// was (only spare capacity may have grown, so [`Self::size_in_bytes`] can too).
+    /// added, [`SegmentError::Full`] at [`MAX_DOCS`] documents, [`SegmentError::TermTooLong`] when a `text` field's
+    /// analyzer yields a token longer than [`MAX_TERM_LEN`] bytes (SPEC §5.3.1), [`SegmentError::TooLarge`] when the
+    /// document would overflow an internal index (a position past `u32::MAX`, more than `u32::MAX` terms). The
+    /// builder is then as it was (only spare capacity may have grown, so [`Self::size_in_bytes`] can too).
     pub fn add(&mut self, doc: &Document) -> Result<u32, SegmentError> {
         let docid = self.doc_count();
         if docid >= self.max_docs {

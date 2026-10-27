@@ -27,7 +27,11 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(block.get(values.len()), None);
         let mut decoded = vec![1];
         block.decode_into(&mut decoded);
-        assert_eq!(decoded.get(1..), Some(values.as_slice()), "decode_into disagrees with iter");
+        assert_eq!(
+            decoded.get(1..),
+            Some(values.as_slice()),
+            "decode_into disagrees with iter"
+        );
 
         let mut w = Writer::new();
         w.write_for_block(&values)

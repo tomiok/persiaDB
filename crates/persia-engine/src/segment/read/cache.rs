@@ -92,11 +92,15 @@ pub struct CacheStats {
 
 /// A least-recently-used cache of decoded section blocks (SPEC §10.6), bounded in bytes.
 ///
-/// Every open [`super::Segment`] reads its block-framed sections through one, which bounds the decoded bytes of all
-/// the segments that use it: the process-wide [`BlockCache::shared`] (of [`BlockCache::DEFAULT_CAPACITY`]) unless
-/// [`super::Segment::open_with_cache`] gives it another. A database or server opens all its segments with one cache
-/// sized by its configuration (ROADMAP 5.3.15). Blocks are decoded outside the lock, so readers of other blocks
-/// do not wait; two readers that miss the same block at once may both decode it, and one copy is kept.
+/// Every open [`super::Segment`] reads its block-framed sections through one, which keeps at most its capacity of
+/// decoded blocks for all the segments that use it: the process-wide [`BlockCache::shared`] (of
+/// [`BlockCache::DEFAULT_CAPACITY`]) unless [`super::Segment::open_with_cache`] gives it another. A database or server
+/// opens all its segments with one cache sized by its configuration (ROADMAP 10.2.5, 11.4.7). Blocks are decoded
+/// outside the lock, so readers of other blocks do not wait; two readers that miss the same block at once may both
+/// decode it, and one copy is kept.
+///
+/// The capacity bounds what the cache keeps, not what readers hold: a block handed out stays alive while a reader
+/// uses it (a cursor keeps one), even after the cache evicts it.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -125,7 +129,7 @@ impl BlockCache {
     pub const DEFAULT_CAPACITY: u64 = 8 << 20;
 
     /// The cache of [`BlockCache::DEFAULT_CAPACITY`] that every segment opened with [`super::Segment::open`] in this
-    /// process shares, so however many segments it opens, they keep at most that many decoded bytes together.
+    /// process shares, so however many segments it opens, the cache keeps at most that many decoded bytes for them.
     ///
     /// ```
     /// use std::sync::Arc;

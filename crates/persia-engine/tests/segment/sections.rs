@@ -3875,11 +3875,30 @@ fn a_damaged_norms_block_fails_only_the_reads_that_reach_it() {
             }),
         ),
         (
+            "a valid middle block holding one byte less than block_size",
+            middle,
+            Box::new(move |b: &mut Vec<Vec<u8>>| {
+                let p = b[middle][16..b[middle].len() - 1].to_vec();
+                b[middle] = reblock(&b[middle], &p);
+            }),
+        ),
+        (
+            "a valid last block holding one byte less than total_len leaves it",
+            last,
+            Box::new(move |b: &mut Vec<Vec<u8>>| {
+                let p = b[last][16..b[last].len() - 1].to_vec();
+                b[last] = reblock(&b[last], &p);
+            }),
+        ),
+        // The block shrinks by one byte but its region keeps its length (a trailing byte), so the table's ends stay
+        // as they were and now say one byte more than the block's own header.
+        (
             "a valid block one byte shorter than its table says",
             middle,
             Box::new(move |b: &mut Vec<Vec<u8>>| {
                 let p = b[middle][16..b[middle].len() - 1].to_vec();
                 b[middle] = reblock(&b[middle], &p);
+                b[middle].push(0);
             }),
         ),
         (
@@ -3888,6 +3907,7 @@ fn a_damaged_norms_block_fails_only_the_reads_that_reach_it() {
             Box::new(move |b: &mut Vec<Vec<u8>>| {
                 let p = b[last][16..b[last].len() - 1].to_vec();
                 b[last] = reblock(&b[last], &p);
+                b[last].push(0);
             }),
         ),
         (
@@ -3902,10 +3922,21 @@ fn a_damaged_norms_block_fails_only_the_reads_that_reach_it() {
     };
     for (name, bad_block, damage) in damages {
         let mut s = Seg::parse(&bytes);
+        let before = Seg::parse(&bytes).section(Norms, title.get()).bytes.clone();
         edit_framed_blocks(&mut s, Norms, title.get(), |b| {
             assert_eq!(b.len(), blocks);
             damage(b);
         });
+        if name.contains("than its table says") {
+            // The table's ends are the original ones: only the block disagrees with them.
+            let after = &s.section(Norms, title.get()).bytes;
+            assert_eq!(after.len(), before.len(), "{name}");
+            assert_eq!(
+                after[after.len() - 64..after.len() - 24],
+                before[before.len() - 64..before.len() - 24],
+                "{name}"
+            );
+        }
         let edited = s.to_bytes();
         let seg = open(&schema, &edited).unwrap_or_else(|e| panic!("{name}: open failed: {e}"));
         let norms = seg

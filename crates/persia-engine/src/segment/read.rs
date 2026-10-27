@@ -132,8 +132,8 @@ impl Segment {
     }
 
     /// As [`Self::open`], reading blocks through `cache` (SPEC §10.6, ROADMAP 5.3.11), which may be shared with other
-    /// segments: it then bounds the decoded bytes all of them keep. The segment's blocks leave it when the segment
-    /// is dropped.
+    /// segments: it then keeps at most its capacity of decoded blocks for all of them. The segment's blocks leave it when
+    /// the segment is dropped.
     ///
     /// ```
     /// # use persia_analysis::AnalyzerRegistry;

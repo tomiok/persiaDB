@@ -192,8 +192,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the cost of walking any term dictionary at open is bounded. The built-in analyzers cut tokens at 255 bytes, so no
   segment they wrote changes. ADR-0027 records the rule (decision 12).
 - `persia-engine`: `Segment::open` reads through one process-wide cache, `BlockCache::shared` (8 MiB), instead of an
-  8 MiB cache per segment, so a process that opens many segments keeps at most 8 MiB of decoded blocks for all of them
-  (ROADMAP 5.3.15); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
+  8 MiB cache per segment, so however many segments a process opens, the cache keeps at most 8 MiB of decoded blocks
+  for all of them (ROADMAP 5.3.15; a block a reader or cursor still holds outlives its eviction, one per cursor); `Segment::open_with_cache` still takes any cache, and `Segment::cache` returns the one in use.
 - `persia-engine` (breaking): `Segment::norms` returns `Norms<'_>`, which reads the `Norms` section a framed block at a
   time through the segment's block cache (ROADMAP 5.3.14) instead of copying and re-checking all `doc_count` bytes on
   each call. `Norms::get` and `Norms::length` return a `Result`: a corrupt block is reported when a norm in it is read.
@@ -239,8 +239,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `Segment::open` checks the structure of each `TermDict` and `IdMap` FST before the `fst` crate reads
   it, so a crafted FST behind a valid CRC is a corruption error instead of a panic or an endless stream (SPEC §5.3).
   An `IdMap` or `keyword` `TermDict` with a path longer than the longest id or keyword value is corruption too, so a
-  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6). Not yet for a `text` field's `TermDict`, whose
-  terms have no length bound (ROADMAP 5.4.5): a crafted one cannot make open panic, but it can still make it slow.
+  small FST cannot make open stream for hours (SPEC §5.3.1, §5.3.6); a `text` field's `TermDict` too since its terms
+  have a length bound (ROADMAP 5.4.5, see Changed).
 - Website: the article column is centered between the left nav and the narrow "On this page" rail, at Starlight's 45rem reading width.
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 

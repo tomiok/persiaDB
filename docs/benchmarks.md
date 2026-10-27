@@ -18,7 +18,10 @@ Throughput is in values per second (G = 10^9, M = 10^6).
 | `postings_block/decode` (unpack + delta + checks) | mean docid step 2 / 64 / 4096 | 778 / 693 / 680 M |
 | `for_block/iter` (1024 values, includes block validation) | width 7 / 20 / 64 | 341 / 343 / 352 M |
 | `for_block/get_random` (1024 random lookups) | width 7 / 20 / 64 | 242 / 262 / 262 M |
-| `for_block/decode_into` (1024 values, includes block validation; 2026-10-27, ROADMAP 5.3.16) | width 7 / 20 / 63 / 64 | 754 / 733 / 719 / 716 M |
+| `for_block/decode_into` (1024 values, includes block validation; 2026-10-27, ROADMAP 5.3.16) | width 7 / 20 / 63 / 64 | 755 / 739 / 722 M / 3.49 G |
+
+The `iter` and `get_random` rows were recorded when the keys held only 48 random bits, so their width-64 case
+encoded at width 48. Since 2026-10-27 every case encodes at its labelled width, as the `decode_into` row was measured.
 
 ## `persia-analysis` analyzers
 
