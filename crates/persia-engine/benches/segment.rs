@@ -279,6 +279,8 @@ fn bench_open_large_dict(c: &mut Criterion) {
 }
 /// Documents in [`bench_records_over_many_blocks`]: at 1 KiB blocks, record arrays of thousands of blocks.
 const MANY_BLOCK_DOCS: u32 = 50_000;
+/// Every 50th document: 1000 lookups spread over the whole section.
+const STEP: usize = 50;
 
 /// Record lookups in sections of many blocks (ROADMAP 5.3.10): each `id_of` reads one record, so its cost must not
 /// grow with the section's block count (it did while every lookup re-validated the whole block table).
@@ -309,7 +311,7 @@ fn bench_records_over_many_blocks(c: &mut Criterion) {
     group.throughput(Throughput::Elements(1000));
     group.bench_function("id_of_1000", |b| {
         b.iter(|| {
-            for d in (0..MANY_BLOCK_DOCS).step_by((MANY_BLOCK_DOCS / 1000) as usize) {
+            for d in (0..MANY_BLOCK_DOCS).step_by(STEP) {
                 black_box(seg.id_of(d).unwrap());
             }
         });

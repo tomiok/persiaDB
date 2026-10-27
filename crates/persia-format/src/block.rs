@@ -509,7 +509,8 @@ impl<'a> BlockTable<'a> {
     }
 
     /// Where block `index` is stored, relative to the section start (e.g. for a range request). At most
-    /// `16 + block_size` bytes long.
+    /// `16 + block_size` bytes long for a table [`BlockTable::open`] validated; under [`BlockReader::reopen`] of
+    /// bytes other than those validated, any range (decoding it then fails).
     ///
     /// # Errors
     /// [`Error::OutOfBounds`] if `index >= block_count`.
@@ -624,6 +625,7 @@ impl<'a> BlockTable<'a> {
 /// [`BlockReader::reopen`] (SPEC §5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ValidatedTable {
+    section_len: u64,
     total_len: u64,
     block_size: u32,
     block_count: u32,
@@ -653,8 +655,9 @@ impl<'a> BlockReader<'a> {
     /// What [`BlockReader::open`] validated, without the borrow: kept next to immutable section bytes, it lets
     /// [`BlockReader::reopen`] rebuild the reader in O(1) instead of checking the table CRC and every block end
     /// again (a segment reopens its sections on every lookup).
-    pub const fn validated(&self) -> ValidatedTable {
+    pub fn validated(&self) -> ValidatedTable {
         ValidatedTable {
+            section_len: to_u64(self.section.len()),
             total_len: self.table.total_len,
             block_size: self.table.block_size,
             block_count: self.table.block_count,
@@ -669,8 +672,15 @@ impl<'a> BlockReader<'a> {
     /// when the block is read, whatever the table's bytes say now.
     ///
     /// # Errors
-    /// [`Error::InvalidInputLen`] if `section` is shorter than the table `table` describes.
+    /// [`Error::InvalidInputLen`] if `section` is not as long as the section `table` was validated for.
     pub fn reopen(section: &'a [u8], base: u64, table: ValidatedTable) -> Result<Self> {
+        if to_u64(section.len()) != table.section_len {
+            return Err(Error::InvalidInputLen {
+                len: to_u64(section.len()),
+                min: table.section_len,
+                max: table.section_len,
+            });
+        }
         let table_len = u64::from(table.block_count)
             .saturating_mul(to_u64(END_LEN))
             .saturating_add(to_u64(TABLE_TRAILER_LEN));
@@ -700,7 +710,8 @@ impl<'a> BlockReader<'a> {
         })
     }
 
-    /// The validated block table.
+    /// The block table: validated by [`BlockReader::open`], or as validated for the bytes given to
+    /// [`BlockReader::reopen`].
     pub const fn table(&self) -> &BlockTable<'a> {
         &self.table
     }
@@ -745,10 +756,21 @@ impl<'a> BlockReader<'a> {
     /// `out` is left as it was.
     pub fn read_block(&self, index: u32, out: &mut Vec<u8>) -> Result<()> {
         let range = self.table.block_range(index)?;
-        // In-section ranges were validated by `open`.
-        let start = usize::try_from(range.start).unwrap_or(usize::MAX);
-        let end = usize::try_from(range.end).unwrap_or(usize::MAX);
-        let block = self.section.get(start..end).unwrap_or_default();
+        // `open` checked that every range fits the section; after `reopen` on other bytes one may not, which is
+        // corruption of the table, like any block end `open` rejects.
+        let block = usize::try_from(range.start)
+            .ok()
+            .zip(usize::try_from(range.end).ok())
+            .and_then(|(s, e)| self.section.get(s..e))
+            .ok_or(Error::CorruptBlock {
+                index,
+                offset: self.table.base.saturating_add(range.start),
+                reason: Corruption::InvalidBlockEnd {
+                    end: range.end,
+                    min: range.start,
+                    max: to_u64(self.section.len()),
+                },
+            })?;
         self.table.decode_block(index, block, out)
     }
 
@@ -1061,21 +1083,24 @@ mod tests {
             for at in (0..bytes.len()).step_by(step) {
                 let mut edited = bytes.clone();
                 edited[at] ^= 0x5a;
-                if let Ok(r) = BlockReader::reopen(&edited, 0, v) {
-                    let _ = read_all(&r);
+                // Same length, so `reopen` takes it; whatever then fails is corruption, not a caller error.
+                let r = BlockReader::reopen(&edited, 0, v).unwrap();
+                if let Err(e) = read_all(&r) {
+                    assert!(e.is_corruption(), "byte {at}: {e:?}");
                 }
             }
             assert!(matches!(
                 BlockReader::reopen(&bytes[..10], 0, v),
                 Err(Error::InvalidInputLen { .. })
             ));
-            // Another section's table, longer than these bytes' blocks: errors, not panics.
+            // Another section's table is refused at `reopen`.
             let other = BlockReader::open(&section(8, Compression::None, &data), 0)
                 .unwrap()
                 .validated();
-            if let Ok(r) = BlockReader::reopen(&bytes, 0, other) {
-                assert!(read_all(&r).is_err());
-            }
+            assert!(matches!(
+                BlockReader::reopen(&bytes, 0, other),
+                Err(Error::InvalidInputLen { .. })
+            ));
         }
     }
     #[test]
