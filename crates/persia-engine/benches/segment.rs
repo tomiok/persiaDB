@@ -323,7 +323,8 @@ fn bench_records_over_many_blocks(c: &mut Criterion) {
 /// cross a framed block.
 const COLUMN_DOCS: u32 = 50_000;
 
-/// Every document's numeric key, then its keyword ords, read through the lazy column readers (ROADMAP 5.3.12).
+/// Every document's numeric key, then its keyword ords, read through the lazy column readers (ROADMAP 5.3.12), by
+/// docid and through a cursor (ROADMAP 5.3.16).
 fn bench_columns(c: &mut Criterion) {
     let schema = schema();
     let price = schema.field("price").unwrap().id();
@@ -358,6 +359,24 @@ fn bench_columns(c: &mut Criterion) {
         b.iter(|| {
             for d in 0..COLUMN_DOCS {
                 black_box(col.ords(d).unwrap());
+            }
+        });
+    });
+    group.bench_function("numeric_key_cursor", |b| {
+        let col = seg.numeric_column(price).unwrap();
+        b.iter(|| {
+            let mut cursor = col.cursor();
+            for d in 0..COLUMN_DOCS {
+                black_box(cursor.key(d).unwrap());
+            }
+        });
+    });
+    group.bench_function("keyword_ords_cursor", |b| {
+        let col = seg.keyword_column(brand).unwrap();
+        b.iter(|| {
+            let mut cursor = col.cursor();
+            for d in 0..COLUMN_DOCS {
+                black_box(cursor.ords(d).unwrap());
             }
         });
     });

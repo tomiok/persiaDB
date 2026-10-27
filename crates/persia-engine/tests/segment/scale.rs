@@ -366,7 +366,10 @@ fn documents_without_values() {
     let title = seg.field_stats(id(&schema, "title")).unwrap();
     assert_eq!((title.docs_with_field, title.sum_field_len), (0, 0));
     assert!(seg.terms(id(&schema, "title")).unwrap().is_empty());
-    assert_eq!(seg.norms(id(&schema, "title")).unwrap().get(199), 0);
+    assert_eq!(
+        seg.norms(id(&schema, "title")).unwrap().get(199).unwrap(),
+        0
+    );
     assert_eq!(
         seg.numeric_column(id(&schema, "qty"))
             .unwrap()

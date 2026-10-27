@@ -1517,9 +1517,9 @@ range-request coalescing, readahead for sequential sections, request hedging (op
 dedup concurrent identical fetches. Segment footers and FSTs are pinned on open.
 Above it, an open segment reads its block-framed sections (SPEC §5.2) through a cache of **decoded** blocks keyed by
 `(open segment, section, block)`, LRU and bounded in bytes, which any number of segments may share (each opening of a
-segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, columns and
+segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, norms, columns and
 document fetches reuse it without decompressing it or checking its CRC again. Readers that miss the same block at the
-same time may each decode it; one copy is kept. `Norms` does not go through it yet (ROADMAP 5.3.14).
+same time may each decode it; one copy is kept.
 It holds no state of its own on disk.
 
 ---

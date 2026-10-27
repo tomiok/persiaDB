@@ -62,6 +62,9 @@ proptest! {
         prop_assert!(r.is_empty());
         prop_assert_eq!(block.len(), keys.len());
         prop_assert_eq!(block.iter().collect::<Vec<_>>(), keys.clone());
+        let mut decoded = vec![7];
+        block.decode_into(&mut decoded);
+        prop_assert_eq!(&decoded[1..], keys.as_slice());
         prop_assert_eq!(reference_decode(&bytes), keys.clone());
         for (i, &k) in keys.iter().enumerate() {
             prop_assert_eq!(block.get(i), Some(k));
@@ -108,6 +111,9 @@ proptest! {
             let values: Vec<u64> = block.iter().collect();
             prop_assert_eq!(values.len(), block.len());
             prop_assert!(values.iter().all(|&v| v >= block.min()));
+            let mut decoded = Vec::new();
+            block.decode_into(&mut decoded);
+            prop_assert_eq!(&decoded, &values);
             prop_assert_eq!(values, reference_decode(&bytes));
         } else {
             prop_assert_eq!(r.position(), 0);

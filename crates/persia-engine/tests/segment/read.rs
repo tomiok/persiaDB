@@ -12,8 +12,8 @@ use persia_engine::schema::{
     CollectionSchema, FieldKind, FieldType, KeywordOptions, SchemaBuilder,
 };
 use persia_engine::segment::{
-    BlockCache, CacheStats, ReadError, Segment, SegmentCorruption, TermIndex, Tombstones,
-    UnsupportedSegment, WriteOptions,
+    BlockCache, CacheStats, NumericColumn, ReadError, SectionKind, Segment, SegmentCorruption,
+    TermIndex, Tombstones, UnsupportedSegment, WriteOptions,
 };
 use persia_format::checksum::crc32c;
 use persia_format::for_codec::{f64_to_key, i64_to_key};
@@ -91,8 +91,10 @@ pub fn read_lookups(schema: &CollectionSchema, bytes: &[u8]) -> Result<ReadBack,
                 out.terms
                     .insert(fid.get(), read_index(&seg.terms(fid)?, o.positions)?);
                 let norms = seg.norms(fid)?;
-                out.norms
-                    .insert(fid.get(), (0..n).map(|d| norms.get(d)).collect());
+                out.norms.insert(
+                    fid.get(),
+                    (0..n).map(|d| norms.get(d)).collect::<Result<_, _>>()?,
+                );
             }
             FieldKind::Keyword(_) => {
                 out.terms
@@ -420,7 +422,7 @@ fn block_max_bounds_every_block() {
     while let Some(d) = p.next().unwrap() {
         let m = p.block_max().unwrap();
         let tf = p.freq().unwrap();
-        assert!(d <= m.last_docid && tf <= m.max_tf && norms.get(d) >= m.min_norm);
+        assert!(d <= m.last_docid && tf <= m.max_tf && norms.get(d).unwrap() >= m.min_norm);
         assert!(info.max_tf() >= m.max_tf && info.min_norm() <= m.min_norm);
         // Positions: "alpha beta alpha" repeated, so alpha sits at 0, 2, 3, 5, ...
         let pos = p.positions().unwrap();
@@ -431,7 +433,7 @@ fn block_max_bounds_every_block() {
     }
     assert_eq!(blocks.len(), 2100_usize.div_ceil(128));
     assert_eq!(docs.len(), 2100);
-    assert_eq!(norms.length(5), 6);
+    assert_eq!(norms.length(5).unwrap(), 6);
 }
 
 #[test]
@@ -519,7 +521,7 @@ fn term_enumeration() {
     assert_eq!(t.get(b"red").unwrap(), None);
     assert!(collect_terms(t.prefix(b""), &Index::default()).is_empty());
     assert!(seg.keyword_column(tag).unwrap().is_empty());
-    assert_eq!(seg.norms(title).unwrap().get(0), 0);
+    assert_eq!(seg.norms(title).unwrap().get(0).unwrap(), 0);
     assert_eq!(seg.bool_column(id(&schema, "flag")).unwrap().get(0), None);
     assert_eq!(
         seg.numeric_column(id(&schema, "price"))
@@ -1188,6 +1190,49 @@ fn a_small_cache_stays_within_capacity_and_reads_the_same() {
     }
 }
 
+/// Norms read one framed block at a time through the segment's cache (ROADMAP 5.3.14): a second reader decodes
+/// nothing, and a damaged block fails the reads that reach it, not the open or `norms`.
+#[test]
+fn norms_read_a_block_at_a_time_through_the_cache() {
+    let (schema, docs, _) = dense(3000);
+    let options = WriteOptions {
+        block_size: 509,
+        ..WriteOptions::default()
+    };
+    let bytes = build(&schema, &docs, options);
+    let title = id(&schema, "title");
+    let (seg, cache) = open_cached(&schema, &bytes, 1 << 20);
+    let norms = seg.norms(title).unwrap();
+    let all: Vec<u8> = (0..3000).map(|d| norms.get(d).unwrap()).collect();
+    // "alpha beta alpha " repeated (i % 4) + 1 times: 3, 6, 9 or 12 tokens.
+    assert!((0..3000).all(|d| norms.length(d).unwrap() == 3 * (d % 4 + 1)));
+    let misses = cache.stats().misses;
+    let mut cursor = seg.norms(title).unwrap().cursor();
+    for d in 0..3000 {
+        assert_eq!(cursor.get(d).unwrap(), all[d as usize]);
+    }
+    assert_eq!(norms.get(3000).unwrap(), 0, "past the segment");
+    assert_eq!(cursor.get(u32::MAX).unwrap(), 0);
+    assert_eq!(cache.stats().misses, misses, "every Norms block was cached");
+
+    // Damage the last framed block's payload: its CRC no longer matches.
+    let section = seg
+        .sections()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.kind == SectionKind::Norms && s.field == title.get())
+        .unwrap();
+    let mut damaged = bytes.clone();
+    let table_len = 8 * u64::from(section.stream.unwrap().block_count) + 24;
+    let at = section.offset + section.len - table_len - 1;
+    damaged[at as usize] ^= 0x55;
+    let seg = open(&schema, &damaged).unwrap();
+    let norms = seg.norms(title).unwrap();
+    assert_eq!(norms.get(0).unwrap(), all[0], "the first block still reads");
+    assert!(norms.get(2999).unwrap_err().is_corruption());
+    assert!(norms.cursor().get(2999).unwrap_err().is_corruption());
+}
+
 /// `(doc, positions)` of `term` in field `title`, for the documents `want` picks; the others are passed over.
 fn positions_of(
     seg: &Segment,
@@ -1445,6 +1490,9 @@ proptest! {
             let gets: Vec<Option<Value>> = (0..n + 2).map(|d| col.get(d).unwrap()).collect();
             seq_keys.push((keys, gets));
         }
+        let title = id(&schema, "title");
+        let norms = seg.norms(title).unwrap();
+        let seq_norms: Vec<u8> = (0..n + 2).map(|d| norms.get(d).unwrap()).collect();
 
         // Shuffled (up to 700 docids, plus the FOR block boundaries and docids past the segment), each twice, through
         // a cache of `capacity`, with the columns opened again.
@@ -1455,18 +1503,27 @@ proptest! {
         order.extend(again.into_iter().map(|j| order[j as usize]).collect::<Vec<_>>());
         let col = seg.keyword_column(tag).unwrap();
         let cols: Vec<_> = numeric.iter().map(|&f| seg.numeric_column(f).unwrap()).collect();
+        // One cursor per column for the whole order: it must read the same out of order as in order (ROADMAP 5.3.16).
+        let mut tags = col.cursor();
+        let mut cursors: Vec<_> = cols.iter().map(NumericColumn::cursor).collect();
+        let norms = seg.norms(title).unwrap();
+        let mut norm_cursor = norms.cursor();
         for &d in &order {
             let i = d as usize;
             prop_assert_eq!(&col.ords(d).unwrap(), &seq_ords[i], "ords of {}", d);
+            prop_assert_eq!(tags.ords(d).unwrap(), seq_ords[i].as_slice(), "cursor ords of {}", d);
             let values: Vec<Vec<u8>> = col.values(d).unwrap().into_iter().map(<[u8]>::to_vec).collect();
             prop_assert_eq!(&values, &seq_values[i], "values of {}", d);
-            for (c, (keys, gets)) in cols.iter().zip(&seq_keys) {
+            for ((c, cursor), (keys, gets)) in cols.iter().zip(&mut cursors).zip(&seq_keys) {
                 prop_assert_eq!(c.key(d).unwrap(), keys[i], "key of {}", d);
+                prop_assert_eq!(cursor.key(d).unwrap(), keys[i], "cursor key of {}", d);
                 prop_assert_eq!(c.has_value(d), keys[i].is_some(), "has_value of {}", d);
                 let got = c.get(d).unwrap();
                 // f64 values compare by key: -0.0 and NaN payloads stay exact.
                 prop_assert_eq!(got.as_ref().map(value_key), gets[i].as_ref().map(value_key), "get of {}", d);
             }
+            prop_assert_eq!(norms.get(d).unwrap(), seq_norms[i], "norm of {}", d);
+            prop_assert_eq!(norm_cursor.get(d).unwrap(), seq_norms[i], "cursor norm of {}", d);
             prop_assert!(cache.stats().bytes <= capacity);
         }
     }

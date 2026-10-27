@@ -24,7 +24,9 @@ use persia_format::{BlobRef, ByteSource, Reader};
 use roaring::RoaringBitmap;
 
 pub use cache::{BlockCache, CacheStats};
-pub use columns::{BoolColumn, KeywordColumn, Norms, NumericColumn};
+pub use columns::{
+    BoolColumn, KeywordColumn, KeywordCursor, Norms, NormsCursor, NumericColumn, NumericCursor,
+};
 pub use error::{ReadError, SegmentCorruption, UnsupportedSegment};
 pub use footer::FieldStats;
 pub use postings::{BlockMax, Postings, Tombstones};
@@ -339,7 +341,7 @@ impl Segment {
     ///
     /// # Errors
     /// As [`Self::terms`], for a field that is not `text`; a corruption if the section is.
-    pub fn norms(&self, field: FieldId) -> Result<Norms, ReadError> {
+    pub fn norms(&self, field: FieldId) -> Result<Norms<'_>, ReadError> {
         let f = self.field(field)?;
         if f.field_type() != FieldType::Text {
             return Err(type_error(field, f.field_type(), "norms"));

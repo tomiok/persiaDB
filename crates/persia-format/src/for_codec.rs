@@ -162,9 +162,7 @@ impl<'a> Reader<'a> {
             packed,
         };
         // Only a minimum near the top of the range can overflow; then every value must be checked.
-        if min.checked_add(block.mask()).is_none()
-            && block.raws().any(|raw| min.checked_add(raw).is_none())
-        {
+        if min.checked_add(block.mask()).is_none() && min.checked_add(block.max_raw()).is_none() {
             return Err(Error::Corrupt {
                 offset: start,
                 reason: Corruption::ValueOverflow { bits: u64::BITS },
@@ -208,11 +206,69 @@ impl ForBlock<'_> {
     /// All keys, in order.
     pub fn iter(&self) -> impl Iterator<Item = u64> + '_ {
         // Validated when the block was read: min + raw does not overflow.
-        self.raws().map(|raw| self.min.wrapping_add(raw))
+        (0..self.len()).map(|i| self.min.wrapping_add(self.raw(i)))
     }
 
-    fn raws(&self) -> impl Iterator<Item = u64> + '_ {
-        (0..self.len()).map(|i| self.raw(i))
+    /// Appends every key to `out`, in order: what [`Self::iter`] yields, unpacked in one pass (for a reader that
+    /// keeps a decoded block, ROADMAP 5.3.16).
+    pub fn decode_into(&self, out: &mut Vec<u64>) {
+        let start = out.len();
+        out.resize(start.saturating_add(self.len()), 0);
+        let keys = out.get_mut(start..).unwrap_or_default();
+        self.unpack(keys);
+        // Validated when the block was read: min + raw does not overflow.
+        let min = self.min;
+        for k in keys {
+            *k = min.wrapping_add(*k);
+        }
+    }
+
+    /// The largest raw value.
+    fn max_raw(&self) -> u64 {
+        let mut raws = [0_u64; VALUES_PER_BLOCK];
+        let raws = raws.get_mut(..self.len()).unwrap_or_default();
+        self.unpack(raws);
+        raws.iter().copied().max().unwrap_or(0)
+    }
+
+    /// Writes the raw values into `out`, which holds `len` of them.
+    fn unpack(&self, out: &mut [u64]) {
+        let width = u64::from(self.width);
+        if width == 0 {
+            out.fill(0);
+            return;
+        }
+        if width == 64 {
+            let (whole, _) = self.packed.as_chunks::<8>();
+            for (o, c) in out.iter_mut().zip(whole) {
+                *o = u64::from_le_bytes(*c);
+            }
+            return;
+        }
+        // The packed bits as little-endian words, zero-padded by one: a value spans at most two of them.
+        let mut words = [0_u64; VALUES_PER_BLOCK + 1];
+        let (whole, rest) = self.packed.as_chunks::<8>();
+        for (w, c) in words.iter_mut().zip(whole) {
+            *w = u64::from_le_bytes(*c);
+        }
+        if let Some(w) = words.get_mut(whole.len()) {
+            let mut last = [0_u8; 8];
+            for (dst, &b) in last.iter_mut().zip(rest) {
+                *dst = b;
+            }
+            *w = u64::from_le_bytes(last);
+        }
+        let mask = self.mask();
+        for (i, o) in out.iter_mut().enumerate() {
+            // i < 1024 and width <= 64: below 2^17, so the word index is at most 1024.
+            let bit = crate::error::to_u64(i).wrapping_mul(width);
+            let at = usize::try_from(bit >> 6).unwrap_or(usize::MAX);
+            let shift = bit & 63;
+            let lo = words.get(at).copied().unwrap_or(0) >> shift;
+            // `<< 1 << (63 - shift)` is `<< (64 - shift)`, and 0 when the value starts on a word boundary.
+            let hi = (words.get(at.wrapping_add(1)).copied().unwrap_or(0) << 1) << (63 ^ shift);
+            *o = (lo | hi) & mask;
+        }
     }
 
     /// The `width` bits of value `index`; `index < len`, so they are inside `packed`.

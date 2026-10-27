@@ -18,6 +18,7 @@ Throughput is in values per second (G = 10^9, M = 10^6).
 | `postings_block/decode` (unpack + delta + checks) | mean docid step 2 / 64 / 4096 | 778 / 693 / 680 M |
 | `for_block/iter` (1024 values, includes block validation) | width 7 / 20 / 64 | 341 / 343 / 352 M |
 | `for_block/get_random` (1024 random lookups) | width 7 / 20 / 64 | 242 / 262 / 262 M |
+| `for_block/decode_into` (1024 values, includes block validation; 2026-10-27, ROADMAP 5.3.16) | width 7 / 20 / 63 / 64 | 754 / 733 / 719 / 716 M |
 
 ## `persia-analysis` analyzers
 
@@ -110,10 +111,14 @@ gains are those of re-reading, and a first read of a block costs what it did bef
 `cargo bench -p persia-engine --bench segment -- segment_columns`: a 50 000-document segment (default `WriteOptions`)
 whose `f64` keys span the key range (64-bit FOR blocks, many crossing a framed block). `numeric_key_scan` reads every
 document's key with `NumericColumn::key`; `keyword_ords_scan` every document's ords with `KeywordColumn::ords`.
+`numeric_key_cursor` and `keyword_ords_cursor` read the same through `NumericColumn::cursor` and
+`KeywordColumn::cursor` (ROADMAP 5.3.16), which keep their decoded FOR blocks to themselves and unpack a block with
+`ForBlock::decode_into`.
 Values per second. The lazy readers of ROADMAP 5.3.12 trade speed for memory: before them a column was a decoded
 `Vec` of 8 bytes per document (first row, measured on the parent commit); now one block per FOR stream (one for a numeric column, two for a keyword column) stays decoded.
 
-| Recorded | `numeric_key_scan` | `keyword_ords_scan` |
-|---|--:|--:|
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M |
-| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M |
+| Recorded | `numeric_key_scan` | `keyword_ords_scan` | `numeric_key_cursor` | `keyword_ords_cursor` |
+|---|--:|--:|--:|--:|
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; eager columns (before ROADMAP 5.3.12) | 491 M | 651 M | | |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; lazy columns (ROADMAP 5.3.12) | 30.0 M | 11.4 M | | |
+| 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux; cursors (ROADMAP 5.3.16) | 31.9 M | 10.8 M | 214 M | 59.5 M |

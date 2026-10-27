@@ -1,7 +1,8 @@
-//! Typed readers of `Norms` and `Columns` (SPEC §5.3.4, §5.3.5; ROADMAP 5.3.5, 5.3.12). Norms, bool bitmaps,
-//! presence bitmaps and a keyword column's dictionary are decoded when the reader is opened; numeric keys and keyword
-//! ords stay in their FOR blocks, read one block at a time through the segment's block cache (SPEC §5.2.1 makes any
-//! value O(1)), so a reader's memory does not grow with the document count.
+//! Typed readers of `Norms` and `Columns` (SPEC §5.3.4, §5.3.5; ROADMAP 5.3.5, 5.3.12, 5.3.14). Bool bitmaps,
+//! presence bitmaps and a keyword column's dictionary are decoded when the reader is opened; norms, numeric keys and
+//! keyword ords stay in their blocks, read one block at a time through the segment's block cache (SPEC §5.2.1 makes
+//! any value O(1)), so a reader's memory does not grow with the document count. A cursor (ROADMAP 5.3.16) keeps the
+//! block it last decoded to itself, so a scan neither locks nor allocates per value.
 
 use core::ops::Range;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -12,23 +13,23 @@ use roaring::RoaringBitmap;
 use super::super::norms;
 use super::super::write::columns::{TAG_BOOL, TAG_KEYWORD, TAG_NUMERIC};
 use super::error::{ReadError, SegmentCorruption};
-use super::stream::Stream;
+use super::stream::{Cursor, Stream};
 use crate::document::Value;
 use crate::schema::FieldType;
 
-/// The quantized field lengths of a `text` field (SPEC §5.3.4).
-#[derive(Debug, Clone, Default)]
-pub struct Norms {
-    /// One byte per document; empty when the field has no tokens in the segment.
-    bytes: Vec<u8>,
+/// The quantized field lengths of a `text` field (SPEC §5.3.4), read a block at a time through the segment's block
+/// cache (ROADMAP 5.3.14): opening it costs nothing, whatever the document count.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Norms<'s> {
+    /// `doc_count` bytes; `None` when the field has no tokens in the segment.
+    stream: Option<Stream<'s>>,
 }
 
-impl Norms {
-    pub(super) fn read(stream: Option<Stream<'_>>, doc_count: u32) -> Result<Self, ReadError> {
-        let Some(stream) = stream else {
-            return Ok(Self::default());
-        };
-        if stream.len() != u64::from(doc_count) {
+impl<'s> Norms<'s> {
+    pub(super) fn read(stream: Option<Stream<'s>>, doc_count: u32) -> Result<Self, ReadError> {
+        if let Some(stream) = &stream
+            && stream.len() != u64::from(doc_count)
+        {
             return Err(stream.corrupt(
                 0,
                 SegmentCorruption::Invalid {
@@ -36,24 +37,75 @@ impl Norms {
                 },
             ));
         }
-        Ok(Self {
-            bytes: stream.read_all()?,
-        })
+        Ok(Self { stream })
     }
 
     /// The norm byte of `docid`; 0 for a document without tokens in the field (or a docid past the segment).
-    pub fn get(&self, docid: u32) -> u8 {
-        usize::try_from(docid)
-            .ok()
-            .and_then(|d| self.bytes.get(d))
-            .copied()
-            .unwrap_or(0)
+    ///
+    /// # Errors
+    /// A corruption if the block that holds it is.
+    pub fn get(&self, docid: u32) -> Result<u8, ReadError> {
+        match self.stream {
+            Some(stream) if u64::from(docid) < stream.len() => {
+                let mut norm = [0_u8];
+                stream.read_into(u64::from(docid), &mut norm)?;
+                let [norm] = norm;
+                Ok(norm)
+            }
+            _ => Ok(0),
+        }
     }
 
     /// The field length `docid`'s norm stands for: exact below 40 tokens, otherwise rounded down by less than
     /// 12.5 % (SPEC §5.3.4).
-    pub fn length(&self, docid: u32) -> u32 {
-        norms::decode(self.get(docid))
+    ///
+    /// # Errors
+    /// As [`Self::get`].
+    pub fn length(&self, docid: u32) -> Result<u32, ReadError> {
+        self.get(docid).map(norms::decode)
+    }
+
+    /// A reader that keeps the last block it read: for scoring many documents, in docid order or close to it.
+    pub fn cursor(&self) -> NormsCursor<'s> {
+        NormsCursor {
+            cursor: self.stream.map(Cursor::new),
+        }
+    }
+}
+
+/// Reads [`Norms`] keeping the last block it read, so a scan looks each block up in the cache once (ROADMAP 5.3.16).
+#[derive(Debug, Clone)]
+pub struct NormsCursor<'s> {
+    cursor: Option<Cursor<'s>>,
+}
+
+impl NormsCursor<'_> {
+    /// As [`Norms::get`].
+    ///
+    /// # Errors
+    /// As [`Norms::get`].
+    pub fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
+        let Some(cursor) = &mut self.cursor else {
+            return Ok(0);
+        };
+        let at = u64::from(docid);
+        if at >= cursor.stream.len() {
+            return Ok(0);
+        }
+        let stream = cursor.stream;
+        cursor
+            .read(at, at.saturating_add(1))?
+            .first()
+            .copied()
+            .ok_or_else(|| bad(&stream, at, "a block shorter than its table says"))
+    }
+
+    /// As [`Norms::length`].
+    ///
+    /// # Errors
+    /// As [`Norms::get`].
+    pub fn length(&mut self, docid: u32) -> Result<u32, ReadError> {
+        self.get(docid).map(norms::decode)
     }
 }
 
@@ -361,6 +413,108 @@ impl Clone for LastBlock {
     }
 }
 
+/// Reads a [`ForColumn`] keeping the last FOR block it decoded in a buffer of its own (ROADMAP 5.3.16): unlike
+/// [`ForColumn::get`], no lock per value, and no allocation once the buffer holds a block.
+#[derive(Debug, Clone)]
+struct ForCursor<'c, 's> {
+    column: &'c ForColumn<'s>,
+    /// The block `values` holds.
+    block: Option<u64>,
+    values: Vec<u64>,
+}
+
+impl<'c, 's> ForCursor<'c, 's> {
+    fn new(column: &'c ForColumn<'s>) -> Self {
+        Self {
+            column,
+            block: None,
+            values: Vec::new(),
+        }
+    }
+
+    /// Block `b`'s values.
+    fn load(&mut self, b: u64) -> Result<&[u64], ReadError> {
+        if self.block != Some(b) {
+            self.block = None;
+            let values = &mut self.values;
+            values.clear();
+            self.column.with_block(b, |block, _| {
+                block.decode_into(values);
+                Ok(())
+            })?;
+            self.block = Some(b);
+        }
+        Ok(&self.values)
+    }
+
+    /// As [`ForColumn::get`].
+    #[inline]
+    fn get(&mut self, i: u64) -> Result<u64, ReadError> {
+        // The hot path of a scan: the value is in the block already decoded.
+        if self.block == Some(i / PER_BLOCK)
+            && let Some(&v) = usize::try_from(i % PER_BLOCK)
+                .ok()
+                .and_then(|w| self.values.get(w))
+        {
+            return Ok(v);
+        }
+        self.get_slow(i)
+    }
+
+    #[inline(never)]
+    fn get_slow(&mut self, i: u64) -> Result<u64, ReadError> {
+        let column = self.column;
+        if column.all.is_some() || i >= column.count {
+            return column.get(i);
+        }
+        let within = usize::try_from(i % PER_BLOCK).unwrap_or(usize::MAX);
+        // `with_block` checked the block holds what its place in the column says.
+        self.load(i / PER_BLOCK)?
+            .get(within)
+            .copied()
+            .ok_or_else(|| column.bad(column.at, "a FOR block count"))
+    }
+
+    /// As [`ForColumn::get_range`].
+    #[inline]
+    fn get_range(&mut self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
+        // The hot path of a scan: the range is in the block already decoded.
+        let b = range.start / PER_BLOCK;
+        if self.block == Some(b)
+            && range.start < range.end
+            && range.end.saturating_sub(1) / PER_BLOCK == b
+            && let Some(values) = usize::try_from(range.start % PER_BLOCK)
+                .ok()
+                .zip(usize::try_from(range.end.saturating_sub(1) % PER_BLOCK).ok())
+                .and_then(|(from, last)| self.values.get(from..=last))
+        {
+            out.extend_from_slice(values);
+            return Ok(());
+        }
+        self.get_range_slow(range, out)
+    }
+
+    #[inline(never)]
+    fn get_range_slow(&mut self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
+        let column = self.column;
+        if column.all.is_some() || range.end > column.count {
+            return column.get_range(range, out);
+        }
+        let mut i = range.start;
+        while i < range.end {
+            let b = i / PER_BLOCK;
+            let block_start = b.saturating_mul(PER_BLOCK);
+            let to = range.end.min(block_start.saturating_add(PER_BLOCK));
+            let values = self.load(b)?;
+            let from = usize::try_from(i.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            let upto = usize::try_from(to.saturating_sub(block_start)).unwrap_or(usize::MAX);
+            out.extend_from_slice(values.get(from..upto).unwrap_or_default());
+            i = to;
+        }
+        Ok(())
+    }
+}
+
 /// The values of an `i64`, `f64` or `datetime` field (SPEC §5.3.5), read from their FOR blocks on demand.
 #[derive(Debug, Clone)]
 pub struct NumericColumn<'s> {
@@ -422,11 +576,74 @@ impl<'s> NumericColumn<'s> {
     /// # Errors
     /// As [`Self::key`].
     pub fn get(&self, docid: u32) -> Result<Option<Value>, ReadError> {
-        Ok(self.key(docid)?.map(|key| match self.field_type {
+        Ok(self.key(docid)?.map(|key| self.value(key)))
+    }
+
+    /// A reader for scans (filters, sorting): it keeps the FOR block it last decoded to itself, so reading the keys
+    /// in docid order decodes each block once, without a lock or an allocation per value (ROADMAP 5.3.16).
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::{Document, Value};
+    /// # use persia_engine::schema::{FieldKind, SchemaBuilder};
+    /// # use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # let schema = SchemaBuilder::new("c").field("n", FieldKind::I64 { stored: false }).build()?;
+    /// # let n = schema.field("n").map(|f| f.id()).ok_or("no field")?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("a").with(n, Value::I64(-3)))?;
+    /// # builder.add(&Document::new("b"))?;
+    /// # let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// # let segment = Segment::open(ByteSource::new(SegmentWriter::new(&builder, meta).finish()?.into()), &schema)?;
+    /// let column = segment.numeric_column(n)?;
+    /// let mut cursor = column.cursor();
+    /// let values: Vec<_> = (0..segment.doc_count()).map(|d| cursor.get(d)).collect::<Result<_, _>>()?;
+    /// assert_eq!(values, [Some(Value::I64(-3)), None]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn cursor(&self) -> NumericCursor<'_, 's> {
+        NumericCursor {
+            keys: self.keys.as_ref().map(ForCursor::new),
+            column: self,
+        }
+    }
+
+    /// `key` typed as the field.
+    fn value(&self, key: u64) -> Value {
+        match self.field_type {
             FieldType::F64 => Value::F64(key_to_f64(key)),
             FieldType::Datetime => Value::Datetime(key_to_i64(key)),
             _ => Value::I64(key_to_i64(key)),
-        }))
+        }
+    }
+}
+
+/// A [`NumericColumn`] reader for scans, from [`NumericColumn::cursor`].
+#[derive(Debug, Clone)]
+pub struct NumericCursor<'c, 's> {
+    column: &'c NumericColumn<'s>,
+    keys: Option<ForCursor<'c, 's>>,
+}
+
+impl NumericCursor<'_, '_> {
+    /// As [`NumericColumn::key`].
+    ///
+    /// # Errors
+    /// As [`NumericColumn::key`].
+    #[inline]
+    pub fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
+        match &mut self.keys {
+            Some(keys) if self.column.has_value(docid) => keys.get(u64::from(docid)).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    /// As [`NumericColumn::get`].
+    ///
+    /// # Errors
+    /// As [`NumericColumn::key`].
+    pub fn get(&mut self, docid: u32) -> Result<Option<Value>, ReadError> {
+        Ok(self.key(docid)?.map(|key| self.column.value(key)))
     }
 }
 
@@ -606,29 +823,84 @@ impl<'s> KeywordColumn<'s> {
     /// # Errors
     /// A corruption if the FOR blocks that hold them are, or if they do not increase or pass the dictionary.
     pub fn ords(&self, docid: u32) -> Result<Vec<u64>, ReadError> {
-        let Some((starts, ords)) = &self.lists else {
-            return Ok(Vec::new());
-        };
+        let mut out = Vec::new();
+        if let Some((starts, ords)) = &self.lists {
+            self.ords_into(
+                docid,
+                (starts, |i| starts.get(i)),
+                (ords, |r, out| ords.get_range(r, out)),
+                &mut out,
+            )?;
+        }
+        Ok(out)
+    }
+
+    /// A reader for scans (filters, facets): it keeps the FOR blocks it last decoded and its output buffer to itself,
+    /// so reading every document's ords in docid order decodes each block once, without a lock or an allocation per
+    /// document (ROADMAP 5.3.16).
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::{Document, Value};
+    /// # use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+    /// # use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # let schema = SchemaBuilder::new("c").field("tag", FieldKind::Keyword(KeywordOptions::default())).build()?;
+    /// # let tag = schema.field("tag").map(|f| f.id()).ok_or("no field")?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// # builder.add(&Document::new("a").with(tag, Value::Strings(vec!["x".into(), "w".into()])))?;
+    /// # builder.add(&Document::new("b"))?;
+    /// # let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// # let segment = Segment::open(ByteSource::new(SegmentWriter::new(&builder, meta).finish()?.into()), &schema)?;
+    /// let column = segment.keyword_column(tag)?;
+    /// let mut cursor = column.cursor();
+    /// assert_eq!(cursor.ords(0)?, [0, 1]); // "w", "x"
+    /// assert_eq!(cursor.ords(1)?, [0_u64; 0]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn cursor(&self) -> KeywordCursor<'_, 's> {
+        KeywordCursor {
+            column: self,
+            lists: self
+                .lists
+                .as_ref()
+                .map(|(s, o)| (ForCursor::new(s), ForCursor::new(o))),
+            out: Vec::new(),
+        }
+    }
+
+    /// Appends `docid`'s ords to `out` (empty first), reading the `starts` and `ords` FOR columns through `start_at`
+    /// and `ords_in`, and checks them.
+    fn ords_into(
+        &self,
+        docid: u32,
+        (starts, mut start_at): (&ForColumn<'_>, impl FnMut(u64) -> Result<u64, ReadError>),
+        (ords, ords_in): (
+            &ForColumn<'_>,
+            impl FnOnce(Range<u64>, &mut Vec<u64>) -> Result<(), ReadError>,
+        ),
+        out: &mut Vec<u64>,
+    ) -> Result<(), ReadError> {
+        out.clear();
         let doc = u64::from(docid);
         if doc >= starts.count.saturating_sub(1) {
-            return Ok(Vec::new());
+            return Ok(());
         }
-        let first = starts.get(doc)?;
-        let end = starts.get(doc.saturating_add(1))?;
+        let first = start_at(doc)?;
+        let end = start_at(doc.saturating_add(1))?;
         // A document's ords are distinct values of the dictionary: at most `len` of them.
         if first > end || end > ords.count || end.saturating_sub(first) > self.len() {
             return Err(starts.bad(starts.at, "keyword starts that decrease, pass the ords, or span more ords than the dictionary holds",
             ));
         }
-        let mut out = Vec::new();
         // At most `len` values (checked above), but the dictionary may be large: fail cleanly rather than abort.
         let n = usize::try_from(end.saturating_sub(first)).unwrap_or(usize::MAX);
-        out.try_reserve_exact(n).map_err(|_| {
+        out.try_reserve(n).map_err(|_| {
             ords.stream.error(persia_format::Error::OutOfMemory {
                 bytes: end.saturating_sub(first).checked_mul(8),
             })
         })?;
-        ords.get_range(first..end, &mut out)?;
+        ords_in(first..end, out)?;
         let increasing = out.windows(2).all(|o| matches!(o, [x, y] if x < y));
         if !increasing || out.last().is_some_and(|&o| o >= self.len()) {
             return Err(ords.bad(
@@ -636,7 +908,7 @@ impl<'s> KeywordColumn<'s> {
                 "a document's ords not increasing or past the dictionary",
             ));
         }
-        Ok(out)
+        Ok(())
     }
 
     /// `docid`'s distinct values, ascending.
@@ -649,6 +921,42 @@ impl<'s> KeywordColumn<'s> {
             .into_iter()
             .filter_map(|o| self.value(o))
             .collect())
+    }
+}
+
+/// A [`KeywordColumn`] reader for scans, from [`KeywordColumn::cursor`].
+#[derive(Debug, Clone)]
+pub struct KeywordCursor<'c, 's> {
+    column: &'c KeywordColumn<'s>,
+    /// Cursors over the `starts` and the ords.
+    lists: Option<(ForCursor<'c, 's>, ForCursor<'c, 's>)>,
+    out: Vec<u64>,
+}
+
+impl<'c> KeywordCursor<'c, '_> {
+    /// As [`KeywordColumn::ords`], into a buffer the cursor reuses.
+    ///
+    /// # Errors
+    /// As [`KeywordColumn::ords`].
+    #[inline]
+    pub fn ords(&mut self, docid: u32) -> Result<&[u64], ReadError> {
+        let column = self.column;
+        self.out.clear();
+        if let Some((starts, ords)) = &mut self.lists {
+            let (s, o) = (starts.column, ords.column);
+            column.ords_into(
+                docid,
+                (s, |i| starts.get(i)),
+                (o, |r, out| ords.get_range(r, out)),
+                &mut self.out,
+            )?;
+        }
+        Ok(&self.out)
+    }
+
+    /// The column it reads, for [`KeywordColumn::value`].
+    pub fn column(&self) -> &'c KeywordColumn<'_> {
+        self.column
     }
 }
 

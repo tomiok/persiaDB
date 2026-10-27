@@ -177,6 +177,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
+- `persia-engine` (breaking): `Segment::norms` returns `Norms<'_>`, which reads the `Norms` section a framed block at a
+  time through the segment's block cache (ROADMAP 5.3.14) instead of copying and re-checking all `doc_count` bytes on
+  each call. `Norms::get` and `Norms::length` return a `Result`: a corrupt block is reported when a norm in it is read.
+- `persia-engine`: `NumericColumn::cursor`, `KeywordColumn::cursor` and `Norms::cursor` (ROADMAP 5.3.16) return
+  readers for scans (`NumericCursor`, `KeywordCursor`, `NormsCursor`) that keep the block they last decoded to
+  themselves: no lock and no allocation per value, and `KeywordCursor::ords` returns a slice of a buffer it reuses.
+  Scanning every document of `segment_columns` (docs/benchmarks.md): 214 M numeric keys/s (`NumericColumn::key`: 32 M)
+  and 59.5 M keyword ord lists/s (`KeywordColumn::ords`: 10.8 M).
+- `persia-format`: `ForBlock::decode_into` unpacks a whole FOR block into a `Vec`, about twice as fast as `iter`
+  (`for_block/decode_into`), and `read_for_block` checks a block whose values may overflow with the same unpacker.
 - `persia-engine`: `Postings::positions` decodes only the current document's positions (ROADMAP 5.3.13), reading its
   block's positions run forward and skipping the packed groups of documents passed over by their width byte, instead
   of decoding the whole run. Memory now follows one document's term frequency, and the 2^26-positions-per-block limit

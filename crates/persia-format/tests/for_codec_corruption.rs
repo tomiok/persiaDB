@@ -107,7 +107,8 @@ fn reference_for(bytes: &[u8], start: u64) -> Result<Decoded, Error> {
     })
 }
 
-/// Reads with the crate at absolute offset `base + skip`, checking atomicity and that `get`/`iter` agree.
+/// Reads with the crate at absolute offset `base + skip`, checking atomicity and that `get`, `iter` and `decode_into`
+/// agree.
 fn library_for(bytes: &[u8], base: u64, skip: usize) -> Result<Decoded, Error> {
     let mut r = Reader::with_base_offset(bytes, base);
     r.skip(skip).unwrap();
@@ -119,6 +120,9 @@ fn library_for(bytes: &[u8], base: u64, skip: usize) -> Result<Decoded, Error> {
             assert_eq!(block.get(usize::MAX), None);
             let values: Vec<u64> = block.iter().collect();
             assert_eq!(values.len(), len);
+            let mut decoded = Vec::new();
+            block.decode_into(&mut decoded);
+            assert_eq!(decoded, values, "decode_into disagrees with iter");
             for (i, &v) in values.iter().enumerate() {
                 assert_eq!(block.get(i), Some(v), "get({i}) disagrees with iter");
                 assert!(v >= block.min());

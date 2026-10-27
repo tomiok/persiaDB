@@ -1,4 +1,4 @@
-//! Reading the logical stream of a block-framed section (SPEC §5.2): whole, a block at a time through the segment's
+//! Reading the logical stream of a block-framed section (SPEC §5.2): a range, a block at a time through the segment's
 //! [`BlockCache`] (ROADMAP 5.3.11), or a range at a time through a [`Cursor`] that keeps the last block it read, so
 //! sequential reads (postings blocks, skip entries, runs that span blocks) look each block up once.
 
@@ -130,13 +130,6 @@ impl<'s> Stream<'s> {
         self.blocks
             .read_range(start, len, out)
             .map_err(|e| self.error(e))
-    }
-
-    /// The whole stream.
-    pub(super) fn read_all(&self) -> Result<Vec<u8>, ReadError> {
-        let mut out = Vec::new();
-        self.read_range(0, self.len(), &mut out)?;
-        Ok(out)
     }
 
     /// Block `index`, decoded into `out` (cleared first), bypassing the cache.
