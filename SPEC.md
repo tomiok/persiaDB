@@ -1191,7 +1191,8 @@ Locally (ROADMAP 6.3, ADR-0029) a flush and its commit are one step, and it flus
 operations, each into one segment of its live documents in docid order (none if every document was replaced or
 deleted), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (the engine runs no thread of its own) and which commits when any
-memtable is idle or reached `commit_interval` since its first unflushed write. Flushing all of them makes the
+memtable is idle or reached `commit_interval` since its first unflushed write. Operations replayed at an open count as
+written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
 commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
 write, sync or commit after that poisons the database until it is reopened (§4.5). Creating a collection is a commit
 of its own, so its records follow it in the log.

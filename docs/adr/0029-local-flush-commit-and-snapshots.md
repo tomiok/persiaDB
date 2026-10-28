@@ -56,9 +56,10 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 
 ## Consequences
 
-- Until ROADMAP 6.4.3, a flush keeps only the memtable's live documents: a delete or upsert of an id that lives in an
-  older segment is lost from the flush (the older segment's version shows again). Nothing reads across segments yet;
-  6.4.3 adds tombstones through the commit.
+- Until ROADMAP 6.4.3, a flush keeps only the memtable's live documents. So `delete` refuses an id that is in a
+  committed segment (`NeedsTombstones`, before logging) instead of letting the next flush undo it, and replacing such
+  a document leaves the older copy live in its segment (a newest-first lookup finds the new one). 6.4.3 adds
+  tombstones through the commit and lifts both.
 - Flush commits write a segment per collection with operations, so one busy collection makes small segments of the
   others; merging (ROADMAP 6.5) absorbs them.
 - A commit re-indexes the flushed documents: a flush costs about one more analysis pass than reusing the memtable's

@@ -55,6 +55,7 @@ use arc_swap::ArcSwap;
 use persia_analysis::AnalyzerRegistry;
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
+use persia_format::source::ByteSource;
 use persia_format::superblock::Superblock;
 use persia_storage::Storage;
 use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
@@ -154,6 +155,17 @@ pub enum DatabaseError {
     /// Replaying the WAL failed: the open fails.
     #[error(transparent)]
     Replay(#[from] ReplayError),
+    /// The delete names a document that is in a committed segment: deleting it needs tombstones (ROADMAP 6.4.3), and
+    /// a flush would otherwise bring it back. Nothing was logged.
+    #[error(
+        "collection {collection:?}: deleting committed document {id:?} needs tombstones (ROADMAP 6.4.3)"
+    )]
+    NeedsTombstones {
+        /// The collection.
+        collection: String,
+        /// The document id.
+        id: String,
+    },
     /// No committed collection has the name.
     #[error("no collection {name:?}")]
     NoSuchCollection {
@@ -468,6 +480,10 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// Adds or replaces the document `doc` of `collection` (SPEC §8.1), with `durability` (SPEC §8.2.1). A memtable
     /// at its size threshold is flushed and committed first.
     ///
+    /// Until tombstones (ROADMAP 6.4.3, ADR-0029), replacing a document that is already in a committed segment leaves
+    /// the older copy in its segment once the new one is flushed: a lookup newest segment first finds the new one, but
+    /// both count as live documents.
+    ///
     /// # Errors
     /// [`DatabaseError::NoSuchCollection`], [`DatabaseError::Memtable`] or [`DatabaseError::Record`] for an operation
     /// that is rejected (and not logged), [`DatabaseError::Wal`] (which poisons the database), or a failed commit.
@@ -527,6 +543,11 @@ impl<F: ContainerFile + Sync> Database<F> {
                     self.reach(durability)?;
                     return Err(DatabaseError::BatchRejected { index, source });
                 }
+                // The documents before it are durable at `durability`, unless the WAL failed (then nothing is).
+                Err(e) if !self.poisoned => {
+                    self.reach(durability)?;
+                    return Err(e);
+                }
                 Err(e) => return Err(e),
             }
         }
@@ -535,8 +556,11 @@ impl<F: ContainerFile + Sync> Database<F> {
 
     /// Deletes the document with id `id` from `collection` (SPEC §8.1), with `durability`.
     ///
+    /// Until tombstones (ROADMAP 6.4.3, ADR-0029) only documents not yet in a committed segment can be deleted: those
+    /// still in the memtable, or ids the collection never had.
+    ///
     /// # Errors
-    /// As [`Database::put`].
+    /// [`DatabaseError::NeedsTombstones`] for a document in a committed segment; otherwise as [`Database::put`].
     pub fn delete(
         &mut self,
         collection: &str,
@@ -545,6 +569,25 @@ impl<F: ContainerFile + Sync> Database<F> {
     ) -> Result<(), DatabaseError> {
         self.usable()?;
         self.flush_if_full(collection)?;
+        // Until tombstones (ROADMAP 6.4.3) a flush cannot carry the delete of a committed document, which would come
+        // back: refuse it before anything is logged.
+        if let Some(c) = self.collections.get(collection) {
+            for segment in &c.segments {
+                let found = segment
+                    .docid_of(id)
+                    .map_err(|source| DatabaseError::OpenSegment {
+                        collection: collection.to_owned(),
+                        id: SegmentId::new(segment.segment_id()),
+                        source,
+                    })?;
+                if found.is_some() {
+                    return Err(DatabaseError::NeedsTombstones {
+                        collection: collection.to_owned(),
+                        id: id.to_owned(),
+                    });
+                }
+            }
+        }
         let Self {
             wal, collections, ..
         } = &mut *self;
@@ -731,39 +774,25 @@ impl<F: ContainerFile + Sync> Database<F> {
             fence_token: next.fence_token(),
         })?;
 
-        // Durable: step 4.
-        let mut opened = Vec::new();
-        {
-            let objects = ContainerObjects::new(self.wal.log(), &next);
-            for p in &planned {
-                let Some((id, _)) = &p.segment else { continue };
-                let schema = self
-                    .collections
-                    .get(&p.collection)
-                    .map(|c| Arc::clone(&c.schema))
-                    .ok_or_else(|| no_such(&p.collection))?;
-                let entry = next
-                    .collection(&p.collection)
-                    .and_then(|c| c.segment(*id))
-                    .ok_or(DatabaseError::Internal {
-                        what: "a committed segment is not in its manifest",
-                    })?;
-                opened.push(open_segment(&objects, &p.collection, entry, &schema)?);
-            }
-        }
-        let mut opened = opened.into_iter();
+        // Durable: step 4. The new segments are opened from the bytes just written: an open checks their frames.
         for p in planned {
             let Some(c) = self.collections.get_mut(&p.collection) else {
                 continue;
             };
+            if let Some((id, flushed)) = p.segment {
+                let entry = next
+                    .collection(&p.collection)
+                    .and_then(|e| e.segment(id))
+                    .ok_or(DatabaseError::Internal {
+                        what: "a committed segment is not in its manifest",
+                    })?;
+                let source = ByteSource::new(flushed.bytes.into());
+                c.segments
+                    .push(open_source(source, &p.collection, entry, &c.schema)?);
+            }
             c.memtable = p.memtable;
             c.first_write = None;
             c.last_write = None;
-            if p.segment.is_some()
-                && let Some(segment) = opened.next()
-            {
-                c.segments.push(segment);
-            }
         }
         if let Some((name, collection)) = created {
             self.collections.insert(name, collection);
@@ -826,6 +855,23 @@ fn open_segment<F: ContainerFile + Sync>(
     let key = persia_storage::Key::new(objects::segment_key(collection, entry))
         .map_err(persia_storage::Error::from)?;
     let source = objects.get_range(&key, 0..entry.size)?;
+    let segment = open_source(source, collection, entry, schema)?;
+    if let Some(t) = entry.tombstones {
+        // Read only to check its frame (ROADMAP 6.3.7); sidecars are applied by ROADMAP 6.4.
+        let key = format!("tombstones/{collection}/{}.{}.tomb", entry.id, t.version);
+        let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
+        objects.get(&key)?;
+    }
+    Ok(segment)
+}
+
+/// Opens the bytes of the segment `entry` describes and checks its footer against the entry.
+fn open_source(
+    source: ByteSource,
+    collection: &str,
+    entry: &SegmentEntry,
+    schema: &CollectionSchema,
+) -> Result<Arc<Segment>, DatabaseError> {
     let segment = Segment::open(source, schema).map_err(|source| DatabaseError::OpenSegment {
         collection: collection.to_owned(),
         id: entry.id,
@@ -841,12 +887,6 @@ fn open_segment<F: ContainerFile + Sync>(
     }
     if segment.doc_count() != entry.doc_count {
         return Err(mismatch("doc_count"));
-    }
-    if let Some(t) = entry.tombstones {
-        // Read only to check its frame (ROADMAP 6.3.7); sidecars are applied by ROADMAP 6.4.
-        let key = format!("tombstones/{collection}/{}.{}.tomb", entry.id, t.version);
-        let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
-        objects.get(&key)?;
     }
     Ok(Arc::new(segment))
 }

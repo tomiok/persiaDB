@@ -23,7 +23,8 @@ pub struct CommitPolicy {
 pub struct MemtableState {
     /// [`crate::memtable::Memtable::size_in_bytes`].
     pub size_in_bytes: usize,
-    /// When its oldest unflushed operation was applied; `None` when it is empty.
+    /// When its oldest unflushed operation was applied; `None` when it is empty. After a reopen, the database counts
+    /// replayed operations as applied at the open, so they wait up to one more interval.
     pub first_write: Option<Instant>,
     /// When its newest operation was applied; `None` when it is empty.
     pub last_write: Option<Instant>,

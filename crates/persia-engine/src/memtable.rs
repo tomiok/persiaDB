@@ -387,8 +387,11 @@ impl Memtable {
     ) -> Result<u32, Logged<E>> {
         let staged = self.stage_put(doc).map_err(Logged::Rejected)?;
         if let Err(e) = log(&staged.encoded) {
-            write(&self.shared)
-                .map_err(Logged::Rejected)?
+            // The log's error is what the caller must see, poisoned lock or not; the data is append-only, so the
+            // rollback is sound either way.
+            self.shared
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
                 .rollback(&staged.marks);
             return Err(Logged::Log(e));
         }

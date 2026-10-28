@@ -21,6 +21,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   read-only `Storage` under the remote layout's keys. `Memtable::put_logged`/`delete_logged` stage an operation, log
   it, then publish it, so a rejected operation is never logged (6.3.9); `Memtable::reader` gives a `MemtableReader`.
   Fuzz target `database_open`; bench `database` (`put_buffered` 269 K, `commit` 205 K documents/s).
+  Known limits until tombstones (ROADMAP 6.4.3): `delete` of a document already in a committed segment is refused
+  (`DatabaseError::NeedsTombstones`), and replacing such a document leaves the older copy in its segment (a lookup
+  newest segment first finds the new one, but both count as live).
 - `persia-format`: `Corruption::WrongFrame`, for a manifest location that names a frame of another kind or length.
 - `persia-engine`: the write-ahead log (ROADMAP 6.2, SPEC §8.2.1, ADR-0028). `WalWriter` encodes `put` and `delete`
   records into chunks (`WalChunk` frames of the container), with per-call `Durability` (`Buffered`, `Async`, `Fsync`,
