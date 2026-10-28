@@ -1,6 +1,6 @@
-//! The golden database (ROADMAP 6.3.8; SPEC §4.4, §9.1, §15): a container written by the commit path, holding a
-//! Segment frame whose `BlobRefs` section has a `BlobRef` with non-empty `user_meta`, and one WAL record after the
-//! last commit.
+//! The golden databases (ROADMAP 6.3.8, 6.4.3; SPEC §4.4, §8.3, §9.1, §15): containers written by the commit path. The
+//! first holds a Segment frame whose `BlobRefs` section has a `BlobRef` with non-empty `user_meta`, and one WAL record
+//! after the last commit; the second, tombstone sidecars.
 //!
 //! Invariants:
 //! 1. Writing the database again, with the same ids, clock and documents, gives exactly the bytes of
@@ -9,6 +9,9 @@
 //!    `PERSIA_WRITE_DATABASE_FIXTURES=1` writes it when missing.
 //! 2. Opening the fixture shows the committed segment with the blob reference and its `user_meta`, and the replayed
 //!    document after it.
+//! 3. `tombstones.persia` (ROADMAP 6.4.3, ADR-0030), written the same way, holds three segments, a second sidecar
+//!    version that deletes all of the first segment, and a delete in the WAL; it is stable byte for byte and opens to
+//!    the documents the commits left, the replayed delete hiding a segment's document.
 
 #![allow(
     clippy::unwrap_used,
@@ -145,4 +148,94 @@ fn golden_database_is_stable_and_opens() {
         panic!("note-2 is not replayed");
     };
     assert_eq!(memtable.document(late_id).unwrap(), late);
+}
+
+fn tombstones_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/database/v1.0/tombstones.persia")
+}
+
+/// The database with tombstone sidecars (ROADMAP 6.4.3), written by the commit path: `photo-1` and `note-1` flushed
+/// into S1; `note-1` deleted and `note-2` put (S1's sidecar v1, S2); `photo-1` replaced (S3, S1's sidecar v2, which
+/// deletes all of S1); then a delete of `note-2` left in the WAL.
+fn write_tombstones() -> Vec<u8> {
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), *b"persia-golden-tb", options()).unwrap();
+    db.create_collection(schema()).unwrap();
+    let (photo, note, late) = docs();
+    db.put_batch("files", &[photo.clone(), note], Durability::Fsync)
+        .unwrap();
+    assert_eq!(db.commit().unwrap(), 3);
+    db.delete("files", "note-1", Durability::Fsync).unwrap();
+    db.put("files", &late, Durability::Fsync).unwrap();
+    assert_eq!(db.commit().unwrap(), 4);
+    db.put("files", &replaced(&photo), Durability::Fsync)
+        .unwrap();
+    assert_eq!(db.commit().unwrap(), 5);
+    db.delete("files", "note-2", Durability::Fsync).unwrap();
+    drop(db);
+    file.durable_bytes()
+}
+
+fn replaced(photo: &Document) -> Document {
+    let title = schema().field("title").unwrap().id();
+    photo
+        .clone()
+        .with(title, Value::String("Sunrise over the harbour".into()))
+}
+
+#[test]
+fn golden_database_with_tombstones_is_stable_and_opens() {
+    let path = tombstones_path();
+    let written = write_tombstones();
+    if std::env::var_os("PERSIA_WRITE_DATABASE_FIXTURES").is_some() && !path.exists() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &written).unwrap();
+    }
+    let stored = std::fs::read(&path).unwrap_or_else(|e| {
+        panic!(
+            "{}: {e} (PERSIA_WRITE_DATABASE_FIXTURES=1 writes it)",
+            path.display()
+        )
+    });
+    assert_eq!(
+        written, stored,
+        "the commit path changed the database's bytes"
+    );
+
+    let db = Database::open_on(SimFile::from_bytes(stored), options()).unwrap();
+    assert_eq!(db.seq(), 5);
+    let entries = db
+        .manifest()
+        .collection("files")
+        .unwrap()
+        .segments()
+        .to_vec();
+    let sidecars: Vec<Option<(u64, u32)>> = entries
+        .iter()
+        .map(|e| e.tombstones.map(|t| (t.version, t.deleted)))
+        .collect();
+    assert_eq!(sidecars, [Some((2, 2)), None, None]);
+    let snapshot = db.snapshot();
+    let files = snapshot.collection("files").unwrap();
+    // The decoded sidecar, not only the manifest's counts.
+    let deleted: Vec<u32> = files.tombstones()[0]
+        .as_ref()
+        .unwrap()
+        .docids()
+        .iter()
+        .collect();
+    assert_eq!(deleted, [0, 1]);
+    let (photo, _, _) = docs();
+    assert_eq!(files.get("photo-1").unwrap(), Some(replaced(&photo)));
+    assert_eq!(files.get("note-1").unwrap(), None);
+    // In S2, hidden by the replayed delete.
+    assert_eq!(files.get("note-2").unwrap(), None);
+    assert!(
+        files.segments()[1]
+            .document_by_id("note-2")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(files.memtable().lookup("note-2"), Some(IdState::Deleted));
 }

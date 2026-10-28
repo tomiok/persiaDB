@@ -35,12 +35,9 @@ use persia_storage::{
     Capabilities, Error, Key, KeyPrefix, ObjectMeta, Op, PutOutcome, Result, Storage,
 };
 
-use crate::manifest::{Location, MAX_MANIFEST_LEN, Manifest, SegmentEntry};
+use crate::manifest::{Location, MAX_MANIFEST_LEN, Manifest, SegmentEntry, SegmentId};
+use crate::tombstone::MAX_SIDECAR_LEN;
 use crate::wal::MAX_CHUNK_LEN;
-
-/// Largest payload a tombstone sidecar frame may hold: its layout is fixed by ROADMAP 6.4.2, and a full set of
-/// deleted docids of a segment of `2^31` documents takes at most `2^28` bytes plus container headers.
-const MAX_SIDECAR_LEN: usize = (1 << 28) + (1 << 20);
 
 /// What a key names.
 #[derive(Debug, Clone, Copy)]
@@ -84,6 +81,11 @@ pub(crate) fn segment_key(collection: &str, entry: &SegmentEntry) -> String {
     format!("segments/{collection}/{}.seg", entry.id)
 }
 
+/// The key of version `version` of a segment's tombstone sidecar (SPEC §10.4).
+pub(crate) fn sidecar_key(collection: &str, id: SegmentId, version: u64) -> String {
+    format!("tombstones/{collection}/{id}.{version}.tomb")
+}
+
 impl<'a, F: ContainerFile> ContainerObjects<'a, F> {
     /// The objects of `container` as `manifest` describes them. `manifest` must be the one the container's
     /// superblock commits ([`super::Database::objects`] passes it): another one gives a view whose keys disagree with
@@ -105,7 +107,7 @@ impl<'a, F: ContainerFile> ContainerObjects<'a, F> {
                 if let Some(t) = entry.tombstones {
                     // An object location here is caught by `Manifest::check_layout`; the view then has no sidecar.
                     if let Location::Frame { offset, len } = t.location {
-                        let key = format!("tombstones/{name}/{}.{}.tomb", entry.id, t.version);
+                        let key = sidecar_key(name, entry.id, t.version);
                         objects.insert(key, Target::Tombstones { offset, len });
                     }
                 }

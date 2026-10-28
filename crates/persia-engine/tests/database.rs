@@ -38,7 +38,7 @@ use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
     CollectionDiff, Layout, Location, Manifest, ManifestDiff, SegmentEntry, SegmentId,
 };
-use persia_engine::memtable::{FlushPolicy, IdState, MemtableError};
+use persia_engine::memtable::{FlushPolicy, MemtableError};
 use persia_engine::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::segment::SegmentError;
 use persia_engine::view::SearchView;
@@ -77,20 +77,11 @@ fn clock() -> Arc<ManualClock> {
     Arc::new(ManualClock::new(1_700_000_000_000_000))
 }
 
-/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', and newer segments
-/// hide older ones (SPEC §8.3).
+/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', then the newest
+/// segment with a live copy (SPEC §8.3).
 fn get(snapshot: &Snapshot, collection: &str, id: &str) -> Option<Document> {
     let c = snapshot.collection(collection)?;
-    let memtable = c.memtable();
-    match memtable.lookup(id) {
-        Some(IdState::Live(docid)) => return Some(memtable.document(docid).unwrap()),
-        Some(IdState::Deleted) => return None,
-        None => {}
-    }
-    c.segments()
-        .iter()
-        .rev()
-        .find_map(|s| s.document_by_id(id).unwrap().map(|(_, d)| d))
+    c.get(id).unwrap()
 }
 
 /// Every live document `snapshot` shows, by id.
@@ -859,39 +850,4 @@ fn a_crash_after_a_size_flush_writes_no_document_twice() {
     }
     assert_eq!(documents(&db.snapshot(), "a").len(), i + 1);
     assert_eq!(documents(&db.snapshot(), "b").len(), 1);
-}
-
-/// Until tombstones (ROADMAP 6.4.3), a delete of a committed document is refused before it is logged, rather than
-/// undone by the next flush (review of PR #39).
-#[test]
-fn deleting_a_committed_document_is_refused_until_tombstones() {
-    let clock = clock();
-    let file = SimFile::new();
-    let mut db = Database::create_on(file.clone(), [14; 16], options(&clock)).unwrap();
-    db.create_collection(schema("a")).unwrap();
-    db.put("a", &doc("old", "committed"), Durability::Fsync)
-        .unwrap();
-    db.commit().unwrap();
-    db.put("a", &doc("new", "in the memtable"), Durability::Fsync)
-        .unwrap();
-    let (frames, end) = (wal_frames(db.container()), db.container().end());
-    assert!(matches!(
-        db.delete("a", "old", Durability::Fsync),
-        Err(DatabaseError::NeedsTombstones { .. })
-    ));
-    assert_eq!(
-        (wal_frames(db.container()), db.container().end()),
-        (frames, end)
-    );
-    // Not yet committed, or never written: deleted as usual.
-    db.delete("a", "new", Durability::Fsync).unwrap();
-    db.delete("a", "never", Durability::Fsync).unwrap();
-    db.commit().unwrap();
-    drop(db);
-    let db = Database::open_on(file.crash(CrashLoss::All), options(&clock)).unwrap();
-    let ids: Vec<String> = documents(&db.snapshot(), "a")
-        .into_iter()
-        .map(|(id, _)| id)
-        .collect();
-    assert_eq!(ids, ["old"]);
 }

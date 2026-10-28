@@ -224,3 +224,28 @@ fn logged_writes_reach_the_log_only_when_accepted() {
     assert_eq!(mem.delete_logged("a", || Ok::<(), &str>(())), Ok(true));
     assert_eq!(mem.view().lookup("a"), Some(IdState::Deleted));
 }
+
+/// The ids a flush tombstones (ROADMAP 6.4.3): every id an applied put or delete named, not one whose only operation
+/// failed to log (its id stays interned).
+#[test]
+fn for_each_id_yields_the_ids_of_applied_operations() {
+    let (mut mem, t, _) = unguarded();
+    mem.put(&Document::new("put").with(t, Value::String("a".into())))
+        .unwrap();
+    mem.delete("deleted").unwrap();
+    let failed = mem.put_logged(
+        &Document::new("unlogged").with(t, Value::String("b".into())),
+        |_| Err("log failed"),
+    );
+    assert!(matches!(failed, Err(Logged::Log("log failed"))));
+    let failed = mem.delete_logged("unlogged-delete", || Err("log failed"));
+    assert!(matches!(failed, Err(Logged::Log("log failed"))));
+    let mut ids = Vec::new();
+    mem.for_each_id(|id| {
+        ids.push(String::from_utf8(id.to_vec()).unwrap());
+        Ok::<(), ()>(())
+    })
+    .unwrap();
+    ids.sort();
+    assert_eq!(ids, ["deleted", "put"]);
+}

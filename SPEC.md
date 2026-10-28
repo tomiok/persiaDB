@@ -712,7 +712,7 @@ back to back: record `d` spans `[end[d−1], end[d])` (`end[−1] = 0`). `DocSto
 each has `doc_count` records, in docid order. A record may span blocks (§5.2). Ends that decrease, or a last end
 other than the stream length minus `8·n`, are corruption, and so is an empty `IdList` record or a non-empty `BlobRefs`
 record that is not exactly one `BlobRef` encoding. `IdMap` is an FST from each id to its
-docid; no path of it is longer than the longest id (512 bytes, §6.4.1), and a segment holds an id at most once (the builder rejects a duplicate; how the write path handles an upsert of a document not yet flushed is open, ROADMAP 6).
+docid; no path of it is longer than the longest id (512 bytes, §6.4.1), and a segment holds an id at most once (the builder rejects a duplicate; the memtable keeps one version per id, and a flush tombstones the older segments' copies, §8.3).
 
 ### 5.4 Internal doc ids
 `docid` is a segment-local `u32`, dense `0..doc_count`. Segments MUST NOT exceed `2^31` docs.
@@ -1189,7 +1189,7 @@ Rules:
 
 Locally (ROADMAP 6.3, ADR-0029) a flush and its commit are one step, and it flushes every memtable that holds
 operations, each into one segment of its live documents in docid order (none if every document was replaced or
-deleted), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
+deleted), with the tombstone sidecars that delete the older segments' copies of the ids it touched (§8.3), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (the engine runs no thread of its own) and which commits when any
 memtable is idle or reached `commit_interval` since its first unflushed write. Operations replayed at an open count as
 written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
@@ -1280,23 +1280,50 @@ segment's version of it (§8.3), so a segment copy of a replayed id is never vis
 tombstones it (ROADMAP 6.4.3).
 
 ### 8.3 Upserts and deletes
-Upsert = tombstone for the previous docid (looked up via `IdMap` across segments newest-first) + insert into memtable.
+Upsert = insert into the memtable + tombstones, at the next commit, for every live copy of the id in the committed
+segments (looked up via `IdMap`, write path below).
 Delete = tombstone only. Tombstones are the only mutable-looking state; they live in per-segment **tombstone sidecars**
 (versioned, referenced by the manifest), never inside the immutable segment bytes.
 Inside the memtable an upsert replaces in place: the new version gets the next memtable docid and the earlier one is
 marked dead, so no search sees it and the flush leaves it out. A delete marks the memtable's version dead and is
 recorded even for an id the memtable lacks, so it hides the id in older segments until its tombstone is committed.
 
-Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2, see SPEC §18.3):
+Tombstone sidecar (ADR-0030; the layout closes SPEC §18.3):
 - One sidecar per `(segment_id, version)`; `version` is a `u64`: 1 for a segment's first sidecar, one more per rewrite
-  (§8.7.2; the manifest rules are normative, the payload below is still a proposal).
-- Payload: `segment_id u128`, `version u64`, `doc_count u32` (must equal the segment's), then the **full** set of deleted
-  docids as a serialized roaring bitmap (portable format). Full set, not a delta, so one sidecar is enough to read; each
-  version is a superset of the previous one (deletions are never undone), which the writer checks before committing it.
-- Docids `>= doc_count` are corruption.
+  (§8.7.2). It holds the **full** set of the segment's deleted docids, not a delta, so one sidecar is enough to read;
+  each version is a superset of the previous one (deletions are never undone), which the writer checks before
+  committing it.
+```
+0   4  magic       bytes "PTMB" (0x50 0x54 0x4D 0x42)
+4   4  version     u32 = 1 (the encoding)
+8   16 segment_id  u128
+24  8  sidecar     u64  (the sidecar's version, ≥ 1)
+32  4  doc_count   u32  (the segment's, 1..=2^31)
+36  4  deleted     u32  (1..=doc_count)
+40  ..  the deleted docids: a roaring bitmap, portable serialization
+..  4  crc32c      u32  over every byte before it
+```
+- Reading: the length (at most 2^28 + 2^20 bytes, which bounds the writer's encoding of any segment: an encoding
+  above it is corruption), the magic, the CRC32C trailer, then `version` (0 is corruption;
+  above 1 is unsupported), then the rest. Anything else that does not hold is corruption: `sidecar` 0, `doc_count`
+  or `deleted` out of range, a bitmap that does not deserialize or does not end at the trailer, a cardinality other
+  than `deleted`, a docid `>= doc_count`. The bitmap's container kinds and offsets are free (the writer uses run
+  containers where they are smaller); nothing hashes a sidecar. Opening a database checks `segment_id`, `sidecar`,
+  `doc_count` and `deleted` against the segment's manifest entry, as corruption.
 - Stored locally as a `TombstoneSidecar` frame (SPEC §4.4), remotely as `tombstones/<collection>/<segment_id>.<ver>.tomb` (SPEC §10.4).
 - The manifest maps each live segment to its current sidecar version (absent = no deletions). Superseded sidecars become
   garbage once no snapshot references them (same lifetime rule as segments, SPEC §8.5).
+
+**Write path** (ROADMAP 6.4.3). A flush commit (§8.2) tombstones, for each memtable it flushes, every live copy in
+the collection's committed segments of every id the memtable has an operation for (put or delete, replayed or not):
+an upsert's older version and a deleted document alike. Each segment that loses documents gets its next sidecar
+version, appended after the new segments and before the WAL's commit point and the manifest (§4.5 step 1), and an
+updated entry in the commit's diff. So a commit leaves at most one live copy of each id, and every snapshot shows
+each id at most once: the memtable's version or delete before the commit, the new segment and the sidecars after.
+
+**Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the newest
+segment whose `IdMap` holds the id (§5.3.6) decides: its copy if live, none if its sidecar deletes it. Older copies
+are never consulted, so a deleted id stays deleted whatever older segments hold.
 
 ### 8.4 Concurrency
 - **Single writer** per database/shard (file lock locally; lease remotely, SPEC §11.3). Opening a second writer fails fast.
@@ -1761,13 +1788,14 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
   by CI forever. `cargo xtask fixtures` writes (and CI checks) only the directory of the version the build writes;
   a released version's directory is never regenerated.
 - Encodings that live inside frames or objects rather than in the container layout have their own version field and
-  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024),
-  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`),
+  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024; tombstone sidecars: `tests/fixtures/tombstones/v1/`, ADR-0030),
+  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`, `PERSIA_WRITE_TOMBSTONE_FIXTURES=1`),
   existing ones never.
 - Whole databases written by the engine's commit path, which exercise every encoding inside a container together,
   live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests
   and written on request when missing (`PERSIA_WRITE_DATABASE_FIXTURES=1`; ROADMAP 6.3.8). `blob-ref.persia` holds a
-  segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit.
+  segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit; `tombstones.persia` (ROADMAP 6.4.3)
+  three segments, two versions of one tombstone sidecar, and a delete in the WAL.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.
@@ -1825,7 +1853,7 @@ Comparison against other engines is reported with methodology, never cherry-pick
 
 1. ~~Blob hash~~: resolved by ADR-0002, SHA-256 (§9.1).
 2. Single blob per document vs many (`blobs: []`) in v1.
-3. Tombstone sidecar format vs copy-on-write segment footers. Current proposal: full-set sidecars (SPEC §8.3).
+3. ~~Tombstone sidecar format vs copy-on-write segment footers~~: resolved by ADR-0030, full-set sidecars (§8.3).
 4. Positions: always-on vs opt-in (current: opt-in).
 5. Resharding strategy (split-by-hash-range using immutable segments + filtering merge).
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.

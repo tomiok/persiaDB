@@ -182,3 +182,11 @@ container is a `SimFile`, so no time is spent in a real sync. Documents per seco
 | Recorded | `put_buffered` | `commit` |
 |---|--:|--:|
 | 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.3) | 269 K | 205 K |
+
+Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 000 documents that each replace one in
+4 older segments (one sidecar written); `commit_inserts_<n>_segments` commits 2 000 new ids, each still looked up in
+`n` older segments. Measured in one run with `commit`, so the four compare. Documents per second.
+
+| Recorded | `commit` | `commit_upserts` | `commit_inserts_4_segments` | `commit_inserts_64_segments` |
+|---|--:|--:|--:|--:|
+| 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.4, 6750fe8) | 201 K | 153 K | 174 K | 97.4 K |

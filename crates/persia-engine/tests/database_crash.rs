@@ -9,7 +9,8 @@
 //! 1. The reopen succeeds and shows the documents of every acknowledged operation, plus at most the one operation
 //!    that failed: a commit changes no document, so a commit cut at any step of SPEC §4.5 loses nothing.
 //! 2. The committed `seq` is the one before the failed commit or one more; never anything in between.
-//! 3. Recovery is idempotent: committing after the reopen, and reopening again, shows the same documents.
+//! 3. Recovery is idempotent: committing after the reopen, and reopening again, shows the same documents; every one
+//!    of these states has at most one live copy of an id in the segments (SPEC §8.3).
 //! 4. The same holds for a fault inside `create_collection` (the collection exists after the reopen if and only if
 //!    its create was acknowledged, or it is the failed operation) and inside the size-triggered flush and commit a
 //!    `put` runs before logging (SPEC §8.2 step 3).
@@ -32,7 +33,7 @@ use persia_engine::db::{
     CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::memtable::{FlushPolicy, IdState};
+use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
@@ -90,8 +91,8 @@ fn apply(state: &mut State, op: &Op) {
     }
 }
 
-/// Puts and upserts to two collections, a delete of an id written since the last commit (deletes of flushed ids
-/// need tombstones, ROADMAP 6.4.3), and commits between them.
+/// Puts and upserts to two collections, deletes of an id written since the last commit and of committed ids (whose
+/// commits write tombstone sidecars, ROADMAP 6.4.3), and commits between them.
 fn workload() -> Vec<Op> {
     let mut ops = Vec::new();
     for round in 0..3 {
@@ -104,6 +105,11 @@ fn workload() -> Vec<Op> {
         }
         ops.push(Op::Put("a", format!("tmp{round}"), "short lived".into()));
         ops.push(Op::Delete("a", format!("tmp{round}")));
+        match round {
+            1 => ops.push(Op::Delete("a", "seed".into())),
+            2 => ops.push(Op::Delete("b", "b0-0".into())),
+            _ => {}
+        }
         ops.push(Op::Commit);
     }
     ops.push(Op::Put("b", "tail".into(), "after the last commit".into()));
@@ -144,6 +150,19 @@ fn observed(snapshot: &Snapshot) -> State {
         let Some(c) = snapshot.collection(name) else {
             continue;
         };
+        // A commit leaves at most one live copy of an id in the segments (SPEC §8.3, ADR-0030).
+        let mut live = BTreeSet::new();
+        for view in c.segment_views() {
+            for docid in 0..view.doc_count() {
+                if view.is_live(docid) {
+                    let id = view.segment().id_of(docid).unwrap();
+                    assert!(
+                        live.insert(id.clone()),
+                        "{name}: {id} is live in two segments"
+                    );
+                }
+            }
+        }
         let memtable = c.memtable();
         let mut ids = BTreeSet::new();
         for docid in 0..memtable.doc_count() {
@@ -158,16 +177,7 @@ fn observed(snapshot: &Snapshot) -> State {
         }
         let docs = state.entry(name).or_default();
         for id in ids {
-            let found = match memtable.lookup(&id) {
-                Some(IdState::Live(docid)) => Some(memtable.document(docid).unwrap()),
-                Some(IdState::Deleted) => None,
-                None => c
-                    .segments()
-                    .iter()
-                    .rev()
-                    .find_map(|s| s.document_by_id(&id).unwrap().map(|(_, d)| d)),
-            };
-            if let Some(d) = found {
+            if let Some(d) = c.get(&id).unwrap() {
                 let Some(Value::String(text)) = d.fields().next().map(|(_, v)| v.clone()) else {
                     panic!("{id}: no body");
                 };
