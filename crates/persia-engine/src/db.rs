@@ -59,6 +59,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::Superblock;
 use persia_storage::Storage;
 use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
+use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use objects::ContainerObjects;
@@ -74,6 +75,7 @@ use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::schema::CollectionSchema;
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
+use crate::view::{SearchView, SegmentView};
 use crate::wal::{
     DEFAULT_CHUNK_TARGET, Durability, RecordError, ReplayError, WalMark, WalRecord, WalWriteError,
     WalWriter, replay_container,
@@ -132,7 +134,18 @@ pub enum DatabaseError {
         /// `segment_id` or `doc_count`.
         field: &'static str,
     },
-    /// A committed tombstone sidecar does not decode (SPEC §8.3).
+    /// Reading a committed segment failed while a commit was planned: nothing was written.
+    #[error("collection {collection:?}, segment {id}: {source}")]
+    ReadSegment {
+        /// The collection.
+        collection: String,
+        /// The segment.
+        id: SegmentId,
+        /// What was wrong.
+        source: ReadError,
+    },
+    /// A committed tombstone sidecar does not decode, or a planned one breaks a rule of SPEC §8.3 (a bug: nothing
+    /// was written then).
     #[error("collection {collection:?}, segment {id}: {source}")]
     Sidecar {
         /// The collection.
@@ -178,17 +191,6 @@ pub enum DatabaseError {
     /// Replaying the WAL failed: the open fails.
     #[error(transparent)]
     Replay(#[from] ReplayError),
-    /// The delete names a document that is in a committed segment: deleting it needs tombstones (ROADMAP 6.4.3), and
-    /// a flush would otherwise bring it back. Nothing was logged.
-    #[error(
-        "collection {collection:?}: deleting committed document {id:?} needs tombstones (ROADMAP 6.4.3)"
-    )]
-    NeedsTombstones {
-        /// The collection.
-        collection: String,
-        /// The document id.
-        id: String,
-    },
     /// No committed collection has the name.
     #[error("no collection {name:?}")]
     NoSuchCollection {
@@ -219,7 +221,9 @@ impl DatabaseError {
             Self::Container(e) => e.is_corruption(),
             Self::Storage(e) => e.is_corruption(),
             Self::Manifest(e) => e.is_corruption(),
-            Self::OpenSegment { source, .. } => source.is_corruption(),
+            Self::OpenSegment { source, .. } | Self::ReadSegment { source, .. } => {
+                source.is_corruption()
+            }
             Self::Sidecar { source, .. } => source.is_corruption(),
             Self::Replay(e) => e.is_corruption(),
             Self::Layout(_)
@@ -269,6 +273,13 @@ struct LiveSegment {
     deleted: Option<(u64, Arc<Tombstones>)>,
 }
 
+impl LiveSegment {
+    /// The segment without its deleted documents.
+    fn view(&self) -> SegmentView<'_> {
+        SegmentView::new(&self.segment, self.deleted.as_ref().map(|(_, t)| &**t))
+    }
+}
+
 /// The writer's state of one committed collection.
 #[derive(Debug)]
 struct Collection {
@@ -289,6 +300,8 @@ struct Planned {
     mark: WalMark,
     /// Its segment, unless it has no live document.
     segment: Option<(SegmentId, flush::Flushed)>,
+    /// The next tombstone sidecar of each committed segment it deletes from, by the segment's index (SPEC §8.3).
+    sidecars: Vec<(usize, TombstoneSidecar)>,
     /// The empty memtable that replaces it once the commit is durable.
     memtable: Memtable,
 }
@@ -515,9 +528,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// Adds or replaces the document `doc` of `collection` (SPEC §8.1), with `durability` (SPEC §8.2.1). A memtable
     /// at its size threshold is flushed and committed first.
     ///
-    /// Until tombstones (ROADMAP 6.4.3, ADR-0029), replacing a document that is already in a committed segment leaves
-    /// the older copy in its segment once the new one is flushed: a lookup newest segment first finds the new one, but
-    /// both count as live documents.
+    /// The new version hides the earlier ones at once; the next commit tombstones the committed one (SPEC §8.3).
     ///
     /// # Errors
     /// [`DatabaseError::NoSuchCollection`], [`DatabaseError::Memtable`] or [`DatabaseError::Record`] for an operation
@@ -589,13 +600,12 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(())
     }
 
-    /// Deletes the document with id `id` from `collection` (SPEC §8.1), with `durability`.
-    ///
-    /// Until tombstones (ROADMAP 6.4.3, ADR-0029) only documents not yet in a committed segment can be deleted: those
-    /// still in the memtable, or ids the collection never had.
+    /// Deletes the document with id `id` from `collection` (SPEC §8.1), with `durability`. The delete hides every
+    /// version of the id at once; the next commit tombstones the committed ones (SPEC §8.3). Deleting an id the
+    /// collection does not have is not an error.
     ///
     /// # Errors
-    /// [`DatabaseError::NeedsTombstones`] for a document in a committed segment; otherwise as [`Database::put`].
+    /// As [`Database::put`].
     pub fn delete(
         &mut self,
         collection: &str,
@@ -604,26 +614,6 @@ impl<F: ContainerFile + Sync> Database<F> {
     ) -> Result<(), DatabaseError> {
         self.usable()?;
         self.flush_if_full(collection)?;
-        // Until tombstones (ROADMAP 6.4.3) a flush cannot carry the delete of a committed document, which would come
-        // back: refuse it before anything is logged.
-        if let Some(c) = self.collections.get(collection) {
-            for live in &c.segments {
-                let segment = &live.segment;
-                let found = segment
-                    .docid_of(id)
-                    .map_err(|source| DatabaseError::OpenSegment {
-                        collection: collection.to_owned(),
-                        id: SegmentId::new(segment.segment_id()),
-                        source,
-                    })?;
-                if found.is_some() {
-                    return Err(DatabaseError::NeedsTombstones {
-                        collection: collection.to_owned(),
-                        id: id.to_owned(),
-                    });
-                }
-            }
-        }
         let Self {
             wal, collections, ..
         } = &mut *self;
@@ -692,11 +682,12 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// second time after a crash.
     ///
     /// # Errors
-    /// [`DatabaseError::Segment`] if a segment cannot be built (nothing is written then); any other error poisons
+    /// [`DatabaseError::Segment`] if a segment cannot be built, [`DatabaseError::ReadSegment`] if a committed one
+    /// cannot be read to find the documents to tombstone (nothing is written then); any other error poisons
     /// the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
         self.usable()?;
-        // Build every segment before writing anything, so a failure here leaves the database as it was.
+        // Build every segment and sidecar before writing anything, so a failure here leaves the database as it was.
         let mut planned = Vec::new();
         for (name, c) in &self.collections {
             if c.memtable.is_empty() {
@@ -714,6 +705,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 collection: name.clone(),
                 mark: self.wal.mark(),
                 segment: segment.map(|s| (id, s)),
+                sidecars: plan_sidecars(name, c)?,
                 memtable: Memtable::new(&c.schema, registry)?,
             });
         }
@@ -762,7 +754,8 @@ impl<F: ContainerFile + Sync> Database<F> {
         result
     }
 
-    /// The commit protocol (SPEC §4.5): the segment frames and the WAL records still buffered, synced (step 1); the
+    /// The commit protocol (SPEC §4.5): the segment and sidecar frames and the WAL records still buffered, synced
+    /// (step 1); the
     /// Manifest frame and the superblock slot ([`Container::commit`], steps 2 and 3); then the new state is
     /// published (step 4).
     fn commit_planned(
@@ -797,6 +790,8 @@ impl<F: ContainerFile + Sync> Database<F> {
             // Before `commit_point`, so this commit advances `wal_start` past the flushed records (SPEC §8.2.1).
             self.wal.flushed(&p.collection, p.mark);
         }
+        // The sidecars that delete the older versions, after the new segments (SPEC §8.3).
+        self.append_sidecars(&planned, &mut diff)?;
         let wal_start = self.wal.commit_point()?.max(self.manifest.wal_start());
         self.wal.log_mut().sync()?;
         diff.wal_start = Some(wal_start);
@@ -815,6 +810,20 @@ impl<F: ContainerFile + Sync> Database<F> {
             let Some(c) = self.collections.get_mut(&p.collection) else {
                 continue;
             };
+            for (index, sidecar) in p.sidecars {
+                let live = c.segments.get_mut(index).ok_or(DatabaseError::Internal {
+                    what: "a tombstoned segment is not open",
+                })?;
+                let version = sidecar.version();
+                // `TombstoneSidecar::new` checked every docid against the segment's count.
+                let tombstones = live
+                    .segment
+                    .tombstones(sidecar.into_deleted())
+                    .map_err(|_| DatabaseError::Internal {
+                        what: "a planned sidecar does not fit its segment",
+                    })?;
+                live.deleted = Some((version, Arc::new(tombstones)));
+            }
             if let Some((id, flushed)) = p.segment {
                 let entry = next
                     .collection(&p.collection)
@@ -841,12 +850,114 @@ impl<F: ContainerFile + Sync> Database<F> {
             .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
         Ok(self.manifest.seq())
     }
+
+    /// Appends the tombstone sidecar frames of `planned` and adds each as an updated entry to `diff` (SPEC §8.3).
+    fn append_sidecars(
+        &mut self,
+        planned: &[Planned],
+        diff: &mut ManifestDiff,
+    ) -> Result<(), DatabaseError> {
+        for p in planned {
+            for (_, sidecar) in &p.sidecars {
+                let container = self.wal.log_mut();
+                let frame = container.append(
+                    FrameKind::TombstoneSidecar,
+                    &sidecar.encode(),
+                    Compression::None,
+                )?;
+                let mut entry = *self
+                    .manifest
+                    .collection(&p.collection)
+                    .and_then(|e| e.segment(sidecar.segment_id()))
+                    .ok_or(DatabaseError::Internal {
+                        what: "a tombstoned segment is not in the manifest",
+                    })?;
+                entry.tombstones = Some(crate::manifest::Tombstones {
+                    version: sidecar.version(),
+                    deleted: sidecar.deleted_count(),
+                    location: Location::Frame {
+                        offset: frame.offset,
+                        len: frame.len,
+                    },
+                });
+                let change = diff
+                    .collections
+                    .entry(p.collection.clone())
+                    .or_insert_with(|| CollectionDiff::Change(CollectionChange::default()));
+                if let CollectionDiff::Change(change) = change {
+                    change.updated.push(entry);
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 fn no_such(name: &str) -> DatabaseError {
     DatabaseError::NoSuchCollection {
         name: name.to_owned(),
     }
+}
+
+/// The next tombstone sidecar of each committed segment of `c` that holds a live version of an id `c`'s memtable
+/// has an operation for, by the segment's index (SPEC §8.3, ROADMAP 6.4.3), each checked to keep every deletion of
+/// the current one. Every segment is searched, not only the newest holding the id, so copies left live by earlier
+/// builds are deleted too (ADR-0030).
+fn plan_sidecars(
+    name: &str,
+    c: &Collection,
+) -> Result<Vec<(usize, TombstoneSidecar)>, DatabaseError> {
+    let mut added: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
+    if c.segments.is_empty() {
+        return Ok(Vec::new());
+    }
+    c.memtable.for_each_id(|id| {
+        let id = std::str::from_utf8(id).map_err(|_| DatabaseError::Internal {
+            what: "a memtable id is not UTF-8",
+        })?;
+        for (index, live) in c.segments.iter().enumerate() {
+            let found = live
+                .view()
+                .docid_of(id)
+                .map_err(|source| DatabaseError::ReadSegment {
+                    collection: name.to_owned(),
+                    id: SegmentId::new(live.segment.segment_id()),
+                    source,
+                })?;
+            if let Some(docid) = found {
+                added.entry(index).or_default().insert(docid);
+            }
+        }
+        Ok::<(), DatabaseError>(())
+    })?;
+    let none = RoaringBitmap::new();
+    let mut sidecars = Vec::with_capacity(added.len());
+    for (index, new) in added {
+        let live = c.segments.get(index).ok_or(DatabaseError::Internal {
+            what: "a tombstoned segment is not open",
+        })?;
+        let id = SegmentId::new(live.segment.segment_id());
+        let invalid = |source| DatabaseError::Sidecar {
+            collection: name.to_owned(),
+            id,
+            source,
+        };
+        let (version, current) = live
+            .deleted
+            .as_ref()
+            .map_or((0, &none), |(v, t)| (*v, t.docids()));
+        let next = version
+            .checked_add(1)
+            .ok_or(invalid(SidecarError::Invalid {
+                what: "no version after u64::MAX",
+            }))?;
+        let doc_count = live.segment.doc_count();
+        let sidecar =
+            TombstoneSidecar::new(id, next, doc_count, current | &new).map_err(invalid)?;
+        sidecar.check_follows(version, current).map_err(invalid)?;
+        sidecars.push((index, sidecar));
+    }
+    Ok(sidecars)
 }
 
 /// A random segment id that no segment of `manifest` or of `planned` has (SPEC §8.7.1).

@@ -168,6 +168,11 @@ impl TombstoneSidecar {
         &self.deleted
     }
 
+    /// The deleted docids, by value.
+    pub fn into_deleted(self) -> RoaringBitmap {
+        self.deleted
+    }
+
     /// How many documents are deleted: the manifest's `deleted` count (SPEC §8.7).
     pub fn deleted_count(&self) -> u32 {
         // At most `doc_count` (checked on construction), so it fits.

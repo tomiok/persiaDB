@@ -1,5 +1,6 @@
 //! The write path of a database (ROADMAP 6.3): `put` of 2 000 documents with `Buffered` durability through the stage,
-//! log and publish steps, and the `commit` that flushes them into one segment and publishes it. The container is a
+//! log and publish steps, the `commit` that flushes them into one segment and publishes it, and `commit_upserts`, the
+//! same commit when every document replaces one in older segments (ROADMAP 6.4.3). The container is a
 //! simulated file, so these measure the engine's work, not the disk's sync latency. Deterministic input, so runs
 //! compare. Run: `cargo bench -p persia-engine --bench database`.
 
@@ -76,6 +77,26 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut db = database();
+                db.put_batch("bench", &docs, Durability::Buffered).unwrap();
+                db
+            },
+            |mut db| {
+                db.commit().unwrap();
+                db
+            },
+            BatchSize::LargeInput,
+        );
+    });
+    // Every document replaces a committed one: the commit looks each id up in 4 segments and writes a sidecar
+    // (ROADMAP 6.4.3).
+    group.bench_function("commit_upserts", |b| {
+        b.iter_batched(
+            || {
+                let mut db = database();
+                for _ in 0..4 {
+                    db.put_batch("bench", &docs, Durability::Buffered).unwrap();
+                    db.commit().unwrap();
+                }
                 db.put_batch("bench", &docs, Durability::Buffered).unwrap();
                 db
             },

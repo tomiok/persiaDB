@@ -1791,7 +1791,8 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
 - Whole databases written by the engine's commit path, which exercise every encoding inside a container together,
   live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests
   and written on request when missing (`PERSIA_WRITE_DATABASE_FIXTURES=1`; ROADMAP 6.3.8). `blob-ref.persia` holds a
-  segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit.
+  segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit; `tombstones.persia` (ROADMAP 6.4.3)
+  three segments, two versions of one tombstone sidecar, and a delete in the WAL.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

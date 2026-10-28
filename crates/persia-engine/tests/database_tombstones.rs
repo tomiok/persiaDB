@@ -5,6 +5,10 @@
 //!    then the segments newest first, deleted documents left out (6.4.1).
 //! 2. Opening a database applies each segment's committed tombstone sidecar, and rejects as corruption a sidecar that
 //!    does not decode or disagrees with its manifest entry: `segment_id`, version, `doc_count`, `deleted` (6.4.2).
+//! 3. A commit tombstones every live copy, in every committed segment, of each id its memtables touched (put or
+//!    delete, replayed or not), in the next sidecar version of each segment (a superset): afterwards each id has at
+//!    most one live copy. Writes are visible before the commit (read-your-writes); older snapshots keep their state;
+//!    a reopen after losing every unsynced write shows the same documents (6.4.3).
 
 #![allow(
     clippy::unwrap_used,
@@ -15,20 +19,24 @@
 
 use std::sync::Arc;
 
+use persia_analysis::AnalyzerRegistry;
+
 use persia_engine::db::{
     Database, DatabaseError, DatabaseOptions, Located, ManualClock, SegmentIds,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
-    CollectionChange, CollectionDiff, Location, Manifest, ManifestDiff, SegmentId, Tombstones,
+    CollectionChange, CollectionDiff, Location, Manifest, ManifestDiff, SegmentEntry, SegmentId,
+    Tombstones,
 };
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
+use persia_engine::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::tombstone::TombstoneSidecar;
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
-use persia_storage::container::sim::SimFile;
+use persia_storage::container::sim::{CrashLoss, SimFile};
 use persia_storage::container::{Commit, Container, Mode};
 use roaring::RoaringBitmap;
 
@@ -240,4 +248,196 @@ fn open_rejects_sidecars_that_disagree_with_the_manifest() {
     let e = Database::open_on(file, options()).unwrap_err();
     assert!(e.is_corruption(), "{e}");
     assert!(matches!(e, DatabaseError::Sidecar { .. }), "{e}");
+}
+
+/// Ids of the live documents of collection `a`, from every segment view and the memtable, with how many live copies
+/// each has (a memtable version or delete hides the segments'): a commit leaves at most one (SPEC §8.3).
+fn live_copies(db: &Database<SimFile>) -> std::collections::BTreeMap<String, usize> {
+    let snapshot = db.snapshot();
+    let a = snapshot.collection("a").unwrap();
+    let mut copies = std::collections::BTreeMap::new();
+    let memtable = a.memtable();
+    for docid in 0..memtable.doc_count() {
+        if memtable.is_live(docid) {
+            *copies
+                .entry(memtable.document(docid).unwrap().id().to_owned())
+                .or_default() += 1;
+        }
+    }
+    for view in a.segment_views() {
+        for docid in 0..view.doc_count() {
+            let id = view.segment().id_of(docid).unwrap();
+            // The memtable's version or delete of an id hides the segments'.
+            if view.is_live(docid) && memtable.lookup(&id).is_none() {
+                *copies.entry(id).or_default() += 1;
+            }
+        }
+    }
+    copies
+}
+
+fn ids(db: &Database<SimFile>) -> Vec<String> {
+    let copies = live_copies(db);
+    assert!(copies.values().all(|&n| n == 1), "{copies:?}");
+    copies.into_keys().collect()
+}
+
+#[test]
+fn deletes_and_upserts_of_committed_documents_are_tombstoned_by_the_commit() {
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [5; 16], options()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    for id in ["p", "q", "r"] {
+        db.put("a", &doc(id, "one"), Durability::Fsync).unwrap();
+    }
+    db.commit().unwrap();
+    let before = db.snapshot();
+
+    // Read-your-writes: visible at once, before any commit.
+    db.delete("a", "q", Durability::Fsync).unwrap();
+    db.put("a", &doc("r", "two"), Durability::Fsync).unwrap();
+    db.delete("a", "never", Durability::Fsync).unwrap();
+    let a = db.snapshot();
+    let a = a.collection("a").unwrap();
+    assert_eq!(a.get("q").unwrap(), None);
+    assert_eq!(text(&a.get("r").unwrap().unwrap()), "two");
+
+    db.commit().unwrap();
+    assert_eq!(ids(&db), ["p", "r"]);
+    let segments = db.manifest().collection("a").unwrap().segments().to_vec();
+    assert_eq!(segments.len(), 2);
+    let t = segments[0].tombstones.unwrap();
+    assert_eq!((t.version, t.deleted), (1, 2));
+    assert_eq!(segments[1].tombstones, None);
+    let a = db.snapshot();
+    let a = a.collection("a").unwrap();
+    assert_eq!(text(&a.get("r").unwrap().unwrap()), "two");
+    // A snapshot taken before keeps its segments without the sidecar; its memtable, flushed now, shows the writes
+    // (SPEC §8.4), so it too shows each id once.
+    let old = before.collection("a").unwrap();
+    assert!(old.tombstones()[0].is_none());
+    assert_eq!(text(&old.get("r").unwrap().unwrap()), "two");
+    assert_eq!(old.get("q").unwrap(), None);
+
+    // The next version is a superset; deleting every document leaves the segment listed, fully deleted.
+    db.delete("a", "p", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let t = db.manifest().collection("a").unwrap().segments()[0]
+        .tombstones
+        .unwrap();
+    assert_eq!((t.version, t.deleted), (2, 3));
+    assert_eq!(ids(&db), ["r"]);
+
+    // Losing every unsynced write keeps every commit.
+    drop(db);
+    let db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
+    assert_eq!(ids(&db), ["r"]);
+    let a = db.snapshot();
+    assert_eq!(
+        text(&a.collection("a").unwrap().get("r").unwrap().unwrap()),
+        "two"
+    );
+}
+
+#[test]
+fn a_replayed_delete_is_tombstoned_by_the_next_commit() {
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [6; 16], options()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.put("a", &doc("p", "one"), Durability::Fsync).unwrap();
+    db.put("a", &doc("q", "one"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.delete("a", "p", Durability::Fsync).unwrap();
+    db.put("a", &doc("q", "two"), Durability::Fsync).unwrap();
+    drop(db);
+
+    let mut db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
+    assert_eq!(ids(&db), ["q"]);
+    db.commit().unwrap();
+    assert_eq!(ids(&db), ["q"]);
+    let t = db.manifest().collection("a").unwrap().segments()[0]
+        .tombstones
+        .unwrap();
+    assert_eq!((t.version, t.deleted), (1, 2));
+    drop(db);
+    let db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
+    assert_eq!(ids(&db), ["q"]);
+}
+
+/// Builds a segment of documents `ids` with id `segment_id`.
+fn segment_bytes(segment_id: u128, ids: &[&str]) -> Vec<u8> {
+    let schema = schema("a");
+    let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    for id in ids {
+        b.add(&doc(id, "old")).unwrap();
+    }
+    let meta = SegmentMeta {
+        segment_id,
+        created_at: 0,
+        merge_generation: 0,
+    };
+    SegmentWriter::new(&b, meta).finish().unwrap()
+}
+
+/// Builds before ROADMAP 6.4.3 could leave an id live in two segments (ADR-0029 Consequences): a commit that touches
+/// it deletes every copy, not only the newest (ADR-0030).
+#[test]
+fn a_commit_deletes_every_older_copy_of_an_id() {
+    let file = SimFile::new();
+    {
+        let mut c = Container::create_on(file.clone(), [7; 16]).unwrap();
+        let mut entries = Vec::new();
+        for (id, docs) in [(1, &["x", "y"][..]), (2, &["x"][..])] {
+            let bytes = segment_bytes(id, docs);
+            let f = c
+                .append(FrameKind::Segment, &bytes, Compression::None)
+                .unwrap();
+            entries.push(SegmentEntry {
+                id: SegmentId::new(id),
+                doc_count: u32::try_from(docs.len()).unwrap(),
+                size: bytes.len() as u64,
+                location: Location::Frame {
+                    offset: f.offset,
+                    len: f.len,
+                },
+                tombstones: None,
+            });
+        }
+        c.sync().unwrap();
+        let mut diff = ManifestDiff {
+            wal_start: Some(c.end()),
+            ..ManifestDiff::default()
+        };
+        diff.collections.insert(
+            "a".into(),
+            CollectionDiff::Create {
+                schema: schema("a"),
+                segments: entries,
+            },
+        );
+        let m = Manifest::empty().apply(&diff).unwrap();
+        let wal_start = c.end();
+        let frame = c
+            .append(FrameKind::Manifest, &m.encode().unwrap(), Compression::None)
+            .unwrap();
+        c.commit(Commit {
+            manifest: frame,
+            wal_start,
+            fence_token: 0,
+        })
+        .unwrap();
+    }
+    let mut db = Database::open_on(file, options()).unwrap();
+    assert_eq!(live_copies(&db)["x"], 2);
+    db.put("a", &doc("x", "new"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    assert_eq!(ids(&db), ["x", "y"]);
+    let segments = db.manifest().collection("a").unwrap().segments().to_vec();
+    assert_eq!(segments[0].tombstones.map(|t| t.deleted), Some(1));
+    assert_eq!(segments[1].tombstones.map(|t| t.deleted), Some(1));
+    let a = db.snapshot();
+    assert_eq!(
+        text(&a.collection("a").unwrap().get("x").unwrap().unwrap()),
+        "new"
+    );
 }

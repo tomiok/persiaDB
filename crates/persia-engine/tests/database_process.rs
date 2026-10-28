@@ -44,7 +44,6 @@ use persia_engine::db::{
     Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::memtable::IdState;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
@@ -149,20 +148,11 @@ fn options(seed: u64) -> DatabaseOptions {
     }
 }
 
-/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', and newer segments
-/// hide older ones (SPEC §8.3).
+/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', then the newest
+/// segment with a live copy (SPEC §8.3).
 fn get(snapshot: &Snapshot, id: &str) -> Option<Document> {
     let c = snapshot.collection(COLLECTION)?;
-    let memtable = c.memtable();
-    match memtable.lookup(id) {
-        Some(IdState::Live(docid)) => return Some(memtable.document(docid).unwrap()),
-        Some(IdState::Deleted) => return None,
-        None => {}
-    }
-    c.segments()
-        .iter()
-        .rev()
-        .find_map(|s| s.document_by_id(id).unwrap().map(|(_, d)| d))
+    c.get(id).unwrap()
 }
 
 /// Every live document id `snapshot` shows.

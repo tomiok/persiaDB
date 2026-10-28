@@ -32,7 +32,7 @@ use persia_engine::db::{
     CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::memtable::{FlushPolicy, IdState};
+use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
@@ -90,8 +90,8 @@ fn apply(state: &mut State, op: &Op) {
     }
 }
 
-/// Puts and upserts to two collections, a delete of an id written since the last commit (deletes of flushed ids
-/// need tombstones, ROADMAP 6.4.3), and commits between them.
+/// Puts and upserts to two collections, deletes of an id written since the last commit and of committed ids (whose
+/// commits write tombstone sidecars, ROADMAP 6.4.3), and commits between them.
 fn workload() -> Vec<Op> {
     let mut ops = Vec::new();
     for round in 0..3 {
@@ -104,6 +104,11 @@ fn workload() -> Vec<Op> {
         }
         ops.push(Op::Put("a", format!("tmp{round}"), "short lived".into()));
         ops.push(Op::Delete("a", format!("tmp{round}")));
+        match round {
+            1 => ops.push(Op::Delete("a", "seed".into())),
+            2 => ops.push(Op::Delete("b", "b0-0".into())),
+            _ => {}
+        }
         ops.push(Op::Commit);
     }
     ops.push(Op::Put("b", "tail".into(), "after the last commit".into()));
@@ -158,16 +163,7 @@ fn observed(snapshot: &Snapshot) -> State {
         }
         let docs = state.entry(name).or_default();
         for id in ids {
-            let found = match memtable.lookup(&id) {
-                Some(IdState::Live(docid)) => Some(memtable.document(docid).unwrap()),
-                Some(IdState::Deleted) => None,
-                None => c
-                    .segments()
-                    .iter()
-                    .rev()
-                    .find_map(|s| s.document_by_id(&id).unwrap().map(|(_, d)| d)),
-            };
-            if let Some(d) = found {
+            if let Some(d) = c.get(&id).unwrap() {
                 let Some(Value::String(text)) = d.fields().next().map(|(_, v)| v.clone()) else {
                     panic!("{id}: no body");
                 };

@@ -577,13 +577,22 @@ fn object_view(case: ObjectsCase) -> Result<(), TestCaseError> {
             .unwrap();
     }
 
-    // What is listed: the committed manifest, every live segment, the WAL chunks from `wal_start` to `log_end`.
+    // What is listed: the committed manifest, every live segment and its current tombstone sidecar (upserts of
+    // committed ids write them), the WAL chunks from `wal_start` to `log_end`.
     let manifest = db.manifest();
     let mut expected: BTreeSet<String> = BTreeSet::new();
     expected.insert(format!("manifests/{:020}.mf", manifest.seq()));
     for c in manifest.collections() {
         for s in c.segments() {
             expected.insert(format!("segments/{}/{}.seg", c.name(), s.id));
+            if let Some(t) = s.tombstones {
+                expected.insert(format!(
+                    "tombstones/{}/{}.{}.tomb",
+                    c.name(),
+                    s.id,
+                    t.version
+                ));
+            }
         }
     }
     let sb = db.container().superblock();
