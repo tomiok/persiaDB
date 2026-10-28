@@ -1,0 +1,22 @@
+# Persia DB waitlist relay. Deploy steps: README.md in this directory.
+# Requires Wrangler 4.36 or newer (the rate-limit binding is stable there).
+name = "persia-waitlist"
+main = "src/index.mjs"
+compatibility_date = "2026-10-01"
+
+[vars]
+GITHUB_REPOSITORY = "tomiok/persiaDB"
+# Browser Origin values, no path. GitHub Pages sends the site origin.
+# localhost is for `astro dev` against `wrangler dev`.
+ALLOWED_ORIGINS = "https://tomiok.github.io,http://localhost:4321,http://127.0.0.1:4321"
+
+# 5 calls per 60 seconds per key, counted separately in each Cloudflare location.
+# period must be 10 or 60. namespace_id is an account-local integer; change it
+# if 1001 is already used by another worker on the account.
+[[ratelimits]]
+name = "WAITLIST_RATE_LIMIT"
+namespace_id = "1001"
+
+  [ratelimits.simple]
+  limit = 5
+  period = 60

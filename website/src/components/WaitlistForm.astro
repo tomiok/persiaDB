@@ -1,0 +1,92 @@
+---
+import rawKey from '../waitlist/public.pem?raw';
+import { resolveRelayUrl } from '../waitlist/config.mjs';
+import { importPublicKey, looksLikeSpkiPem } from '../waitlist/protocol/crypto.mjs';
+
+const relay = resolveRelayUrl(import.meta.env.PUBLIC_WAITLIST_RELAY_URL);
+let keyReady = false;
+if (looksLikeSpkiPem(rawKey)) {
+    try {
+        await importPublicKey(rawKey);
+        keyReady = true;
+    } catch {
+        keyReady = false;
+    }
+}
+const open = keyReady && relay.length > 0;
+const config = encodeURIComponent(
+    JSON.stringify({
+        relay: open ? relay : '',
+        publicKey: open ? rawKey : '',
+        open,
+    }),
+);
+---
+
+<form
+    class="waitlist"
+    data-waitlist
+    data-config={config}
+    method="post"
+    action=""
+    novalidate
+    autocomplete="off"
+>
+    <p class="waitlist-note">
+        {
+            open
+                ? 'Encrypted in this browser with a public key. The private key is not on this site.'
+                : 'The waitlist is not open yet. The public key or the relay URL is not configured.'
+        }
+    </p>
+    <label>
+        Email
+        <input
+            name="email"
+            type="email"
+            inputmode="email"
+            autocomplete="email"
+            maxlength="254"
+            required
+            spellcheck="false"
+            disabled={!open}
+        />
+    </label>
+    <label>
+        <span>Name <span class="waitlist-optional">(optional)</span></span>
+        <input name="name" type="text" autocomplete="name" maxlength="120" disabled={!open} />
+    </label>
+    <label>
+        <span>Company <span class="waitlist-optional">(optional)</span></span>
+        <input
+            name="company"
+            type="text"
+            autocomplete="organization"
+            maxlength="120"
+            disabled={!open}
+        />
+    </label>
+    <label>
+        <span>Use case <span class="waitlist-optional">(optional)</span></span>
+        <textarea name="use_case" maxlength="500" rows="4" disabled={!open}></textarea>
+    </label>
+    <!-- Off-screen and empty. A bot that fills every input is dropped. -->
+    <div class="waitlist-hp" aria-hidden="true">
+        <label>
+            Leave this empty
+            <input name="hp" type="text" tabindex="-1" autocomplete="off" value="" />
+        </label>
+    </div>
+    <button class="waitlist-submit" type="submit" disabled={!open}>Join the waitlist</button>
+    <p class="waitlist-status" role="status" aria-live="polite"></p>
+    <noscript>
+        <p class="waitlist-note">
+            JavaScript is required. Encryption runs in the browser, so this form does not post the
+            address anywhere without it.
+        </p>
+    </noscript>
+    <script>
+        import { bindWaitlistForms } from '../waitlist/form-client.mjs';
+        bindWaitlistForms();
+    </script>
+</form>

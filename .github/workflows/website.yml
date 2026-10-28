@@ -7,14 +7,18 @@ on:
   pull_request:
     paths:
       - 'website/**'
+      - 'scripts/waitlist/**'
       - 'PROGRESS.md'
       - '.github/workflows/website.yml'
+      - '.github/workflows/waitlist.yml'
   push:
     branches: [main]
     paths:
       - 'website/**'
+      - 'scripts/waitlist/**'
       - 'PROGRESS.md'
       - '.github/workflows/website.yml'
+      - '.github/workflows/waitlist.yml'
   workflow_dispatch:
 
 permissions:
@@ -45,11 +49,21 @@ jobs:
           node-version-file: website/.nvmrc
           cache: npm
           cache-dependency-path: website/package-lock.json
+      - name: Waitlist tests
+        run: |
+          node --test \
+            website/src/waitlist/*.test.mjs \
+            website/src/waitlist/protocol/*.test.mjs \
+            website/relay/waitlist/src/*.test.mjs \
+            scripts/waitlist/*.test.mjs
       - name: Install
         working-directory: website
         run: npm ci
       - name: Build
         working-directory: website
+        env:
+          # Public URL of the Cloudflare Worker. Empty until the owner sets the variable.
+          PUBLIC_WAITLIST_RELAY_URL: ${{ vars.WAITLIST_RELAY_URL }}
         run: npm run build
       - name: Upload GitHub Pages artifact
         if: github.event_name != 'pull_request'

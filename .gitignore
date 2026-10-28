@@ -30,3 +30,11 @@ lcov.info
 /website/node_modules/
 /website/dist/
 /website/.astro/
+
+# Waitlist private keys. website/src/waitlist/public.pem is the public key and is committed.
+waitlist-private.pem
+**/*waitlist-private*
+
+# Cloudflare worker local secrets and cache.
+/website/relay/waitlist/.dev.vars
+/website/relay/waitlist/.wrangler/

@@ -28,7 +28,7 @@ const llmsSmallUrl = `${origin}${base}/llms-small.txt`;
 
 // Sidebar order. A page that exists on disk but is missing here is still
 // emitted, so a new doc cannot disappear from the index.
-const docsOrder = ['index', 'features', 'architecture', 'roadmap', 'about'];
+const docsOrder = ['index', 'features', 'architecture', 'roadmap', 'about', 'waitlist'];
 const guideOrder = [
 	'guide/overview',
 	'guide/embedded-search',
