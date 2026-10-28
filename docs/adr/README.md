@@ -54,3 +54,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0029](./0029-local-flush-commit-and-snapshots.md) | Local flush, commit and snapshot publication | proposed |
 | [0030](./0030-tombstone-sidecars.md) | Tombstone sidecars, and upserts and deletes through the commit | proposed |
 | [0031](./0031-tiered-merge-policy-and-merger.md) | Tiered merge policy, and a merger that fills a segment builder | proposed |
+| [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |

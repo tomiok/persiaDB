@@ -41,7 +41,9 @@
 
 mod clock;
 mod flush;
+mod merging;
 mod objects;
+mod obsolete;
 mod policy;
 mod snapshot;
 
@@ -62,7 +64,10 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
+pub use merging::MergeOutcome;
 pub use objects::ContainerObjects;
+use obsolete::Pin;
+pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
 
@@ -72,6 +77,7 @@ use crate::manifest::{
     Manifest, ManifestDiff, ManifestEncodeError, ManifestError, SegmentEntry, SegmentId,
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
+use crate::merge::MergeOptions;
 use crate::schema::CollectionSchema;
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
@@ -210,6 +216,9 @@ pub enum DatabaseError {
         /// What did not hold.
         what: &'static str,
     },
+    /// A merge worker thread could not be started; nothing was merged.
+    #[error("starting a merge thread: {0}")]
+    MergeThread(#[source] std::io::Error),
     /// An earlier write, sync or commit failed, so what reached the disk is unknown: reopen the database.
     #[error("an earlier write failed; reopen the database to recover")]
     Poisoned,
@@ -251,6 +260,8 @@ pub struct DatabaseOptions {
     pub write_options: WriteOptions,
     /// The size at which the WAL writer closes a chunk (SPEC §8.2.1).
     pub wal_chunk_target: usize,
+    /// How segments are merged in the background (SPEC §8.5).
+    pub merge: MergeOptions,
 }
 
 impl Default for DatabaseOptions {
@@ -262,6 +273,7 @@ impl Default for DatabaseOptions {
             segment_ids: SegmentIds::random(),
             write_options: WriteOptions::default(),
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
+            merge: MergeOptions::default(),
         }
     }
 }
@@ -324,6 +336,8 @@ pub struct Database<F = File> {
     collections: BTreeMap<String, Collection>,
     published: Arc<ArcSwap<Snapshot>>,
     options: DatabaseOptions,
+    /// Merges in flight, segments they failed on, and objects merges and commits made obsolete.
+    merges: merging::Merges,
     poisoned: bool,
 }
 
@@ -461,6 +475,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             manifest,
             collections,
             published: Arc::new(ArcSwap::from_pointee(snapshot)),
+            merges: merging::Merges::new(options.merge.threads),
             options,
             poisoned: false,
         }
@@ -705,7 +720,14 @@ impl<F: ContainerFile + Sync> Database<F> {
             if c.memtable.is_empty() {
                 continue;
             }
-            let id = new_segment_id(&mut self.options.segment_ids, &self.manifest, &planned);
+            let merges = &self.merges;
+            let taken = |id| {
+                merges.reserves(id)
+                    || planned
+                        .iter()
+                        .any(|p: &Planned| p.segment.as_ref().is_some_and(|(s, _)| *s == id))
+            };
+            let id = new_segment_id(&mut self.options.segment_ids, &self.manifest, taken);
             let meta = SegmentMeta {
                 segment_id: id.get(),
                 created_at: self.options.clock.unix_micros(),
@@ -798,20 +820,10 @@ impl<F: ContainerFile + Sync> Database<F> {
         }
         // The sidecars that delete the older versions, after the new segments (SPEC §8.3).
         self.append_sidecars(&planned, &mut diff)?;
-        let wal_start = self.wal.commit_point()?.max(self.manifest.wal_start());
-        self.wal.log_mut().sync()?;
-        diff.wal_start = Some(wal_start);
-        let next = self.manifest.apply(&diff)?;
-        let encoded = next.encode()?;
-        let container = self.wal.log_mut();
-        let frame = container.append(FrameKind::Manifest, &encoded, Compression::None)?;
-        container.commit(Commit {
-            manifest: frame,
-            wal_start,
-            fence_token: next.fence_token(),
-        })?;
+        let next = self.commit_diff(diff)?;
 
         // Durable: step 4. The new segments are opened from the bytes just written: an open checks their frames.
+        let seq = next.seq();
         for p in planned {
             let Some(c) = self.collections.get_mut(&p.collection) else {
                 continue;
@@ -821,6 +833,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                     what: "a tombstoned segment is not open",
                 })?;
                 let version = sidecar.version();
+                let segment = sidecar.segment_id();
                 // `TombstoneSidecar::new` checked every docid against the segment's count.
                 let tombstones = live
                     .segment
@@ -828,7 +841,24 @@ impl<F: ContainerFile + Sync> Database<F> {
                     .map_err(|_| DatabaseError::Internal {
                         what: "a planned sidecar does not fit its segment",
                     })?;
-                live.deleted = Some((version, Arc::new(tombstones)));
+                let superseded = live.deleted.replace((version, Arc::new(tombstones)));
+                if let Some((_, old)) = superseded {
+                    // Older snapshots may still read it (SPEC §8.3).
+                    let entry = self
+                        .manifest
+                        .collection(&p.collection)
+                        .and_then(|e| e.segment(segment));
+                    if let Some(t) = entry.and_then(|e| e.tombstones) {
+                        let kind = ObsoleteKind::Sidecar {
+                            segment,
+                            version: t.version,
+                        };
+                        let pin = Pin::sidecar(&old);
+                        self.merges
+                            .obsolete
+                            .retire(&p.collection, kind, t.location, seq, pin);
+                    }
+                }
             }
             if let Some((id, flushed)) = p.segment {
                 let entry = next
@@ -855,6 +885,25 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.published
             .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
         Ok(self.manifest.seq())
+    }
+
+    /// Steps 1 (the WAL's part) to 3 of the commit protocol (SPEC §4.5) for `diff`, whose frames are appended: writes
+    /// and syncs the WAL records still buffered, takes `wal_start`, syncs, appends the Manifest frame and writes the
+    /// superblock slot. Returns the committed manifest; the caller publishes it.
+    fn commit_diff(&mut self, mut diff: ManifestDiff) -> Result<Manifest, DatabaseError> {
+        let wal_start = self.wal.commit_point()?.max(self.manifest.wal_start());
+        self.wal.log_mut().sync()?;
+        diff.wal_start = Some(wal_start);
+        let next = self.manifest.apply(&diff)?;
+        let encoded = next.encode()?;
+        let container = self.wal.log_mut();
+        let frame = container.append(FrameKind::Manifest, &encoded, Compression::None)?;
+        container.commit(Commit {
+            manifest: frame,
+            wal_start,
+            fence_token: next.fence_token(),
+        })?;
+        Ok(next)
     }
 
     /// Appends the tombstone sidecar frames of `planned` and adds each as an updated entry to `diff` (SPEC §8.3).
@@ -978,15 +1027,17 @@ fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, Data
     Ok(sidecars)
 }
 
-/// A random segment id that no segment of `manifest` or of `planned` has (SPEC §8.7.1).
-fn new_segment_id(ids: &mut SegmentIds, manifest: &Manifest, planned: &[Planned]) -> SegmentId {
+/// A random segment id that no segment of `manifest` has, nor any that `taken` reports: planned in the same
+/// commit, or the output of a merge in flight (SPEC §8.7.1).
+fn new_segment_id(
+    ids: &mut SegmentIds,
+    manifest: &Manifest,
+    taken: impl Fn(SegmentId) -> bool,
+) -> SegmentId {
     loop {
         let id = SegmentId::new(ids.next_id());
         let in_manifest = manifest.collections().any(|c| c.segment(id).is_some());
-        let in_planned = planned
-            .iter()
-            .any(|p| p.segment.as_ref().is_some_and(|(s, _)| *s == id));
-        if !in_manifest && !in_planned {
+        if !in_manifest && !taken(id) {
             return id;
         }
     }

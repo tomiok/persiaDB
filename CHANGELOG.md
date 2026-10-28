@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: background merges (ROADMAP 6.5.3–6.5.5, SPEC §8.5, ADR-0032). `Database::merge_step`,
+  `finish_merges`, `cancel_merges` and `merges_running` run the merge policy over every collection on a pool of
+  `MergeOptions::threads` workers (default 1; 0 merges inline), which verify each merged segment before the writer
+  commits it as a merge commit; a merge whose inputs lost documents meanwhile is discarded and replanned, a failed one
+  is not retried until reopen. `MergeOutcome`. `DatabaseOptions::merge`; `DatabaseError::MergeThread`;
+  `MergeError::Verify`, `Cancelled`, `Internal`; `merge::merge_until` (cancellable merge). Obsolete segments and
+  sidecars are tracked until no reader holds them: `Database::obsolete`, `take_unreferenced`, `ObsoleteObject`,
+  `ObsoleteKind`.
 - `persia-engine`: tiered merge policy (ROADMAP 6.5.1, SPEC §8.5, ADR-0031). `merge::MergePolicy::plan` turns a
   collection's manifest entries into disjoint `MergePlan`s: drops of fully deleted segments, tier merges of the
   smallest segments of a size tier, and rewrites of segments with more than 20% deleted. Knobs `merge.*` (SPEC §14).

@@ -1377,7 +1377,27 @@ A merged segment lists its inputs' documents in plan order (§5.5) and is added 
 Order does not matter for lookups: a commit leaves at most one live copy of each id (§8.3), and a merged segment
 holds only live documents.
 Merges run in background threads, are crash-safe (new segment + new manifest commit), and never block reads or writes.
-Obsolete segments are deleted only after no snapshot references them (reference counting / epoch).
+**Scheduling** (ADR-0032, ROADMAP 6.5.3). The writer plans, a pool of `merge_threads` worker threads (§14, default 1)
+merges, and the writer commits. Each plan becomes a job holding its inputs as the writer's open segments and their
+deletions at the plan's sidecar versions; a worker merges them (§5.5), writes the merged segment, opens it and runs
+`Segment::verify` on it, all in memory. At most one job per thread is in flight, finished ones included, so merged
+bytes waiting for their commit are bounded too (backpressure); plans that find no room are made again later. With
+`merge_threads` 0 a merge runs on the writer's thread, one per step. The embedding drives the writer: a merge step
+commits the jobs that finished, then plans and submits; finishing waits for every merge until the policy plans none;
+cancelling stops every job in flight at its next field or stage and commits nothing; closing the database cancels
+and joins its workers. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
+inputs at the sidecar versions the plan read and adds the merged segment (none for a drop plan), following the commit
+protocol (§4.5); `wal_start` stays where the WAL puts it. It is made only if every input is still live at that
+version and the schema is unchanged, which the writer checks before writing anything: otherwise (a commit deleted
+from an input meanwhile) the result is discarded and the segments are planned again. A merge that fails, the
+merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
+reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
+**Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, and a sidecar a later version
+supersedes (§8.3), are obsolete from that commit on, but older snapshots, and merges in flight, may still read them.
+The writer tracks each with a weak reference to what readers hold of it (the open segment, the decoded deletions):
+once no snapshot, job or reader holds it, it is unreferenced and may be deleted. Locally it is a frame, which a
+container compaction (§4.6) reclaims; a compaction must keep the obsolete frames still referenced. Remotely (M12)
+it is an object to delete. Older manifests are not tracked: no snapshot reads its manifest's frame again.
 
 ### 8.6 Recovery
 On open: pick superblock → load manifest → replay WAL frames from `wal_start` into a memtable (validating CRCs, §8.2.1)
@@ -1809,7 +1829,8 @@ Embedded: builder options (`OpenOptions`), sensible defaults, no files.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
 Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `search_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`.
-Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge.*` as in §8.5.
+Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge_threads` 1
+(0 merges on the writer's thread); `merge.*` as in §8.5.
 
 ---
 
