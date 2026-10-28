@@ -73,6 +73,7 @@ use crate::manifest::{
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::schema::CollectionSchema;
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
+use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::wal::{
     DEFAULT_CHUNK_TARGET, Durability, RecordError, ReplayError, WalMark, WalRecord, WalWriteError,
     WalWriter, replay_container,
@@ -129,6 +130,28 @@ pub enum DatabaseError {
         /// The segment.
         id: SegmentId,
         /// `segment_id` or `doc_count`.
+        field: &'static str,
+    },
+    /// A committed tombstone sidecar does not decode (SPEC §8.3).
+    #[error("collection {collection:?}, segment {id}: {source}")]
+    Sidecar {
+        /// The collection.
+        collection: String,
+        /// The segment.
+        id: SegmentId,
+        /// What was wrong.
+        source: SidecarError,
+    },
+    /// A committed tombstone sidecar disagrees with its manifest entry (corruption).
+    #[error(
+        "collection {collection:?}, segment {id}: the tombstone sidecar's {field} disagrees with the manifest"
+    )]
+    SidecarMismatch {
+        /// The collection.
+        collection: String,
+        /// The segment.
+        id: SegmentId,
+        /// `segment_id`, `version`, `doc_count` or `deleted`.
         field: &'static str,
     },
     /// Building a segment failed: nothing was written.
@@ -197,8 +220,12 @@ impl DatabaseError {
             Self::Storage(e) => e.is_corruption(),
             Self::Manifest(e) => e.is_corruption(),
             Self::OpenSegment { source, .. } => source.is_corruption(),
+            Self::Sidecar { source, .. } => source.is_corruption(),
             Self::Replay(e) => e.is_corruption(),
-            Self::Layout(_) | Self::SlotMismatch { .. } | Self::SegmentMismatch { .. } => true,
+            Self::Layout(_)
+            | Self::SlotMismatch { .. }
+            | Self::SegmentMismatch { .. }
+            | Self::SidecarMismatch { .. } => true,
             _ => false,
         }
     }
@@ -369,10 +396,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 let schema = Arc::new(entry.schema().clone());
                 let mut segments = Vec::with_capacity(entry.segments().len());
                 for segment in entry.segments() {
-                    segments.push(LiveSegment {
-                        segment: open_segment(&objects, name, segment, &schema)?,
-                        deleted: None,
-                    });
+                    segments.push(open_segment(&objects, name, segment, &schema)?);
                 }
                 memtables.insert(name.to_owned(), Memtable::new(&schema, &options.registry)?);
                 collections.insert(name.to_owned(), (schema, segments));
@@ -859,25 +883,71 @@ fn check_slot(manifest: &Manifest, sb: &Superblock) -> Result<(), DatabaseError>
     Ok(())
 }
 
-/// Opens a committed segment through the container's objects, which check its frame (ROADMAP 6.3.6, 6.3.7), and
-/// checks its footer against the manifest entry.
+/// Opens a committed segment and its tombstone sidecar through the container's objects, which check their frames
+/// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry.
 fn open_segment<F: ContainerFile + Sync>(
     objects: &ContainerObjects<'_, F>,
     collection: &str,
     entry: &SegmentEntry,
     schema: &CollectionSchema,
-) -> Result<Arc<Segment>, DatabaseError> {
+) -> Result<LiveSegment, DatabaseError> {
     let key = persia_storage::Key::new(objects::segment_key(collection, entry))
         .map_err(persia_storage::Error::from)?;
     let source = objects.get_range(&key, 0..entry.size)?;
     let segment = open_source(source, collection, entry, schema)?;
-    if let Some(t) = entry.tombstones {
-        // Read only to check its frame (ROADMAP 6.3.7); sidecars are applied by ROADMAP 6.4.
-        let key = format!("tombstones/{collection}/{}.{}.tomb", entry.id, t.version);
-        let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
-        objects.get(&key)?;
+    let deleted = match entry.tombstones {
+        None => None,
+        Some(t) => {
+            let key = objects::sidecar_key(collection, entry.id, t.version);
+            let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
+            let sidecar = read_sidecar(&objects.get(&key)?, collection, entry)?;
+            let tombstones = segment
+                .tombstones(sidecar.deleted().clone())
+                .map_err(|source| DatabaseError::OpenSegment {
+                    collection: collection.to_owned(),
+                    id: entry.id,
+                    source,
+                })?;
+            Some((t.version, Arc::new(tombstones)))
+        }
+    };
+    Ok(LiveSegment { segment, deleted })
+}
+
+/// Decodes the tombstone sidecar of the segment `entry` describes and checks it against the entry (SPEC §8.3).
+fn read_sidecar(
+    bytes: &[u8],
+    collection: &str,
+    entry: &SegmentEntry,
+) -> Result<TombstoneSidecar, DatabaseError> {
+    let sidecar = TombstoneSidecar::decode(bytes).map_err(|source| DatabaseError::Sidecar {
+        collection: collection.to_owned(),
+        id: entry.id,
+        source,
+    })?;
+    let mismatch = |field| DatabaseError::SidecarMismatch {
+        collection: collection.to_owned(),
+        id: entry.id,
+        field,
+    };
+    let Some(t) = entry.tombstones else {
+        return Err(DatabaseError::Internal {
+            what: "a sidecar read for a segment without one",
+        });
+    };
+    if sidecar.segment_id() != entry.id {
+        return Err(mismatch("segment_id"));
     }
-    Ok(segment)
+    if sidecar.version() != t.version {
+        return Err(mismatch("version"));
+    }
+    if sidecar.doc_count() != entry.doc_count {
+        return Err(mismatch("doc_count"));
+    }
+    if sidecar.deleted_count() != t.deleted {
+        return Err(mismatch("deleted"));
+    }
+    Ok(sidecar)
 }
 
 /// Opens the bytes of the segment `entry` describes and checks its footer against the entry.

@@ -9,5 +9,6 @@ pub mod manifest;
 pub mod memtable;
 pub mod schema;
 pub mod segment;
+pub mod tombstone;
 pub mod view;
 pub mod wal;

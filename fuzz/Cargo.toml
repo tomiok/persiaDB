@@ -186,3 +186,10 @@ path = "fuzz_targets/database_open.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "tombstone_sidecar"
+path = "fuzz_targets/tombstone_sidecar.rs"
+test = false
+doc = false
+bench = false

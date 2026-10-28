@@ -283,6 +283,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
 ### Format
+- Tombstone sidecar encoding 1 (SPEC §8.3; ADR-0030): `PTMB` magic, encoding version, `segment_id`, sidecar version,
+  `doc_count`, deleted count, the deleted docids as a portable roaring bitmap, CRC32C trailer. Golden files in
+  `tests/fixtures/tombstones/v1/`.
 - Segment format 1.0 (SPEC §5.1, §5.3; ADR-0027): footer with a `PSEG` locator (up to 1 MiB; statistics, section
   table, id range, CRC32C), section kinds 1–12 (all block-framed but the two FSTs, which carry a CRC32C trailer),
   56-byte TermInfo records (with per-term `max_tf` and `min_norm`), `tf − 1` frequencies aligned with postings blocks, 40-byte skip entries, per-block position
