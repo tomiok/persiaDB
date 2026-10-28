@@ -159,3 +159,68 @@ proptest! {
         }
     }
 }
+
+/// ROADMAP 6.3.9: an operation the memtable rejects never reaches the log, and one whose logging fails is not
+/// visible.
+#[test]
+fn logged_writes_reach_the_log_only_when_accepted() {
+    let schema = SchemaBuilder::new("c")
+        .field("t", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let t = schema.field("t").unwrap().id();
+    let doc = |id: &str| Document::new(id).with(t, Value::String("hello world".into()));
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .with_max_docs(2);
+    let mut log = Vec::new();
+    let mut logging = |bytes: &[u8]| {
+        log.push(bytes.to_vec());
+        Ok::<(), &str>(())
+    };
+    assert_eq!(mem.put_logged(&doc("a"), &mut logging), Ok(0));
+    // The failed log: the document is not there, and its id is unknown to every view.
+    assert_eq!(
+        mem.put_logged(&doc("b"), |_| Err("disk")),
+        Err(Logged::Log("disk"))
+    );
+    let view = mem.view();
+    assert_eq!((view.lookup("b"), view.live_count()), (None, 1));
+    assert_eq!(docs(&view, t, b"hello"), [0]);
+    // An invalid document is rejected before logging.
+    let bad = Document::new("e").with(t, Value::I64(1));
+    assert!(matches!(
+        mem.put_logged(&bad, &mut logging),
+        Err(Logged::Rejected(MemtableError::Segment(
+            SegmentError::Document(_)
+        )))
+    ));
+    assert_eq!(mem.put_logged(&doc("c"), &mut logging), Ok(1));
+    // So is a put once every docid is used.
+    assert_eq!(
+        mem.put_logged(&doc("d"), &mut logging),
+        Err(Logged::Rejected(MemtableError::Segment(
+            SegmentError::Full { max_docs: 2 }
+        )))
+    );
+    assert_eq!(log.len(), 2);
+    // The payload is the document's full encoding, what replay decodes.
+    assert_eq!(Document::decode(&log[1], &schema).unwrap(), doc("c"));
+    // Deletes: a bad id is rejected unlogged; a failed log leaves the id live.
+    let mut deletes = 0;
+    assert!(matches!(
+        mem.delete_logged("", || {
+            deletes += 1;
+            Ok::<(), &str>(())
+        }),
+        Err(Logged::Rejected(_))
+    ));
+    assert_eq!(
+        mem.delete_logged("a", || Err("disk")),
+        Err(Logged::Log("disk"))
+    );
+    assert_eq!(deletes, 0);
+    assert_eq!(mem.view().lookup("a"), Some(IdState::Live(0)));
+    assert_eq!(mem.delete_logged("a", || Ok::<(), &str>(())), Ok(true));
+    assert_eq!(mem.view().lookup("a"), Some(IdState::Deleted));
+}

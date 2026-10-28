@@ -44,6 +44,7 @@
 mod flush;
 mod view;
 
+use std::convert::Infallible;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
@@ -77,6 +78,43 @@ pub enum MemtableError {
     Poisoned,
 }
 
+/// Why a write-ahead logged operation ([`Memtable::put_logged`], [`Memtable::delete_logged`]) did not apply.
+#[derive(Debug, Clone, PartialEq, thiserror::Error)]
+pub enum Logged<E> {
+    /// The memtable rejected the operation before it was logged.
+    #[error(transparent)]
+    Rejected(MemtableError),
+    /// Logging failed; the operation is not in the memtable.
+    #[error("logging the operation failed: {0}")]
+    Log(#[source] E),
+}
+
+/// A `put` that passed every check and is indexed, but not visible yet.
+#[derive(Debug)]
+struct StagedPut {
+    docid: u32,
+    version: u64,
+    /// The id's arena id.
+    id: u32,
+    /// The `FieldSet::All` encoding.
+    encoded: Vec<u8>,
+    marks: Vec<Option<Mark>>,
+}
+
+/// A read handle on a memtable: takes [`MemtableView`]s of its latest writes, from any thread (SPEC §8.4). A
+/// published snapshot holds one per collection, so a search sees the writes applied when it starts.
+#[derive(Debug, Clone)]
+pub struct MemtableReader {
+    shared: Arc<RwLock<Inner>>,
+}
+
+impl MemtableReader {
+    /// A view of every write applied so far.
+    pub fn view(&self) -> MemtableView {
+        MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
+    }
+}
+
 /// The writer of a memtable: applies `put` and `delete` (SPEC §8.1) one at a time and hands out [`MemtableView`]s.
 #[derive(Debug)]
 pub struct Memtable {
@@ -84,6 +122,8 @@ pub struct Memtable {
     shared: Arc<RwLock<Inner>>,
     tokens: TokenStream,
     occurrences: Vec<(u32, u32)>,
+    /// [`MAX_DOCS`], but in tests.
+    max_docs: u32,
 }
 
 /// What a memtable holds; shared with its views.
@@ -276,12 +316,46 @@ impl Memtable {
             shared: Arc::new(RwLock::new(inner)),
             tokens: TokenStream::new(),
             occurrences: Vec::new(),
+            max_docs: MAX_DOCS,
         })
+    }
+
+    /// Caps the docids, so tests reach [`SegmentError::Full`].
+    #[cfg(test)]
+    pub(crate) fn with_max_docs(mut self, max_docs: u32) -> Self {
+        self.max_docs = max_docs;
+        self
     }
 
     /// The schema documents are indexed with.
     pub fn schema(&self) -> &CollectionSchema {
         &self.schema
+    }
+
+    /// A read handle that takes views of this memtable's latest writes.
+    pub fn reader(&self) -> MemtableReader {
+        MemtableReader {
+            shared: Arc::clone(&self.shared),
+        }
+    }
+
+    /// Calls `f` with the `FieldSet::All` encoding of each live document, in docid order: what a flush writes
+    /// (ROADMAP 6.3.1). Holds the read lock throughout, so views can still be taken; `&self` keeps writes out.
+    pub(crate) fn for_each_live<E>(
+        &self,
+        mut f: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let inner = read(&self.shared);
+        let mut start = 0;
+        for (&end, &killed) in inner.doc_ends.iter().zip(&inner.killed_at) {
+            if killed == ALIVE
+                && let Some(bytes) = inner.docs.get(start..end)
+            {
+                f(bytes)?;
+            }
+            start = end;
+        }
+        Ok(())
     }
 
     /// Adds `doc` and returns its docid; an earlier version of the same id in the memtable is replaced (SPEC §8.3).
@@ -291,11 +365,56 @@ impl Memtable {
     /// a token over [`crate::segment::MAX_TERM_LEN`] bytes, an overflow) and [`SegmentError::Full`] when every docid
     /// is used; [`MemtableError::Poisoned`]. The memtable is then as it was (only spare capacity may have grown).
     pub fn put(&mut self, doc: &Document) -> Result<u32, MemtableError> {
+        self.put_logged(doc, |_| Ok::<(), Infallible>(()))
+            .map_err(|e| match e {
+                Logged::Rejected(e) => e,
+                Logged::Log(never) => match never {},
+            })
+    }
+
+    /// [`Memtable::put`] for a write-ahead logged operation (SPEC §8.2.1 "What may be logged", ROADMAP 6.3.9): checks
+    /// and indexes `doc` without making it visible, passes its `FieldSet::All` encoding (the WAL record's payload) to
+    /// `log`, and makes it visible only if `log` succeeds. So a document the memtable rejects is never logged, and no
+    /// view sees one that was not. The write lock is not held while `log` runs.
+    ///
+    /// # Errors
+    /// [`Logged::Rejected`] as [`Memtable::put`], before `log` is called; [`Logged::Log`] with `log`'s error, after
+    /// which the document is not in the memtable (its id may stay interned, unseen by any view).
+    pub fn put_logged<E>(
+        &mut self,
+        doc: &Document,
+        log: impl FnOnce(&[u8]) -> Result<(), E>,
+    ) -> Result<u32, Logged<E>> {
+        let staged = self.stage_put(doc).map_err(Logged::Rejected)?;
+        if let Err(e) = log(&staged.encoded) {
+            write(&self.shared)
+                .map_err(Logged::Rejected)?
+                .rollback(&staged.marks);
+            return Err(Logged::Log(e));
+        }
+        let mut inner = write(&self.shared).map_err(Logged::Rejected)?;
+        // Nothing fails from here on. `&mut self` kept every other write out since the stage, so the docid and the
+        // version are still the next ones.
+        inner.link(staged.docid, &staged.marks);
+        inner.docs.extend_from_slice(&staged.encoded);
+        let end = inner.docs.len();
+        inner.doc_ends.push(end);
+        inner.killed_at.push(ALIVE);
+        inner.live = inner.live.saturating_add(1);
+        inner.record(staged.id, staged.docid, staged.version);
+        Ok(staged.docid)
+    }
+
+    /// Everything of a `put` that can fail: validates, indexes `doc` (its postings stay unchained, so no view sees
+    /// them) and interns its id.
+    fn stage_put(&mut self, doc: &Document) -> Result<StagedPut, MemtableError> {
         let mut inner = write(&self.shared)?;
         let docid = u32::try_from(inner.killed_at.len())
             .ok()
-            .filter(|&d| d < MAX_DOCS)
-            .ok_or(SegmentError::Full { max_docs: MAX_DOCS })?;
+            .filter(|&d| d < self.max_docs)
+            .ok_or(SegmentError::Full {
+                max_docs: self.max_docs,
+            })?;
         let version = inner.next_version()?;
         // Validates the whole document before anything changes.
         let encoded = doc
@@ -307,22 +426,19 @@ impl Memtable {
             .index(docid, doc, &mut self.tokens, &mut self.occurrences)
             .and_then(|()| inner.check_postings())
             .and_then(|()| inner.intern(doc.id()));
-        let id = match result {
-            Ok(id) => id,
+        match result {
+            Ok(id) => Ok(StagedPut {
+                docid,
+                version,
+                id,
+                encoded,
+                marks,
+            }),
             Err(e) => {
                 inner.rollback(&marks);
-                return Err(e.into());
+                Err(e.into())
             }
-        };
-        // Nothing fails from here on.
-        inner.link(docid, &marks);
-        inner.docs.extend_from_slice(&encoded);
-        let end = inner.docs.len();
-        inner.doc_ends.push(end);
-        inner.killed_at.push(ALIVE);
-        inner.live = inner.live.saturating_add(1);
-        inner.record(id, docid, version);
-        Ok(docid)
+        }
     }
 
     /// Deletes the document with id `id` (SPEC §8.1): the memtable's version, if any, is left out from now on, and
@@ -333,12 +449,37 @@ impl Memtable {
     /// [`MAX_ID_LEN`] bytes; [`SegmentError::TooLarge`] past `u32::MAX` ids or operations;
     /// [`MemtableError::Poisoned`].
     pub fn delete(&mut self, id: &str) -> Result<bool, MemtableError> {
+        self.delete_logged(id, || Ok::<(), Infallible>(()))
+            .map_err(|e| match e {
+                Logged::Rejected(e) => e,
+                Logged::Log(never) => match never {},
+            })
+    }
+
+    /// [`Memtable::delete`] for a write-ahead logged operation, as [`Memtable::put_logged`]: `log` runs once the
+    /// delete is known to apply, and the delete is visible only if it succeeds.
+    ///
+    /// # Errors
+    /// [`Logged::Rejected`] as [`Memtable::delete`], before `log` is called; [`Logged::Log`] with `log`'s error.
+    pub fn delete_logged<E>(
+        &mut self,
+        id: &str,
+        log: impl FnOnce() -> Result<(), E>,
+    ) -> Result<bool, Logged<E>> {
         if !(1..=MAX_ID_LEN).contains(&id.len()) {
-            return Err(SegmentError::Document(DocumentError::IdLen { len: id.len() }).into());
+            let e = SegmentError::Document(DocumentError::IdLen { len: id.len() });
+            return Err(Logged::Rejected(e.into()));
         }
-        let mut inner = write(&self.shared)?;
-        let version = inner.next_version()?;
-        let id = inner.intern(id)?;
+        let (version, id) = {
+            let mut inner = write(&self.shared).map_err(Logged::Rejected)?;
+            let version = inner
+                .next_version()
+                .map_err(|e| Logged::Rejected(e.into()))?;
+            let id = inner.intern(id).map_err(|e| Logged::Rejected(e.into()))?;
+            (version, id)
+        };
+        log().map_err(Logged::Log)?;
+        let mut inner = write(&self.shared).map_err(Logged::Rejected)?;
         Ok(inner.record(id, NONE, version))
     }
 
