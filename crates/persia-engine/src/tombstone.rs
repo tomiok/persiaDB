@@ -26,7 +26,7 @@
 //! let second = TombstoneSidecar::new(SegmentId::new(7), 2, 10, first.deleted() | &RoaringBitmap::from_iter([1]))?;
 //! second.check_follows(first.version(), first.deleted())?;
 //! assert_eq!((second.version(), second.deleted_count()), (2, 2));
-//! assert_eq!(TombstoneSidecar::decode(&second.encode())?, second);
+//! assert_eq!(TombstoneSidecar::decode(&second.encode()?)?, second);
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -181,7 +181,11 @@ impl TombstoneSidecar {
     }
 
     /// The encoding (see the module docs). At most [`MAX_SIDECAR_LEN`] bytes.
-    pub fn encode(&self) -> Vec<u8> {
+    ///
+    /// # Errors
+    /// [`SidecarError::Invalid`] if the bitmap does not serialize; writing to memory does not fail today, but a
+    /// sidecar without its bitmap must never reach the disk.
+    pub fn encode(&self) -> Result<Vec<u8>, SidecarError> {
         let mut w = Writer::new();
         w.write_bytes(&MAGIC);
         w.write_u32(VERSION);
@@ -190,13 +194,15 @@ impl TombstoneSidecar {
         w.write_u32(self.doc_count);
         w.write_u32(self.deleted_count());
         let mut bitmap = Vec::with_capacity(self.deleted.serialized_size());
-        // Writing to a `Vec` cannot fail.
-        if self.deleted.serialize_into(&mut bitmap).is_ok() {
-            w.write_bytes(&bitmap);
-        }
+        self.deleted
+            .serialize_into(&mut bitmap)
+            .map_err(|_| SidecarError::Invalid {
+                what: "the deleted docids do not serialize",
+            })?;
+        w.write_bytes(&bitmap);
         let crc = crc32c(w.as_slice());
         w.write_u32(crc);
-        w.into_inner()
+        Ok(w.into_inner())
     }
 
     /// Decodes a sidecar: the length, the magic, the CRC32C trailer, the version, then the rest.
@@ -286,14 +292,14 @@ mod tests {
     #[test]
     fn round_trips() {
         let s = sidecar(&[0, 5, 99]);
-        let bytes = s.encode();
+        let bytes = s.encode().unwrap();
         assert_eq!(&bytes[..4], b"PTMB");
         assert_eq!(TombstoneSidecar::decode(&bytes).unwrap(), s);
     }
 
     #[test]
     fn rejects_what_spec_does_not_allow() {
-        let bytes = sidecar(&[1, 2]).encode();
+        let bytes = sidecar(&[1, 2]).encode().unwrap();
         let corrupt = |b: &[u8]| TombstoneSidecar::decode(b).unwrap_err().is_corruption();
         // Any flipped bit fails the checksum.
         for i in 0..bytes.len() {

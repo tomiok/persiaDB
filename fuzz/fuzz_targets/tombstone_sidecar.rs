@@ -25,12 +25,12 @@ fuzz_target!(|data: &[u8]| {
     let Ok(sidecar) = TombstoneSidecar::decode(&input) else {
         return;
     };
-    let bytes = sidecar.encode();
+    let bytes = sidecar.encode().expect("a decoded sidecar encodes");
     let again = TombstoneSidecar::decode(&bytes).expect("an encoded sidecar decodes");
     assert_eq!(again.deleted(), sidecar.deleted());
     assert_eq!(
         (again.segment_id(), again.version(), again.doc_count()),
         (sidecar.segment_id(), sidecar.version(), sidecar.doc_count())
     );
-    assert_eq!(again.encode(), bytes);
+    assert_eq!(again.encode().expect("encodes"), bytes);
 });

@@ -17,7 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   first, deleted documents left out), `get`, `segment_views` and `tombstones`; `Located`. Removed
   `DatabaseError::NeedsTombstones`; added `DatabaseError::ReadSegment`, `Sidecar`, `SidecarMismatch`. Fuzz target
   `tombstone_sidecar`; golden database `tombstones.persia`. Benches `commit_upserts` and `commit_inserts_{4,64}_segments`
-  (2 000 documents: `commit` 9.9 ms, upserts over 4 segments 13.1 ms, inserts over 64 segments 20.5 ms).
+  (internal snapshot in `docs/benchmarks.md`).
 - `persia-engine`: the local write path (ROADMAP 6.3, SPEC §4.5, §8.2, §8.4, ADR-0029). `db::Database` creates or
   opens a database on a container, creates collections, and takes `put`, `put_batch` and `delete` with a
   `Durability`. `commit()` flushes every memtable into a `Segment` frame and commits a manifest naming them; `tick()`
@@ -29,7 +29,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Repair::Quarantine`. `ContainerObjects` presents the committed manifest, segments, sidecars and WAL chunks as a
   read-only `Storage` under the remote layout's keys. `Memtable::put_logged`/`delete_logged` stage an operation, log
   it, then publish it, so a rejected operation is never logged (6.3.9); `Memtable::reader` gives a `MemtableReader`.
-  Fuzz target `database_open`; bench `database` (`put_buffered` 269 K, `commit` 205 K documents/s).
+  Fuzz target `database_open`; bench `database` (internal snapshot in `docs/benchmarks.md`).
 - `persia-format`: `Corruption::WrongFrame`, for a manifest location that names a frame of another kind or length.
 - `persia-engine`: the write-ahead log (ROADMAP 6.2, SPEC §8.2.1, ADR-0028). `WalWriter` encodes `put` and `delete`
   records into chunks (`WalChunk` frames of the container), with per-call `Durability` (`Buffered`, `Async`, `Fsync`,

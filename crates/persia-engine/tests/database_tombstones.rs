@@ -199,7 +199,7 @@ fn deleted(docids: &[u32]) -> RoaringBitmap {
 fn open_applies_committed_sidecars() {
     let (file, id) = one_segment();
     let sidecar = TombstoneSidecar::new(id, 1, 5, deleted(&[1, 3])).unwrap();
-    commit_sidecar(&file, &sidecar.encode(), 1, 2);
+    commit_sidecar(&file, &sidecar.encode().unwrap(), 1, 2);
     let db = Database::open_on(file, options()).unwrap();
     let snapshot = db.snapshot();
     let a = snapshot.collection("a").unwrap();
@@ -244,7 +244,7 @@ fn open_rejects_sidecars_that_disagree_with_the_manifest() {
     ];
     for (sidecar, version, count, field) in cases {
         let (file, _) = one_segment();
-        commit_sidecar(&file, &sidecar.unwrap().encode(), version, count);
+        commit_sidecar(&file, &sidecar.unwrap().encode().unwrap(), version, count);
         let e = Database::open_on(file, options()).unwrap_err();
         assert!(e.is_corruption(), "{field}: {e}");
         assert!(
@@ -257,7 +257,8 @@ fn open_rejects_sidecars_that_disagree_with_the_manifest() {
     let (file, id) = one_segment();
     let mut bytes = TombstoneSidecar::new(id, 1, 5, deleted(&[1, 3]))
         .unwrap()
-        .encode();
+        .encode()
+        .unwrap();
     bytes[45] ^= 0x40;
     commit_sidecar(&file, &bytes, 1, 2);
     let e = Database::open_on(file, options()).unwrap_err();
@@ -462,7 +463,8 @@ fn a_newer_sidecar_encoding_is_unsupported_not_corrupt() {
     let (file, id) = one_segment();
     let mut bytes = TombstoneSidecar::new(id, 1, 5, deleted(&[1, 3]))
         .unwrap()
-        .encode();
+        .encode()
+        .unwrap();
     bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
     let end = bytes.len() - 4;
     let crc = persia_format::checksum::crc32c(&bytes[..end]);
@@ -520,7 +522,7 @@ fn a_deleted_newest_copy_ends_the_lookup() {
         let f = c
             .append(
                 FrameKind::TombstoneSidecar,
-                &sidecar.encode(),
+                &sidecar.encode().unwrap(),
                 Compression::None,
             )
             .unwrap();
@@ -570,7 +572,7 @@ fn a_commit_that_cannot_be_planned_writes_nothing() {
     let (file, id) = one_segment();
     let sidecar = TombstoneSidecar::new(id, u64::MAX, 5, deleted(&[1, 3])).unwrap();
     // The manifest says version 1 (what a diff allows); patch its stored version to u64::MAX.
-    commit_sidecar_patched(&file, &sidecar.encode(), 1, 2, |m| {
+    commit_sidecar_patched(&file, &sidecar.encode().unwrap(), 1, 2, |m| {
         let mut entry = vec![1];
         entry.extend(1_u64.to_le_bytes());
         entry.extend(2_u32.to_le_bytes());

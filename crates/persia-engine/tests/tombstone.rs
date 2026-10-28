@@ -63,7 +63,7 @@ fn golden_fixtures_decode_and_reencode_byte_for_byte() {
         ("mixed.tomb", golden_mixed()),
     ] {
         let path = fixture_dir().join(name);
-        let encoded = sidecar.encode();
+        let encoded = sidecar.encode().unwrap();
         if write && !path.exists() {
             std::fs::create_dir_all(fixture_dir()).unwrap();
             std::fs::write(&path, &encoded).unwrap();
@@ -85,7 +85,7 @@ fn golden_fixtures_decode_and_reencode_byte_for_byte() {
 
 #[test]
 fn sparse_golden_bytes() {
-    let bytes = golden_sparse().encode();
+    let bytes = golden_sparse().encode().unwrap();
     let mut expected = b"PTMB".to_vec();
     expected.extend(1_u32.to_le_bytes()); // encoding version
     expected.extend(0x0123_4567_89ab_cdef_0011_2233_4455_6677_u128.to_le_bytes());
@@ -121,15 +121,15 @@ proptest! {
 
     #[test]
     fn round_trips(s in sidecar()) {
-        let bytes = s.encode();
+        let bytes = s.encode().unwrap();
         let back = TombstoneSidecar::decode(&bytes).unwrap();
         prop_assert_eq!(&back, &s);
-        prop_assert_eq!(back.encode(), bytes);
+        prop_assert_eq!(back.encode().unwrap(), bytes);
     }
 
     #[test]
     fn truncations_and_extensions_are_corruption(s in sidecar(), cut in any::<prop::sample::Index>(), extra in 1..9_usize) {
-        let bytes = s.encode();
+        let bytes = s.encode().unwrap();
         let short = &bytes[..cut.index(bytes.len())];
         prop_assert!(TombstoneSidecar::decode(short).unwrap_err().is_corruption());
         let mut long = bytes.clone();
@@ -387,7 +387,7 @@ fn check_decode_contract(bytes: &[u8]) -> Result<(), TestCaseError> {
             prop_assert_eq!(u64::from(s.deleted_count()), s.deleted().len());
             prop_assert!((1..=s.doc_count()).contains(&s.deleted_count()));
             prop_assert!(s.deleted().max().unwrap() < s.doc_count());
-            let again = TombstoneSidecar::decode(&s.encode()).unwrap();
+            let again = TombstoneSidecar::decode(&s.encode().unwrap()).unwrap();
             prop_assert_eq!(again, s);
         }
     }
@@ -399,7 +399,7 @@ fn the_hand_built_encoder_matches_the_writer() {
     // Guards the helpers above: in the writer's own layout they produce the writer's bytes.
     let cs = mixed_runs();
     let s = TombstoneSidecar::new(SegmentId::new(42), 3, 5 << 16, docids(&cs)).unwrap();
-    assert_eq!(sidecar_of(&cs, Layout::Runs), s.encode());
+    assert_eq!(sidecar_of(&cs, Layout::Runs), s.encode().unwrap());
     let h = Head {
         encoding: 1,
         segment: 0x0123_4567_89ab_cdef_0011_2233_4455_6677,
@@ -409,7 +409,7 @@ fn the_hand_built_encoder_matches_the_writer() {
     };
     assert_eq!(
         seal(h, &portable(&[array(0, &[3])], Layout::NoRuns)),
-        golden_sparse().encode()
+        golden_sparse().encode().unwrap()
     );
 }
 
@@ -417,7 +417,7 @@ fn the_hand_built_encoder_matches_the_writer() {
 fn every_bit_flip_of_the_golden_sidecars_is_corruption() {
     // The unit tests flip bit 0 of each byte; here every bit of both golden encodings (the CRC covers all).
     for (name, s) in [("sparse", golden_sparse()), ("mixed", golden_mixed())] {
-        let mut b = s.encode();
+        let mut b = s.encode().unwrap();
         for i in 0..b.len() {
             for bit in 0..8 {
                 b[i] ^= 1 << bit;
@@ -732,7 +732,11 @@ fn portable_bitmaps_in_other_layouts_decode() {
         let built =
             TombstoneSidecar::new(s.segment_id(), s.version(), s.doc_count(), expected).unwrap();
         assert_eq!(s, built, "{case}");
-        assert_eq!(TombstoneSidecar::decode(&s.encode()).unwrap(), s, "{case}");
+        assert_eq!(
+            TombstoneSidecar::decode(&s.encode().unwrap()).unwrap(),
+            s,
+            "{case}"
+        );
         // Bit flips in the foreign layout are corruption too.
         let mut b = bytes.clone();
         for i in (0..bytes.len()).step_by(7) {
@@ -807,7 +811,7 @@ proptest! {
 
     #[test]
     fn any_bit_flip_is_corruption(s in sidecar(), at in any::<prop::sample::Index>(), bit in 0..8_u8) {
-        let mut bytes = s.encode();
+        let mut bytes = s.encode().unwrap();
         let i = at.index(bytes.len());
         bytes[i] ^= 1 << bit;
         prop_assert!(
@@ -821,7 +825,7 @@ proptest! {
         s in sidecar(),
         edits in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..4),
     ) {
-        let mut bytes = s.encode();
+        let mut bytes = s.encode().unwrap();
         let covered = bytes.len() - 4;
         for (at, value) in edits {
             // Anywhere after the magic, which is checked before the CRC.
@@ -836,7 +840,7 @@ proptest! {
         edits in prop::collection::vec((any::<prop::sample::Index>(), any::<u8>()), 1..4),
     ) {
         // Concentrated on the bitmap's own header: cookie, count, run flags, descriptions, offsets.
-        let mut bytes = s.encode();
+        let mut bytes = s.encode().unwrap();
         let window = (bytes.len() - 4 - 40).min(64);
         for (at, value) in edits {
             bytes[40 + at.index(window)] = value;
@@ -848,7 +852,7 @@ proptest! {
     fn a_union_at_the_next_version_follows((prev, added, prev_version, extra) in succession()) {
         let next = build(prev_version + 1, &prev | &added, extra);
         prop_assert_eq!(next.check_follows(prev_version, &prev), Ok(()));
-        let back = TombstoneSidecar::decode(&next.encode()).unwrap();
+        let back = TombstoneSidecar::decode(&next.encode().unwrap()).unwrap();
         prop_assert_eq!(back.check_follows(prev_version, &prev), Ok(()));
     }
 

@@ -301,10 +301,19 @@ struct Planned {
     mark: WalMark,
     /// Its segment, unless it has no live document.
     segment: Option<(SegmentId, flush::Flushed)>,
-    /// The next tombstone sidecar of each committed segment it deletes from, by the segment's index (SPEC §8.3).
-    sidecars: Vec<(usize, TombstoneSidecar)>,
+    /// The next tombstone sidecar of each committed segment it deletes from (SPEC §8.3).
+    sidecars: Vec<PlannedSidecar>,
     /// The empty memtable that replaces it once the commit is durable.
     memtable: Memtable,
+}
+
+/// The next tombstone sidecar of a committed segment, encoded before anything is written.
+#[derive(Debug)]
+struct PlannedSidecar {
+    /// The segment's index in its collection's segments.
+    index: usize,
+    sidecar: TombstoneSidecar,
+    bytes: Vec<u8>,
 }
 
 /// The single writer of a database on a local container (see the module docs).
@@ -782,13 +791,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                     },
                     tombstones: None,
                 };
-                let change = diff
-                    .collections
-                    .entry(p.collection.clone())
-                    .or_insert_with(|| CollectionDiff::Change(CollectionChange::default()));
-                if let CollectionDiff::Change(change) = change {
-                    change.added.push(entry);
-                }
+                change_of(&mut diff, &p.collection)?.added.push(entry);
             }
             // Before `commit_point`, so this commit advances `wal_start` past the flushed records (SPEC §8.2.1).
             self.wal.flushed(&p.collection, p.mark);
@@ -813,7 +816,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             let Some(c) = self.collections.get_mut(&p.collection) else {
                 continue;
             };
-            for (index, sidecar) in p.sidecars {
+            for PlannedSidecar { index, sidecar, .. } in p.sidecars {
                 let live = c.segments.get_mut(index).ok_or(DatabaseError::Internal {
                     what: "a tombstoned segment is not open",
                 })?;
@@ -861,13 +864,10 @@ impl<F: ContainerFile + Sync> Database<F> {
         diff: &mut ManifestDiff,
     ) -> Result<(), DatabaseError> {
         for p in planned {
-            for (_, sidecar) in &p.sidecars {
+            for PlannedSidecar { sidecar, bytes, .. } in &p.sidecars {
                 let container = self.wal.log_mut();
-                let frame = container.append(
-                    FrameKind::TombstoneSidecar,
-                    &sidecar.encode(),
-                    Compression::None,
-                )?;
+                let frame =
+                    container.append(FrameKind::TombstoneSidecar, bytes, Compression::None)?;
                 let mut entry = *self
                     .manifest
                     .collection(&p.collection)
@@ -883,16 +883,29 @@ impl<F: ContainerFile + Sync> Database<F> {
                         len: frame.len,
                     },
                 });
-                let change = diff
-                    .collections
-                    .entry(p.collection.clone())
-                    .or_insert_with(|| CollectionDiff::Change(CollectionChange::default()));
-                if let CollectionDiff::Change(change) = change {
-                    change.updated.push(entry);
-                }
+                change_of(diff, &p.collection)?.updated.push(entry);
             }
         }
         Ok(())
+    }
+}
+
+/// The change of collection `name` in `diff`, added if it has none. A flush never changes a collection the same commit
+/// creates or drops: a segment or sidecar recorded elsewhere would be written but not referenced, its deletions
+/// visible until a reopen.
+fn change_of<'d>(
+    diff: &'d mut ManifestDiff,
+    name: &str,
+) -> Result<&'d mut CollectionChange, DatabaseError> {
+    let entry = diff
+        .collections
+        .entry(name.to_owned())
+        .or_insert_with(|| CollectionDiff::Change(CollectionChange::default()));
+    match entry {
+        CollectionDiff::Change(change) => Ok(change),
+        _ => Err(DatabaseError::Internal {
+            what: "a flush of a collection the commit creates or drops",
+        }),
     }
 }
 
@@ -906,10 +919,7 @@ fn no_such(name: &str) -> DatabaseError {
 /// has an operation for, by the segment's index (SPEC §8.3, ROADMAP 6.4.3), each checked to keep every deletion of
 /// the current one. Every segment is searched, not only the newest holding the id, so copies left live by earlier
 /// builds are deleted too (ADR-0030).
-fn plan_sidecars(
-    name: &str,
-    c: &Collection,
-) -> Result<Vec<(usize, TombstoneSidecar)>, DatabaseError> {
+fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, DatabaseError> {
     let mut added: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
     if c.segments.is_empty() {
         return Ok(Vec::new());
@@ -958,7 +968,12 @@ fn plan_sidecars(
         let sidecar =
             TombstoneSidecar::new(id, next, doc_count, current | &new).map_err(invalid)?;
         sidecar.check_follows(version, current).map_err(invalid)?;
-        sidecars.push((index, sidecar));
+        let bytes = sidecar.encode().map_err(invalid)?;
+        sidecars.push(PlannedSidecar {
+            index,
+            sidecar,
+            bytes,
+        });
     }
     Ok(sidecars)
 }
