@@ -1,6 +1,17 @@
 ---
 title: "Milestones and dependencies"
 description: "What each Persia DB milestone from M0 to v1.0 delivers, which milestones it depends on, and the post-MVP milestones through v3.0."
+head:
+  - tag: title
+    content: "Milestones M0-M15 and later releases to v3.0 | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Milestones M0-M15 and later releases to v3.0 | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Milestones M0-M15 and later releases to v3.0 | PersiaDB"
 ---
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.

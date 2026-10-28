@@ -1,6 +1,17 @@
 ---
 title: "Embedded API"
 description: "The planned Db and Collection API. Method names are illustrative and are not in the crate."
+head:
+  - tag: title
+    content: "Planned embedded Rust API: Db::open and search | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Planned embedded Rust API: Db::open and search | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Planned embedded Rust API: Db::open and search | PersiaDB"
 ---
 
 **Planned.** The usage walkthrough, including what works today and the FAQ, is [Getting started](/guide/getting-started/).

@@ -1,6 +1,17 @@
 ---
 title: "Code"
 description: "What the Persia DB crates export today, with links to the source. The embedded Db API does not exist yet."
+head:
+  - tag: title
+    content: "Source guide to the Rust crates that exist today | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Source guide to the Rust crates that exist today | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Source guide to the Rust crates that exist today | PersiaDB"
 ---
 
 This page quotes code that is on `main`. It does not describe a database you can open.

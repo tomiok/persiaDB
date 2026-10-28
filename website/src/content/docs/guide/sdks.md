@@ -1,6 +1,17 @@
 ---
 title: "Embedded SDKs"
 description: "The planned in-process Go and TypeScript bindings. Not implemented. Network clients are a different milestone."
+head:
+  - tag: title
+    content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
 ---
 
 **Planned. Not implemented.** There is no Go module and no npm package. The Rust API these bindings

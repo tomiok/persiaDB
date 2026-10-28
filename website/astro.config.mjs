@@ -16,6 +16,8 @@ const jsonLd = JSON.stringify({
     '@context': 'https://schema.org',
     '@type': 'SoftwareSourceCode',
     name: 'Persia DB',
+    // Queried spelling. og:site_name is the same string; `name` stays the written brand.
+    alternateName: 'PersiaDB',
     description: 'An embedded, single-file, cloud-native search database, written in Rust.',
     codeRepository: 'https://github.com/tomiok/persiaDB',
     programmingLanguage: 'Rust',

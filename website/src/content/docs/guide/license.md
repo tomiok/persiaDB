@@ -1,6 +1,17 @@
 ---
 title: "License"
 description: "Persia DB is licensed under the Apache License, Version 2.0, including copyright, NOTICE attribution, and the terms for contributions."
+head:
+  - tag: title
+    content: "Apache License 2.0 for the search database | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Apache License 2.0 for the search database | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Apache License 2.0 for the search database | PersiaDB"
 ---
 
 Persia DB is licensed under the [Apache License, Version 2.0](https://github.com/tomiok/persiaDB/blob/main/LICENSE).

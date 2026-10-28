@@ -1,6 +1,17 @@
 ---
 title: "Contributing"
 description: "How to pick a roadmap leaf, what a pull request has to pass, and where to report security issues."
+head:
+  - tag: title
+    content: "How to contribute to the Rust search database | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "How to contribute to the Rust search database | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "How to contribute to the Rust search database | PersiaDB"
 ---
 
 Persia DB is a database, so correctness comes first and speed comes after, with measurements.

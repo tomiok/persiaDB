@@ -1,6 +1,17 @@
 ---
 title: "Overview"
 description: "What Persia DB is: an embedded, single-file search database written in Rust, what already works in pre-alpha, and why it is built this way."
+head:
+  - tag: title
+    content: "Embedded single-file search database in Rust | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Embedded single-file search database in Rust | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Embedded single-file search database in Rust | PersiaDB"
 ---
 
 > **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.

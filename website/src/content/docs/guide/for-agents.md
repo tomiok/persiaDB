@@ -1,6 +1,17 @@
 ---
 title: "For AI agents"
 description: "Status, the API that exists, the API that is only specified, and the constraints for code that reads or writes this repository."
+head:
+  - tag: title
+    content: "API status and repository rules for AI agents | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "API status and repository rules for AI agents | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "API status and repository rules for AI agents | PersiaDB"
 ---
 
 Read this before generating a call to Persia or a patch against the repo.

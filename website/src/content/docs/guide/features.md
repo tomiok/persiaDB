@@ -1,6 +1,17 @@
 ---
 title: "Feature reference"
 description: "Reference for Persia DB search, BM25F ranking, the zero-results cascade, schema, durability, and blobs. Each item is planned or done."
+head:
+  - tag: title
+    content: "Reference for BM25F, schema, relaxation, blobs | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Reference for BM25F, schema, relaxation, blobs | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Reference for BM25F, schema, relaxation, blobs | PersiaDB"
 ---
 
 Search, ranking, relaxation, the document write path, blobs, and the server are **planned**.

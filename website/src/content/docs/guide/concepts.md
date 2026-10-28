@@ -1,6 +1,17 @@
 ---
 title: "Key concepts"
 description: "The names Persia uses for a database, a segment, a commit, and relaxation."
+head:
+  - tag: title
+    content: "Database, segment, commit, and query relaxation | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Database, segment, commit, and query relaxation | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Database, segment, commit, and query relaxation | PersiaDB"
 ---
 
 Names below are the ones used in code and in the SPEC. The short definitions are
