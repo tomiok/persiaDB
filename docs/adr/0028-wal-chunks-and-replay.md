@@ -40,11 +40,13 @@ assume about the records it reads.
 6. **Collections in replay.** Replay decodes every put with the schema of the manifest it starts from: schema
    changes are committed before records use them, and an evolved schema decodes earlier encodings. Dropping a
    collection first flushes every memtable, so the drop's commit has `wal_start` at the end of the log and no record
-   of the dropped (or a recreated) collection is replayed; a record for a collection the manifest lacks is
-   corruption.
+   written before the drop (of the dropped collection, or of an earlier collection of the same name) is replayed;
+   records of a collection recreated after the drop are logged after its create commit and replay normally. A record
+   for a collection the manifest lacks is corruption.
    Records that replay could not apply would fail every later open, so only operations replay can apply are logged:
-   collection committed, memtable accepting (SPEC §8.2.1 "What may be logged"; enforced by the write path, ROADMAP
-   6.3.9).
+   collection committed, memtable accepting (SPEC §8.2.1 "What may be logged"). The WAL checks only framing; the
+   write path must enforce this before acknowledging, which is not done yet (ROADMAP 6.3.9, a prerequisite of any
+   writer that acknowledges WAL records).
 7. **No torn records.** A chunk is a whole frame that passed its CRC, so a crash leaves no partial chunk for replay
    to cut: an invalid chunk or record means a writer bug or damage and fails the open (§8.6). Torn tails are the
    container's business (§4.4). Replay stops at the first invalid byte and reports its offset.

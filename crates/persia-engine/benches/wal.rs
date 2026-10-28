@@ -1,5 +1,5 @@
 //! The WAL (ROADMAP 6.2): encoding records into chunks through [`WalWriter`] with `Buffered` durability (rotation at
-//! the default 1 MiB), one `Fsync` batch, and replaying the chunks into a memtable. The log is a simulated file, so
+//! 64 KiB, so the ~0.5 MiB workload closes several chunks), one `Fsync` batch, and replaying the chunks into a memtable. The log is a simulated file, so
 //! these measure the engine's work, not the disk's sync latency. Deterministic input, so runs compare.
 //! Run: `cargo bench -p persia-engine --bench wal`.
 
@@ -20,6 +20,8 @@ use persia_storage::container::sim::SimFile;
 use persia_storage::container::{Container, Mode};
 
 const DOCS: usize = 2_000;
+/// Below the default 1 MiB, so the workload rotates.
+const CHUNK_TARGET: usize = 64 << 10;
 const WORDS: [&str; 8] = [
     "alpha", "beta", "gamma", "delta", "omega", "search", "engine", "log",
 ];
@@ -52,7 +54,9 @@ fn documents(schema: &CollectionSchema) -> Vec<Vec<u8>> {
 
 fn write(docs: &[Vec<u8>], durability: Durability, batch: bool) -> SimFile {
     let file = SimFile::new();
-    let mut wal = WalWriter::new(Container::create_on(file.clone(), [1; 16]).unwrap());
+    let mut wal = WalWriter::new(Container::create_on(file.clone(), [1; 16]).unwrap())
+        .unwrap()
+        .with_chunk_target(CHUNK_TARGET);
     let records: Vec<_> = docs
         .iter()
         .map(|d| WalRecord::put("bench", d).unwrap())

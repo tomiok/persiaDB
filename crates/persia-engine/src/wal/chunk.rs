@@ -213,10 +213,6 @@ impl ChunkBuilder {
         self.buf.len()
     }
 
-    pub(super) fn is_empty(&self) -> bool {
-        self.count == 0
-    }
-
     /// Whether `record` fits.
     pub(super) fn fits(&self, record: &WalRecord<'_>) -> bool {
         self.count < u32::MAX

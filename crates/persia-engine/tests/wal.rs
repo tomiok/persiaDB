@@ -53,9 +53,9 @@ use persia_engine::schema::{
 };
 use persia_engine::view::SearchView;
 use persia_engine::wal::{
-    ChunkFull, DEFAULT_CHUNK_TARGET, Durability, MAX_CHUNK_LEN, RecordError, Replay, ReplayError,
-    WalCorruption, WalError, WalOp, WalRecord, WalWriteError, WalWriter, decode_chunk,
-    encode_chunk, replay_container,
+    ChunkFull, DEFAULT_CHUNK_TARGET, Durability, LogHoldsChunks, MAX_CHUNK_LEN, RecordError,
+    Replay, ReplayError, WalCorruption, WalError, WalOp, WalRecord, WalWriteError, WalWriter,
+    decode_chunk, encode_chunk, replay_container,
 };
 use persia_format::block::Compression;
 use persia_format::checksum::crc32c;
@@ -301,7 +301,7 @@ fn history() -> Vec<Vec<Op>> {
 /// first chunk (nothing flushed). Returns the file and, per group, the end of its chunk.
 fn write_history(history: &[Vec<Op>], committed: usize) -> (SimFile, Vec<u64>, u64) {
     let file = SimFile::new();
-    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap());
+    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap()).unwrap();
     let mut ends = Vec::new();
     let mut log_end = wal.log().end();
     for (i, group) in history.iter().enumerate() {
@@ -956,7 +956,7 @@ type Wal = WalWriter<Container<SimFile>>;
 
 fn new_wal() -> (SimFile, Wal) {
     let file = SimFile::new();
-    let wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap());
+    let wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap()).unwrap();
     (file, wal)
 }
 
@@ -1362,6 +1362,7 @@ fn a_fault_at_every_call_poisons_the_writer_and_keeps_acknowledged_writes() {
     let run = |fault: Option<SimFault>| {
         let file = SimFile::new();
         let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap())
+            .unwrap()
             .with_chunk_target(target);
         let base = file.mutations();
         file.set_fault(fault.map(|f| match f {
@@ -1561,7 +1562,7 @@ fn replay_stops_at_a_corrupt_record_keeping_earlier_ones() {
 
 #[test]
 fn a_flush_covers_only_the_records_before_its_mark() {
-    let mut wal = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap());
+    let mut wal = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap()).unwrap();
     wal.append(
         &WalRecord::delete("notes", "n1").unwrap(),
         Durability::Fsync,
@@ -1585,7 +1586,7 @@ fn a_flush_covers_only_the_records_before_its_mark() {
 /// `wal_start` from `commit_point` (or, wrongly, from `wal_start` without a sync). Returns the reopened container.
 fn drop_with_a_buffered_record(use_commit_point: bool) -> Container<SimFile> {
     let file = SimFile::new();
-    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap());
+    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap()).unwrap();
     wal.append(
         &WalRecord::delete("tasks", "t1").unwrap(),
         Durability::Buffered,
@@ -1639,7 +1640,7 @@ fn a_commit_point_keeps_buffered_records_of_a_dropped_collection_out_of_replay()
 
 #[test]
 fn a_mark_taken_right_after_resume_covers_the_replayed_chunks_only() {
-    let mut first = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap());
+    let mut first = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap()).unwrap();
     first
         .append(
             &WalRecord::delete("notes", "n1").unwrap(),
@@ -1661,4 +1662,30 @@ fn a_mark_taken_right_after_resume_covers_the_replayed_chunks_only() {
     assert_eq!(wal.wal_start(), replayed);
     wal.flushed("notes", m);
     assert_eq!(wal.wal_start(), new);
+}
+
+#[test]
+fn new_refuses_a_log_that_holds_chunks() {
+    let file = SimFile::new();
+    let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16]).unwrap()).unwrap();
+    wal.append(
+        &WalRecord::delete("notes", "n1").unwrap(),
+        Durability::Fsync,
+    )
+    .unwrap();
+    drop(wal);
+    let reopened = Container::open_on(file.crash(CrashLoss::All), Mode::ReadWrite).unwrap();
+    assert_eq!(WalWriter::new(reopened).unwrap_err(), LogHoldsChunks);
+}
+
+#[test]
+fn buffered_len_counts_record_bytes_only() {
+    let mut wal = WalWriter::new(Container::create_on(SimFile::new(), [7; 16]).unwrap()).unwrap();
+    // body_len, op, name_len, "notes", "n1", CRC.
+    wal.append(
+        &WalRecord::delete("notes", "n1").unwrap(),
+        Durability::Buffered,
+    )
+    .unwrap();
+    assert_eq!(wal.buffered_len(), 4 + 1 + 1 + 5 + 2 + 4);
 }

@@ -1228,7 +1228,7 @@ writer, like the container it writes to (§4.5): the records it held are lost or
 **What may be logged.** Replay must be able to apply every record, or every later open fails. A record is
 logged only for an operation that replay can apply: its collection is in the committed manifest (a created
 collection's commit completes before its first record), and its collection's memtable accepts it (a put's
-document validates and indexes: a docid left, no term over the limit a custom analyzer could emit). The write path guarantees this
+document validates and indexes: a docid left, no term over the limit a custom analyzer could emit). The write path must guarantee this
 before acknowledging (ROADMAP 6.3.9); the WAL itself checks only the record's framing.
 
 **`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection not yet covered by
@@ -1251,7 +1251,9 @@ as a delete (§8.3). The chunks are whole frames that passed validation, so a to
 invalid chunk or record stops it with corruption, at the first invalid byte, and the open fails. Replay is
 idempotent: by id, the state after a put or delete depends only on the last operation on that id, so applying a
 suffix of the log again, to a fresh memtable or on top of segments that already hold some of it, gives the same
-documents.
+documents. Replay writes only to memtables: a memtable's version of an id, live or deleted, hides every older
+segment's version of it (§8.3), so a segment copy of a replayed id is never visible, and the commit after replay
+tombstones it (ROADMAP 6.4.3).
 
 ### 8.3 Upserts and deletes
 Upsert = tombstone for the previous docid (looked up via `IdMap` across segments newest-first) + insert into memtable.

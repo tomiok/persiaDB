@@ -25,7 +25,7 @@
 //! let encoded = doc.encode(&schema, FieldSet::All)?;
 //!
 //! let file = SimFile::new();
-//! let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16])?);
+//! let mut wal = WalWriter::new(Container::create_on(file.clone(), [7; 16])?)?;
 //! wal.append_batch(
 //!     &[WalRecord::put("notes", &encoded)?, WalRecord::delete("notes", "n0")?],
 //!     Durability::Fsync,
@@ -55,4 +55,6 @@ pub use chunk::{
     WalOp, WalRecord, decode_chunk, encode_chunk,
 };
 pub use replay::{Replay, ReplayError, ReplaySummary, replay_container};
-pub use writer::{DEFAULT_CHUNK_TARGET, Durability, WalLog, WalMark, WalWriteError, WalWriter};
+pub use writer::{
+    DEFAULT_CHUNK_TARGET, Durability, LogHoldsChunks, WalLog, WalMark, WalWriteError, WalWriter,
+};

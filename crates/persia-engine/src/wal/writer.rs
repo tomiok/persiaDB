@@ -6,7 +6,7 @@ use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
 use persia_storage::container::{self, Container, ContainerFile};
 
-use super::chunk::{ChunkBuilder, ChunkFull, MAX_CHUNK_LEN, WalRecord};
+use super::chunk::{ChunkBuilder, ChunkFull, HEADER_LEN, MAX_CHUNK_LEN, WalRecord};
 
 /// Default size at which the writer closes its in-memory chunk and writes it out (SPEC §8.2.1).
 pub const DEFAULT_CHUNK_TARGET: usize = 1 << 20;
@@ -43,6 +43,10 @@ pub trait WalLog {
 
     /// The position the next chunk would take: the end of the log.
     fn end(&self) -> u64;
+
+    /// Whether the log holds chunks a replay would read (locally, a `WalChunk` frame from the committed `wal_start`
+    /// on).
+    fn holds_chunks(&self) -> bool;
 }
 
 impl<F: ContainerFile> WalLog for Container<F> {
@@ -61,6 +65,10 @@ impl<F: ContainerFile> WalLog for Container<F> {
     fn end(&self) -> u64 {
         Container::end(self)
     }
+
+    fn holds_chunks(&self) -> bool {
+        self.frames().iter().any(|f| f.kind == FrameKind::WalChunk)
+    }
 }
 
 /// Why a write to the WAL failed.
@@ -78,6 +86,11 @@ pub enum WalWriteError<E: std::error::Error + 'static> {
     #[error(transparent)]
     ChunkFull(#[from] ChunkFull),
 }
+
+/// [`WalWriter::new`] was given a log that holds chunks; replay them and use [`WalWriter::resume`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("the log holds WAL chunks: replay them and resume the writer with what replay found")]
+pub struct LogHoldsChunks;
 
 /// Where a chunk holding records of a collection is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,7 +122,7 @@ pub struct WalMark(u64);
 /// use persia_storage::container::sim::SimFile;
 ///
 /// let container = Container::create_on(SimFile::new(), [7; 16])?;
-/// let mut wal = WalWriter::new(container);
+/// let mut wal = WalWriter::new(container)?;
 /// wal.append(&WalRecord::delete("notes", "n1")?, Durability::Buffered)?;
 /// assert_eq!(wal.wal_start(), wal.log().end()); // nothing written yet
 /// let flush = wal.mark(); // the memtable of "notes" is frozen here
@@ -138,9 +151,16 @@ pub struct WalWriter<L> {
 }
 
 impl<L: WalLog> WalWriter<L> {
-    /// A writer appending to `log`, with no records waiting for a flush.
-    pub fn new(log: L) -> Self {
-        Self::resume(log, BTreeMap::new())
+    /// A writer appending to `log`, which holds no chunks yet (a new container, or one whose `wal_start` is the end
+    /// of its log). A log with chunks goes through replay and [`WalWriter::resume`], which keeps them needed.
+    ///
+    /// # Errors
+    /// [`LogHoldsChunks`] if `log` holds chunks: a writer that forgot them could move `wal_start` past them.
+    pub fn new(log: L) -> Result<Self, LogHoldsChunks> {
+        if log.holds_chunks() {
+            return Err(LogHoldsChunks);
+        }
+        Ok(Self::resume(log, BTreeMap::new()))
     }
 
     /// A writer appending to `log` after replay: `pending` gives, per collection, the position of the oldest chunk
@@ -190,13 +210,9 @@ impl<L: WalLog> WalWriter<L> {
         self.log
     }
 
-    /// Bytes of records in the in-memory chunk.
+    /// Bytes of the records in the in-memory chunk, without its header.
     pub fn buffered_len(&self) -> usize {
-        if self.chunk.is_empty() {
-            0
-        } else {
-            self.chunk.len()
-        }
+        self.chunk.len().saturating_sub(HEADER_LEN)
     }
 
     /// Appends one record with durability `durability`. The caller logs only an operation replay can apply: its

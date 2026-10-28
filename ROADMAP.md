@@ -375,7 +375,7 @@ Deps: M2, M5.
 - [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
 
 ## 6.2 WAL (SPEC §8.2)
-- [x] 6.2.1 WAL record format: op (put/delete), collection id, payload, checksum
+- [x] 6.2.1 WAL record format: op (put/delete), collection name, payload, checksum
 - [x] 6.2.2 Group commit: batch appends, single fsync, durability levels (`Buffered|Fsync|Async`)
 - [x] 6.2.3 WAL chunk rotation and `wal_start` advancement
 - 6.2.4 Replay: validate CRCs, stop at first invalid, idempotent

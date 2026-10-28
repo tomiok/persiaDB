@@ -159,7 +159,7 @@ Documents and postings per second.
 ## `persia-engine` WAL
 
 `cargo bench -p persia-engine --bench wal`: 2 000 encoded documents of about 40 words. `append_buffered` writes them one
-`Buffered` record at a time through `WalWriter` (chunks rotate at 1 MiB) and syncs once; `append_batch_fsync` is one
+`Buffered` record at a time through `WalWriter` (chunks rotate at 64 KiB, about 8 chunks) and syncs once; `append_batch_fsync` is one
 `append_batch` with `Fsync`; `replay` reopens the container and replays every chunk into a memtable (decoding each
 document and indexing it). The log is a `SimFile`, so no time is spent in a real sync. Document bytes per second.
 
