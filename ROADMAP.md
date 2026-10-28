@@ -375,12 +375,12 @@ Deps: M2, M5.
 - [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
 
 ## 6.2 WAL (SPEC §8.2)
-- [ ] 6.2.1 WAL record format: op (put/delete), collection id, payload, checksum
-- [ ] 6.2.2 Group commit: batch appends, single fsync, durability levels (`Buffered|Fsync|Async`)
-- [ ] 6.2.3 WAL chunk rotation and `wal_start` advancement
+- [x] 6.2.1 WAL record format: op (put/delete), collection name, payload, checksum
+- [x] 6.2.2 Group commit: batch appends, single fsync, durability levels (`Buffered|Fsync|Async`)
+- [x] 6.2.3 WAL chunk rotation and `wal_start` advancement
 - 6.2.4 Replay: validate CRCs, stop at first invalid, idempotent
-  - [ ] 6.2.4.1 [T] truncate WAL at every byte → recovered state equals a prefix of operations
-- [ ] 6.2.5 Fuzz WAL replay
+  - [x] 6.2.4.1 [T] truncate WAL at every byte → recovered state equals a prefix of operations
+- [x] 6.2.5 Fuzz WAL replay
 
 ## 6.3 Flush & commit
 - [ ] 6.3.1 Memtable → segment (uses M5 writer) → storage frame/object
@@ -391,6 +391,7 @@ Deps: M2, M5.
 - [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
 - [ ] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
 - [ ] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
+- [ ] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
@@ -413,6 +414,7 @@ Deps: M2, M5.
 - [ ] 6.6.2 Single-writer enforcement + read-only open for readers
 - [ ] 6.6.3 `persia verify` full database verification command
 - [ ] 6.6.4 Differential + crash-loop test harness (kill -9 child process in loop, reopen, check invariants) — shared with integration-tester
+- [ ] 6.6.5 Flush during replay: one collection's unflushed record holds `wal_start` back for all, so replay may hold more than a memtable threshold (or `MAX_DOCS` docids) of another collection; flush to a segment when a replayed memtable reaches its threshold instead of failing the open. Test: replay past the size threshold and the docid limit (found in the 6.2 review)
 
 ---
 

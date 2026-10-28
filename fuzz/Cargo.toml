@@ -172,3 +172,10 @@ path = "fuzz_targets/segment.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "wal_replay"
+path = "fuzz_targets/wal_replay.rs"
+test = false
+doc = false
+bench = false

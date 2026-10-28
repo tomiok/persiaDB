@@ -30,3 +30,7 @@ workspace = true
 [[bench]]
 name = "segment"
 harness = false
+
+[[bench]]
+name = "wal"
+harness = false

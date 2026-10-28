@@ -27,7 +27,7 @@ mod field;
 mod json;
 mod validate;
 
-pub(crate) use validate::field_name_problem;
+pub(crate) use validate::{collection_name_problem, field_name_problem};
 
 use std::collections::BTreeMap;
 use std::fmt;

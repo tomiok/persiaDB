@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the write-ahead log (ROADMAP 6.2, SPEC §8.2.1, ADR-0028). `WalWriter` encodes `put` and `delete`
+  records into chunks (`WalChunk` frames of the container), with per-call `Durability` (`Buffered`, `Async`, `Fsync`,
+  the default): one sync covers every record written since the last (group commit), chunks rotate at 1 MiB, and a
+  failed write or sync poisons the writer. It tracks `wal_start`, the oldest chunk holding a record of a collection not
+  flushed since. `replay_container` (or `Replay`, chunk by chunk) applies the chunks from `wal_start` to the
+  collections' memtables; replay is idempotent, and an invalid chunk or record fails it. Fuzz target `wal_replay`.
 - `persia-engine`: the memtable (ROADMAP 6.1, SPEC §8.2–§8.4). `Memtable` indexes `put`s and `delete`s in memory
   with the segment builder's analysis, so it has the terms, positions and norms of the segment it will flush to. An
   upsert replaces the earlier version inside the memtable; a delete is recorded even for an id the memtable lacks
@@ -267,6 +273,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   runs with a gap of 100 between values, Lucene `SmallFloat` norms, tagged columns (FOR numeric, roaring bool,
   dictionary + ords keyword) and record arrays for rows, ids and blob references. Golden segment in
   `tests/fixtures/segment/v1.0/`.
+- WAL chunk encoding version 1 (SPEC §8.2.1; ADR-0028): magic `PWAL`, `version`, `record_count`, then records of
+  `body_len`, body (`op` put/delete, the collection name, the document encoding or the id) and a CRC32C each; at most
+  64 MiB. Golden chunks in `tests/fixtures/wal/v1/`.
 - Manifest encoding version 1 (SPEC §8.7; ADR-0024): magic `PMNF`, fixed-width little-endian scalar fields, and
   variable-length segment entries (id, doc count, size, object or frame location, optional tombstone sidecar),
   schemas as JSON with pinned ids and analyzer versions, CRC32C trailer. Golden files in `tests/fixtures/manifest/v1/`.
