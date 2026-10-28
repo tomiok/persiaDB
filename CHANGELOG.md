@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the local write path (ROADMAP 6.3, SPEC §4.5, §8.2, §8.4, ADR-0029). `db::Database` creates or
+  opens a database on a container, creates collections, and takes `put`, `put_batch` and `delete` with a
+  `Durability`. `commit()` flushes every memtable into a `Segment` frame and commits a manifest naming them; `tick()`
+  applies `CommitPolicy` (memtable size, 10 s idle, `commit_interval` 60 s) with an injected `Clock`. After each commit
+  a `Snapshot` (segments plus a read handle on each memtable) is published atomically; `DatabaseReader` loads it from
+  any thread. Opening checks the manifest against the superblock and every frame location (`Manifest::check_layout`,
+  `Layout`), opens the segments and replays the WAL; `open_container` takes a container opened with
+  `Repair::Quarantine`. `ContainerObjects` presents the committed manifest, segments, sidecars and WAL chunks as a
+  read-only `Storage` under the remote layout's keys. `Memtable::put_logged`/`delete_logged` stage an operation, log
+  it, then publish it, so a rejected operation is never logged (6.3.9); `Memtable::reader` gives a `MemtableReader`.
+  Fuzz target `database_open`; bench `database` (`put_buffered` 269 K, `commit` 205 K documents/s).
+- `persia-format`: `Corruption::WrongFrame`, for a manifest location that names a frame of another kind or length.
 - `persia-engine`: the write-ahead log (ROADMAP 6.2, SPEC §8.2.1, ADR-0028). `WalWriter` encodes `put` and `delete`
   records into chunks (`WalChunk` frames of the container), with per-call `Durability` (`Buffered`, `Async`, `Fsync`,
   the default): one sync covers every record written since the last (group commit), chunks rotate at 1 MiB, and a
