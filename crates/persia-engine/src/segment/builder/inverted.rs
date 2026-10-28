@@ -108,6 +108,44 @@ impl Inverted {
         Ok(())
     }
 
+    /// Records one posting as a merge copies it (ROADMAP 6.5.2): term id `term` occurs `tf ≥ 1` times in document
+    /// `doc`, at `positions` (`tf` of them when the field keeps positions, ignored otherwise). Postings arrive in
+    /// docid order, and within a document in term id order; [`Self::end_doc`] closes each document.
+    pub(crate) fn add_posting(
+        &mut self,
+        doc: u32,
+        term: u32,
+        tf: u32,
+        positions: &[u32],
+    ) -> Result<(), SegmentError> {
+        let too_many = || SegmentError::TooLarge { what: "positions" };
+        let pos_start = match &mut self.positions {
+            Some(list) => {
+                let start = u32::try_from(list.len()).map_err(|_| too_many())?;
+                list.extend_from_slice(positions);
+                u32::try_from(list.len()).map_err(|_| too_many())?;
+                start
+            }
+            None => 0,
+        };
+        self.postings.push(Posting {
+            term,
+            doc,
+            tf,
+            pos_start,
+        });
+        Ok(())
+    }
+
+    /// Closes document `doc` after its [`Self::add_posting`] calls: its field has `len` tokens (or values), the sum
+    /// of its postings' frequencies.
+    pub(crate) fn end_doc(&mut self, doc: u32, len: u32) {
+        if len > 0 {
+            self.lengths.push((doc, len));
+            self.sum_len = self.sum_len.saturating_add(u64::from(len));
+        }
+    }
+
     /// Where the accumulators end, for [`Self::rollback`].
     pub(crate) fn mark(&self) -> Mark {
         Mark {

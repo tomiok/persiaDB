@@ -161,6 +161,23 @@ Documents and postings per second.
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.1) | 78.9 K | 45.4 M | 69.6 K |
 
+## `persia-engine` segment merging
+
+`cargo bench -p persia-engine --bench segment -- segment_merge`: the 2 000 documents of the segment building
+benchmarks, written as 8 segments of 250, every 10th document of each deleted. `copy_8` is `merge` (ROADMAP 6.5.2:
+every live posting, position, column value, row, id and blob ref copied into a builder); `copy_and_write_8` adds
+`MergedSegment::write`. Live documents per second; compare with `segment/add` and `segment/finish`, which build the same
+documents from scratch.
+
+| Recorded | `segment_merge/copy_8` | `segment_merge/copy_and_write_8` | `segment/add`, same run |
+|---|--:|--:|--:|
+| 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.5.2) | 44.8 K | 30.2 K | 70.0 K |
+
+The copy is slower than analyzing the documents again. Taking parts out of the merge, one at a time, put about 26 ms
+of the 40 ms in the reader (per term: a `Postings` cursor, then `next` and `freq` block by block), 8 ms in regrouping
+the copied postings by document, and 4 ms in interning terms. A merge-specific reader that decodes whole lists is
+ROADMAP 6.5.7.
+
 ## `persia-engine` WAL
 
 `cargo bench -p persia-engine --bench wal`: 2 000 encoded documents of about 40 words. `append_buffered` writes them one
