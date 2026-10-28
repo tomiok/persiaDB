@@ -4,6 +4,11 @@ Reference numbers for later comparison (for example, a SIMD decoder against the 
 They are single-machine snapshots, not targets (SPEC §16.2). Re-run them on the same machine before
 comparing, and add a new dated row instead of editing an old one. Automated regression tracking is ROADMAP 1.11.2.
 
+The comparative campaign — other engines, shared corpora, and what may be claimed — is specified in
+[`BENCHMARKS.md`](../BENCHMARKS.md). That file is a methodology plan and has no results. The tables on
+this page are internal microbenchmark snapshots. They are not product claims and they are not
+comparisons against other engines.
+
 ## `persia-format` integer codecs (scalar)
 
 - Command: `cargo bench -p persia-format --bench bitpack --bench blocks -- --warm-up-time 1 --measurement-time 2`
