@@ -10,6 +10,9 @@
 //!    that failed: a commit changes no document, so a commit cut at any step of SPEC §4.5 loses nothing.
 //! 2. The committed `seq` is the one before the failed commit or one more; never anything in between.
 //! 3. Recovery is idempotent: committing after the reopen, and reopening again, shows the same documents.
+//! 4. The same holds for a fault inside `create_collection` (the collection exists after the reopen if and only if
+//!    its create was acknowledged, or it is the failed operation) and inside the size-triggered flush and commit a
+//!    `put` runs before logging (SPEC §8.2 step 3).
 
 #![allow(
     clippy::unwrap_used,
@@ -26,10 +29,10 @@ use std::sync::Arc;
 use std::path::Path;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
+    CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::memtable::IdState;
+use persia_engine::memtable::{FlushPolicy, IdState};
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
@@ -65,6 +68,8 @@ enum Op {
     Put(&'static str, String, String),
     Delete(&'static str, String),
     Commit,
+    /// `create_collection` of a collection with the test schema.
+    Create(&'static str),
 }
 
 /// Documents by collection and id: their body text.
@@ -79,6 +84,9 @@ fn apply(state: &mut State, op: &Op) {
             state.entry(c).or_default().remove(id);
         }
         Op::Commit => {}
+        Op::Create(c) => {
+            state.entry(c).or_default();
+        }
     }
 }
 
@@ -125,13 +133,17 @@ fn run(db: &mut Database<SimFile>, op: &Op) -> Result<(), DatabaseError> {
         Op::Put(c, id, text) => db.put(c, &doc(id, text), Durability::Fsync),
         Op::Delete(c, id) => db.delete(c, id, Durability::Fsync),
         Op::Commit => db.commit().map(drop),
+        Op::Create(c) => db.create_collection(schema(c)).map(drop),
     }
 }
 
 fn observed(snapshot: &Snapshot) -> State {
     let mut state = State::new();
-    for name in ["a", "b"] {
-        let c = snapshot.collection(name).unwrap();
+    for name in ["a", "b", "c"] {
+        // A collection whose create did not survive is absent from the state, not empty.
+        let Some(c) = snapshot.collection(name) else {
+            continue;
+        };
         let memtable = c.memtable();
         let mut ids = BTreeSet::new();
         for docid in 0..memtable.doc_count() {
@@ -294,5 +306,112 @@ fn a_crash_at_any_write_of_the_write_path_keeps_every_acknowledged_operation() {
     }
     assert_eq!(checked, total * 6);
     // Deterministic; shown so a change in how often the fallback runs is visible.
+    eprintln!("{quarantined} of {checked} crashes left a corrupt tail (quarantined)");
+}
+
+/// Options whose every memtable is full after one operation, so each `put` flushes and commits the memtable before
+/// logging (SPEC §8.2 step 3).
+fn flushing_options() -> DatabaseOptions {
+    DatabaseOptions {
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: 1,
+                ..FlushPolicy::default()
+            },
+            ..CommitPolicy::default()
+        },
+        ..options()
+    }
+}
+
+/// Invariant 4 (ROADMAP 6.3.5): a fault at every mutating call of `create_collection` and of the size-triggered
+/// flush inside `put`. The reopen shows a collection whose create was acknowledged, and one whose create failed
+/// either fully or not at all; and every acknowledged put.
+#[test]
+fn a_crash_inside_create_collection_or_a_size_triggered_flush_keeps_every_acknowledged_operation() {
+    let base_bytes = {
+        let file = SimFile::new();
+        let mut db = Database::create_on(file.clone(), [6; 16], flushing_options()).unwrap();
+        db.create_collection(schema("a")).unwrap();
+        file.durable_bytes()
+    };
+    let base_state: State = BTreeMap::from([("a", BTreeMap::new())]);
+    // No explicit commit: every segment comes from a size-triggered flush or rides on a create.
+    let ops = vec![
+        Op::Put("a", "a0".into(), "first".into()),
+        Op::Put("a", "a1".into(), "second".into()),
+        Op::Create("b"),
+        Op::Put("b", "b0".into(), "bravo".into()),
+        Op::Put("a", "a0".into(), "first replaced".into()),
+        Op::Put("b", "b1".into(), "bravo two".into()),
+        Op::Create("c"),
+        Op::Put("a", "a2".into(), "third".into()),
+        Op::Put("b", "b0".into(), "bravo replaced".into()),
+    ];
+
+    let total = {
+        let file = SimFile::from_bytes(base_bytes.clone());
+        let mut db = Database::open_on(file.clone(), flushing_options()).unwrap();
+        let start = file.mutations();
+        for op in &ops {
+            run(&mut db, op).unwrap();
+        }
+        // The puts did flush: `a` and `b` hold segments though nothing called `commit`.
+        let snapshot = db.snapshot();
+        assert!(snapshot.collection("a").unwrap().segments().len() >= 2);
+        assert!(!snapshot.collection("b").unwrap().segments().is_empty());
+        file.mutations() - start
+    };
+    assert!(total > 40, "{total} mutating calls");
+
+    let mut checked = 0;
+    let mut quarantined = 0;
+    for point in 0..total {
+        for apply_first in [false, true] {
+            let file = SimFile::from_bytes(base_bytes.clone());
+            let mut db = Database::open_on(file.clone(), flushing_options()).unwrap();
+            let at = file.mutations() + point;
+            file.set_fault(Some(if apply_first {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            let mut acknowledged = base_state.clone();
+            let mut failed = None;
+            let mut seq = db.seq();
+            for op in &ops {
+                seq = db.seq();
+                match run(&mut db, op) {
+                    Ok(()) => apply(&mut acknowledged, op),
+                    Err(e) => {
+                        failed = Some((op.clone(), e));
+                        break;
+                    }
+                }
+            }
+            let (failed, error) = failed.unwrap_or_else(|| panic!("no fault at call {point}"));
+            let mut with_failed = acknowledged.clone();
+            apply(&mut with_failed, &failed);
+            drop(db);
+
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(point)] {
+                let ctx = format!(
+                    "call {point}, apply first {apply_first}, {loss:?}, {failed:?}: {error}"
+                );
+                let (state, reopened_seq) = reopen(&file.crash(loss), &ctx, &mut quarantined);
+                assert!(
+                    state == acknowledged || state == with_failed,
+                    "{ctx}\n  observed {state:?}\n  acknowledged {acknowledged:?}"
+                );
+                // A put may have committed its flush before its own record failed; a create commits.
+                assert!(
+                    reopened_seq == seq || reopened_seq == seq + 1,
+                    "{ctx}: seq {reopened_seq}, before the failed operation {seq}"
+                );
+                checked += 1;
+            }
+        }
+    }
+    assert_eq!(checked, total * 6);
     eprintln!("{quarantined} of {checked} crashes left a corrupt tail (quarantined)");
 }
