@@ -179,3 +179,10 @@ path = "fuzz_targets/wal_replay.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "database_open"
+path = "fuzz_targets/database_open.rs"
+test = false
+doc = false
+bench = false
