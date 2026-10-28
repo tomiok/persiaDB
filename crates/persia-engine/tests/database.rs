@@ -293,11 +293,9 @@ fn tick_follows_the_commit_policy() {
     assert_eq!(db.tick().unwrap(), None);
     clock.advance(Duration::from_secs(100));
     assert_eq!(db.tick().unwrap(), None, "empty memtables are never due");
-    // Any commit restarts the interval.
-    db.create_collection(schema("c")).unwrap();
     let seq = db.seq();
 
-    // Idle: `a` stops at t, `b` keeps being written.
+    // Idle: `a` stops at t, `b` keeps being written. When `a` is due, the commit flushes both (ADR-0029).
     db.put("a", &doc("a1", "x"), Durability::Buffered).unwrap();
     db.put("b", &doc("b1", "x"), Durability::Buffered).unwrap();
     clock.advance(Duration::from_secs(9));
@@ -307,10 +305,14 @@ fn tick_follows_the_commit_policy() {
     assert_eq!(db.tick().unwrap(), Some(seq + 1));
     let s = db.snapshot();
     assert_eq!(s.collection("a").unwrap().segments().len(), 1);
-    assert!(s.collection("b").unwrap().segments().is_empty());
+    assert_eq!(s.collection("b").unwrap().segments().len(), 1);
+    assert_eq!(
+        db.manifest().wal_start(),
+        db.container().superblock().manifest_off
+    );
 
-    // Interval: `b` is written every 5 s, never idle for 10 s, and is flushed 30 s after the last commit.
-    for _ in 0..5 {
+    // Interval: `b` is written every 5 s, never idle for 10 s, and is flushed 30 s after its first unflushed write.
+    for _ in 0..6 {
         clock.advance(Duration::from_secs(5));
         db.put("b", &doc("b3", "x"), Durability::Buffered).unwrap();
         assert_eq!(db.tick().unwrap(), None);
@@ -318,8 +320,53 @@ fn tick_follows_the_commit_policy() {
     clock.advance(Duration::from_secs(5));
     db.put("b", &doc("b4", "x"), Durability::Buffered).unwrap();
     assert_eq!(db.tick().unwrap(), Some(seq + 2));
-    assert_eq!(db.snapshot().collection("b").unwrap().segments().len(), 1);
+    assert_eq!(db.snapshot().collection("b").unwrap().segments().len(), 2);
     assert_eq!(db.tick().unwrap(), None);
+}
+
+/// Commits that flush nothing (here, creating collections) do not restart a memtable's interval (review of 6.3.4).
+#[test]
+fn other_commits_do_not_starve_the_interval() {
+    let clock = clock();
+    let opts = DatabaseOptions {
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: 1 << 20,
+                idle: Duration::from_secs(10),
+            },
+            interval: Duration::from_secs(60),
+        },
+        ..options(&clock)
+    };
+    let mut db = Database::create_on(SimFile::new(), [12; 16], opts).unwrap();
+    db.create_collection(schema("trickle")).unwrap();
+    let mut flushed_at = None;
+    for step in 1..=100_u64 {
+        clock.advance(Duration::from_secs(5));
+        db.put(
+            "trickle",
+            &doc(&format!("t{step}"), "x"),
+            Durability::Buffered,
+        )
+        .unwrap();
+        if step % 4 == 0 {
+            db.create_collection(schema(&format!("c{step}"))).unwrap();
+        }
+        if db.tick().unwrap().is_some() {
+            flushed_at = Some(step);
+            break;
+        }
+    }
+    // First write at step 1 (5 s); due 60 s later.
+    assert_eq!(flushed_at, Some(13));
+    assert_eq!(
+        db.snapshot()
+            .collection("trickle")
+            .unwrap()
+            .segments()
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -767,4 +814,49 @@ fn a_batch_takes_one_sync() {
     assert_eq!(file.mutations(), before);
     db.put("a", &doc("y", "y"), Durability::Async).unwrap();
     assert_eq!(file.mutations() - before, 1);
+}
+
+/// A flush triggered by one collection flushes every collection, so a crash after it replays no record that is
+/// already in a segment, and the next commit writes no second copy (review of 6.3.1/6.3.4).
+#[test]
+fn a_crash_after_a_size_flush_writes_no_document_twice() {
+    let clock = clock();
+    let opts = || DatabaseOptions {
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: 4 << 10,
+                idle: Duration::from_secs(10),
+            },
+            interval: Duration::from_secs(3600),
+        },
+        ..options(&clock)
+    };
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [13; 16], opts()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.create_collection(schema("b")).unwrap();
+    db.put("b", &doc("b1", "bravo"), Durability::Fsync).unwrap();
+    let text = "lorem ipsum dolor sit amet ".repeat(20);
+    let mut i = 0;
+    while db.snapshot().collection("a").unwrap().segments().is_empty() {
+        db.put("a", &doc(&format!("a{i}"), &text), Durability::Fsync)
+            .unwrap();
+        i += 1;
+    }
+    db.put("a", &doc("late", "after the flush"), Durability::Fsync)
+        .unwrap();
+    drop(db);
+    let mut db = Database::open_on(file.crash(CrashLoss::All), opts()).unwrap();
+    db.commit().unwrap();
+    for name in ["a", "b"] {
+        let snapshot = db.snapshot();
+        let mut ids = Vec::new();
+        for s in snapshot.collection(name).unwrap().segments() {
+            ids.extend((0..s.doc_count()).map(|d| s.id_of(d).unwrap()));
+        }
+        let unique: BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "{name}: {ids:?}");
+    }
+    assert_eq!(documents(&db.snapshot(), "a").len(), i + 1);
+    assert_eq!(documents(&db.snapshot(), "b").len(), 1);
 }

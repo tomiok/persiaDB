@@ -392,7 +392,9 @@ impl Memtable {
                 .rollback(&staged.marks);
             return Err(Logged::Log(e));
         }
-        let mut inner = write(&self.shared).map_err(Logged::Rejected)?;
+        // Logged: publishing must not fail now. A poisoned lock means an earlier write panicked; the data is append-only,
+        // so this write still lands whole.
+        let mut inner = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         // Nothing fails from here on. `&mut self` kept every other write out since the stage, so the docid and the
         // version are still the next ones.
         inner.link(staged.docid, &staged.marks);
@@ -479,7 +481,7 @@ impl Memtable {
             (version, id)
         };
         log().map_err(Logged::Log)?;
-        let mut inner = write(&self.shared).map_err(Logged::Rejected)?;
+        let mut inner = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         Ok(inner.record(id, NONE, version))
     }
 
@@ -609,8 +611,8 @@ impl Inner {
             .collect()
     }
 
-    /// Undoes a document that failed before [`Self::link`] and before its id was interned: its postings were never
-    /// chained.
+    /// Undoes a document that failed before [`Self::link`]: its postings were never chained. Its id was not interned,
+    /// except when [`Memtable::put_logged`]'s log failed; an id with no operation is unseen by every view.
     fn rollback(&mut self, marks: &[Option<Mark>]) {
         for (field, mark) in self.fields.iter_mut().zip(marks) {
             if let (Some(index), Some(mark)) = (field.index_mut(), mark) {

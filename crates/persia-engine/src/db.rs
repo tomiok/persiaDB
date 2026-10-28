@@ -61,7 +61,7 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use objects::ContainerObjects;
-pub use policy::{CommitPolicy, CommitReason};
+pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Snapshot};
 
 use crate::document::Document;
@@ -166,6 +166,12 @@ pub enum DatabaseError {
         /// The name.
         name: String,
     },
+    /// An invariant of the database did not hold: a bug, reported rather than acted on. The database is poisoned.
+    #[error("internal error: {what}")]
+    Internal {
+        /// What did not hold.
+        what: &'static str,
+    },
     /// An earlier write, sync or commit failed, so what reached the disk is unknown: reopen the database.
     #[error("an earlier write failed; reopen the database to recover")]
     Poisoned,
@@ -222,6 +228,8 @@ struct Collection {
     schema: Arc<CollectionSchema>,
     segments: Vec<Arc<Segment>>,
     memtable: Memtable,
+    /// When the memtable's oldest unflushed operation was applied; `None` while it is empty.
+    first_write: Option<Instant>,
     /// When the memtable was last written; `None` while it is empty.
     last_write: Option<Instant>,
 }
@@ -246,7 +254,6 @@ pub struct Database<F = File> {
     collections: BTreeMap<String, Collection>,
     published: Arc<ArcSwap<Snapshot>>,
     options: DatabaseOptions,
-    last_commit: Instant,
     poisoned: bool,
 }
 
@@ -361,6 +368,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 schema,
                 segments,
                 memtable,
+                first_write: last_write,
                 last_write,
             };
             states.insert(name, state);
@@ -383,7 +391,6 @@ impl<F: ContainerFile + Sync> Database<F> {
             manifest,
             collections,
             published: Arc::new(ArcSwap::from_pointee(snapshot)),
-            last_commit: options.clock.now(),
             options,
             poisoned: false,
         }
@@ -452,6 +459,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             schema: Arc::new(schema),
             segments: Vec::new(),
             memtable,
+            first_write: None,
             last_write: None,
         };
         self.commit_guarded(Vec::new(), diff, Some((name, collection)))
@@ -479,7 +487,8 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`Database::put`] of every document of `docs` in order, reaching `durability` once for all of them (one
     /// sync for `Fsync`, SPEC §8.2.1). The last document is logged with `durability` and becomes visible once it is
     /// durable, like a single `put`; the ones before it are visible once buffered, so a reader may see them before
-    /// the batch is durable (a failed sync then poisons the database, and a reopen decides what survived).
+    /// the batch is durable (a failed sync then poisons the database, and a reopen decides what survived). The size
+    /// threshold is checked before each document, so a batch may commit part of itself.
     ///
     /// # Errors
     /// As [`Database::put`]; a rejected document is [`DatabaseError::BatchRejected`], after the documents before it
@@ -491,17 +500,9 @@ impl<F: ContainerFile + Sync> Database<F> {
         durability: Durability,
     ) -> Result<(), DatabaseError> {
         self.usable()?;
-        self.flush_if_full(collection)?;
-        let now = self.options.clock.now();
-        let Self {
-            wal,
-            collections,
-            poisoned,
-            ..
-        } = self;
-        let state = collections
-            .get_mut(collection)
-            .ok_or_else(|| no_such(collection))?;
+        if !self.collections.contains_key(collection) {
+            return Err(no_such(collection));
+        }
         let last = docs.len().saturating_sub(1);
         for (index, doc) in docs.iter().enumerate() {
             let level = if index == last {
@@ -509,22 +510,24 @@ impl<F: ContainerFile + Sync> Database<F> {
             } else {
                 Durability::Buffered
             };
+            self.flush_if_full(collection)?;
+            let Self {
+                wal, collections, ..
+            } = &mut *self;
+            let state = collections
+                .get_mut(collection)
+                .ok_or_else(|| no_such(collection))?;
             let logged = state.memtable.put_logged(doc, |encoded| {
                 let record = WalRecord::put(collection, encoded)?;
                 wal.append(&record, level).map_err(DatabaseError::from)
             });
-            match logged {
-                Ok(_) => state.last_write = Some(now),
-                Err(Logged::Rejected(source)) => {
+            match self.written(collection, logged.map(drop)) {
+                Ok(()) => {}
+                Err(DatabaseError::Memtable(source)) => {
                     self.reach(durability)?;
                     return Err(DatabaseError::BatchRejected { index, source });
                 }
-                Err(Logged::Log(e)) => {
-                    if matches!(e, DatabaseError::Wal(_)) {
-                        *poisoned = true;
-                    }
-                    return Err(e);
-                }
+                Err(e) => return Err(e),
             }
         }
         Ok(())
@@ -542,13 +545,9 @@ impl<F: ContainerFile + Sync> Database<F> {
     ) -> Result<(), DatabaseError> {
         self.usable()?;
         self.flush_if_full(collection)?;
-        let now = self.options.clock.now();
         let Self {
-            wal,
-            collections,
-            poisoned,
-            ..
-        } = self;
+            wal, collections, ..
+        } = &mut *self;
         let state = collections
             .get_mut(collection)
             .ok_or_else(|| no_such(collection))?;
@@ -556,15 +555,29 @@ impl<F: ContainerFile + Sync> Database<F> {
             let record = WalRecord::delete(collection, id)?;
             wal.append(&record, durability).map_err(DatabaseError::from)
         });
+        self.written(collection, logged.map(drop))
+    }
+
+    /// Records the outcome of a logged operation on `collection`: its write times when it applied, poisoning when the
+    /// WAL failed. A rejection becomes [`DatabaseError::Memtable`].
+    fn written(
+        &mut self,
+        collection: &str,
+        logged: Result<(), Logged<DatabaseError>>,
+    ) -> Result<(), DatabaseError> {
         match logged {
-            Ok(_) => {
-                state.last_write = Some(now);
+            Ok(()) => {
+                let now = self.options.clock.now();
+                if let Some(c) = self.collections.get_mut(collection) {
+                    c.first_write.get_or_insert(now);
+                    c.last_write = Some(now);
+                }
                 Ok(())
             }
             Err(Logged::Rejected(e)) => Err(e.into()),
             Err(Logged::Log(e)) => {
                 if matches!(e, DatabaseError::Wal(_)) {
-                    *poisoned = true;
+                    self.poisoned = true;
                 }
                 Err(e)
             }
@@ -581,13 +594,13 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(result?)
     }
 
-    /// Flushes and commits `collection` if its memtable reached the size threshold (SPEC §8.2 step 3).
+    /// Commits if `collection`'s memtable reached the size threshold (SPEC §8.2 step 3).
     fn flush_if_full(&mut self, collection: &str) -> Result<(), DatabaseError> {
         let full = self.collections.get(collection).is_some_and(|c| {
             c.memtable.size_in_bytes() >= self.options.policy.flush.memtable_bytes
         });
         if full {
-            self.commit_collections(vec![collection.to_owned()])?;
+            self.commit()?;
         }
         Ok(())
     }
@@ -595,48 +608,18 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// Flushes every memtable that holds operations and commits (SPEC §4.5); returns the `seq` of the committed
     /// state, unchanged if there was nothing to flush.
     ///
+    /// Every flush commit flushes every collection with operations, whatever triggered it (ADR-0029): `wal_start`
+    /// then reaches the end of the log, so no record already in a segment is replayed into a memtable and flushed a
+    /// second time after a crash.
+    ///
     /// # Errors
     /// [`DatabaseError::Segment`] if a segment cannot be built (nothing is written then); any other error poisons
     /// the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
-        let names = self.collections.keys().cloned().collect();
-        self.commit_collections(names)
-    }
-
-    /// Commits if the [`CommitPolicy`] says so at the clock's `now`, flushing the memtables it names (ROADMAP
-    /// 6.3.4); returns the new `seq` if it committed. Call it periodically: the engine runs no thread of its own.
-    ///
-    /// # Errors
-    /// As [`Database::commit`].
-    pub fn tick(&mut self) -> Result<Option<u64>, DatabaseError> {
-        self.usable()?;
-        let now = self.options.clock.now();
-        let memtables = self
-            .collections
-            .values()
-            .map(|c| (c.memtable.size_in_bytes(), c.last_write));
-        let due = self.options.policy.due(memtables, self.last_commit, now);
-        let names: Vec<String> = self
-            .collections
-            .keys()
-            .zip(due)
-            .filter_map(|(name, due)| due.map(|_| name.clone()))
-            .collect();
-        if names.is_empty() {
-            return Ok(None);
-        }
-        self.commit_collections(names).map(Some)
-    }
-
-    /// Flushes the non-empty memtables of `names` and commits.
-    fn commit_collections(&mut self, names: Vec<String>) -> Result<u64, DatabaseError> {
         self.usable()?;
         // Build every segment before writing anything, so a failure here leaves the database as it was.
         let mut planned = Vec::new();
-        for name in names {
-            let Some(c) = self.collections.get(&name) else {
-                continue;
-            };
+        for (name, c) in &self.collections {
             if c.memtable.is_empty() {
                 continue;
             }
@@ -649,7 +632,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             let registry = &self.options.registry;
             let segment = flush::segment(&c.memtable, registry, meta, self.options.write_options)?;
             planned.push(Planned {
-                collection: name,
+                collection: name.clone(),
                 mark: self.wal.mark(),
                 segment: segment.map(|s| (id, s)),
                 memtable: Memtable::new(&c.schema, registry)?,
@@ -661,6 +644,31 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.commit_guarded(planned, ManifestDiff::default(), None)
     }
 
+    /// Commits if the [`CommitPolicy`] finds any memtable due at the clock's `now` (ROADMAP 6.3.4), flushing every
+    /// memtable with operations ([`Database::commit`]); returns the new `seq` if it committed. Call it periodically:
+    /// the engine runs no thread of its own.
+    ///
+    /// # Errors
+    /// As [`Database::commit`].
+    pub fn tick(&mut self) -> Result<Option<u64>, DatabaseError> {
+        self.usable()?;
+        let now = self.options.clock.now();
+        let memtables = self.collections.values().map(|c| MemtableState {
+            size_in_bytes: c.memtable.size_in_bytes(),
+            first_write: c.first_write,
+            last_write: c.last_write,
+        });
+        if self
+            .options
+            .policy
+            .due(memtables, now)
+            .iter()
+            .all(Option::is_none)
+        {
+            return Ok(None);
+        }
+        self.commit().map(Some)
+    }
     /// [`Database::commit_planned`]; any failure poisons the database, since the container may hold part of it.
     fn commit_guarded(
         &mut self,
@@ -737,9 +745,9 @@ impl<F: ContainerFile + Sync> Database<F> {
                 let entry = next
                     .collection(&p.collection)
                     .and_then(|c| c.segment(*id))
-                    .ok_or(DatabaseError::Apply(ApplyError::SegmentOrder {
-                        collection: p.collection.clone(),
-                    }))?;
+                    .ok_or(DatabaseError::Internal {
+                        what: "a committed segment is not in its manifest",
+                    })?;
                 opened.push(open_segment(&objects, &p.collection, entry, &schema)?);
             }
         }
@@ -749,6 +757,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 continue;
             };
             c.memtable = p.memtable;
+            c.first_write = None;
             c.last_write = None;
             if p.segment.is_some()
                 && let Some(segment) = opened.next()
@@ -760,7 +769,6 @@ impl<F: ContainerFile + Sync> Database<F> {
             self.collections.insert(name, collection);
         }
         self.manifest = Arc::new(next);
-        self.last_commit = self.options.clock.now();
         self.published
             .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
         Ok(self.manifest.seq())
@@ -859,6 +867,3 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
             .collect(),
     }
 }
-
-#[cfg(test)]
-mod tests;

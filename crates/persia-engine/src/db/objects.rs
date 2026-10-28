@@ -16,6 +16,9 @@
 //! superblock slot: a frame has no name to `put`, and a commit is not a `put_if_absent` of one object. `put`,
 //! `put_if_absent` and `delete` are [`Error::Unsupported`], and [`Storage::capabilities`] claims nothing.
 //!
+//! Reads fetch and check the whole frame, also for a range of it, and `list` reads the frames of the manifest, the
+//! sidecars and the WAL chunks to report their payload lengths: the view serves opens and tools, not hot paths.
+//!
 //! Every read checks the frame against what the manifest says it is (SPEC §8.7.1, ROADMAP 6.3.7): a frame of the
 //! right kind and length, entirely below the committed `log_end`. Anything else is [`Error::Corrupt`].
 
@@ -82,8 +85,9 @@ pub(crate) fn segment_key(collection: &str, entry: &SegmentEntry) -> String {
 }
 
 impl<'a, F: ContainerFile> ContainerObjects<'a, F> {
-    /// The objects of `container` as `manifest`, its committed manifest, describes them. With no commit yet
-    /// (`seq` 0) there is no manifest object.
+    /// The objects of `container` as `manifest` describes them. `manifest` must be the one the container's
+    /// superblock commits ([`super::Database::objects`] passes it): another one gives a view whose keys disagree with
+    /// the frames. With no commit yet (`seq` 0) there is no manifest object.
     pub fn new(container: &'a Container<F>, manifest: &Manifest) -> Self {
         let sb = container.superblock();
         let mut objects = BTreeMap::new();

@@ -1187,11 +1187,12 @@ Rules:
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
 5. WAL chunks fully covered by committed segments are dropped (`wal_start` advances).
 
-Locally (ROADMAP 6.3, ADR-0029) a flush and its commit are one step: `commit()` flushes every memtable that holds
+Locally (ROADMAP 6.3, ADR-0029) a flush and its commit are one step, and it flushes every memtable that holds
 operations, each into one segment of its live documents in docid order (none if every document was replaced or
-deleted), and commits them together; a memtable at its size threshold is flushed before the next write to it, and the
-idle and interval triggers are checked by `tick()`, which the embedding calls periodically (the engine runs no thread
-of its own). A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
+deleted), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
+`tick()`, which the embedding calls periodically (the engine runs no thread of its own) and which commits when any
+memtable is idle or reached `commit_interval` since its first unflushed write. Flushing all of them makes the
+commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
 write, sync or commit after that poisons the database until it is reopened (§4.5). Creating a collection is a commit
 of its own, so its records follow it in the log.
 
@@ -1375,7 +1376,9 @@ and that each frame location names a valid frame of the right kind (`Segment`, `
 length, ending at or below `log_end`; it also checks each segment's footer `segment_id` and `doc_count` against its
 entry. A remote reader (M12) applies the same layout check with object locations only.
 
-**Segment ids.** Writers draw each new `segment_id` at random (128 bits from a cryptographically secure source).
+**Segment ids.** Writers draw each new `segment_id` at random: 128 bits from a keyed pseudo-random function whose key comes from the
+operating system's randomness (ADR-0029). What matters is uniqueness, not unpredictability; an id already in the
+manifest is drawn again.
 An id is never reused: older snapshots may still reference a segment that was merged away (§8.5), and remote keys
 of segments and sidecars (§10.4) are named by it. A manifest can only check uniqueness within itself and against the
 manifest a commit builds on (§8.7.2); random ids make a collision with an older, no longer listed segment

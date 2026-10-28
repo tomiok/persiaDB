@@ -16,10 +16,13 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 1. **One writer object, `persia_engine::db::Database`**, over a container (generic `ContainerFile`, so tests use the
    simulated file). It owns the `WalWriter` (which owns the container), the committed manifest, and per collection the
    schema, the open segments and the memtable.
-2. **Flush = commit.** `commit()` flushes every memtable with operations into one segment (its live documents, in
-   docid order, re-indexed by the segment builder) and commits them in one manifest. A memtable at its size threshold
-   is flushed before the next write to it; `tick()` applies the idle trigger and `commit_interval` (default 60 s) as a
-   pure `CommitPolicy` over an injected `Clock`. The engine starts no thread: the embedding (M10) calls `tick()`.
+2. **Flush = commit, of every collection.** A flush commit flushes every memtable with operations into one segment
+   each (its live documents, in docid order, re-indexed by the segment builder) and commits them in one manifest,
+   whatever triggered it: `commit()`, a memtable at its size threshold (before the next write to it), or `tick()`,
+   which applies the idle trigger and `commit_interval` (default 60 s, measured from each memtable's first unflushed
+   write) as a pure `CommitPolicy` over an injected `Clock`. The engine starts no thread: the embedding (M10) calls
+   `tick()`. Flushing every collection makes `wal_start` reach the end of the log at each flush commit, so a crash
+   never replays a record already in a segment, which the next flush would write a second time (found in review).
 3. **Commit order** (SPEC §4.5). Build every segment first (no I/O; an error leaves the database unchanged). Then
    append the Segment frames, mark the flushed collections in the WAL writer, write and sync the buffered WAL records
    (`commit_point`), sync the frames, append the Manifest frame, write the slot. Any error after the first append
@@ -44,9 +47,10 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 8. **Checks on open** (ROADMAP 6.3.7): the manifest's `seq`, `fence_token`, `wal_start` against the slot; the layout
    (frame locations only locally, `Manifest::check_layout`); each frame through the view; each segment footer's id and
    document count against its entry.
-9. **Segment ids** come from `SegmentIds`: SipHash keyed by the standard library's OS-seeded `RandomState` over a
-   counter (no new dependency), or a seeded generator for tests and golden files. A drawn id already in the manifest
-   is drawn again.
+9. **Segment ids** come from `SegmentIds`: the standard library's keyed hasher (`RandomState`, OS-seeded) over a
+   counter, a keyed PRF with no new dependency, or a seeded generator for tests and golden files. SPEC §8.7.1 needs
+   uniqueness, not unpredictability (std does not specify the hash, and successive `RandomState`s of a thread share
+   half the key, which keeps outputs distinct). A drawn id already in the manifest is drawn again.
 10. **Golden database** `tests/fixtures/database/v1.0/blob-ref.persia`, written by the commit path with a fixed clock,
     ids and `db_uuid`, compared byte for byte by an engine test (SPEC §15).
 
@@ -55,6 +59,8 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 - Until ROADMAP 6.4.3, a flush keeps only the memtable's live documents: a delete or upsert of an id that lives in an
   older segment is lost from the flush (the older segment's version shows again). Nothing reads across segments yet;
   6.4.3 adds tombstones through the commit.
+- Flush commits write a segment per collection with operations, so one busy collection makes small segments of the
+  others; merging (ROADMAP 6.5) absorbs them.
 - A commit re-indexes the flushed documents: a flush costs about one more analysis pass than reusing the memtable's
   postings would. Reusing them is a possible optimization (`Inverted` is shared with the builder).
 - A reader may see a document of a batch before the batch's sync; if that sync fails, the database is poisoned and a
@@ -68,6 +74,9 @@ reads I/O through the `Storage` trait, while a container stores frames without n
   or **a dry run before the WAL** (analysis twice). Staging gets both properties for one analysis.
 - **A writable `Storage` view** mapping `put` to an append and `put_if_absent` of a manifest to a commit: it would hide
   the step order of SPEC §4.5 behind calls that promise atomic single-object visibility they cannot give.
+- **Flushing only the collections that are due**: fewer small segments, but `wal_start` then stays behind the
+  oldest unflushed record of another collection, and after a crash replay re-applies records already flushed, which
+  the next flush writes a second time until tombstones (6.4.3) hide them.
 - **A background flush thread in the engine**: the engine is synchronous by design; the facade owns threads.
 - **Replay without re-validation** to survive `strict` changes: a second code path that skips the schema's rules, for
   a rare operation that can afford a flush.

@@ -12,7 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: the local write path (ROADMAP 6.3, SPEC §4.5, §8.2, §8.4, ADR-0029). `db::Database` creates or
   opens a database on a container, creates collections, and takes `put`, `put_batch` and `delete` with a
   `Durability`. `commit()` flushes every memtable into a `Segment` frame and commits a manifest naming them; `tick()`
-  applies `CommitPolicy` (memtable size, 10 s idle, `commit_interval` 60 s) with an injected `Clock`. After each commit
+  applies `CommitPolicy` (memtable size, 10 s idle, `commit_interval` 60 s from a memtable's first unflushed write;
+  `MemtableState`) with an injected `Clock`; every flush commit flushes all collections. After each commit
   a `Snapshot` (segments plus a read handle on each memtable) is published atomically; `DatabaseReader` loads it from
   any thread. Opening checks the manifest against the superblock and every frame location (`Manifest::check_layout`,
   `Layout`), opens the segments and replays the WAL; `open_container` takes a container opened with

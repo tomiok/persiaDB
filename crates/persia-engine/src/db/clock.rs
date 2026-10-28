@@ -92,8 +92,9 @@ pub struct SegmentIds(Source);
 
 #[derive(Debug)]
 enum Source {
-    /// SipHash-1-3, keyed from the operating system's randomness (the standard library's `RandomState`), of a
-    /// counter: unpredictable without the key, which never leaves the process.
+    /// The standard library's keyed hasher (`RandomState`, seeded from the operating system's randomness; `SipHash`
+    /// today, unspecified by std) of a counter: a keyed PRF, so ids are unique with overwhelming probability
+    /// (SPEC §8.7.1). Unpredictability is not required.
     Random { keys: RandomState, drawn: u64 },
     /// `SplitMix64`: reproducible, for tests and golden files.
     Seeded(u64),
