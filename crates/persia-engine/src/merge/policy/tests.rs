@@ -353,6 +353,12 @@ proptest! {
         p.segments_per_merge = width;
         let plans = p.plan(&segments, &busy);
         let position = |id: SegmentId| segments.iter().position(|e| e.id == id);
+        // (live documents, live size) of an entry, as SPEC §8.5 defines them.
+        let live_of = |e: &SegmentEntry| {
+            let live = e.doc_count - e.tombstones.map_or(0, |t| t.deleted);
+            let size = u128::from(e.size) * u128::from(live) / u128::from(e.doc_count);
+            (u64::from(live), u64::try_from(size).unwrap())
+        };
         let mut seen = HashSet::new();
         for plan in &plans {
             prop_assert!(!plan.inputs.is_empty());
@@ -378,9 +384,39 @@ proptest! {
                 }
             }
             match plan.reason {
-                MergeReason::Tier(_) => prop_assert_eq!(plan.inputs.len(), width),
+                MergeReason::Tier(_) => {
+                    prop_assert_eq!(plan.inputs.len(), width);
+                    let (docs, bytes) = plan.inputs.iter().fold((0, 0), |(d, b), i| {
+                        let (live, size) = live_of(&segments[position(i.id).unwrap()]);
+                        (d + live, b + u128::from(size))
+                    });
+                    prop_assert!(bytes <= u128::from(p.max_merged_bytes), "byte cap");
+                    prop_assert!(docs <= u64::from(p.max_merged_docs), "doc cap");
+                }
                 MergeReason::Deletes => prop_assert_eq!(plan.inputs.len(), 1),
                 MergeReason::Drop => {}
+            }
+        }
+        // Maximal: a tier left with `width` eligible segments stopped because its smallest `width` break a cap.
+        let mut left: Vec<(u32, u64, usize, u64)> = segments
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| !busy.contains(&e.id) && !seen.contains(&e.id))
+            .map(|(i, e)| {
+                let (live, size) = live_of(e);
+                (p.tier_of(size), size, i, live)
+            })
+            .filter(|&(_, size, _, live)| live > 0 && size < p.max_merged_bytes)
+            .collect();
+        left.sort_unstable();
+        for tier in left.chunk_by(|a, b| a.0 == b.0) {
+            if let Some(smallest) = tier.get(..width) {
+                let bytes: u128 = smallest.iter().map(|c| u128::from(c.1)).sum();
+                let docs: u64 = smallest.iter().map(|c| c.3).sum();
+                prop_assert!(
+                    bytes > u128::from(p.max_merged_bytes) || docs > u64::from(p.max_merged_docs),
+                    "tier {} could still merge", tier[0].0
+                );
             }
         }
         // Every fully deleted free segment is dropped; nothing that should be rewritten is left out.

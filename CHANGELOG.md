@@ -14,7 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   smallest segments of a size tier, and rewrites of segments with more than 20% deleted. Knobs `merge.*` (SPEC §14).
 - `persia-engine`: segment merger (ROADMAP 6.5.2, SPEC §5.5, ADR-0031). `merge::merge` copies the live documents of
   several segments (postings, positions, columns, rows, ids, blob refs; docids remapped, nothing analyzed again) into a
-  `MergedSegment`, whose `write` gives the segment a flush of the same documents would. `MergeSource`, `MergeError`.
+  `MergedSegment`, whose `write` gives the segment a flush of the same documents would. `MergeSource`, `MergeError`
+  (`DuplicateLiveId`, `SchemaMismatch`, `Unsupported`, `Corrupt`, `Read`, `Build`).
   Bench `segment_merge`; the `segment` fuzz target also merges what it opens.
 - `persia-engine`: upserts and deletes across segments (ROADMAP 6.4, SPEC §8.3, ADR-0030). A flush commit tombstones
   every live copy, in every committed segment, of each id its memtables touched, by writing the next version of each

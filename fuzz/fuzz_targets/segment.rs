@@ -16,7 +16,8 @@
 //! `advance` and `shallow_advance` to a few targets, norms, columns (directly and through cursors), every document,
 //! id and blob reference, then `Segment::verify`; then it is merged (ROADMAP 6.5.2) alone and with every other
 //! document deleted, and each merged segment written. Half the inputs are read through a 4 KiB block cache, and
-//! positions are also read for every 7th document only. Errors are ignored; the only failure is a panic (or a hang).
+//! positions are also read for every 7th document only. Errors are ignored, except that a segment that verifies must
+//! merge into one that opens and verifies; otherwise the only failure is a panic (or a hang).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -26,7 +27,7 @@ use std::sync::{Arc, OnceLock};
 use libfuzzer_sys::fuzz_target;
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
-use persia_engine::merge::{MergeSource, merge};
+use persia_engine::merge::{MergeError, MergeSource, merge};
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -536,18 +537,31 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
     let _ = seg.sections();
 }
 
-/// Merges `seg` alone, then with every other document deleted, and writes each result; every error is ignored.
+/// Merges `seg` alone, then with every other document deleted, and writes each result. Errors are ignored, except
+/// for an input that passes `Segment::verify`: its merge must succeed (unless it sets rocompat flags) and the merged
+/// segment must open and verify too.
 fn merge_all(seg: &Segment, schema: &CollectionSchema) {
     static REGISTRY: OnceLock<AnalyzerRegistry> = OnceLock::new();
     let registry = REGISTRY.get_or_init(AnalyzerRegistry::builtin);
+    let valid = seg.verify().is_ok();
     let odd = seg.tombstones((1..seg.doc_count()).step_by(2).collect());
     for tombstones in [None, odd.as_ref().ok()] {
         let source = MergeSource {
             segment: seg,
             tombstones,
         };
-        if let Ok(Some(merged)) = merge(schema, registry, &[source]) {
-            let _ = merged.write(8, 0, WriteOptions::default());
+        match merge(schema, registry, &[source]) {
+            Ok(Some(merged)) => {
+                let written = merged.write(8, 0, WriteOptions::default());
+                if valid {
+                    let bytes = written.expect("a valid input merges to a writable segment");
+                    let out = Segment::open(ByteSource::new(bytes.into()), schema)
+                        .expect("the merge of a valid input opens");
+                    out.verify().expect("the merge of a valid input verifies");
+                }
+            }
+            Err(MergeError::Unsupported { .. }) | Ok(None) => {}
+            Err(e) => assert!(!valid, "a valid input failed to merge: {e}"),
         }
     }
 }

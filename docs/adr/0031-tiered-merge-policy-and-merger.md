@@ -36,10 +36,20 @@ happens to a segment whose documents are all deleted (ADR-0030 item 8 keeps it l
    after the kept segments. Merges may take segments that are not adjacent: a commit leaves at most one live copy of
    each id (SPEC §8.3) and a merged segment holds only live documents, so the newest-segment-decides lookup gives
    the same answer.
-8. **The merger fills a `SegmentBuilder`** from the input readers: term dictionaries merged k-way per field,
-   postings and positions copied with docids remapped, norms, columns, `DocStore` rows, ids and blob refs copied, and
-   statistics recomputed from what was copied. `SegmentWriter` then writes it, as for a flush. Peak memory is about
-   the merged segment's size, the same bound a flush has. A streaming writer is later work (ROADMAP 6.5.6).
+8. **The merger fills a `SegmentBuilder`** from the input readers: each input's term dictionary, read in byte order,
+   is added to the builder's one dictionary per field (the writer sorts the union, as for a flush, so no k-way merge
+   of the streams is needed); postings and positions are copied with docids remapped; columns, `DocStore` rows, ids
+   and blob refs are copied; statistics are recomputed from what was copied. `SegmentWriter` then writes it, as for
+   a flush. Peak memory is about the merged segment's size, the same bound a flush has. A streaming writer is later
+   work (ROADMAP 6.5.6).
+9. **Inputs are read, not verified.** A merge decodes each row (the id and blob reference come from it, as a flush
+   takes them from the document) but runs no `Segment::verify`, which would read every input twice. Damage only
+   `verify` finds is mostly copied into the merged segment, where `verify` still finds it (a column value that
+   differs from its row), and the scheduler verifies the merged segment before its commit (ROADMAP 6.5.3). Damage
+   that makes the `IdList`, `IdMap` or `BlobRefs` disagree with the rows is resolved toward the rows instead, and is
+   then no longer detectable; with section checksums only a writer bug produces it. Verifying inputs too is a
+   scheduler option if that trade changes. An id live in two inputs, which §8.3 rules out, is
+   its own error, so a scheduler can tell it from damage.
 
 ## Consequences
 

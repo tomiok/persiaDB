@@ -725,10 +725,15 @@ The inputs' live documents keep their order, input by input in the plan's order 
 again: postings, frequencies and positions are copied with their docids remapped, and column values, `DocStore` rows
 (as stored, ADR-0023), ids and blob references are copied as they are. Every statistic (term statistics, norms, field
 statistics) is computed from what was copied, so the merged segment is byte for byte the segment a flush of the
-same documents in the same order writes, with the same `segment_id`, `created_at` and `merge_generation`. The
-output uses the collection's current schema; an input written before fields were added (§6.2.4) has no values for
-them. A merge refuses an input with unknown `rocompat_flags` (§5.1) and an id live in two inputs (a commit leaves at
-most one, §8.3) (ADR-0031, ROADMAP 6.5.2).
+same documents in the same order writes, with the same `segment_id`, `created_at` and `merge_generation`, whenever a
+flush accepts them; rows that a flush would reject (extras of a collection that became `strict`, §6.4.2) are copied as
+stored all the same. Each input's terms are added to one dictionary that the writer sorts, as for a flush. The output
+uses the collection's current schema; an input written before fields were added (§6.2.4) has no values for them, and
+every input must be read with that schema. A merge refuses an input with unknown `rocompat_flags` (§5.1) and an id
+live in two inputs (a commit leaves at most one, §8.3). A merge reads its inputs as any reader does, without
+`verify`: damage only `verify` finds is copied (and found by verifying the merged segment, which happens before a
+commit adds it, ROADMAP 6.5.3), except an `IdList`, `IdMap` or `BlobRefs` that disagrees with the rows, which the
+rows override (ADR-0031, ROADMAP 6.5.2).
 
 ---
 
@@ -1365,7 +1370,8 @@ holds are left out. Then, in this order:
 
 Plans come in that order, tier merges by tier then by size, rewrites in manifest order. Defaults (SPEC §14):
 `tier_floor` 2 MiB, `tier_factor` 10, `segments_per_merge` 8, `deleted_percent` 20, `max_merged_bytes` 5 GiB,
-`max_merged_docs` 2^31; a `tier_factor` or `segments_per_merge` below 2, or a `tier_floor` of 0, counts as 2 or 1.
+`max_merged_docs` 2^31; a `tier_factor` or `segments_per_merge` below 2, or a `tier_floor` of 0, counts as 2 or 1,
+and a `max_merged_docs` above 2^31 as 2^31.
 Live sizes are estimates, so a merged segment may come out somewhat above `max_merged_bytes`.
 A merged segment lists its inputs' documents in plan order (§5.5) and is added after the kept segments (§8.7.2).
 Order does not matter for lookups: a commit leaves at most one live copy of each id (§8.3), and a merged segment

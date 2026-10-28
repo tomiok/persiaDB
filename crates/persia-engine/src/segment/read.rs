@@ -462,6 +462,11 @@ impl Segment {
             })
     }
 
+    /// The schema the segment was opened with.
+    pub(crate) fn schema(&self) -> &CollectionSchema {
+        &self.schema
+    }
+
     /// The id of document `docid` (from the `IdList`).
     ///
     /// # Errors

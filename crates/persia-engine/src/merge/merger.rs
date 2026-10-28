@@ -22,12 +22,16 @@ use crate::segment::{
 /// A docid the merge leaves out.
 const GONE: u32 = u32::MAX;
 
+/// Segment `rocompat_flags` this build knows how to rewrite (SPEC §5.1 defines none yet).
+const KNOWN_ROCOMPAT_FLAGS: u64 = 0;
+
 /// One segment a merge reads, and its deletions at the sidecar version the plan read (SPEC §8.7.2).
 #[derive(Debug, Clone, Copy)]
 pub struct MergeSource<'a> {
     /// The segment, opened with the schema the merge writes (the collection's current one).
     pub segment: &'a Segment,
-    /// Its deleted documents; `None` when it has none. They must be this segment's.
+    /// Its deleted documents; `None` when it has none. They must be this segment's: [`Tombstones`] does not record
+    /// whose they are, so another segment's would delete the wrong documents unnoticed.
     pub tombstones: Option<&'a Tombstones>,
 }
 
@@ -53,18 +57,36 @@ pub enum MergeError {
         /// Its flags.
         flags: u64,
     },
-    /// An input's postings contradict themselves: a frequency of 0, or not as many positions as the frequency.
-    #[error("segment {segment:032x}, field {field}: {what}")]
+    /// An input contradicts itself in a way its reader does not check: a frequency of 0, positions other than the
+    /// frequency, a field of more than `u32::MAX` tokens, or one id in two rows.
+    #[error(
+        "segment {segment:032x}{}: {what}",
+        field.map(|f| format!(", field {f}")).unwrap_or_default()
+    )]
     Corrupt {
         /// The input's id.
         segment: u128,
-        /// The field.
-        field: FieldId,
+        /// The field, if the damage is in one.
+        field: Option<FieldId>,
         /// What did not hold.
         what: &'static str,
     },
-    /// The merged documents do not fit one segment, or two inputs hold a live copy of one id (SPEC §8.3 rules that
-    /// out: a commit leaves at most one).
+    /// Two inputs hold a live copy of `id`, the later one being `segment`. SPEC §8.3 rules that out (a commit leaves
+    /// at most one): the tombstones passed are not the ones the plan read.
+    #[error("segment {segment:032x}: id {id:?} is live in an earlier input too")]
+    DuplicateLiveId {
+        /// The later input's id.
+        segment: u128,
+        /// The document id.
+        id: String,
+    },
+    /// An input was opened with another schema than the one the merge writes.
+    #[error("segment {segment:032x} was opened with another schema than the merge's")]
+    SchemaMismatch {
+        /// The input's id.
+        segment: u128,
+    },
+    /// The merged documents do not fit one segment, or `registry` lacks an analyzer.
     #[error(transparent)]
     Build(#[from] SegmentError),
 }
@@ -77,9 +99,9 @@ pub struct MergedSegment {
 }
 
 impl MergedSegment {
-    /// What the merge copied.
-    pub fn builder(&self) -> &SegmentBuilder {
-        &self.builder
+    /// Live documents the merge copied.
+    pub fn doc_count(&self) -> u32 {
+        self.builder.doc_count()
     }
 
     /// One more than the highest of the inputs' (SPEC §5.1).
@@ -143,8 +165,9 @@ impl MergedSegment {
 ///
 /// # Errors
 /// [`MergeError::Read`] or [`MergeError::Corrupt`] when an input cannot be read; [`MergeError::Unsupported`] for an
-/// input a merge must not rewrite; [`MergeError::Build`] when `registry` lacks an analyzer, the documents do not fit
-/// one segment, or an id is live in two inputs.
+/// input a merge must not rewrite; [`MergeError::SchemaMismatch`] for one opened with another schema;
+/// [`MergeError::DuplicateLiveId`] when an id is live in two inputs; [`MergeError::Build`] when `registry` lacks an
+/// analyzer or the documents do not fit one segment.
 pub fn merge(
     schema: &CollectionSchema,
     registry: &AnalyzerRegistry,
@@ -156,9 +179,12 @@ pub fn merge(
     for source in sources {
         let segment = source.segment;
         let id = segment.segment_id();
-        let flags = segment.rocompat_flags();
+        let flags = segment.rocompat_flags() & !KNOWN_ROCOMPAT_FLAGS;
         if flags != 0 {
             return Err(MergeError::Unsupported { segment: id, flags });
+        }
+        if segment.schema() != schema {
+            return Err(MergeError::SchemaMismatch { segment: id });
         }
         generation = generation.max(segment.merge_generation());
         let docids = copy_documents(&mut builder, source)?;
@@ -197,6 +223,8 @@ fn copy_documents(
         segment: segment.segment_id(),
         source,
     };
+    // Merged docids below this came from earlier inputs.
+    let first = builder.doc_count();
     let mut docids = Vec::with_capacity(segment.doc_count() as usize);
     for old in 0..segment.doc_count() {
         if source.tombstones.is_some_and(|t| t.contains(old)) {
@@ -208,7 +236,7 @@ fn copy_documents(
             return Err(SegmentError::Full { max_docs: MAX_DOCS }.into());
         }
         let (row, doc) = segment.row(old).map_err(read)?;
-        let (_, fresh) =
+        let (earlier, fresh) =
             builder
                 .ids
                 .intern(doc.id().as_bytes())
@@ -216,10 +244,19 @@ fn copy_documents(
                     what: "document ids",
                 })?;
         if !fresh {
-            return Err(SegmentError::DuplicateId {
-                id: doc.id().to_owned(),
-            }
-            .into());
+            // An id's arena id is its merged docid.
+            return Err(if earlier < first {
+                MergeError::DuplicateLiveId {
+                    segment: segment.segment_id(),
+                    id: doc.id().to_owned(),
+                }
+            } else {
+                MergeError::Corrupt {
+                    segment: segment.segment_id(),
+                    field: None,
+                    what: "one document id in two rows",
+                }
+            });
         }
         builder.rows.push(&row);
         if let Some(blob) = doc.blob_ref() {
@@ -250,9 +287,10 @@ struct Scratch {
     positions: Vec<u32>,
 }
 
-/// Copies the live postings of one `text` or `keyword` field. The input is read term by term (k-way across inputs:
-/// each input's terms are interned in byte order into the one dictionary the writer sorts), then regrouped by
-/// document, the order [`Inverted`] keeps.
+/// Copies the live postings of one `text` or `keyword` field. Each input's dictionary is read in byte order and its
+/// terms interned into the builder's one dictionary, inputs one after another; the writer sorts the union, as for a
+/// flush, rather than a k-way merge of the inputs' streams. The postings are then regrouped by document, the order
+/// [`Inverted`] keeps.
 fn copy_postings(
     segment: &Segment,
     field: FieldId,
@@ -267,7 +305,7 @@ fn copy_postings(
     };
     let corrupt = |what| MergeError::Corrupt {
         segment: id,
-        field,
+        field: Some(field),
         what,
     };
     let keep_positions = inverted.positions.is_some();
@@ -323,9 +361,10 @@ fn copy_postings(
                 &[]
             };
             inverted.add_posting(e.doc, e.term, e.tf, positions)?;
+            // A flush rejects a field of more tokens, so only a damaged input gets here.
             len = len
                 .checked_add(e.tf)
-                .ok_or(SegmentError::TooLarge { what: "positions" })?;
+                .ok_or_else(|| corrupt("a field of more than u32::MAX tokens"))?;
         }
         if let Some(e) = group.first() {
             inverted.end_doc(e.doc, len);

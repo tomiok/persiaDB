@@ -1,6 +1,7 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
 //! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3);
-//! merging segments (ROADMAP 6.5.2); opening a segment with a large term dictionary; the memtable: `put` and postings through a view (ROADMAP 6.1).
+//! merging segments (ROADMAP 6.5.2); opening a segment with a large term dictionary; the memtable: `put` and postings
+//! through a view (ROADMAP 6.1).
 //! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
