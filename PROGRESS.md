@@ -124,7 +124,7 @@ _Nothing in progress._
 - `6.5.4` Safe deletion of obsolete segments via snapshot epoch/refcount (M6)
 - `6.5.5` [T] property: merge(search results) == pre-merge results (same hits/scores within epsilon) (M6)
 - `6.5.6` Streaming merge writer: encode the merged sections while the inputs are read, so a merge holds no more than a block per section instead of the whole merged segment in a `SegmentBuilder` (ADR-0031 item 8, found in 6.5.2) (M6)
-- `6.5.7` Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; `segment_merge/copy_8` must beat `segment/add` (it was 36 % slower in 6.5.2, `docs/benchmarks.md`) (M6)
+- `6.5.7` Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; goal: `segment_merge/copy_8` faster than `segment/add` on the same run (internal bench, `docs/benchmarks.md`; not a claim, BENCHMARKS.md) (M6)
 - `6.6.1` Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6) (M6)
 - `6.6.2` Single-writer enforcement + read-only open for readers (M6)
 - `6.6.3` `persia verify` full database verification command (M6)

@@ -319,7 +319,12 @@ fn copy_postings(
         // Interned only once a live posting needs it: a term every document of which is deleted is dropped.
         let mut term_id = None;
         while let Some(old) = postings.next().map_err(read)? {
-            let new = docids.get(old as usize).copied().unwrap_or(GONE);
+            // `docids` has one entry per document: a docid past it is damage, never a deletion (the reader rejects it
+            // today; dropping it silently would hide it from the output's `verify`).
+            let new = docids
+                .get(old as usize)
+                .copied()
+                .ok_or_else(|| corrupt("a posting past the segment's documents"))?;
             if new == GONE {
                 continue;
             }
@@ -355,8 +360,14 @@ fn copy_postings(
         let mut len = 0_u32;
         for e in group {
             let positions = if keep_positions {
+                // Pushed with exactly `tf` positions above, so the range is there; never default to none.
                 let end = e.positions.saturating_add(e.tf as usize);
-                scratch.positions.get(e.positions..end).unwrap_or_default()
+                scratch
+                    .positions
+                    .get(e.positions..end)
+                    .ok_or(SegmentError::Internal {
+                        what: "merge positions out of range",
+                    })?
             } else {
                 &[]
             };
