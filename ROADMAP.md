@@ -396,10 +396,13 @@ Deps: M2, M5.
 - [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
 
 ## 6.4 Upserts & deletes across segments
-- [~] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
-- [~] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
-- [~] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
-- [~] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
+- [x] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
+- [x] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
+- [x] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
+- [x] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
+- [ ] 6.4.5 Prune the commit's tombstone lookups by each segment's footer id range (`Segment::id_range`), once open or `Segment::verify` checks `min_id`/`max_id` against the `IdMap` (a wrong range would leave an older copy live). Helps time-ordered ids only; random ids (UUIDs) span every range. Bench `commit_inserts_*` before and after (found in 6.4.3: 64 segments double a 2 000-document commit)
+- [ ] 6.4.6 Drop a segment from the manifest in the commit that deletes its last live document, instead of keeping it listed with `deleted = doc_count` until a merge (ADR-0030 item 8)
+- [ ] 6.4.7 Per-segment id membership filter (e.g. a Bloom filter section) so a commit skips segments that cannot hold an id, for random ids that id ranges do not prune; a format change (SPEC §5.3, ADR, golden file) (found in the 6.4 review)
 
 ## 6.5 Compaction / merging (SPEC §8.5)
 - [ ] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests
@@ -450,7 +453,7 @@ Deps: M5 (M6 for end-to-end).
   - [ ] 7.4.4.2 Block-max WAND using skip metadata
   - [ ] 7.4.4.3 [T] differential: pruned results == exhaustive results
 - [ ] 7.4.5 Filter evaluation to roaring bitmaps/column predicates; intersect with candidates
-- [ ] 7.4.6 Tombstone application; memtable as additional segment
+- [ ] 7.4.6 Tombstone application; memtable as additional segment: an id the memtable has (put or delete, `MemtableView::lookup`) hides every segment copy of it, which the segments' tombstones do not yet delete before the commit (SPEC §8.3, found in the 6.4 review)
 
 ## 7.5 Sorting, pagination, facets
 - [ ] 7.5.1 Sort by column (asc/desc, missing handling) with top-k

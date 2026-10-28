@@ -365,12 +365,13 @@ impl Memtable {
         mut f: impl FnMut(&[u8]) -> Result<(), E>,
     ) -> Result<(), E> {
         let inner = read(&self.shared);
-        for (index, &latest) in inner.latest.iter().enumerate() {
+        // Ids are interned as `u32`s, so `latest` has at most `u32::MAX + 1` entries.
+        for (id, &latest) in (0..=u32::MAX).zip(&inner.latest) {
             // An id staged by an operation whose log failed has no applied operation.
             if latest == 0 {
                 continue;
             }
-            f(u32::try_from(index).map_or(&[][..], |i| inner.ids.key(i)))?;
+            f(inner.ids.key(id))?;
         }
         Ok(())
     }

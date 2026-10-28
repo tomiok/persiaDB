@@ -203,7 +203,8 @@ pub enum DatabaseError {
         /// The name.
         name: String,
     },
-    /// An invariant of the database did not hold: a bug, reported rather than acted on. The database is poisoned.
+    /// An invariant of the database did not hold: a bug, reported rather than acted on. Found while a commit is
+    /// planned, nothing was written; found later, the database is poisoned.
     #[error("internal error: {what}")]
     Internal {
         /// What did not hold.
@@ -682,9 +683,11 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// second time after a crash.
     ///
     /// # Errors
+    /// Found while the commit is planned, before anything is written (the database is unchanged and usable):
     /// [`DatabaseError::Segment`] if a segment cannot be built, [`DatabaseError::ReadSegment`] if a committed one
-    /// cannot be read to find the documents to tombstone (nothing is written then); any other error poisons
-    /// the database: the commit may or may not have happened, and a reopen tells.
+    /// cannot be read to find the documents to tombstone (a corrupt `IdMap`: every commit touching that id fails
+    /// until the segment is repaired), [`DatabaseError::Sidecar`] if a sidecar cannot follow the current one. Any
+    /// other error poisons the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
         self.usable()?;
         // Build every segment and sidecar before writing anything, so a failure here leaves the database as it was.

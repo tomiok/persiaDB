@@ -119,6 +119,18 @@ fn lookup_prefers_the_memtable_then_the_newest_segment() {
 /// Appends `bytes` as a sidecar frame to a closed database's container and commits a manifest that names it as
 /// version `version`, with `deleted` documents, of the first segment of collection `a`.
 fn commit_sidecar(file: &SimFile, bytes: &[u8], version: u64, deleted: u32) {
+    commit_sidecar_patched(file, bytes, version, deleted, |_| {});
+}
+
+/// [`commit_sidecar`], with `patch` applied to the manifest's encoding before its CRC32C trailer is recomputed: a
+/// manifest no diff can produce.
+fn commit_sidecar_patched(
+    file: &SimFile,
+    bytes: &[u8],
+    version: u64,
+    deleted: u32,
+    patch: impl FnOnce(&mut Vec<u8>),
+) {
     let mut c = Container::open_on(file.clone(), Mode::ReadWrite).unwrap();
     let sb = *c.superblock();
     let frame = c.read_frame(sb.manifest_off, usize::MAX).unwrap();
@@ -149,12 +161,13 @@ fn commit_sidecar(file: &SimFile, bytes: &[u8], version: u64, deleted: u32) {
     );
     let next = manifest.apply(&diff).unwrap();
     let wal_start = c.end();
+    let mut encoded = next.encode().unwrap();
+    patch(&mut encoded);
+    let end = encoded.len() - 4;
+    let crc = persia_format::checksum::crc32c(&encoded[..end]);
+    encoded[end..].copy_from_slice(&crc.to_le_bytes());
     let m = c
-        .append(
-            FrameKind::Manifest,
-            &next.encode().unwrap(),
-            Compression::None,
-        )
+        .append(FrameKind::Manifest, &encoded, Compression::None)
         .unwrap();
     c.commit(Commit {
         manifest: m,
@@ -548,4 +561,42 @@ fn a_deleted_newest_copy_ends_the_lookup() {
     let a = snapshot.collection("a").unwrap();
     assert_eq!(a.lookup(&a.memtable(), "x").unwrap(), None);
     assert_eq!(a.get("x").unwrap(), None);
+}
+
+/// A commit that fails while it is planned (here: no sidecar version after `u64::MAX`) writes nothing and does not
+/// poison the database (SPEC §8.2, ADR-0030 item 4).
+#[test]
+fn a_commit_that_cannot_be_planned_writes_nothing() {
+    let (file, id) = one_segment();
+    let sidecar = TombstoneSidecar::new(id, u64::MAX, 5, deleted(&[1, 3])).unwrap();
+    // The manifest says version 1 (what a diff allows); patch its stored version to u64::MAX.
+    commit_sidecar_patched(&file, &sidecar.encode(), 1, 2, |m| {
+        let mut entry = vec![1];
+        entry.extend(1_u64.to_le_bytes());
+        entry.extend(2_u32.to_le_bytes());
+        let at = m.windows(entry.len()).position(|w| w == entry).unwrap();
+        m[at + 1..at + 9].copy_from_slice(&u64::MAX.to_le_bytes());
+    });
+    let mut db = Database::open_on(file, options()).unwrap();
+    let (seq, end) = (db.seq(), db.container().end());
+    db.delete("a", "x0", Durability::Fsync).unwrap();
+    let wal_end = db.container().end();
+    let e = db.commit().unwrap_err();
+    assert!(matches!(e, DatabaseError::Sidecar { .. }), "{e}");
+    assert_eq!((db.seq(), db.container().end()), (seq, wal_end));
+    assert!(wal_end > end);
+    // Not poisoned: writes still work.
+    db.put("a", &doc("fresh", "new"), Durability::Fsync)
+        .unwrap();
+    assert_eq!(
+        text(
+            &db.snapshot()
+                .collection("a")
+                .unwrap()
+                .get("fresh")
+                .unwrap()
+                .unwrap()
+        ),
+        "new"
+    );
 }

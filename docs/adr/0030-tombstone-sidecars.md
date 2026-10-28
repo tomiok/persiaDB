@@ -36,7 +36,7 @@ copy live.
    appends the frame. A failure is an internal error, before anything is written.
 5. **Tombstones are written by the flush commit** (SPEC §8.2, ROADMAP 6.4.3). For each memtable it flushes, the
    commit takes every id the memtable has an operation for (a put or a delete, replayed or not) and looks it up in
-   every committed segment of the collection, skipping segments whose id range excludes it; every live copy found
+   every committed segment of the collection; every live copy found
    is deleted in the next sidecar version of its segment, which goes in the diff as an updated entry. A segment's
    sidecars are appended after the new segments and before the WAL's commit point and the manifest (SPEC §4.5
    step 1). Looking in every segment, not only the newest holding the id, also removes duplicates left by builds
@@ -58,11 +58,18 @@ copy live.
 ## Consequences
 
 - `delete` of a committed document no longer fails; `DatabaseError::NeedsTombstones` is gone.
-- A flush costs one `IdMap` lookup per touched id per segment whose id range covers it, plus one sidecar frame per
-  segment that lost documents. Merging (6.5) bounds the segment count.
+- A flush costs one `IdMap` lookup per touched id per committed segment, plain inserts of new ids included (a few
+  hundred nanoseconds each; benches `commit_upserts` and `commit_inserts`), plus one sidecar frame per segment that
+  lost documents. Merging (6.5) bounds the segment count; pruning by id range (6.4.5) helps time-ordered ids only,
+  and a per-segment membership filter (6.4.7, a format change) would help random ones.
 - Each rewrite stores the full set again: a segment deleted from in many commits writes sidecars that grow up to its
   bitmap size each time. Merges, triggered by the deleted ratio (SPEC §8.5), bound that.
 - The writer holds every live segment's deleted set in memory (shared with readers as `Tombstones`).
+- Remotely (M12), a sidecar's key names its segment and version, not its content. A writer that crashes after
+  uploading `tombstones/<c>/<id>.<v>.tomb` but before its manifest, and loses unsynced WAL records, may replan the
+  same version with other deletions and write the same key with other bytes. Overwriting an unreferenced key is
+  safe only if no reader can see it before the manifest does; the remote commit protocol (ROADMAP 12) must decide
+  between overwrite-before-commit and a nonce in the key.
 
 ## Alternatives considered
 
@@ -71,5 +78,6 @@ copy live.
 - **Copy-on-write segment footers**: rewrites part of a segment object, which breaks immutability and caching.
 - **A canonical bitmap encoding** (re-encode and compare): rejects valid bitmaps from other roaring writers for no
   benefit, since no sidecar is hashed or compared by bytes.
-- **Looking up only the newest segment holding an id**: cheaper, but leaves older duplicates written before this
-  change live forever.
+- **Looking up only the newest segment holding an id**: cheaper for upserts (inserts must check every segment
+  anyway), but an older live copy, from a build before this change or a future bug, would stay live: invisible to
+  lookups, which the newest copy decides, but kept by a merge, which drops only tombstoned documents.

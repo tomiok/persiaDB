@@ -218,6 +218,14 @@ fn golden_database_with_tombstones_is_stable_and_opens() {
     assert_eq!(sidecars, [Some((2, 2)), None, None]);
     let snapshot = db.snapshot();
     let files = snapshot.collection("files").unwrap();
+    // The decoded sidecar, not only the manifest's counts.
+    let deleted: Vec<u32> = files.tombstones()[0]
+        .as_ref()
+        .unwrap()
+        .docids()
+        .iter()
+        .collect();
+    assert_eq!(deleted, [0, 1]);
     let (photo, _, _) = docs();
     assert_eq!(files.get("photo-1").unwrap(), Some(replaced(&photo)));
     assert_eq!(files.get("note-1").unwrap(), None);

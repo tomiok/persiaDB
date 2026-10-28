@@ -16,7 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   database decodes and checks each sidecar. `CollectionSnapshot::lookup` (memtable first, then segments newest
   first, deleted documents left out), `get`, `segment_views` and `tombstones`; `Located`. Removed
   `DatabaseError::NeedsTombstones`; added `DatabaseError::ReadSegment`, `Sidecar`, `SidecarMismatch`. Fuzz target
-  `tombstone_sidecar`; golden database `tombstones.persia`.
+  `tombstone_sidecar`; golden database `tombstones.persia`. Benches `commit_upserts` and `commit_inserts_{4,64}_segments`
+  (2 000 documents: `commit` 9.9 ms, upserts over 4 segments 13.1 ms, inserts over 64 segments 20.5 ms).
 - `persia-engine`: the local write path (ROADMAP 6.3, SPEC §4.5, §8.2, §8.4, ADR-0029). `db::Database` creates or
   opens a database on a container, creates collections, and takes `put`, `put_batch` and `delete` with a
   `Durability`. `commit()` flushes every memtable into a `Segment` frame and commits a manifest naming them; `tick()`

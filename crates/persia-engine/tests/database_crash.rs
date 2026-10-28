@@ -9,7 +9,8 @@
 //! 1. The reopen succeeds and shows the documents of every acknowledged operation, plus at most the one operation
 //!    that failed: a commit changes no document, so a commit cut at any step of SPEC §4.5 loses nothing.
 //! 2. The committed `seq` is the one before the failed commit or one more; never anything in between.
-//! 3. Recovery is idempotent: committing after the reopen, and reopening again, shows the same documents.
+//! 3. Recovery is idempotent: committing after the reopen, and reopening again, shows the same documents; every one
+//!    of these states has at most one live copy of an id in the segments (SPEC §8.3).
 //! 4. The same holds for a fault inside `create_collection` (the collection exists after the reopen if and only if
 //!    its create was acknowledged, or it is the failed operation) and inside the size-triggered flush and commit a
 //!    `put` runs before logging (SPEC §8.2 step 3).
@@ -149,6 +150,19 @@ fn observed(snapshot: &Snapshot) -> State {
         let Some(c) = snapshot.collection(name) else {
             continue;
         };
+        // A commit leaves at most one live copy of an id in the segments (SPEC §8.3, ADR-0030).
+        let mut live = BTreeSet::new();
+        for view in c.segment_views() {
+            for docid in 0..view.doc_count() {
+                if view.is_live(docid) {
+                    let id = view.segment().id_of(docid).unwrap();
+                    assert!(
+                        live.insert(id.clone()),
+                        "{name}: {id} is live in two segments"
+                    );
+                }
+            }
+        }
         let memtable = c.memtable();
         let mut ids = BTreeSet::new();
         for docid in 0..memtable.doc_count() {

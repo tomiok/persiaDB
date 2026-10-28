@@ -1280,7 +1280,8 @@ segment's version of it (§8.3), so a segment copy of a replayed id is never vis
 tombstones it (ROADMAP 6.4.3).
 
 ### 8.3 Upserts and deletes
-Upsert = tombstone for the previous docid (looked up via `IdMap` across segments newest-first) + insert into memtable.
+Upsert = insert into the memtable + tombstones, at the next commit, for every live copy of the id in the committed
+segments (looked up via `IdMap`, write path below).
 Delete = tombstone only. Tombstones are the only mutable-looking state; they live in per-segment **tombstone sidecars**
 (versioned, referenced by the manifest), never inside the immutable segment bytes.
 Inside the memtable an upsert replaces in place: the new version gets the next memtable docid and the earlier one is

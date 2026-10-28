@@ -89,7 +89,9 @@ impl CollectionSnapshot {
         &self.tombstones
     }
 
-    /// Each segment with its deletions, oldest first: what a search runs over, beside the memtable.
+    /// Each segment with its committed deletions, oldest first. Before a commit, the memtable's versions and deletes of
+    /// ids also hide segment copies the tombstones do not yet delete: a search over these views and the memtable
+    /// must apply that too (SPEC §8.3, ROADMAP 7.4.6); [`Self::lookup`] does.
     pub fn segment_views(
         &self,
     ) -> impl DoubleEndedIterator<Item = SegmentView<'_>> + ExactSizeIterator {

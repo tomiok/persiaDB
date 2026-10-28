@@ -18,7 +18,8 @@
 //!    filtered full list. A reopen after losing every unsynced write lists the same objects with the same bytes,
 //!    and every listed WAL chunk is at or after the committed `wal_start`.
 //! 4. One live copy (SPEC §8.3, ADR-0030): after every step of 1, no id is live in two segments (deleted documents
-//!    left out), and the manifest's `deleted` count of every segment equals its tombstones' size in the snapshot.
+//!    left out); the snapshot lists the manifest's segments in its order, and each `deleted` count equals the size of
+//!    the tombstones the snapshot applies (a stale sidecar version fails the next commit's `apply`).
 //!
 //! Seeds: `PROPTEST_RNG_SEED` (default fixed below) and `PROPTEST_CASES`; a failure prints the seed it ran with.
 
@@ -189,7 +190,10 @@ fn one_live_copy(snapshot: &Snapshot) -> Result<(), TestCaseError> {
             }
         }
         let entries = snapshot.manifest().collection(name).unwrap().segments();
-        for (entry, tombstones) in entries.iter().zip(c.tombstones()) {
+        prop_assert_eq!(entries.len(), c.segments().len(), "{}", name);
+        prop_assert_eq!(entries.len(), c.tombstones().len(), "{}", name);
+        for ((entry, segment), tombstones) in entries.iter().zip(c.segments()).zip(c.tombstones()) {
+            prop_assert_eq!(entry.id.get(), segment.segment_id(), "{}", name);
             prop_assert_eq!(
                 entry.tombstones.map(|t| u64::from(t.deleted)),
                 tombstones.as_ref().map(|t| t.len()),
