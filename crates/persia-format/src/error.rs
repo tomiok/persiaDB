@@ -317,6 +317,21 @@ pub enum Corruption {
         /// The frame's total length.
         len: u64,
     },
+    /// A frame location of a manifest (SPEC §8.7) names a valid frame of another kind or length, or one past the
+    /// committed `log_end` (`found_kind` 0 and `found_len` 0 when it names no frame of the log at all).
+    #[error(
+        "expected a frame of kind {expected_kind} and {expected_len} bytes, found kind {found_kind} and {found_len} bytes"
+    )]
+    WrongFrame {
+        /// The kind byte the location calls for.
+        expected_kind: u8,
+        /// The length the location gives.
+        expected_len: u64,
+        /// The kind byte of the frame found.
+        found_kind: u8,
+        /// The total length of the frame found.
+        found_len: u64,
+    },
     /// A valid frame whose `frame_seq` breaks its container's run (SPEC §4.4; ADR-0013): a leftover or misplaced
     /// frame, or a frame missing before it.
     #[error("frame_seq {found}, expected {expected}")]

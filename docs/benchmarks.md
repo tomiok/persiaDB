@@ -166,3 +166,14 @@ document and indexing it). The log is a `SimFile`, so no time is spent in a real
 | Recorded | `append_buffered` | `append_batch_fsync` | `replay` |
 |---|--:|--:|--:|
 | 2026-10-27, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.2) | 356 MiB/s | 462 MiB/s | 66.1 MiB/s |
+
+## `persia-engine` database write path
+
+`cargo bench -p persia-engine --bench database`: 2 000 documents of about 40 words (the WAL bench's). `put_buffered`
+puts them one at a time with `Buffered` durability through `Database::put` (stage in the memtable, log, publish);
+`commit` flushes the 2 000 into one segment, appends its frame and the Manifest frame and writes the slot. The
+container is a `SimFile`, so no time is spent in a real sync. Documents per second.
+
+| Recorded | `put_buffered` | `commit` |
+|---|--:|--:|
+| 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.3) | 269 K | 205 K |

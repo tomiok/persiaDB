@@ -83,6 +83,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "arc-swap"
+version = "1.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "380962b3d93b99642e50b9febf72c071e97e8b32d86eae9cf4ef582bb960ae6e"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -581,6 +590,8 @@ dependencies = [
 name = "persia-engine"
 version = "0.0.0"
 dependencies = [
+ "arc-swap",
+ "bytes",
  "criterion",
  "fst",
  "persia-analysis",
@@ -590,6 +601,7 @@ dependencies = [
  "roaring",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
 ]
 

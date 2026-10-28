@@ -10,6 +10,8 @@ publish.workspace = true
 persia-format.workspace = true
 persia-storage.workspace = true
 persia-analysis.workspace = true
+arc-swap.workspace = true
+bytes.workspace = true
 fst.workspace = true
 roaring.workspace = true
 serde.workspace = true
@@ -19,6 +21,7 @@ thiserror.workspace = true
 [dev-dependencies]
 criterion.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
@@ -33,4 +36,8 @@ harness = false
 
 [[bench]]
 name = "wal"
+harness = false
+
+[[bench]]
+name = "database"
 harness = false
