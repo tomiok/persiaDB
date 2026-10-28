@@ -39,7 +39,7 @@ happens to a segment whose documents are all deleted (ADR-0030 item 8 keeps it l
 8. **The merger fills a `SegmentBuilder`** from the input readers: term dictionaries merged k-way per field,
    postings and positions copied with docids remapped, norms, columns, `DocStore` rows, ids and blob refs copied, and
    statistics recomputed from what was copied. `SegmentWriter` then writes it, as for a flush. Peak memory is about
-   the merged segment's size, the same bound a flush has. A streaming writer is later work (new ROADMAP leaf).
+   the merged segment's size, the same bound a flush has. A streaming writer is later work (ROADMAP 6.5.6).
 
 ## Consequences
 
@@ -47,6 +47,9 @@ happens to a segment whose documents are all deleted (ADR-0030 item 8 keeps it l
   makes sense, so the function never fails.
 - Live sizes are estimates (deleted documents need not be the average size), so a merge may write somewhat more
   than `max_merged_bytes`.
+- The first merger copies more slowly than a flush analyzes (`docs/benchmarks.md`, segment merging): most of its time
+  is the query-oriented postings cursor, set up per term. Copying stays the design, for the rows it must keep as
+  they are (Alternatives), and ROADMAP 6.5.7 gives it a reader of whole lists.
 - The policy never merges across collections or schemas; inputs of one collection may differ in
   `schema_field_count` (fields added later), and the merger writes the output under the collection's current schema.
 

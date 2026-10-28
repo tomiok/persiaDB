@@ -721,6 +721,14 @@ Doc order within a segment is insertion order unless the collection declares `in
 ### 5.5 Merging
 Merging reads N segments, drops tombstoned docs, remaps docids, and writes one new segment
 (fresh statistics). Merge policy: tiered (see 8.5).
+The inputs' live documents keep their order, input by input in the plan's order (§8.5). Nothing is analyzed
+again: postings, frequencies and positions are copied with their docids remapped, and column values, `DocStore` rows
+(as stored, ADR-0023), ids and blob references are copied as they are. Every statistic (term statistics, norms, field
+statistics) is computed from what was copied, so the merged segment is byte for byte the segment a flush of the
+same documents in the same order writes, with the same `segment_id`, `created_at` and `merge_generation`. The
+output uses the collection's current schema; an input written before fields were added (§6.2.4) has no values for
+them. A merge refuses an input with unknown `rocompat_flags` (§5.1) and an id live in two inputs (a commit leaves at
+most one, §8.3) (ADR-0031, ROADMAP 6.5.2).
 
 ---
 

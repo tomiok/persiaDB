@@ -1,6 +1,6 @@
 //! Indexing throughput: [`SegmentBuilder::add`] over synthetic documents, and [`SegmentWriter::finish`] (ROADMAP 5.1,
 //! 5.2); reading the segment they build: open, term lookup, postings, skipping, positions, documents (ROADMAP 5.3);
-//! opening a segment with a large term dictionary; the memtable: `put` and postings through a view (ROADMAP 6.1).
+//! merging segments (ROADMAP 6.5.2); opening a segment with a large term dictionary; the memtable: `put` and postings through a view (ROADMAP 6.1).
 //! Deterministic input (a fixed-seed generator), so runs compare; baselines in `docs/benchmarks.md`.
 //! Run: `cargo bench -p persia-engine --bench segment`.
 
@@ -13,6 +13,7 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::Memtable;
+use persia_engine::merge::{MergeSource, merge};
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -463,9 +464,65 @@ fn bench_memtable(c: &mut Criterion) {
     group.finish();
 }
 
+/// Merging 8 segments of the same documents, every 10th deleted (ROADMAP 6.5.2): compare with `segment/add` + `finish`,
+/// which re-index them.
+fn bench_merge(c: &mut Criterion) {
+    let schema = schema();
+    let registry = AnalyzerRegistry::builtin();
+    let docs = documents(&schema);
+    let inputs: Vec<Segment> = docs
+        .chunks(docs.len().div_ceil(8))
+        .zip(1_u128..)
+        .map(|(chunk, id)| {
+            let meta = SegmentMeta {
+                segment_id: id,
+                ..META
+            };
+            let bytes = SegmentWriter::new(&build(&schema, &registry, chunk), meta)
+                .finish()
+                .unwrap();
+            Segment::open(ByteSource::new(bytes.into()), &schema).unwrap()
+        })
+        .collect();
+    let tombstones: Vec<_> = inputs
+        .iter()
+        .map(|s| {
+            s.tombstones((0..s.doc_count()).step_by(10).collect())
+                .unwrap()
+        })
+        .collect();
+    let sources: Vec<_> = inputs
+        .iter()
+        .zip(&tombstones)
+        .map(|(segment, t)| MergeSource {
+            segment,
+            tombstones: Some(t),
+        })
+        .collect();
+    let live: u64 = tombstones
+        .iter()
+        .zip(&inputs)
+        .map(|(t, s)| u64::from(s.doc_count()) - t.len())
+        .sum();
+
+    let mut group = c.benchmark_group("segment_merge");
+    group.throughput(Throughput::Elements(live));
+    group.bench_function("copy_8", |b| {
+        b.iter(|| black_box(merge(&schema, &registry, &sources).unwrap()));
+    });
+    group.bench_function("copy_and_write_8", |b| {
+        b.iter(|| {
+            let merged = merge(&schema, &registry, &sources).unwrap().unwrap();
+            black_box(merged.write(99, 0, WriteOptions::default()).unwrap())
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench,
+    bench_merge,
     bench_read,
     bench_norms,
     bench_open_large_dict,

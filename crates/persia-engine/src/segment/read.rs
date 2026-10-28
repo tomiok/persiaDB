@@ -417,6 +417,18 @@ impl Segment {
         Document::decode(&row, &self.schema).map_err(|source| ReadError::Document { docid, source })
     }
 
+    /// Document `docid`'s row as stored, and the document it decodes to: a merge copies the bytes (ADR-0023: rows
+    /// are kept as they are) after checking them.
+    ///
+    /// # Errors
+    /// As [`Self::document`].
+    pub(crate) fn row(&self, docid: u32) -> Result<(Vec<u8>, Document), ReadError> {
+        let row = self.record(SectionKind::DocStore, docid)?;
+        let doc = Document::decode(&row, &self.schema)
+            .map_err(|source| ReadError::Document { docid, source })?;
+        Ok((row, doc))
+    }
+
     /// The document with id `id`, and its docid, if the segment has it (via the `IdMap`).
     ///
     /// # Errors

@@ -60,7 +60,7 @@ pub(crate) struct Records {
 }
 
 impl Records {
-    fn push(&mut self, record: &[u8]) {
+    pub(crate) fn push(&mut self, record: &[u8]) {
         self.bytes.extend_from_slice(record);
         self.ends.push(self.bytes.len());
     }

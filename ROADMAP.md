@@ -407,12 +407,14 @@ Deps: M2, M5.
 ## 6.5 Compaction / merging (SPEC §8.5)
 - [~] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests
 - 6.5.2 Segment merger: N readers → one writer, dropping tombstoned docs, remapping docids
-  - [ ] 6.5.2.1 Merge term dictionaries and postings (k-way)
-  - [ ] 6.5.2.2 Merge columns, norms, doc store, id map, blob refs
-  - [ ] 6.5.2.3 Recompute statistics
+  - [~] 6.5.2.1 Merge term dictionaries and postings (k-way)
+  - [~] 6.5.2.2 Merge columns, norms, doc store, id map, blob refs
+  - [~] 6.5.2.3 Recompute statistics
 - [ ] 6.5.3 Background merge scheduler (thread pool, cancellation, backpressure)
 - [ ] 6.5.4 Safe deletion of obsolete segments via snapshot epoch/refcount
 - [ ] 6.5.5 [T] property: merge(search results) == pre-merge results (same hits/scores within epsilon)
+- [ ] 6.5.6 Streaming merge writer: encode the merged sections while the inputs are read, so a merge holds no more than a block per section instead of the whole merged segment in a `SegmentBuilder` (ADR-0031 item 8, found in 6.5.2)
+- [ ] 6.5.7 Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; `segment_merge/copy_8` must beat `segment/add` (it was 36 % slower in 6.5.2, `docs/benchmarks.md`)
 
 ## 6.6 Open/recovery orchestration
 - [ ] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)
