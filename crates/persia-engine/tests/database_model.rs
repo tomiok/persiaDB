@@ -1,12 +1,12 @@
-//! Property tests of the database write path against a naive model (ROADMAP 6.3; SPEC §4.5, §8.2, §8.2.1, §8.6,
-//! §10.1, ADR-0029).
+//! Property tests of the database write path against a naive model (ROADMAP 6.3, 6.4.4; SPEC §4.5, §8.2, §8.2.1, §8.6,
+//! §8.3, §10.1, ADR-0029, ADR-0030).
 //!
 //! Invariants:
 //! 1. Differential: any sequence of puts, upserts, deletes (over two collections), commits, policy ticks (the clock
 //!    advances), creates of further collections (commits that flush nothing but move `wal_start`) and reopens shows,
 //!    after every step, exactly the documents a `BTreeMap` model holds; so does a reopen that loses every unsynced
-//!    write (all operations are `Fsync`), and a further commit and reopen. Deletes are restricted to ids in no
-//!    segment: deleting a flushed id needs tombstones (ROADMAP 6.4.3, ADR-0029 Consequences).
+//!    write (all operations are `Fsync`), and a further commit and reopen. Deletes and upserts reach ids in any
+//!    segment, so commits write tombstone sidecars (ROADMAP 6.4.3, 6.4.4).
 //! 2. Durability levels (SPEC §8.2.1): after any prefix of a sequence of `Buffered`, `Async` and `Fsync` operations
 //!    and commits, a crash that keeps the OS's pages (`CrashLoss::Nothing`, process death) reopens to the state of a
 //!    prefix of the sequence that includes every `Async`/`Fsync`-acknowledged operation; a crash that loses every
@@ -17,6 +17,8 @@
 //!    the end are `ShortRead`, kind `Corrupt`; inverted ranges are `InvalidRange`); `list` of any prefix is the
 //!    filtered full list. A reopen after losing every unsynced write lists the same objects with the same bytes,
 //!    and every listed WAL chunk is at or after the committed `wal_start`.
+//! 4. One live copy (SPEC §8.3, ADR-0030): after every step of 1, no id is live in two segments (deleted documents
+//!    left out), and the manifest's `deleted` count of every segment equals its tombstones' size in the snapshot.
 //!
 //! Seeds: `PROPTEST_RNG_SEED` (default fixed below) and `PROPTEST_CASES`; a failure prints the seed it ran with.
 
@@ -41,7 +43,7 @@ use persia_engine::db::{
     CommitPolicy, Database, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::memtable::{FlushPolicy, IdState};
+use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
@@ -141,20 +143,10 @@ fn options(clock: &Arc<ManualClock>, wal_chunk_target: usize) -> DatabaseOptions
 /// Documents by collection and id.
 type State = BTreeMap<String, BTreeMap<String, Document>>;
 
-/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', newer segments
-/// hide older ones (SPEC §8.3).
+/// The document with id `id` as `snapshot` shows it: the memtable's version hides the segments', then the newest
+/// segment with a live copy (SPEC §8.3).
 fn get(snapshot: &Snapshot, collection: &str, id: &str) -> Option<Document> {
-    let c = snapshot.collection(collection)?;
-    let memtable = c.memtable();
-    match memtable.lookup(id) {
-        Some(IdState::Live(docid)) => return Some(memtable.document(docid).unwrap()),
-        Some(IdState::Deleted) => return None,
-        None => {}
-    }
-    c.segments()
-        .iter()
-        .rev()
-        .find_map(|s| s.document_by_id(id).unwrap().map(|(_, d)| d))
+    snapshot.collection(collection)?.get(id).unwrap()
 }
 
 /// Every live document of every collection `snapshot` shows.
@@ -183,14 +175,31 @@ fn observed(snapshot: &Snapshot) -> State {
     state
 }
 
-/// Whether a segment of `collection` holds `id`: a delete of it would need a tombstone (ROADMAP 6.4.3).
-fn in_segment(snapshot: &Snapshot, collection: &str, id: &str) -> bool {
-    snapshot
-        .collection(collection)
-        .unwrap()
-        .segments()
-        .iter()
-        .any(|s| s.document_by_id(id).unwrap().is_some())
+/// Invariant 4: no id is live in two segments of a collection, and each segment's committed `deleted` count is the
+/// size of the tombstones the snapshot applies.
+fn one_live_copy(snapshot: &Snapshot) -> Result<(), TestCaseError> {
+    for (name, c) in snapshot.collections() {
+        let mut seen = BTreeSet::new();
+        for view in c.segment_views() {
+            for docid in 0..view.doc_count() {
+                if view.is_live(docid) {
+                    let id = view.segment().id_of(docid).unwrap();
+                    prop_assert!(seen.insert(id.clone()), "{}: {} is live twice", name, id);
+                }
+            }
+        }
+        let entries = snapshot.manifest().collection(name).unwrap().segments();
+        for (entry, tombstones) in entries.iter().zip(c.tombstones()) {
+            prop_assert_eq!(
+                entry.tombstones.map(|t| u64::from(t.deleted)),
+                tombstones.as_ref().map(|t| t.len()),
+                "{}: segment {}",
+                name,
+                entry.id
+            );
+        }
+    }
+    Ok(())
 }
 
 fn empty_state() -> State {
@@ -268,9 +277,6 @@ fn differential(ops: Vec<Op>) -> Result<(), TestCaseError> {
             }
             Op::Delete { c, id } => {
                 let id = format!("d{id}");
-                if in_segment(&db.snapshot(), COLLECTIONS[*c], &id) {
-                    continue;
-                }
                 db.delete(COLLECTIONS[*c], &id, Durability::Fsync).unwrap();
                 model.get_mut(COLLECTIONS[*c]).unwrap().remove(&id);
             }
@@ -312,6 +318,7 @@ fn differential(ops: Vec<Op>) -> Result<(), TestCaseError> {
             }
         }
         prop_assert_eq!(&observed(&db.snapshot()), &model, "step {}: {:?}", step, op);
+        one_live_copy(&db.snapshot())?;
         prop_assert_eq!(db.reader().seq(), db.seq());
     }
 
@@ -321,6 +328,7 @@ fn differential(ops: Vec<Op>) -> Result<(), TestCaseError> {
     let (file, mut db) = reopen(&file, &clock);
     prop_assert_eq!(db.seq(), seq);
     prop_assert_eq!(&observed(&db.snapshot()), &model, "after the reopen");
+    one_live_copy(&db.snapshot())?;
     // Recovery is idempotent: flushing the replayed records and reopening keeps the documents.
     db.commit().unwrap();
     prop_assert_eq!(
@@ -342,6 +350,7 @@ fn differential(ops: Vec<Op>) -> Result<(), TestCaseError> {
         &model,
         "after the commit and a reopen"
     );
+    one_live_copy(&db.snapshot())?;
     Ok(())
 }
 
@@ -445,9 +454,6 @@ fn durability_levels(ops: Vec<DurableOp>) -> Result<(), TestCaseError> {
             }
             DurableOp::Delete { c, id, durability } => {
                 let id = format!("d{id}");
-                if in_segment(&db.snapshot(), COLLECTIONS[*c], &id) {
-                    continue;
-                }
                 db.delete(COLLECTIONS[*c], &id, *durability).unwrap();
                 model.get_mut(COLLECTIONS[*c]).unwrap().remove(&id);
                 *durability
