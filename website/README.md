@@ -29,3 +29,13 @@ links do the same with `import.meta.env.BASE_URL`.
 The same build writes [`llms.txt`](https://tomiok.github.io/persiaDB/llms.txt) (an index of every docs page) and
 [`llms-full.txt`](https://tomiok.github.io/persiaDB/llms-full.txt) (those pages in Markdown). Links in both files
 use the `/persiaDB/` base.
+
+## Waitlist
+
+The landing page and `/waitlist/` include a form that encrypts the submission in the browser.
+Setup (keypair, Cloudflare Worker, GitHub secret) is [`scripts/waitlist/README.md`](../scripts/waitlist/README.md).
+The relay that forwards ciphertext lives in [`relay/waitlist`](relay/waitlist/README.md).
+
+```bash
+npm test
+```

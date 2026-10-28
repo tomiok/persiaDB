@@ -146,6 +146,7 @@ export default defineConfig({
                 { label: 'How it works', slug: 'architecture' },
                 { label: 'Roadmap', slug: 'roadmap' },
                 { label: 'About', slug: 'about' },
+                { label: 'Waitlist', slug: 'waitlist' },
                 {
                     label: 'Guide',
                     items: [

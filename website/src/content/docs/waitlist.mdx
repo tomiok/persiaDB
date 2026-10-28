@@ -1,0 +1,27 @@
+---
+title: Waitlist
+description: Leave an email to hear when Persia DB can be run. The browser encrypts it before it is stored.
+head:
+  - tag: title
+    content: "Waitlist for the embedded search database | PersiaDB"
+  - tag: meta
+    attrs:
+      property: og:title
+      content: "Waitlist for the embedded search database | PersiaDB"
+  - tag: meta
+    attrs:
+      name: twitter:title
+      content: "Waitlist for the embedded search database | PersiaDB"
+---
+
+import WaitlistForm from '../../components/WaitlistForm.astro';
+
+Persia DB is pre-alpha. There is no release to install. Leave an email if you want a note when a
+build is worth trying. A name, a company, and a use case are optional.
+
+The page encrypts the form in your browser with a public key. What leaves the browser is
+ciphertext. The project keeps that ciphertext in a git branch, one line per submission. The
+private key is not on this site and not in the repository, so the stored lines are not readable
+from the repo alone.
+
+<WaitlistForm />

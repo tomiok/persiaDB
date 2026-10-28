@@ -1,0 +1,86 @@
+# Append one encrypted waitlist line to the `waitlist` branch.
+#
+# The static site cannot hold a GitHub token. A Cloudflare Worker
+# (website/relay/waitlist) calls repository_dispatch with a token stored as a
+# Worker secret. This workflow is the only writer. It must be on the default
+# branch before GitHub will run it.
+#
+# The `waitlist` branch exists so signups are not commits on main. A commit on
+# main would redeploy the site and rerun CI. Do not merge `waitlist` back into
+# main. The file is ciphertext; decrypt it locally (scripts/waitlist/README.md).
+
+name: waitlist
+
+on:
+  repository_dispatch:
+    types: [waitlist-submission]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: waitlist-append
+  cancel-in-progress: false
+
+jobs:
+  append:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: true
+          fetch-depth: 1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Append ciphertext on the waitlist branch
+        env:
+          WAITLIST_CIPHERTEXT: ${{ github.event.client_payload.ciphertext }}
+        run: |
+          set -euo pipefail
+          current="$RUNNER_TEMP/waitlist-current.txt"
+          next="$RUNNER_TEMP/waitlist-next.txt"
+          : > "$current"
+          if git ls-remote --exit-code --heads origin waitlist >/dev/null 2>&1; then
+            git fetch --depth=1 origin waitlist
+            if git cat-file -e FETCH_HEAD:waitlist.txt.enc; then
+              git show FETCH_HEAD:waitlist.txt.enc > "$current"
+            fi
+            echo existing > "$RUNNER_TEMP/waitlist-branch-kind"
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo "could not query origin/waitlist (status $status)" >&2
+              exit 1
+            fi
+            echo new > "$RUNNER_TEMP/waitlist-branch-kind"
+          fi
+          set +e
+          node scripts/waitlist/merge.mjs --current "$current" --out "$next"
+          code=$?
+          set -e
+          if [ "$code" -eq 2 ]; then
+            echo "duplicate submission; not committing"
+            exit 0
+          fi
+          if [ "$code" -ne 0 ]; then
+            exit "$code"
+          fi
+          kind="$(cat "$RUNNER_TEMP/waitlist-branch-kind")"
+          if [ "$kind" = "existing" ]; then
+            git checkout -B waitlist FETCH_HEAD
+          else
+            git checkout -B waitlist
+          fi
+          branch="$(git branch --show-current)"
+          if [ "$branch" != "waitlist" ]; then
+            echo "refusing to commit on ${branch}" >&2
+            exit 1
+          fi
+          cp "$next" waitlist.txt.enc
+          git add -- waitlist.txt.enc
+          git -c user.name='github-actions[bot]' \
+            -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -m "chore(waitlist): append encrypted submission"
+          git push origin HEAD:waitlist

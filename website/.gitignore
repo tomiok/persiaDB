@@ -17,5 +17,9 @@ pnpm-debug.log*
 .env
 .env.production
 
+# Waitlist relay local secrets. .dev.vars.example is the template.
+relay/waitlist/.dev.vars
+relay/waitlist/.wrangler/
+
 # macOS-specific files
 .DS_Store

@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `npx wrangler dev`. Never commit .dev.vars.
+# Fine-grained PAT for tomiok/persiaDB only, Contents: Read and write.
+# GitHub requires Contents write for POST /repos/{owner}/{repo}/dispatches.
+GITHUB_DISPATCH_TOKEN=github_pat_replace_me
