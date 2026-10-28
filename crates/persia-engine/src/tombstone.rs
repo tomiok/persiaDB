@@ -40,8 +40,9 @@ use crate::manifest::{MAX_SEGMENT_DOCS, SegmentId};
 pub const MAGIC: [u8; 4] = *b"PTMB";
 /// The encoding version this build writes and reads.
 pub const VERSION: u32 = 1;
-/// The largest encoding: the bitmap of a segment of `2^31` documents takes at most `2^28` bytes in bitmap
-/// containers, plus their descriptions and offsets, the header and the trailer.
+/// The largest encoding: what this writer produces for any segment (each container in its smallest kind, at most
+/// 8 KiB: `2^28` bytes for `2^31` documents, plus descriptions, offsets, header and trailer). Anything longer is
+/// corruption, even a valid bitmap with needlessly large run containers.
 pub const MAX_SIDECAR_LEN: usize = (1 << 28) + (1 << 20);
 
 /// Magic, version, segment id, sidecar version, `doc_count`, `deleted`.

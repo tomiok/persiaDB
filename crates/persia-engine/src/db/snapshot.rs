@@ -106,8 +106,9 @@ impl CollectionSnapshot {
 
     /// Where the live version of `id` is, as of `memtable` (a view of [`Self::memtable`]) and this snapshot's
     /// segments (SPEC §8.3, ROADMAP 6.4.1): the memtable's version or delete of the id, if it has one, hides every
-    /// segment's; otherwise the segments are searched newest first through their `IdMap`s, deleted documents left
-    /// out. `None` if no live version exists.
+    /// segment's; otherwise the newest segment whose `IdMap` holds the id decides: its copy if live, `None` if its
+    /// tombstones delete it (older copies are never consulted, so a deleted id stays deleted even if an older
+    /// segment still held it live). `None` if no segment holds the id.
     ///
     /// # Errors
     /// A corruption of a segment's `IdMap`.
@@ -117,12 +118,13 @@ impl CollectionSnapshot {
             Some(IdState::Deleted) => return Ok(None),
             None => {}
         }
-        Ok(newest_live(self.segment_views(), id)?
+        Ok(newest(self.segment_views(), id)?
             .map(|(index, docid)| Located::Segment { index, docid }))
     }
 
-    /// The live document with id `id`, as of a view of the memtable taken now: a write is visible to the next
-    /// lookup that follows it (read-your-writes), a commit changes nothing a lookup returns.
+    /// The live document with id `id` ([`Self::lookup`] with a view of the memtable taken now). A snapshot loaded
+    /// after a write sees it (read-your-writes), and so does one loaded before it, up to the commit that flushes its
+    /// memtable: snapshots loaded from then on see it in a segment.
     ///
     /// # Errors
     /// As [`Self::lookup`]; a corruption of the segment's `DocStore`.
@@ -140,14 +142,14 @@ impl CollectionSnapshot {
     }
 }
 
-/// The newest of `views` (oldest first) that holds `id` live, by index, and its docid there.
-pub(super) fn newest_live<'s>(
+/// The newest of `views` (oldest first) whose `IdMap` holds `id`, by index, and its docid there, if that copy is live.
+fn newest<'s>(
     views: impl DoubleEndedIterator<Item = SegmentView<'s>> + ExactSizeIterator,
     id: &str,
 ) -> Result<Option<(usize, u32)>, ReadError> {
     for (index, view) in views.enumerate().rev() {
-        if let Some(docid) = view.docid_of(id)? {
-            return Ok(Some((index, docid)));
+        if let Some(docid) = view.segment().docid_of(id)? {
+            return Ok(view.is_live(docid).then_some((index, docid)));
         }
     }
     Ok(None)

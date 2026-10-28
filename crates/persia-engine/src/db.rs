@@ -1013,7 +1013,7 @@ fn open_segment<F: ContainerFile + Sync>(
             let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
             let sidecar = read_sidecar(&objects.get(&key)?, collection, entry)?;
             let tombstones = segment
-                .tombstones(sidecar.deleted().clone())
+                .tombstones(sidecar.into_deleted())
                 .map_err(|source| DatabaseError::OpenSegment {
                     collection: collection.to_owned(),
                     id: entry.id,

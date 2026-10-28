@@ -9,6 +9,8 @@
 //!    delete, replayed or not), in the next sidecar version of each segment (a superset): afterwards each id has at
 //!    most one live copy. Writes are visible before the commit (read-your-writes); older snapshots keep their state;
 //!    a reopen after losing every unsynced write shows the same documents (6.4.3).
+//! 4. The newest segment whose `IdMap` holds an id decides a lookup: a deleted copy there ends it (6.4.1). A newer
+//!    sidecar encoding is unsupported, not corrupt; one longer than `MAX_SIDECAR_LEN` is corrupt (6.4.2).
 
 #![allow(
     clippy::unwrap_used,
@@ -31,7 +33,7 @@ use persia_engine::manifest::{
 };
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
-use persia_engine::tombstone::TombstoneSidecar;
+use persia_engine::tombstone::{MAX_SIDECAR_LEN, SidecarError, TombstoneSidecar};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_format::block::Compression;
@@ -440,4 +442,110 @@ fn a_commit_deletes_every_older_copy_of_an_id() {
         text(&a.collection("a").unwrap().get("x").unwrap().unwrap()),
         "new"
     );
+}
+
+#[test]
+fn a_newer_sidecar_encoding_is_unsupported_not_corrupt() {
+    let (file, id) = one_segment();
+    let mut bytes = TombstoneSidecar::new(id, 1, 5, deleted(&[1, 3]))
+        .unwrap()
+        .encode();
+    bytes[4..8].copy_from_slice(&2_u32.to_le_bytes());
+    let end = bytes.len() - 4;
+    let crc = persia_format::checksum::crc32c(&bytes[..end]);
+    bytes[end..].copy_from_slice(&crc.to_le_bytes());
+    commit_sidecar(&file, &bytes, 1, 2);
+    let e = Database::open_on(file, options()).unwrap_err();
+    assert!(!e.is_corruption(), "{e}");
+    assert!(
+        matches!(
+            e,
+            DatabaseError::Sidecar {
+                source: SidecarError::UnsupportedVersion { version: 2 },
+                ..
+            }
+        ),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_oversized_sidecar_is_corrupt() {
+    let bytes = vec![0; MAX_SIDECAR_LEN + 1];
+    assert!(
+        TombstoneSidecar::decode(&bytes)
+            .unwrap_err()
+            .is_corruption()
+    );
+}
+
+/// The newest segment holding an id decides a lookup: a deleted copy there ends it, even if an older segment still
+/// holds the id live (which a commit never leaves, ADR-0030).
+#[test]
+fn a_deleted_newest_copy_ends_the_lookup() {
+    let file = SimFile::new();
+    {
+        let mut c = Container::create_on(file.clone(), [8; 16]).unwrap();
+        let mut entries = Vec::new();
+        for id in [1, 2] {
+            let bytes = segment_bytes(id, &["x"]);
+            let f = c
+                .append(FrameKind::Segment, &bytes, Compression::None)
+                .unwrap();
+            entries.push(SegmentEntry {
+                id: SegmentId::new(id),
+                doc_count: 1,
+                size: bytes.len() as u64,
+                location: Location::Frame {
+                    offset: f.offset,
+                    len: f.len,
+                },
+                tombstones: None,
+            });
+        }
+        let sidecar = TombstoneSidecar::new(SegmentId::new(2), 1, 1, deleted(&[0])).unwrap();
+        let f = c
+            .append(
+                FrameKind::TombstoneSidecar,
+                &sidecar.encode(),
+                Compression::None,
+            )
+            .unwrap();
+        entries[1].tombstones = Some(Tombstones {
+            version: 1,
+            deleted: 1,
+            location: Location::Frame {
+                offset: f.offset,
+                len: f.len,
+            },
+        });
+        c.sync().unwrap();
+        let mut diff = ManifestDiff {
+            wal_start: Some(c.end()),
+            ..ManifestDiff::default()
+        };
+        diff.collections.insert(
+            "a".into(),
+            CollectionDiff::Create {
+                schema: schema("a"),
+                segments: entries,
+            },
+        );
+        let m = Manifest::empty().apply(&diff).unwrap();
+        let wal_start = c.end();
+        let frame = c
+            .append(FrameKind::Manifest, &m.encode().unwrap(), Compression::None)
+            .unwrap();
+        c.commit(Commit {
+            manifest: frame,
+            wal_start,
+            fence_token: 0,
+        })
+        .unwrap();
+    }
+    let db = Database::open_on(file, options()).unwrap();
+    let snapshot = db.snapshot();
+    let a = snapshot.collection("a").unwrap();
+    assert_eq!(a.lookup(&a.memtable(), "x").unwrap(), None);
+    assert_eq!(a.get("x").unwrap(), None);
 }

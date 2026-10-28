@@ -27,8 +27,10 @@ copy live.
    against its manifest entry: `segment_id`, version, `doc_count` and `deleted`.
 3. **The bitmap is not canonical.** The portable format leaves container offsets and container kinds free; the reader
    accepts any valid form, the writer runs `optimize()` (run containers where they are smaller, so a bulk delete
-   stays small). Nothing hashes a sidecar, so one encoding per value is not needed. The largest sidecar, every
-   document of a `2^31`-document segment in bitmap containers, fits `MAX_SIDECAR_LEN` (`2^28 + 2^20` bytes).
+   stays small). Nothing hashes a sidecar, so one encoding per value is not needed. The writer's largest sidecar,
+   every document of a `2^31`-document segment with each container in its smallest kind (at most 8 KiB), fits
+   `MAX_SIDECAR_LEN` (`2^28 + 2^20` bytes); an encoding above it (possible only with needlessly large run
+   containers) is corruption.
 4. **Superset check before commit.** The writer builds version `n + 1` as the union of version `n` and the new
    deletions, then checks `TombstoneSidecar::check_follows` (the next version, every earlier docid kept) before it
    appends the frame. A failure is an internal error, before anything is written.
@@ -39,13 +41,19 @@ copy live.
    sidecars are appended after the new segments and before the WAL's commit point and the manifest (SPEC §4.5
    step 1). Looking in every segment, not only the newest holding the id, also removes duplicates left by builds
    before this change (ADR-0029 Consequences).
-6. **Lookups** (ROADMAP 6.4.1): the memtable's version or delete of an id hides the segments'; otherwise the
-   segments are searched newest first through their `IdMap`s, deleted documents left out (`CollectionSnapshot::lookup`,
-   `get`). Since a commit keeps at most one live copy of an id, newest first is only a shortcut.
+6. **Lookups** (ROADMAP 6.4.1): the memtable's version or delete of an id hides the segments'; otherwise the newest
+   segment whose `IdMap` holds the id decides: its copy if live, none if deleted (`CollectionSnapshot::lookup`,
+   `get`). Older copies are not consulted, so a lookup never depends on every older copy having been deleted.
 7. **Visibility.** A write is visible in the memtable once logged (ADR-0029); the commit publishes the new segment and
    the sidecars that hide the older copies in one snapshot, so every snapshot shows each id at most once.
 8. A segment whose documents are all deleted stays listed (with `deleted = doc_count`) until a merge drops it
    (ROADMAP 6.5); removing it at once is a possible optimization.
+9. **No format version bump.** The sidecar encoding carries its own version (1), frame kind 5 and the manifest's
+   sidecar reference already existed, and no build that writes sidecars has been released. Builds before this
+   change read a sidecar's frame but ignored its payload, so they would show deleted documents; none was released.
+10. **The decoder relies on `roaring`'s checked `deserialize_from`** (sorted keys and values, run and cardinality
+    checks, a bounded container count); the unchecked variant panics on hostile bytes. Tests pin that behavior, so a
+    `roaring` upgrade that weakened it fails them.
 
 ## Consequences
 

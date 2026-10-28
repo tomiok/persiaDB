@@ -1302,7 +1302,8 @@ Tombstone sidecar (ADR-0030; the layout closes SPEC §18.3):
 40  ..  the deleted docids: a roaring bitmap, portable serialization
 ..  4  crc32c      u32  over every byte before it
 ```
-- Reading: the length (at most 2^28 + 2^20 bytes), the magic, the CRC32C trailer, then `version` (0 is corruption;
+- Reading: the length (at most 2^28 + 2^20 bytes, which bounds the writer's encoding of any segment: an encoding
+  above it is corruption), the magic, the CRC32C trailer, then `version` (0 is corruption;
   above 1 is unsupported), then the rest. Anything else that does not hold is corruption: `sidecar` 0, `doc_count`
   or `deleted` out of range, a bitmap that does not deserialize or does not end at the trailer, a cardinality other
   than `deleted`, a docid `>= doc_count`. The bitmap's container kinds and offsets are free (the writer uses run
@@ -1319,8 +1320,9 @@ version, appended after the new segments and before the WAL's commit point and t
 updated entry in the commit's diff. So a commit leaves at most one live copy of each id, and every snapshot shows
 each id at most once: the memtable's version or delete before the commit, the new segment and the sidecars after.
 
-**Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the segments
-are searched newest first through their `IdMap`s (§5.3.6), deleted documents left out.
+**Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the newest
+segment whose `IdMap` holds the id (§5.3.6) decides: its copy if live, none if its sidecar deletes it. Older copies
+are never consulted, so a deleted id stays deleted whatever older segments hold.
 
 ### 8.4 Concurrency
 - **Single writer** per database/shard (file lock locally; lease remotely, SPEC §11.3). Opening a second writer fails fast.
