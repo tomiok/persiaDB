@@ -1187,6 +1187,16 @@ Rules:
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
 5. WAL chunks fully covered by committed segments are dropped (`wal_start` advances).
 
+Locally (ROADMAP 6.3, ADR-0029) a flush and its commit are one step, and it flushes every memtable that holds
+operations, each into one segment of its live documents in docid order (none if every document was replaced or
+deleted), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
+`tick()`, which the embedding calls periodically (the engine runs no thread of its own) and which commits when any
+memtable is idle or reached `commit_interval` since its first unflushed write. Operations replayed at an open count as
+written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
+commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
+write, sync or commit after that poisons the database until it is reopened (§4.5). Creating a collection is a commit
+of its own, so its records follow it in the log.
+
 #### 8.2.1 WAL chunks (ADR-0028)
 The WAL is one ordered log of operations for the whole database (single writer, §8.4), stored as **chunks**: locally
 each chunk is the payload of one `WalChunk` frame (§4.4), remotely one object (`wal/<seq:020>.wal`, §10.4; M12).
@@ -1230,6 +1240,20 @@ logged only for an operation that replay can apply: its collection is in the com
 collection's commit completes before its first record), and its collection's memtable accepts it (a put's
 document validates and indexes: a docid left, no term over the limit a custom analyzer could emit). The write path must guarantee this
 before acknowledging (ROADMAP 6.3.9); the WAL itself checks only the record's framing.
+
+The write path does it in three steps (ADR-0029): the memtable *stages* the operation (validates and indexes a put,
+interns the id, but publishes nothing: no view sees it), the record is logged, and only then the memtable *publishes*
+it. A rejected operation is never logged, and no reader sees an operation that was not logged. A single `put` or
+`delete` is logged with its durability before it is published, so it is visible only once durable at that level; in
+a `put_batch` the documents before the last are logged `Buffered` and visible at once, and the last one carries the
+batch's durability (one sync for all). A batch whose document is rejected keeps the ones before it, made durable at
+the batch's level. A sync that fails after a reader saw a buffered document poisons the database; a reopen decides
+what survived.
+
+Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
+put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).
+So a commit that changes a schema flushes every memtable first, like a drop: its `wal_start` is the end of the log,
+and no record encoded under an earlier schema is ever replayed (ROADMAP 6.3.10).
 
 **`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection not yet covered by
 a committed flush; with no such chunk, the end of the log. A flush starts from a point in the log (when its memtable
@@ -1281,6 +1305,11 @@ Tombstone sidecar (proposed; exact byte layout fixed by an ADR in ROADMAP 6.4.2,
   taken (docids and operations are numbered, and a replaced or deleted document records the operation that ended it),
   and a later write never changes what the view returns. Readers take the memtable's lock only while copying data
   out, never for a whole search.
+- **Snapshots** (§4.5 step 4, ROADMAP 6.3.3): once a commit's slot is durable, the writer swaps in a new snapshot
+  atomically: the manifest, each collection's open segments and a read handle on its memtable. Readers load the
+  current one without locks and keep it as long as they like; it shows the committed segments plus the memtable's
+  writes as of each view taken from it. A memtable a commit flushes stays in the older snapshots and takes no more
+  writes, so every snapshot shows a flushed document exactly once: in the memtable before, in the segment after.
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.
@@ -1342,9 +1371,15 @@ Anything else is corruption:
 
 The encoding allows both kinds of location in one manifest, but no layout uses that yet: a local container's
 manifest holds only frame locations and a remote one only object locations, and their readers treat any other
-location as corruption (ROADMAP 6.3.7).
+location as corruption (ROADMAP 6.3.7). Opening a local database therefore checks, as corruption, that the
+committed manifest's `seq`, `fence_token` and `wal_start` equal the active slot's, that it holds no object location,
+and that each frame location names a valid frame of the right kind (`Segment`, `TombstoneSidecar`) and exactly that
+length, ending at or below `log_end`; it also checks each segment's footer `segment_id` and `doc_count` against its
+entry. A remote reader (M12) applies the same layout check with object locations only.
 
-**Segment ids.** Writers draw each new `segment_id` at random (128 bits from a cryptographically secure source).
+**Segment ids.** Writers draw each new `segment_id` at random: 128 bits from a keyed pseudo-random function whose key comes from the
+operating system's randomness (ADR-0029). What matters is uniqueness, not unpredictability; an id already in the
+manifest is drawn again.
 An id is never reused: older snapshots may still reference a segment that was merged away (§8.5), and remote keys
 of segments and sidecars (§10.4) are named by it. A manifest can only check uniqueness within itself and against the
 manifest a commit builds on (§8.7.2); random ids make a collision with an older, no longer listed segment
@@ -1456,7 +1491,14 @@ pub trait Storage: Send + Sync {
 }
 ```
 A **container adapter** implements the local single-file layout (SPEC §4) on top of the filesystem and
-presents the same logical objects to the engine.
+presents the same logical objects to the engine. A container stores no names, so the names come from the committed
+manifest and superblock (ROADMAP 6.3.6, ADR-0029), with the keys of the remote layout (§10.4):
+`manifests/<seq:020>.mf` is the committed Manifest frame, `segments/<collection>/<segment_id>.seg` and
+`tombstones/<collection>/<segment_id>.<version>.tomb` the frames the manifest locates (`segment_id` as 32 lowercase hex
+digits), `wal/<frame_seq:020>.wal` the `WalChunk` frames of `wal_start..log_end`. The view is read-only: a commit
+appends frames and writes a slot (§4.5), which no `put` or `put_if_absent` of one object expresses, so writes are
+`Unsupported` and it claims no capability. Every read checks that the frame is of the kind and length the location
+gives and lies below `log_end` (§8.7.1); anything else is `Corrupt`.
 
 **Keys.** A `Key` is UTF-8, 1–1024 bytes (the S3/GCS limit), made of `/`-separated segments. Every segment is
 non-empty (so no leading, trailing or doubled `/`) and is not `.` or `..`; no character is a control character
@@ -1704,6 +1746,7 @@ Embedded: builder options (`OpenOptions`), sensible defaults, no files.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
 Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `search_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`.
+Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3).
 
 ---
 
@@ -1721,6 +1764,10 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
   golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024),
   checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`),
   existing ones never.
+- Whole databases written by the engine's commit path, which exercise every encoding inside a container together,
+  live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests
+  and written on request when missing (`PERSIA_WRITE_DATABASE_FIXTURES=1`; ROADMAP 6.3.8). `blob-ref.persia` holds a
+  segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

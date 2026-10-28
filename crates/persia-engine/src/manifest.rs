@@ -269,6 +269,44 @@ impl Manifest {
         self.collections.get(name)
     }
 
+    /// Checks that every location is of the kind `layout` uses (SPEC §8.7.1, ROADMAP 6.3.7): a local container's
+    /// manifest holds only frame locations, a remote one only object locations. Readers treat anything else as
+    /// corruption.
+    ///
+    /// ```
+    /// use persia_engine::manifest::{Layout, Manifest};
+    ///
+    /// let empty = Manifest::empty();
+    /// assert!(empty.check_layout(Layout::Container).is_ok());
+    /// assert!(empty.check_layout(Layout::Objects).is_ok());
+    /// ```
+    ///
+    /// # Errors
+    /// [`LayoutError`] for the first location of the other kind.
+    pub fn check_layout(&self, layout: Layout) -> Result<(), LayoutError> {
+        for collection in self.collections.values() {
+            for segment in &collection.segments {
+                let sidecar = segment.tombstones.map(|t| t.location);
+                for location in std::iter::once(segment.location).chain(sidecar) {
+                    let ok = match (layout, location) {
+                        (Layout::Container, Location::Frame { .. })
+                        | (Layout::Objects, Location::Object) => true,
+                        (Layout::Container, Location::Object)
+                        | (Layout::Objects, Location::Frame { .. }) => false,
+                    };
+                    if !ok {
+                        return Err(LayoutError {
+                            layout,
+                            collection: collection.name().to_owned(),
+                            segment: segment.id,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// The encoding of SPEC §8.7.
     ///
     /// # Errors
@@ -287,6 +325,29 @@ impl Manifest {
     pub fn decode(bytes: &[u8]) -> Result<Self, ManifestError> {
         codec::decode(bytes)
     }
+}
+
+/// Where a manifest's segments and sidecars are stored (SPEC §8.7.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    /// The local single-file container: frame locations only.
+    Container,
+    /// An object store (SPEC §10.4): object locations only.
+    Objects,
+}
+
+/// A manifest location of the kind its [`Layout`] does not use: corruption (SPEC §8.7.1).
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "collection {collection:?}, segment {segment}: a location a {layout:?} layout does not use"
+)]
+pub struct LayoutError {
+    /// The layout the manifest was read for.
+    pub layout: Layout,
+    /// The collection.
+    pub collection: String,
+    /// The segment whose location (or sidecar's) is of the other kind.
+    pub segment: SegmentId,
 }
 
 /// XXH3-128 of an encoded manifest (SPEC §8.7): identifies a commit's bytes as stored. Decoding and re-encoding may

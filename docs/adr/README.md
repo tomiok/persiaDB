@@ -51,3 +51,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0026](./0026-counting-allocator-in-tests.md) | A counting global allocator in allocation tests | proposed |
 | [0027](./0027-segment-footer-and-sections.md) | Segment footer, section kinds and section encodings | proposed |
 | [0028](./0028-wal-chunks-and-replay.md) | WAL chunks, durability levels and replay | proposed |
+| [0029](./0029-local-flush-commit-and-snapshots.md) | Local flush, commit and snapshot publication | proposed |

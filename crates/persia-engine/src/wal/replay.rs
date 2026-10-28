@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use persia_format::frame::FrameKind;
 use persia_storage::container::{self, Container, ContainerFile};
 
-use super::chunk::{MAX_CHUNK_LEN, WalError, WalOp, decode_chunk};
+use super::chunk::{MAX_CHUNK_LEN, WalCorruption, WalError, WalOp, decode_chunk};
 use crate::document::{DecodeError, Document};
 use crate::memtable::{Memtable, MemtableError};
 
@@ -141,8 +141,15 @@ impl<'m> Replay<'m> {
                     memtable.put(&doc).map_err(at_record)?;
                 }
                 WalOp::Delete => {
-                    // Checked by the decoder.
-                    let id = record.deleted_id().unwrap_or_default();
+                    // Checked by the decoder; should that check ever regress, the record is corrupt, not a delete of
+                    // the empty id.
+                    let id = record.deleted_id().ok_or(ReplayError::Chunk {
+                        chunk,
+                        error: WalError::Corrupt {
+                            offset,
+                            reason: WalCorruption::Id,
+                        },
+                    })?;
                     memtable.delete(id).map_err(at_record)?;
                 }
             }

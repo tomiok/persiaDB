@@ -383,20 +383,22 @@ Deps: M2, M5.
 - [x] 6.2.5 Fuzz WAL replay
 
 ## 6.3 Flush & commit
-- [ ] 6.3.1 Memtable → segment (uses M5 writer) → storage frame/object
-- [ ] 6.3.2 Manifest build + commit protocol (local, SPEC §4.5)
-- [ ] 6.3.3 Atomic snapshot publication to readers (`ArcSwap`-style) with `seq`
-- [ ] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`); the interval flushes a memtable whose writes never pause long enough for the idle trigger (SPEC §8.2 step 3, found in 6.1.4)
-- [ ] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
-- [ ] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
-- [ ] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
-- [ ] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
-- [ ] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
+- [x] 6.3.1 Memtable → segment (uses M5 writer) → storage frame/object
+- [x] 6.3.2 Manifest build + commit protocol (local, SPEC §4.5)
+- [x] 6.3.3 Atomic snapshot publication to readers (`ArcSwap`-style) with `seq`
+- [x] 6.3.4 Auto-commit policy (size, interval, explicit `commit()`); the interval flushes a memtable whose writes never pause long enough for the idle trigger (SPEC §8.2 step 3, found in 6.1.4)
+- [x] 6.3.5 [T] crash tests at every protocol step using `FaultyStorage`
+- [x] 6.3.6 Expose the single-file container's logical objects (Segment/Manifest/WalChunk) to the engine through the `Storage` trait view (moved from 2.4.6): the container stores no object names, so the key → frame mapping is designed with the manifest and the commit protocol (SPEC §10.1, §4.5)
+- [x] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
+- [x] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
+- [x] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
+- [ ] 6.3.10 Schema change and drop through commit (SPEC §8.2.1, §8.7.2): both flush every memtable first, so `wal_start` reaches the end of the log and no record of an earlier schema (or of the dropped collection) is replayed; reopen the collection's segments with the evolved schema. Test: a non-`strict` put with extra fields, then `strict`, then a crash and reopen (found in 6.3.9)
+- [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
 
 ## 6.4 Upserts & deletes across segments
 - [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
 - [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
-- [ ] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes)
+- [ ] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
 - [ ] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
 
 ## 6.5 Compaction / merging (SPEC §8.5)

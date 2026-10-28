@@ -200,7 +200,8 @@ impl<L: WalLog> WalWriter<L> {
     }
 
     /// The log, to append other frames (a commit's Segment and Manifest frames). Take the commit's `wal_start` from
-    /// [`WalWriter::commit_point`] first, so the records buffered so far precede them (SPEC §4.5 step 1).
+    /// [`WalWriter::commit_point`] before appending the Manifest, so the records buffered so far precede it (SPEC §4.5
+    /// step 1); Segment frames may come before or after it.
     pub fn log_mut(&mut self) -> &mut L {
         &mut self.log
     }
