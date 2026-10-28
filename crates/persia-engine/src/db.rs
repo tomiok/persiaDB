@@ -63,7 +63,7 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use objects::ContainerObjects;
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
-pub use snapshot::{CollectionSnapshot, DatabaseReader, Snapshot};
+pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
 
 use crate::document::Document;
 use crate::manifest::{
@@ -72,7 +72,7 @@ use crate::manifest::{
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::schema::CollectionSchema;
-use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, WriteOptions};
+use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::wal::{
     DEFAULT_CHUNK_TARGET, Durability, RecordError, ReplayError, WalMark, WalRecord, WalWriteError,
     WalWriter, replay_container,
@@ -234,11 +234,19 @@ impl Default for DatabaseOptions {
     }
 }
 
+/// A committed segment and its current deletions (SPEC §8.3).
+#[derive(Debug, Clone)]
+struct LiveSegment {
+    segment: Arc<Segment>,
+    /// Its current tombstone sidecar's version and deleted docids; `None` while it has none.
+    deleted: Option<(u64, Arc<Tombstones>)>,
+}
+
 /// The writer's state of one committed collection.
 #[derive(Debug)]
 struct Collection {
     schema: Arc<CollectionSchema>,
-    segments: Vec<Arc<Segment>>,
+    segments: Vec<LiveSegment>,
     memtable: Memtable,
     /// When the memtable's oldest unflushed operation was applied; `None` while it is empty.
     first_write: Option<Instant>,
@@ -361,7 +369,10 @@ impl<F: ContainerFile + Sync> Database<F> {
                 let schema = Arc::new(entry.schema().clone());
                 let mut segments = Vec::with_capacity(entry.segments().len());
                 for segment in entry.segments() {
-                    segments.push(open_segment(&objects, name, segment, &schema)?);
+                    segments.push(LiveSegment {
+                        segment: open_segment(&objects, name, segment, &schema)?,
+                        deleted: None,
+                    });
                 }
                 memtables.insert(name.to_owned(), Memtable::new(&schema, &options.registry)?);
                 collections.insert(name.to_owned(), (schema, segments));
@@ -572,7 +583,8 @@ impl<F: ContainerFile + Sync> Database<F> {
         // Until tombstones (ROADMAP 6.4.3) a flush cannot carry the delete of a committed document, which would come
         // back: refuse it before anything is logged.
         if let Some(c) = self.collections.get(collection) {
-            for segment in &c.segments {
+            for live in &c.segments {
+                let segment = &live.segment;
                 let found = segment
                     .docid_of(id)
                     .map_err(|source| DatabaseError::OpenSegment {
@@ -787,8 +799,11 @@ impl<F: ContainerFile + Sync> Database<F> {
                         what: "a committed segment is not in its manifest",
                     })?;
                 let source = ByteSource::new(flushed.bytes.into());
-                c.segments
-                    .push(open_source(source, &p.collection, entry, &c.schema)?);
+                let segment = open_source(source, &p.collection, entry, &c.schema)?;
+                c.segments.push(LiveSegment {
+                    segment,
+                    deleted: None,
+                });
             }
             c.memtable = p.memtable;
             c.first_write = None;
@@ -899,7 +914,12 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
             .map(|(name, c)| {
                 let snapshot = CollectionSnapshot {
                     schema: Arc::clone(&c.schema),
-                    segments: c.segments.clone(),
+                    segments: c.segments.iter().map(|s| Arc::clone(&s.segment)).collect(),
+                    tombstones: c
+                        .segments
+                        .iter()
+                        .map(|s| s.deleted.as_ref().map(|(_, t)| Arc::clone(t)))
+                        .collect(),
                     memtable: c.memtable.reader(),
                 };
                 (name.clone(), snapshot)

@@ -396,10 +396,10 @@ Deps: M2, M5.
 - [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
 
 ## 6.4 Upserts & deletes across segments
-- [ ] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
-- [ ] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
-- [ ] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
-- [ ] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
+- [~] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
+- [~] 6.4.2 Tombstone sidecar format + versioning (SPEC §8.3, ADR); the writer builds each version as a superset of the previous one, checked before commit (the manifest only sees counts, SPEC §8.7.2)
+- [~] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
+- [~] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
 
 ## 6.5 Compaction / merging (SPEC §8.5)
 - [ ] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests

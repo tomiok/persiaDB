@@ -32,6 +32,11 @@ impl Tombstones {
         }
     }
 
+    /// The deleted docids.
+    pub fn docids(&self) -> &RoaringBitmap {
+        &self.deleted
+    }
+
     /// Whether `docid` is deleted.
     pub fn contains(&self, docid: u32) -> bool {
         self.deleted.contains(docid)

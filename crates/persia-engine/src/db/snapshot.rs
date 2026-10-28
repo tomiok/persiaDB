@@ -11,10 +11,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 
+use crate::document::Document;
 use crate::manifest::Manifest;
-use crate::memtable::{MemtableReader, MemtableView};
+use crate::memtable::{IdState, MemtableReader, MemtableView};
 use crate::schema::CollectionSchema;
-use crate::segment::Segment;
+use crate::segment::{ReadError, Segment, Tombstones};
+use crate::view::{SearchView, SegmentView};
 
 /// The state one commit published, plus each collection's memtable (SPEC §8.4).
 #[derive(Debug)]
@@ -50,7 +52,23 @@ impl Snapshot {
 pub struct CollectionSnapshot {
     pub(super) schema: Arc<CollectionSchema>,
     pub(super) segments: Vec<Arc<Segment>>,
+    /// The deletions of each segment, by its index in `segments`, as of the commit (SPEC §8.3).
+    pub(super) tombstones: Vec<Option<Arc<Tombstones>>>,
     pub(super) memtable: MemtableReader,
+}
+
+/// Where the live version of a document id is (SPEC §8.3, ROADMAP 6.4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Located {
+    /// In the memtable, with this docid.
+    Memtable(u32),
+    /// In a committed segment.
+    Segment {
+        /// The segment's index in [`CollectionSnapshot::segments`].
+        index: usize,
+        /// Its docid there.
+        docid: u32,
+    },
 }
 
 impl CollectionSnapshot {
@@ -59,15 +77,80 @@ impl CollectionSnapshot {
         &self.schema
     }
 
-    /// The live segments, oldest first, as the manifest lists them.
+    /// The live segments, oldest first, as the manifest lists them. Some of their documents may be deleted:
+    /// [`Self::segment_views`] leaves those out.
     pub fn segments(&self) -> &[Arc<Segment>] {
         &self.segments
+    }
+
+    /// The deleted documents of each segment of [`Self::segments`], in the same order; `None` for a segment
+    /// without deletions.
+    pub fn tombstones(&self) -> &[Option<Arc<Tombstones>>] {
+        &self.tombstones
+    }
+
+    /// Each segment with its deletions, oldest first: what a search runs over, beside the memtable.
+    pub fn segment_views(
+        &self,
+    ) -> impl DoubleEndedIterator<Item = SegmentView<'_>> + ExactSizeIterator {
+        self.segments
+            .iter()
+            .zip(&self.tombstones)
+            .map(|(s, t)| SegmentView::new(s, t.as_deref()))
     }
 
     /// A view of the memtable's writes so far. Its versions of ids hide the segments' (SPEC §8.3).
     pub fn memtable(&self) -> MemtableView {
         self.memtable.view()
     }
+
+    /// Where the live version of `id` is, as of `memtable` (a view of [`Self::memtable`]) and this snapshot's
+    /// segments (SPEC §8.3, ROADMAP 6.4.1): the memtable's version or delete of the id, if it has one, hides every
+    /// segment's; otherwise the segments are searched newest first through their `IdMap`s, deleted documents left
+    /// out. `None` if no live version exists.
+    ///
+    /// # Errors
+    /// A corruption of a segment's `IdMap`.
+    pub fn lookup(&self, memtable: &MemtableView, id: &str) -> Result<Option<Located>, ReadError> {
+        match memtable.lookup(id) {
+            Some(IdState::Live(docid)) => return Ok(Some(Located::Memtable(docid))),
+            Some(IdState::Deleted) => return Ok(None),
+            None => {}
+        }
+        Ok(newest_live(self.segment_views(), id)?
+            .map(|(index, docid)| Located::Segment { index, docid }))
+    }
+
+    /// The live document with id `id`, as of a view of the memtable taken now: a write is visible to the next
+    /// lookup that follows it (read-your-writes), a commit changes nothing a lookup returns.
+    ///
+    /// # Errors
+    /// As [`Self::lookup`]; a corruption of the segment's `DocStore`.
+    pub fn get(&self, id: &str) -> Result<Option<Document>, ReadError> {
+        let memtable = self.memtable();
+        match self.lookup(&memtable, id)? {
+            None => Ok(None),
+            Some(Located::Memtable(docid)) => memtable.document(docid).map(Some),
+            Some(Located::Segment { index, docid }) => self
+                .segments
+                .get(index)
+                .map(|s| s.document(docid))
+                .transpose(),
+        }
+    }
+}
+
+/// The newest of `views` (oldest first) that holds `id` live, by index, and its docid there.
+pub(super) fn newest_live<'s>(
+    views: impl DoubleEndedIterator<Item = SegmentView<'s>> + ExactSizeIterator,
+    id: &str,
+) -> Result<Option<(usize, u32)>, ReadError> {
+    for (index, view) in views.enumerate().rev() {
+        if let Some(docid) = view.docid_of(id)? {
+            return Ok(Some((index, docid)));
+        }
+    }
+    Ok(None)
 }
 
 /// A handle that loads the latest [`Snapshot`], from any thread. Cheap to clone.
