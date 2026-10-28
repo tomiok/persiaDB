@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: tiered merge policy (ROADMAP 6.5.1, SPEC §8.5, ADR-0031). `merge::MergePolicy::plan` turns a
+  collection's manifest entries into disjoint `MergePlan`s: drops of fully deleted segments, tier merges of the
+  smallest segments of a size tier, and rewrites of segments with more than 20% deleted. Knobs `merge.*` (SPEC §14).
 - `persia-engine`: upserts and deletes across segments (ROADMAP 6.4, SPEC §8.3, ADR-0030). A flush commit tombstones
   every live copy, in every committed segment, of each id its memtables touched, by writing the next version of each
   affected segment's tombstone sidecar (`tombstone::TombstoneSidecar`, checked to keep every earlier deletion before

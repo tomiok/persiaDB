@@ -405,7 +405,7 @@ Deps: M2, M5.
 - [ ] 6.4.7 Per-segment id membership filter (e.g. a Bloom filter section) so a commit skips segments that cannot hold an id, for random ids that id ranges do not prune; a format change (SPEC §5.3, ADR, golden file) (found in the 6.4 review)
 
 ## 6.5 Compaction / merging (SPEC §8.5)
-- [ ] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests
+- [~] 6.5.1 Merge policy (tiered) as pure function: segments → merge plans; [T] table tests
 - 6.5.2 Segment merger: N readers → one writer, dropping tombstoned docs, remapping docids
   - [ ] 6.5.2.1 Merge term dictionaries and postings (k-way)
   - [ ] 6.5.2.2 Merge columns, norms, doc store, id map, blob refs

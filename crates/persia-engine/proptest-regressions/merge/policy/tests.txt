@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc eb3fd40e41114ed8dd372a6fa5a8d007944f7fd34b2c16de738087893f81670b # shrinks to raw = [(1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 1, 0), (1, 10, 0), (1678, 10598, 218), (1478, 14589654271541369804, 709), (1864, 2826388993398047823, 1584), (1047, 9353, 816), (661, 105, 575), (356, 17181949413936608849, 295), (849, 11803266283937867082, 483), (527, 138, 79), (1269, 43, 1167), (103, 31, 11), (1758, 194, 1195), (1987, 3843, 1013), (1789, 179, 89), (1236, 3698075560224458720, 135), (170, 17512650593082445068, 34)], busy_mask = [true, true, false, false, true, true, false, false, false, true, true, false, true, true, true, true, false, true, false, true, false, false, false, true, true, true, true, false, true, true, false, true, true, true, true, false, false, true, false, true, true, true, false, true, false, true, true, false, true, false, false, true, true, false, true, false, false, true, true, false], width = 3

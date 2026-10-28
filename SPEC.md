@@ -1340,6 +1340,28 @@ are never consulted, so a deleted id stays deleted whatever older segments hold.
 
 ### 8.5 Compaction (merge policy)
 Tiered: group segments by size tier (factor 10), merge when ≥ 8 in a tier or when deleted ratio > 20%.
+The policy is a pure function (ADR-0031, ROADMAP 6.5.1): a collection's live segments as the manifest lists them,
+and the ones a running merge already holds, in; disjoint merge plans out. Each plan lists its input segments in
+manifest order, with the sidecar version it read (§8.7.2). For a segment, `live = doc_count - deleted` and its
+**live size** is `size × live / doc_count` (rounded down; the manifest has no other size). Segments a running merge
+holds are left out. Then, in this order:
+1. **Drop**: every segment with `live = 0` goes in one plan that writes no segment (it only removes them).
+2. **Tier merges**: a segment's tier is 0 when its live size is below `tier_floor × tier_factor`, and otherwise the
+   largest `t` with `live size ≥ tier_floor × tier_factor^t`. Segments whose live size is at least
+   `max_merged_bytes` take no part. Within each tier, from tier 0 up: while at least `segments_per_merge` segments
+   are left, the `segments_per_merge` smallest (by live size, then manifest order) form one plan, if their live
+   sizes add up to at most `max_merged_bytes` and their live documents to at most `max_merged_docs`; otherwise the
+   tier plans no more merges.
+3. **Deletion rewrites**: every segment left with `deleted × 100 > doc_count × deleted_percent` is rewritten alone,
+   whatever its size.
+
+Plans come in that order, tier merges by tier then by size, rewrites in manifest order. Defaults (SPEC §14):
+`tier_floor` 2 MiB, `tier_factor` 10, `segments_per_merge` 8, `deleted_percent` 20, `max_merged_bytes` 5 GiB,
+`max_merged_docs` 2^31; a `tier_factor` or `segments_per_merge` below 2, or a `tier_floor` of 0, counts as 2 or 1.
+Live sizes are estimates, so a merged segment may come out somewhat above `max_merged_bytes`.
+A merged segment lists its inputs' documents in plan order (§5.5) and is added after the kept segments (§8.7.2).
+Order does not matter for lookups: a commit leaves at most one live copy of each id (§8.3), and a merged segment
+holds only live documents.
 Merges run in background threads, are crash-safe (new segment + new manifest commit), and never block reads or writes.
 Obsolete segments are deleted only after no snapshot references them (reference counting / epoch).
 
@@ -1771,9 +1793,9 @@ They are blocked on the embedded API (M10). They do not replace the `persia` cra
 
 Embedded: builder options (`OpenOptions`), sensible defaults, no files.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
-Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `search_threads`,
+Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `search_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`.
-Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3).
+Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge.*` as in §8.5.
 
 ---
 

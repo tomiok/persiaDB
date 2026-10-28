@@ -7,6 +7,7 @@ pub mod db;
 pub mod document;
 pub mod manifest;
 pub mod memtable;
+pub mod merge;
 pub mod schema;
 pub mod segment;
 pub mod tombstone;
