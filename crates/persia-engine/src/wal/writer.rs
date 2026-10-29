@@ -187,6 +187,21 @@ impl<L: WalLog> WalWriter<L> {
         }
     }
 
+    /// Records that replay applied a record of `collection` from the chunk at position `at`, which then holds
+    /// `wal_start` back until a flush covers it (any [`WalWriter::mark`] does), as [`WalWriter::resume`] does for
+    /// a whole replay. Replay goes in log order, so only the collection's first chunk since its last flush counts.
+    pub fn replayed(&mut self, collection: &str, at: u64) {
+        if self.held.contains_key(collection) {
+            return;
+        }
+        let held = Held {
+            last: 0,
+            at: At::Written(at),
+        };
+        self.held
+            .insert(collection.to_owned(), VecDeque::from([held]));
+    }
+
     /// Sets the size at which the in-memory chunk is written out (rotation), at most [`MAX_CHUNK_LEN`].
     #[must_use]
     pub fn with_chunk_target(mut self, bytes: usize) -> Self {
