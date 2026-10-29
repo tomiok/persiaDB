@@ -40,6 +40,7 @@ use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
+use persia_format::frame::FrameKind;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile, Error as ContainerError, Mode, Repair};
 use persia_storage::vfs::Vfs;
@@ -298,6 +299,73 @@ fn reopen(crashed: &SimFile, ctx: &str, quarantined: &mut usize) -> (State, u64)
         }
         Err(e) => panic!("{ctx}: reopen failed: {e}"),
     }
+}
+
+/// A commit cut after its Manifest frame but before its superblock slot leaves that Manifest after `log_end`. The
+/// reopen must not let it hide what the next writer logs: puts acknowledged after the reopen, with no commit before
+/// the next crash, are replayed by the open after it (SPEC §8.6). Found by `database_process`
+/// (`kill_9_loop_through_replay_flushes_merges_and_open`), whose child killed mid-commit was followed by one that
+/// only wrote.
+#[test]
+fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
+    let created = SimFile::new();
+    let mut db = Database::create_on(created.clone(), [4; 16], options()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.put("a", &doc("a0", "zero"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.put("a", &doc("a1", "one"), Durability::Fsync).unwrap();
+    let base = created.durable_bytes();
+    drop(db);
+
+    let commit_calls = {
+        let file = SimFile::from_bytes(base.clone());
+        let mut db = Database::open_on(file.clone(), options()).unwrap();
+        let start = file.mutations();
+        db.commit().unwrap();
+        file.mutations() - start
+    };
+    let mut orphaned = 0;
+    for point in 0..commit_calls {
+        for apply_first in [false, true] {
+            let file = SimFile::from_bytes(base.clone());
+            let mut db = Database::open_on(file.clone(), options()).unwrap();
+            let at = file.mutations() + point;
+            file.set_fault(Some(if apply_first {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            assert!(db.commit().is_err(), "call {point}");
+            drop(db);
+            for loss in [CrashLoss::All, CrashLoss::Nothing] {
+                let ctx = format!("call {point}, apply first {apply_first}, {loss:?}");
+                let crashed = file.crash(loss);
+                let found = Container::open_on(crashed.clone(), Mode::ReadOnly).unwrap();
+                let log_end = found.superblock().log_end;
+                if found
+                    .frames()
+                    .iter()
+                    .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end)
+                {
+                    orphaned += 1;
+                }
+                drop(found);
+                let mut db = Database::open_on(crashed.clone(), options())
+                    .unwrap_or_else(|e| panic!("{ctx}: reopen: {e}"));
+                db.put("a", &doc("a2", "two"), Durability::Fsync).unwrap();
+                drop(db);
+                let db = Database::open_on(crashed.crash(CrashLoss::All), options())
+                    .unwrap_or_else(|e| panic!("{ctx}: second reopen: {e}"));
+                let snapshot = db.snapshot();
+                let a = snapshot.collection("a").unwrap();
+                for id in ["a0", "a1", "a2"] {
+                    assert!(a.get(id).unwrap().is_some(), "{ctx}: {id} lost");
+                }
+            }
+        }
+    }
+    // The cut that leaves a Manifest without its slot is among the points.
+    assert!(orphaned > 0, "no fault point left an uncommitted Manifest");
 }
 
 /// Flushes what the reopen replayed, which must keep the documents.

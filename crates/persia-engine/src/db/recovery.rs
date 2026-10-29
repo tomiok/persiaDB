@@ -8,6 +8,8 @@
 //!    their manifest entries, and an empty memtable per collection.
 //! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1), stopping at the
 //!    first Manifest frame after `log_end` whose `seq` is newer than the loaded manifest (SPEC §8.6).
+//!    The writer then commits once, flushing nothing, if such a Manifest (a cut commit's) is there, so the WAL it logs
+//!    next is never behind it (SPEC §8.6, ROADMAP 6.6.9).
 //! 5. Ready: the first snapshot shows the segments and the replayed memtables.
 //!
 //! Nothing before step 4 writes but the container's tail repair, and replay writes only to memtables, except that
@@ -26,10 +28,10 @@ use persia_storage::Storage;
 use persia_storage::container::{Container, ContainerFile};
 
 use super::{
-    Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment, objects,
-    open_source,
+    Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
+    Structural, objects, open_source,
 };
-use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, SegmentEntry};
+use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, ManifestDiff, SegmentEntry};
 use crate::memtable::{Memtable, MemtableError};
 use crate::schema::CollectionSchema;
 use crate::segment::SegmentError;
@@ -48,6 +50,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options);
         db.replay()?;
+        db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).
         let now = db.options.clock.now();
         for c in db.collections.values_mut() {
@@ -57,6 +60,24 @@ impl<F: ContainerFile + Sync> Database<F> {
             }
         }
         Ok(db)
+    }
+
+    /// Step 4's end, for the writer: a Manifest frame after `log_end` is a commit cut before its superblock slot
+    /// (SPEC §4.5), whose `seq` is newer than the loaded manifest's, so every replay stops at it ([`wal_chunks`]).
+    /// The writer is about to append after it, and a crash before its next commit would leave those records behind
+    /// it, never replayed although acknowledged. So it commits at once, flushing nothing: `log_end` moves past the
+    /// Manifest, and replay ignores it from then on (SPEC §8.6). `wal_start` stays where replay left it.
+    fn retire_uncommitted_manifest(&mut self) -> Result<(), DatabaseError> {
+        let container = self.wal.log();
+        let log_end = container.superblock().log_end;
+        let found = container
+            .frames()
+            .iter()
+            .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end);
+        if found {
+            self.commit_guarded(Vec::new(), ManifestDiff::default(), Structural::None)?;
+        }
+        Ok(())
     }
 
     /// Step 4: replays every chunk from `wal_start` that belongs to the loaded snapshot into the memtables,
@@ -169,7 +190,8 @@ pub(super) fn load<F: ContainerFile + Sync>(
 /// it (a collection that manifest creates, then a put) are the next snapshot's. Replaying them onto the loaded
 /// manifest fails with [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest
 /// were logged against the loaded snapshot and are replayed. A crash can leave the same Manifest after
-/// `log_end` without a finished superblock (SPEC §4.5); a read-write open stops there too.
+/// `log_end` without a finished superblock (SPEC §4.5); a read-write open stops there too, then retires it with a
+/// commit before it logs anything (`Database::retire_uncommitted_manifest`).
 pub(super) fn wal_chunks<F: ContainerFile>(
     container: &Container<F>,
     loaded_seq: u64,

@@ -427,6 +427,7 @@ Deps: M2, M5.
 - [ ] 6.6.6 Refresh a `ReadOnlyDatabase` in place: a new snapshot from the next manifest and the WAL frames written since, instead of a reopen (ADR-0033 Alternatives, found in 6.6.2)
 - [x] 6.6.7 `persia verify` with custom analyzers, and distinct exit codes for corruption and other failures (found in the 6.6 review); custom analyzers moved to 6.6.8, since a schema names only built-in analyzers today (SPEC §6.2.2)
 - [ ] 6.6.8 `persia verify` with custom analyzers, once a schema can name an analyzer registered with `AnalyzerRegistry::register` (today `AnalyzerRef` accepts built-ins only, SPEC §6.2.2): a way to load them in the CLI, or a replay that validates records without analyzing their `text` fields (found in 6.6.7)
+- [x] 6.6.9 A writer's open retires a Manifest frame a cut commit left after `log_end` (a commit that flushes nothing), so the WAL it logs next is not hidden behind it from later opens (SPEC §8.6). Test: crash in a commit, reopen, write, crash, reopen (found by the 6.6.4 crash loop in the 7.2 batch)
 
 ---
 

@@ -1538,7 +1538,12 @@ so the snapshot stays the one the open loaded: the committed manifest, plus WAL 
 Manifest. WAL between `log_end` and that Manifest was logged before the newer commit and belongs to the loaded
 snapshot. Applying what follows the Manifest would mix two commits, or fail the open on a collection the loaded
 manifest lacks. A read-write open holds the lock, so nothing commits during its scan; the same stop applies to a
-Manifest a crash left after `log_end` (a commit that did not finish, §4.5).
+Manifest a crash left after `log_end` (a commit that did not finish, §4.5). Such a Manifest must never have WAL after
+it: a later writer would append its records behind it, and every open after a crash that came before the writer's
+next commit would stop at it, losing records that were acknowledged. So a **writer that finds a Manifest after
+`log_end`** commits once at the end of step 4, before it accepts writes. That commit flushes nothing and keeps
+`wal_start` where replay left it. It only moves `log_end` past the stray Manifest, which replay then never consults again
+(ROADMAP 6.6.9).
 
 **Verification** (ROADMAP 6.6.3, `persia verify`) is a read-only open plus what no open or lookup checks: every live
 segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),
