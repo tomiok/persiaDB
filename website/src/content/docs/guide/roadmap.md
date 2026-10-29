@@ -80,6 +80,9 @@ reader; the full write path (M6) also needs storage.
 Depends on M2 and M5. The memtable, the WAL and its replay, flush and the local commit protocol,
 upserts and deletes via tombstone sidecars, tiered compaction, and open/recovery. Crash-loop tests
 (kill the process and reopen) land here. The embedded API waits on this milestone.
+Its state is the table above.
+
+%%WRITE_PATH_NOW%%
 
 ## M7 — Query engine and ranking
 

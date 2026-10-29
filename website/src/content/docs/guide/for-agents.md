@@ -24,27 +24,25 @@ Machine-readable copies of these pages: [llms.txt](/llms.txt) and [llms-full.txt
 Pre-alpha. %%PROGRESS_SUMMARY%%.
 The live counter is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md). Do not treat a number on an older page as newer than that file.
 
-Nothing works end to end. You cannot open a database or search.
-Opening a container file is implemented in `persia-storage`; that is not `Db::open`, and it does not search.
-`SegmentBuilder` and `SegmentWriter` in `persia-engine` can write one segment's bytes. That is not `put` or `commit`, and nothing searches it.
+%%PRE_ALPHA%%
+%%LIBRARY_NOW%%
 The on-disk format is unstable until v1.0 (SPEC §15).
 
 | Question | Answer |
 |---|---|
-| Usable database API? | No. `persia` exports no types. |
+| Usable database API? | No. %%NO_PUBLIC_API%% |
 | Published on crates.io? | No. `publish = false`. |
 | CLI? | File sweep (`container` / `store` `files` and `sweep`), plus `inspect segment` and `dump segment` (`--verify` on inspect). Not compact, import, or search. |
-| Working library code? | `persia-format` codecs (header, superblock, checksums, integer codecs, block compression, block framing, frames, mmap, `BlobId`). `persia-storage`: memory, local file, and the single-file container. `persia-engine`: schema, documents, manifests, and a segment builder, writer, and reader. `persia-analysis`: tokenizers and built-in analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`). |
+| Working library code? | %%LIBRARY_NOW%% |
 | Next work? | The ready-next list in PROGRESS.md. |
-| First callable release? | `v0.1`, ROADMAP M10. Blocked on the write path, query, relaxation, and blobs. |
+| First callable release? | %%M10_BLOCKED%% |
 
 The walkthrough with the illustrative calls, and the FAQ, is [Getting started](/guide/getting-started/).
 
 ## Do not invent these calls
 
-The following names appear in the SPEC and the README. They are **not** Rust items in this repository. Do not emit them as working code, and do not describe them as available:
-
-`Db::open`, `create_collection`, `put`, `put_batch`, `put_struct`, `delete`, `get`, `commit`, `search`, `put_blob`, `get_blob`, `OpenOptions`.
+The following names appear in the SPEC and the README. %%ENGINE_CALLS%%
+Do not emit `persia::Db::open` or `search` as working code, and do not describe them as the public API.
 
 A search result's `relaxation` object (`level`, `applied`, `original`, `effective`, `corrected`) is specified in SPEC §7.6 and returned by nothing today.
 
@@ -69,4 +67,4 @@ Code that only needs the byte codecs can use `persia-format` (`Header`, `Reader`
 Each guide page has a `description` in its frontmatter and stable headings.
 [llms.txt](/llms.txt) is the index. [llms-full.txt](/llms-full.txt) is the pages in Markdown.
 Prefer those, plus SPEC.md, over guessing from the crate names.
-`persia-engine`, `persia-storage`, and `persia-analysis` export the library code named above, including the segment builder. `persia-blob` and `persia-proto` are module docs only.
+`persia-engine`, `persia-storage`, and `persia-analysis` export the library code in the table above. `persia-blob` and `persia-proto` are module docs only.

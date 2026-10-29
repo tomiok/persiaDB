@@ -1,6 +1,6 @@
 ---
 title: "Getting started with PersiaDB"
-description: "Getting started with PersiaDB, a Rust search library aimed at embedded full-text search. The embedded Db API is planned. Format codecs, storage, schema, analysis, and a segment writer are what you can call today. Nothing runs a query."
+description: "Getting started with PersiaDB, a pre-alpha Rust search library. The public Db API is not in the crate. The engine has a WAL, commit, deletes, and segment merging. Nothing runs a query."
 head:
   - tag: title
     content: "Getting started with PersiaDB: a Rust search library"
@@ -12,9 +12,9 @@ head:
 
 Getting started with PersiaDB means separating this Rust search library's design from the code you can call.
 The design is embedded full-text search in Rust: a library in your process, one file, ranked results, and no search daemon.
-That embedded `Db` API is planned (roadmap M10) and is not in the crate.
-What you can call today starts with the format-layer codecs in `persia-format`, plus the storage, schema, analysis, and segment libraries below.
-Nothing opens a database or runs a query. A segment builder can write one segment's bytes. That is not `Db::open`.
+%%PRE_ALPHA%%
+%%M10_BLOCKED%%
+What you can call today is the library code below. A segment builder can write one segment's bytes. That is not `persia::Db::open`.
 
 [What is an embedded search database?](/guide/embedded-search/) defines that in-process shape.
 The [comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch, and it is not a benchmark.
@@ -58,13 +58,13 @@ assert_eq!(decoded.access(), Access::ReadWrite);
 
 Also implemented in that crate, and only as byte codecs: checksums, integer blocks, zstd block compression, block framing, the two superblock slots, frames (including the streaming encoder), the memory-map reader, and `BlobId` / `BlobRef`. The public module list is [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs). The [code](/guide/code/) page quotes exports from that file.
 
-`persia-storage` implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container: create, open, append, commit, recover, and compact. That commit is the container file, not an index of documents. `persia-engine` implements collection schema, document validation, manifest types, and a segment builder, writer, and reader. It does not answer a query, and there is no WAL or memtable. `persia-analysis` implements tokenizers, filters, stemmers for English, Spanish, Portuguese, French, German, and Italian, and the built-in analyzers `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, and `it`. It does not search. `persia-blob` exports no API.
+%%LIBRARY_NOW%%
 
 Those crates are in the same git repository and are unpublished the same way. Depending on them does not give you `Db::open`.
 
 ## Embedded full-text search in Rust
 
-**Illustrative. Not implemented.** Nothing in this section is a function you can call. Names match the README sketch and SPEC §6.2, §7.1, §7.6, §8.1, and §9.6. They are not a stability promise. The first release that is supposed to provide them is `v0.1` (ROADMAP M10), which is blocked on the write path, query, relaxation, and blobs.
+**Illustrative public API.** The block below is the SPEC sketch of `persia::Db` (SPEC §6.2, §7.1, §7.6, §8.1, and §9.6). It is not a stability promise. %%ENGINE_CALLS%% %%M10_BLOCKED%%
 
 The shape a caller is meant to use:
 
@@ -144,11 +144,11 @@ The [FAQ](/guide/faq/) answers the same kind of question for status, how this di
 
 ### Can I add Persia to a Rust project today?
 
-Not as a database. `persia` is unpublished and has no API. You can depend on `persia-format` from git, as shown above, if you need the byte codecs, and on `persia-storage`, `persia-engine`, and `persia-analysis` for the container, schema types, analyzers, and a segment builder. None of those dependencies give you `Db::open`.
+Not as a database. %%NO_PUBLIC_API%% You can depend on `persia-format` from git, as shown above, and on `persia-storage`, `persia-engine`, and `persia-analysis`. %%ENGINE_CALLS%%
 
 ### How do I open a database, index, and search?
 
-You don't, yet, through `Db::open`. Those calls are the illustrative block on this page. A lower-level container open exists in `persia-storage`. That open does not index or search. A segment builder can write one segment's bytes, and nothing queries it. The milestone that is supposed to ship the embedded API is M10 (`v0.1`). It waits on the document write path, query, relaxation, and blobs. [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
+You don't, yet, through `persia::Db::open`. Those calls are the illustrative block on this page. %%ENGINE_CALLS%% A lower-level container open also exists in `persia-storage`. %%M10_BLOCKED%% [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the checklist.
 
 ### How do I read which relaxation was applied?
 

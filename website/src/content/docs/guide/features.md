@@ -14,9 +14,9 @@ head:
       content: "Reference for BM25F, schema, relaxation, blobs | PersiaDB"
 ---
 
-Search, ranking, relaxation, the document write path, blobs, and the server are **planned**.
-Schema, analyzers, the container commit, and segment bytes exist as library code.
-You cannot call `Db` or `search` today.
+Search, ranking, relaxation, blobs, and the server are **planned**.
+Schema, analyzers, the container commit, segment bytes, and part of the write path exist as library code.
+%%NO_PUBLIC_API%%
 
 | Capability | Status | Defined in |
 |---|---|---|
@@ -25,8 +25,8 @@ You cannot call `Db` or `search` today.
 | Zero-results relaxation | Planned (M8) | SPEC §7.6 |
 | Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
 | Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). They do not run inside a query. | SPEC §6.3 |
-| Segment writer and reader | Library code in `persia-engine` (M5). The leaf count is on the [roadmap](/roadmap/). Nothing searches the segment. | SPEC §5 |
-| Crash-safe commit and recovery | Container commit is done (M2). The document write path is planned (M6). | SPEC §4.5, §8.6 |
+| Segment writer and reader | %%M5_CELL%% | SPEC §5 |
+| Crash-safe commit and recovery | %%DURABILITY_CELL%% | SPEC §4.5, §8.6 |
 | Blob storage | Planned (M9) | SPEC §9 |
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
@@ -149,9 +149,7 @@ run in the background, and publish through the same commit protocol (SPEC §8.5)
 local file is reclaimed by rewriting live data into a new file and atomically replacing the old one
 (SPEC §4.6).
 
-The single-file container commit in `persia-storage` follows that superblock order (M2) and is
-crash-tested. It does not store a document. The WAL, memtable, flush, index commit, and merge
-above are not built (M6). You cannot store a searchable document and recover it.
+The numbered steps above are the path in SPEC §8.2. %%WRITE_PATH_NOW%%
 
 ## Blobs
 

@@ -5,6 +5,7 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 import {
+	layerDiagram,
 	layerView,
 	llmsStatusParagraph,
 	queryPathCaption,
@@ -53,14 +54,16 @@ const ids = ['M1', 'M2', 'M4', 'M5', 'M7', 'M9', 'M10', 'M11', 'M12', 'M14', 'M3
 
 test('the live snapshot fills every box and drops the stale labels', () => {
 	const parsed = parseProgress(progressMd);
-	const view = layerView(parsed);
+	const view = layerDiagram();
 	const lines = view.diagram.split('\n');
 	assert.equal(new Set(lines.map((line) => line.length)).size, 1);
 	assert.equal(view.formatStatus, 'done');
 	assert.equal(view.analysisStatus, 'done');
 	assert.equal(view.storageDetail, 'memory and local file');
 	assert.equal(view.storageStatus, 's3, gcs, azure planned');
-	assert.equal(view.engineStatus, 'M5 in progress');
+	assert.equal(view.engineStatus, 'M6, no query');
+	assert.equal(view.diagram.includes('segments and WAL'), true);
+	assert.equal(view.diagram.includes('M5 in progress'), false);
 	assert.equal(view.blobStatus, 'not started');
 	assert.equal(view.apiStatus, 'stub · no methods yet');
 	assert.equal(view.serverStatus, 'planned');
@@ -69,37 +72,41 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(view.diagram.includes('workspace stubs'), false);
 	assert.match(view.caption, /Format, local storage, schema, and text analysis are done \(M1–M4\)/);
 	const m5 = parsed.milestones.find((ms) => ms.id === 'M5');
-	assert.equal(m5?.state, 'in progress');
-	assert.match(
-		view.caption,
-		new RegExp(`segment writer and reader are in progress \\(M5, ${m5?.done}/${m5?.leaves}\\)`),
-	);
-	assert.match(view.caption, /Query is not started \(M7\)/);
+	const m6 = parsed.milestones.find((ms) => ms.id === 'M6');
+	assert.equal(m5?.state, 'done');
+	assert.equal(m6?.state, 'in progress');
+	assert.match(view.caption, /WAL with chunks, group commit, and replay/);
+	assert.match(view.caption, /no query engine/);
 	assert.match(view.caption, /exports no Db or Collection/);
-	assert.match(view.caption, /no indexing API and no query/);
+	assert.equal(view.caption.includes('M5 in progress'), false);
+	assert.equal(view.caption.includes('no indexing API'), false);
 	assert.equal(view.caption.includes('only persia-format'), false);
 	assert.deepEqual(view.accent, ['persia-format', 'encodings, checksums']);
 	assert.deepEqual(view.accentAlt, ['persia-storage']);
-	assert.equal(layerView(loadProgress()).caption, view.caption);
+	assert.equal(layerDiagram().caption, view.caption);
+	assert.equal(layerView(loadProgress()).engineStatus, 'M6, no query');
 });
 
 test('figure captions follow the same snapshot', () => {
 	const parsed = parseProgress(progressMd);
-	assert.match(writePathCaption(parsed), /container commit is done \(M2,/);
-	assert.match(writePathCaption(parsed), /merge path is not started \(M6\)/);
 	const m5 = parsed.milestones.find((ms) => ms.id === 'M5');
-	assert.match(
-		writePathCaption(parsed),
-		new RegExp(`segment's bytes is in progress \\(M5, ${m5?.done}/${m5?.leaves}\\)`),
-	);
+	const m6 = parsed.milestones.find((ms) => ms.id === 'M6');
+	assert.match(writePathCaption(parsed), /container commit is done \(M2,/);
+	assert.match(writePathCaption(parsed), new RegExp(`in progress \\(M6, ${m6?.done}/${m6?.leaves}\\)`));
+	assert.match(writePathCaption(parsed), /WAL with chunks, group commit, and replay/);
+	assert.match(writePathCaption(parsed), /Nothing searches/);
+	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
-	assert.match(queryPathCaption(parsed), /Searching segments is not started \(M7\)/);
+	assert.match(queryPathCaption(parsed), /Searching segments is not started \(M7/);
 	assert.match(storageDiagramCaption(parsed), /Block framing is done \(M1,/);
 	assert.match(storageDiagramCaption(parsed), /S3, GCS, and Azure are not started \(M12\)/);
 	const llms = llmsStatusParagraph();
 	assert.match(llms, /Pre-alpha\./);
-	assert.match(llms, new RegExp(`M5, ${m5?.done}/${m5?.leaves}`));
+	assert.match(llms, /WAL with chunks/);
+	assert.match(llms, /no search/);
 	assert.equal(llms.includes('indexes a document, or runs a search'), false);
+	assert.equal(llms.includes('No WAL'), false);
+	assert.equal(m5?.state, 'done');
 });
 
 test('a finished segment milestone says query has not started', () => {

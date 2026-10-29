@@ -101,8 +101,7 @@ A fault on a mapped page kills the process (ADR-0010). Mapped reads are opt-in a
 ## What has to exist first
 
 The bindings are blocked on the Rust API (ROADMAP 10.1): `Db::open`, collections, put, delete, get,
-commit, search, a stable error type. That milestone is blocked on the write path (M6), query (M7),
-relaxation (M8), and blobs (M9). Blobs in the SDK wait on the same work, plus the upload-staging
+commit, search, a stable error type. %%M10_BLOCKED%% Blobs in the SDK wait on the same work, plus the upload-staging
 decision (SPEC §18.8). Opening `s3://` waits on cloud backends (M12). The WASM package waits on a
 storage backend nobody has designed.
 

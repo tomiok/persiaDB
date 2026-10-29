@@ -18,9 +18,9 @@ import RelaxationFlow from '../../components/RelaxationFlow.astro';
 import WinButton from '../../components/WinButton.astro';
 
 The product is a search database: ranked full-text search, filters, facets, and a default that
-avoids an empty page. Almost all of that is still **planned**. The table says which milestone
-builds it. The long form, including the schema sketch and the relaxation JSON, is the
-[feature reference](/guide/features/).
+avoids an empty page. Search, ranking, and relaxation are still **planned**. The write path is
+partly in the tree. The table says which milestone builds each row. The long form, including the
+schema sketch and the relaxation JSON, is the [feature reference](/guide/features/).
 
 | Capability | Status |
 |---|---|
@@ -29,8 +29,8 @@ builds it. The long form, including the schema sketch and the relaxation JSON, i
 | Zero-results relaxation | Planned (M8), on by default in the design |
 | Schema and documents | Done as library code (M3). Not reachable through `Db`. |
 | Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. They do not run a query. |
-| Segment writer and reader | Library code in `persia-engine` (M5). The leaf count is on the [roadmap](/roadmap/). Nothing searches the segment. |
-| Crash-safe commit and recovery | Container commit is done (M2). Document WAL and index commit are planned (M6). |
+| Segment writer and reader | %%M5_CELL%% |
+| Crash-safe commit and recovery | %%DURABILITY_CELL%% |
 | Blob storage | Planned (M9) |
 | gRPC and HTTP server | Planned (M11) |
 | S3, GCS, Azure, replication | Planned (M12) |

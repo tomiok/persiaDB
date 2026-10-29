@@ -11,7 +11,7 @@
     "dev": "astro dev",
     "start": "astro dev",
     "build": "astro build",
-    "test": "node --test src/waitlist/*.test.mjs src/waitlist/protocol/*.test.mjs relay/waitlist/src/*.test.mjs",
+    "test": "node --test src/*.test.mjs src/waitlist/*.test.mjs src/waitlist/protocol/*.test.mjs relay/waitlist/src/*.test.mjs",
     "preview": "astro preview",
     "astro": "astro"
   },

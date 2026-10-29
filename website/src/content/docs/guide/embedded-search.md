@@ -10,8 +10,8 @@ head:
       content: "What is an embedded search database? Embedded full-text search in Rust"
 ---
 
-> **Status: pre-alpha.** Persia DB does not open a database, index a document, or answer a query.
-> `Db::open` and `search` elsewhere on this site are illustrative, from
+> **Status: pre-alpha.** %%PRE_ALPHA%%
+> `persia::Db::open` and `search` elsewhere on this site are illustrative, from
 > [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md).
 > Counts below are read from [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) when the site is built:
 > %%PROGRESS_SUMMARY%%. That file is the live counter.
@@ -49,15 +49,15 @@ The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SP
 | Design choice | Specified in | In the repository |
 |---|---|---|
 | In-process library. No daemon and no config file for the embedded API. Options are builders, with defaults. | [SPEC §14](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#14-configuration) | Planned (M10). The `persia` crate exports no `Db` and no `Collection`. |
-| One local file, `<name>.persia`, plus an optional `<name>.persia.blobs` pack for client bytes such as PDF or images. | SPEC §4, §9 | The container format and the single-file container (open, append, commit, recover, compact) are implemented (M1, M2). Segment sections — the term dictionary, postings, stored documents — have a writer and a reader in `persia-engine` (M5). The leaf count is on the [roadmap](/roadmap/). Nothing searches the segment. The blob store has not been started (M9). `BlobId` and `BlobRef` exist as types in `persia-format`. |
-| The engine is written in this repository: analysis, BM25F, filters, facets, and query execution. | SPEC §6, §7. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on Tantivy, Lucene, or SQLite. | Tokenizers and built-in analyzers are in `persia-analysis`. A segment writer and reader exist. BM25F, filters, facets, and query execution are not implemented. Nothing runs a query. |
+| One local file, `<name>.persia`, plus an optional `<name>.persia.blobs` pack for client bytes such as PDF or images. | SPEC §4, §9 | The container format and the single-file container (open, append, commit, recover, compact) are implemented (M1, M2). %%M5_CELL%% %%DURABILITY_CELL%% The blob store has not been started (M9). `BlobId` and `BlobRef` exist as types in `persia-format`. |
+| The engine is written in this repository: analysis, BM25F, filters, facets, and query execution. | SPEC §6, §7. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on Tantivy, Lucene, or SQLite. | %%ENGINE_SHORT%% BM25F, filters, facets, and query execution are not implemented. |
 | A query with too few hits is relaxed step by step (synonyms, dropped terms, prefix, a fuzzy step, then a fallback). The response names the step. On by default. | [SPEC §7.6](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) | Planned (M8). Ranking and relaxation settings exist as schema config structs. The cascade does not run. |
 | Segments are immutable. The same segment bytes live in a local file or in S3, GCS, or Azure Blob. Query nodes are stateless. | SPEC §3, §5, §10, §11 | A segment writer and reader exist (M5). Memory and local-file storage exist (M2). Object-storage backends and Kubernetes are planned (M12, M13). |
-| A power loss leaves the previous commit or the new one. | [SPEC §4.5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local), §8 | The container commit is implemented and crash-tested (M2). There is no document write path: no memtable, no engine WAL replay, and no index commit (M6). A searchable document cannot be stored and recovered yet. |
+| A power loss leaves the previous commit or the new one. | [SPEC §4.5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local), §8 | %%WRITE_PATH_NOW%% |
 | Optional gRPC and HTTP server. Embedded mode has no authentication. | SPEC §12, §14 | Planned (M11). |
 | Embedded Go and TypeScript bindings open the same file in-process. Rust and Go network clients talk to the server. | SPEC §13, [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) | Design only. No Go module and no npm package. Network clients are milestone M14. |
 
-The first release a caller is supposed to use is `v0.1` (roadmap M10). That milestone is blocked on the write path, query, relaxation, and blobs. The on-disk format stays unstable until `v1.0` (M15, [SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)). The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release.
+%%M10_BLOCKED%% The on-disk format stays unstable until `v1.0` (M15, [SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)). The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release.
 
 [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency and throughput figures and labels them as targets, not promises. This project does not publish search benchmarks. The query engine is not built.
 
@@ -65,21 +65,21 @@ Out of scope for v1 ([SPEC §1.2](https://github.com/tomiok/persiaDB/blob/main/S
 
 ## What the code can do today
 
-[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. Milestone states are on the [roadmap](/roadmap/) page, generated from that file. What you can call is library code: `persia-format` (on-disk codecs, including the streaming frame encoder), `persia-storage` (the `Storage` trait, memory and local-file backends, and the single-file container), `persia-engine` (collection schema, documents, manifest types, and a segment builder, writer, and reader), and `persia-analysis` (tokenizers and built-in analyzers; it does not search). `persia-blob` exports no API. The document write path, query, and relaxation are not implemented. Building one segment is not `Db::open`.
+[PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. Milestone states are on the [roadmap](/roadmap/) page, generated from that file. %%LIBRARY_NOW%% Building one segment is not `persia::Db::open`.
 
 A git dependency can use:
 
 - `persia-format`, which encodes and decodes on-disk bytes: integer codecs, checksums, `None` and `Zstd` block compression, block framing, the container header, the superblock, and frames.
 - `persia-storage`, which implements the `Storage` trait, a memory backend, a local-file backend, and the single-file container.
-- `persia-engine` schema types, which validate a collection schema, and `SegmentBuilder` / `SegmentWriter` / `Segment`, which build and read one segment. They do not search.
+- %%ENGINE_SHORT%%
 
-The `persia` command lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can also inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not import documents or search. There is no `Db::open`. The intended API, marked as illustrative, is the [embedded API](/guide/embedded-api/) page. The file layout is [File format and storage](/guide/file-format/).
+The `persia` command lists and removes temporary and quarantine files next to a container or a local store (`persia container files`, `persia container sweep`, `persia store files`, `persia store sweep`). It can also inspect and dump one segment file (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not import documents or search. There is no `persia::Db::open`. The intended API, marked as illustrative, is the [embedded API](/guide/embedded-api/) page. The file layout is [File format and storage](/guide/file-format/).
 
 ## Read next
 
 - [Comparison](/guide/comparison/) — Persia DB next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.
-- [How it works](/architecture/) — crate layers, and the planned write path and query path.
+- [How it works](/architecture/) — crate layers, the write path, and the query path.
 - [Roadmap](/roadmap/) — milestone status. The live counter is PROGRESS.md. The longer dependency notes are [Milestones](/guide/roadmap/).
 - [Overview](/guide/overview/) — the project narrative, including goals and non-goals.
 - [Crate architecture](/guide/architecture/) — how the Rust crates are layered.

@@ -15,9 +15,8 @@ head:
 ---
 
 **Planned.** The usage walkthrough, including what works today and the FAQ, is [Getting started](/guide/getting-started/).
-The public crate `persia` is a stub. The first usable release is `v0.1` (ROADMAP M10),
-which depends on the write path, query, relaxation, and blobs. Method names below are illustrative
-and not final. This is the sketch already in the README:
+The public crate `persia` is a stub. %%M10_BLOCKED%% %%ENGINE_CALLS%%
+Method names below are illustrative and not final. This is the sketch already in the README:
 
 ```rust
 let db = persia::Db::open("app.persia")?;

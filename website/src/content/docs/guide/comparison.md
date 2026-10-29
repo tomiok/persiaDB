@@ -3,8 +3,8 @@ title: "Persia DB vs SQLite FTS5, Tantivy, and Meilisearch"
 description: "Persia DB versus SQLite FTS5, Tantivy, and Meilisearch: embedded or server, single file or segments, language, and maturity. Pre-alpha; it does not search yet."
 ---
 
-> **Status: pre-alpha.** Persia DB does not open a database, index a document, or answer a query.
-> `Db::open` and `search` elsewhere on this site are illustrative, from
+> **Status: pre-alpha.** %%PRE_ALPHA%%
+> `persia::Db::open` and `search` elsewhere on this site are illustrative, from
 > [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md).
 > Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
@@ -23,7 +23,7 @@ When this page and the SPEC disagree, the SPEC wins.
 | What you store | Planned: one `<name>.persia` file, plus an optional `<name>.persia.blobs` pack. | The FTS5 index lives in the SQLite database file. | A directory of segment files. | The server's own data directory. |
 | How you query | Planned: a collection API, BM25F, filters, and facets. | SQL `MATCH`, with a `bm25()` ranking function. | Queries against a schema declared in code. | JSON over HTTP. Typo tolerance is on by default. |
 | Object storage | Planned: the same segment bytes locally or in S3, GCS, or Azure Blob. | A local database file. | A directory the library writes. | You run the server. |
-| Today | Pre-alpha. Codecs, local storage, schema types, text analysis, and a segment writer exist as library code. It does not search. | Part of SQLite. | A released library. | A released server. |
+| Today | %%PRE_ALPHA%% | Part of SQLite. | A released library. | A released server. |
 
 ## Persia DB
 
@@ -34,8 +34,8 @@ and on the [overview](/guide/overview/). It is not what the crate does today.
 [What is an embedded search database?](/guide/embedded-search/) defines that in-process, single-file shape,
 and separates it from running a search server.
 
-What the repository implements today is on-disk codecs, local storage, schema and document types, text analysis, and a segment writer and reader.
-There is no `Db::open` and no query. Building one segment is not a database.
+%%LIBRARY_NOW%%
+Building one segment is not `persia::Db::open`. %%ENGINE_CALLS%%
 The [getting started](/guide/getting-started/) page separates that library code from the illustrative API.
 The first release a caller can use is `v0.1` (roadmap M10). The format stays unstable until `v1.0` (M15).
 Counts on the [roadmap](/roadmap/) are read from PROGRESS.md when the site is built.

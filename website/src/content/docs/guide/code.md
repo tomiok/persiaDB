@@ -1,6 +1,6 @@
 ---
 title: "Code"
-description: "What the Persia DB crates export today, with links to the source. The embedded Db API does not exist yet."
+description: "What the Persia DB crates export today, with links to the source. The public Db API does not exist yet. The engine has a WAL, commit, and segment merging, and nothing searches."
 head:
   - tag: title
     content: "Source guide to the Rust crates that exist today | PersiaDB"
@@ -14,10 +14,10 @@ head:
       content: "Source guide to the Rust crates that exist today | PersiaDB"
 ---
 
-This page quotes code that is on `main`. It does not describe a database you can open.
+This page quotes code that is on `main`. %%PRE_ALPHA%%
 `persia-format` is the on-disk codec crate. `persia-storage`, `persia-engine`, and `persia-analysis` also export library code, summarized below.
 `persia` does not. The `Db::open` sketch on the [embedded API](/guide/embedded-api/) page is
-illustrative: those methods are not in the tree.
+illustrative: `persia::Db` is not in the tree. %%ENGINE_CALLS%%
 
 ## Crate layout
 
@@ -29,7 +29,7 @@ What each file says about itself:
 |---|---|---|---|
 | `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, frames (including the streaming encoder), mmap, `BlobId`, and `BlobRef`. |
 | `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
-| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | `document`, `manifest`, `schema`, and `segment` (builder, writer, reader). No WAL and no query. |
+| `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | %%ENGINE_NOW%% |
 | `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | The trait, memory, local file, and the single-file container. No S3, GCS, or Azure. |
 | `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` / `fr` / `de` / `it` stemmers, and built-in analyzers. |
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | Module docs only. |

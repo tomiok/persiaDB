@@ -1,6 +1,6 @@
 ---
 title: How it works
-description: "How a Persia DB write and query move through the engine: crate layers, the planned write path, the query path, and segment storage."
+description: "How a Persia DB write and query move through the engine: crate layers, the write path, the query path, and segment storage."
 head:
   - tag: title
     content: "Write path, query path, and segment storage | PersiaDB"
@@ -40,8 +40,8 @@ S3, GCS, and Azure do not.
 
 A segment is one byte string: sections, then a footer. Locally it is a frame payload. Remotely it is
 one object. The bytes match. Codecs on a block are `None` and `Zstd`. The local container, the block
-codecs, and the memory and file backends exist. `persia-engine` can build and read one segment.
-S3, GCS, and Azure backends do not (M12). Nothing runs a query over that segment.
+codecs, and the memory and file backends exist. %%ENGINE_SHORT%%
+S3, GCS, and Azure backends do not (M12).
 
 <StorageDiagram />
 

@@ -1,8 +1,10 @@
 ---
 import AsciiFigure from './AsciiFigure.astro';
-import { writePathCaption } from '../layers.mjs';
+import { writePathAccents, writePathCaption, writePathLead } from '../layers.mjs';
 
 const writeStatus = writePathCaption();
+const writeLead = writePathLead();
+const writeAccent = writePathAccents();
 
 const diagram = `
 ╔═ write ══════════════════════════════════════════════════════════╗ 
@@ -34,9 +36,10 @@ const diagram = `
 <AsciiFigure
     label="Life of a write"
     diagram={diagram}
-    accent={['3. commit', 'data, then manifest', 'inactive superblock']}
+    accent={writeAccent.accent}
+    accentAlt={writeAccent.accentAlt}
 >
-    Planned local write path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local">SPEC §4.5</a>,
+    {writeLead} (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local">SPEC §4.5</a>,
         <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#82-flow">§8.2</a>).
         A crash before the superblock write keeps the previous commit. Deletions live in tombstone sidecars.
         {writeStatus}

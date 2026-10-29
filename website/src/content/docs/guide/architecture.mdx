@@ -17,7 +17,8 @@ head:
 import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
 
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
-`persia-format`, `persia-storage`, `persia-engine` (schema, documents, manifests, and a segment builder, writer, and reader), and `persia-analysis` contain library code.
+`persia-format`, `persia-storage`, `persia-engine`, and `persia-analysis` contain library code.
+%%ENGINE_SHORT%%
 `persia` exports no `Db`. `persia-server` is an empty `main`. `persia-blob` and `persia-proto` are module docs only.
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
@@ -40,7 +41,7 @@ Three rules shape the rest of the design:
 | `persia-format` | Encodings, checksums, frames, block codecs. No I/O policy. | Implemented (M1) |
 | `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Memory, local file, and the container are implemented (M2). Cloud is M12. |
 | `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). It does not search. |
-| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Schema, documents, and manifests exist (M3). A segment builder, writer, and reader exist (M5). Query, the WAL, and relaxation do not (M6–M8). |
+| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | %%ENGINE_SHORT%% |
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | No API yet (M9) |
 | `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10). The crate exports no types. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |

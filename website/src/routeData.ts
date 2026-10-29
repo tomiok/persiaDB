@@ -1,12 +1,11 @@
 import { defineRouteMiddleware } from '@astrojs/starlight/route-data';
 import { breadcrumbJsonLd, jsonLdScript } from './breadcrumbs';
-import { PROGRESS_TOKEN, progressSentence } from './progress.mjs';
+import { substituteStatusText } from './status.mjs';
 
 // Frontmatter `head` (the FAQ JSON-LD) is not Markdown, so the progress plugin
-// never sees it. Substitute the same sentence the pages use.
+// never sees it. Substitute the same sentences the pages use.
 function fillProgress(value: string): string {
-	if (!value.includes(PROGRESS_TOKEN)) return value;
-	return value.replaceAll(PROGRESS_TOKEN, progressSentence());
+	return substituteStatusText(value);
 }
 
 type HeadEntry = { tag: string; content?: unknown; attrs?: Record<string, unknown> };

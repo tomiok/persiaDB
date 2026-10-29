@@ -63,7 +63,8 @@ layers build on (ROADMAP M0 and M1, both done):
   (SPEC §4.4, [ADR-0009](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0009-frame-validation-and-scan-end.md), ROADMAP 1.7).
   The memory-map reader and `BlobId` / `BlobRef` are in the same crate.
 
-Those pieces are library code. `persia-storage` implements the `Storage` trait, memory and local-file backends, and the single-file container (open, append, commit, recover, compact). `persia-engine` implements collection schema, documents, manifests, and a segment builder, writer, and reader. `persia-analysis` implements tokenizers and built-in analyzers. None of that opens a database or answers a query. The document write path (WAL, memtable, index commit) and search are not implemented (see [Getting started](/guide/getting-started/) and [Milestones](/guide/roadmap/)).
+Those pieces are library code. %%LIBRARY_NOW%%
+See [Getting started](/guide/getting-started/) and [Milestones](/guide/roadmap/).
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 

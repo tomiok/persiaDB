@@ -4,6 +4,7 @@
 // "stub" or "planned" on a milestone that has moved.
 
 import { loadProgress } from './progress.mjs';
+import { loadStatus } from './status.mjs';
 
 /** @typedef {import('./progress.mjs').Progress} Progress */
 /** @typedef {import('./progress.mjs').Milestone} Milestone */
@@ -138,17 +139,34 @@ function formatStatus(m1) {
 
 /**
  * @param {Milestone} m5
+ * @param {Milestone} m6
  * @param {Milestone} m7
  */
-function engineStatus(m5, m7) {
+function engineStatus(m5, m6, m7) {
 	const queryStarted = m7.state === 'in progress' || m7.state === 'done' || m7.done > 0;
-	if (m5.state === 'done' && m7.state === 'done') return 'done';
-	if (m5.state === 'done' && !queryStarted) return 'query not started';
-	if (m5.state === 'done' && m7.state === 'in progress') return 'M7 in progress';
+	const writeStarted = m6.state === 'in progress' || m6.state === 'done' || m6.done > 0;
+	if (m5.state === 'done' && m6.state === 'done' && m7.state === 'done') return 'done';
+	if (m5.state === 'done' && m6.state === 'done' && m7.state === 'in progress') return 'M7 in progress';
+	if (writeStarted && m6.state !== 'done' && !queryStarted) return 'M6, no query';
+	if (m6.state === 'done' && !queryStarted) return 'no query yet';
+	if (m5.state === 'done' && !writeStarted && !queryStarted) return 'query not started';
 	if (m5.state === 'in progress' && !queryStarted) return 'M5 in progress';
 	if ((m5.state === 'in progress' || m5.done > 0) && queryStarted) return 'in progress';
-	if (untouched(m5) && !queryStarted) return 'not started';
+	if (untouched(m5) && !queryStarted && !writeStarted) return 'not started';
 	return 'in progress';
+}
+
+/**
+ * @param {Milestone} m6
+ * @param {Milestone} m7
+ * @param {boolean} walReady
+ */
+function engineDetail(m6, m7, walReady) {
+	const queryStarted = m7.state === 'in progress' || m7.state === 'done' || m7.done > 0;
+	const writeStarted = m6.state === 'in progress' || m6.state === 'done' || m6.done > 0;
+	if (walReady && queryStarted) return 'WAL and query';
+	if (walReady && writeStarted) return 'segments and WAL';
+	return 'segments, query';
 }
 
 /**
@@ -162,13 +180,15 @@ function narrowStatus(ms) {
 
 /**
  * @param {Progress} progress
+ * @param {string | undefined} engineDetailText
  */
-function caption(progress) {
+function caption(progress, engineDetailText) {
 	const m1 = milestone(progress, 'M1');
 	const m2 = milestone(progress, 'M2');
 	const m3 = milestone(progress, 'M3');
 	const m4 = milestone(progress, 'M4');
 	const m5 = milestone(progress, 'M5');
+	const m6 = milestone(progress, 'M6');
 	const m7 = milestone(progress, 'M7');
 	const m9 = milestone(progress, 'M9');
 	const m10 = milestone(progress, 'M10');
@@ -186,8 +206,12 @@ function caption(progress) {
 			parts.push(`${label} is ${stateClause(milestone(progress, id))}.`);
 		}
 	}
-	parts.push(`The segment writer and reader are ${stateClause(m5)}.`);
-	parts.push(`Query is ${stateClause(m7)}.`);
+	if (engineDetailText) parts.push(engineDetailText);
+	else {
+		parts.push(`The segment writer and reader are ${stateClause(m5)}.`);
+		parts.push(`The write path is ${stateClause(m6)}.`);
+		parts.push(`Query is ${stateClause(m7)}.`);
+	}
 	parts.push(`The blob store is ${stateClause(m9)}.`);
 	if (untouched(m10)) {
 		parts.push(
@@ -198,24 +222,24 @@ function caption(progress) {
 	}
 	parts.push(`The server is ${stateClause(m11)}. Network SDKs are ${stateClause(m14)}.`);
 	parts.push(`S3, GCS, and Azure are ${stateClause(m12)}.`);
-	if (m7.state !== 'done' && m10.state !== 'done') {
-		parts.push('Nothing works end to end: there is no indexing API and no query.');
-	} else if (m10.state !== 'done') {
-		parts.push('Nothing works end to end: there is no indexing API.');
-	} else if (m7.state !== 'done') {
-		parts.push('Nothing works end to end: there is no query.');
+	if (!engineDetailText && m7.state !== 'done') {
+		parts.push('Nothing searches, and the public persia crate exports no Db or Collection.');
+	} else if (!engineDetailText && m10.state !== 'done') {
+		parts.push('The public persia crate exports no Db or Collection.');
 	}
 	return parts.join(' ');
 }
 
 /**
  * @param {Progress} progress
+ * @param {{ walReady?: boolean, engineDetail?: string }} [options]
  */
-export function layerView(progress) {
+export function layerView(progress, options = {}) {
 	const m1 = milestone(progress, 'M1');
 	const m2 = milestone(progress, 'M2');
 	const m4 = milestone(progress, 'M4');
 	const m5 = milestone(progress, 'M5');
+	const m6 = milestone(progress, 'M6');
 	const m7 = milestone(progress, 'M7');
 	const m9 = milestone(progress, 'M9');
 	const m10 = milestone(progress, 'M10');
@@ -238,8 +262,8 @@ export function layerView(progress) {
 		'║                                ▼                                 ║░',
 		'║ ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓  ┏━━━━━━━━━━━━━━━━━━┓ ║░',
 		row('engine', 'blob', 'analysis'),
-		row('segments, query', 'chunks, dedup', 'analyzers'),
-		row(engineStatus(m5, m7), narrowStatus(m9), narrowStatus(m4)),
+		row(engineDetail(m6, m7, options.walReady === true), 'chunks, dedup', 'analyzers'),
+		row(engineStatus(m5, m6, m7), narrowStatus(m9), narrowStatus(m4)),
 		'║ ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛  ┗━━━━━━━━━━━━━━━━━━┛ ║░',
 		'║                                ▼                                 ║░',
 		'║       ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓       ║░',
@@ -276,14 +300,14 @@ export function layerView(progress) {
 
 	return {
 		diagram: lines.join('\n'),
-		caption: caption(progress),
+		caption: caption(progress, options.engineDetail),
 		accent,
 		accentAlt,
 		serverStatus: serverStatus(m11, m14),
 		apiStatus: apiStatus(m10),
 		storageDetail,
 		storageStatus,
-		engineStatus: engineStatus(m5, m7),
+		engineStatus: engineStatus(m5, m6, m7),
 		blobStatus: narrowStatus(m9),
 		analysisStatus: narrowStatus(m4),
 		formatStatus: formatStatus(m1),
@@ -292,17 +316,39 @@ export function layerView(progress) {
 
 /** @returns {ReturnType<typeof layerView>} */
 export function layerDiagram() {
-	return layerView(loadProgress());
+	const status = loadStatus();
+	return layerView(loadProgress(), { walReady: status.walReady, engineDetail: status.engineShort });
 }
 
 /**
  * @param {Progress} [progress]
  */
 export function writePathCaption(progress = loadProgress()) {
+	const live = loadProgress();
+	const m6 = milestone(progress, 'M6');
+	const liveM6 = milestone(live, 'M6');
+	const same =
+		m6.state === liveM6.state && m6.done === liveM6.done && m6.leaves === liveM6.leaves;
+	if (same) return loadStatus().writePathNow;
 	const m2 = milestone(progress, 'M2');
 	const m5 = milestone(progress, 'M5');
-	const m6 = milestone(progress, 'M6');
-	return `The container commit is ${stateClause(m2)} and does not index documents. This memtable, WAL, flush, and merge path is ${stateClause(m6)}. Writing one segment's bytes is ${stateClause(m5)} and is not this path.`;
+	return `The container commit is ${stateClause(m2)}. Writing one segment's bytes is ${stateClause(m5)}. The memtable, WAL, flush, and merge path is ${stateClause(m6)}.`;
+}
+
+/** Lead-in for the write-path figure. Follows M6 in PROGRESS.md. */
+export function writePathLead() {
+	return loadStatus().writePathLead;
+}
+
+/**
+ * Highlight the commit box, and the WAL box once that leaf group is checked.
+ * @returns {{ accent: string[], accentAlt: string[] }}
+ */
+export function writePathAccents() {
+	return {
+		accent: ['3. commit', 'data, then manifest', 'inactive superblock'],
+		accentAlt: loadStatus().walReady ? ['WAL, then memtable'] : [],
+	};
 }
 
 /**
@@ -331,7 +377,7 @@ export function llmsStatusParagraph() {
 	return [
 		'Pre-alpha.',
 		view.caption,
-		'`Db::open`, `put`, `commit`, and `search` in these pages are illustrative, from SPEC.md, and are not in the crate.',
+		loadStatus().engineCalls,
 		'SPEC.md wins if a page disagrees with it. PROGRESS.md is the live roadmap counter.',
 	].join(' ');
 }

@@ -23,7 +23,7 @@ head:
             "name": "What is Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. persia-format implements the on-disk codecs. persia-storage implements the Storage trait, memory and local-file backends, and the single-file container. persia-engine implements collection schema, documents, manifest types, and a segment builder, writer, and reader. persia-analysis implements tokenizers and built-in analyzers. None of that is a database, and nothing runs a query. The public persia crate exports no Db and no Collection. Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
+              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. %%LIBRARY_NOW%% Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
             }
           },
           {
@@ -31,7 +31,7 @@ head:
             "name": "Is Persia DB production ready?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.\n\nPROGRESS.md is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
+              "text": "No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%\n\nPROGRESS.md is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
             }
           },
           {
@@ -63,7 +63,7 @@ head:
             "name": "What file format does Persia DB use?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "A local database is specified as two files (SPEC §4 and §9). The file name.persia is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file name.persia.blobs is a planned content-addressed pack for client bytes such as PDF or images. BlobId and BlobRef exist as types in persia-format. The blob store is milestone M9 and has not been started. persia-blob exports no API.\n\nImplemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in persia-format. Opening, appending, committing, recovering, and compacting a container file are implemented in persia-storage. Segment sections (the term dictionary, postings, and stored documents) have a writer and a reader in persia-engine (milestone M5). PROGRESS.md is the leaf count. Nothing searches the segment. S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on File format and storage."
+              "text": "A local database is specified as two files (SPEC §4 and §9). The file name.persia is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file name.persia.blobs is a planned content-addressed pack for client bytes such as PDF or images. BlobId and BlobRef exist as types in persia-format. The blob store is milestone M9 and has not been started. persia-blob exports no API.\n\nImplemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in persia-format. Opening, appending, committing, recovering, and compacting a container file are implemented in persia-storage. %%ENGINE_SHORT%% S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on File format and storage."
             }
           },
           {
@@ -71,7 +71,7 @@ head:
             "name": "Is Persia DB crash-safe?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.\n\nThat guarantee is the container, not a search database. There is no document write path yet: no memtable, no engine WAL replay, and no index commit (milestone M6). You cannot store a searchable document and recover it. Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist."
+              "text": "The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.\n\n%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist."
             }
           },
           {
@@ -87,7 +87,7 @@ head:
             "name": "How do I get started with Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "You cannot add Persia DB as a database yet. There is no cargo add persia. Getting started separates the library code you can call from the illustrative Db::open and search API, which is not in the crate.\n\nA git dependency can use persia-format for the byte codecs and persia-storage for the container and the memory and local stores. Collection schema types live in persia-engine. They validate a schema. The same crate can build and read one segment. It does not search. The milestone that is supposed to ship the embedded API is v0.1 (M10)."
+              "text": "You cannot add Persia DB as a database yet. There is no cargo add persia. Getting started separates the library code you can call from the illustrative Db::open and search API, which is not in the crate.\n\n%%LIBRARY_NOW%% %%ENGINE_CALLS%% %%M10_BLOCKED%%"
             }
           },
           {
@@ -112,13 +112,13 @@ Planned work is marked as planned. Nothing here is a benchmark.
 
 Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md). When this site and the SPEC disagree, the SPEC wins.
 
-What the repository contains today is library code, not a search you can call. `persia-format` implements the on-disk codecs. `persia-storage` implements the `Storage` trait, memory and local-file backends, and the single-file container. `persia-engine` implements collection schema, documents, manifest types, and a segment builder, writer, and reader. `persia-analysis` implements tokenizers and built-in analyzers. None of that is a database, and nothing runs a query. The public `persia` crate exports no `Db` and no `Collection`. Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+What the repository contains today is library code, not a search you can call. %%LIBRARY_NOW%% Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
 What an embedded search database is, and how embedded full-text search in Rust fits this design, is [What is an embedded search database?](/guide/embedded-search/).
 
 ## Is Persia DB production ready?
 
-No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). The first release a caller is supposed to use is v0.1 (M10), and that milestone is blocked on the write path, query, relaxation, and blobs.
+No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%
 
 [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The [comparison page](/guide/comparison/) says which one fits which job, and it is not a benchmark.
 
@@ -150,13 +150,13 @@ Embedded Go and TypeScript bindings are a design only ([ADR-0018](https://github
 
 A local database is specified as two files (SPEC §4 and §9). The file `name.persia` is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file `name.persia.blobs` is a planned content-addressed pack for client bytes such as PDF or images. `BlobId` and `BlobRef` exist as types in `persia-format`. The blob store is milestone M9 and has not been started. `persia-blob` exports no API.
 
-Implemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in `persia-format`. Opening, appending, committing, recovering, and compacting a container file are implemented in `persia-storage`. Segment sections (the term dictionary, postings, and stored documents) have a writer and a reader in `persia-engine` (milestone M5). [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the leaf count. Nothing searches the segment. S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on [File format and storage](/guide/file-format/).
+Implemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in `persia-format`. Opening, appending, committing, recovering, and compacting a container file are implemented in `persia-storage`. %%ENGINE_SHORT%% S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on [File format and storage](/guide/file-format/).
 
 ## Is Persia DB crash-safe?
 
 The single-file container commit is implemented and crash-tested. SPEC §4.5 orders the writes: data frames, then the manifest frame, then the inactive superblock slot, with an fdatasync at each step. A crash before the new superblock is durable leaves the previous commit. Opening the container runs recovery, keeps that commit, and truncates a torn tail. Create and compaction are specified to leave either no new file or a complete one. Tests inject faults at those steps and kill the process. Recovery must return the old state or the new state, and not a mix of the two.
 
-That guarantee is the container, not a search database. There is no document write path yet: no memtable, no engine WAL replay, and no index commit (milestone M6). You cannot store a searchable document and recover it. Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist.
+%%WRITE_PATH_NOW%% Checksums cover the bytes that exist, and fuzz targets cover the parsers that exist.
 
 ## What license is Persia DB under?
 
@@ -166,7 +166,7 @@ Apache License, Version 2.0. The text is the [LICENSE](https://github.com/tomiok
 
 You cannot add Persia DB as a database yet. There is no `cargo add persia`. [Getting started](/guide/getting-started/) separates the library code you can call from the illustrative `Db::open` and `search` API, which is not in the crate.
 
-A git dependency can use `persia-format` for the byte codecs and `persia-storage` for the container and the memory and local stores. Collection schema types live in `persia-engine`. They validate a schema. The same crate can build and read one segment. It does not search. The milestone that is supposed to ship the embedded API is v0.1 (M10).
+%%LIBRARY_NOW%% %%ENGINE_CALLS%% %%M10_BLOCKED%%
 
 ## How can I contribute to Persia DB?
 
