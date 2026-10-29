@@ -1337,7 +1337,9 @@ Tombstone sidecar (ADR-0030; the layout closes SPEC §18.3):
 the collection's committed segments of every id the memtable has an operation for (put or delete, replayed or not):
 an upsert's older version and a deleted document alike. Each segment that loses documents gets its next sidecar
 version, appended after the new segments and before the WAL's commit point and the manifest (§4.5 step 1), and an
-updated entry in the commit's diff. So a commit leaves at most one live copy of each id, and every snapshot shows
+updated entry in the commit's diff. A segment that would lose its last live document gets no sidecar: the diff removes it, at
+the sidecar version it has (0 for none), and it is obsolete from that commit on, like a merged-away segment (§8.5,
+ROADMAP 6.4.6). So a commit leaves at most one live copy of each id, and every snapshot shows
 each id at most once: the memtable's version or delete before the commit, the new segment and the sidecars after.
 
 **Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the newest
@@ -1365,7 +1367,9 @@ and the ones a running merge already holds, in; disjoint merge plans out. Each p
 manifest order, with the sidecar version it read (§8.7.2). For a segment, `live = doc_count - deleted` and its
 **live size** is `size × live / doc_count` (rounded down; the manifest has no other size). Segments a running merge
 holds are left out. Then, in this order:
-1. **Drop**: every segment with `live = 0` goes in one plan that writes no segment (it only removes them).
+1. **Drop**: every segment with `live = 0` goes in one plan that writes no segment (it only removes them). A
+   flush commit already removes the segments it leaves without a live document (§8.3); this plan covers the ones
+   earlier builds kept listed.
 2. **Tier merges**: a segment's tier is 0 when its live size is below `tier_floor × tier_factor`, and otherwise the
    largest `t` with `live size ≥ tier_floor × tier_factor^t`. Segments whose live size is at least
    `max_merged_bytes` take no part. Within each tier, from tier 0 up: while at least `segments_per_merge` segments
@@ -1907,7 +1911,8 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
   live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests
   and written on request when missing (`PERSIA_WRITE_DATABASE_FIXTURES=1`; ROADMAP 6.3.8). `blob-ref.persia` holds a
   segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit; `tombstones.persia` (ROADMAP 6.4.3)
-  three segments, two versions of one tombstone sidecar, and a delete in the WAL.
+  three segments, two versions of one tombstone sidecar, and a delete in the WAL. `emptied.persia` (ROADMAP 6.4.6): the same
+  commits, whose third removes the segment it empties instead of writing its second sidecar.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

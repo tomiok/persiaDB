@@ -238,6 +238,9 @@ fn a_dropped_collection_is_never_replayed_into_one_created_again() {
     db.delete("notes", "old1", Durability::Fsync).unwrap();
     db.put("notes", &body_doc("old0", "committed"), Durability::Fsync)
         .unwrap();
+    // Keeps the first segment listed once `old0` is deleted, with a sidecar (ROADMAP 6.4.6).
+    db.put("notes", &body_doc("keep", "committed"), Durability::Fsync)
+        .unwrap();
     db.commit().unwrap();
     db.put("notes", &with_extra("old2"), Durability::Fsync)
         .unwrap();
@@ -296,7 +299,7 @@ fn a_dropped_collection_is_never_replayed_into_one_created_again() {
     let snapshot = db.snapshot();
     let c = snapshot.collection("notes").unwrap();
     assert_eq!((c.segments().len(), c.memtable().live_count()), (0, 1));
-    for id in ["old0", "old1", "old2", "old3"] {
+    for id in ["old0", "old1", "old2", "old3", "keep"] {
         assert!(c.get(id).unwrap().is_none(), "{id}");
     }
 }

@@ -366,8 +366,9 @@ fn verify_counts_deletions_after_a_commit() {
     let report = reader.verify().unwrap();
     assert_eq!((report.replayed, report.uncommitted_frames), (0, 0));
     assert_eq!(report.tail, Tail::Clean);
-    // The base segments lost every id the backlog touched; the new ones hold the backlog's live documents.
-    assert_eq!(report.segments, 4);
+    // The base segments lost every id the backlog touched (one lost all and was removed, ROADMAP 6.4.6); the new ones
+    // hold the backlog's live documents.
+    assert_eq!(report.segments, 3);
     let live: usize = model.values().map(BTreeMap::len).sum();
     assert_eq!(report.documents - report.deleted, live as u64);
 }

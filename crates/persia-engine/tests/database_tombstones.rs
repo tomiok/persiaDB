@@ -9,6 +9,7 @@
 //!    delete, replayed or not), in the next sidecar version of each segment (a superset): afterwards each id has at
 //!    most one live copy. Writes are visible before the commit (read-your-writes); older snapshots keep their state;
 //!    a reopen after losing every unsynced write shows the same documents (6.4.3).
+//!    A commit that deletes a segment's last live document removes the segment instead, with no sidecar (6.4.6).
 //! 4. The newest segment whose `IdMap` holds an id decides a lookup: a deleted copy there ends it (6.4.1). A newer
 //!    sidecar encoding is unsupported, not corrupt; one longer than `MAX_SIDECAR_LEN` is corrupt (6.4.2).
 
@@ -24,7 +25,7 @@ use std::sync::Arc;
 use persia_analysis::AnalyzerRegistry;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, Located, ManualClock, SegmentIds,
+    Database, DatabaseError, DatabaseOptions, Located, ManualClock, ObsoleteKind, SegmentIds,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
@@ -335,14 +336,46 @@ fn deletes_and_upserts_of_committed_documents_are_tombstoned_by_the_commit() {
     assert_eq!(text(&old.get("r").unwrap().unwrap()), "two");
     assert_eq!(old.get("q").unwrap(), None);
 
-    // The next version is a superset; deleting every document leaves the segment listed, fully deleted.
+    // Deleting the last live document removes the segment instead of writing a sidecar of every docid (ROADMAP
+    // 6.4.6); it and its sidecar are obsolete, held by the snapshots that still list them.
+    let held = db.snapshot();
+    let emptied = segments[0].id;
+    let frames = db.container().frames().len();
     db.delete("a", "p", Durability::Fsync).unwrap();
     db.commit().unwrap();
-    let t = db.manifest().collection("a").unwrap().segments()[0]
-        .tombstones
-        .unwrap();
-    assert_eq!((t.version, t.deleted), (2, 3));
+    let listed = db.manifest().collection("a").unwrap().segments().to_vec();
+    assert_eq!(
+        listed.iter().map(|e| e.id).collect::<Vec<_>>(),
+        [segments[1].id]
+    );
+    assert!(
+        db.container().frames()[frames..]
+            .iter()
+            .all(|f| f.kind != FrameKind::TombstoneSidecar),
+        "no sidecar is written for the removed segment"
+    );
     assert_eq!(ids(&db), ["r"]);
+    let obsolete: Vec<_> = db
+        .obsolete()
+        .map(|(o, held)| (o.kind, o.obsolete_since, held))
+        .collect();
+    let seq = db.seq();
+    assert_eq!(
+        obsolete,
+        [
+            (ObsoleteKind::Segment(emptied), seq, true),
+            (
+                ObsoleteKind::Sidecar {
+                    segment: emptied,
+                    version: 1
+                },
+                seq,
+                true
+            ),
+        ]
+    );
+    assert_eq!(held.collection("a").unwrap().segments().len(), 2);
+    drop(held);
 
     // Losing every unsynced write keeps every commit.
     drop(db);
@@ -362,22 +395,24 @@ fn a_replayed_delete_is_tombstoned_by_the_next_commit() {
     db.create_collection(schema("a")).unwrap();
     db.put("a", &doc("p", "one"), Durability::Fsync).unwrap();
     db.put("a", &doc("q", "one"), Durability::Fsync).unwrap();
+    // Stays live, so the segment keeps a sidecar rather than being removed (ROADMAP 6.4.6).
+    db.put("a", &doc("r", "one"), Durability::Fsync).unwrap();
     db.commit().unwrap();
     db.delete("a", "p", Durability::Fsync).unwrap();
     db.put("a", &doc("q", "two"), Durability::Fsync).unwrap();
     drop(db);
 
     let mut db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
-    assert_eq!(ids(&db), ["q"]);
+    assert_eq!(ids(&db), ["q", "r"]);
     db.commit().unwrap();
-    assert_eq!(ids(&db), ["q"]);
+    assert_eq!(ids(&db), ["q", "r"]);
     let t = db.manifest().collection("a").unwrap().segments()[0]
         .tombstones
         .unwrap();
     assert_eq!((t.version, t.deleted), (1, 2));
     drop(db);
     let db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
-    assert_eq!(ids(&db), ["q"]);
+    assert_eq!(ids(&db), ["q", "r"]);
 }
 
 /// Builds a segment of documents `ids` with id `segment_id`.
@@ -450,7 +485,11 @@ fn a_commit_deletes_every_older_copy_of_an_id() {
     assert_eq!(ids(&db), ["x", "y"]);
     let segments = db.manifest().collection("a").unwrap().segments().to_vec();
     assert_eq!(segments[0].tombstones.map(|t| t.deleted), Some(1));
-    assert_eq!(segments[1].tombstones.map(|t| t.deleted), Some(1));
+    // Segment 2 held only `x`: removed rather than fully deleted (ROADMAP 6.4.6).
+    assert_eq!(segments.len(), 2);
+    assert_eq!(segments[0].id, SegmentId::new(1));
+    assert_ne!(segments[1].id, SegmentId::new(2));
+    assert_eq!(segments[1].tombstones, None);
     let a = db.snapshot();
     assert_eq!(
         text(&a.collection("a").unwrap().get("x").unwrap().unwrap()),

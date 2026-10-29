@@ -9,9 +9,12 @@
 //!    `PERSIA_WRITE_DATABASE_FIXTURES=1` writes it when missing.
 //! 2. Opening the fixture shows the committed segment with the blob reference and its `user_meta`, and the replayed
 //!    document after it.
-//! 3. `tombstones.persia` (ROADMAP 6.4.3, ADR-0030), written the same way, holds three segments, a second sidecar
-//!    version that deletes all of the first segment, and a delete in the WAL; it is stable byte for byte and opens to
-//!    the documents the commits left, the replayed delete hiding a segment's document.
+//! 3. `tombstones.persia` (ROADMAP 6.4.3, ADR-0030), written by the commit path before ROADMAP 6.4.6, holds three
+//!    segments, a second sidecar version that deletes all of the first segment, and a delete in the WAL. It opens
+//!    forever to the documents the commits left, the replayed delete hiding a segment's document, and a merge drops
+//!    the fully deleted segment.
+//! 4. `emptied.persia` (ROADMAP 6.4.6): the same commits today, whose third removes the segment it empties instead of
+//!    writing that sidecar. It is stable byte for byte and opens to the same documents.
 
 #![allow(
     clippy::unwrap_used,
@@ -150,14 +153,16 @@ fn golden_database_is_stable_and_opens() {
     assert_eq!(memtable.document(late_id).unwrap(), late);
 }
 
-fn tombstones_path() -> PathBuf {
+fn database_path(name: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../tests/fixtures/database/v1.0/tombstones.persia")
+        .join("../../tests/fixtures/database/v1.0")
+        .join(name)
 }
 
 /// The database with tombstone sidecars (ROADMAP 6.4.3), written by the commit path: `photo-1` and `note-1` flushed
-/// into S1; `note-1` deleted and `note-2` put (S1's sidecar v1, S2); `photo-1` replaced (S3, S1's sidecar v2, which
-/// deletes all of S1); then a delete of `note-2` left in the WAL.
+/// into S1; `note-1` deleted and `note-2` put (S1's sidecar v1, S2); `photo-1` replaced (S3; this deletes the rest
+/// of S1, which the commit removes, ROADMAP 6.4.6; builds before wrote S1's sidecar v2); then a delete of `note-2`
+/// left in the WAL.
 fn write_tombstones() -> Vec<u8> {
     let file = SimFile::new();
     let mut db = Database::create_on(file.clone(), *b"persia-golden-tb", options()).unwrap();
@@ -184,58 +189,86 @@ fn replaced(photo: &Document) -> Document {
         .with(title, Value::String("Sunrise over the harbour".into()))
 }
 
-#[test]
-fn golden_database_with_tombstones_is_stable_and_opens() {
-    let path = tombstones_path();
-    let written = write_tombstones();
+/// The stored database `name`, written by `write` when missing and `PERSIA_WRITE_DATABASE_FIXTURES` is set.
+fn stored(name: &str, write: impl FnOnce() -> Vec<u8>) -> Vec<u8> {
+    let path = database_path(name);
     if std::env::var_os("PERSIA_WRITE_DATABASE_FIXTURES").is_some() && !path.exists() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &written).unwrap();
+        std::fs::write(&path, write()).unwrap();
     }
-    let stored = std::fs::read(&path).unwrap_or_else(|e| {
+    std::fs::read(&path).unwrap_or_else(|e| {
         panic!(
             "{}: {e} (PERSIA_WRITE_DATABASE_FIXTURES=1 writes it)",
             path.display()
         )
-    });
-    assert_eq!(
-        written, stored,
-        "the commit path changed the database's bytes"
-    );
+    })
+}
 
-    let db = Database::open_on(SimFile::from_bytes(stored), options()).unwrap();
-    assert_eq!(db.seq(), 5);
-    let entries = db
-        .manifest()
+/// What both tombstone databases show: `photo-1` replaced, `note-1` deleted by a sidecar, `note-2` in a segment and
+/// hidden by the replayed delete.
+fn check_tombstoned(db: &Database<SimFile>, note_segment: usize) {
+    let snapshot = db.snapshot();
+    let files = snapshot.collection("files").unwrap();
+    let (photo, _, _) = docs();
+    assert_eq!(files.get("photo-1").unwrap(), Some(replaced(&photo)));
+    assert_eq!(files.get("note-1").unwrap(), None);
+    // In a segment, hidden by the replayed delete.
+    assert_eq!(files.get("note-2").unwrap(), None);
+    assert!(
+        files.segments()[note_segment]
+            .document_by_id("note-2")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(files.memtable().lookup("note-2"), Some(IdState::Deleted));
+}
+
+fn sidecars(db: &Database<SimFile>) -> Vec<Option<(u64, u32)>> {
+    db.manifest()
         .collection("files")
         .unwrap()
         .segments()
-        .to_vec();
-    let sidecars: Vec<Option<(u64, u32)>> = entries
         .iter()
         .map(|e| e.tombstones.map(|t| (t.version, t.deleted)))
-        .collect();
-    assert_eq!(sidecars, [Some((2, 2)), None, None]);
-    let snapshot = db.snapshot();
-    let files = snapshot.collection("files").unwrap();
+        .collect()
+}
+
+#[test]
+fn golden_database_with_a_fully_deleted_segment_still_opens() {
+    // Written before ROADMAP 6.4.6: never regenerated (SPEC §15).
+    let stored = stored("tombstones.persia", || {
+        panic!("tombstones.persia is released; it is never written again")
+    });
+    let mut db = Database::open_on(SimFile::from_bytes(stored), options()).unwrap();
+    assert_eq!(db.seq(), 5);
+    assert_eq!(sidecars(&db), [Some((2, 2)), None, None]);
     // The decoded sidecar, not only the manifest's counts.
-    let deleted: Vec<u32> = files.tombstones()[0]
+    let snapshot = db.snapshot();
+    let deleted: Vec<u32> = snapshot.collection("files").unwrap().tombstones()[0]
         .as_ref()
         .unwrap()
         .docids()
         .iter()
         .collect();
     assert_eq!(deleted, [0, 1]);
-    let (photo, _, _) = docs();
-    assert_eq!(files.get("photo-1").unwrap(), Some(replaced(&photo)));
-    assert_eq!(files.get("note-1").unwrap(), None);
-    // In S2, hidden by the replayed delete.
-    assert_eq!(files.get("note-2").unwrap(), None);
-    assert!(
-        files.segments()[1]
-            .document_by_id("note-2")
-            .unwrap()
-            .is_some()
+    check_tombstoned(&db, 1);
+    // The merge policy's drop plan removes the fully deleted segment (SPEC §8.5).
+    db.finish_merges().unwrap();
+    assert_eq!(sidecars(&db), [None, None]);
+    check_tombstoned(&db, 0);
+}
+
+#[test]
+fn golden_database_dropping_an_emptied_segment_is_stable_and_opens() {
+    let written = write_tombstones();
+    let stored = stored("emptied.persia", || written.clone());
+    assert_eq!(
+        written, stored,
+        "the commit path changed the database's bytes"
     );
-    assert_eq!(files.memtable().lookup("note-2"), Some(IdState::Deleted));
+    let db = Database::open_on(SimFile::from_bytes(stored), options()).unwrap();
+    assert_eq!(db.seq(), 5);
+    // S1 is gone: its last live document was deleted by the commit that replaced `photo-1` (ROADMAP 6.4.6).
+    assert_eq!(sidecars(&db), [None, None]);
+    check_tombstoned(&db, 0);
 }

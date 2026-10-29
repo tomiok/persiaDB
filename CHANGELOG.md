@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: a commit that deletes a segment's last live document removes the segment from the manifest
+  instead of writing a sidecar that deletes every document (ROADMAP 6.4.6, SPEC §8.3, ADR-0030 item 8); the segment
+  and its sidecar become obsolete objects. Golden database `emptied.persia`.
 - `persia-engine`: `Database::evolve_collection` and `drop_collection` (ROADMAP 6.3.10, SPEC §8.2.1, §8.7.2). Both
   commit at once and flush every memtable in that commit, so no WAL record of an earlier schema or of a dropped
   collection is replayed; an evolved collection's segments are reopened with its new schema (`Segment::reopen`), and

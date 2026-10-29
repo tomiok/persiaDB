@@ -305,25 +305,16 @@ fn dropping_a_database_joins_its_merge_workers() {
 }
 
 #[test]
-fn fully_deleted_segments_are_dropped_without_a_merge() {
+fn fully_deleted_segments_are_removed_by_their_commit() {
     let (_, mut db) = database(0);
     commit_segments(&mut db, &[&["a0", "a1"]]);
     db.delete("a", "a0", Durability::Fsync).unwrap();
     db.delete("a", "a1", Durability::Fsync).unwrap();
     db.commit().unwrap();
-    let outcomes = db.merge_step().unwrap();
-    assert!(
-        matches!(
-            &outcomes[..],
-            [MergeOutcome::Committed {
-                reason: MergeReason::Drop,
-                output: None,
-                ..
-            }]
-        ),
-        "{outcomes:?}"
-    );
+    // The commit removed the segment (ROADMAP 6.4.6): no drop plan is left for a merge. The policy's drop plan
+    // covers segments older builds kept listed (`database_fixture`, `tombstones.persia`).
     assert_eq!(segment_count(&db), 0);
+    assert!(db.merge_step().unwrap().is_empty());
 }
 
 #[test]
