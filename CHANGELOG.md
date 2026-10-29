@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- Roadmap: M31 Persia Studio (target v1.1), a read-only browser inspector. The core is a WASM build shared with the TypeScript SDK work (M16). M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia-engine`: a commit that deletes a segment's last live document removes the segment from the manifest
   instead of writing a sidecar that deletes every document (ROADMAP 6.4.6, SPEC §8.3, ADR-0030 item 8); the segment
   and its sidecar become obsolete objects. Golden database `emptied.persia`.

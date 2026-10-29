@@ -28,7 +28,7 @@
   <a href="./PROGRESS.md">Progress</a>
 </p>
 
-> **Pre-alpha.** The 2026-10-27 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **210 of 451** MVP leaves (47%). Post-MVP work is 0 of 151 and sits outside that percentage. Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). When this file and `PROGRESS.md` disagree, `PROGRESS.md` wins.
+> **Pre-alpha.** The 2026-10-27 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **210 of 451** MVP leaves (47%). Post-MVP work is 0 of 164 and sits outside that percentage. Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). When this file and `PROGRESS.md` disagree, `PROGRESS.md` wins.
 >
 > The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
 
@@ -226,12 +226,12 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 
 ### After v1.0
 
-From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves are started (0 of 151).
+From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves are started (0 of 164).
 
 | Target | Milestones |
 |---|---|
 | v1.0 | M0–M15, the MVP |
-| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import |
+| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio |
 | v1.2 | M20 Encryption at rest, M21 Python SDK |
 | v2.0 | M22 Multi-tenant, M23 Persia Cloud, M24 CDC connectors, M25 Web dashboard |
 | v2.1 | M26 UI components |
