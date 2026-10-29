@@ -316,8 +316,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 - `persia-engine`: acknowledged writes no longer get lost after two crashes in a row (ROADMAP 6.6.9, SPEC §8.6). A
   commit cut after its Manifest frame left that Manifest after `log_end`. Every open stops replay there, so the WAL a
-  later writer logged behind it was dropped by the open after that writer's crash. A writer that finds such a
-  Manifest now commits once at the end of its open, flushing nothing, so `log_end` moves past it.
+  later writer logged behind it was dropped by the open after that writer's crash. A writer's open now replays past
+  such a Manifest, then commits once, flushing nothing, so `log_end` moves past it. A file already in that state gets
+  its records back at its next writer open.
 - `persia-engine`: a read-only open (and `persia verify`) beside a live writer no longer fails with
   `ReplayError::UnknownCollection` when the writer creates a collection and logs to it while the reader's tail is
   scanned. Replay stops at the first Manifest frame after the loaded `log_end` whose `seq` is newer, so the snapshot
