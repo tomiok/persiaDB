@@ -270,6 +270,42 @@ fn a_merge_whose_input_lost_documents_meanwhile_is_discarded() {
 }
 
 #[test]
+fn a_merge_whose_input_a_commit_removed_is_discarded() {
+    let (_, mut db) = database(1);
+    commit_segments(&mut db, &[&["a0", "a1"], &["b0", "b1"]]);
+    let first = db.manifest().collection("a").unwrap().segments()[0].id;
+    db.merge_step().unwrap();
+    assert_eq!(db.merges_running(), 1);
+    // Deleting every document of an input removes it from the manifest (ROADMAP 6.4.6).
+    db.delete("a", "a0", Durability::Fsync).unwrap();
+    db.delete("a", "a1", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    assert_eq!(segment_count(&db), 1);
+    // The job still reads it.
+    let held = |db: &Database<SimFile>| {
+        db.obsolete()
+            .find(|(o, _)| o.kind == ObsoleteKind::Segment(first))
+            .map(|(_, held)| held)
+    };
+    assert_eq!(held(&db), Some(true));
+    let (seq, frames) = (db.seq(), db.container().frames().len());
+    let outcomes = db.finish_merges().unwrap();
+    assert!(
+        matches!(&outcomes[..], [MergeOutcome::Conflict { inputs, .. }] if inputs.contains(&first)),
+        "{outcomes:?}"
+    );
+    assert_eq!((db.seq(), db.container().frames().len()), (seq, frames));
+    assert_eq!(held(&db), Some(false));
+    assert_eq!(
+        documents(&db.snapshot())
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["b0", "b1"]
+    );
+}
+
+#[test]
 fn cancelled_merges_commit_nothing() {
     let (_, mut db) = database(1);
     commit_segments(&mut db, &[&["a0"], &["b0"]]);
@@ -305,25 +341,16 @@ fn dropping_a_database_joins_its_merge_workers() {
 }
 
 #[test]
-fn fully_deleted_segments_are_dropped_without_a_merge() {
+fn fully_deleted_segments_are_removed_by_their_commit() {
     let (_, mut db) = database(0);
     commit_segments(&mut db, &[&["a0", "a1"]]);
     db.delete("a", "a0", Durability::Fsync).unwrap();
     db.delete("a", "a1", Durability::Fsync).unwrap();
     db.commit().unwrap();
-    let outcomes = db.merge_step().unwrap();
-    assert!(
-        matches!(
-            &outcomes[..],
-            [MergeOutcome::Committed {
-                reason: MergeReason::Drop,
-                output: None,
-                ..
-            }]
-        ),
-        "{outcomes:?}"
-    );
+    // The commit removed the segment (ROADMAP 6.4.6): no drop plan is left for a merge. The policy's drop plan
+    // covers segments older builds kept listed (`database_fixture`, `tombstones.persia`).
     assert_eq!(segment_count(&db), 0);
+    assert!(db.merge_step().unwrap().is_empty());
 }
 
 #[test]

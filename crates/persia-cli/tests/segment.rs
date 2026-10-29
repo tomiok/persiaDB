@@ -126,6 +126,7 @@ fn inspect_verify_finds_damage_that_open_does_not() {
         s(&schema),
         "--verify",
     ]);
+    assert_eq!(failed.status.code(), Some(3), "corruption (ROADMAP 6.6.7)");
     let err = stderr(&failed);
     assert!(err.contains("verifying the segment"), "{err}");
     assert!(err.contains("Positions"), "{err}");
@@ -136,20 +137,40 @@ fn inspect_verify_finds_damage_that_open_does_not() {
 }
 
 #[test]
+fn a_damaged_schema_hash_is_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let schema = fixture("basic.schema.json");
+    let mut bytes = std::fs::read(fixture("basic.pseg")).unwrap();
+    let n = bytes.len();
+    assert_eq!(&bytes[n - 4..], b"PSEG");
+    let footer_len =
+        usize::try_from(u32::from_le_bytes(bytes[n - 8..n - 4].try_into().unwrap())).unwrap();
+    // `schema_hash` is footer byte 40 (SPEC §5.1), inside the footer CRC. Flipping it without repairing
+    // the CRC must fail the checksum (exit 3), not the schema comparison (exit 1).
+    let start = n.checked_sub(8 + footer_len).unwrap();
+    let hash = start.checked_add(40).unwrap();
+    bytes[hash] ^= 0x01;
+    let seg = dir.path().join("damaged.pseg");
+    std::fs::write(&seg, &bytes).unwrap();
+    let failed = persia(&["inspect", "segment", s(&seg), "--schema", s(&schema)]);
+    assert_eq!(failed.status.code(), Some(3));
+    let err = stderr(&failed);
+    assert!(err.contains("checksum"), "{err}");
+    assert!(!err.contains("is not the one the segment"), "{err}");
+}
+
+#[test]
 fn a_segment_needs_its_schema() {
     let dir = tempfile::tempdir().unwrap();
     let seg = fixture("basic.pseg");
     let json = std::fs::read_to_string(fixture("basic.schema.json")).unwrap();
     let other = dir.path().join("other.json");
     std::fs::write(&other, json.replace("\"things\"", "\"others\"")).unwrap();
-    let err = stderr(&persia(&[
-        "inspect",
-        "segment",
-        s(&seg),
-        "--schema",
-        s(&other),
-    ]));
-    assert!(err.contains("opening the segment"), "{err}");
+    let wrong = persia(&["inspect", "segment", s(&seg), "--schema", s(&other)]);
+    // A wrong argument, not a damaged segment: the generic failure status (ROADMAP 6.6.7).
+    assert_eq!(wrong.status.code(), Some(1));
+    let err = stderr(&wrong);
+    assert!(err.contains("is not the one the segment"), "{err}");
     let err = stderr(&persia(&[
         "inspect",
         "segment",

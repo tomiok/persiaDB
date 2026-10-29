@@ -13,7 +13,8 @@ pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
     if !path.is_file() {
         bail!("{} is not a container file", path.display());
     }
-    // The built-in analyzers: replay analyzes the `text` fields of the logged documents.
+    // The built-in analyzers: replay analyzes the `text` fields of the logged documents, and a schema names only
+    // built-in analyzers (SPEC §6.2.2); one this build lacks, from a newer build, fails the open as unsupported.
     let options = DatabaseOptions::default();
     let db = ReadOnlyDatabase::open(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;

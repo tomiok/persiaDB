@@ -10,7 +10,8 @@
 
 use std::sync::{Arc, Weak};
 
-use crate::manifest::{Location, SegmentId};
+use super::LiveSegment;
+use crate::manifest::{Location, SegmentEntry, SegmentId};
 use crate::segment::{Segment, Tombstones};
 
 /// What an obsolete object is.
@@ -43,13 +44,16 @@ pub struct ObsoleteObject {
 /// What readers hold of an obsolete object.
 #[derive(Debug)]
 pub(crate) enum Pin {
-    Segment(Weak<Segment>),
+    /// Every instance of the segment readers may hold: one per schema it was opened with (ROADMAP 6.3.10).
+    Segment(Vec<Weak<Segment>>),
     Sidecar(Weak<Tombstones>),
 }
 
 impl Pin {
-    pub fn segment(segment: &Arc<Segment>) -> Self {
-        Self::Segment(Arc::downgrade(segment))
+    pub fn segment(segment: &Arc<Segment>, earlier: &[Weak<Segment>]) -> Self {
+        let mut all = earlier.to_vec();
+        all.push(Arc::downgrade(segment));
+        Self::Segment(all)
     }
 
     pub fn sidecar(tombstones: &Arc<Tombstones>) -> Self {
@@ -61,7 +65,7 @@ impl Pin {
         // check. `Weak::strong_count` is a relaxed load; the standard library says not to use it
         // to decide whether the allocation is still reachable (a reader can still hold it).
         match self {
-            Self::Segment(w) => w.upgrade().is_some(),
+            Self::Segment(all) => all.iter().any(|w| w.upgrade().is_some()),
             Self::Sidecar(w) => w.upgrade().is_some(),
         }
     }
@@ -90,6 +94,26 @@ impl Obsolete {
             obsolete_since: seq,
         };
         self.objects.push((object, pin));
+    }
+
+    /// Records that the commit `seq` stopped listing the segment `live` of `collection`, which `entry` (the last manifest
+    /// entry that listed it) describes, and its current sidecar.
+    pub fn retire_segment(
+        &mut self,
+        collection: &str,
+        live: &LiveSegment,
+        entry: &SegmentEntry,
+        seq: u64,
+    ) {
+        let kind = ObsoleteKind::Segment(entry.id);
+        self.retire(collection, kind, entry.location, seq, live.pin());
+        if let (Some((version, tombstones)), Some(t)) = (&live.deleted, entry.tombstones) {
+            let kind = ObsoleteKind::Sidecar {
+                segment: entry.id,
+                version: *version,
+            };
+            self.retire(collection, kind, t.location, seq, Pin::sidecar(tombstones));
+        }
     }
 
     /// Every obsolete object not yet taken, and whether a reader may still read it.

@@ -1270,7 +1270,9 @@ what survived.
 Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
 put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).
 So a commit that changes a schema flushes every memtable first, like a drop: its `wal_start` is the end of the log,
-and no record encoded under an earlier schema is ever replayed (ROADMAP 6.3.10).
+and no record encoded under an earlier schema is ever replayed (ROADMAP 6.3.10). The writer then opens the
+collection's segments again with the new schema, so a field added since reads as empty in them; snapshots taken
+before keep the schema and segments they hold.
 
 **`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection not yet covered by
 a committed flush; with no such chunk, the end of the log. A flush starts from a point in the log (when its memtable
@@ -1335,7 +1337,9 @@ Tombstone sidecar (ADR-0030; the layout closes SPEC §18.3):
 the collection's committed segments of every id the memtable has an operation for (put or delete, replayed or not):
 an upsert's older version and a deleted document alike. Each segment that loses documents gets its next sidecar
 version, appended after the new segments and before the WAL's commit point and the manifest (§4.5 step 1), and an
-updated entry in the commit's diff. So a commit leaves at most one live copy of each id, and every snapshot shows
+updated entry in the commit's diff. A segment that would lose its last live document gets no sidecar: the diff removes it, at
+the sidecar version it has (0 for none), and it is obsolete from that commit on, like a merged-away segment (§8.5,
+ROADMAP 6.4.6). So a commit leaves at most one live copy of each id, and every snapshot shows
 each id at most once: the memtable's version or delete before the commit, the new segment and the sidecars after.
 
 **Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the newest
@@ -1363,7 +1367,9 @@ and the ones a running merge already holds, in; disjoint merge plans out. Each p
 manifest order, with the sidecar version it read (§8.7.2). For a segment, `live = doc_count - deleted` and its
 **live size** is `size × live / doc_count` (rounded down; the manifest has no other size). Segments a running merge
 holds are left out. Then, in this order:
-1. **Drop**: every segment with `live = 0` goes in one plan that writes no segment (it only removes them).
+1. **Drop**: every segment with `live = 0` goes in one plan that writes no segment (it only removes them). A
+   flush commit already removes the segments it leaves without a live document (§8.3); this plan covers the ones
+   earlier builds kept listed.
 2. **Tier merges**: a segment's tier is 0 when its live size is below `tier_floor × tier_factor`, and otherwise the
    largest `t` with `live size ≥ tier_floor × tier_factor^t`. Segments whose live size is at least
    `max_merged_bytes` take no part. Within each tier, from tier 0 up: while at least `segments_per_merge` segments
@@ -1397,9 +1403,11 @@ version and the schema is unchanged, which the writer checks before writing anyt
 from an input meanwhile) the result is discarded and the segments are planned again. A merge that fails, the
 merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
 reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
-**Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, and a sidecar a later version
+**Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, the segments and sidecars of
+a collection a commit drops (ROADMAP 6.3.10), and a sidecar a later version
 supersedes (§8.3), are obsolete from that commit on, but older snapshots, and merges in flight, may still read them.
-The writer tracks each with a weak reference to what readers hold of it (the open segment, the decoded deletions):
+The writer tracks each with a weak reference to what readers hold of it (the open segment, every instance opened
+with an earlier schema of its collection included, and the decoded deletions):
 once no snapshot, job or reader holds it, it is unreferenced and may be deleted. Locally it is a frame, which a
 container compaction (§4.6) reclaims; a compaction must keep the obsolete frames still referenced. Remotely (M12)
 it is an object to delete. Older manifests are not tracked: no snapshot reads its manifest's frame again.
@@ -1453,7 +1461,11 @@ Manifest a crash left after `log_end` (a commit that did not finish, §4.5).
 segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),
 and that the bytes after `log_end` are clean, a torn tail, or only zeros and stale frames (a lower `frame_seq`,
 which a read-write open truncates too; a read-only open classifies them by reading, §4.4); any other corruption there,
-which a read-write open refuses or quarantines, fails it. It writes nothing.
+which a read-write open refuses or quarantines, fails it. It writes nothing. `persia verify` (like every `persia` command) exits
+with status 3 when it fails on corruption, status 4 when the file is not a Persia container (the header magic differs, or
+the file is too short to hold the magic; §4.2 still calls that corruption), and 1 on any other failure (ROADMAP 6.6.7),
+so a script separates a wrong file, a damaged database, and any other failed run. It
+analyzes replayed records with the built-in analyzers, the only ones a schema can name (§6.2.2).
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
@@ -1901,7 +1913,8 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
   live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests
   and written on request when missing (`PERSIA_WRITE_DATABASE_FIXTURES=1`; ROADMAP 6.3.8). `blob-ref.persia` holds a
   segment whose `BlobRef` has `user_meta`, and a WAL record after the last commit; `tombstones.persia` (ROADMAP 6.4.3)
-  three segments, two versions of one tombstone sidecar, and a delete in the WAL.
+  three segments, two versions of one tombstone sidecar, and a delete in the WAL. `emptied.persia` (ROADMAP 6.4.6): the same
+  commits, whose third removes the segment it empties instead of writing its second sidecar.
 - A format version is frozen once released (tagged). Until then its layout may be amended in place by an ADR
   (e.g. ADR-0008); every change after release bumps the version and updates fixtures. Until v1.0 there is no
   compatibility promise across released versions.

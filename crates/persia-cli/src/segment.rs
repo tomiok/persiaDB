@@ -10,7 +10,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use persia_engine::schema::{CollectionSchema, Field, FieldType};
-use persia_engine::segment::{SEGMENT_FIELD, SectionInfo, Segment};
+use persia_engine::segment::{ReadError, SEGMENT_FIELD, SectionInfo, Segment, SegmentCorruption};
 use persia_format::ByteSource;
 
 /// Opens the segment file `path` with the schema in `schema_path`; also returns the file's size.
@@ -21,8 +21,28 @@ pub fn open(path: &Path, schema_path: &Path) -> Result<(Segment, CollectionSchem
         .with_context(|| format!("parsing the schema {}", schema_path.display()))?;
     let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let size = bytes.len();
-    let segment = Segment::open(ByteSource::new(bytes.into()), &schema)
-        .with_context(|| format!("opening the segment {}", path.display()))?;
+    let segment = match Segment::open(ByteSource::new(bytes.into()), &schema) {
+        Ok(segment) => segment,
+        // The schema is an argument here, not stored data: a mismatch is a usage failure (exit 1), not a corrupt
+        // segment (exit 3, ROADMAP 6.6.7). No `ReadError` stays in the chain.
+        //
+        // `schema_hash` and `schema_field_count` sit in the footer, and its CRC32C covers every footer byte
+        // before the checksum (SPEC §5.1). `Segment::open` verifies that CRC before it interprets either field,
+        // so a damaged hash fails as `SegmentCorruption::FooterChecksum` (still exit 3) and never reaches this
+        // arm. These two reasons mean the checksummed footer does not match the schema argument.
+        Err(ReadError::Corrupt {
+            reason:
+                SegmentCorruption::SchemaHash { .. } | SegmentCorruption::SchemaFieldCount { .. },
+            ..
+        }) => bail!(
+            "the schema {} is not the one the segment {} was written with",
+            schema_path.display(),
+            path.display()
+        ),
+        Err(e) => {
+            return Err(e).with_context(|| format!("opening the segment {}", path.display()));
+        }
+    };
     Ok((segment, schema, size))
 }
 

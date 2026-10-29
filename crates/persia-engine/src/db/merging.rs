@@ -16,7 +16,7 @@ use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
 use persia_storage::container::ContainerFile;
 
-use super::obsolete::{Obsolete, ObsoleteKind, ObsoleteObject, Pin};
+use super::obsolete::{Obsolete, ObsoleteObject};
 use super::{
     CollectionChange, CollectionDiff, Database, DatabaseError, LiveSegment, Location, ManifestDiff,
     SegmentEntry, SegmentId, new_segment_id, open_source, snapshot_of,
@@ -377,27 +377,9 @@ impl<F: ContainerFile + Sync> Database<F> {
             let entry = base
                 .segment(id)
                 .ok_or(internal("a merged segment is not in the manifest"))?;
-            let obsolete = &mut self.merges.obsolete;
-            obsolete.retire(
-                &job.collection,
-                ObsoleteKind::Segment(id),
-                entry.location,
-                seq,
-                Pin::segment(&live.segment),
-            );
-            if let (Some((version, tombstones)), Some(t)) = (&live.deleted, entry.tombstones) {
-                let kind = ObsoleteKind::Sidecar {
-                    segment: id,
-                    version: *version,
-                };
-                obsolete.retire(
-                    &job.collection,
-                    kind,
-                    t.location,
-                    seq,
-                    Pin::sidecar(tombstones),
-                );
-            }
+            self.merges
+                .obsolete
+                .retire_segment(&job.collection, live, entry, seq);
         }
         c.segments
             .retain(|l| !removed.contains(&SegmentId::new(l.segment.segment_id())));
@@ -409,10 +391,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                     .ok_or(internal("a committed segment is not in its manifest"))?;
                 let segment =
                     open_source(ByteSource::new(bytes), &job.collection, entry, &c.schema)?;
-                c.segments.push(LiveSegment {
-                    segment,
-                    deleted: None,
-                });
+                c.segments.push(LiveSegment::new(segment, None));
                 Some(job.segment_id)
             }
             None => None,

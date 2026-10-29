@@ -47,7 +47,9 @@ copy live.
 7. **Visibility.** A write is visible in the memtable once logged (ADR-0029); the commit publishes the new segment and
    the sidecars that hide the older copies in one snapshot, so every snapshot shows each id at most once.
 8. A segment whose documents are all deleted stays listed (with `deleted = doc_count`) until a merge drops it
-   (ROADMAP 6.5); removing it at once is a possible optimization.
+   (ROADMAP 6.5); removing it at once is a possible optimization. *Update (ROADMAP 6.4.6):* the flush commit that
+   deletes a segment's last live document now removes it from the manifest instead of writing that sidecar; the
+   merge policy's drop plan remains for segments listed so before.
 9. **No format version bump.** The sidecar encoding carries its own version (1), frame kind 5 and the manifest's
    sidecar reference already existed, and no build that writes sidecars has been released. Builds before this
    change read a sidecar's frame but ignored its payload, so they would show deleted documents; none was released.

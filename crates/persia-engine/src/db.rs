@@ -54,7 +54,7 @@ mod verify;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use arc_swap::ArcSwap;
@@ -82,7 +82,7 @@ use crate::manifest::{
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
-use crate::schema::CollectionSchema;
+use crate::schema::{CollectionSchema, EvolutionError};
 use crate::segment::{ReadError, Segment, SegmentError, SegmentMeta, Tombstones, WriteOptions};
 use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::view::{SearchView, SegmentView};
@@ -230,6 +230,14 @@ pub enum DatabaseError {
         /// The name.
         name: String,
     },
+    /// A schema change that SPEC §6.2.4 forbids ([`Database::evolve_collection`]); nothing was written.
+    #[error("collection {collection:?}: {source}")]
+    Evolution {
+        /// The collection.
+        collection: String,
+        /// Why.
+        source: EvolutionError,
+    },
     /// An invariant of the database did not hold: a bug, reported rather than acted on. Found while a commit is
     /// planned, nothing was written; found later, the database is poisoned.
     #[error("internal error: {what}")]
@@ -312,9 +320,35 @@ struct LiveSegment {
     segment: Arc<Segment>,
     /// Its current tombstone sidecar's version and deleted docids; `None` while it has none.
     deleted: Option<(u64, Arc<Tombstones>)>,
+    /// The instances opened with the collection's earlier schemas, which older snapshots may still hold (ROADMAP
+    /// 6.3.10): an obsolete segment stays referenced while any of them is.
+    earlier: Vec<Weak<Segment>>,
 }
 
 impl LiveSegment {
+    fn new(segment: Arc<Segment>, deleted: Option<(u64, Arc<Tombstones>)>) -> Self {
+        Self {
+            segment,
+            deleted,
+            earlier: Vec::new(),
+        }
+    }
+
+    /// What readers may hold of the segment, for [`ObsoleteObject`] tracking.
+    fn pin(&self) -> Pin {
+        Pin::segment(&self.segment, &self.earlier)
+    }
+
+    /// Replaces the segment with `reopened`, the same bytes opened with the collection's evolved schema.
+    fn reopened(&mut self, reopened: Arc<Segment>) {
+        // Same reachability check as `Pin::referenced`: `upgrade` takes an `Acquire` and holds a strong
+        // reference for the check. `Weak::strong_count` is a relaxed load, and the standard library says not
+        // to use it to decide whether a snapshot still holds the segment.
+        self.earlier.retain(|w| w.upgrade().is_some());
+        let old = std::mem::replace(&mut self.segment, reopened);
+        self.earlier.push(Arc::downgrade(&old));
+    }
+
     /// The segment without its deleted documents.
     fn view(&self) -> SegmentView<'_> {
         SegmentView::new(&self.segment, self.deleted.as_ref().map(|(_, t)| &**t))
@@ -343,8 +377,36 @@ struct Planned {
     segment: Option<(SegmentId, flush::Flushed)>,
     /// The next tombstone sidecar of each committed segment it deletes from (SPEC §8.3).
     sidecars: Vec<PlannedSidecar>,
+    /// The committed segments it deletes the last live documents of: removed instead (ROADMAP 6.4.6).
+    emptied: Vec<Emptied>,
     /// The empty memtable that replaces it once the commit is durable.
     memtable: Memtable,
+}
+
+/// What a commit does to the set of collections or their schemas, applied to the writer's state once it is durable.
+#[derive(Debug)]
+enum Structural {
+    None,
+    /// A new collection, with its empty memtable.
+    Create(String, Collection),
+    /// A collection's evolved schema, its segments opened again with it (in segment order), and its empty memtable.
+    Evolve {
+        name: String,
+        schema: Arc<CollectionSchema>,
+        segments: Vec<Arc<Segment>>,
+        memtable: Memtable,
+    },
+    Drop(String),
+}
+
+/// A committed segment a flush deletes the last live documents of, which its commit removes (SPEC §8.3, ROADMAP 6.4.6).
+#[derive(Debug)]
+struct Emptied {
+    /// The segment's index in its collection's segments.
+    index: usize,
+    id: SegmentId,
+    /// The sidecar version it was read at (0 for none), which the diff names.
+    version: u64,
 }
 
 /// The next tombstone sidecar of a committed segment, encoded before anything is written.
@@ -440,7 +502,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, Manifest::empty(), BTreeMap::new(), options);
-        db.commit_guarded(Vec::new(), ManifestDiff::default(), None)?;
+        db.commit_guarded(Vec::new(), ManifestDiff::default(), Structural::None)?;
         Ok(db)
     }
 
@@ -530,7 +592,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             first_write: None,
             last_write: None,
         };
-        self.commit_guarded(Vec::new(), diff, Some((name, collection)))
+        self.commit_guarded(Vec::new(), diff, Structural::Create(name, collection))
     }
 
     /// Adds or replaces the document `doc` of `collection` (SPEC §8.1), with `durability` (SPEC §8.2.1). A memtable
@@ -699,10 +761,94 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// other error poisons the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
         self.usable()?;
-        // Build every segment and sidecar before writing anything, so a failure here leaves the database as it was.
+        let planned = self.plan_flushes(None)?;
+        if planned.is_empty() {
+            return Ok(self.manifest.seq());
+        }
+        self.commit_guarded(planned, ManifestDiff::default(), Structural::None)
+    }
+
+    /// Replaces the schema of the collection `proposed` names with the evolution of its current schema into
+    /// `proposed` (SPEC §6.2.4, [`CollectionSchema::evolve`]), committing it at once; returns the commit's `seq`,
+    /// unchanged if the evolved schema is the current one.
+    ///
+    /// The commit flushes every memtable first, as [`Database::commit`] does, so its `wal_start` is the end of the
+    /// log and no record encoded under the earlier schema is ever replayed with the new one (SPEC §8.2.1, ROADMAP
+    /// 6.3.10): a non-`strict` put with extra fields would fail validation once the collection is `strict`. The
+    /// collection's segments are opened again with the new schema; older snapshots keep the old one.
+    ///
+    /// Any change commits and flushes every memtable, a query-time one (`boost`, `strict`, ...) included.
+    ///
+    /// # Errors
+    /// [`DatabaseError::NoSuchCollection`]; [`DatabaseError::Evolution`] for a change §6.2.4 forbids;
+    /// [`DatabaseError::Memtable`] if the registry lacks an analyzer of an added field; otherwise as
+    /// [`Database::commit`].
+    pub fn evolve_collection(&mut self, proposed: &CollectionSchema) -> Result<u64, DatabaseError> {
+        self.usable()?;
+        let name = proposed.name();
+        let c = self.collections.get(name).ok_or_else(|| no_such(name))?;
+        let schema = c
+            .schema
+            .evolve(proposed)
+            .map_err(|source| DatabaseError::Evolution {
+                collection: name.to_owned(),
+                source,
+            })?;
+        if schema == *c.schema {
+            return Ok(self.manifest.seq());
+        }
+        let memtable = new_memtable(&schema, &self.options)?;
+        let mut segments = Vec::with_capacity(c.segments.len());
+        for live in &c.segments {
+            let reopened =
+                live.segment
+                    .reopen(&schema)
+                    .map_err(|source| DatabaseError::ReadSegment {
+                        collection: name.to_owned(),
+                        id: SegmentId::new(live.segment.segment_id()),
+                        source,
+                    })?;
+            segments.push(Arc::new(reopened));
+        }
+        let planned = self.plan_flushes(None)?;
+        let mut diff = ManifestDiff::default();
+        change_of(&mut diff, name)?.schema = Some(schema.clone());
+        let evolved = Structural::Evolve {
+            name: name.to_owned(),
+            schema: Arc::new(schema),
+            segments,
+            memtable,
+        };
+        self.commit_guarded(planned, diff, evolved)
+    }
+
+    /// Drops the collection `name` and all its documents, committing it at once; returns the commit's `seq`.
+    ///
+    /// The commit flushes every other memtable first, as [`Database::commit`] does, so its `wal_start` is the end of
+    /// the log and no record of the dropped collection is ever replayed, also once a collection of the same name is
+    /// created again (SPEC §8.2.1, ROADMAP 6.3.10). The collection's segments and sidecars become obsolete
+    /// ([`Database::obsolete`]); older snapshots still show it.
+    ///
+    /// # Errors
+    /// [`DatabaseError::NoSuchCollection`]; otherwise as [`Database::commit`].
+    pub fn drop_collection(&mut self, name: &str) -> Result<u64, DatabaseError> {
+        self.usable()?;
+        if !self.collections.contains_key(name) {
+            return Err(no_such(name));
+        }
+        let planned = self.plan_flushes(Some(name))?;
+        let mut diff = ManifestDiff::default();
+        diff.collections
+            .insert(name.to_owned(), CollectionDiff::Drop);
+        self.commit_guarded(planned, diff, Structural::Drop(name.to_owned()))
+    }
+
+    /// Plans the flush of every memtable with operations but `skip`'s: builds every segment and sidecar before
+    /// anything is written, so a failure here leaves the database as it was.
+    fn plan_flushes(&mut self, skip: Option<&str>) -> Result<Vec<Planned>, DatabaseError> {
         let mut planned = Vec::new();
         for (name, c) in &self.collections {
-            if c.memtable.is_empty() {
+            if c.memtable.is_empty() || skip == Some(name.as_str()) {
                 continue;
             }
             let merges = &self.merges;
@@ -720,18 +866,17 @@ impl<F: ContainerFile + Sync> Database<F> {
             };
             let registry = &self.options.registry;
             let segment = flush::segment(&c.memtable, registry, meta, self.options.write_options)?;
+            let (sidecars, emptied) = plan_sidecars(name, c)?;
             planned.push(Planned {
                 collection: name.clone(),
                 mark: self.wal.mark(),
                 segment: segment.map(|s| (id, s)),
-                sidecars: plan_sidecars(name, c)?,
+                sidecars,
+                emptied,
                 memtable: new_memtable(&c.schema, &self.options)?,
             });
         }
-        if planned.is_empty() {
-            return Ok(self.manifest.seq());
-        }
-        self.commit_guarded(planned, ManifestDiff::default(), None)
+        Ok(planned)
     }
 
     /// Commits if the [`CommitPolicy`] finds any memtable due at the clock's `now` (ROADMAP 6.3.4), flushing every
@@ -764,9 +909,9 @@ impl<F: ContainerFile + Sync> Database<F> {
         &mut self,
         planned: Vec<Planned>,
         diff: ManifestDiff,
-        created: Option<(String, Collection)>,
+        structural: Structural,
     ) -> Result<u64, DatabaseError> {
-        let result = self.commit_planned(planned, diff, created);
+        let result = self.commit_planned(planned, diff, structural);
         if result.is_err() {
             self.poisoned = true;
         }
@@ -781,8 +926,13 @@ impl<F: ContainerFile + Sync> Database<F> {
         &mut self,
         planned: Vec<Planned>,
         mut diff: ManifestDiff,
-        created: Option<(String, Collection)>,
+        structural: Structural,
     ) -> Result<u64, DatabaseError> {
+        if let Structural::Drop(name) = &structural {
+            // Its records no longer hold `wal_start` back: the commit's is the end of the log (SPEC §8.2.1).
+            let mark = self.wal.mark();
+            self.wal.flushed(name, mark);
+        }
         for p in &planned {
             if let Some((id, flushed)) = &p.segment {
                 let container = self.wal.log_mut();
@@ -809,67 +959,161 @@ impl<F: ContainerFile + Sync> Database<F> {
 
         // Durable: step 4. The new segments are opened from the bytes just written: an open checks their frames.
         let seq = next.seq();
+        let evolved_memtable = self.apply_structural(structural, seq)?;
         for p in planned {
-            let Some(c) = self.collections.get_mut(&p.collection) else {
-                continue;
-            };
-            for PlannedSidecar { index, sidecar, .. } in p.sidecars {
-                let live = c.segments.get_mut(index).ok_or(DatabaseError::Internal {
-                    what: "a tombstoned segment is not open",
-                })?;
-                let version = sidecar.version();
-                let segment = sidecar.segment_id();
-                // `TombstoneSidecar::new` checked every docid against the segment's count.
-                let tombstones = live
-                    .segment
-                    .tombstones(sidecar.into_deleted())
-                    .map_err(|_| DatabaseError::Internal {
-                        what: "a planned sidecar does not fit its segment",
-                    })?;
-                let superseded = live.deleted.replace((version, Arc::new(tombstones)));
-                if let Some((_, old)) = superseded {
-                    // Older snapshots may still read it (SPEC §8.3).
-                    let entry = self
-                        .manifest
-                        .collection(&p.collection)
-                        .and_then(|e| e.segment(segment));
-                    if let Some(t) = entry.and_then(|e| e.tombstones) {
-                        let kind = ObsoleteKind::Sidecar {
-                            segment,
-                            version: t.version,
-                        };
-                        let pin = Pin::sidecar(&old);
-                        self.merges
-                            .obsolete
-                            .retire(&p.collection, kind, t.location, seq, pin);
-                    }
-                }
-            }
-            if let Some((id, flushed)) = p.segment {
-                let entry = next
-                    .collection(&p.collection)
-                    .and_then(|e| e.segment(id))
-                    .ok_or(DatabaseError::Internal {
-                        what: "a committed segment is not in its manifest",
-                    })?;
-                let source = ByteSource::new(flushed.bytes.into());
-                let segment = open_source(source, &p.collection, entry, &c.schema)?;
-                c.segments.push(LiveSegment {
-                    segment,
-                    deleted: None,
-                });
-            }
-            c.memtable = p.memtable;
-            c.first_write = None;
-            c.last_write = None;
+            self.publish_flush(p, &next, seq)?;
         }
-        if let Some((name, collection)) = created {
-            self.collections.insert(name, collection);
+        if let Some((name, memtable)) = evolved_memtable
+            && let Some(c) = self.collections.get_mut(&name)
+        {
+            // Replaces the empty memtable the flush planned with the old schema.
+            c.memtable = memtable;
         }
         self.manifest = Arc::new(next);
         self.published
             .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
         Ok(self.manifest.seq())
+    }
+
+    /// Step 4 for one flush of a durable commit `seq`, whose manifest is `next` (`self.manifest` is still the one it
+    /// built on): applies its sidecars, removes the segments it emptied (ROADMAP 6.4.6), opens its segment and swaps
+    /// in its empty memtable.
+    fn publish_flush(
+        &mut self,
+        p: Planned,
+        next: &Manifest,
+        seq: u64,
+    ) -> Result<(), DatabaseError> {
+        let Some(c) = self.collections.get_mut(&p.collection) else {
+            return Ok(());
+        };
+        for PlannedSidecar { index, sidecar, .. } in p.sidecars {
+            let live = c.segments.get_mut(index).ok_or(DatabaseError::Internal {
+                what: "a tombstoned segment is not open",
+            })?;
+            let version = sidecar.version();
+            let segment = sidecar.segment_id();
+            // `TombstoneSidecar::new` checked every docid against the segment's count.
+            let tombstones = live
+                .segment
+                .tombstones(sidecar.into_deleted())
+                .map_err(|_| DatabaseError::Internal {
+                    what: "a planned sidecar does not fit its segment",
+                })?;
+            let superseded = live.deleted.replace((version, Arc::new(tombstones)));
+            if let Some((_, old)) = superseded {
+                // Older snapshots may still read it (SPEC §8.3).
+                let entry = self
+                    .manifest
+                    .collection(&p.collection)
+                    .and_then(|e| e.segment(segment));
+                if let Some(t) = entry.and_then(|e| e.tombstones) {
+                    let kind = ObsoleteKind::Sidecar {
+                        segment,
+                        version: t.version,
+                    };
+                    let pin = Pin::sidecar(&old);
+                    self.merges
+                        .obsolete
+                        .retire(&p.collection, kind, t.location, seq, pin);
+                }
+            }
+        }
+        // After the sidecars, which name segments by index; before the new segment, which goes last.
+        let mut emptied: Vec<usize> = p.emptied.iter().map(|e| e.index).collect();
+        emptied.sort_unstable();
+        for index in emptied.into_iter().rev() {
+            if index >= c.segments.len() {
+                return Err(DatabaseError::Internal {
+                    what: "an emptied segment is not open",
+                });
+            }
+            let live = c.segments.remove(index);
+            let id = SegmentId::new(live.segment.segment_id());
+            let entry = self
+                .manifest
+                .collection(&p.collection)
+                .and_then(|e| e.segment(id))
+                .ok_or(DatabaseError::Internal {
+                    what: "an emptied segment is not in the manifest",
+                })?;
+            self.merges
+                .obsolete
+                .retire_segment(&p.collection, &live, entry, seq);
+        }
+        if let Some((id, flushed)) = p.segment {
+            let entry = next
+                .collection(&p.collection)
+                .and_then(|e| e.segment(id))
+                .ok_or(DatabaseError::Internal {
+                    what: "a committed segment is not in its manifest",
+                })?;
+            let source = ByteSource::new(flushed.bytes.into());
+            let segment = open_source(source, &p.collection, entry, &c.schema)?;
+            c.segments.push(LiveSegment::new(segment, None));
+        }
+        c.memtable = p.memtable;
+        c.first_write = None;
+        c.last_write = None;
+        Ok(())
+    }
+
+    /// Applies `structural` to the writer's state once the commit `seq` is durable. Runs before the flushed segments
+    /// are opened, so an evolved collection's opens with the new schema too. Returns the evolved collection's empty
+    /// memtable, which replaces the one its flush planned with the old schema.
+    fn apply_structural(
+        &mut self,
+        structural: Structural,
+        seq: u64,
+    ) -> Result<Option<(String, Memtable)>, DatabaseError> {
+        match structural {
+            Structural::None => {}
+            Structural::Create(name, collection) => {
+                self.collections.insert(name, collection);
+            }
+            Structural::Evolve {
+                name,
+                schema,
+                segments,
+                memtable,
+            } => {
+                let c = self
+                    .collections
+                    .get_mut(&name)
+                    .ok_or(DatabaseError::Internal {
+                        what: "an evolved collection is not open",
+                    })?;
+                if segments.len() != c.segments.len() {
+                    return Err(DatabaseError::Internal {
+                        what: "an evolved collection's segments changed while its commit was planned",
+                    });
+                }
+                c.schema = schema;
+                for (live, reopened) in c.segments.iter_mut().zip(segments) {
+                    live.reopened(reopened);
+                }
+                return Ok(Some((name, memtable)));
+            }
+            Structural::Drop(name) => {
+                let (Some(c), Some(entry)) = (
+                    self.collections.remove(&name),
+                    self.manifest.collection(&name),
+                ) else {
+                    return Err(DatabaseError::Internal {
+                        what: "a dropped collection is not open",
+                    });
+                };
+                for live in &c.segments {
+                    let entry = entry
+                        .segment(SegmentId::new(live.segment.segment_id()))
+                        .ok_or(DatabaseError::Internal {
+                            what: "a dropped segment is not in the manifest",
+                        })?;
+                    self.merges.obsolete.retire_segment(&name, live, entry, seq);
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// Steps 1 (the WAL's part) to 3 of the commit protocol (SPEC §4.5) for `diff`, whose frames are appended: writes
@@ -895,7 +1139,8 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(next)
     }
 
-    /// Appends the tombstone sidecar frames of `planned` and adds each as an updated entry to `diff` (SPEC §8.3).
+    /// Appends the tombstone sidecar frames of `planned` and adds each as an updated entry to `diff`, and removes the
+    /// segments `planned` empties (SPEC §8.3).
     fn append_sidecars(
         &mut self,
         planned: &[Planned],
@@ -922,6 +1167,11 @@ impl<F: ContainerFile + Sync> Database<F> {
                     },
                 });
                 change_of(diff, &p.collection)?.updated.push(entry);
+            }
+            for e in &p.emptied {
+                change_of(diff, &p.collection)?
+                    .removed
+                    .insert(e.id, e.version);
             }
         }
         Ok(())
@@ -970,11 +1220,15 @@ fn no_such(name: &str) -> DatabaseError {
 /// The next tombstone sidecar of each committed segment of `c` that holds a live version of an id `c`'s memtable
 /// has an operation for, by the segment's index (SPEC §8.3, ROADMAP 6.4.3), each checked to keep every deletion of
 /// the current one. Every segment is searched, not only the newest holding the id, so copies left live by earlier
-/// builds are deleted too (ADR-0030).
-fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, DatabaseError> {
+/// builds are deleted too (ADR-0030). A segment left without a live document gets no sidecar: it is listed in the
+/// second vector, for the commit to remove (ROADMAP 6.4.6).
+fn plan_sidecars(
+    name: &str,
+    c: &Collection,
+) -> Result<(Vec<PlannedSidecar>, Vec<Emptied>), DatabaseError> {
     let mut added: BTreeMap<usize, RoaringBitmap> = BTreeMap::new();
     if c.segments.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     c.memtable.for_each_id(|id| {
         let id = std::str::from_utf8(id).map_err(|_| DatabaseError::Internal {
@@ -997,6 +1251,7 @@ fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, Data
     })?;
     let none = RoaringBitmap::new();
     let mut sidecars = Vec::with_capacity(added.len());
+    let mut emptied = Vec::new();
     for (index, new) in added {
         let live = c.segments.get(index).ok_or(DatabaseError::Internal {
             what: "a tombstoned segment is not open",
@@ -1011,14 +1266,18 @@ fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, Data
             .deleted
             .as_ref()
             .map_or((0, &none), |(v, t)| (*v, t.docids()));
+        let doc_count = live.segment.doc_count();
+        let all = current | &new;
+        if all.len() == u64::from(doc_count) {
+            emptied.push(Emptied { index, id, version });
+            continue;
+        }
         let next = version
             .checked_add(1)
             .ok_or(invalid(SidecarError::Invalid {
                 what: "no version after u64::MAX",
             }))?;
-        let doc_count = live.segment.doc_count();
-        let sidecar =
-            TombstoneSidecar::new(id, next, doc_count, current | &new).map_err(invalid)?;
+        let sidecar = TombstoneSidecar::new(id, next, doc_count, all).map_err(invalid)?;
         sidecar.check_follows(version, current).map_err(invalid)?;
         let bytes = sidecar.encode().map_err(invalid)?;
         sidecars.push(PlannedSidecar {
@@ -1027,7 +1286,7 @@ fn plan_sidecars(name: &str, c: &Collection) -> Result<Vec<PlannedSidecar>, Data
             bytes,
         });
     }
-    Ok(sidecars)
+    Ok((sidecars, emptied))
 }
 
 /// A random segment id that no segment of `manifest` has, nor any that `taken` reports: planned in the same

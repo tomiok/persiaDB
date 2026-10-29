@@ -14,6 +14,9 @@
 //! 4. The same holds for a fault inside `create_collection` (the collection exists after the reopen if and only if
 //!    its create was acknowledged, or it is the failed operation) and inside the size-triggered flush and commit a
 //!    `put` runs before logging (SPEC §8.2 step 3).
+//! 5. The workload changes a schema and drops and recreates a collection while records are unflushed (ROADMAP
+//!    6.3.10): a fault in those commits keeps invariants 1 to 3, and the recreated collection never shows the dropped
+//!    one's documents.
 
 #![allow(
     clippy::unwrap_used,
@@ -42,9 +45,22 @@ use persia_storage::container::{Container, ContainerFile, Error as ContainerErro
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::SimFs;
 
+/// The test schema; `c` is not `strict`, so its puts may carry extra fields.
 fn schema(name: &str) -> CollectionSchema {
     SchemaBuilder::new(name)
         .field("body", FieldKind::Text(TextOptions::default()))
+        .strict(name != "c")
+        .build()
+        .unwrap()
+}
+
+/// The test schema with a field added and `strict` flipped (SPEC §6.2.4): `c` becomes `strict`, so a replayed put
+/// of `c` with extras would fail the open if the change did not flush it (ROADMAP 6.3.10).
+fn evolved(name: &str) -> CollectionSchema {
+    SchemaBuilder::new(name)
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field("tag", FieldKind::Text(TextOptions::default()))
+        .strict(name == "c")
         .build()
         .unwrap()
 }
@@ -67,26 +83,44 @@ fn options() -> DatabaseOptions {
 #[derive(Debug, Clone)]
 enum Op {
     Put(&'static str, String, String),
+    /// A put with an extra field, to a collection that is not `strict`.
+    PutExtra(&'static str, String, String),
     Delete(&'static str, String),
     Commit,
     /// `create_collection` of a collection with the test schema.
     Create(&'static str),
+    /// `evolve_collection` into [`evolved`] (ROADMAP 6.3.10).
+    Evolve(&'static str),
+    /// `drop_collection` (ROADMAP 6.3.10).
+    Drop(&'static str),
 }
+
+/// A pseudo document id in [`State`] for a collection whose schema change survived: not a valid document id.
+const EVOLVED: &str = "#evolved";
 
 /// Documents by collection and id: their body text.
 type State = BTreeMap<&'static str, BTreeMap<String, String>>;
 
 fn apply(state: &mut State, op: &Op) {
     match op {
-        Op::Put(c, id, text) => {
+        Op::Put(c, id, text) | Op::PutExtra(c, id, text) => {
             state.entry(c).or_default().insert(id.clone(), text.clone());
         }
         Op::Delete(c, id) => {
             state.entry(c).or_default().remove(id);
         }
         Op::Commit => {}
+        Op::Evolve(c) => {
+            state
+                .entry(c)
+                .or_default()
+                .insert(EVOLVED.into(), String::new());
+        }
         Op::Create(c) => {
             state.entry(c).or_default();
+        }
+        Op::Drop(c) => {
+            state.remove(c);
         }
     }
 }
@@ -106,8 +140,23 @@ fn workload() -> Vec<Op> {
         ops.push(Op::Put("a", format!("tmp{round}"), "short lived".into()));
         ops.push(Op::Delete("a", format!("tmp{round}")));
         match round {
-            1 => ops.push(Op::Delete("a", "seed".into())),
-            2 => ops.push(Op::Delete("b", "b0-0".into())),
+            // A schema change and a drop with unflushed records, which their commits flush (ROADMAP 6.3.10).
+            0 => ops.extend([
+                Op::Create("c"),
+                Op::PutExtra("c", "c1".into(), "with extras".into()),
+            ]),
+            1 => ops.extend([
+                Op::Delete("a", "seed".into()),
+                Op::Evolve("a"),
+                Op::PutExtra("c", "c2".into(), "unflushed extras".into()),
+                Op::Evolve("c"),
+            ]),
+            2 => ops.extend([
+                Op::Delete("b", "b0-0".into()),
+                Op::Drop("b"),
+                Op::Create("b"),
+                Op::Put("b", "b-new".into(), "after the drop".into()),
+            ]),
             _ => {}
         }
         ops.push(Op::Commit);
@@ -137,9 +186,16 @@ fn base() -> (SimFile, State) {
 fn run(db: &mut Database<SimFile>, op: &Op) -> Result<(), DatabaseError> {
     match op {
         Op::Put(c, id, text) => db.put(c, &doc(id, text), Durability::Fsync),
+        Op::PutExtra(c, id, text) => {
+            let mut d = doc(id, text);
+            d.insert_extra("color", serde_json::json!("red"));
+            db.put(c, &d, Durability::Fsync)
+        }
         Op::Delete(c, id) => db.delete(c, id, Durability::Fsync),
         Op::Commit => db.commit().map(drop),
         Op::Create(c) => db.create_collection(schema(c)).map(drop),
+        Op::Evolve(c) => db.evolve_collection(&evolved(c)).map(drop),
+        Op::Drop(c) => db.drop_collection(c).map(drop),
     }
 }
 
@@ -176,6 +232,9 @@ fn observed(snapshot: &Snapshot) -> State {
             }
         }
         let docs = state.entry(name).or_default();
+        if c.schema().field("tag").is_some() {
+            docs.insert(EVOLVED.into(), String::new());
+        }
         for id in ids {
             if let Some(d) = c.get(&id).unwrap() {
                 let Some(Value::String(text)) = d.fields().next().map(|(_, v)| v.clone()) else {
@@ -305,7 +364,10 @@ fn a_crash_at_any_write_of_the_write_path_keeps_every_acknowledged_operation() {
                     state == acknowledged || state == with_failed,
                     "{ctx}\n  observed {state:?}\n  acknowledged {acknowledged:?}"
                 );
-                let committing = matches!(failed, Op::Commit);
+                let committing = matches!(
+                    failed,
+                    Op::Commit | Op::Evolve(_) | Op::Drop(_) | Op::Create(_)
+                );
                 assert!(
                     reopened_seq == seq || (committing && reopened_seq == seq + 1),
                     "{ctx}: seq {reopened_seq}, before the failed operation {seq}"

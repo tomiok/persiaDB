@@ -10,12 +10,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - Roadmap: M31 Persia Studio (target v1.1), a read-only browser inspector. The core is a WASM build shared with the TypeScript SDK work (M16). M0–M15 stay the MVP. The progress percentage still counts only those leaves.
+- `persia-engine`: a commit that deletes a segment's last live document removes the segment from the manifest
+  instead of writing a sidecar that deletes every document (ROADMAP 6.4.6, SPEC §8.3, ADR-0030 item 8); the segment
+  and its sidecar become obsolete objects. Golden database `emptied.persia`.
+- `persia-engine`: `Database::evolve_collection` and `drop_collection` (ROADMAP 6.3.10, SPEC §8.2.1, §8.7.2). Both
+  commit at once and flush every memtable in that commit, so no WAL record of an earlier schema or of a dropped
+  collection is replayed; an evolved collection's segments are reopened with its new schema (`Segment::reopen`), and
+  a dropped one's segments and sidecars become obsolete objects. `DatabaseError::Evolution`.
 - `persia-engine`: the open sequence and read-only opens (ROADMAP 6.6, SPEC §8.4, §8.6, ADR-0033). A read-write open
   now flushes a replayed memtable that reaches its size threshold or runs out of docids, instead of failing the open.
   `db::ReadOnlyDatabase` opens a database beside its writer (no lock, no writes) at the snapshot it finds, and
   `verify` checks it whole: every segment's bytes, one live copy per id, the bytes after the last commit
   (`VerifyReport`, `Tail`; `DatabaseError::LiveTwice`, `CorruptTail`). `persia-storage`: `Recovery::stale_tail`.
-- `persia-cli`: `persia verify <path>` checks a database read-only, also while its writer has it open.
+- `persia-cli`: `persia verify <path>` checks a database read-only, also while its writer has it open. Every
+  `persia` command exits with status 3 when it fails on corrupt stored bytes (`verify`, `inspect segment --verify`),
+  4 when the file is not a Persia container, 1 on any other failure and 2 on a usage error.
 - `persia-engine`: background merges (ROADMAP 6.5.3–6.5.5, SPEC §8.5, ADR-0032). `Database::merge_step`,
   `finish_merges`, `cancel_merges` and `merges_running` run the merge policy over every collection on a pool of
   `MergeOptions::threads` workers (default 1; 0 merges inline), which verify each merged segment before the writer

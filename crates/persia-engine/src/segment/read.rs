@@ -182,6 +182,18 @@ impl Segment {
         Ok(segment)
     }
 
+    /// The same bytes opened again for `schema`, the collection's schema after an evolution (SPEC §6.2.4,
+    /// ROADMAP 6.3.10), through the same cache. Fields added since read as empty instead of unknown, and documents
+    /// decode with `schema`. `self` is unchanged: readers holding it keep the schema it was opened with.
+    /// The two instances cache their blocks separately while both are alive.
+    ///
+    /// # Errors
+    /// As [`Self::open`]: a corruption if `schema` is not an evolution of the schema the segment was indexed with
+    /// (its hash over the segment's field count differs).
+    pub fn reopen(&self, schema: &CollectionSchema) -> Result<Self, ReadError> {
+        Self::open_with_cache(self.source.clone(), schema, Arc::clone(&self.cache))
+    }
+
     /// The cache the segment reads its blocks through.
     pub fn cache(&self) -> &Arc<BlockCache> {
         &self.cache
