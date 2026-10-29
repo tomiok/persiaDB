@@ -139,7 +139,8 @@ fn missing_paths_are_errors_and_create_nothing() {
         vec!["verify", path_arg(&missing)],
     ] {
         let out = persia(&args);
-        assert!(!out.status.success(), "{args:?}");
+        // Not a corruption: the generic failure status (ROADMAP 6.6.7).
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
         assert!(!String::from_utf8_lossy(&out.stderr).is_empty(), "{args:?}");
         assert!(!missing.exists(), "{args:?} created {}", missing.display());
     }
@@ -398,8 +399,16 @@ fn verify_reports_a_torn_tail_and_fails_on_a_corrupt_one() {
     bytes[end + 100] = 0x5a;
     std::fs::write(&path, &bytes).unwrap();
     let out = persia(&["verify", path_arg(&path)]);
-    assert!(!out.status.success());
+    // Corruption has its own exit status (ROADMAP 6.6.7).
+    assert_eq!(out.status.code(), Some(3));
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("corrupt after its last commit"), "{err}");
     assert_eq!(out.stdout, b"");
+}
+
+#[test]
+fn verify_usage_errors_exit_with_2() {
+    let _serial = serial();
+    let out = persia(&["verify"]);
+    assert_eq!(out.status.code(), Some(2));
 }

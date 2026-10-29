@@ -425,7 +425,8 @@ Deps: M2, M5.
 - [x] 6.6.4 Differential + crash-loop test harness (kill -9 child process in loop, reopen, check invariants) — shared with integration-tester
 - [x] 6.6.5 Flush during replay: one collection's unflushed record holds `wal_start` back for all, so replay may hold more than a memtable threshold (or `MAX_DOCS` docids) of another collection; flush to a segment when a replayed memtable reaches its threshold instead of failing the open. Test: replay past the size threshold and the docid limit (found in the 6.2 review)
 - [ ] 6.6.6 Refresh a `ReadOnlyDatabase` in place: a new snapshot from the next manifest and the WAL frames written since, instead of a reopen (ADR-0033 Alternatives, found in 6.6.2)
-- [~] 6.6.7 `persia verify` with custom analyzers, and distinct exit codes for corruption and other failures (found in the 6.6 review)
+- [~] 6.6.7 `persia verify` with custom analyzers, and distinct exit codes for corruption and other failures (found in the 6.6 review); custom analyzers moved to 6.6.8, since a schema names only built-in analyzers today (SPEC §6.2.2)
+- [ ] 6.6.8 `persia verify` with custom analyzers, once a schema can name an analyzer registered with `AnalyzerRegistry::register` (today `AnalyzerRef` accepts built-ins only, SPEC §6.2.2): a way to load them in the CLI, or a replay that validates records without analyzing their `text` fields (found in 6.6.7)
 
 ---
 

@@ -11,6 +11,10 @@
 //! postings (module `segment`).
 //!
 //! `persia verify` checks a whole database read-only (ROADMAP 6.6.3, module `database`).
+//!
+//! Exit status (ROADMAP 6.6.7): 0 on success, 3 when the command failed on corrupt stored bytes (a database, container
+//! or segment that breaks its format), 2 for a usage error, and 1 for any other failure (a missing file, an I/O error,
+//! a lock held by a writer, data written by a newer build). Scripts can then tell damage from a failed run.
 #![forbid(unsafe_code)]
 
 mod database;
@@ -22,6 +26,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use persia_engine::db::DatabaseError;
+use persia_engine::segment::ReadError;
 use persia_storage::container::{Container, Error as ContainerError, Mode};
 use persia_storage::{InUse, LocalStorage, SideFile, SideFileKind};
 
@@ -48,7 +54,7 @@ enum Command {
     Dump(DumpCommand),
     /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
     /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
-    /// Fails on any corruption. Uses the built-in analyzers: a database with a custom analyzer does not open here.
+    /// Exits with status 3 on corruption and 1 on any other failure (see the crate docs).
     Verify {
         /// The container file.
         path: PathBuf,
@@ -133,9 +139,33 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("persia: {err:#}");
-            ExitCode::FAILURE
+            if is_corruption(&err) {
+                ExitCode::from(EXIT_CORRUPT)
+            } else {
+                ExitCode::FAILURE
+            }
         }
     }
+}
+
+/// The exit status of a command that failed on corrupt stored bytes (crate docs).
+const EXIT_CORRUPT: u8 = 3;
+
+/// Whether `err` reports corrupt stored bytes: the outermost Persia error in its chain decides, since it knows
+/// what its sources mean (an I/O error reading a segment is not a corruption).
+fn is_corruption(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|c| {
+            if let Some(e) = c.downcast_ref::<DatabaseError>() {
+                Some(e.is_corruption())
+            } else if let Some(e) = c.downcast_ref::<ReadError>() {
+                Some(e.is_corruption())
+            } else {
+                c.downcast_ref::<ContainerError>()
+                    .map(ContainerError::is_corruption)
+            }
+        })
+        .unwrap_or(false)
 }
 
 fn run(cli: Cli) -> Result<()> {

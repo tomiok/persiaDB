@@ -126,6 +126,7 @@ fn inspect_verify_finds_damage_that_open_does_not() {
         s(&schema),
         "--verify",
     ]);
+    assert_eq!(failed.status.code(), Some(3), "corruption (ROADMAP 6.6.7)");
     let err = stderr(&failed);
     assert!(err.contains("verifying the segment"), "{err}");
     assert!(err.contains("Positions"), "{err}");
