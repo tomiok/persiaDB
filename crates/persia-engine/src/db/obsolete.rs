@@ -57,9 +57,12 @@ impl Pin {
     }
 
     fn referenced(&self) -> bool {
+        // `upgrade` takes an `Acquire` on the strong count and holds a strong reference for the
+        // check. `Weak::strong_count` is a relaxed load; the standard library says not to use it
+        // to decide whether the allocation is still reachable (a reader can still hold it).
         match self {
-            Self::Segment(w) => w.strong_count() > 0,
-            Self::Sidecar(w) => w.strong_count() > 0,
+            Self::Segment(w) => w.upgrade().is_some(),
+            Self::Sidecar(w) => w.upgrade().is_some(),
         }
     }
 }

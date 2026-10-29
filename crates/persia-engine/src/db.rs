@@ -331,13 +331,14 @@ struct PlannedSidecar {
 /// The single writer of a database on a local container (see the module docs).
 #[derive(Debug)]
 pub struct Database<F = File> {
+    /// Dropped first (fields drop in declaration order): cancel and join merge workers while the
+    /// segments they read and the container are still alive (SPEC §8.5).
+    merges: merging::Merges,
     wal: WalWriter<Container<F>>,
     manifest: Arc<Manifest>,
     collections: BTreeMap<String, Collection>,
     published: Arc<ArcSwap<Snapshot>>,
     options: DatabaseOptions,
-    /// Merges in flight, segments they failed on, and objects merges and commits made obsolete.
-    merges: merging::Merges,
     poisoned: bool,
 }
 

@@ -393,6 +393,41 @@ fn obsolete_objects_wait_for_their_last_reader() {
     assert_eq!(db.take_unreferenced().len(), 3);
 }
 
+/// A reader may keep an `Arc<Segment>` after dropping the snapshot that handed it out. The obsolete frame stays
+/// referenced until that arc is gone too: deletion follows what can still read the bytes, not the snapshot value.
+#[test]
+fn a_cloned_segment_keeps_its_obsolete_frame_alive() {
+    let (_, mut db) = database(0);
+    commit_segments(&mut db, &[&["a0", "a1"], &["b0", "b1"]]);
+    let held = db.snapshot();
+    let segment = Arc::clone(&held.collection("a").unwrap().segments()[0]);
+    let id = SegmentId::new(segment.segment_id());
+    let outcomes = db.finish_merges().unwrap();
+    assert_eq!(committed(&outcomes), 1, "{outcomes:?}");
+    assert_eq!(segment_count(&db), 1);
+    assert!(db.take_unreferenced().is_empty());
+
+    drop(held);
+    let referenced: Vec<_> = db
+        .obsolete()
+        .filter(|(_, referenced)| *referenced)
+        .map(|(o, _)| o.kind)
+        .collect();
+    assert_eq!(referenced, vec![ObsoleteKind::Segment(id)]);
+    let freed = db.take_unreferenced();
+    assert!(
+        freed.iter().all(|o| o.kind != ObsoleteKind::Segment(id)),
+        "{freed:?}"
+    );
+    assert_eq!(freed.len(), 1, "{freed:?}");
+
+    drop(segment);
+    let freed = db.take_unreferenced();
+    assert_eq!(freed.len(), 1, "{freed:?}");
+    assert_eq!(freed[0].kind, ObsoleteKind::Segment(id));
+    assert_eq!(db.obsolete().count(), 0);
+}
+
 /// A segment of `docs` written with id `id`.
 fn segment_bytes(id: u128, docs: &[Document]) -> Vec<u8> {
     let s = schema();

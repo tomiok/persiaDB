@@ -331,6 +331,13 @@ impl<F: ContainerFile + Sync> Database<F> {
         let mut diff = removal(job);
         let mut added = None;
         if let Some(Merged { bytes, doc_count }) = merged {
+            // Checked before the frame is appended. Swallowing a missing change would commit the
+            // removal and leave the merged bytes unreferenced: the inputs' live documents would be
+            // gone.
+            let Some(CollectionDiff::Change(change)) = diff.collections.get_mut(&job.collection)
+            else {
+                return Err(internal("a merge diff has no collection change"));
+            };
             let frame = self
                 .wal
                 .log_mut()
@@ -345,10 +352,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 },
                 tombstones: None,
             };
-            if let Some(CollectionDiff::Change(change)) = diff.collections.get_mut(&job.collection)
-            {
-                change.added.push(entry);
-            }
+            change.added.push(entry);
             added = Some(bytes);
         }
         let next = self.commit_diff(diff)?;
