@@ -1,6 +1,7 @@
 //! User text → [`Query`] (SPEC §7.1.1): analysis per field, default AND, quoted phrases, `-` exclusion and
 //! `field:` scoping. Never fails: syntax that does not parse is read as plain words.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
@@ -167,10 +168,12 @@ impl QueryCompiler {
     }
 
     /// Compiles `text` (SPEC §7.1.1). Clauses are separated by whitespace and all required (default AND):
-    /// - a word is analyzed with each of `fields`' analyzers; the tokens of one span of the word become one
-    ///   [`Query::Combined`] over the fields that produced them (a word may give several, as `e-mail` does);
+    /// - a word is analyzed with each of `fields`' analyzers. When they all split it into the same spans, each
+    ///   span becomes one [`Query::Combined`] over the fields (a word may give several, as `e-mail` does);
+    ///   otherwise each field requires its own tokens, and one of the fields must match;
     /// - `"a phrase"` becomes, per field, a [`Query::Phrase`] (fields without positions: every term required),
-    ///   one of which must match; a phrase of at most one token per field is a word;
+    ///   one of which must match; a phrase of at most one token per field is a word. Phrases score with the
+    ///   schema `boost`: the weights of `fields` apply to words;
     /// - `field:word` and `field:"a phrase"` search that `text` or `keyword` field only, with [`Query::Term`]s
     ///   (a `keyword` field takes the text as is);
     /// - `-` before a clause excludes the documents it matches.
@@ -179,7 +182,8 @@ impl QueryCompiler {
     /// are plain text. Clauses that analyze to no token (stopwords) are left out, as are tokens longer than
     /// [`MAX_TERM_LEN`] (no document holds one); without any clause left the query is [`Query::MatchAll`]. Text
     /// beyond [`QueryLimits::max_text_len`] and the clauses from the first one that would exceed `limits` on are
-    /// left out, with [`Compiled::truncated`] set. The query then validates against the schema and `limits`
+    /// left out, with [`Compiled::truncated`] set (the root counts as a clause at depth 1 even when the query is
+    /// a single clause). The query then validates against the schema and `limits`
     /// ([`Query::validate`]) whenever [`Query::MatchAll`] does. `fields` should come from the same schema:
     /// fields that are not its `text` fields are skipped.
     pub fn compile(&self, text: &str, fields: &DefaultFields, limits: &QueryLimits) -> Compiled {
@@ -234,125 +238,98 @@ impl QueryCompiler {
         fields: &DefaultFields,
         tokens: &mut TokenStream,
     ) -> Vec<Query> {
-        match (clause.field, clause.phrase) {
-            (Some(field), _) => self
+        if let Some(field) = clause.field {
+            return self
                 .field_clause(field, clause.text, tokens)
                 .into_iter()
-                .collect(),
-            (None, false) => self.word(clause.text, fields, tokens),
-            (None, true) => {
-                let per_field: Vec<(FieldId, Vec<String>)> = fields
-                    .fields()
-                    .iter()
-                    .filter_map(|&(id, _)| Some((id, self.terms(id, clause.text, tokens)?)))
-                    .filter(|(_, terms)| !terms.is_empty())
-                    .collect();
-                if per_field.iter().all(|(_, terms)| terms.len() <= 1) {
-                    return self.word(clause.text, fields, tokens);
-                }
-                let mut should: Vec<Query> = per_field
-                    .into_iter()
-                    .filter_map(|(id, _)| self.field_clause(id, clause.text, tokens))
-                    .collect();
-                match should.len() {
-                    0 => Vec::new(),
-                    1 => should.pop().into_iter().collect(),
-                    _ => vec![Query::Bool(BoolQuery {
-                        should,
-                        ..BoolQuery::default()
-                    })],
-                }
-            }
+                .collect();
         }
-    }
-
-    /// A word over the default fields: one [`Query::Combined`] per token span, in text order.
-    fn word(&self, word: &str, fields: &DefaultFields, tokens: &mut TokenStream) -> Vec<Query> {
-        // (start, end, repeat of that span in its field) → the fields' terms of that token.
-        let mut groups: Vec<((usize, usize, usize), Vec<WeightedTerm>)> = Vec::new();
-        for &(id, weight) in fields.fields() {
-            let Some(analyzer) = self.analyzer(id) else {
-                continue;
-            };
-            analyzer.analyze_query(word, tokens);
-            let mut spans: Vec<(usize, usize)> = Vec::new();
-            for token in tokens.iter().filter(|t| fits(&t.text)) {
-                let span = (token.start, token.end);
-                let repeat = spans.iter().filter(|&&s| s == span).count();
-                spans.push(span);
-                let key = (token.start, token.end, repeat);
-                let term = WeightedTerm {
-                    field: id,
-                    term: token.text.clone(),
-                    weight,
-                };
-                match groups.iter_mut().find(|(k, _)| *k == key) {
-                    // The repeat count keeps a field once per group.
-                    Some((_, terms)) => terms.push(term),
-                    None => groups.push((key, vec![term])),
-                }
-            }
+        let per_field: Vec<FieldTokens> = fields
+            .fields()
+            .iter()
+            .filter_map(|&(id, weight)| {
+                let tokens = self.analyzed(id, clause.text, tokens)?;
+                (!tokens.is_empty()).then_some(FieldTokens { id, weight, tokens })
+            })
+            .collect();
+        if !clause.phrase || per_field.iter().all(|f| f.tokens.len() <= 1) {
+            return word(per_field);
         }
-        groups.sort_by_key(|&(key, _)| key);
-        groups
+        let should: Vec<Query> = per_field
             .into_iter()
-            .map(|(_, fields)| Query::Combined(CombinedQuery { fields }))
-            .collect()
+            .filter_map(|f| self.text_query(f.id, f.tokens))
+            .collect();
+        one_of(should).into_iter().collect()
     }
 
-    /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms (one: a term; more: a phrase,
-    /// or every term required without positions). `None` for no term.
+    /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms ([`Self::text_query`]).
+    /// `None` for no term.
     fn field_clause(&self, id: FieldId, text: &str, tokens: &mut TokenStream) -> Option<Query> {
-        let field = self.schema.field_by_id(id)?;
-        let term = |term: String| Query::Term(TermQuery { field: id, term });
-        match field.kind() {
-            FieldKind::Keyword(_) => {
-                (!text.is_empty() && fits(text)).then(|| term(text.to_owned()))
-            }
-            FieldKind::Text(options) => {
-                let analyzer = self.analyzer(id)?;
-                analyzer.analyze_query(text, tokens);
-                let mut kept: Vec<(u32, String)> = tokens
-                    .iter()
-                    .filter(|t| fits(&t.text))
-                    .map(|t| (t.position, t.text.clone()))
-                    .collect();
-                kept.sort_by_key(|&(position, _)| position);
-                let first = kept.first().map(|&(p, _)| p)?;
-                if kept.len() == 1 {
-                    return kept.pop().map(|(_, t)| term(t));
-                }
-                Some(if options.positions {
-                    Query::Phrase(PhraseQuery {
-                        field: id,
-                        terms: kept
-                            .into_iter()
-                            .map(|(position, term)| PhraseTerm {
-                                term,
-                                position: position.saturating_sub(first),
-                            })
-                            .collect(),
-                    })
-                } else {
-                    Query::Bool(BoolQuery {
-                        must: kept.into_iter().map(|(_, t)| term(t)).collect(),
-                        ..BoolQuery::default()
-                    })
+        match self.schema.field_by_id(id)?.kind() {
+            FieldKind::Keyword(_) => (!text.is_empty() && fits(text)).then(|| {
+                Query::Term(TermQuery {
+                    field: id,
+                    term: text.to_owned(),
                 })
+            }),
+            FieldKind::Text(_) => {
+                let analyzed = self.analyzed(id, text, tokens)?;
+                self.text_query(id, analyzed)
             }
             _ => None,
         }
     }
 
-    /// The terms `text` analyzes to in `text` field `id`; `None` if it is not one.
-    fn terms(&self, id: FieldId, text: &str, tokens: &mut TokenStream) -> Option<Vec<String>> {
-        let analyzer = self.analyzer(id)?;
-        analyzer.analyze_query(text, tokens);
+    /// The query of a `text` field's tokens: one is a term; more are a phrase, or every term required in a field
+    /// without positions. `None` for no token.
+    fn text_query(&self, id: FieldId, mut analyzed: Vec<QueryToken>) -> Option<Query> {
+        let term = |term: String| Query::Term(TermQuery { field: id, term });
+        analyzed.sort_by_key(|t| t.position);
+        let first = analyzed.first()?.position;
+        if analyzed.len() == 1 {
+            return analyzed.pop().map(|t| term(t.term));
+        }
+        let positions = matches!(
+            self.schema.field_by_id(id)?.kind(),
+            FieldKind::Text(o) if o.positions
+        );
+        Some(if positions {
+            Query::Phrase(PhraseQuery {
+                field: id,
+                terms: analyzed
+                    .into_iter()
+                    .map(|t| PhraseTerm {
+                        term: t.term,
+                        position: t.position.saturating_sub(first),
+                    })
+                    .collect(),
+            })
+        } else {
+            Query::Bool(BoolQuery {
+                must: analyzed.into_iter().map(|t| term(t.term)).collect(),
+                ..BoolQuery::default()
+            })
+        })
+    }
+
+    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order; `None` if
+    /// it is not a `text` field.
+    fn analyzed(
+        &self,
+        id: FieldId,
+        text: &str,
+        tokens: &mut TokenStream,
+    ) -> Option<Vec<QueryToken>> {
+        self.analyzer(id)?.analyze_query(text, tokens);
         Some(
             tokens
                 .iter()
                 .filter(|t| fits(&t.text))
-                .map(|t| t.text.clone())
+                .map(|t| QueryToken {
+                    span: (t.start, t.end),
+                    position: t.position,
+                    term: t.text.clone(),
+                })
                 .collect(),
         )
     }
@@ -360,6 +337,95 @@ impl QueryCompiler {
     fn analyzer(&self, id: FieldId) -> Option<&Analyzer> {
         let index = usize::try_from(id.get()).ok()?;
         self.analyzers.get(index)?.as_deref()
+    }
+}
+
+/// One query-time token of a word or phrase.
+#[derive(Debug)]
+struct QueryToken {
+    span: (usize, usize),
+    position: u32,
+    term: String,
+}
+
+/// The tokens a default field gives a word or phrase, and the field's weight.
+#[derive(Debug)]
+struct FieldTokens {
+    id: FieldId,
+    weight: f64,
+    tokens: Vec<QueryToken>,
+}
+
+/// A word over the default fields that have tokens for it (SPEC §7.1.1). When the fields agree on how to split it
+/// (no two of their token spans overlap unless equal; a field may lack a span, as for a stopword), each span is one
+/// required [`Query::Combined`] over the fields that have it (`e-mail`: two). Otherwise one field's split must not
+/// add requirements on another, so each field requires its own tokens and one of the fields must match.
+fn word(per_field: Vec<FieldTokens>) -> Vec<Query> {
+    let combined = |fields: Vec<WeightedTerm>| Query::Combined(CombinedQuery { fields });
+    if agree(&per_field) {
+        let mut groups: BTreeMap<(usize, usize), Vec<WeightedTerm>> = BTreeMap::new();
+        for f in per_field {
+            for token in f.tokens {
+                groups.entry(token.span).or_default().push(WeightedTerm {
+                    field: f.id,
+                    term: token.term,
+                    weight: f.weight,
+                });
+            }
+        }
+        return groups.into_values().map(combined).collect();
+    }
+    let should = per_field.into_iter().map(|f| {
+        let mut must: Vec<Query> = f
+            .tokens
+            .into_iter()
+            .map(|t| {
+                combined(vec![WeightedTerm {
+                    field: f.id,
+                    term: t.term,
+                    weight: f.weight,
+                }])
+            })
+            .collect();
+        match must.len() {
+            1 => must.pop().unwrap_or(Query::MatchAll),
+            _ => Query::Bool(BoolQuery {
+                must,
+                ..BoolQuery::default()
+            }),
+        }
+    });
+    one_of(should.collect()).into_iter().collect()
+}
+
+/// Whether the fields split a word the same way: within a field spans are distinct (so a group holds a field once),
+/// and across fields no two spans overlap unless they are equal. Linear after the sort.
+fn agree(per_field: &[FieldTokens]) -> bool {
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    for f in per_field {
+        let own = f.tokens.iter().map(|t| t.span);
+        // Tokens of one analysis have strictly increasing starts (SPEC §6.3.1), so equal spans are adjacent.
+        if own.clone().zip(own.clone().skip(1)).any(|(a, b)| a == b) {
+            return false;
+        }
+        spans.extend(own);
+    }
+    spans.sort_unstable();
+    spans.dedup();
+    spans.windows(2).all(|w| match w {
+        [a, b] => a.1 <= b.0,
+        _ => true,
+    })
+}
+
+/// A query matching any of `alternatives`: itself when there is one, `None` when there is none.
+fn one_of(mut alternatives: Vec<Query>) -> Option<Query> {
+    match alternatives.len() {
+        0 | 1 => alternatives.pop(),
+        _ => Some(Query::Bool(BoolQuery {
+            should: alternatives,
+            ..BoolQuery::default()
+        })),
     }
 }
 

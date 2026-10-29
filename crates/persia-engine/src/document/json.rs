@@ -109,7 +109,7 @@ fn field_value(field: &Field, value: J) -> Result<Option<Value>, DocumentError> 
 
 /// An integer JSON number as an `i64`. `serde_json` reads `-0` and integers beyond `u64` or below `i64::MIN` as
 /// floats, so those are told apart from numbers written with a fraction or exponent by their value.
-fn integer(field: &str, n: &Number) -> Result<i64, DocumentError> {
+pub(crate) fn integer(field: &str, n: &Number) -> Result<i64, DocumentError> {
     if let Some(v) = n.as_i64() {
         return Ok(v);
     }

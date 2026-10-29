@@ -7,7 +7,7 @@ use serde_json::Value as J;
 
 use crate::document::MAX_KEYWORD_LEN;
 use crate::document::datetime;
-use crate::document::json::{Strict, json_kind};
+use crate::document::json::{Strict, integer, json_kind};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldType};
 
 use super::QueryError;
@@ -20,6 +20,7 @@ pub const MAX_FILTER_JSON_LEN: usize = 1 << 20;
 /// A filter (SPEC §7.1.2). Built by [`Filter::from_json`], which validates it, or by hand and checked with
 /// [`Filter::validate`].
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Filter {
     /// Documents whose field holds the value. Fields: `keyword`, `i64`, `f64`, `bool`, `datetime`.
     Term {
@@ -64,7 +65,7 @@ pub enum FilterValue {
     Keyword(String),
     /// An `i64` value.
     I64(i64),
-    /// An `f64` value, not NaN; `-0.0` equals `0.0`.
+    /// An `f64` value, not NaN; `-0.0` equals `0.0` (matching normalizes it: a hand-built filter may hold it).
     F64(f64),
     /// A `bool` value.
     Bool(bool),
@@ -255,6 +256,7 @@ fn parse(value: &J, schema: &CollectionSchema) -> Result<Filter, QueryError> {
     match op.as_str() {
         "term" => {
             let (field, value) = field_and(arg, op, schema)?;
+            field_of(schema, field.id(), "a term filter", has_values)?;
             Ok(Filter::Term {
                 field: field.id(),
                 value: to_value(field, value)?,
@@ -262,6 +264,7 @@ fn parse(value: &J, schema: &CollectionSchema) -> Result<Filter, QueryError> {
         }
         "terms" => {
             let (field, values) = field_and(arg, op, schema)?;
+            field_of(schema, field.id(), "a terms filter", has_values)?;
             let J::Array(values) = values else {
                 return Err(syntax(format!(
                     "`terms` takes an array of values, found {}",
@@ -278,6 +281,7 @@ fn parse(value: &J, schema: &CollectionSchema) -> Result<Filter, QueryError> {
         }
         "range" => {
             let (field, bounds) = field_and(arg, op, schema)?;
+            field_of(schema, field.id(), "a range filter", is_ordered)?;
             let (lower, upper) = parse_bounds(field, bounds)?;
             Ok(Filter::Range {
                 field: field.id(),
@@ -379,22 +383,15 @@ fn parse_bounds(
 fn to_value(field: &Field, value: &J) -> Result<FilterValue, QueryError> {
     let converted = match (field.field_type(), value) {
         (FieldType::Keyword, J::String(s)) => Some(FilterValue::Keyword(s.clone())),
-        // A negative zero written with a fraction or exponent is 0, as in documents (SPEC §6.4.1).
-        (FieldType::I64, J::Number(n)) => n
-            .as_i64()
-            .or_else(|| (n.as_f64() == Some(0.0)).then_some(0))
-            .map(FilterValue::I64),
+        // Integers as in documents: a negative zero written with a fraction or exponent is 0 (SPEC §6.4.1).
+        (FieldType::I64, J::Number(n)) => integer(field.name(), n).ok().map(FilterValue::I64),
         (FieldType::F64, J::Number(n)) => n.as_f64().map(|v| FilterValue::F64(v + 0.0)),
         (FieldType::Bool, J::Bool(b)) => Some(FilterValue::Bool(*b)),
-        (FieldType::Datetime, J::Number(n)) => n.as_i64().map(FilterValue::Datetime),
-        (FieldType::Datetime, J::String(s)) => datetime::parse(s).map(FilterValue::Datetime),
-        (FieldType::Text | FieldType::Stored, _) => {
-            return Err(QueryError::WrongFieldType {
-                field: field.name().to_owned(),
-                field_type: field.field_type(),
-                what: "a filter value",
-            });
+        (FieldType::Datetime, J::Number(n)) => {
+            integer(field.name(), n).ok().map(FilterValue::Datetime)
         }
+        (FieldType::Datetime, J::String(s)) => datetime::parse(s).map(FilterValue::Datetime),
+        // Callers check the field's type first; `text` and `stored` take no value.
         _ => None,
     };
     converted.ok_or_else(|| QueryError::FilterValue {

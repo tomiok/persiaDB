@@ -10,6 +10,7 @@ use super::limits::{QueryLimits, Usage};
 /// A query: what documents match and how they score (SPEC §7.1). Terms are given as analyzed (the form the index
 /// holds them in): [`super::QueryCompiler`] analyzes user text; a hand-built query names terms as they are.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum Query {
     /// One term of one `text` or `keyword` field.
     Term(TermQuery),

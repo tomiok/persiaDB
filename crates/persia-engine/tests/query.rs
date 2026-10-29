@@ -93,6 +93,7 @@ fn show(schema: &CollectionSchema, q: &Query) -> String {
         Query::Boost(b) => format!("{}^{}", show(schema, &b.query), b.boost),
         Query::ConstantScore(c) => format!("const({})={}", show(schema, &c.query), c.score),
         Query::MatchAll => "*".to_owned(),
+        other => format!("{other:?}"),
     }
 }
 
@@ -169,6 +170,7 @@ fn user_text_compiles_as_specified() {
         ("title:\"red shoes\"", "title:\"red@0 shoes@1\""),
         ("body:\"red shoes\"", "{+body:red +body:shoe}"),
         ("title:\"!!\"", "*"),
+        ("body:the", "*"),
         // Degraded syntax: plain text.
         (
             "\"red shoes",
@@ -1097,9 +1099,118 @@ proptest! {
         // Nothing is cut when the limits are generous.
         let generous = compiler(&schema).compile(&text, &fields, &QueryLimits::default());
         prop_assert!(!generous.truncated || text.len() > QueryLimits::default().max_text_len);
-        // A truncated compilation leaves out a suffix of the generous one's clauses, never adds any.
+        // Within the text length, a compilation cut by the other limits keeps a prefix of the generous one's clauses.
         if !compiled.truncated {
             prop_assert_eq!(&compiled.query, &generous.query);
+        } else if text.len() <= max_text_len {
+            let ((must, not), (all_must, all_not)) = (clauses(&compiled.query), clauses(&generous.query));
+            let collapsed = all_must.first() == Some(&compiled.query) || all_not.is_empty() && all_must.is_empty();
+            prop_assert!(
+                collapsed || (all_must.starts_with(&must) && all_not.starts_with(&not)),
+                "{must:?} {not:?} not a prefix of {all_must:?} {all_not:?}"
+            );
         }
+    }
+}
+
+/// The required and excluded clauses of a compiled query, in text order; a root that is not a plain Bool is one.
+fn clauses(q: &Query) -> (Vec<Query>, Vec<Query>) {
+    match q {
+        Query::MatchAll => (Vec::new(), Vec::new()),
+        Query::Bool(b) if b.should.is_empty() && b.filter.is_empty() => {
+            (b.must.clone(), b.must_not.clone())
+        }
+        other => (vec![other.clone()], Vec::new()),
+    }
+}
+
+#[test]
+fn fields_that_split_a_word_differently_do_not_constrain_each_other() {
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .field(
+            "sku",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let limits = QueryLimits::default();
+    let compile = |text: &str| {
+        let compiled = compiler(&schema).compile(text, &DefaultFields::all(&schema), &limits);
+        compiled.query.validate(&schema, &limits).unwrap();
+        show(&schema, &compiled.query)
+    };
+    // Same split: one combined per span.
+    assert_eq!(compile("shoes"), "(sku:shoes^1|title:shoes^1)");
+    // Different splits: each field requires its own tokens, one field must match.
+    assert_eq!(
+        compile("e-mail"),
+        "{?(sku:e-mail^1) ?{+(title:e^1) +(title:mail^1)}}"
+    );
+    assert_eq!(
+        compile("Red e-mail"),
+        "{+(sku:Red^1|title:red^1) +{?(sku:e-mail^1) ?{+(title:e^1) +(title:mail^1)}}}"
+    );
+    // A field without tokens for the word does not count.
+    assert_eq!(compile("!!"), "(sku:!!^1)");
+}
+
+#[test]
+fn phrases_score_with_the_schema_boost() {
+    let schema = schema();
+    let fields = DefaultFields::parse(&schema, &["title^5"]).unwrap();
+    let limits = QueryLimits::default();
+    assert_eq!(
+        compile_with("\"red shoes\" red", &fields, &limits).0,
+        "{+title:\"red@0 shoes@1\" +(title:red^5)}"
+    );
+}
+
+#[test]
+fn one_long_word_compiles_quickly_and_is_cut() {
+    // 4096 tokens per field: grouping is linear, and the clause is over max_terms.
+    let schema = schema();
+    let text = "a-".repeat(4096);
+    let limits = QueryLimits::default();
+    let started = std::time::Instant::now();
+    let compiled = compiler(&schema).compile(&text, &DefaultFields::all(&schema), &limits);
+    assert_eq!(
+        (compiled.query, compiled.truncated),
+        (Query::MatchAll, true)
+    );
+    // Generous for debug builds; the quadratic grouping took far longer.
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+}
+
+#[test]
+fn filter_numbers_follow_the_document_forms() {
+    let schema = schema();
+    let f = |name| id(&schema, name);
+    assert_eq!(
+        filter(r#"{"term": ["at", -0.0]}"#),
+        Ok(Filter::Term {
+            field: f("at"),
+            value: FilterValue::Datetime(0)
+        })
+    );
+    for json in [r#"{"term": ["stock", 0.0]}"#, r#"{"term": ["stock", 0e0]}"#] {
+        assert!(
+            matches!(filter(json), Err(QueryError::FilterValue { .. })),
+            "{json}"
+        );
+    }
+    // The field's type is checked before the value's.
+    for json in [
+        r#"{"range": ["brand", {"gt": 1}]}"#,
+        r#"{"term": ["title", 1]}"#,
+        r#"{"terms": ["notes", [1]]}"#,
+    ] {
+        assert!(
+            matches!(filter(json), Err(QueryError::WrongFieldType { .. })),
+            "{json}"
+        );
     }
 }

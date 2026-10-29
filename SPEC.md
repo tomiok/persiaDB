@@ -1135,7 +1135,7 @@ constant_score, match_all) is the internal form; `q` text is compiled to it (§7
 them. `combined` is one query word over several `text` fields, each with its own analyzed term and weight `w_f`,
 scored as one BM25F term (§7.2). A `bool` matches a document that matches every `must` and `filter` clause, no
 `must_not` clause, and at least one `should` clause when it has no `must` or `filter` clause but some `should`; so an
-empty `bool` matches every document, and one of `must_not` clauses alone every other document. `must` and `should`
+empty `bool` matches every document, and one with only `must_not` clauses matches every other document. `must` and `should`
 score; `filter` and `must_not` do not. A hand-built query is validated against the schema and the limits (§7.1.3):
 `term`, `prefix`, `fuzzy` take `text` or `keyword` fields, `combined` distinct `text` fields, `phrase` a `text` field
 with `positions` and terms in non-decreasing relative positions; terms are at most 32 KiB (§5.3.1), prefixes not
@@ -1149,11 +1149,16 @@ by Unicode whitespace and all required (default AND); each is `[-][field:](word 
 
 - A **word** is analyzed with the query-time analyzer (§6.3.4) of each default field: the `text` fields named by
   `fields` (`"name"` or `"name^weight"`; a weight overrides the schema `boost` as `w_f`), or every `text` field with its
-  `boost`. Tokens of the same span of the word become one `combined` over the fields that produced them, each
-  required: `e-mail` gives two. A field where the word is a stopword is left out of its `combined`.
+  `boost`. Fields where the word analyzes to no token (a stopword) are left out. When the fields agree on how to
+  split the word (no two of their token spans overlap unless equal; a field may lack a span, as for a stopword), the
+  tokens of each span become one `combined` over the fields that have it, each required: `e-mail` gives two. When
+  they split it differently (`standard` gives `e`, `mail`; `whitespace` keeps `e-mail`), one field's split must not
+  add requirements on another: each field requires its own tokens (each a one-field `combined`), and one of the
+  fields must match.
 - A **`"phrase"`** becomes, per default field, a `phrase` of its tokens (relative positions keep the gaps stopwords
   leave), or, in a field without `positions`, a `bool` requiring each token; one of the fields must match. A phrase of
-  at most one token in every field is a word.
+  at most one token in every field is a word. Phrases score with the schema `boost`; the weights of `fields` apply to
+  words.
 - **`field:`** before a word or phrase limits it to that `text` or `keyword` field, which need not be a default field:
   a `text` field gets `term`s (one token: a `term`; more: as a phrase in that field), a `keyword` field one `term` of
   the text as given, unanalyzed.
@@ -1165,7 +1170,8 @@ closing quote is a plain character. Clauses that analyze to no token are left ou
 32 KiB (no document holds one). With no clause left, the query is `match_all`: empty text browses (§7.6's fallback ranks
 it). A query with exactly one required clause is that clause. Text beyond `max_text_len` bytes (cut at a character
 boundary) and every clause from the first one that would exceed a limit of §7.1.3 are left out, and the response
-reports that the query was truncated; the compiled query always satisfies the limits.
+reports it as `query_truncated: true` (distinct from relaxation's `truncated`, §7.6); the compiled query always
+satisfies the limits. The count includes a root `bool` at depth 1 even when the query is a single clause.
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1186,7 +1192,9 @@ datetime range. A value of another type, an unknown field, an unknown operator o
 
 #### 7.1.3 Limits
 Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
-user text is cut (§7.1.1). Defaults, configurable per engine:
+user text is cut (§7.1.1). Queries the relaxation cascade builds (§7.6) are held to the same limits: a level cuts its
+expansions (synonyms, prefixes, fuzzy terms; the least important first) to fit what the query leaves of each limit, and
+reports it in `applied`. Defaults, configurable per engine:
 
 | Limit | Default | Counts |
 |---|---|---|
@@ -1203,6 +1211,10 @@ tf~(t,d) = Σ_f  w_f · tf(t,d,f) / (1 − b_f + b_f · len_f(d)/avglen_f)
 score(t,d) = idf(t) · tf~ · (k1+1) / (k1 + tf~)
 idf(t) = ln(1 + (N − df + 0.5)/(df + 0.5))
 ```
+For a `combined` query (§7.1), `t` is one query word and each field `f` has its own analyzed term `t_f`;
+`tf(t,d,f)` is the frequency of `t_f`, and `df` is `max_f df_f(t_f)` (a lower bound on the documents holding any of
+them, computable from per-field statistics alone). A `term` query on a `text` field is a `combined` over that field
+with its schema `boost` as `w_f`.
 Total = Σ_t score + static_rank contribution. `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
@@ -1232,7 +1244,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
 | L2 | `drop_terms` | `minimum_should_match` steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term. Stopwords/low-IDF terms dropped first |
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
-| L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST; corrected terms reported |
+| L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST (cap expansions, default 50); corrected terms reported |
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |
 
 Rules:

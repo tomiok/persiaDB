@@ -434,12 +434,12 @@ Deps: M2, M5.
 Deps: M5 (M6 for end-to-end).
 
 ## 7.1 Query AST & parser
-- [~] 7.1.1 AST: Term, Phrase, Prefix, Fuzzy, Bool{must,should,must_not,filter}, Boost, ConstantScore, MatchAll
+- [x] 7.1.1 AST: Term, Phrase, Prefix, Fuzzy, Bool{must,should,must_not,filter}, Boost, ConstantScore, MatchAll
 - 7.1.2 User text → AST compiler (analysis per field, default AND, quoted phrases, `-` exclusion, `field:`)
-  - [~] 7.1.2.1 Never fail on user input (invalid syntax degrades to plain terms)
-  - [~] 7.1.2.2 [T] fuzz + table-driven tests
-- [~] 7.1.3 Filter DSL (term, terms, range, exists, and/or/not) parser + validation against schema
-- [~] 7.1.4 Query limits (max terms/clauses/expansions) with explicit errors
+  - [x] 7.1.2.1 Never fail on user input (invalid syntax degrades to plain terms)
+  - [x] 7.1.2.2 [T] fuzz + table-driven tests
+- [x] 7.1.3 Filter DSL (term, terms, range, exists, and/or/not) parser + validation against schema
+- [x] 7.1.4 Query limits (max terms/clauses/expansions) with explicit errors
 
 ## 7.2 Collection statistics
 - [ ] 7.2.1 Aggregate `N`, `avglen`, `df` across live segments (cached per snapshot)
@@ -491,6 +491,9 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.1.3 Score offset per level to guarantee ordering across levels
 - [ ] 8.1.4 Budget (`budget_ms`) and `truncated` flag
 - [ ] 8.1.5 Response metadata struct (`level`, `applied`, `original`, `effective`, `corrected`)
+- [ ] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
+- [ ] 8.1.7 Source span and original text of each compiled clause in `Compiled`, for `original`/`effective`/`corrected` and the L3/L4 length rules (found in the 7.1 review)
+- [ ] 8.1.8 Relaxed queries within `QueryLimits`: cut expansions to the remaining budget, report it in `applied` (SPEC §7.1.3, found in the 7.1 review)
 
 ## 8.2 Levels
 - [ ] 8.2.1 L1 synonyms: expand terms with synonym groups

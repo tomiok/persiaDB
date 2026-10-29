@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 0728933417de945f54c7fd82979b0a9e4b5dbb73466cd67e2d8afcac078faf07 # shrinks to text = "", max_terms = 1, max_clauses = 1, max_depth = 1, max_text_len = 0, all_fields = false
+cc 5cc3effa8f115fc0ea3083d467de53b414bc48eee00ab1f1b6e312909f7c530a # shrinks to text = "b -\"title:\"title: B\"title:\"b", max_terms = 2, max_clauses = 3, max_depth = 2, max_text_len = 28, all_fields = false
