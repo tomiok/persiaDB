@@ -32,8 +32,10 @@ use std::sync::Arc;
 
 use std::path::Path;
 
+use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, SegmentIds, Snapshot,
+    CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, ReadOnlyDatabase,
+    SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::FlushPolicy;
@@ -303,9 +305,10 @@ fn reopen(crashed: &SimFile, ctx: &str, quarantined: &mut usize) -> (State, u64)
 
 /// A commit cut after its Manifest frame but before its superblock slot leaves that Manifest after `log_end`. The
 /// reopen must not let it hide what the next writer logs: puts acknowledged after the reopen, with no commit before
-/// the next crash, are replayed by the open after it (SPEC §8.6). Found by `database_process`
-/// (`kill_9_loop_through_replay_flushes_merges_and_open`), whose child killed mid-commit was followed by one that
-/// only wrote.
+/// the next crash, are replayed by the writer's and by a read-only open after it (SPEC §8.6, ROADMAP 6.6.9). Found
+/// by `database_process` (`kill_9_loop_through_replay_flushes_merges_and_open`), whose child killed mid-commit was
+/// followed by one that only wrote. The reopen retires the Manifest with exactly one commit, only when there is
+/// one; a fault at any call of that retirement leaves a state the same holds for.
 #[test]
 fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
     let created = SimFile::new();
@@ -314,6 +317,7 @@ fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
     db.put("a", &doc("a0", "zero"), Durability::Fsync).unwrap();
     db.commit().unwrap();
     db.put("a", &doc("a1", "one"), Durability::Fsync).unwrap();
+    let loaded = db.seq();
     let base = created.durable_bytes();
     drop(db);
 
@@ -324,48 +328,133 @@ fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
         db.commit().unwrap();
         file.mutations() - start
     };
-    let mut orphaned = 0;
+    let (mut stray, mut retirement_faults, mut torn) = (0, 0, 0);
     for point in 0..commit_calls {
         for apply_first in [false, true] {
             let file = SimFile::from_bytes(base.clone());
             let mut db = Database::open_on(file.clone(), options()).unwrap();
-            let at = file.mutations() + point;
-            file.set_fault(Some(if apply_first {
-                SimFault::ApplyThenFail(at)
-            } else {
-                SimFault::FailAt(at)
-            }));
+            file.set_fault(Some(fault(file.mutations() + point, apply_first)));
             assert!(db.commit().is_err(), "call {point}");
             drop(db);
-            for loss in [CrashLoss::All, CrashLoss::Nothing] {
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(point)] {
                 let ctx = format!("call {point}, apply first {apply_first}, {loss:?}");
                 let crashed = file.crash(loss);
-                let found = Container::open_on(crashed.clone(), Mode::ReadOnly).unwrap();
-                let log_end = found.superblock().log_end;
-                if found
-                    .frames()
-                    .iter()
-                    .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end)
-                {
-                    orphaned += 1;
+                let Some(found) = stray_manifest(&crashed) else {
+                    // A corrupt tail: the quarantining open of `reopen` covers it.
+                    torn += 1;
+                    continue;
+                };
+                if found {
+                    stray += 1;
+                    retirement_faults += cut_retirements(&ctx, &crashed);
                 }
-                drop(found);
-                let mut db = Database::open_on(crashed.clone(), options())
-                    .unwrap_or_else(|e| panic!("{ctx}: reopen: {e}"));
-                db.put("a", &doc("a2", "two"), Durability::Fsync).unwrap();
-                drop(db);
-                let db = Database::open_on(crashed.crash(CrashLoss::All), options())
-                    .unwrap_or_else(|e| panic!("{ctx}: second reopen: {e}"));
-                let snapshot = db.snapshot();
-                let a = snapshot.collection("a").unwrap();
-                for id in ["a0", "a1", "a2"] {
-                    assert!(a.get(id).unwrap().is_some(), "{ctx}: {id} lost");
+                let seq = write_crash_reopen(&ctx, &crashed);
+                // The cut commit took effect (its slot written), or the reopen retired its Manifest: one more seq.
+                assert!(
+                    seq == loaded || seq == loaded + 1,
+                    "{ctx}: seq {seq}, loaded {loaded}"
+                );
+                if found {
+                    assert_eq!(seq, loaded + 1, "{ctx}: one retiring commit");
                 }
             }
         }
     }
     // The cut that leaves a Manifest without its slot is among the points.
-    assert!(orphaned > 0, "no fault point left an uncommitted Manifest");
+    assert!(
+        stray > 0 && retirement_faults > 0,
+        "stray {stray}, retirement faults {retirement_faults}"
+    );
+    eprintln!(
+        "{stray} stray Manifests, {retirement_faults} cut retirements, {torn} corrupt tails skipped"
+    );
+}
+
+fn fault(at: u64, apply_first: bool) -> SimFault {
+    if apply_first {
+        SimFault::ApplyThenFail(at)
+    } else {
+        SimFault::FailAt(at)
+    }
+}
+
+/// Whether `file` holds a valid Manifest frame after the committed `log_end`; `None` if a read-only container open
+/// fails (a corrupt tail).
+fn stray_manifest(file: &SimFile) -> Option<bool> {
+    let container = Container::open_on(file.clone(), Mode::ReadOnly).ok()?;
+    let log_end = container.superblock().log_end;
+    Some(
+        container
+            .frames()
+            .iter()
+            .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end),
+    )
+}
+
+/// The writer's open of `crashed`, then a put, a crash that keeps only synced bytes, and a read-only and a writer
+/// reopen: every acknowledged document is there in both. Returns the `seq` of the first open.
+fn write_crash_reopen(ctx: &str, crashed: &SimFile) -> u64 {
+    let mut db = Database::open_on(crashed.clone(), options())
+        .unwrap_or_else(|e| panic!("{ctx}: reopen: {e}"));
+    let seq = db.seq();
+    assert_eq!(
+        stray_manifest(crashed),
+        Some(false),
+        "{ctx}: the open left a Manifest after log_end"
+    );
+    db.put("a", &doc("a2", "two"), Durability::Fsync).unwrap();
+    drop(db);
+    let again = crashed.crash(CrashLoss::All);
+    let reader = ReadOnlyDatabase::open_on(again.clone(), &AnalyzerRegistry::builtin())
+        .unwrap_or_else(|e| panic!("{ctx}: read-only open: {e}"));
+    reader
+        .verify()
+        .unwrap_or_else(|e| panic!("{ctx}: verify: {e}"));
+    let writer =
+        Database::open_on(again, options()).unwrap_or_else(|e| panic!("{ctx}: second reopen: {e}"));
+    for (what, snapshot) in [
+        ("read-only", reader.snapshot()),
+        ("writer", writer.snapshot()),
+    ] {
+        let a = snapshot.collection("a").unwrap();
+        for id in ["a0", "a1", "a2"] {
+            assert!(
+                a.get(id).unwrap().is_some(),
+                "{ctx}: {id} lost ({what} open)"
+            );
+        }
+    }
+    seq
+}
+
+/// A fault at each call of the open that retires `crashed`'s stray Manifest, a crash, and then
+/// [`write_crash_reopen`]: a cut retirement is as harmless as the cut commit. Returns how many it checked.
+fn cut_retirements(ctx: &str, crashed: &SimFile) -> usize {
+    let calls = {
+        let file = SimFile::from_bytes(crashed.bytes());
+        let start = file.mutations();
+        drop(Database::open_on(file.clone(), options()).unwrap());
+        file.mutations() - start
+    };
+    assert!(calls > 0, "{ctx}: the retiring open wrote nothing");
+    let mut checked = 0;
+    for point in 0..calls {
+        for apply_first in [false, true] {
+            let file = SimFile::from_bytes(crashed.bytes());
+            file.set_fault(Some(fault(file.mutations() + point, apply_first)));
+            assert!(
+                Database::open_on(file.clone(), options()).is_err(),
+                "{ctx}: retirement call {point}"
+            );
+            for loss in [CrashLoss::All, CrashLoss::Nothing] {
+                let ctx =
+                    format!("{ctx}; retirement call {point}, apply first {apply_first}, {loss:?}");
+                write_crash_reopen(&ctx, &file.crash(loss));
+                checked += 1;
+            }
+        }
+    }
+    checked
 }
 
 /// Flushes what the reopen replayed, which must keep the documents.
