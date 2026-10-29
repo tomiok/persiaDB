@@ -18,6 +18,7 @@ use crate::view::SearchView;
 
 /// How the container's bytes after its committed `log_end` ended (SPEC §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Tail {
     /// At a frame boundary.
     Clean,
@@ -26,10 +27,17 @@ pub enum Tail {
         /// Where the torn frame starts.
         offset: u64,
     },
+    /// At an invalid frame from `offset` on, followed only by zeros and stale frames (a lower `frame_seq`, ADR-0013):
+    /// never acknowledged data, which a read-write open truncates like a torn tail.
+    Stale {
+        /// Where the invalid frame starts.
+        offset: u64,
+    },
 }
 
 /// What [`ReadOnlyDatabase::verify`] found, for a database that passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct VerifyReport {
     /// The `seq` of the last commit.
     pub seq: u64,
@@ -57,13 +65,19 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// # Errors
     /// A corruption ([`DatabaseError::is_corruption`]): [`DatabaseError::OpenSegment`] for a segment that fails
     /// [`Segment::verify`](crate::segment::Segment::verify) or an id read, [`DatabaseError::LiveTwice`],
-    /// [`DatabaseError::CorruptTail`].
+    /// [`DatabaseError::CorruptTail`] for bytes after `log_end` that may be acknowledged data or are not frames (a
+    /// read-write open refuses or quarantines them). [`DatabaseError::OpenSegment`] also reports an I/O error while a
+    /// segment is read; that one is not a corruption.
     pub fn verify(&self) -> Result<VerifyReport, DatabaseError> {
-        let tail = match self.container().recovery().scan_end {
+        let recovery = self.container().recovery();
+        let tail = match recovery.scan_end {
+            ScanEnd::Clean { .. } => Tail::Clean,
             ScanEnd::TornTail { offset, .. } => Tail::Torn { offset },
-            ScanEnd::Corrupt { offset, .. } => return Err(DatabaseError::CorruptTail { offset }),
-            // An unsupported frame fails the open itself.
-            _ => Tail::Clean,
+            ScanEnd::Corrupt { offset, .. } if recovery.stale_tail => Tail::Stale { offset },
+            // An unsupported frame fails the open itself; reported as corrupt should that ever change.
+            ScanEnd::Corrupt { offset, .. } | ScanEnd::Unsupported { offset, .. } => {
+                return Err(DatabaseError::CorruptTail { offset });
+            }
         };
         let snapshot = self.snapshot();
         let mut report = VerifyReport {

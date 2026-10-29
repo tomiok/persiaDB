@@ -48,7 +48,7 @@ enum Command {
     Dump(DumpCommand),
     /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
     /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
-    /// Fails on any corruption.
+    /// Fails on any corruption. Uses the built-in analyzers: a database with a custom analyzer does not open here.
     Verify {
         /// The container file.
         path: PathBuf,

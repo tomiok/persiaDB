@@ -1423,8 +1423,8 @@ The open sequence (ROADMAP 6.6.1, ADR-0033), the same for a writer and a read-on
 5. Ready: the first snapshot shows the segments and the replayed memtables. Replayed operations count as written at
    the open (§8.2).
 
-Nothing before step 4 writes. One collection's unflushed record holds `wal_start` back for every collection
-(§8.2.1), so a backlog can be larger than a memtable: a **writer's replay flushes** (ROADMAP 6.6.5). Before applying a
+Nothing before step 4 writes but the container's tail repair (§4.4); a read-only open writes nothing. One
+collection's unflushed record holds `wal_start` back for every collection (§8.2.1), so a backlog can be larger than a memtable: a **writer's replay flushes** (ROADMAP 6.6.5). Before applying a
 record it commits if the record's memtable reached its size threshold (as a write does, §8.2 step 3), and when a
 memtable has no room left for the record (no docid, operation or id left: `SegmentError::Full` or `TooLarge`, which
 an empty memtable would not report) it commits and applies the record again. Such a commit flushes every memtable
@@ -1441,8 +1441,9 @@ shows the snapshot it found and does not follow later commits; it is opened agai
 
 **Verification** (ROADMAP 6.6.3, `persia verify`) is a read-only open plus what no open or lookup checks: every live
 segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),
-and that the bytes after `log_end` are clean or a torn tail (corruption there, which a read-write open truncates or
-quarantines, §4.4, fails it). It writes nothing.
+and that the bytes after `log_end` are clean, a torn tail, or only zeros and stale frames (a lower `frame_seq`,
+which a read-write open truncates too; a read-only open classifies them by reading, §4.4); any other corruption there,
+which a read-write open refuses or quarantines, fails it. It writes nothing.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's

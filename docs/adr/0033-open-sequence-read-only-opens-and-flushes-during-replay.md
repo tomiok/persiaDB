@@ -35,7 +35,9 @@ only what it needs, and `Segment::verify` ran only on merged segments.
    size threshold a writer flushes at.
 5. **`ReadOnlyDatabase::verify`** (and `persia verify`) adds to the open: `Segment::verify` on every live segment, at
    most one live copy of each id per collection (SPEC §8.3; it keeps the live ids of one collection in memory), and
-   corruption after `log_end` as an error (`DatabaseError::CorruptTail`; a torn tail is reported, not an error). New
+   corruption after `log_end` as an error (`DatabaseError::CorruptTail`), except what a read-write open truncates
+   silently: a torn tail, or zeros and stale frames (`Recovery::stale_tail`, which read-only container opens now
+   classify too), reported as `Tail::Torn` and `Tail::Stale`. New
    corruption variants `DatabaseError::LiveTwice` and `CorruptTail`.
 6. **The writer lock is the container's** (SPEC §4.5.1): a second `Database::open` fails with
    `DatabaseError::Container(Locked)`; no database-level lock is added.
@@ -44,8 +46,8 @@ only what it needs, and `Segment::verify` ran only on merged segments.
 
 - An open may commit, so it may fail with any commit error, and a crash inside it leaves a later manifest; the next
   open reaches the same documents (tested at every write of such an open).
-- A read-only reader sees the WAL records synced after the last commit, as a writer's open would, but never a
-  record the writer only buffered.
+- A read-only reader sees the WAL records written after the last commit, as a writer's open would (an `Async` one
+  before it is synced, so a power loss may still drop it), but never a record the writer only buffered.
 - `verify` costs a full read of every segment and memory for one collection's ids.
 
 ## Alternatives considered

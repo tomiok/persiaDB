@@ -190,7 +190,7 @@ impl<L: WalLog> WalWriter<L> {
     /// Records that replay applied a record of `collection` from the chunk at position `at`, which then holds
     /// `wal_start` back until a flush covers it (any [`WalWriter::mark`] does), as [`WalWriter::resume`] does for
     /// a whole replay. Replay goes in log order, so only the collection's first chunk since its last flush counts.
-    pub fn replayed(&mut self, collection: &str, at: u64) {
+    pub(crate) fn replayed(&mut self, collection: &str, at: u64) {
         if self.held.contains_key(collection) {
             return;
         }

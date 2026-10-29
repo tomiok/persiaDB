@@ -6,8 +6,8 @@
 //! 2. One writer: a second read-write open of a file fails fast with `Locked` while the first is open, and succeeds
 //!    once it is closed. A read-only open succeeds beside the writer, takes no lock, writes nothing (not even a torn
 //!    tail's truncation), and keeps the snapshot it found while the writer commits (6.6.2).
-//! 3. `verify` passes on a sound database, counting what it checked, reports a torn tail, and fails as corruption on
-//!    corrupt bytes after `log_end` (6.6.3).
+//! 3. `verify` passes on a sound database, counting what it checked, reports a torn tail and stale frames (which a
+//!    writer truncates too, so both agree), and fails as corruption on other corrupt bytes after `log_end` (6.6.3).
 //! 4. A replayed backlog larger than a memtable's size threshold is flushed during the open, as writes would be, and
 //!    shows exactly the documents of the model; the next open replays to the same state without committing again; a
 //!    crash at any write of such an open, losing any unsynced part, reopens to the same documents (6.6.5).
@@ -364,4 +364,40 @@ fn put(db: &mut Database<SimFile>, model: &mut Docs, c: &str, id: &str, text: &s
         .get_mut(c)
         .unwrap()
         .insert(id.to_owned(), text.to_owned());
+}
+
+#[test]
+fn verify_agrees_with_a_writer_on_a_stale_tail() {
+    let (file, model) = backlog();
+    let registry = AnalyzerRegistry::builtin();
+    // A copy of an earlier frame after the last one: valid, but with a lower `frame_seq` (ADR-0013), as a crash
+    // that loses a truncation can leave. A writer truncates it like a torn tail.
+    let mut bytes = file.bytes();
+    let end = bytes.len();
+    let stale = {
+        let reader = ReadOnlyDatabase::open_on(file.clone(), &registry).unwrap();
+        reader.container().uncommitted_frames()[0]
+    };
+    let (from, len) = (
+        usize::try_from(stale.offset).unwrap(),
+        usize::try_from(stale.len).unwrap(),
+    );
+    let copy = bytes[from..from + len].to_vec();
+    bytes.extend_from_slice(&copy);
+
+    let reader = ReadOnlyDatabase::open_on(SimFile::from_bytes(bytes.clone()), &registry).unwrap();
+    assert!(reader.container().recovery().stale_tail);
+    assert_eq!(observed(&reader.snapshot()), model);
+    let report = reader.verify().unwrap();
+    assert_eq!(report.tail, Tail::Stale { offset: end as u64 });
+
+    let written = SimFile::from_bytes(bytes);
+    let db = Database::open_on(written.clone(), options(BIG)).unwrap();
+    assert_eq!(observed(&db.snapshot()), model);
+    drop(db);
+    let report = ReadOnlyDatabase::open_on(written, &registry)
+        .unwrap()
+        .verify()
+        .unwrap();
+    assert_eq!(report.tail, Tail::Clean);
 }

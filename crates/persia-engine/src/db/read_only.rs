@@ -4,7 +4,8 @@
 //! It runs the open sequence of a writer ([`super::recovery`]) on a container opened read-only, which takes no lock
 //! and never writes, so it opens next to a live writer (and a second writer fails fast on the writer lock, SPEC
 //! §4.5.1). It holds the [`Snapshot`] of what it found: the committed segments, and memtables holding the WAL
-//! records from `wal_start` on, the synced ones after the last commit included. It does not follow the writer's
+//! records from `wal_start` on, those written after the last commit included (written, not necessarily synced: an
+//! `Async` write a power loss may still drop). It does not follow the writer's
 //! later commits; open it again for those.
 
 use std::fs::File;

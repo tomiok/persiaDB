@@ -9,8 +9,8 @@
 //! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1).
 //! 5. Ready: the first snapshot shows the segments and the replayed memtables.
 //!
-//! Nothing before step 4 writes, and replay writes only to memtables, except that the writer flushes a replayed
-//! memtable that reaches its size threshold or runs out of docids, as a write would (ROADMAP 6.6.5): one
+//! Nothing before step 4 writes but the container's tail repair, and replay writes only to memtables, except that
+//! the writer flushes a replayed memtable that reaches its size threshold or runs out of docids, as a write would (ROADMAP 6.6.5): one
 //! collection's unflushed record holds `wal_start` back for every collection (SPEC §8.2.1), so a backlog can exceed
 //! a memtable. Such a commit keeps `wal_start` at the chunk being replayed, since its later records are not in a
 //! memtable yet; a crash after it replays that chunk again, which is harmless (replay is idempotent, SPEC §8.2.1).

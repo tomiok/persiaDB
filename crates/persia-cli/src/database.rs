@@ -25,6 +25,10 @@ pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
         Tail::Torn { offset } => {
             format!("torn at offset {offset} (a read-write open truncates it)")
         }
+        Tail::Stale { offset } => {
+            format!("stale frames from offset {offset} on (a read-write open truncates them)")
+        }
+        other => format!("{other:?}"),
     };
     let rows = [
         ("seq", report.seq.to_string()),
