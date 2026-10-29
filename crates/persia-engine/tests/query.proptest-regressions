@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 0728933417de945f54c7fd82979b0a9e4b5dbb73466cd67e2d8afcac078faf07 # shrinks to text = "", max_terms = 1, max_clauses = 1, max_depth = 1, max_text_len = 0, all_fields = false
+cc 5cc3effa8f115fc0ea3083d467de53b414bc48eee00ab1f1b6e312909f7c530a # shrinks to text = "b -\"title:\"title: B\"title:\"b", max_terms = 2, max_clauses = 3, max_depth = 2, max_text_len = 28, all_fields = false
+cc a73d9fba36048fe8aae7aafb800f28c14dfa9f9e819b18addd431858fbd2f482 # shrinks to text = "\"𐵯[À\"\"title:", max_terms = 6, max_clauses = 7, max_depth = 3, max_text_len = 16, all_fields = true
+cc 9c9b2c9ca7e3334312b61e6cceca8cbc9724eb45f7e95ec405d545b5b20153b2 # shrinks to text = "\"title:-title:0-\"--title:0\"", max_terms = 3, max_clauses = 5, max_depth = 2, max_text_len = 27, all_fields = false

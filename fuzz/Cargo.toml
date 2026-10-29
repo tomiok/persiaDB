@@ -193,3 +193,17 @@ path = "fuzz_targets/tombstone_sidecar.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "query_text"
+path = "fuzz_targets/query_text.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filter_json"
+path = "fuzz_targets/filter_json.rs"
+test = false
+doc = false
+bench = false
