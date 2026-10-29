@@ -41,6 +41,7 @@ use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
+use persia_format::frame::FrameKind;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile, Error as ContainerError, Mode, Repair};
 use persia_storage::vfs::Vfs;
@@ -438,9 +439,21 @@ fn a_crash_at_any_write_of_a_merge_commit_gives_the_old_or_the_new_manifest() {
 
                 for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(point)] {
                     let ctx = format!("{ctx}, {loss:?}: {error}");
-                    let f = reopen(&file.crash(loss), &ctx, &mut quarantined);
+                    let crashed = file.crash(loss);
+                    let stray = stray_manifest(&crashed);
+                    let f = reopen(&crashed, &ctx, &mut quarantined);
                     if f.segments == pre {
-                        assert_eq!(f.seq, pre_seq, "{ctx}");
+                        // A cut merge commit's Manifest is retired by the reopen's own commit (ROADMAP 6.6.9).
+                        match stray {
+                            Some(stray) => {
+                                assert_eq!(
+                                    f.seq,
+                                    pre_seq + u64::from(stray),
+                                    "{ctx}, stray {stray}"
+                                );
+                            }
+                            None => assert!(f.seq == pre_seq || f.seq == pre_seq + 1, "{ctx}"),
+                        }
                         assert!(
                             prefixes.contains(&f.docs),
                             "{ctx}: before the merge, observed {:?}",
@@ -740,4 +753,17 @@ proptest! {
     ) {
         run_case(threads, &ops)?;
     }
+}
+
+/// Whether `file` holds a valid Manifest frame after the committed `log_end` (a cut commit's, ROADMAP 6.6.9); `None`
+/// if a read-only open cannot tell (a corrupt tail, which the reopen quarantines).
+fn stray_manifest(file: &SimFile) -> Option<bool> {
+    let container = Container::open_on(file.clone(), Mode::ReadOnly).ok()?;
+    let log_end = container.superblock().log_end;
+    Some(
+        container
+            .frames()
+            .iter()
+            .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end),
+    )
 }
