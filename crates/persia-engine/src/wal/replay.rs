@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use persia_format::frame::FrameKind;
 use persia_storage::container::{self, Container, ContainerFile};
 
-use super::chunk::{MAX_CHUNK_LEN, WalCorruption, WalError, WalOp, decode_chunk};
+use super::chunk::{MAX_CHUNK_LEN, WalCorruption, WalError, WalOp, WalRecord, decode_chunk};
 use crate::document::{DecodeError, Document};
 use crate::memtable::{Memtable, MemtableError};
 
@@ -123,36 +123,7 @@ impl<'m> Replay<'m> {
                     collection: collection.to_owned(),
                 }
             })?;
-            let at_record = |error| ReplayError::Memtable {
-                chunk,
-                offset,
-                error,
-            };
-            match record.op() {
-                WalOp::Put => {
-                    let doc =
-                        Document::decode(record.payload(), memtable.schema()).map_err(|error| {
-                            ReplayError::Document {
-                                chunk,
-                                offset,
-                                error,
-                            }
-                        })?;
-                    memtable.put(&doc).map_err(at_record)?;
-                }
-                WalOp::Delete => {
-                    // Checked by the decoder; should that check ever regress, the record is corrupt, not a delete of
-                    // the empty id.
-                    let id = record.deleted_id().ok_or(ReplayError::Chunk {
-                        chunk,
-                        error: WalError::Corrupt {
-                            offset,
-                            reason: WalCorruption::Id,
-                        },
-                    })?;
-                    memtable.delete(id).map_err(at_record)?;
-                }
-            }
+            apply(memtable, chunk, offset, &record)?;
             self.summary.records = self.summary.records.saturating_add(1);
             self.summary
                 .pending
@@ -185,4 +156,44 @@ pub fn replay_container<F: ContainerFile>(
         replay.chunk(frame.offset, &chunk.payload)?;
     }
     Ok(replay.finish())
+}
+
+/// Applies one record, at `offset` in the chunk at position `chunk`, to its collection's `memtable`: a put as an
+/// upsert, a delete as a delete (SPEC §8.2.1). On an error the memtable is as it was.
+pub(crate) fn apply(
+    memtable: &mut Memtable,
+    chunk: u64,
+    offset: u64,
+    record: &WalRecord<'_>,
+) -> Result<(), ReplayError> {
+    let at_record = |error| ReplayError::Memtable {
+        chunk,
+        offset,
+        error,
+    };
+    match record.op() {
+        WalOp::Put => {
+            let doc = Document::decode(record.payload(), memtable.schema()).map_err(|error| {
+                ReplayError::Document {
+                    chunk,
+                    offset,
+                    error,
+                }
+            })?;
+            memtable.put(&doc).map_err(at_record)?;
+        }
+        WalOp::Delete => {
+            // Checked by the decoder; should that check ever regress, the record is corrupt, not a delete of the
+            // empty id.
+            let id = record.deleted_id().ok_or(ReplayError::Chunk {
+                chunk,
+                error: WalError::Corrupt {
+                    offset,
+                    reason: WalCorruption::Id,
+                },
+            })?;
+            memtable.delete(id).map_err(at_record)?;
+        }
+    }
+    Ok(())
 }

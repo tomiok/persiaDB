@@ -131,6 +131,10 @@ pub struct Recovery {
     pub truncated_from: Option<u64>,
     /// Where a read-write open copied the bytes after a corrupt scan before truncating them (ADR-0014), if it did.
     pub quarantined: Option<PathBuf>,
+    /// After a scan that ended in corruption: whether what follows the stop is only zeros and frames with a lower
+    /// `frame_seq` (ADR-0013), which can never be acknowledged data and which a read-write open truncates like a torn
+    /// tail (SPEC §4.4). Checked by read-only opens too (reading only), so a verification agrees with a writer.
+    pub stale_tail: bool,
 }
 
 /// An open container file (SPEC §4).
@@ -279,6 +283,7 @@ impl<F: ContainerFile> Container<F> {
                 },
                 truncated_from: None,
                 quarantined: None,
+                stale_tail: false,
             },
             location: None,
             mapped: None,
@@ -349,6 +354,7 @@ impl<F: ContainerFile> Container<F> {
                 scan_end: ScanEnd::Clean { offset: sb.log_end },
                 truncated_from: None,
                 quarantined: None,
+                stale_tail: false,
             },
             location: None,
             mapped: None,
@@ -411,6 +417,21 @@ impl<F: ContainerFile> Container<F> {
             ScanEnd::Corrupt { offset, error } => {
                 if self.mode == Mode::ReadWrite {
                     self.repair_tail(*offset, error, file_len, policy)?;
+                } else {
+                    // The scan already recorded the stop. A writer may truncate this tail before the classify
+                    // read (SPEC §4.4, §4.7): the bytes are gone, and that short read is not a failure of the
+                    // open. Not knowing whether they were stale leaves `stale_tail` clear. Any other I/O error
+                    // still fails the open.
+                    self.recovery.stale_tail =
+                        match tail::classify(&self.file, *offset, file_len, self.next_frame_seq) {
+                            Ok(contents) => contents == TailContents::Discardable,
+                            Err(Error::Io { source, .. })
+                                if source.kind() == io::ErrorKind::UnexpectedEof =>
+                            {
+                                false
+                            }
+                            Err(other) => return Err(other),
+                        };
                 }
             }
             ScanEnd::Unsupported { error, .. } => return Err(Error::Format(error.clone())),
@@ -442,7 +463,7 @@ impl<F: ContainerFile> Container<F> {
         // `next_frame_seq` is what the scan expected at `offset`.
         let contents = tail::classify(&self.file, offset, file_len, self.next_frame_seq)?;
         match (contents, policy.quarantine, policy.repair) {
-            (TailContents::Discardable, ..) => {}
+            (TailContents::Discardable, ..) => self.recovery.stale_tail = true,
             (TailContents::Garbage, Some((vfs, path)), _)
             | (
                 TailContents::MayBeAcknowledged(_) | TailContents::Undecided,
@@ -927,6 +948,7 @@ impl<F: ContainerFile> Container<F> {
                 scan_end: ScanEnd::Clean { offset: end },
                 truncated_from: None,
                 quarantined: None,
+                stale_tail: false,
             },
             location: None,
             mapped: None,

@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: the open sequence and read-only opens (ROADMAP 6.6, SPEC §8.4, §8.6, ADR-0033). A read-write open
+  now flushes a replayed memtable that reaches its size threshold or runs out of docids, instead of failing the open.
+  `db::ReadOnlyDatabase` opens a database beside its writer (no lock, no writes) at the snapshot it finds, and
+  `verify` checks it whole: every segment's bytes, one live copy per id, the bytes after the last commit
+  (`VerifyReport`, `Tail`; `DatabaseError::LiveTwice`, `CorruptTail`). `persia-storage`: `Recovery::stale_tail`.
+- `persia-cli`: `persia verify <path>` checks a database read-only, also while its writer has it open.
 - `persia-engine`: background merges (ROADMAP 6.5.3–6.5.5, SPEC §8.5, ADR-0032). `Database::merge_step`,
   `finish_merges`, `cancel_merges` and `merges_running` run the merge policy over every collection on a pool of
   `MergeOptions::threads` workers (default 1; 0 merges inline), which verify each merged segment before the writer
@@ -286,6 +292,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
+- `persia-engine`: a read-only open (and `persia verify`) beside a live writer no longer fails with
+  `ReplayError::UnknownCollection` when the writer creates a collection and logs to it while the reader's tail is
+  scanned. Replay stops at the first Manifest frame after the loaded `log_end` whose `seq` is newer, so the snapshot
+  stays the one the open loaded (SPEC §8.6, ADR-0033).
+- `persia-storage`: a read-only open whose corrupt-tail classify races a writer's truncation no longer fails with an
+  I/O error; `stale_tail` stays clear.
+- `persia-engine`: `ReadOnlyDatabase::verify` on a container whose read-write open already quarantined and truncated
+  a garbage tail reports `Tail::Clean` instead of `CorruptTail`.
 - `persia-storage`: a read-only `Container::open` beside a writer in another process no longer fails spuriously: with an
   I/O error when the writer's recovery truncated a torn tail under its scan (and perhaps appended again), or with a
   false "superblock does not fit the container" when the writer committed between its look at the file length and its

@@ -54,6 +54,7 @@ pub use chunk::{
     ChunkFull, ChunkRecords, MAGIC, MAX_CHUNK_LEN, RecordError, VERSION, WalCorruption, WalError,
     WalOp, WalRecord, decode_chunk, encode_chunk,
 };
+pub(crate) use replay::apply;
 pub use replay::{Replay, ReplayError, ReplaySummary, replay_container};
 pub use writer::{
     DEFAULT_CHUNK_TARGET, Durability, LogHoldsChunks, WalLog, WalMark, WalWriteError, WalWriter,

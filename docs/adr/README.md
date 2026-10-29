@@ -55,3 +55,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0030](./0030-tombstone-sidecars.md) | Tombstone sidecars, and upserts and deletes through the commit | proposed |
 | [0031](./0031-tiered-merge-policy-and-merger.md) | Tiered merge policy, and a merger that fills a segment builder | proposed |
 | [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |
+| [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |

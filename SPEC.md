@@ -1292,9 +1292,9 @@ as a delete (§8.3). The chunks are whole frames that passed validation, so a to
 invalid chunk or record stops it with corruption, at the first invalid byte, and the open fails. Replay is
 idempotent: by id, the state after a put or delete depends only on the last operation on that id, so applying a
 suffix of the log again, to a fresh memtable or on top of segments that already hold some of it, gives the same
-documents. Replay writes only to memtables: a memtable's version of an id, live or deleted, hides every older
+documents. Replay writes to memtables, and a memtable's version of an id, live or deleted, hides every older
 segment's version of it (§8.3), so a segment copy of a replayed id is never visible, and the commit after replay
-tombstones it (ROADMAP 6.4.3).
+tombstones it (ROADMAP 6.4.3). A writer's replay also flushes, as writes do (§8.6, ROADMAP 6.6.5).
 
 ### 8.3 Upserts and deletes
 Upsert = insert into the memtable + tombstones, at the next commit, for every live copy of the id in the committed
@@ -1344,6 +1344,7 @@ are never consulted, so a deleted id stays deleted whatever older segments hold.
 
 ### 8.4 Concurrency
 - **Single writer** per database/shard (file lock locally; lease remotely, SPEC §11.3). Opening a second writer fails fast.
+- Readers in other processes open the database read-only (§8.6): no lock, a fixed snapshot of what the open found.
 - Any number of readers; readers see a consistent manifest snapshot (MVCC by manifest `seq`).
 - The memtable has one writer too. A reader's memtable view holds exactly the operations applied before it was
   taken (docids and operations are numbered, and a replaced or deleted document records the operation that ended it),
@@ -1409,6 +1410,50 @@ On open: pick superblock → load manifest → replay WAL frames from `wal_start
 so is a break in their `frame_seq` run or a last frame whose `frame_seq` is not `next_frame_seq - 1` (ADR-0013). Only
 the scan from `log_end` (§4.4) ends at a torn tail that is truncated, so mapped bytes never change (§4.7).
 Recovery MUST be idempotent.
+
+The open sequence (ROADMAP 6.6.1, ADR-0033), the same for a writer and a read-only open:
+1. The container's recovery (§4.5.1): header, active slot, the frames of `wal_start..log_end`, the scan from
+   `log_end`.
+2. The committed manifest (none for `seq` 0): its frame, decoded and checked against the slot and the local layout
+   (§8.7.1).
+3. Each collection's segments and tombstone sidecars, opened through the container and checked against their
+   manifest entries (§8.3, §8.7.1), and an empty memtable per collection.
+4. The `WalChunk` frames from `wal_start` on (those after `log_end` included), in log order, each record applied to
+   its collection's memtable (§8.2.1). Replay stops at the first Manifest frame after the loaded `log_end` whose
+   `seq` is greater than the loaded manifest's, and does not apply the frames after it (below).
+5. Ready: the first snapshot shows the segments and the replayed memtables. Replayed operations count as written at
+   the open (§8.2).
+
+Nothing before step 4 writes but the container's tail repair (§4.4); a read-only open writes nothing. One
+collection's unflushed record holds `wal_start` back for every collection (§8.2.1), so a backlog can be larger than a memtable: a **writer's replay flushes** (ROADMAP 6.6.5). Before applying a
+record it commits if the record's memtable reached its size threshold (as a write does, §8.2 step 3), and when a
+memtable has no room left for the record (no docid, operation or id left: `SegmentError::Full` or `TooLarge`, which
+an empty memtable would not report) it commits and applies the record again. Such a commit flushes every memtable
+(§8.2) and is a normal commit (§4.5), except that its `wal_start` is at most the start of the chunk being replayed:
+the records from there on may not be in a memtable yet. The records of that chunk before the flush are then replayed
+again by the next open, which is harmless (§8.2.1). Records replayed after the last such commit hold `wal_start` back
+until a later flush covers them, like records written after the open. An open that fails or crashes during these
+commits leaves a state from which the next open reaches the same documents.
+
+A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
+write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
+threshold, so memory grows with each collection's unflushed backlog until the memtable's docid limit (about 2^31
+operations) fails the open. A read-write open flushes at the threshold (above) and so bounds that memory. It
+shows the snapshot it found and does not follow later commits; it is opened again for those. Because it holds no
+lock, a writer may commit while the tail is scanned (§4.5.1). The scan can then include that commit's Manifest
+frame, after the loaded `log_end`, and WAL frames logged after it — including records of a collection the loaded
+manifest does not have. Replay stops at the first such Manifest whose `seq` is greater than the loaded manifest's,
+so the snapshot stays the one the open loaded: the committed manifest, plus WAL from `wal_start` up to that
+Manifest. WAL between `log_end` and that Manifest was logged before the newer commit and belongs to the loaded
+snapshot. Applying what follows the Manifest would mix two commits, or fail the open on a collection the loaded
+manifest lacks. A read-write open holds the lock, so nothing commits during its scan; the same stop applies to a
+Manifest a crash left after `log_end` (a commit that did not finish, §4.5).
+
+**Verification** (ROADMAP 6.6.3, `persia verify`) is a read-only open plus what no open or lookup checks: every live
+segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),
+and that the bytes after `log_end` are clean, a torn tail, or only zeros and stale frames (a lower `frame_seq`,
+which a read-write open truncates too; a read-only open classifies them by reading, §4.4); any other corruption there,
+which a read-write open refuses or quarantines, fails it. It writes nothing.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's

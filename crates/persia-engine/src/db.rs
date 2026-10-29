@@ -8,7 +8,8 @@
 //!
 //! Opening a database recovers the container, checks the committed manifest against the superblock (ROADMAP
 //! 6.3.7), opens the segments through [`ContainerObjects`] (ROADMAP 6.3.6) and replays the WAL into fresh
-//! memtables (SPEC §8.6).
+//! memtables, flushing a memtable that fills up (SPEC §8.6, ROADMAP 6.6.1, 6.6.5). [`ReadOnlyDatabase`] opens a
+//! database beside its writer and verifies it (ROADMAP 6.6.2, 6.6.3).
 //!
 //! ```
 //! use persia_engine::db::{Database, DatabaseOptions};
@@ -45,7 +46,10 @@ mod merging;
 mod objects;
 mod obsolete;
 mod policy;
+mod read_only;
+mod recovery;
 mod snapshot;
+mod verify;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -58,8 +62,6 @@ use persia_analysis::AnalyzerRegistry;
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
 use persia_format::source::ByteSource;
-use persia_format::superblock::Superblock;
-use persia_storage::Storage;
 use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
@@ -69,12 +71,14 @@ pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
+pub use read_only::ReadOnlyDatabase;
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
+pub use verify::{Tail, VerifyReport};
 
 use crate::document::Document;
 use crate::manifest::{
-    ApplyError, CollectionChange, CollectionDiff, Layout, LayoutError, Location, MAX_MANIFEST_LEN,
-    Manifest, ManifestDiff, ManifestEncodeError, ManifestError, SegmentEntry, SegmentId,
+    ApplyError, CollectionChange, CollectionDiff, LayoutError, Location, Manifest, ManifestDiff,
+    ManifestEncodeError, ManifestError, SegmentEntry, SegmentId,
 };
 use crate::memtable::{Logged, Memtable, MemtableError};
 use crate::merge::MergeOptions;
@@ -84,7 +88,7 @@ use crate::tombstone::{SidecarError, TombstoneSidecar};
 use crate::view::{SearchView, SegmentView};
 use crate::wal::{
     DEFAULT_CHUNK_TARGET, Durability, RecordError, ReplayError, WalMark, WalRecord, WalWriteError,
-    WalWriter, replay_container,
+    WalWriter,
 };
 
 /// Why a database operation failed.
@@ -118,7 +122,8 @@ pub enum DatabaseError {
         /// The slot's value.
         superblock: u64,
     },
-    /// A committed segment does not open, or is not the segment its manifest entry describes.
+    /// A committed segment does not open, or is not the segment its manifest entry describes, or fails
+    /// [`Segment::verify`] ([`ReadOnlyDatabase::verify`]).
     #[error("collection {collection:?}, segment {id}: {source}")]
     OpenSegment {
         /// The collection.
@@ -172,6 +177,22 @@ pub enum DatabaseError {
         id: SegmentId,
         /// `segment_id`, `version`, `doc_count` or `deleted`.
         field: &'static str,
+    },
+    /// A document id is live in two committed segments ([`ReadOnlyDatabase::verify`]): a commit leaves at most one
+    /// live copy of each id (SPEC §8.3), so this is corruption.
+    #[error("collection {collection:?}: the id {id:?} is live in two segments")]
+    LiveTwice {
+        /// The collection.
+        collection: String,
+        /// The id.
+        id: String,
+    },
+    /// The container holds corrupt bytes after its committed `log_end`, from `offset` on, which a read-only open
+    /// read up to and a read-write open truncates or quarantines (SPEC §4.4; [`ReadOnlyDatabase::verify`]).
+    #[error("the container is corrupt after its last commit, at offset {offset}")]
+    CorruptTail {
+        /// Where the scan from `log_end` stopped.
+        offset: u64,
     },
     /// Building a segment failed: nothing was written.
     #[error(transparent)]
@@ -239,7 +260,9 @@ impl DatabaseError {
             Self::Layout(_)
             | Self::SlotMismatch { .. }
             | Self::SegmentMismatch { .. }
-            | Self::SidecarMismatch { .. } => true,
+            | Self::SidecarMismatch { .. }
+            | Self::LiveTwice { .. }
+            | Self::CorruptTail { .. } => true,
             _ => false,
         }
     }
@@ -262,6 +285,9 @@ pub struct DatabaseOptions {
     pub wal_chunk_target: usize,
     /// How segments are merged in the background (SPEC §8.5).
     pub merge: MergeOptions,
+    /// Caps each memtable's docids, so tests reach the limit.
+    #[cfg(test)]
+    pub(crate) memtable_max_docs: Option<u32>,
 }
 
 impl Default for DatabaseOptions {
@@ -274,6 +300,8 @@ impl Default for DatabaseOptions {
             write_options: WriteOptions::default(),
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
             merge: MergeOptions::default(),
+            #[cfg(test)]
+            memtable_max_docs: None,
         }
     }
 }
@@ -340,6 +368,9 @@ pub struct Database<F = File> {
     published: Arc<ArcSwap<Snapshot>>,
     options: DatabaseOptions,
     poisoned: bool,
+    /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
+    /// the records from there on may not be in a memtable yet (ROADMAP 6.6.5).
+    replaying: Option<u64>,
 }
 
 impl Database<File> {
@@ -413,56 +444,6 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(db)
     }
 
-    fn recover(container: Container<F>, options: DatabaseOptions) -> Result<Self, DatabaseError> {
-        let sb = *container.superblock();
-        let manifest = if sb.seq == 0 {
-            // Created, but the first commit did not complete.
-            Manifest::empty()
-        } else {
-            let frame = container.read_frame_source(sb.manifest_off, MAX_MANIFEST_LEN)?;
-            let manifest = Manifest::decode(&frame.payload)?;
-            check_slot(&manifest, &sb)?;
-            manifest
-        };
-        manifest.check_layout(Layout::Container)?;
-        let mut collections = BTreeMap::new();
-        let mut memtables = BTreeMap::new();
-        {
-            let objects = ContainerObjects::new(&container, &manifest);
-            for entry in manifest.collections() {
-                let name = entry.name();
-                let schema = Arc::new(entry.schema().clone());
-                let mut segments = Vec::with_capacity(entry.segments().len());
-                for segment in entry.segments() {
-                    segments.push(open_segment(&objects, name, segment, &schema)?);
-                }
-                memtables.insert(name.to_owned(), Memtable::new(&schema, &options.registry)?);
-                collections.insert(name.to_owned(), (schema, segments));
-            }
-        }
-        let summary = replay_container(&container, &mut memtables)?;
-        let now = options.clock.now();
-        let mut states = BTreeMap::new();
-        for (name, (schema, segments)) in collections {
-            let memtable = match memtables.remove(&name) {
-                Some(m) => m,
-                None => Memtable::new(&schema, &options.registry)?,
-            };
-            let last_write = (!memtable.is_empty()).then_some(now);
-            let state = Collection {
-                schema,
-                segments,
-                memtable,
-                first_write: last_write,
-                last_write,
-            };
-            states.insert(name, state);
-        }
-        let wal = WalWriter::resume(container, summary.pending)
-            .with_chunk_target(options.wal_chunk_target);
-        Ok(Self::assemble(wal, manifest, states, options))
-    }
-
     fn assemble(
         wal: WalWriter<Container<F>>,
         manifest: Manifest,
@@ -479,6 +460,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             merges: merging::Merges::new(options.merge.threads),
             options,
             poisoned: false,
+            replaying: None,
         }
     }
 
@@ -509,7 +491,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         }
     }
 
-    /// The committed objects of the container, as [`Storage`] (ROADMAP 6.3.6).
+    /// The committed objects of the container, as [`Storage`](persia_storage::Storage) (ROADMAP 6.3.6).
     pub fn objects(&self) -> ContainerObjects<'_, F> {
         ContainerObjects::new(self.wal.log(), &self.manifest)
     }
@@ -534,7 +516,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         if self.collections.contains_key(&name) {
             return Err(DatabaseError::CollectionExists { name });
         }
-        let memtable = Memtable::new(&schema, &self.options.registry)?;
+        let memtable = new_memtable(&schema, &self.options)?;
         let mut diff = ManifestDiff::default();
         let create = CollectionDiff::Create {
             schema: schema.clone(),
@@ -705,7 +687,9 @@ impl<F: ContainerFile + Sync> Database<F> {
     ///
     /// Every flush commit flushes every collection with operations, whatever triggered it (ADR-0029): `wal_start`
     /// then reaches the end of the log, so no record already in a segment is replayed into a memtable and flushed a
-    /// second time after a crash.
+    /// second time after a crash. A commit made while replay is still applying a chunk is the exception (SPEC
+    /// §8.6, ROADMAP 6.6.5): `wal_start` stops at that chunk, because the records after the ones already applied
+    /// are not in a memtable yet. The next open replays the chunk again, which is harmless (replay is idempotent).
     ///
     /// # Errors
     /// Found while the commit is planned, before anything is written (the database is unchanged and usable):
@@ -741,7 +725,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 mark: self.wal.mark(),
                 segment: segment.map(|s| (id, s)),
                 sidecars: plan_sidecars(name, c)?,
-                memtable: Memtable::new(&c.schema, registry)?,
+                memtable: new_memtable(&c.schema, &self.options)?,
             });
         }
         if planned.is_empty() {
@@ -892,7 +876,11 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// and syncs the WAL records still buffered, takes `wal_start`, syncs, appends the Manifest frame and writes the
     /// superblock slot. Returns the committed manifest; the caller publishes it.
     fn commit_diff(&mut self, mut diff: ManifestDiff) -> Result<Manifest, DatabaseError> {
-        let wal_start = self.wal.commit_point()?.max(self.manifest.wal_start());
+        let mut wal_start = self.wal.commit_point()?;
+        if let Some(chunk) = self.replaying {
+            wal_start = wal_start.min(chunk);
+        }
+        let wal_start = wal_start.max(self.manifest.wal_start());
         self.wal.log_mut().sync()?;
         diff.wal_start = Some(wal_start);
         let next = self.manifest.apply(&diff)?;
@@ -957,6 +945,20 @@ fn change_of<'d>(
             what: "a flush of a collection the commit creates or drops",
         }),
     }
+}
+
+/// An empty memtable for `schema`, with the analyzers of `options`.
+fn new_memtable(
+    schema: &CollectionSchema,
+    options: &DatabaseOptions,
+) -> Result<Memtable, MemtableError> {
+    let memtable = Memtable::new(schema, &options.registry)?;
+    #[cfg(test)]
+    let memtable = match options.memtable_max_docs {
+        Some(max) => memtable.with_max_docs(max),
+        None => memtable,
+    };
+    Ok(memtable)
 }
 
 fn no_such(name: &str) -> DatabaseError {
@@ -1042,93 +1044,6 @@ fn new_segment_id(
             return id;
         }
     }
-}
-
-/// The manifest's `seq`, `fence_token` and `wal_start` equal those of the slot that commits it (SPEC §8.7,
-/// ROADMAP 6.3.7).
-fn check_slot(manifest: &Manifest, sb: &Superblock) -> Result<(), DatabaseError> {
-    let fields = [
-        ("seq", manifest.seq(), sb.seq),
-        ("fence_token", manifest.fence_token(), sb.fence_token),
-        ("wal_start", manifest.wal_start(), sb.wal_start),
-    ];
-    for (field, manifest, superblock) in fields {
-        if manifest != superblock {
-            return Err(DatabaseError::SlotMismatch {
-                field,
-                manifest,
-                superblock,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Opens a committed segment and its tombstone sidecar through the container's objects, which check their frames
-/// (ROADMAP 6.3.6, 6.3.7), and checks both against the manifest entry.
-fn open_segment<F: ContainerFile + Sync>(
-    objects: &ContainerObjects<'_, F>,
-    collection: &str,
-    entry: &SegmentEntry,
-    schema: &CollectionSchema,
-) -> Result<LiveSegment, DatabaseError> {
-    let key = persia_storage::Key::new(objects::segment_key(collection, entry))
-        .map_err(persia_storage::Error::from)?;
-    let source = objects.get_range(&key, 0..entry.size)?;
-    let segment = open_source(source, collection, entry, schema)?;
-    let deleted = match entry.tombstones {
-        None => None,
-        Some(t) => {
-            let key = objects::sidecar_key(collection, entry.id, t.version);
-            let key = persia_storage::Key::new(key).map_err(persia_storage::Error::from)?;
-            let sidecar = read_sidecar(&objects.get(&key)?, collection, entry)?;
-            let tombstones = segment
-                .tombstones(sidecar.into_deleted())
-                .map_err(|source| DatabaseError::OpenSegment {
-                    collection: collection.to_owned(),
-                    id: entry.id,
-                    source,
-                })?;
-            Some((t.version, Arc::new(tombstones)))
-        }
-    };
-    Ok(LiveSegment { segment, deleted })
-}
-
-/// Decodes the tombstone sidecar of the segment `entry` describes and checks it against the entry (SPEC §8.3).
-fn read_sidecar(
-    bytes: &[u8],
-    collection: &str,
-    entry: &SegmentEntry,
-) -> Result<TombstoneSidecar, DatabaseError> {
-    let sidecar = TombstoneSidecar::decode(bytes).map_err(|source| DatabaseError::Sidecar {
-        collection: collection.to_owned(),
-        id: entry.id,
-        source,
-    })?;
-    let mismatch = |field| DatabaseError::SidecarMismatch {
-        collection: collection.to_owned(),
-        id: entry.id,
-        field,
-    };
-    let Some(t) = entry.tombstones else {
-        return Err(DatabaseError::Internal {
-            what: "a sidecar read for a segment without one",
-        });
-    };
-    if sidecar.segment_id() != entry.id {
-        return Err(mismatch("segment_id"));
-    }
-    if sidecar.version() != t.version {
-        return Err(mismatch("version"));
-    }
-    if sidecar.doc_count() != entry.doc_count {
-        return Err(mismatch("doc_count"));
-    }
-    if sidecar.deleted_count() != t.deleted {
-        return Err(mismatch("deleted"));
-    }
-    Ok(sidecar)
 }
 
 /// Opens the bytes of the segment `entry` describes and checks its footer against the entry.
