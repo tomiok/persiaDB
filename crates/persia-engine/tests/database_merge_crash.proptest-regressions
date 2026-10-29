@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 802b1b5b3bb2c67f8111c82cee7cee096db5142212ff3c132f2b8008f767ada6 # shrinks to threads = 0, ops = [Put(1, 0, 0, false), Commit, Put(1, 0, 0, false), Commit, Put(0, 0, 0, false)]
+cc 36c53f293bc14315fbab0c3c72de309262fe39a641fb6742421c07bccc3e2829 # shrinks to threads = 0, ops = [Put(0, 0, 0, false), Commit, Put(0, 0, 0, false), Commit, Put(0, 0, 0, false), MergeStep, MergeStep]
+cc 93ab548337c58b56dd21f81c847d9c09d85703ab05e88eda9783b3fd4bf72371 # shrinks to threads = 1, ops = [Put(0, 0, 0, false), Commit, Put(0, 2, 0, false), Commit, MergeStep, Put(0, 2, 0, false), Commit]

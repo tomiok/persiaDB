@@ -170,7 +170,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         outcomes
     }
 
-    /// Merges in flight.
+    /// Merges submitted and not yet committed or discarded: running, or finished and waiting for the next step.
     pub fn merges_running(&self) -> usize {
         self.merges.workers.in_flight()
     }
@@ -305,18 +305,20 @@ impl<F: ContainerFile + Sync> Database<F> {
         })
     }
 
-    /// Whether `job`'s collection still has its schema and every input, each at the sidecar version the plan read:
-    /// the merge diff then applies (SPEC §8.7.2). Checked before anything is written.
+    /// Whether `job`'s collection still has its schema and every input, each at the sidecar version the plan read,
+    /// and the manifest accepts the diff that removes them (SPEC §8.7.2). Checked before anything is written, so a
+    /// merge diff that would not apply is discarded instead of poisoning the database after its frame is appended.
     fn still_applies(&self, job: &MergeJob) -> bool {
         let Some(c) = self.collections.get(&job.collection) else {
             return false;
         };
-        Arc::ptr_eq(&c.schema, &job.schema)
+        let open = Arc::ptr_eq(&c.schema, &job.schema)
             && job.plan.inputs.iter().all(|input| {
                 find(&c.segments, input.id).is_some_and(|live| {
                     live.deleted.as_ref().map_or(0, |(v, _)| *v) == input.sidecar
                 })
-            })
+            });
+        open && self.manifest.apply(&removal(job)).is_ok()
     }
 
     /// The merge commit (SPEC §4.5, §8.7.2): the merged segment's frame, then the manifest that removes the inputs
@@ -326,17 +328,14 @@ impl<F: ContainerFile + Sync> Database<F> {
         job: &MergeJob,
         merged: Option<Merged>,
     ) -> Result<(Option<SegmentId>, u64), DatabaseError> {
-        let mut change = CollectionChange::default();
-        for input in &job.plan.inputs {
-            change.removed.insert(input.id, input.sidecar);
-        }
+        let mut diff = removal(job);
         let mut added = None;
         if let Some(Merged { bytes, doc_count }) = merged {
             let frame = self
                 .wal
                 .log_mut()
                 .append(FrameKind::Segment, &bytes, Compression::None)?;
-            change.added.push(SegmentEntry {
+            let entry = SegmentEntry {
                 id: job.segment_id,
                 doc_count,
                 size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
@@ -345,12 +344,13 @@ impl<F: ContainerFile + Sync> Database<F> {
                     len: frame.len,
                 },
                 tombstones: None,
-            });
+            };
+            if let Some(CollectionDiff::Change(change)) = diff.collections.get_mut(&job.collection)
+            {
+                change.added.push(entry);
+            }
             added = Some(bytes);
         }
-        let mut diff = ManifestDiff::default();
-        diff.collections
-            .insert(job.collection.clone(), CollectionDiff::Change(change));
         let next = self.commit_diff(diff)?;
 
         // Durable: step 4.
@@ -403,12 +403,8 @@ impl<F: ContainerFile + Sync> Database<F> {
                     .collection(&job.collection)
                     .and_then(|e| e.segment(job.segment_id))
                     .ok_or(internal("a committed segment is not in its manifest"))?;
-                let segment = open_source(
-                    ByteSource::new(bytes.into()),
-                    &job.collection,
-                    entry,
-                    &c.schema,
-                )?;
+                let segment =
+                    open_source(ByteSource::new(bytes), &job.collection, entry, &c.schema)?;
                 c.segments.push(LiveSegment {
                     segment,
                     deleted: None,
@@ -432,4 +428,16 @@ fn find(segments: &[LiveSegment], id: SegmentId) -> Option<&LiveSegment> {
 
 fn internal(what: &'static str) -> DatabaseError {
     DatabaseError::Internal { what }
+}
+
+/// The diff that removes `job`'s inputs at the sidecar versions its plan read; the merge commit adds its segment.
+fn removal(job: &MergeJob) -> ManifestDiff {
+    let mut change = CollectionChange::default();
+    for input in &job.plan.inputs {
+        change.removed.insert(input.id, input.sidecar);
+    }
+    let mut diff = ManifestDiff::default();
+    diff.collections
+        .insert(job.collection.clone(), CollectionDiff::Change(change));
+    diff
 }

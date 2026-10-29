@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-10-28
-- Related: SPEC §4.5, §4.6, §5.5, §8.3, §8.5, §8.7.2, §14; ROADMAP 6.5.3–6.5.5; ADR-0029, ADR-0031
+- Related: SPEC §4.5, §4.6, §5.5, §7.2, §8.3, §8.5, §8.7.2, §14; ROADMAP 6.5.3–6.5.5; ADR-0029 (amended), ADR-0031
 
 ## Context
 
@@ -34,7 +34,9 @@ planned against one manifest may finish after commits that deleted from its inpu
    frame, WAL commit point, sync, manifest, slot. Re-applying the newer deletions to the merged segment instead
    would save the merge, but needs a docid map kept with the result; it can come later without a format change.
 5. **Cancellation** is a flag per job, checked by `merge::merge_until` before each input and each field, and between
-   writing and verifying. Cancelled and conflicting merges are not failures.
+   writing and verifying. Writing, opening and verifying the merged segment are not interrupted, so a cancel (and
+   dropping the database) waits at most for those stages of the merges in flight. Cancelled and conflicting merges
+   are not failures.
 6. **A failed merge is not retried** until the database is reopened (its inputs are left out of planning): damaged
    input fails the same way every time, and retrying would burn a thread forever. The failure is reported as
    `MergeOutcome::Failed`; the database stays usable.
@@ -69,3 +71,8 @@ planned against one manifest may finish after commits that deleted from its inpu
   one writer and makes the commit order the writer's.
 - **An epoch per snapshot** (SPEC §8.5 named both): see item 7.
 - **Retrying failed merges with backoff**: damage does not go away; a reopen (after repair) retries.
+- **The facade owns the pool** (ADR-0029's rule that the engine starts no thread): `MergeJob::run` is pure, so
+  `persia` could run it. Rejected because every embedding of the engine (the facade, the server, the CLI's
+  `compact`, tests) would then reimplement the same pool, bound and cancellation, and SPEC §8.5 asks for background
+  merges of the engine. ADR-0029 is amended: the engine runs merge workers, which only read immutable segments; every
+  commit still happens on the caller's thread.

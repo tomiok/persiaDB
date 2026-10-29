@@ -751,7 +751,7 @@ impl<F: ContainerFile + Sync> Database<F> {
 
     /// Commits if the [`CommitPolicy`] finds any memtable due at the clock's `now` (ROADMAP 6.3.4), flushing every
     /// memtable with operations ([`Database::commit`]); returns the new `seq` if it committed. Call it periodically:
-    /// the engine runs no thread of its own.
+    /// no thread commits on its own (merge workers only merge, ADR-0032).
     ///
     /// # Errors
     /// As [`Database::commit`].

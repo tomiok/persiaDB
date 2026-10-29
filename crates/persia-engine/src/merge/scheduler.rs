@@ -12,6 +12,7 @@ use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
+use bytes::Bytes;
 use persia_analysis::AnalyzerRegistry;
 use persia_format::ByteSource;
 
@@ -70,7 +71,7 @@ pub(crate) struct MergeJob {
 /// A merged segment, written and verified.
 #[derive(Debug)]
 pub(crate) struct Merged {
-    pub bytes: Vec<u8>,
+    pub bytes: Bytes,
     pub doc_count: u32,
 }
 
@@ -108,13 +109,17 @@ impl MergeJob {
         if self.cancelled() {
             return Err(MergeError::Cancelled);
         }
-        let bytes = merged.write(self.segment_id.get(), self.created_at, self.write_options)?;
+        let bytes = Bytes::from(merged.write(
+            self.segment_id.get(),
+            self.created_at,
+            self.write_options,
+        )?);
         if self.cancelled() {
             return Err(MergeError::Cancelled);
         }
         let verify = |source| MergeError::Verify { source };
         let segment =
-            Segment::open(ByteSource::new(bytes.clone().into()), &self.schema).map_err(verify)?;
+            Segment::open(ByteSource::new(bytes.clone()), &self.schema).map_err(verify)?;
         segment.verify().map_err(verify)?;
         Ok(Some(Merged {
             bytes,
@@ -138,7 +143,8 @@ pub(crate) struct Workers {
     threads: usize,
     jobs: Option<Sender<MergeJob>>,
     done_tx: Sender<Finished>,
-    done: Receiver<Finished>,
+    /// In a `Mutex` only to keep the database `Sync`: the writer reaches it through `&mut self` and never locks.
+    done: Mutex<Receiver<Finished>>,
     handles: Vec<JoinHandle<()>>,
     /// The cancel flags of the jobs submitted and not yet collected.
     in_flight: Vec<Arc<AtomicBool>>,
@@ -151,7 +157,7 @@ impl Workers {
             threads,
             jobs: None,
             done_tx,
-            done,
+            done: Mutex::new(done),
             handles: Vec::new(),
             in_flight: Vec::new(),
         }
@@ -206,7 +212,10 @@ impl Workers {
 
     /// A finished job, if one is waiting.
     pub fn try_next(&mut self) -> Option<Finished> {
-        match self.done.try_recv() {
+        let Ok(done) = self.done.get_mut() else {
+            return None;
+        };
+        match done.try_recv() {
             Ok(finished) => Some(self.collected(finished)),
             Err(TryRecvError::Empty | TryRecvError::Disconnected) => None,
         }
@@ -218,10 +227,8 @@ impl Workers {
             return None;
         }
         // `done_tx` lives in `self`, so the channel never disconnects while a job is in flight.
-        self.done
-            .recv()
-            .ok()
-            .map(|finished| self.collected(finished))
+        let done = self.done.get_mut().ok()?;
+        done.recv().ok().map(|finished| self.collected(finished))
     }
 
     fn collected(&mut self, finished: Finished) -> Finished {

@@ -656,19 +656,87 @@ fn assert_same_results(before: &Snapshot, after: &Snapshot) -> Result<(), TestCa
     Ok(())
 }
 
+/// The statistics a scorer sums over segments (SPEC §7.2): documents, documents with `body` tokens, the sum of
+/// `body` lengths, and each word's `df`.
+#[derive(Debug, PartialEq, Eq)]
+struct Stats {
+    docs: u64,
+    docs_with_field: u64,
+    sum_field_len: u64,
+    df: BTreeMap<&'static str, u64>,
+}
+
+/// [`Stats`] as the segments store them (§5.1): deleted documents included.
+fn stored_stats(snapshot: &Snapshot) -> Stats {
+    let body = field("body");
+    let a = snapshot.collection("a").unwrap();
+    let mut stats = Stats {
+        docs: 0,
+        docs_with_field: 0,
+        sum_field_len: 0,
+        df: BTreeMap::new(),
+    };
+    for segment in a.segments() {
+        stats.docs += u64::from(segment.doc_count());
+        if let Some(f) = segment.field_stats(body) {
+            stats.docs_with_field += u64::from(f.docs_with_field);
+            stats.sum_field_len += f.sum_field_len;
+        }
+        let mut terms = segment.terms(body).unwrap();
+        for word in WORDS {
+            if let Some(t) = terms.get(word.as_bytes()).unwrap() {
+                *stats.df.entry(word).or_default() += u64::from(t.df());
+            }
+        }
+    }
+    stats
+}
+
+/// [`Stats`] counted over the live documents only. Every `body` token is one of [`WORDS`], so a document's length
+/// is the sum of its words' frequencies.
+fn live_stats(snapshot: &Snapshot) -> Stats {
+    let mut lengths: BTreeMap<String, u64> = BTreeMap::new();
+    let mut df = BTreeMap::new();
+    for (word, docs) in search(snapshot) {
+        df.insert(word, docs.len() as u64);
+        for (id, ((freq, _, _), _)) in docs {
+            *lengths.entry(id).or_default() += u64::from(freq);
+        }
+    }
+    Stats {
+        docs: documents(snapshot).len() as u64,
+        docs_with_field: lengths.len() as u64,
+        sum_field_len: lengths.values().sum(),
+        df,
+    }
+}
+
+fn has_deletions(snapshot: &Snapshot) -> bool {
+    snapshot
+        .collection("a")
+        .unwrap()
+        .tombstones()
+        .iter()
+        .any(Option::is_some)
+}
+
 proptest! {
     #![proptest_config(ProptestConfig {
         cases: if cfg!(feature = "slow") { 256 } else { 32 },
         ..ProptestConfig::default()
     })]
 
-    /// Commits batches of writes, then merges until the policy plans nothing (after each merge, and at the end,
-    /// searching gives what it gave before any merge).
+    /// Commits batches of writes, then merges until the policy plans nothing, inline (checked after each merge) or
+    /// on a worker. Searching gives what it gave before any merge: the same hits, frequencies, positions and norms,
+    /// and the same scores over live statistics. The merged segments' stored statistics are recomputed from what
+    /// they hold (ROADMAP 6.5.2.3), so with no deletions left they equal the live ones; and when no input had
+    /// deletions, the stored statistics a scorer sums (SPEC §7.2), and so its scores, are unchanged by merging.
     #[test]
     fn merging_keeps_search_results(
         batches in prop::collection::vec(prop::collection::vec(arb_op(), 1..8), 2..7),
+        threads in 0..2_usize,
     ) {
-        let (_, mut db) = database(0);
+        let (_, mut db) = database(threads);
         for batch in &batches {
             for op in batch {
                 apply(&mut db, op);
@@ -676,15 +744,31 @@ proptest! {
             db.commit().unwrap();
         }
         let before = db.snapshot();
-        loop {
-            let outcomes = db.merge_step().unwrap();
-            if outcomes.is_empty() {
-                break;
+        let outcomes = if threads == 0 {
+            let mut all = Vec::new();
+            loop {
+                let outcomes = db.merge_step().unwrap();
+                if outcomes.is_empty() {
+                    break;
+                }
+                assert_same_results(&before, &db.snapshot())?;
+                all.extend(outcomes);
             }
-            for outcome in &outcomes {
-                prop_assert!(matches!(outcome, MergeOutcome::Committed { .. }), "{:?}", outcome);
-            }
-            assert_same_results(&before, &db.snapshot())?;
+            all
+        } else {
+            db.finish_merges().unwrap()
+        };
+        for outcome in &outcomes {
+            prop_assert!(matches!(outcome, MergeOutcome::Committed { .. }), "{:?}", outcome);
+        }
+        let after = db.snapshot();
+        assert_same_results(&before, &after)?;
+        prop_assert_eq!(live_stats(&before), live_stats(&after));
+        if !has_deletions(&after) {
+            prop_assert_eq!(stored_stats(&after), live_stats(&after));
+        }
+        if !has_deletions(&before) {
+            prop_assert_eq!(stored_stats(&before), stored_stats(&after));
         }
         // Merged down: no segment left with a deletion past the policy's threshold, none fully deleted.
         let entries = db.manifest().collection("a").unwrap().segments().to_vec();
@@ -693,4 +777,12 @@ proptest! {
             .iter()
             .all(|e| e.tombstones.is_none_or(|t| u64::from(t.deleted) * 100 <= u64::from(e.doc_count) * 20)));
     }
+}
+
+/// The database stays shareable across threads (`Arc<RwLock<Database>>`, scoped readers) with merge workers in it.
+#[test]
+fn a_database_is_send_and_sync() {
+    fn check<T: Send + Sync>() {}
+    check::<Database<SimFile>>();
+    check::<Database<std::fs::File>>();
 }

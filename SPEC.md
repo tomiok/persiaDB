@@ -1140,7 +1140,10 @@ score(t,d) = idf(t) · tf~ · (k1+1) / (k1 + tf~)
 idf(t) = ln(1 + (N − df + 0.5)/(df + 0.5))
 ```
 Total = Σ_t score + static_rank contribution. `N`, `df`, `avglen` are **collection-level**, summed across live segments
-(and across shards when `global_stats: true`, SPEC §11.5). Norms are quantized; implementation MUST match the reference
+(and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
+(§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
+(§5.5), as in Lucene: a merge of segments without deletions leaves every score unchanged, and one that drops deleted
+documents may move scores toward what the live documents alone give (ROADMAP 6.5.5, 7.2.1). Norms are quantized; implementation MUST match the reference
 (`persia-engine/tests/reference`) within a documented epsilon.
 
 ### 7.3 Execution
