@@ -418,9 +418,20 @@ impl<F: ContainerFile> Container<F> {
                 if self.mode == Mode::ReadWrite {
                     self.repair_tail(*offset, error, file_len, policy)?;
                 } else {
-                    let contents =
-                        tail::classify(&self.file, *offset, file_len, self.next_frame_seq)?;
-                    self.recovery.stale_tail = contents == TailContents::Discardable;
+                    // The scan already recorded the stop. A writer may truncate this tail before the classify
+                    // read (SPEC §4.4, §4.7): the bytes are gone, and that short read is not a failure of the
+                    // open. Not knowing whether they were stale leaves `stale_tail` clear. Any other I/O error
+                    // still fails the open.
+                    self.recovery.stale_tail =
+                        match tail::classify(&self.file, *offset, file_len, self.next_frame_seq) {
+                            Ok(contents) => contents == TailContents::Discardable,
+                            Err(Error::Io { source, .. })
+                                if source.kind() == io::ErrorKind::UnexpectedEof =>
+                            {
+                                false
+                            }
+                            Err(other) => return Err(other),
+                        };
                 }
             }
             ScanEnd::Unsupported { error, .. } => return Err(Error::Format(error.clone())),

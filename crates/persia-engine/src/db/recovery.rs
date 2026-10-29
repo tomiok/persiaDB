@@ -6,7 +6,8 @@
 //! 2. The committed manifest: its frame, decoded, checked against the slot and the local layout (ROADMAP 6.3.7).
 //! 3. Each collection's segments and tombstone sidecars, opened through the container's objects and checked against
 //!    their manifest entries, and an empty memtable per collection.
-//! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1).
+//! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1), stopping at the
+//!    first Manifest frame after `log_end` whose `seq` is newer than the loaded manifest (SPEC §8.6).
 //! 5. Ready: the first snapshot shows the segments and the replayed memtables.
 //!
 //! Nothing before step 4 writes but the container's tail repair, and replay writes only to memtables, except that
@@ -58,9 +59,11 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(db)
     }
 
-    /// Step 4: replays every chunk from `wal_start` into the memtables, flushing as a write would.
+    /// Step 4: replays every chunk from `wal_start` that belongs to the loaded snapshot into the memtables,
+    /// flushing as a write would.
     fn replay(&mut self) -> Result<(), DatabaseError> {
-        for chunk in wal_chunks(self.wal.log()) {
+        let seq = self.manifest.seq();
+        for chunk in wal_chunks(self.wal.log(), seq)? {
             let frame = self
                 .wal
                 .log()
@@ -158,15 +161,34 @@ pub(super) fn load<F: ContainerFile + Sync>(
     Ok((manifest, collections))
 }
 
-/// The positions of the `WalChunk` frames from the committed `wal_start` on, those after `log_end` included
-/// (SPEC §8.6), in log order.
-pub(super) fn wal_chunks<F: ContainerFile>(container: &Container<F>) -> Vec<u64> {
-    container
-        .frames()
-        .iter()
-        .filter(|f| f.kind == FrameKind::WalChunk)
-        .map(|f| f.offset)
-        .collect()
+/// The positions of the `WalChunk` frames of the snapshot loaded at `loaded_seq`, in log order (SPEC §8.6).
+///
+/// That is every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`,
+/// until the first Manifest frame after `log_end` whose `seq` is greater than `loaded_seq`. A read-only open
+/// holds no lock, so a writer may commit while the tail is scanned: the new Manifest and the WAL logged after
+/// it (a collection that manifest creates, then a put) are the next snapshot's. Replaying them onto the loaded
+/// manifest fails with [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest
+/// were logged against the loaded snapshot and are replayed. A crash can leave the same Manifest after
+/// `log_end` without a finished superblock (SPEC §4.5); a read-write open stops there too.
+pub(super) fn wal_chunks<F: ContainerFile>(
+    container: &Container<F>,
+    loaded_seq: u64,
+) -> Result<Vec<u64>, DatabaseError> {
+    let log_end = container.superblock().log_end;
+    let mut chunks = Vec::new();
+    for frame in container.frames() {
+        if frame.offset >= log_end && frame.kind == FrameKind::Manifest {
+            let source = container.read_frame_source(frame.offset, MAX_MANIFEST_LEN)?;
+            let seq = Manifest::decode(&source.payload)?.seq();
+            if seq > loaded_seq {
+                break;
+            }
+        }
+        if frame.kind == FrameKind::WalChunk {
+            chunks.push(frame.offset);
+        }
+    }
+    Ok(chunks)
 }
 
 /// Calls `f` with each record of the chunk at position `chunk`, and the record's offset in it, in order; returns how

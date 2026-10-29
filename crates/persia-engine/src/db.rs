@@ -687,7 +687,9 @@ impl<F: ContainerFile + Sync> Database<F> {
     ///
     /// Every flush commit flushes every collection with operations, whatever triggered it (ADR-0029): `wal_start`
     /// then reaches the end of the log, so no record already in a segment is replayed into a memtable and flushed a
-    /// second time after a crash.
+    /// second time after a crash. A commit made while replay is still applying a chunk is the exception (SPEC
+    /// §8.6, ROADMAP 6.6.5): `wal_start` stops at that chunk, because the records after the ones already applied
+    /// are not in a memtable yet. The next open replays the chunk again, which is harmless (replay is idempotent).
     ///
     /// # Errors
     /// Found while the commit is planned, before anything is written (the database is unchanged and usable):

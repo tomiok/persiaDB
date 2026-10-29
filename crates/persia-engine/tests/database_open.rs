@@ -23,7 +23,11 @@
 )] // Tests: inputs are fixed.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::io;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+
+use persia_format::frame::FrameKind;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
@@ -36,7 +40,7 @@ use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOpti
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
-use persia_storage::container::{Error as ContainerError, ReadOnlyReason};
+use persia_storage::container::{ContainerFile, Error as ContainerError, ReadOnlyReason};
 
 type Docs = BTreeMap<String, BTreeMap<String, String>>;
 
@@ -165,6 +169,115 @@ fn reopening_without_writes_changes_nothing() {
     assert_eq!(observed(&reader.snapshot()), model);
     assert_eq!(Some(reader.seq()), seq);
     assert_eq!(reader.replayed(), 301);
+}
+
+/// Runs `hook` on the second `file_len`: after a read-only open has read the superblock slots and before it
+/// samples the length the tail scan uses (SPEC §4.5.1).
+struct OnSecondStat {
+    file: SimFile,
+    stats: AtomicU64,
+    hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+}
+
+impl std::fmt::Debug for OnSecondStat {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OnSecondStat")
+            .field("file", &self.file)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OnSecondStat {
+    fn new(file: SimFile, hook: impl FnOnce() + Send + 'static) -> Self {
+        Self {
+            file,
+            stats: AtomicU64::new(0),
+            hook: Mutex::new(Some(Box::new(hook))),
+        }
+    }
+}
+
+impl ContainerFile for OnSecondStat {
+    fn file_len(&self) -> io::Result<u64> {
+        // The first stat sizes the header read. The second is the length the tail scan is bounded by, taken
+        // after the slots were read (SPEC §4.5.1).
+        if self.stats.fetch_add(1, Ordering::Relaxed) == 1
+            && let Some(hook) = self.hook.lock().unwrap().take()
+        {
+            hook();
+        }
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> io::Result<()> {
+        self.file.sync_data()
+    }
+    fn sync_all(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+    fn set_len(&self, len: u64) -> io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+/// A writer creates a collection and logs a put to it after the reader has read the superblock and before the
+/// tail scan's length is taken (SPEC §8.4, §8.6). The open keeps the loaded snapshot: the older collection's
+/// uncommitted put, not the new collection.
+#[test]
+fn a_read_only_open_stops_before_a_collection_created_during_its_scan() {
+    let file = SimFile::new();
+    let registry = AnalyzerRegistry::builtin();
+    let mut db = Database::create_on(file.clone(), [3; 16], options(BIG)).unwrap();
+    db.create_collection(schema("notes")).unwrap();
+    db.put("notes", &doc("n1", "hello"), Durability::Fsync)
+        .unwrap();
+    let seq = db.seq();
+
+    let racing = OnSecondStat::new(file.clone(), move || {
+        db.create_collection(schema("extra")).unwrap();
+        db.put("extra", &doc("e1", "during"), Durability::Fsync)
+            .unwrap();
+    });
+    let reader = ReadOnlyDatabase::open_on(racing, &registry)
+        .unwrap_or_else(|e| panic!("read-only open beside a creating writer: {e}"));
+    assert_eq!(reader.seq(), seq);
+    assert_eq!(reader.replayed(), 1);
+    assert_eq!(
+        observed(&reader.snapshot()),
+        Docs::from([(
+            "notes".into(),
+            BTreeMap::from([("n1".into(), "hello".into())])
+        )])
+    );
+    // The scan did see the newer commit: its Manifest, then the put logged after it.
+    let uncommitted = reader.container().uncommitted_frames();
+    let manifest = uncommitted
+        .iter()
+        .find(|f| f.kind == FrameKind::Manifest)
+        .expect("the create's Manifest is in the scanned tail");
+    assert!(
+        uncommitted
+            .iter()
+            .any(|f| f.kind == FrameKind::WalChunk && f.offset >= manifest.end()),
+        "the put logged after that Manifest was scanned: {uncommitted:?}"
+    );
+    reader.verify().unwrap();
+
+    // Opened again, against the superblock the create published: both collections.
+    let later = ReadOnlyDatabase::open_on(file, &registry).unwrap();
+    assert!(later.seq() > seq);
+    let docs = observed(&later.snapshot());
+    assert_eq!(docs["notes"]["n1"], "hello");
+    assert_eq!(docs["extra"]["e1"], "during");
+    later.verify().unwrap();
 }
 
 #[test]
@@ -400,4 +513,45 @@ fn verify_agrees_with_a_writer_on_a_stale_tail() {
         .verify()
         .unwrap();
     assert_eq!(report.tail, Tail::Clean);
+}
+
+/// `open_container` accepts a read-write container. One whose open already quarantined a garbage tail and
+/// truncated it no longer holds those bytes, so `verify` reports a clean end (ADR-0014).
+#[test]
+fn verify_reports_clean_after_a_read_write_open_quarantined_the_tail() {
+    use persia_format::frame::ScanEnd;
+    use persia_storage::container::{Container, Mode};
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let registry = AnalyzerRegistry::builtin();
+    let mut db = Database::create(&path, options(BIG)).unwrap();
+    db.create_collection(schema("notes")).unwrap();
+    db.put("notes", &doc("n1", "hello"), Durability::Fsync)
+        .unwrap();
+    drop(db);
+
+    let mut raw = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
+    let end = raw.metadata().unwrap().len();
+    io::Write::write_all(&mut raw, &[0x5a; 64]).unwrap();
+    raw.sync_all().unwrap();
+    drop(raw);
+
+    let container = Container::open(&path, Mode::ReadWrite).unwrap();
+    assert!(
+        matches!(container.recovery().scan_end, ScanEnd::Corrupt { offset, .. } if offset == end),
+        "{:?}",
+        container.recovery()
+    );
+    assert!(container.recovery().quarantined.is_some());
+    assert!(container.recovery().truncated_from.is_some());
+    assert!(!container.recovery().stale_tail);
+
+    let reader = ReadOnlyDatabase::open_container(container, &registry).unwrap();
+    let report = reader.verify().unwrap();
+    assert_eq!(report.tail, Tail::Clean);
+    assert_eq!(observed(&reader.snapshot())["notes"]["n1"], "hello");
 }

@@ -1123,6 +1123,94 @@ impl ContainerFile for Interleaved {
     }
 }
 
+/// Truncates the file to `cut` on the `nth` read at or past `cut` (0-based), then performs the read.
+///
+/// A corrupt-tail scan reads the stop twice (the header, then the zero check) before the read-only classify
+/// reads it again. Truncating on that third read is a writer repairing the tail between the scan and the classify.
+#[derive(Debug, Clone)]
+struct TruncateOnTailRead {
+    file: SimFile,
+    cut: u64,
+    nth: usize,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl TruncateOnTailRead {
+    fn new(file: SimFile, cut: u64, nth: usize) -> Self {
+        Self {
+            file,
+            cut,
+            nth,
+            reads: std::sync::Arc::default(),
+        }
+    }
+
+    fn reads(&self) -> usize {
+        self.reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl ContainerFile for TruncateOnTailRead {
+    fn file_len(&self) -> std::io::Result<u64> {
+        self.file.file_len()
+    }
+    fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<()> {
+        if offset >= self.cut {
+            let n = self
+                .reads
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if n == self.nth {
+                self.file.set_len(self.cut)?;
+            }
+        }
+        self.file.read_exact_at(buf, offset)
+    }
+    fn write_all_at(&self, buf: &[u8], offset: u64) -> std::io::Result<()> {
+        self.file.write_all_at(buf, offset)
+    }
+    fn sync_data(&self) -> std::io::Result<()> {
+        self.file.sync_data()
+    }
+    fn sync_all(&self) -> std::io::Result<()> {
+        self.file.sync_all()
+    }
+    fn set_len(&self, len: u64) -> std::io::Result<()> {
+        self.file.set_len(len)
+    }
+    fn try_lock(&self) -> std::io::Result<bool> {
+        self.file.try_lock()
+    }
+}
+
+/// A writer truncates a corrupt tail after the read-only scan has classified it and before `tail::classify`
+/// re-reads it (SPEC §4.4). The open succeeds; the tail is not reported stale, because the bytes are gone.
+#[test]
+fn a_read_only_open_survives_a_corrupt_tail_truncated_before_classify() {
+    let mut c = new_sim();
+    commit_batch(&mut c, &[b"w1"], b"m1");
+    let log_end = c.end();
+    let file = c.file().clone();
+    drop(c);
+    // No frame magic, and non-zero: corruption, not a torn tail of zeros.
+    file.write_all_at(&[0x5a; 64], log_end).unwrap();
+    file.sync_data().unwrap();
+
+    // Header, the zero check, then classify.
+    let racing = TruncateOnTailRead::new(file.clone(), log_end, 2);
+    let ro = Container::open_on(racing.clone(), Mode::ReadOnly).unwrap_or_else(|e| {
+        panic!("read-only open while a writer truncates the corrupt tail: {e}")
+    });
+    assert!(
+        matches!(ro.recovery().scan_end, ScanEnd::Corrupt { offset, .. } if offset == log_end),
+        "{:?}",
+        ro.recovery()
+    );
+    assert!(!ro.recovery().stale_tail);
+    assert_eq!(file.file_len().unwrap(), log_end);
+    // The classify read is the one that found the file already truncated.
+    assert!(racing.reads() >= 3, "{}", racing.reads());
+}
+
 /// A writer's recovery truncates a torn tail while a read-only open scans it (SPEC §4.4, §4.5.1): the read-only
 /// open reads up to the new end of the file instead of failing on the bytes that are gone. Seen as a flaky
 /// `kill_9_writers_never_disturb_a_mapped_reader_process` (`container_process.rs`).

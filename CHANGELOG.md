@@ -292,6 +292,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
+- `persia-engine`: a read-only open (and `persia verify`) beside a live writer no longer fails with
+  `ReplayError::UnknownCollection` when the writer creates a collection and logs to it while the reader's tail is
+  scanned. Replay stops at the first Manifest frame after the loaded `log_end` whose `seq` is newer, so the snapshot
+  stays the one the open loaded (SPEC §8.6, ADR-0033).
+- `persia-storage`: a read-only open whose corrupt-tail classify races a writer's truncation no longer fails with an
+  I/O error; `stale_tail` stays clear.
+- `persia-engine`: `ReadOnlyDatabase::verify` on a container whose read-write open already quarantined and truncated
+  a garbage tail reports `Tail::Clean` instead of `CorruptTail`.
 - `persia-storage`: a read-only `Container::open` beside a writer in another process no longer fails spuriously: with an
   I/O error when the writer's recovery truncated a torn tail under its scan (and perhaps appended again), or with a
   false "superblock does not fit the container" when the writer committed between its look at the file length and its

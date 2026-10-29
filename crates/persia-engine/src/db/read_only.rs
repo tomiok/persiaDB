@@ -5,8 +5,9 @@
 //! and never writes, so it opens next to a live writer (and a second writer fails fast on the writer lock, SPEC
 //! §4.5.1). It holds the [`Snapshot`] of what it found: the committed segments, and memtables holding the WAL
 //! records from `wal_start` on, those written after the last commit included (written, not necessarily synced: an
-//! `Async` write a power loss may still drop). It does not follow the writer's
-//! later commits; open it again for those.
+//! `Async` write a power loss may still drop), up to the first Manifest frame after `log_end` that a writer
+//! committed while the tail was scanned (SPEC §8.6). It does not follow the writer's later commits; open it
+//! again for those.
 
 use std::fs::File;
 use std::path::Path;
@@ -78,10 +79,12 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         Self::open_container(Container::open_on(file, Mode::ReadOnly)?, registry)
     }
 
-    /// Runs the open sequence on `container` (SPEC §8.6) without writing to it, whatever its mode. Replay cannot
-    /// flush here, so a backlog that does not fit a memtable ([`ReplayError::Memtable`] with
-    /// [`crate::segment::SegmentError::Full`], about 2^31 operations) fails the open; a read-write open flushes it
-    /// (ROADMAP 6.6.5).
+    /// Runs the open sequence on `container` (SPEC §8.6) without writing to it, whatever its mode.
+    ///
+    /// Replay cannot flush here. It does not stop at the writer's size threshold, so memory grows with the
+    /// unflushed backlog of each collection until the memtable's docid limit ([`ReplayError::Memtable`] with
+    /// [`crate::segment::SegmentError::Full`], about 2^31 operations) fails the open. A read-write open flushes
+    /// at the threshold and so bounds that memory (ROADMAP 6.6.5, ADR-0033).
     ///
     /// # Errors
     /// As [`super::Database::open_on`].
@@ -91,7 +94,8 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     ) -> Result<Self, DatabaseError> {
         let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
         let mut replayed = 0u64;
-        for chunk in wal_chunks(&container) {
+        // Stop at a Manifest committed while this tail was scanned (SPEC §8.6).
+        for chunk in wal_chunks(&container, manifest.seq())? {
             let frame = container
                 .read_frame_source(chunk, MAX_CHUNK_LEN)
                 .map_err(ReplayError::from)?;

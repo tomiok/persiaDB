@@ -1419,7 +1419,8 @@ The open sequence (ROADMAP 6.6.1, ADR-0033), the same for a writer and a read-on
 3. Each collection's segments and tombstone sidecars, opened through the container and checked against their
    manifest entries (§8.3, §8.7.1), and an empty memtable per collection.
 4. The `WalChunk` frames from `wal_start` on (those after `log_end` included), in log order, each record applied to
-   its collection's memtable (§8.2.1).
+   its collection's memtable (§8.2.1). Replay stops at the first Manifest frame after the loaded `log_end` whose
+   `seq` is greater than the loaded manifest's, and does not apply the frames after it (below).
 5. Ready: the first snapshot shows the segments and the replayed memtables. Replayed operations count as written at
    the open (§8.2).
 
@@ -1435,9 +1436,18 @@ until a later flush covers them, like records written after the open. An open th
 commits leaves a state from which the next open reaches the same documents.
 
 A **read-only open** (ROADMAP 6.6.2) runs the same sequence on a container opened read-only (§4.5.1): no lock, no
-write, so it opens beside a live writer, any number at once. It cannot flush: a backlog that does not fit a memtable
-(about 2^31 operations of one collection) fails it with the memtable's error, and a read-write open flushes it. It
-shows the snapshot it found and does not follow later commits; it is opened again for those.
+write, so it opens beside a live writer, any number at once. It cannot flush, and it does not stop at the size
+threshold, so memory grows with each collection's unflushed backlog until the memtable's docid limit (about 2^31
+operations) fails the open. A read-write open flushes at the threshold (above) and so bounds that memory. It
+shows the snapshot it found and does not follow later commits; it is opened again for those. Because it holds no
+lock, a writer may commit while the tail is scanned (§4.5.1). The scan can then include that commit's Manifest
+frame, after the loaded `log_end`, and WAL frames logged after it — including records of a collection the loaded
+manifest does not have. Replay stops at the first such Manifest whose `seq` is greater than the loaded manifest's,
+so the snapshot stays the one the open loaded: the committed manifest, plus WAL from `wal_start` up to that
+Manifest. WAL between `log_end` and that Manifest was logged before the newer commit and belongs to the loaded
+snapshot. Applying what follows the Manifest would mix two commits, or fail the open on a collection the loaded
+manifest lacks. A read-write open holds the lock, so nothing commits during its scan; the same stop applies to a
+Manifest a crash left after `log_end` (a commit that did not finish, §4.5).
 
 **Verification** (ROADMAP 6.6.3, `persia verify`) is a read-only open plus what no open or lookup checks: every live
 segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),

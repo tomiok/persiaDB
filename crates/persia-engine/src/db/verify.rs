@@ -65,15 +65,21 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// # Errors
     /// A corruption ([`DatabaseError::is_corruption`]): [`DatabaseError::OpenSegment`] for a segment that fails
     /// [`Segment::verify`](crate::segment::Segment::verify) or an id read, [`DatabaseError::LiveTwice`],
-    /// [`DatabaseError::CorruptTail`] for bytes after `log_end` that may be acknowledged data or are not frames (a
-    /// read-write open refuses or quarantines them). [`DatabaseError::OpenSegment`] also reports an I/O error while a
-    /// segment is read; that one is not a corruption.
+    /// [`DatabaseError::CorruptTail`] for bytes after `log_end` that are still in the file and are not a torn tail
+    /// or only zeros and stale frames (a read-write open refuses or quarantines them). [`DatabaseError::OpenSegment`]
+    /// also reports an I/O error while a segment is read; that one is not a corruption.
+    ///
+    /// [`ReadOnlyDatabase::open_container`] accepts a container already opened read-write. If that open quarantined
+    /// a garbage tail and truncated it, the bytes are gone and this reports [`Tail::Clean`] (`scan_end` still names
+    /// the stop, and [`persia_storage::container::Recovery::truncated_from`] says the file was cut there).
     pub fn verify(&self) -> Result<VerifyReport, DatabaseError> {
         let recovery = self.container().recovery();
         let tail = match recovery.scan_end {
             ScanEnd::Clean { .. } => Tail::Clean,
             ScanEnd::TornTail { offset, .. } => Tail::Torn { offset },
             ScanEnd::Corrupt { offset, .. } if recovery.stale_tail => Tail::Stale { offset },
+            // The open already copied this tail aside and truncated it (ADR-0014). A later open scans a clean end.
+            ScanEnd::Corrupt { .. } if recovery.truncated_from.is_some() => Tail::Clean,
             // An unsupported frame fails the open itself; reported as corrupt should that ever change.
             ScanEnd::Corrupt { offset, .. } | ScanEnd::Unsupported { offset, .. } => {
                 return Err(DatabaseError::CorruptTail { offset });

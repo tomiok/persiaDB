@@ -30,14 +30,20 @@ only what it needs, and `Segment::verify` ran only on merged segments.
    the first chunk since its last flush), exactly as `WalWriter::resume` did with `ReplaySummary::pending`. A commit
    that flushes nothing (a collection create, a merge commit) keeps them needed.
 4. **`ReadOnlyDatabase`** runs the sequence on a read-only container: no lock, no write, no truncation (SPEC
-   §4.5.1). It keeps the snapshot it found; following a writer's later commits is a reopen. It cannot flush, so a
-   backlog past a memtable's capacity fails it; that needs about 2^31 operations of one collection, far beyond the
-   size threshold a writer flushes at.
+   §4.5.1). It keeps the snapshot it found; following a writer's later commits is a reopen. Replay stops at the
+   first Manifest frame after the loaded `log_end` whose `seq` is newer than the loaded manifest, so a commit that
+   lands during the scan (a new collection, then records logged after that commit) is not mixed into the snapshot.
+   It cannot flush, and it does not stop at the size threshold, so memory grows with each collection's unflushed
+   backlog until the memtable's docid limit (about 2^31 operations) fails the open. A read-write open flushes at
+   the size threshold and so bounds that memory.
 5. **`ReadOnlyDatabase::verify`** (and `persia verify`) adds to the open: `Segment::verify` on every live segment, at
    most one live copy of each id per collection (SPEC §8.3; it keeps the live ids of one collection in memory), and
    corruption after `log_end` as an error (`DatabaseError::CorruptTail`), except what a read-write open truncates
    silently: a torn tail, or zeros and stale frames (`Recovery::stale_tail`, which read-only container opens now
-   classify too), reported as `Tail::Torn` and `Tail::Stale`. New
+   classify too), reported as `Tail::Torn` and `Tail::Stale`. A container whose read-write open already quarantined
+   other corrupt bytes and truncated them reports `Tail::Clean`: those bytes are no longer in the file
+   (`Recovery::truncated_from`). A read-only classify that loses the tail to a writer's truncation (a short read)
+   leaves `stale_tail` clear and does not fail the open. New
    corruption variants `DatabaseError::LiveTwice` and `CorruptTail`.
 6. **The writer lock is the container's** (SPEC §4.5.1): a second `Database::open` fails with
    `DatabaseError::Container(Locked)`; no database-level lock is added.
