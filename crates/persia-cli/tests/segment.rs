@@ -143,14 +143,11 @@ fn a_segment_needs_its_schema() {
     let json = std::fs::read_to_string(fixture("basic.schema.json")).unwrap();
     let other = dir.path().join("other.json");
     std::fs::write(&other, json.replace("\"things\"", "\"others\"")).unwrap();
-    let err = stderr(&persia(&[
-        "inspect",
-        "segment",
-        s(&seg),
-        "--schema",
-        s(&other),
-    ]));
-    assert!(err.contains("opening the segment"), "{err}");
+    let wrong = persia(&["inspect", "segment", s(&seg), "--schema", s(&other)]);
+    // A wrong argument, not a damaged segment: the generic failure status (ROADMAP 6.6.7).
+    assert_eq!(wrong.status.code(), Some(1));
+    let err = stderr(&wrong);
+    assert!(err.contains("is not the one the segment"), "{err}");
     let err = stderr(&persia(&[
         "inspect",
         "segment",

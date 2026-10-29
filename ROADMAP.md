@@ -392,7 +392,7 @@ Deps: M2, M5.
 - [x] 6.3.7 On open, check that the Manifest frame's `seq`, `fence_token` and `wal_start` equal the active slot's, and that every frame location it holds is a frame of the right kind below `log_end`, with no object locations; remote readers reject frame locations (SPEC §8.7.1, found in 3.3)
 - [x] 6.3.8 Golden container fixture holding a segment frame whose `BlobRefs` has a `BlobRef` with non-empty `user_meta` (deferred from 5.2.6, which pins the bare segment in `tests/fixtures/segment/v1.0/`): written by the commit path, opened by CI forever (SPEC §4.4, §9.1, §15)
 - [x] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
-- [~] 6.3.10 Schema change and drop through commit (SPEC §8.2.1, §8.7.2): both flush every memtable first, so `wal_start` reaches the end of the log and no record of an earlier schema (or of the dropped collection) is replayed; reopen the collection's segments with the evolved schema. Test: a non-`strict` put with extra fields, then `strict`, then a crash and reopen (found in 6.3.9)
+- [x] 6.3.10 Schema change and drop through commit (SPEC §8.2.1, §8.7.2): both flush every memtable first, so `wal_start` reaches the end of the log and no record of an earlier schema (or of the dropped collection) is replayed; reopen the collection's segments with the evolved schema. Test: a non-`strict` put with extra fields, then `strict`, then a crash and reopen (found in 6.3.9)
 - [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
 
 ## 6.4 Upserts & deletes across segments
@@ -401,7 +401,7 @@ Deps: M2, M5.
 - [x] 6.4.3 Delete-by-id and upsert through commit; visibility rules (read-your-writes). Until then a flush keeps only the memtable's live documents, so a delete or upsert of an id in an older segment is lost at the flush (ADR-0029, found in 6.3)
 - [x] 6.4.4 [T] differential tests vs. reference model for random put/delete/commit sequences
 - [ ] 6.4.5 Prune the commit's tombstone lookups by each segment's footer id range (`Segment::id_range`), once open or `Segment::verify` checks `min_id`/`max_id` against the `IdMap` (a wrong range would leave an older copy live). Helps time-ordered ids only; random ids (UUIDs) span every range. Bench `commit_inserts_*` before and after (found in 6.4.3: 64 segments double a 2 000-document commit)
-- [~] 6.4.6 Drop a segment from the manifest in the commit that deletes its last live document, instead of keeping it listed with `deleted = doc_count` until a merge (ADR-0030 item 8)
+- [x] 6.4.6 Drop a segment from the manifest in the commit that deletes its last live document, instead of keeping it listed with `deleted = doc_count` until a merge (ADR-0030 item 8)
 - [ ] 6.4.7 Per-segment id membership filter (e.g. a Bloom filter section) so a commit skips segments that cannot hold an id, for random ids that id ranges do not prune; a format change (SPEC §5.3, ADR, golden file) (found in the 6.4 review)
 
 ## 6.5 Compaction / merging (SPEC §8.5)
@@ -425,7 +425,7 @@ Deps: M2, M5.
 - [x] 6.6.4 Differential + crash-loop test harness (kill -9 child process in loop, reopen, check invariants) — shared with integration-tester
 - [x] 6.6.5 Flush during replay: one collection's unflushed record holds `wal_start` back for all, so replay may hold more than a memtable threshold (or `MAX_DOCS` docids) of another collection; flush to a segment when a replayed memtable reaches its threshold instead of failing the open. Test: replay past the size threshold and the docid limit (found in the 6.2 review)
 - [ ] 6.6.6 Refresh a `ReadOnlyDatabase` in place: a new snapshot from the next manifest and the WAL frames written since, instead of a reopen (ADR-0033 Alternatives, found in 6.6.2)
-- [~] 6.6.7 `persia verify` with custom analyzers, and distinct exit codes for corruption and other failures (found in the 6.6 review); custom analyzers moved to 6.6.8, since a schema names only built-in analyzers today (SPEC §6.2.2)
+- [x] 6.6.7 `persia verify` with custom analyzers, and distinct exit codes for corruption and other failures (found in the 6.6 review); custom analyzers moved to 6.6.8, since a schema names only built-in analyzers today (SPEC §6.2.2)
 - [ ] 6.6.8 `persia verify` with custom analyzers, once a schema can name an analyzer registered with `AnalyzerRegistry::register` (today `AnalyzerRef` accepts built-ins only, SPEC §6.2.2): a way to load them in the CLI, or a replay that validates records without analyzing their `text` fields (found in 6.6.7)
 
 ---

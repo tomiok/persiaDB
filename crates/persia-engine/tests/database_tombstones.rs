@@ -641,3 +641,39 @@ fn a_commit_that_cannot_be_planned_writes_nothing() {
         "new"
     );
 }
+
+#[test]
+fn one_commit_removes_a_segment_before_one_it_writes_a_sidecar_for() {
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [6; 16], options()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    for group in [&["x"][..], &["x2", "y"][..]] {
+        for id in group {
+            db.put("a", &doc(id, "one"), Durability::Fsync).unwrap();
+        }
+        db.commit().unwrap();
+    }
+    let before = db.manifest().collection("a").unwrap().segments().to_vec();
+    // S0 loses its only document (removed), S1 one of two (a sidecar): sidecars name segments by index, so the
+    // removal at the lower index must come after them (ROADMAP 6.4.6).
+    db.delete("a", "x", Durability::Fsync).unwrap();
+    db.delete("a", "x2", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let check = |db: &Database<SimFile>| {
+        let after = db.manifest().collection("a").unwrap().segments().to_vec();
+        assert_eq!(after.len(), 1);
+        assert_eq!(after[0].id, before[1].id);
+        assert_eq!(
+            after[0].tombstones.map(|t| (t.version, t.deleted)),
+            Some((1, 1))
+        );
+        assert_eq!(ids(db), ["y"]);
+        let snapshot = db.snapshot();
+        let a = snapshot.collection("a").unwrap();
+        assert!(a.tombstones()[0].is_some());
+        assert_eq!(text(&a.get("y").unwrap().unwrap()), "one");
+    };
+    check(&db);
+    drop(db);
+    check(&Database::open_on(file.crash(CrashLoss::All), options()).unwrap());
+}

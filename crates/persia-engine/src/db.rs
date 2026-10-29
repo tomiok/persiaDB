@@ -1263,17 +1263,17 @@ fn plan_sidecars(
             .deleted
             .as_ref()
             .map_or((0, &none), |(v, t)| (*v, t.docids()));
-        let next = version
-            .checked_add(1)
-            .ok_or(invalid(SidecarError::Invalid {
-                what: "no version after u64::MAX",
-            }))?;
         let doc_count = live.segment.doc_count();
         let all = current | &new;
         if all.len() == u64::from(doc_count) {
             emptied.push(Emptied { index, id, version });
             continue;
         }
+        let next = version
+            .checked_add(1)
+            .ok_or(invalid(SidecarError::Invalid {
+                what: "no version after u64::MAX",
+            }))?;
         let sidecar = TombstoneSidecar::new(id, next, doc_count, all).map_err(invalid)?;
         sidecar.check_follows(version, current).map_err(invalid)?;
         let bytes = sidecar.encode().map_err(invalid)?;

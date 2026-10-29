@@ -235,9 +235,10 @@ fn sidecars(db: &Database<SimFile>) -> Vec<Option<(u64, u32)>> {
 
 #[test]
 fn golden_database_with_a_fully_deleted_segment_still_opens() {
-    // Written before ROADMAP 6.4.6: never regenerated (SPEC §15).
+    // Kept as a file of the commit path before ROADMAP 6.4.6, so a fully deleted listed segment keeps opening: do
+    // not regenerate it.
     let stored = stored("tombstones.persia", || {
-        panic!("tombstones.persia is released; it is never written again")
+        panic!("tombstones.persia is kept as written before ROADMAP 6.4.6; restore it from git")
     });
     let mut db = Database::open_on(SimFile::from_bytes(stored), options()).unwrap();
     assert_eq!(db.seq(), 5);

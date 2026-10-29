@@ -14,7 +14,9 @@
 //!
 //! Exit status (ROADMAP 6.6.7): 0 on success, 3 when the command failed on corrupt stored bytes (a database, container
 //! or segment that breaks its format), 2 for a usage error, and 1 for any other failure (a missing file, an I/O error,
-//! a lock held by a writer, data written by a newer build). Scripts can then tell damage from a failed run.
+//! a lock held by a writer, data written by a newer build, a `--schema` that is not the segment's, a logged record
+//! that replay cannot apply). Scripts can then tell damage from a failed run. A file that is not a Persia container
+//! at all reads as a corrupt one (3).
 #![forbid(unsafe_code)]
 
 mod database;
@@ -343,4 +345,29 @@ fn escaped(path: &Path) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Context;
+
+    use super::*;
+
+    fn wrapped(e: impl std::error::Error + Send + Sync + 'static) -> anyhow::Error {
+        Err::<(), _>(e).context("verifying x").unwrap_err()
+    }
+
+    #[test]
+    fn only_corruption_exits_with_its_status() {
+        assert!(is_corruption(&wrapped(DatabaseError::CorruptTail {
+            offset: 8
+        })));
+        assert!(!is_corruption(&wrapped(DatabaseError::Poisoned)));
+        assert!(!is_corruption(&wrapped(ContainerError::Locked)));
+        // Context around a Persia error does not hide it; the outer one decides for its sources.
+        assert!(!is_corruption(
+            &wrapped(DatabaseError::Container(ContainerError::Locked)).context("a")
+        ));
+        assert!(!is_corruption(&anyhow::anyhow!("no such file")));
+    }
 }
