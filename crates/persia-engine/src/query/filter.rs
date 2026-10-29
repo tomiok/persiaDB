@@ -1,13 +1,14 @@
 //! The filter DSL (SPEC §7.1.2): structured predicates over `keyword`, numeric, `bool` and `datetime` fields that
 //! select documents without scoring.
 
+use std::cmp::Ordering;
 use std::ops::Bound;
 
 use serde_json::Value as J;
 
-use crate::document::MAX_KEYWORD_LEN;
 use crate::document::datetime;
 use crate::document::json::{Strict, integer, json_kind};
+use crate::document::{DocumentError, MAX_KEYWORD_LEN};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldType};
 
 use super::QueryError;
@@ -37,12 +38,15 @@ pub enum Filter {
         values: Vec<FilterValue>,
     },
     /// Documents whose field's value lies within the bounds. Fields: `i64`, `f64`, `datetime`.
+    ///
+    /// [`Filter::validate`] rejects a range with no bound and an empty one (the lower bound above the upper, or
+    /// equal bounds with either side exclusive).
     Range {
         /// The field.
         field: FieldId,
         /// The lower bound.
         lower: Bound<FilterValue>,
-        /// The upper bound; at least one of the two is bounded.
+        /// The upper bound; at least one of the two is bounded, and the range is not empty.
         upper: Bound<FilterValue>,
     },
     /// Documents that have a value in the field (a `text` field: at least one token). Any field but `stored`.
@@ -108,7 +112,7 @@ impl Filter {
     }
 
     /// Checks the filter against `schema` and `limits`: fields exist and have a type the filter applies to, values
-    /// have the field's type and range, every range has a bound, and the filter is within the limits.
+    /// have the field's type and range, every range has a bound and is not empty, and the filter is within the limits.
     ///
     /// # Errors
     /// The first problem found, depth first.
@@ -150,7 +154,11 @@ impl Filter {
                 if bounds.clone().next().is_none() {
                     return Err(range_problem(field, "needs a bound"));
                 }
-                bounds.try_for_each(|v| value_fits(field, v))
+                bounds.try_for_each(|v| value_fits(field, v))?;
+                if range_is_empty(lower, upper) {
+                    return Err(range_problem(field, "empty range"));
+                }
+                Ok(())
             }
             Self::Exists { field } => {
                 usage.add(limits, depth, 0, 0)?;
@@ -191,6 +199,36 @@ fn bound_value(bound: &Bound<FilterValue>) -> Option<&FilterValue> {
     match bound {
         Bound::Included(v) | Bound::Excluded(v) => Some(v),
         Bound::Unbounded => None,
+    }
+}
+
+/// `lower > upper`, or the two bounds equal with either side exclusive (`gt` 5 and `lt` 5, `gte` 5 and `lt` 5).
+/// `gte` 5 and `lte` 5 is the single value 5. An unbounded side is not empty. Incomparable values are left to
+/// [`value_fits`].
+fn range_is_empty(lower: &Bound<FilterValue>, upper: &Bound<FilterValue>) -> bool {
+    let (Some(lo), Some(hi)) = (bound_value(lower), bound_value(upper)) else {
+        return false;
+    };
+    let Some(order) = cmp_value(lo, hi) else {
+        return false;
+    };
+    match order {
+        Ordering::Greater => true,
+        Ordering::Equal => {
+            matches!(lower, Bound::Excluded(_)) || matches!(upper, Bound::Excluded(_))
+        }
+        Ordering::Less => false,
+    }
+}
+
+fn cmp_value(left: &FilterValue, right: &FilterValue) -> Option<Ordering> {
+    match (left, right) {
+        (FilterValue::I64(left), FilterValue::I64(right))
+        | (FilterValue::Datetime(left), FilterValue::Datetime(right)) => Some(left.cmp(right)),
+        (FilterValue::F64(left), FilterValue::F64(right)) => left.partial_cmp(right),
+        (FilterValue::Keyword(left), FilterValue::Keyword(right)) => Some(left.cmp(right)),
+        (FilterValue::Bool(left), FilterValue::Bool(right)) => Some(left.cmp(right)),
+        _ => None,
     }
 }
 
@@ -384,12 +422,11 @@ fn to_value(field: &Field, value: &J) -> Result<FilterValue, QueryError> {
     let converted = match (field.field_type(), value) {
         (FieldType::Keyword, J::String(s)) => Some(FilterValue::Keyword(s.clone())),
         // Integers as in documents: a negative zero written with a fraction or exponent is 0 (SPEC §6.4.1).
-        (FieldType::I64, J::Number(n)) => integer(field.name(), n).ok().map(FilterValue::I64),
+        // The concrete [`DocumentError`] is kept: `.ok()` would report an out-of-range integer as "an integer".
+        (FieldType::I64, J::Number(n)) => return i64_value(field, n, FilterValue::I64),
         (FieldType::F64, J::Number(n)) => n.as_f64().map(|v| FilterValue::F64(v + 0.0)),
         (FieldType::Bool, J::Bool(b)) => Some(FilterValue::Bool(*b)),
-        (FieldType::Datetime, J::Number(n)) => {
-            integer(field.name(), n).ok().map(FilterValue::Datetime)
-        }
+        (FieldType::Datetime, J::Number(n)) => return i64_value(field, n, FilterValue::Datetime),
         (FieldType::Datetime, J::String(s)) => datetime::parse(s).map(FilterValue::Datetime),
         // Callers check the field's type first; `text` and `stored` take no value.
         _ => None,
@@ -399,6 +436,32 @@ fn to_value(field: &Field, value: &J) -> Result<FilterValue, QueryError> {
         expected: expected(field.field_type()),
         found: json_kind(value).to_owned(),
     })
+}
+
+fn i64_value(
+    field: &Field,
+    number: &serde_json::Number,
+    wrap: fn(i64) -> FilterValue,
+) -> Result<FilterValue, QueryError> {
+    match integer(field.name(), number) {
+        Ok(value) => Ok(wrap(value)),
+        Err(err) => Err(QueryError::FilterValue {
+            field: field.name().to_owned(),
+            expected: expected(field.field_type()),
+            found: integer_problem(&err).to_owned(),
+        }),
+    }
+}
+
+/// What [`integer`] refused, as the `found` of [`QueryError::FilterValue`].
+#[allow(clippy::wildcard_enum_match_arm)] // only OutOfRange and WrongType come from `integer`
+fn integer_problem(err: &DocumentError) -> &'static str {
+    match err {
+        DocumentError::OutOfRange { .. } => "a number out of i64 range",
+        DocumentError::WrongType { found, .. } => found,
+        // `integer` only returns those two; anything else is still a number that did not convert.
+        _ => "a number",
+    }
 }
 
 #[cfg(test)]

@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
 
-use crate::schema::{CollectionSchema, FieldId, FieldKind};
+use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaHash};
 use crate::segment::MAX_TERM_LEN;
 
 use super::QueryError;
@@ -17,13 +17,22 @@ use super::ast::{
 use super::limits::{QueryLimits, Usage};
 
 /// The `text` fields plain words and phrases search, with their BM25F weights (the `fields` of SPEC §7.1).
+///
+/// Built for one schema ([`Self::all`], [`Self::parse`]). A field id is a position in that schema, so
+/// [`QueryCompiler::compile`] debug-asserts the schema hash: fields built for another schema are a programming
+/// error, not something to apply silently.
 #[derive(Debug, Clone, PartialEq)]
-pub struct DefaultFields(Vec<(FieldId, f64)>);
+pub struct DefaultFields {
+    fields: Vec<(FieldId, f64)>,
+    /// [`CollectionSchema::hash`] of the schema `fields` were taken from.
+    schema: SchemaHash,
+}
 
 impl DefaultFields {
     /// Every `text` field of `schema`, weighted by its `boost`: the default of SPEC §7.1.
     pub fn all(schema: &CollectionSchema) -> Self {
-        Self(
+        Self::new(
+            schema,
             schema
                 .fields()
                 .iter()
@@ -99,12 +108,19 @@ impl DefaultFields {
             boost_in_range(weight)?;
             fields.push((field.id(), weight));
         }
-        Ok(Self(fields))
+        Ok(Self::new(schema, fields))
     }
 
     /// The fields and their weights, in the order given.
     pub fn fields(&self) -> &[(FieldId, f64)] {
-        &self.0
+        &self.fields
+    }
+
+    fn new(schema: &CollectionSchema, fields: Vec<(FieldId, f64)>) -> Self {
+        Self {
+            fields,
+            schema: schema.hash(),
+        }
     }
 }
 
@@ -181,17 +197,28 @@ impl QueryCompiler {
     /// Nothing fails: a `field:` naming no `text` or `keyword` field, a `"` without its closing quote and a lone `-`
     /// are plain text. Clauses that analyze to no token (stopwords) are left out, as are tokens longer than
     /// [`MAX_TERM_LEN`] (no document holds one); without any clause left the query is [`Query::MatchAll`]. Text
-    /// beyond [`QueryLimits::max_text_len`] and the clauses from the first one that would exceed `limits` on are
-    /// left out, with [`Compiled::truncated`] set (the root counts as a clause at depth 1 even when the query is
-    /// a single clause). The query then validates against the schema and `limits`
-    /// ([`Query::validate`]) whenever [`Query::MatchAll`] does. `fields` should come from the same schema:
-    /// fields that are not its `text` fields are skipped.
+    /// beyond [`QueryLimits::max_text_len`] is cut at a character boundary and then back to the last clause that
+    /// lies entirely inside the cut, so a split word or a phrase whose closing quote was cut off is left out
+    /// ([`text_within_limit`]). The clauses from the first one that would exceed `limits` are left out too, with
+    /// [`Compiled::truncated`] set. A single required clause is that clause, checked at depth 1, so a term fits
+    /// `max_depth` 1; the clause count still includes a root bool. The query then validates against the schema
+    /// and `limits` ([`Query::validate`]) whenever [`Query::MatchAll`] does. `fields` must be built for this
+    /// compiler's schema; debug builds assert that.
     pub fn compile(&self, text: &str, fields: &DefaultFields, limits: &QueryLimits) -> Compiled {
-        let (text, mut truncated) = cut(text, limits.max_text_len);
+        // Field ids are positions in the schema that assigned them (SPEC §6.2.1). Another schema's fields
+        // would search this one's by coincidence of id.
+        debug_assert!(
+            fields.schema == self.schema.hash(),
+            "DefaultFields were built for a different schema than this compiler"
+        );
+        let (text, mut truncated) = cut(text, limits.max_text_len, &self.schema);
         let mut tokens = TokenStream::new();
         let mut query = BoolQuery::default();
         let mut usage = Usage::default();
-        // The root Bool; a query that holds one clause is that clause, so this only over-counts.
+        // Set when the only accepted clause was checked at depth 1, because it is the query. Adding another
+        // clause puts it under a bool, one level deeper, so it has to be checked again.
+        let mut shallow = false;
+        // The root Bool; a query that holds one clause is that clause, so this only over-counts clauses.
         if usage.add(limits, 1, 0, 0).is_err() {
             return Compiled {
                 query: Query::MatchAll,
@@ -208,15 +235,55 @@ impl QueryCompiler {
                     ..BoolQuery::default()
                 })],
             };
-            let mut trial = usage;
-            let fits = part
-                .iter()
-                .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2));
-            if fits.is_err() {
-                truncated = true;
-                break;
+            if shallow {
+                // Promote the depth-1 clause under a root bool and count `part` beside it.
+                let mut trial = Usage::default();
+                let promoted = trial.add(limits, 1, 0, 0).is_ok()
+                    && query
+                        .must
+                        .iter()
+                        .chain(&query.must_not)
+                        .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2))
+                        .is_ok()
+                    && part
+                        .iter()
+                        .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2))
+                        .is_ok();
+                if !promoted {
+                    truncated = true;
+                    break;
+                }
+                shallow = false;
+                usage = trial;
+            } else {
+                let mut trial = usage;
+                let fits = part
+                    .iter()
+                    .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2));
+                if let Err(err) = fits {
+                    // A single required clause is the query, so a depth failure under the bool is retried
+                    // at depth 1 before giving up (SPEC §7.1.1).
+                    let alone = query.must.is_empty()
+                        && query.must_not.is_empty()
+                        && !clause.negated
+                        && part.len() == 1
+                        && matches!(err, QueryError::TooDeep { .. });
+                    if alone && let Some(only) = part.first() {
+                        let mut retry = Usage::default();
+                        if retry.add(limits, 1, 0, 0).is_ok()
+                            && only.check(&self.schema, limits, &mut retry, 1).is_ok()
+                        {
+                            shallow = true;
+                            usage = retry;
+                            query.must.extend(part);
+                            continue;
+                        }
+                    }
+                    truncated = true;
+                    break;
+                }
+                usage = trial;
             }
-            usage = trial;
             if clause.negated {
                 query.must_not.extend(part);
             } else {
@@ -403,9 +470,23 @@ fn word(per_field: Vec<FieldTokens>) -> Vec<Query> {
 fn agree(per_field: &[FieldTokens]) -> bool {
     let mut spans: Vec<(usize, usize)> = Vec::new();
     for f in per_field {
-        let own = f.tokens.iter().map(|t| t.span);
-        // Tokens of one analysis have strictly increasing starts (SPEC §6.3.1), so equal spans are adjacent.
-        if own.clone().zip(own.clone().skip(1)).any(|(a, b)| a == b) {
+        let own: Vec<(usize, usize)> = f.tokens.iter().map(|t| t.span).collect();
+        // SPEC §6.3.1: one analysis has non-decreasing span starts and ends (tokenizers are strictly
+        // increasing; a char filter may map several tokens onto one span). Equal spans are then adjacent,
+        // but a field still must not be grouped twice, so duplicates are rejected whatever their order.
+        debug_assert!(
+            own.windows(2).all(|w| match w {
+                [a, b] => a.0 <= b.0 && a.1 <= b.1,
+                _ => true,
+            }),
+            "SPEC §6.3.1: span starts and ends of one analysis do not decrease"
+        );
+        let mut ordered = own.clone();
+        ordered.sort_unstable();
+        if ordered.windows(2).any(|w| match w {
+            [a, b] => a == b,
+            _ => false,
+        }) {
             return false;
         }
         spans.extend(own);
@@ -434,67 +515,156 @@ fn fits(term: &str) -> bool {
     !term.is_empty() && term.len() <= MAX_TERM_LEN
 }
 
-/// `text` cut to at most `max` bytes at a character boundary, and whether it was cut.
-fn cut(text: &str, max: usize) -> (&str, bool) {
+/// `text` cut to at most `max` bytes without splitting a word or a phrase (SPEC §7.1.1), and whether it was cut.
+///
+/// The cut is a character boundary, then the last clause that is not wholly inside it is dropped: a word the cut
+/// divides, and a phrase whose closing quote lies past it (that quote is what would have closed it; without the
+/// quote the words become required terms). Only `text[..max]` is read, plus one character to see if a word goes on.
+fn cut<'t>(text: &'t str, max: usize, schema: &CollectionSchema) -> (&'t str, bool) {
     if text.len() <= max {
         return (text, false);
     }
     let mut end = max;
-    while !text.is_char_boundary(end) {
+    while end > 0 && !text.is_char_boundary(end) {
         end = end.saturating_sub(1);
     }
-    (text.get(..end).unwrap_or_default(), true)
+    let prefix = text.get(..end).unwrap_or("");
+    let continues = text
+        .get(end..)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| !c.is_whitespace());
+    let spans = clause_spans(prefix, schema);
+    let mut keep = 0;
+    for (clause, clause_end) in &spans {
+        // A closed phrase ends on its quote. A word that runs to the cap and into the next character was split.
+        let split_word = continues && *clause_end == end && !clause.phrase;
+        if split_word {
+            break;
+        }
+        keep = *clause_end;
+    }
+    // A `"` opened inside the cap and never closed there: the closing quote was cut off (or the quoted text
+    // runs past the cap). Drop from that clause, same as dropping the split word it contains.
+    if let Some(open) = unclosed_quote(prefix, schema) {
+        keep = spans
+            .iter()
+            .map(|(_, clause_end)| *clause_end)
+            .filter(|clause_end| *clause_end <= open)
+            .max()
+            .unwrap_or(0);
+    }
+    (text.get(..keep).unwrap_or(""), true)
+}
+
+/// The prefix of `text` [`QueryCompiler::compile`] reads when the text limit is `max_text_len` bytes (SPEC §7.1.1).
+///
+/// Clause limits may drop more. `schema` decides which `field:` prefixes are real clauses.
+#[doc(hidden)]
+pub fn text_within_limit<'a>(
+    text: &'a str,
+    max_text_len: usize,
+    schema: &CollectionSchema,
+) -> &'a str {
+    cut(text, max_text_len, schema).0
 }
 
 /// Splits user text into clauses: `[-][field:](word | "phrase")`, separated by whitespace.
 fn lex<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<Clause<'t>> {
+    clause_spans(text, schema)
+        .into_iter()
+        .map(|(clause, _)| clause)
+        .collect()
+}
+
+/// `(clause, exclusive end byte)` in `text`. The end is the first byte after the clause, not counting the
+/// whitespace that follows it.
+fn clause_spans<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<(Clause<'t>, usize)> {
     let mut clauses = Vec::new();
     let mut rest = text.trim_start();
     while !rest.is_empty() {
-        let mut body = rest;
-        // `-` and `field:` only count when something follows them in the clause.
-        let negated = match body.strip_prefix('-') {
-            Some(after) if starts_clause(after) => {
-                body = after;
-                true
-            }
-            _ => false,
-        };
-        let mut field = None;
-        // Only the clause's first word can name a field, so the search stops at whitespace or a quote.
-        if let Some(colon) = body.find(|c: char| c == ':' || c == '"' || c.is_whitespace())
-            && let Some((name, after)) = body.split_at_checked(colon)
-            && let Some(after) = after.strip_prefix(':')
-            && starts_clause(after)
-            && let Some(f) = schema.field(name)
-            && searchable(f.field_type())
-        {
-            field = Some(f.id());
-            body = after;
-        }
+        let (negated, field, body) = clause_head(rest, schema);
         if let Some(inner) = body.strip_prefix('"')
             && let Some((phrase, after)) = inner.split_once('"')
         {
-            clauses.push(Clause {
-                negated,
-                field,
-                phrase: true,
-                text: phrase,
-            });
+            clauses.push((
+                Clause {
+                    negated,
+                    field,
+                    phrase: true,
+                    text: phrase,
+                },
+                suffix_offset(text, after),
+            ));
             rest = after.trim_start();
             continue;
         }
-        let end = body.find(char::is_whitespace).unwrap_or(body.len());
-        let (word, after) = body.split_at_checked(end).unwrap_or((body, ""));
-        clauses.push(Clause {
-            negated,
-            field,
-            phrase: false,
-            text: word,
-        });
+        let word_end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let (word, after) = body.split_at_checked(word_end).unwrap_or((body, ""));
+        clauses.push((
+            Clause {
+                negated,
+                field,
+                phrase: false,
+                text: word,
+            },
+            suffix_offset(text, after),
+        ));
         rest = after.trim_start();
     }
     clauses
+}
+
+/// Where a clause-opening `"` in `text` is left without its closing quote. `None` when every such quote closes.
+fn unclosed_quote(text: &str, schema: &CollectionSchema) -> Option<usize> {
+    let mut rest = text.trim_start();
+    while !rest.is_empty() {
+        let clause_at = suffix_offset(text, rest);
+        let (_, _, body) = clause_head(rest, schema);
+        if let Some(inner) = body.strip_prefix('"') {
+            if let Some((_, after)) = inner.split_once('"') {
+                rest = after.trim_start();
+                continue;
+            }
+            return Some(clause_at);
+        }
+        let word_end = body.find(char::is_whitespace).unwrap_or(body.len());
+        let after = body.get(word_end..).unwrap_or("");
+        rest = after.trim_start();
+    }
+    None
+}
+
+/// `-` and `field:` only count when the clause continues after them. `body` is what remains to lex.
+fn clause_head<'a>(
+    mut body: &'a str,
+    schema: &CollectionSchema,
+) -> (bool, Option<FieldId>, &'a str) {
+    let negated = match body.strip_prefix('-') {
+        Some(after) if starts_clause(after) => {
+            body = after;
+            true
+        }
+        _ => false,
+    };
+    let mut field = None;
+    // Only the clause's first word can name a field, so the search stops at whitespace or a quote.
+    if let Some(colon) = body.find(|c: char| c == ':' || c == '"' || c.is_whitespace())
+        && let Some((name, after_colon)) = body.split_at_checked(colon)
+        && let Some(after) = after_colon.strip_prefix(':')
+        && starts_clause(after)
+        && let Some(f) = schema.field(name)
+        && searchable(f.field_type())
+    {
+        field = Some(f.id());
+        body = after;
+    }
+    (negated, field, body)
+}
+
+/// Byte index of `suffix` in `text` when `suffix` is a suffix of `text` (or of a prefix `text` was cut from,
+/// which is still a suffix of that prefix). Empty `suffix` is the end.
+fn suffix_offset(text: &str, suffix: &str) -> usize {
+    text.len().saturating_sub(suffix.len())
 }
 
 /// Whether `text` starts a clause: not empty, not whitespace.
@@ -504,13 +674,102 @@ fn starts_clause(text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use persia_analysis::Tokenizer;
+
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+
     use super::*;
 
+    fn schema() -> CollectionSchema {
+        SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap()
+    }
+
+    fn cut_at(text: &str, max: usize) -> (&str, bool) {
+        cut(text, max, &schema())
+    }
+
     #[test]
-    fn cut_keeps_whole_characters() {
-        assert_eq!(cut("añb", 2), ("a", true));
-        assert_eq!(cut("añb", 3), ("añ", true));
-        assert_eq!(cut("añb", 4), ("añb", false));
-        assert_eq!(cut("ñ", 0), ("", true));
+    fn cut_keeps_whole_characters_and_whole_clauses() {
+        // A cut inside `ñ` must not keep a partial character, and a cut inside a word drops the word.
+        assert_eq!(cut_at("añb", 2), ("", true));
+        assert_eq!(cut_at("añb", 3), ("", true));
+        assert_eq!(cut_at("añb", 4), ("añb", false));
+        assert_eq!(cut_at("ñ", 0), ("", true));
+        // The word before the cut character is kept.
+        assert_eq!(cut_at("a ñb", 2), ("a", true));
+        // A word that ends on the cap is kept; the next word is not in the prefix.
+        assert_eq!(cut_at("red shoes", 3), ("red", true));
+        assert_eq!(cut_at("red shoes", 4), ("red", true));
+    }
+
+    #[test]
+    fn equal_spans_are_not_one_field_twice() {
+        /// Two tokens, one span: starts do not decrease (SPEC §6.3.1 after a mapping), so the debug assert holds,
+        /// and the field must still appear once.
+        struct SameSpan;
+        impl Tokenizer for SameSpan {
+            fn tokenize(&self, text: &str, out: &mut TokenStream) {
+                let end = text.len();
+                out.push("one", 0, end, 0);
+                out.push("two", 0, end, 1);
+            }
+        }
+        let analyzer = Analyzer::builder(SameSpan).build();
+        let mut stream = TokenStream::new();
+        analyzer.analyze_query("ab", &mut stream);
+        let tokens: Vec<QueryToken> = stream
+            .iter()
+            .map(|t| QueryToken {
+                span: (t.start, t.end),
+                position: t.position,
+                term: t.text.clone(),
+            })
+            .collect();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].span, tokens[1].span);
+
+        let schema = schema();
+        let id = schema.field("title").unwrap().id();
+        let queries = word(vec![FieldTokens {
+            id,
+            weight: 1.0,
+            tokens,
+        }]);
+        let query = match queries.len() {
+            1 => queries.into_iter().next().unwrap_or(Query::MatchAll),
+            _ => Query::Bool(BoolQuery {
+                must: queries,
+                ..BoolQuery::default()
+            }),
+        };
+        assert_eq!(query.validate(&schema, &QueryLimits::default()), Ok(()));
+        assert!(
+            no_repeated_field(&query),
+            "equal spans put a field in one combined twice: {query:?}"
+        );
+    }
+
+    fn no_repeated_field(query: &Query) -> bool {
+        match query {
+            Query::Combined(combined) => {
+                let mut ids: Vec<FieldId> = combined.fields.iter().map(|f| f.field).collect();
+                let count = ids.len();
+                ids.sort_unstable();
+                ids.dedup();
+                ids.len() == count
+            }
+            Query::Bool(bool) => bool
+                .must
+                .iter()
+                .chain(&bool.should)
+                .chain(&bool.must_not)
+                .all(no_repeated_field),
+            Query::Boost(boost) => no_repeated_field(&boost.query),
+            Query::ConstantScore(score) => no_repeated_field(&score.query),
+            _ => true,
+        }
     }
 }

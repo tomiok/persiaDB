@@ -1168,10 +1168,14 @@ Degradation: `-` and `field:` count only when the clause continues after them wi
 `field` is a `text` or `keyword` field of the schema (case-sensitive), otherwise `field:word` is a word; a `"` without a
 closing quote is a plain character. Clauses that analyze to no token are left out, and so are tokens longer than
 32 KiB (no document holds one). With no clause left, the query is `match_all`: empty text browses (§7.6's fallback ranks
-it). A query with exactly one required clause is that clause. Text beyond `max_text_len` bytes (cut at a character
-boundary) and every clause from the first one that would exceed a limit of §7.1.3 are left out, and the response
-reports it as `query_truncated: true` (distinct from relaxation's `truncated`, §7.6); the compiled query always
-satisfies the limits. The count includes a root `bool` at depth 1 even when the query is a single clause.
+it). A query with exactly one required clause is that clause, so `max_depth` sees that clause's own depth (a single
+term fits `max_depth` 1). Text beyond `max_text_len` bytes is left out at a character boundary, then moved back to the
+end of the last clause that lies wholly inside the cut: a word the cut would split (`running` kept as `runn`) and a
+phrase whose closing quote the cut would remove are left out with it. Either would become a required term and, under
+the default AND, match nothing. Only the capped prefix is read. Every clause from the first one that would exceed a
+limit of §7.1.3 is left out too, and the response reports it as `query_truncated: true` (distinct from relaxation's
+`truncated`, §7.6); the compiled query always satisfies the limits. The clause count includes a root `bool` even when
+the query is a single clause.
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1187,14 +1191,17 @@ satisfies the limits. The count includes a root `bool` at depth 1 even when the 
 
 Values take §6.4.1's JSON forms for the field's type and must be valid values of it: a `keyword` string of at most
 32 KiB, an `i64` integer, any number for `f64` (`-0.0` is 0), a `bool`, a `datetime` integer or RFC 3339 string in the
-datetime range. A value of another type, an unknown field, an unknown operator or bound, and filter JSON longer than
+datetime range. An `i64` or `datetime` number with a fraction or an exponent, or outside the `i64` range, is an error
+that says which. A range with no bound is an error, and so is an empty one: the lower bound above the upper, or the
+two bounds equal with either side exclusive (`gt`/`lt`). `gte` 5 and `lte` 5 is that one value, not empty. A value of
+another type, an unknown field, an unknown operator or bound, and filter JSON longer than
 1 MiB are errors: filters are written by programs, so unlike `q` they fail explicitly.
 
 #### 7.1.3 Limits
 Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
-user text is cut (§7.1.1). Queries the relaxation cascade builds (§7.6) are held to the same limits: a level cuts its
-expansions (synonyms, prefixes, fuzzy terms; the least important first) to fit what the query leaves of each limit, and
-reports it in `applied`. Defaults, configurable per engine:
+user text is cut (§7.1.1). Holding the queries the relaxation cascade builds (§7.6) to these same limits is pending
+(M8, ROADMAP 8.1.8): a level will cut its expansions (synonyms, prefixes, fuzzy terms; the least important first) to
+fit what the query leaves of each limit, and report it in `applied`. Defaults, configurable per engine:
 
 | Limit | Default | Counts |
 |---|---|---|

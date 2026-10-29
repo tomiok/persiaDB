@@ -41,7 +41,7 @@ pub use ast::{
     BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, FuzzyQuery, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, TermQuery, WeightedTerm,
 };
-pub use compile::{Compiled, DefaultFields, QueryCompiler};
+pub use compile::{Compiled, DefaultFields, QueryCompiler, text_within_limit};
 pub use filter::{Filter, FilterValue, MAX_FILTER_JSON_LEN};
 pub use limits::{DEFAULT_MAX_EXPANSIONS, QueryLimits};
 
@@ -181,7 +181,7 @@ pub enum QueryError {
         /// What was given.
         found: String,
     },
-    /// A range filter without bounds, or a bound of another type than the field.
+    /// A range filter without bounds, with an empty range, or a bound of another type than the field.
     #[error("range filter on field {field:?}: {problem}")]
     InvalidRange {
         /// The field.

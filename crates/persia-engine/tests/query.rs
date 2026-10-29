@@ -12,6 +12,7 @@ use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, Compiled, ConstantScoreQuery, DEFAULT_MAX_EXPANSIONS,
     DefaultFields, Filter, FilterValue, FuzzyQuery, MAX_FILTER_JSON_LEN, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, QueryCompiler, QueryError, QueryLimits, TermQuery, WeightedTerm,
+    text_within_limit,
 };
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, FieldType, KeywordOptions, SchemaBuilder,
@@ -231,19 +232,6 @@ fn default_fields_choose_fields_and_weights() {
     );
     // A field outside them is still reachable with `field:`.
     assert_eq!(compile_with("title:red", &fields, &limits).0, "title:red");
-    // Fields of another schema: only ids that name a `text` field of this one are used.
-    let other = SchemaBuilder::new("o")
-        .field("a", FieldKind::Text(TextOptions::default()))
-        .field("b", FieldKind::Text(TextOptions::default()))
-        .field("c", FieldKind::Text(TextOptions::default()))
-        .field("d", FieldKind::Text(TextOptions::default()))
-        .field("e", FieldKind::Text(TextOptions::default()))
-        .build()
-        .unwrap();
-    assert_eq!(
-        compile_with("red", &DefaultFields::all(&other), &limits).0,
-        "(body:red^1)"
-    );
     // No text field: words match nothing to require.
     let keywords = SchemaBuilder::new("k")
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
@@ -326,11 +314,11 @@ fn user_text_is_cut_to_the_limits() {
         f(&mut l);
         l
     };
-    // Text: cut at a character boundary.
+    // Text: cut at a clause boundary, not inside a word (`s` from `shoes` would be a required term).
     let l = limits(|l| l.max_text_len = 5);
     assert_eq!(
         compile_with("red shoes", &fields, &l),
-        ("{+(title:red^3) +(title:s^3)}".into(), true)
+        ("(title:red^3)".into(), true)
     );
     assert_eq!(
         compile_with("red", &fields, &l),
@@ -380,6 +368,97 @@ fn user_text_is_cut_to_the_limits() {
         (compiled.query, compiled.truncated),
         (Query::MatchAll, true)
     );
+}
+
+#[test]
+fn a_deep_clause_stays_within_max_depth_when_another_follows() {
+    // A first clause that only fits as the root (depth 1) must not be wrapped under a bool — one level
+    // deeper — when a later clause is added, or the result exceeds max_depth.
+    let schema = schema();
+    let limits = QueryLimits {
+        max_terms: 6,
+        max_clauses: 7,
+        max_depth: 3,
+        max_text_len: 16,
+        ..QueryLimits::default()
+    };
+    let text = "\"\u{10d6f}[\u{c0}\"\"title:";
+    let compiled = compiler(&schema).compile(text, &DefaultFields::all(&schema), &limits);
+    assert_eq!(compiled.query.validate(&schema, &limits), Ok(()));
+}
+
+#[test]
+fn a_single_clause_fits_max_depth_one() {
+    let schema = schema();
+    let fields = DefaultFields::parse(&schema, &["title"]).unwrap();
+    let limits = QueryLimits {
+        max_depth: 1,
+        ..QueryLimits::default()
+    };
+    // Term(foo) is depth 1. The bool the compiler counts exists only while a second clause is added.
+    assert_eq!(
+        compile_with("foo", &fields, &limits),
+        ("(title:foo^3)".into(), false)
+    );
+    assert_eq!(
+        compile_with("foo bar", &fields, &limits),
+        ("(title:foo^3)".into(), true)
+    );
+    // A negation is a bool, so its term sits at depth 2.
+    assert_eq!(compile_with("-foo", &fields, &limits), ("*".into(), true));
+    // The clause budget still counts the root bool: one term needs two clauses.
+    let tight = QueryLimits {
+        max_clauses: 1,
+        ..QueryLimits::default()
+    };
+    assert_eq!(compile_with("foo", &fields, &tight), ("*".into(), true));
+}
+
+#[test]
+fn truncation_does_not_split_a_word_or_drop_a_phrases_quote() {
+    let schema = schema();
+    let fields = DefaultFields::parse(&schema, &["title"]).unwrap();
+    let limits = |max_text_len| QueryLimits {
+        max_text_len,
+        ..QueryLimits::default()
+    };
+    // "running" is 7 bytes. A cap of 4 would keep "runn", a different required term.
+    assert_eq!(
+        compile_with("running", &fields, &limits(4)),
+        ("*".into(), true)
+    );
+    // "red running": the cap falls inside "running" (r e d space r u n n = 8).
+    assert_eq!(
+        compile_with("red running", &fields, &limits(8)),
+        ("(title:red^3)".into(), true)
+    );
+    // "go \"red shoes\" zz" is 17 bytes; index 13 is the phrase's closing quote.
+    // Cap 13 removes that quote, so the phrase must not become required words.
+    assert_eq!(
+        compile_with("go \"red shoes\" zz", &fields, &limits(13)),
+        ("(title:go^3)".into(), true)
+    );
+    // Cap 15 keeps the phrase (it ends at byte 14) and drops the split "zz".
+    assert_eq!(
+        compile_with("go \"red shoes\" zz", &fields, &limits(15)),
+        ("{+(title:go^3) +title:\"red@0 shoes@1\"}".into(), true)
+    );
+}
+
+#[test]
+#[cfg(debug_assertions)]
+#[should_panic(expected = "different schema")]
+fn default_fields_from_another_schema_are_rejected() {
+    let schema = schema();
+    let other = SchemaBuilder::new("o")
+        .field("a", FieldKind::Text(TextOptions::default()))
+        .field("b", FieldKind::Text(TextOptions::default()))
+        .field("c", FieldKind::Text(TextOptions::default()))
+        .field("d", FieldKind::Text(TextOptions::default()))
+        .field("e", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let _ = compiler(&schema).compile("red", &DefaultFields::all(&other), &QueryLimits::default());
 }
 
 fn term(field: FieldId, t: &str) -> Query {
@@ -953,21 +1032,48 @@ fn filters_reject_bad_input_explicitly() {
         Err(QueryError::FilterValue { .. })
     ));
     // Ranges.
-    for (json, problem) in [
-        (r#"{"range": ["price", {}]}"#, "needs a bound"),
+    for (json, field, problem) in [
+        (r#"{"range": ["price", {}]}"#, "price", "needs a bound"),
         (
             r#"{"range": ["price", {"gt": 1, "gte": 2}]}"#,
+            "price",
             "two bounds on one side",
         ),
         (
             r#"{"range": ["price", {"lte": 1, "lt": 2}]}"#,
+            "price",
             "two bounds on one side",
+        ),
+        (
+            r#"{"range": ["price", {"gt": 5, "lt": 5}]}"#,
+            "price",
+            "empty range",
+        ),
+        (
+            r#"{"range": ["price", {"gte": 5, "lt": 5}]}"#,
+            "price",
+            "empty range",
+        ),
+        (
+            r#"{"range": ["price", {"gt": 5, "lte": 5}]}"#,
+            "price",
+            "empty range",
+        ),
+        (
+            r#"{"range": ["stock", {"gt": 5, "lt": 4}]}"#,
+            "stock",
+            "empty range",
+        ),
+        (
+            r#"{"range": ["at", {"gte": 1, "lte": 0}]}"#,
+            "at",
+            "empty range",
         ),
     ] {
         assert_eq!(
             filter(json),
             Err(QueryError::InvalidRange {
-                field: "price".into(),
+                field: field.into(),
                 problem
             }),
             "{json}"
@@ -1055,6 +1161,38 @@ fn hand_built_filters_validate() {
         }),
         Ok(())
     );
+    // Inclusive on both sides of one value is that value. Exclusive on either side of it is empty.
+    let stock = id(&schema, "stock");
+    assert_eq!(
+        check(Filter::Range {
+            field: stock,
+            lower: Bound::Included(FilterValue::I64(5)),
+            upper: Bound::Included(FilterValue::I64(5))
+        }),
+        Ok(())
+    );
+    assert_eq!(
+        check(Filter::Range {
+            field: stock,
+            lower: Bound::Excluded(FilterValue::I64(5)),
+            upper: Bound::Included(FilterValue::I64(5))
+        }),
+        Err(QueryError::InvalidRange {
+            field: "stock".into(),
+            problem: "empty range"
+        })
+    );
+    assert_eq!(
+        check(Filter::Range {
+            field: price,
+            lower: Bound::Included(FilterValue::F64(2.0)),
+            upper: Bound::Excluded(FilterValue::F64(1.0))
+        }),
+        Err(QueryError::InvalidRange {
+            field: "price".into(),
+            problem: "empty range"
+        })
+    );
 }
 
 /// User-ish text: words, quotes, dashes, colons, field names, whitespace and some non-ASCII.
@@ -1099,15 +1237,38 @@ proptest! {
         // Nothing is cut when the limits are generous.
         let generous = compiler(&schema).compile(&text, &fields, &QueryLimits::default());
         prop_assert!(!generous.truncated || text.len() > QueryLimits::default().max_text_len);
-        // Within the text length, a compilation cut by the other limits keeps a prefix of the generous one's clauses.
         if !compiled.truncated {
             prop_assert_eq!(&compiled.query, &generous.query);
-        } else if text.len() <= max_text_len {
-            let ((must, not), (all_must, all_not)) = (clauses(&compiled.query), clauses(&generous.query));
-            let collapsed = all_must.first() == Some(&compiled.query) || all_not.is_empty() && all_must.is_empty();
+        }
+        // A text cut is the same query as compiling that prefix with generous limits, then applying the
+        // other limits: the result keeps a prefix of the prefix's clauses. When the reference collapsed
+        // to nothing, the compiled query is MatchAll — not an arbitrary rewrite.
+        let cut_text = text_within_limit(&text, max_text_len, &schema);
+        prop_assert!(text.starts_with(cut_text));
+        prop_assert!(cut_text.len() <= max_text_len || text.len() <= max_text_len);
+        if text.len() <= max_text_len {
+            prop_assert_eq!(cut_text, text.as_str());
+        }
+        let reference = if text.len() > max_text_len {
+            compiler(&schema).compile(cut_text, &fields, &QueryLimits::default())
+        } else {
+            generous
+        };
+        let ((must, not), (all_must, all_not)) = (clauses(&compiled.query), clauses(&reference.query));
+        if all_must.is_empty() && all_not.is_empty() {
+            // The old check treated an empty reference as a free pass (`collapsed`). No clause in
+            // the reference means the compilation is MatchAll.
+            prop_assert_eq!(&compiled.query, &Query::MatchAll);
+        } else {
+            // A single kept clause is stored unwrapped, so it equals the reference's first must
+            // clause rather than a one-element prefix of the flattened list. Later clauses,
+            // including exclusions, may have been cut.
+            let unwrapped_first = all_must.first() == Some(&compiled.query);
+            let prefix = all_must.starts_with(&must) && all_not.starts_with(&not);
             prop_assert!(
-                collapsed || (all_must.starts_with(&must) && all_not.starts_with(&not)),
-                "{must:?} {not:?} not a prefix of {all_must:?} {all_not:?}"
+                unwrapped_first || prefix,
+                "{must:?} {not:?} not a prefix of {all_must:?} {all_not:?} ({})",
+                text_within_limit(&text, max_text_len, &schema)
             );
         }
     }
@@ -1196,12 +1357,38 @@ fn filter_numbers_follow_the_document_forms() {
             value: FilterValue::Datetime(0)
         })
     );
-    for json in [r#"{"term": ["stock", 0.0]}"#, r#"{"term": ["stock", 0e0]}"#] {
-        assert!(
-            matches!(filter(json), Err(QueryError::FilterValue { .. })),
-            "{json}"
-        );
-    }
+    let found = |json: &str| match filter(json) {
+        Err(QueryError::FilterValue { found, .. }) => found,
+        other => panic!("{json}: {other:?}"),
+    };
+    // A fraction and an exponent are not integers; an integer past i64 is not "an integer" either.
+    assert_eq!(
+        found(r#"{"term": ["stock", 1.5]}"#),
+        "a number with a fraction or exponent"
+    );
+    assert_eq!(
+        found(r#"{"term": ["stock", 0e0]}"#),
+        "a number with a fraction or exponent"
+    );
+    assert_eq!(
+        found(r#"{"term": ["stock", 0.0]}"#),
+        "a number with a fraction or exponent"
+    );
+    assert_eq!(
+        found(r#"{"term": ["stock", 9223372036854775808]}"#),
+        "a number out of i64 range"
+    );
+    assert_eq!(
+        found(r#"{"term": ["at", 1.5]}"#),
+        "a number with a fraction or exponent"
+    );
+    assert_eq!(
+        found(r#"{"range": ["at", {"gt": 9223372036854775808}]}"#),
+        "a number out of i64 range"
+    );
+    // Equal inclusive bounds are that one value. A gap of one integer is not an empty range.
+    assert!(filter(r#"{"range": ["stock", {"gte": 5, "lte": 5}]}"#).is_ok());
+    assert!(filter(r#"{"range": ["stock", {"gt": 5, "lt": 6}]}"#).is_ok());
     // The field's type is checked before the value's.
     for json in [
         r#"{"range": ["brand", {"gt": 1}]}"#,
