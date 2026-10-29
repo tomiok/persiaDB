@@ -1,5 +1,6 @@
-//! The `persia` binary's maintenance commands, end to end (ROADMAP 2.3.8, 2.4.19; ADR-0019): output lines, what is
-//! removed and kept, and the errors for a missing path or a container a writer holds.
+//! The `persia` binary's maintenance commands, end to end (ROADMAP 2.3.8, 2.4.19, 6.6.3; ADR-0019): output lines,
+//! what is removed and kept, `verify` on sound and corrupt databases, and the errors for a missing path or a
+//! container a writer holds.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
 
@@ -135,6 +136,7 @@ fn missing_paths_are_errors_and_create_nothing() {
         vec!["container", "sweep", path_arg(&missing)],
         vec!["store", "files", path_arg(&missing)],
         vec!["store", "sweep", path_arg(&missing)],
+        vec!["verify", path_arg(&missing)],
     ] {
         let out = persia(&args);
         assert!(!out.status.success(), "{args:?}");
@@ -308,4 +310,96 @@ fn a_failed_store_sweep_still_reports_what_it_removed() {
         assert_eq!(String::from_utf8_lossy(&out.stdout).lines().count(), 2);
     }
     assert!(!first.exists());
+}
+
+/// A database with one committed document, one synced but uncommitted, and its writer, still open.
+fn database(path: &Path) -> persia_engine::db::Database {
+    use persia_engine::db::{Database, DatabaseOptions};
+    use persia_engine::document::{Document, Value};
+    use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    use persia_engine::wal::Durability;
+
+    let schema = SchemaBuilder::new("notes")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let body = schema.field("body").unwrap().id();
+    let mut db = Database::create(path, DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    for (id, durability) in [("n1", Durability::Fsync), ("n2", Durability::Fsync)] {
+        let doc = Document::new(id).with(body, Value::String(format!("note {id}")));
+        db.put("notes", &doc, durability).unwrap();
+        if id == "n1" {
+            db.commit().unwrap();
+        }
+    }
+    db
+}
+
+/// `key value` pairs of `persia verify`'s output, which must have succeeded.
+fn report(out: &Output) -> Vec<(String, String)> {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout.clone())
+        .unwrap()
+        .lines()
+        .map(|l| {
+            let (key, value) = l.split_once(' ').unwrap();
+            (key.to_owned(), value.trim_start().to_owned())
+        })
+        .collect()
+}
+
+fn pair(key: &str, value: &str) -> (String, String) {
+    (key.into(), value.into())
+}
+
+#[test]
+fn verify_reports_a_sound_database_also_beside_its_writer() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let writer = database(&path);
+    let expected = [
+        pair("seq", "3"),
+        pair("collections", "1"),
+        pair("segments", "1"),
+        pair("documents", "1 (0 deleted)"),
+        pair("replayed", "1 WAL records"),
+        pair("uncommitted", "1 frames"),
+        pair("tail", "clean"),
+        pair("verify", "ok"),
+    ];
+    // Read-only: the writer keeps its lock and the file is unchanged.
+    let before = std::fs::read(&path).unwrap();
+    assert_eq!(report(&persia(&["verify", path_arg(&path)])), expected);
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    drop(writer);
+    assert_eq!(report(&persia(&["verify", path_arg(&path)])), expected);
+}
+
+#[test]
+fn verify_reports_a_torn_tail_and_fails_on_a_corrupt_one() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let end = bytes.len();
+    bytes.resize(end + 4096, 0);
+    std::fs::write(&path, &bytes).unwrap();
+    let found = report(&persia(&["verify", path_arg(&path)]));
+    let tail = format!("torn at offset {end} (a read-write open truncates it)");
+    assert!(found.contains(&pair("tail", &tail)), "{found:?}");
+
+    bytes[end + 100] = 0x5a;
+    std::fs::write(&path, &bytes).unwrap();
+    let out = persia(&["verify", path_arg(&path)]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("corrupt after its last commit"), "{err}");
+    assert_eq!(out.stdout, b"");
 }

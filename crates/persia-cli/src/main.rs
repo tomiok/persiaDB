@@ -9,8 +9,11 @@
 //! Segment commands (ROADMAP 5.4.2, 5.4.3) read one segment file with the schema it was written with: `inspect
 //! segment` prints its footer, sections and per-field statistics, and `dump segment` a field's terms or one term's
 //! postings (module `segment`).
+//!
+//! `persia verify` checks a whole database read-only (ROADMAP 6.6.3, module `database`).
 #![forbid(unsafe_code)]
 
+mod database;
 mod segment;
 
 use std::io::{BufWriter, Write};
@@ -43,6 +46,13 @@ enum Command {
     /// Prints the content of an on-disk object, for debugging.
     #[command(subcommand)]
     Dump(DumpCommand),
+    /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
+    /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
+    /// Fails on any corruption.
+    Verify {
+        /// The container file.
+        path: PathBuf,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -141,6 +151,7 @@ fn run(cli: Cli) -> Result<()> {
             field,
             term,
         }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
+        Command::Verify { path } => to_stdout(|out| database::verify(out, &path))?,
         Command::Container(ContainerCommand::Files { path }) => {
             if !path.is_file() {
                 bail!("{} is not a container file", path.display());
