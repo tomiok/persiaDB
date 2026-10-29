@@ -24,7 +24,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`VerifyReport`, `Tail`; `DatabaseError::LiveTwice`, `CorruptTail`). `persia-storage`: `Recovery::stale_tail`.
 - `persia-cli`: `persia verify <path>` checks a database read-only, also while its writer has it open. Every
   `persia` command exits with status 3 when it fails on corrupt stored bytes (`verify`, `inspect segment --verify`),
-  1 on any other failure and 2 on a usage error.
+  4 when the file is not a Persia container, 1 on any other failure and 2 on a usage error.
 - `persia-engine`: background merges (ROADMAP 6.5.3–6.5.5, SPEC §8.5, ADR-0032). `Database::merge_step`,
   `finish_merges`, `cancel_merges` and `merges_running` run the merge policy over every collection on a pool of
   `MergeOptions::threads` workers (default 1; 0 merges inline), which verify each merged segment before the writer

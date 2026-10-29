@@ -1462,7 +1462,9 @@ segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in
 and that the bytes after `log_end` are clean, a torn tail, or only zeros and stale frames (a lower `frame_seq`,
 which a read-write open truncates too; a read-only open classifies them by reading, §4.4); any other corruption there,
 which a read-write open refuses or quarantines, fails it. It writes nothing. `persia verify` (like every `persia` command) exits
-with status 3 when it fails on corruption and 1 on any other failure (ROADMAP 6.6.7), so a script tells damage from a failed run. It
+with status 3 when it fails on corruption, status 4 when the file is not a Persia container (the header magic differs, or
+the file is too short to hold the magic; §4.2 still calls that corruption), and 1 on any other failure (ROADMAP 6.6.7),
+so a script separates a wrong file, a damaged database, and any other failed run. It
 analyzes replayed records with the built-in analyzers, the only ones a schema can name (§6.2.2).
 
 ### 8.7 Manifest

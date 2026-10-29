@@ -25,6 +25,11 @@ pub fn open(path: &Path, schema_path: &Path) -> Result<(Segment, CollectionSchem
         Ok(segment) => segment,
         // The schema is an argument here, not stored data: a mismatch is a usage failure (exit 1), not a corrupt
         // segment (exit 3, ROADMAP 6.6.7). No `ReadError` stays in the chain.
+        //
+        // `schema_hash` and `schema_field_count` sit in the footer, and its CRC32C covers every footer byte
+        // before the checksum (SPEC §5.1). `Segment::open` verifies that CRC before it interprets either field,
+        // so a damaged hash fails as `SegmentCorruption::FooterChecksum` (still exit 3) and never reaches this
+        // arm. These two reasons mean the checksummed footer does not match the schema argument.
         Err(ReadError::Corrupt {
             reason:
                 SegmentCorruption::SchemaHash { .. } | SegmentCorruption::SchemaFieldCount { .. },

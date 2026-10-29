@@ -12,11 +12,12 @@
 //!
 //! `persia verify` checks a whole database read-only (ROADMAP 6.6.3, module `database`).
 //!
-//! Exit status (ROADMAP 6.6.7): 0 on success, 3 when the command failed on corrupt stored bytes (a database, container
-//! or segment that breaks its format), 2 for a usage error, and 1 for any other failure (a missing file, an I/O error,
-//! a lock held by a writer, data written by a newer build, a `--schema` that is not the segment's, a logged record
-//! that replay cannot apply). Scripts can then tell damage from a failed run. A file that is not a Persia container
-//! at all reads as a corrupt one (3).
+//! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
+//! container or segment that breaks its format), 4 when the file is not a Persia container (its header magic differs,
+//! or it is too short to hold the magic; SPEC §4.2), 2 for a usage error, and 1 for any other failure (a missing file,
+//! an I/O error, a lock held by a writer, data written by a newer build, a `--schema` that is not the segment's, a
+//! logged record that replay cannot apply). A script separates a wrong file (4), damage (3), and any other failed
+//! run (1).
 #![forbid(unsafe_code)]
 
 mod database;
@@ -30,11 +31,17 @@ use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use persia_engine::db::DatabaseError;
 use persia_engine::segment::ReadError;
+use persia_format::{Corruption, Error as FormatError};
 use persia_storage::container::{Container, Error as ContainerError, Mode};
 use persia_storage::{InUse, LocalStorage, SideFile, SideFileKind};
 
 #[derive(Debug, Parser)]
-#[command(name = "persia", version, about = "Persia DB command-line tool")]
+#[command(
+    name = "persia",
+    version,
+    about = "Persia DB command-line tool",
+    after_help = "Exit status: 0 success; 1 another failure; 2 usage error; 3 corrupt Persia data; 4 the file is not a Persia container"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -56,7 +63,8 @@ enum Command {
     Dump(DumpCommand),
     /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
     /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
-    /// Exits with status 3 on corruption and 1 on any other failure (see the crate docs).
+    /// Exits with status 3 on corruption, 4 when the file is not a Persia container, and 1 on any other failure
+    /// (see the crate docs).
     Verify {
         /// The container file.
         path: PathBuf,
@@ -141,17 +149,29 @@ fn main() -> ExitCode {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("persia: {err:#}");
-            if is_corruption(&err) {
-                ExitCode::from(EXIT_CORRUPT)
-            } else {
-                ExitCode::FAILURE
-            }
+            ExitCode::from(status_of(&err))
         }
     }
 }
 
 /// The exit status of a command that failed on corrupt stored bytes (crate docs).
 const EXIT_CORRUPT: u8 = 3;
+/// The exit status of a command whose file is not a Persia container (crate docs). Distinct from [`EXIT_CORRUPT`]:
+/// the format calls a wrong header magic corruption (SPEC §4.2), and a script still needs to tell that file from a
+/// damaged database.
+const EXIT_NOT_CONTAINER: u8 = 4;
+
+/// The process status of a failed command (crate docs). A file that is not a container is also corruption at the
+/// format layer, so that check comes first.
+fn status_of(err: &anyhow::Error) -> u8 {
+    if is_not_container(err) {
+        EXIT_NOT_CONTAINER
+    } else if is_corruption(err) {
+        EXIT_CORRUPT
+    } else {
+        1
+    }
+}
 
 /// Whether `err` reports corrupt stored bytes: the outermost Persia error in its chain decides, since it knows
 /// what its sources mean (an I/O error reading a segment is not a corruption).
@@ -168,6 +188,53 @@ fn is_corruption(err: &anyhow::Error) -> bool {
             }
         })
         .unwrap_or(false)
+}
+
+/// Whether the outermost Persia error says the file is not a Persia container: the header magic differs, or the
+/// file ends before those bytes can be read (SPEC §4.2). A header that has the magic and then fails its CRC is
+/// damage, not this.
+fn is_not_container(err: &anyhow::Error) -> bool {
+    err.chain()
+        .find_map(|c| {
+            if let Some(e) = c.downcast_ref::<DatabaseError>() {
+                Some(database_not_container(e))
+            } else if c.downcast_ref::<ReadError>().is_some() {
+                // A segment command: its bytes are not a container header.
+                Some(false)
+            } else if let Some(e) = c.downcast_ref::<ContainerError>() {
+                Some(container_not_container(e))
+            } else {
+                c.downcast_ref::<FormatError>().map(format_not_container)
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn database_not_container(err: &DatabaseError) -> bool {
+    match err {
+        DatabaseError::Container(e) => container_not_container(e),
+        _ => false,
+    }
+}
+
+fn container_not_container(err: &ContainerError) -> bool {
+    match err {
+        ContainerError::Format(e) => format_not_container(e),
+        _ => false,
+    }
+}
+
+/// [`Corruption::BadMagic`], or an end of input before the 8-byte magic (SPEC §4.2). Anything past the magic,
+/// including a short header that already matched it, is a damaged container.
+fn format_not_container(err: &FormatError) -> bool {
+    match err.corruption() {
+        Some((_, Corruption::BadMagic)) => true,
+        Some((0, Corruption::UnexpectedEof { available, .. })) => {
+            let magic_len = u64::try_from(persia_format::header::MAGIC.len()).unwrap_or(u64::MAX);
+            available < magic_len
+        }
+        _ => false,
+    }
 }
 
 fn run(cli: Cli) -> Result<()> {
@@ -369,5 +436,61 @@ mod tests {
             &wrapped(DatabaseError::Container(ContainerError::Locked)).context("a")
         ));
         assert!(!is_corruption(&anyhow::anyhow!("no such file")));
+        assert_eq!(status_of(&anyhow::anyhow!("no such file")), 1);
+    }
+
+    fn bad_magic() -> FormatError {
+        FormatError::Corrupt {
+            offset: 0,
+            reason: Corruption::BadMagic,
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_not_a_container_exits_with_4() {
+        let magic = wrapped(ContainerError::Format(bad_magic()));
+        // The format calls a wrong magic corruption (SPEC §4.2); the CLI still exits 4, not 3.
+        assert!(is_corruption(&magic));
+        assert!(is_not_container(&magic));
+        assert_eq!(status_of(&magic), EXIT_NOT_CONTAINER);
+
+        let through_open = wrapped(DatabaseError::Container(
+            ContainerError::Format(bad_magic()),
+        ))
+        .context("opening x");
+        assert!(is_not_container(&through_open));
+        assert_eq!(status_of(&through_open), EXIT_NOT_CONTAINER);
+
+        // Shorter than the magic: there is no container to be damaged.
+        let short = wrapped(ContainerError::Format(FormatError::Corrupt {
+            offset: 0,
+            reason: Corruption::UnexpectedEof {
+                needed: 8,
+                available: 0,
+            },
+        }));
+        assert!(is_not_container(&short));
+        assert_eq!(status_of(&short), EXIT_NOT_CONTAINER);
+
+        // The magic matched, then the header ended: a truncated container, exit 3.
+        let truncated = wrapped(ContainerError::Format(FormatError::Corrupt {
+            offset: 8,
+            reason: Corruption::UnexpectedEof {
+                needed: 2,
+                available: 1,
+            },
+        }));
+        assert!(!is_not_container(&truncated));
+        assert_eq!(status_of(&truncated), EXIT_CORRUPT);
+
+        let checksum = wrapped(ContainerError::Format(FormatError::Corrupt {
+            offset: 12,
+            reason: Corruption::ChecksumMismatch {
+                stored: 1,
+                computed: 2,
+            },
+        }));
+        assert!(!is_not_container(&checksum));
+        assert_eq!(status_of(&checksum), EXIT_CORRUPT);
     }
 }

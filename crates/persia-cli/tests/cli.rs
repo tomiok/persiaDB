@@ -407,6 +407,56 @@ fn verify_reports_a_torn_tail_and_fails_on_a_corrupt_one() {
 }
 
 #[test]
+fn a_file_that_is_not_a_container_exits_with_4() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let notes = dir.path().join("notes.txt");
+    std::fs::write(&notes, b"this is not a database").unwrap();
+    let empty = dir.path().join("empty");
+    std::fs::write(&empty, b"").unwrap();
+    for path in [&notes, &empty] {
+        for args in [
+            vec!["verify", path_arg(path)],
+            vec!["container", "sweep", path_arg(path)],
+        ] {
+            let out = persia(&args);
+            assert_eq!(
+                out.status.code(),
+                Some(4),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
+    }
+
+    // The magic is intact and the header CRC is not: a damaged container, still 3.
+    let db = dir.path().join("app.persia");
+    drop(Container::create(&db).unwrap());
+    let mut bytes = std::fs::read(&db).unwrap();
+    bytes[12] ^= 0xff;
+    std::fs::write(&db, &bytes).unwrap();
+    let out = persia(&["verify", path_arg(&db)]);
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let help = persia(&["verify", "--help"]);
+    let text = String::from_utf8(help.stdout).unwrap();
+    assert!(
+        help.status.success() && text.contains("4 when the file is not a Persia container"),
+        "{text}\n{}",
+        String::from_utf8_lossy(&help.stderr)
+    );
+    let root = String::from_utf8(persia(&["--help"]).stdout).unwrap();
+    assert!(
+        root.contains("4 the file is not a Persia container"),
+        "{root}"
+    );
+}
+
+#[test]
 fn verify_usage_errors_exit_with_2() {
     let _serial = serial();
     let out = persia(&["verify"]);

@@ -341,7 +341,10 @@ impl LiveSegment {
 
     /// Replaces the segment with `reopened`, the same bytes opened with the collection's evolved schema.
     fn reopened(&mut self, reopened: Arc<Segment>) {
-        self.earlier.retain(|w| w.strong_count() > 0);
+        // Same reachability check as `Pin::referenced`: `upgrade` takes an `Acquire` and holds a strong
+        // reference for the check. `Weak::strong_count` is a relaxed load, and the standard library says not
+        // to use it to decide whether a snapshot still holds the segment.
+        self.earlier.retain(|w| w.upgrade().is_some());
         let old = std::mem::replace(&mut self.segment, reopened);
         self.earlier.push(Arc::downgrade(&old));
     }
