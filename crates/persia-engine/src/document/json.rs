@@ -128,7 +128,7 @@ fn integer(field: &str, n: &Number) -> Result<i64, DocumentError> {
     })
 }
 
-fn json_kind(value: &J) -> &'static str {
+pub(crate) fn json_kind(value: &J) -> &'static str {
     match value {
         J::Null => "null",
         J::Bool(_) => "a bool",
@@ -258,7 +258,7 @@ fn value_to_json(field: &Field, value: &Value) -> Result<J, DocumentError> {
 }
 
 /// A JSON value that rejects duplicate object keys at every level (`serde_json` keeps the last one).
-struct Strict(J);
+pub(crate) struct Strict(pub(crate) J);
 
 impl<'de> Deserialize<'de> for Strict {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {

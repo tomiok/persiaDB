@@ -434,12 +434,12 @@ Deps: M2, M5.
 Deps: M5 (M6 for end-to-end).
 
 ## 7.1 Query AST & parser
-- [ ] 7.1.1 AST: Term, Phrase, Prefix, Fuzzy, Bool{must,should,must_not,filter}, Boost, ConstantScore, MatchAll
+- [~] 7.1.1 AST: Term, Phrase, Prefix, Fuzzy, Bool{must,should,must_not,filter}, Boost, ConstantScore, MatchAll
 - 7.1.2 User text → AST compiler (analysis per field, default AND, quoted phrases, `-` exclusion, `field:`)
-  - [ ] 7.1.2.1 Never fail on user input (invalid syntax degrades to plain terms)
-  - [ ] 7.1.2.2 [T] fuzz + table-driven tests
-- [ ] 7.1.3 Filter DSL (term, terms, range, exists, and/or/not) parser + validation against schema
-- [ ] 7.1.4 Query limits (max terms/clauses/expansions) with explicit errors
+  - [~] 7.1.2.1 Never fail on user input (invalid syntax degrades to plain terms)
+  - [~] 7.1.2.2 [T] fuzz + table-driven tests
+- [~] 7.1.3 Filter DSL (term, terms, range, exists, and/or/not) parser + validation against schema
+- [~] 7.1.4 Query limits (max terms/clauses/expansions) with explicit errors
 
 ## 7.2 Collection statistics
 - [ ] 7.2.1 Aggregate `N`, `avglen`, `df` across live segments (cached per snapshot)

@@ -1,0 +1,1 @@
+{"and": [{"term": ["brand", "nike"]}, {"range": ["price", {"gt": 1, "lte": 100}]}, {"not": {"exists": "title"}}, {"terms": ["stock", [1, 2]]}, {"or": [{"term": ["active", true]}, {"term": ["at", "2026-01-01T00:00:00Z"]}]}]}

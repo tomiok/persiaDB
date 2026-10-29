@@ -1129,8 +1129,72 @@ returned as it is, and copied as bytes, never re-validated.
   "explain": false
 }
 ```
-Programmatic query AST (term, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost, constant_score)
-is the internal form; `q` text is compiled to it (SPEC §7.6 / default operator AND).
+Programmatic query AST (term, combined, phrase, prefix, fuzzy, bool must/should/must_not, filter, boost,
+constant_score, match_all) is the internal form; `q` text is compiled to it (§7.1.1, default operator AND), and
+`filter` becomes the filter clauses of its root bool (§7.1.2). Terms in the AST are analyzed terms, as the index holds
+them. `combined` is one query word over several `text` fields, each with its own analyzed term and weight `w_f`,
+scored as one BM25F term (§7.2). A `bool` matches a document that matches every `must` and `filter` clause, no
+`must_not` clause, and at least one `should` clause when it has no `must` or `filter` clause but some `should`; so an
+empty `bool` matches every document, and one of `must_not` clauses alone every other document. `must` and `should`
+score; `filter` and `must_not` do not. A hand-built query is validated against the schema and the limits (§7.1.3):
+`term`, `prefix`, `fuzzy` take `text` or `keyword` fields, `combined` distinct `text` fields, `phrase` a `text` field
+with `positions` and terms in non-decreasing relative positions; terms are at most 32 KiB (§5.3.1), prefixes not
+empty; `fuzzy` distance is 1 or 2; `prefix` and `fuzzy` expand to at most `max_expansions` terms (≥ 1; 50 when the
+engine builds them, §7.6); `boost` and field weights are in `0 < w ≤ 1000` (as §6.2.2's `boost`), a constant score is
+finite and ≥ 0.
+
+#### 7.1.1 User text
+`q` is compiled to the AST and **never fails**: syntax that does not parse is read as plain text. Clauses are separated
+by Unicode whitespace and all required (default AND); each is `[-][field:](word | "phrase")`:
+
+- A **word** is analyzed with the query-time analyzer (§6.3.4) of each default field: the `text` fields named by
+  `fields` (`"name"` or `"name^weight"`; a weight overrides the schema `boost` as `w_f`), or every `text` field with its
+  `boost`. Tokens of the same span of the word become one `combined` over the fields that produced them, each
+  required: `e-mail` gives two. A field where the word is a stopword is left out of its `combined`.
+- A **`"phrase"`** becomes, per default field, a `phrase` of its tokens (relative positions keep the gaps stopwords
+  leave), or, in a field without `positions`, a `bool` requiring each token; one of the fields must match. A phrase of
+  at most one token in every field is a word.
+- **`field:`** before a word or phrase limits it to that `text` or `keyword` field, which need not be a default field:
+  a `text` field gets `term`s (one token: a `term`; more: as a phrase in that field), a `keyword` field one `term` of
+  the text as given, unanalyzed.
+- **`-`** before a clause excludes the documents it matches (`must_not`).
+
+Degradation: `-` and `field:` count only when the clause continues after them without whitespace; `field:` only when
+`field` is a `text` or `keyword` field of the schema (case-sensitive), otherwise `field:word` is a word; a `"` without a
+closing quote is a plain character. Clauses that analyze to no token are left out, and so are tokens longer than
+32 KiB (no document holds one). With no clause left, the query is `match_all`: empty text browses (§7.6's fallback ranks
+it). A query with exactly one required clause is that clause. Text beyond `max_text_len` bytes (cut at a character
+boundary) and every clause from the first one that would exceed a limit of §7.1.3 are left out, and the response
+reports that the query was truncated; the compiled query always satisfies the limits.
+
+#### 7.1.2 Filters
+`filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
+
+| Form | Fields | Selects |
+|---|---|---|
+| `{"term": [field, value]}` | `keyword`, `i64`, `f64`, `bool`, `datetime` | documents whose field holds `value` |
+| `{"terms": [field, [values]]}` | as `term` | documents holding any of the values (`[]`: none) |
+| `{"range": [field, {bounds}]}` | `i64`, `f64`, `datetime` | documents whose value is within the bounds: `gt` or `gte`, `lt` or `lte`, at least one |
+| `{"exists": field}` | any but `stored` | documents with a value (`text`: at least one token) |
+| `{"and": [filters]}`, `{"or": [filters]}` | | all (`[]`: every document) / any (`[]`: none) |
+| `{"not": filter}` | | documents the filter does not select |
+
+Values take §6.4.1's JSON forms for the field's type and must be valid values of it: a `keyword` string of at most
+32 KiB, an `i64` integer, any number for `f64` (`-0.0` is 0), a `bool`, a `datetime` integer or RFC 3339 string in the
+datetime range. A value of another type, an unknown field, an unknown operator or bound, and filter JSON longer than
+1 MiB are errors: filters are written by programs, so unlike `q` they fail explicitly.
+
+#### 7.1.3 Limits
+Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
+user text is cut (§7.1.1). Defaults, configurable per engine:
+
+| Limit | Default | Counts |
+|---|---|---|
+| `max_terms` | 1024 | leaf terms: per `term`, `prefix` and `fuzzy`, per field of a `combined`, per `phrase` term, per filter value (`terms` values, range bounds) |
+| `max_clauses` | 1024 | query and filter nodes, at every level |
+| `max_expansions` | 1024 | the `max_expansions` of every `prefix` and `fuzzy`, summed |
+| `max_depth` | 32 | nesting: a leaf is 1, a node one more than its deepest child |
+| `max_text_len` | 8 KiB | bytes of `q` read |
 
 ### 7.2 Scoring: BM25F
 Per term `t` and doc `d` over fields `f` with weights `w_f`:
@@ -1889,7 +1953,7 @@ They are blocked on the embedded API (M10). They do not replace the `persia` cra
 Embedded: builder options (`OpenOptions`), sensible defaults, no files.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
 Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `search_threads`,
-`cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`.
+`cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`, `query.*` (limits, §7.1.3).
 Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge_threads` 1
 (0 merges on the writer's thread); `merge.*` as in §8.5.
 

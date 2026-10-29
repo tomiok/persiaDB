@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: queries (ROADMAP 7.1, SPEC §7.1). `query::Query`, the programmatic AST (term, combined, phrase,
+  prefix, fuzzy, bool, boost, constant score, match all), checked against a schema with `Query::validate`.
+  `QueryCompiler::compile` turns user text into a query and never fails: default AND, `"phrases"`, `-` exclusion and
+  `field:`, analyzed per field over `DefaultFields` (`"title^3"`); syntax that does not parse is plain text.
+  `Filter::from_json` parses and validates the filter DSL (`term`, `terms`, `range`, `exists`, `and`, `or`, `not`).
+  `QueryLimits` bounds terms, clauses, expansions, depth and text length, with explicit `QueryError`s (user text is cut
+  instead, `Compiled::truncated`). Fuzz targets `query_text` and `filter_json`.
 - Roadmap: M31 Persia Studio (target v1.1), a read-only browser inspector. The core is a WASM build shared with the TypeScript SDK work (M16). M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia-engine`: a commit that deletes a segment's last live document removes the segment from the manifest
   instead of writing a sidecar that deletes every document (ROADMAP 6.4.6, SPEC §8.3, ADR-0030 item 8); the segment

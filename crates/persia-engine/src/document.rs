@@ -21,8 +21,8 @@
 
 mod cbor;
 mod codec;
-mod datetime;
-mod json;
+pub(crate) mod datetime;
+pub(crate) mod json;
 mod validate;
 
 use std::collections::BTreeMap;

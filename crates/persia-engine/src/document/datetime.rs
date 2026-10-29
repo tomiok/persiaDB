@@ -10,9 +10,9 @@ pub const MIN_DATETIME: i64 = days_from_civil(0, 1, 1) * MICROS_PER_DAY;
 pub const MAX_DATETIME: i64 = (days_from_civil(9999, 12, 31) + 1) * MICROS_PER_DAY - 1;
 
 /// The range SPEC §6.4.1 allows, for error messages.
-pub(super) const RANGE: &str = "0000-01-01T00:00:00Z..=9999-12-31T23:59:59.999999Z";
+pub(crate) const RANGE: &str = "0000-01-01T00:00:00Z..=9999-12-31T23:59:59.999999Z";
 
-pub(super) const fn in_range(micros: i64) -> bool {
+pub(crate) const fn in_range(micros: i64) -> bool {
     MIN_DATETIME <= micros && micros <= MAX_DATETIME
 }
 
@@ -56,7 +56,7 @@ const fn days_in_month(year: i64, month: i64) -> i64 {
 
 /// `YYYY-MM-DDTHH:MM:SS[.f{1,6}](Z|±hh:mm)` (RFC 3339 §5.6; `t` and `z` accepted too). The result may be outside
 /// the `datetime` range: validation reports that, as for the integer form.
-pub(super) fn parse(text: &str) -> Option<i64> {
+pub(crate) fn parse(text: &str) -> Option<i64> {
     let mut p = Parser(text.as_bytes());
     let year = p.digits(4)?;
     p.byte(b'-')?;
