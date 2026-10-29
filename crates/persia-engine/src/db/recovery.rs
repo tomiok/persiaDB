@@ -259,7 +259,7 @@ fn open_segment<F: ContainerFile + Sync>(
             Some((t.version, Arc::new(tombstones)))
         }
     };
-    Ok(LiveSegment { segment, deleted })
+    Ok(LiveSegment::new(segment, deleted))
 }
 
 /// Decodes the tombstone sidecar of the segment `entry` describes and checks it against the entry (SPEC §8.3).

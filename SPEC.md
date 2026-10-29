@@ -1270,7 +1270,9 @@ what survived.
 Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
 put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).
 So a commit that changes a schema flushes every memtable first, like a drop: its `wal_start` is the end of the log,
-and no record encoded under an earlier schema is ever replayed (ROADMAP 6.3.10).
+and no record encoded under an earlier schema is ever replayed (ROADMAP 6.3.10). The writer then opens the
+collection's segments again with the new schema, so a field added since reads as empty in them; snapshots taken
+before keep the schema and segments they hold.
 
 **`wal_start`** (§8.2 step 5) is the start of the oldest chunk that holds a record of a collection not yet covered by
 a committed flush; with no such chunk, the end of the log. A flush starts from a point in the log (when its memtable
@@ -1397,9 +1399,11 @@ version and the schema is unchanged, which the writer checks before writing anyt
 from an input meanwhile) the result is discarded and the segments are planned again. A merge that fails, the
 merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
 reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
-**Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, and a sidecar a later version
+**Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, the segments and sidecars of
+a collection a commit drops (ROADMAP 6.3.10), and a sidecar a later version
 supersedes (§8.3), are obsolete from that commit on, but older snapshots, and merges in flight, may still read them.
-The writer tracks each with a weak reference to what readers hold of it (the open segment, the decoded deletions):
+The writer tracks each with a weak reference to what readers hold of it (the open segment, every instance opened
+with an earlier schema of its collection included, and the decoded deletions):
 once no snapshot, job or reader holds it, it is unreferenced and may be deleted. Locally it is a frame, which a
 container compaction (§4.6) reclaims; a compaction must keep the obsolete frames still referenced. Remotely (M12)
 it is an object to delete. Older manifests are not tracked: no snapshot reads its manifest's frame again.

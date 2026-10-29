@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: `Database::evolve_collection` and `drop_collection` (ROADMAP 6.3.10, SPEC §8.2.1, §8.7.2). Both
+  commit at once and flush every memtable in that commit, so no WAL record of an earlier schema or of a dropped
+  collection is replayed; an evolved collection's segments are reopened with its new schema (`Segment::reopen`), and
+  a dropped one's segments and sidecars become obsolete objects. `DatabaseError::Evolution`.
 - `persia-engine`: the open sequence and read-only opens (ROADMAP 6.6, SPEC §8.4, §8.6, ADR-0033). A read-write open
   now flushes a replayed memtable that reaches its size threshold or runs out of docids, instead of failing the open.
   `db::ReadOnlyDatabase` opens a database beside its writer (no lock, no writes) at the snapshot it finds, and
