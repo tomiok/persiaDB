@@ -21,9 +21,10 @@
 use std::sync::Arc;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, ManualClock, ObsoleteKind, SegmentIds,
+    Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome, ObsoleteKind, SegmentIds,
 };
 use persia_engine::document::{Document, Value};
+use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::schema::{
     CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -298,4 +299,170 @@ fn a_dropped_collection_is_never_replayed_into_one_created_again() {
     for id in ["old0", "old1", "old2", "old3"] {
         assert!(c.get(id).unwrap().is_none(), "{id}");
     }
+}
+
+#[test]
+fn a_drop_flushes_the_other_memtables() {
+    let file = SimFile::new();
+    let other = SchemaBuilder::new("other")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let mut db = create(&file, &[notes(true), other]);
+    db.put("other", &body_doc("o1", "buffered"), Durability::Buffered)
+        .unwrap();
+    db.put("notes", &body_doc("n1", "dropped"), Durability::Fsync)
+        .unwrap();
+    db.drop_collection("notes").unwrap();
+    let snapshot = db.snapshot();
+    let o = snapshot.collection("other").unwrap();
+    assert_eq!((o.segments().len(), o.memtable().live_count()), (1, 0));
+    assert_replays_nothing(&db);
+    drop(db);
+    let db = reopen(&file);
+    assert!(db.snapshot().collection("notes").is_none());
+    assert!(
+        db.snapshot()
+            .collection("other")
+            .unwrap()
+            .get("o1")
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn deletes_flushed_by_a_schema_change_apply_to_the_reopened_segments() {
+    let file = SimFile::new();
+    let mut db = create(&file, &[notes(true)]);
+    for id in ["n1", "n2"] {
+        db.put("notes", &body_doc(id, "committed"), Durability::Fsync)
+            .unwrap();
+    }
+    db.commit().unwrap();
+    // A memtable of deletes only: the flush writes no segment, only a sidecar of the reopened segment.
+    db.delete("notes", "n1", Durability::Fsync).unwrap();
+    db.evolve_collection(&notes(false)).unwrap();
+    let check = |db: &Database<SimFile>| {
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("notes").unwrap();
+        assert!(!c.schema().strict());
+        assert_eq!(c.segments().len(), 1);
+        assert!(c.tombstones()[0].is_some());
+        assert!(c.get("n1").unwrap().is_none());
+        assert!(c.get("n2").unwrap().is_some());
+    };
+    check(&db);
+    drop(db);
+    check(&reopen(&file));
+}
+
+#[test]
+fn a_segment_retired_after_a_schema_change_stays_held_by_snapshots_of_the_old_schema() {
+    let file = SimFile::new();
+    let mut db = create(&file, &[notes(true)]);
+    db.put("notes", &body_doc("n1", "committed"), Durability::Fsync)
+        .unwrap();
+    db.commit().unwrap();
+    // Holds the segment as opened with the first schema; the writer holds it reopened with the second.
+    let before = db.snapshot();
+    db.evolve_collection(&notes(false)).unwrap();
+    // Deleting its only document retires the segment (at the flush commit, or by a drop merge).
+    db.delete("notes", "n1", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.finish_merges().unwrap();
+    assert!(
+        db.snapshot()
+            .collection("notes")
+            .unwrap()
+            .segments()
+            .is_empty()
+    );
+    let held = |db: &Database<SimFile>| {
+        db.obsolete()
+            .find(|(o, _)| matches!(o.kind, ObsoleteKind::Segment(_)))
+            .map(|(_, held)| held)
+    };
+    assert_eq!(held(&db), Some(true));
+    assert!(
+        db.take_unreferenced()
+            .iter()
+            .all(|o| !matches!(o.kind, ObsoleteKind::Segment(_)))
+    );
+    drop(before);
+    assert_eq!(held(&db), Some(false));
+}
+
+fn merging_options() -> DatabaseOptions {
+    DatabaseOptions {
+        merge: MergeOptions {
+            policy: MergePolicy {
+                segments_per_merge: 2,
+                ..MergePolicy::default()
+            },
+            threads: 1,
+        },
+        ..options()
+    }
+}
+
+/// A database whose `notes` has two segments, and a merge of them in flight.
+fn merging() -> Database<SimFile> {
+    let mut db = Database::create_on(SimFile::new(), [9; 16], merging_options()).unwrap();
+    db.create_collection(notes(false)).unwrap();
+    for id in ["n1", "n2"] {
+        db.put(
+            "notes",
+            &body_doc(id, "one segment each"),
+            Durability::Fsync,
+        )
+        .unwrap();
+        db.commit().unwrap();
+    }
+    assert!(db.merge_step().unwrap().is_empty());
+    assert_eq!(db.merges_running(), 1);
+    db
+}
+
+#[test]
+fn a_merge_in_flight_conflicts_with_a_schema_change_or_a_drop() {
+    // The job in flight conflicts; `finish_merges` then plans again on the new state.
+    let conflicted = |db: &mut Database<SimFile>| {
+        let outcomes = db.finish_merges().unwrap();
+        assert!(
+            matches!(outcomes.first(), Some(MergeOutcome::Conflict { .. })),
+            "{outcomes:?}"
+        );
+        outcomes.len()
+    };
+
+    let mut db = merging();
+    db.evolve_collection(&notes(true)).unwrap();
+    // Merged again, with the new schema.
+    assert_eq!(conflicted(&mut db), 2);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("notes").unwrap();
+    assert!(c.schema().strict());
+    assert_eq!(c.segments().len(), 1);
+
+    let mut db = merging();
+    db.drop_collection("notes").unwrap();
+    let seq = db.seq();
+    assert_eq!(conflicted(&mut db), 1);
+    assert_eq!(db.seq(), seq, "nothing committed");
+
+    // Created again under the same name, with the same schema: still another collection.
+    let mut db = merging();
+    db.drop_collection("notes").unwrap();
+    db.create_collection(notes(false)).unwrap();
+    let seq = db.seq();
+    assert_eq!(conflicted(&mut db), 1);
+    assert_eq!(db.seq(), seq, "nothing committed");
+    assert!(
+        db.snapshot()
+            .collection("notes")
+            .unwrap()
+            .segments()
+            .is_empty()
+    );
 }

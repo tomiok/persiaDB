@@ -45,19 +45,22 @@ use persia_storage::container::{Container, ContainerFile, Error as ContainerErro
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::SimFs;
 
+/// The test schema; `c` is not `strict`, so its puts may carry extra fields.
 fn schema(name: &str) -> CollectionSchema {
     SchemaBuilder::new(name)
         .field("body", FieldKind::Text(TextOptions::default()))
+        .strict(name != "c")
         .build()
         .unwrap()
 }
 
-/// The test schema with a field added and `strict` off (SPEC §6.2.4).
+/// The test schema with a field added and `strict` flipped (SPEC §6.2.4): `c` becomes `strict`, so a replayed put
+/// of `c` with extras would fail the open if the change did not flush it (ROADMAP 6.3.10).
 fn evolved(name: &str) -> CollectionSchema {
     SchemaBuilder::new(name)
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("tag", FieldKind::Text(TextOptions::default()))
-        .strict(false)
+        .strict(name == "c")
         .build()
         .unwrap()
 }
@@ -80,6 +83,8 @@ fn options() -> DatabaseOptions {
 #[derive(Debug, Clone)]
 enum Op {
     Put(&'static str, String, String),
+    /// A put with an extra field, to a collection that is not `strict`.
+    PutExtra(&'static str, String, String),
     Delete(&'static str, String),
     Commit,
     /// `create_collection` of a collection with the test schema.
@@ -90,18 +95,27 @@ enum Op {
     Drop(&'static str),
 }
 
+/// A pseudo document id in [`State`] for a collection whose schema change survived: not a valid document id.
+const EVOLVED: &str = "#evolved";
+
 /// Documents by collection and id: their body text.
 type State = BTreeMap<&'static str, BTreeMap<String, String>>;
 
 fn apply(state: &mut State, op: &Op) {
     match op {
-        Op::Put(c, id, text) => {
+        Op::Put(c, id, text) | Op::PutExtra(c, id, text) => {
             state.entry(c).or_default().insert(id.clone(), text.clone());
         }
         Op::Delete(c, id) => {
             state.entry(c).or_default().remove(id);
         }
-        Op::Commit | Op::Evolve(_) => {}
+        Op::Commit => {}
+        Op::Evolve(c) => {
+            state
+                .entry(c)
+                .or_default()
+                .insert(EVOLVED.into(), String::new());
+        }
         Op::Create(c) => {
             state.entry(c).or_default();
         }
@@ -127,7 +141,16 @@ fn workload() -> Vec<Op> {
         ops.push(Op::Delete("a", format!("tmp{round}")));
         match round {
             // A schema change and a drop with unflushed records, which their commits flush (ROADMAP 6.3.10).
-            1 => ops.extend([Op::Delete("a", "seed".into()), Op::Evolve("a")]),
+            0 => ops.extend([
+                Op::Create("c"),
+                Op::PutExtra("c", "c1".into(), "with extras".into()),
+            ]),
+            1 => ops.extend([
+                Op::Delete("a", "seed".into()),
+                Op::Evolve("a"),
+                Op::PutExtra("c", "c2".into(), "unflushed extras".into()),
+                Op::Evolve("c"),
+            ]),
             2 => ops.extend([
                 Op::Delete("b", "b0-0".into()),
                 Op::Drop("b"),
@@ -163,6 +186,11 @@ fn base() -> (SimFile, State) {
 fn run(db: &mut Database<SimFile>, op: &Op) -> Result<(), DatabaseError> {
     match op {
         Op::Put(c, id, text) => db.put(c, &doc(id, text), Durability::Fsync),
+        Op::PutExtra(c, id, text) => {
+            let mut d = doc(id, text);
+            d.insert_extra("color", serde_json::json!("red"));
+            db.put(c, &d, Durability::Fsync)
+        }
         Op::Delete(c, id) => db.delete(c, id, Durability::Fsync),
         Op::Commit => db.commit().map(drop),
         Op::Create(c) => db.create_collection(schema(c)).map(drop),
@@ -204,6 +232,9 @@ fn observed(snapshot: &Snapshot) -> State {
             }
         }
         let docs = state.entry(name).or_default();
+        if c.schema().field("tag").is_some() {
+            docs.insert(EVOLVED.into(), String::new());
+        }
         for id in ids {
             if let Some(d) = c.get(&id).unwrap() {
                 let Some(Value::String(text)) = d.fields().next().map(|(_, v)| v.clone()) else {

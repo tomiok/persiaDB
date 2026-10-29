@@ -762,6 +762,8 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// 6.3.10): a non-`strict` put with extra fields would fail validation once the collection is `strict`. The
     /// collection's segments are opened again with the new schema; older snapshots keep the old one.
     ///
+    /// Any change commits and flushes every memtable, a query-time one (`boost`, `strict`, ...) included.
+    ///
     /// # Errors
     /// [`DatabaseError::NoSuchCollection`]; [`DatabaseError::Evolution`] for a change §6.2.4 forbids;
     /// [`DatabaseError::Memtable`] if the registry lacks an analyzer of an added field; otherwise as
@@ -1029,6 +1031,11 @@ impl<F: ContainerFile + Sync> Database<F> {
                     .ok_or(DatabaseError::Internal {
                         what: "an evolved collection is not open",
                     })?;
+                if segments.len() != c.segments.len() {
+                    return Err(DatabaseError::Internal {
+                        what: "an evolved collection's segments changed while its commit was planned",
+                    });
+                }
                 c.schema = schema;
                 for (live, reopened) in c.segments.iter_mut().zip(segments) {
                     live.reopened(reopened);
