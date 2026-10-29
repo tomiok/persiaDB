@@ -1,6 +1,6 @@
 # ADR-0029: Local flush, commit and snapshot publication
 
-- Status: proposed
+- Status: proposed; amended by ADR-0032 (the engine runs merge worker threads)
 - Date: 2026-10-28
 - Related: SPEC §4.5, §8.2, §8.2.1, §8.4, §8.7.1, §10.1, §14, §15; ROADMAP 6.3.1–6.3.10; ADR-0014, ADR-0024, ADR-0028
 
@@ -78,6 +78,6 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 - **Flushing only the collections that are due**: fewer small segments, but `wal_start` then stays behind the
   oldest unflushed record of another collection, and after a crash replay re-applies records already flushed, which
   the next flush writes a second time until tombstones (6.4.3) hide them.
-- **A background flush thread in the engine**: the engine is synchronous by design; the facade owns threads.
+- **A background flush thread in the engine**: the engine is synchronous by design; the facade owns threads. (ADR-0032 adds merge workers, which never write; commits stay on the caller's thread.)
 - **Replay without re-validation** to survive `strict` changes: a second code path that skips the schema's rules, for
   a rare operation that can afford a flush.

@@ -410,11 +410,13 @@ Deps: M2, M5.
   - [x] 6.5.2.1 Merge term dictionaries and postings (each input's terms into one dictionary the writer sorts, ADR-0031)
   - [x] 6.5.2.2 Merge columns, norms, doc store, id map, blob refs
   - [x] 6.5.2.3 Recompute statistics
-- [ ] 6.5.3 Background merge scheduler (thread pool, cancellation, backpressure); `Segment::verify` the merged segment before its commit, since a merge copies damage only `verify` finds (SPEC §5.5, found in the 6.5 review)
-- [ ] 6.5.4 Safe deletion of obsolete segments via snapshot epoch/refcount
-- [ ] 6.5.5 [T] property: merge(search results) == pre-merge results (same hits/scores within epsilon)
+- [x] 6.5.3 Background merge scheduler (thread pool, cancellation, backpressure); `Segment::verify` the merged segment before its commit, since a merge copies damage only `verify` finds (SPEC §5.5, found in the 6.5 review)
+- [x] 6.5.4 Safe deletion of obsolete segments via snapshot epoch/refcount
+- [x] 6.5.5 [T] property: merge(search results) == pre-merge results (same hits/scores within epsilon)
 - [ ] 6.5.6 Streaming merge writer: encode the merged sections while the inputs are read, so a merge holds no more than a block per section instead of the whole merged segment in a `SegmentBuilder` (ADR-0031 item 8, found in 6.5.2)
 - [ ] 6.5.7 Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; goal: `segment_merge/copy_8` faster than `segment/add` on the same run (internal bench, `docs/benchmarks.md`; not a claim, BENCHMARKS.md)
+- [ ] 6.5.8 Engine-driven container compaction (SPEC §4.6): `Database` names the live frames (the manifest's, plus the obsolete frames still referenced, 6.5.4) and the WAL range, compacts when dead space reaches the ratio, and publishes the relocated manifest (`Manifest::relocate`) (found in 6.5.4)
+- [ ] 6.5.9 Merges that survive concurrent deletes: re-apply the deletions committed to its inputs since the plan to the merged segment (a docid map kept with the result) instead of discarding it (ADR-0032 item 4, found in 6.5.3)
 
 ## 6.6 Open/recovery orchestration
 - [ ] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)

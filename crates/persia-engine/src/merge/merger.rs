@@ -89,6 +89,22 @@ pub enum MergeError {
     /// The merged documents do not fit one segment, or `registry` lacks an analyzer.
     #[error(transparent)]
     Build(#[from] SegmentError),
+    /// The merged segment does not open, or fails [`Segment::verify`]: an input holds damage only `verify` finds,
+    /// which the merge copied (SPEC §5.5). Nothing is committed.
+    #[error("the merged segment fails verification: {source}")]
+    Verify {
+        /// What was wrong.
+        source: ReadError,
+    },
+    /// The merge was cancelled before it finished.
+    #[error("the merge was cancelled")]
+    Cancelled,
+    /// The merge stopped on a bug (a worker panicked): reported rather than acted on.
+    #[error("internal error: {what}")]
+    Internal {
+        /// What happened.
+        what: &'static str,
+    },
 }
 
 /// The live documents of a merge's inputs, ready to write.
@@ -173,10 +189,32 @@ pub fn merge(
     registry: &AnalyzerRegistry,
     sources: &[MergeSource<'_>],
 ) -> Result<Option<MergedSegment>, MergeError> {
+    merge_until(schema, registry, sources, &|| false)
+}
+
+/// [`merge`], stopping with [`MergeError::Cancelled`] once `cancelled` returns true. It is asked before each input
+/// and each of its fields, so a cancelled merge stops within one field's copy.
+///
+/// # Errors
+/// As [`merge`], and [`MergeError::Cancelled`].
+pub fn merge_until(
+    schema: &CollectionSchema,
+    registry: &AnalyzerRegistry,
+    sources: &[MergeSource<'_>],
+    cancelled: &dyn Fn() -> bool,
+) -> Result<Option<MergedSegment>, MergeError> {
+    let stop = || {
+        if cancelled() {
+            Err(MergeError::Cancelled)
+        } else {
+            Ok(())
+        }
+    };
     let mut builder = SegmentBuilder::new(schema, registry)?;
     let mut generation = 0_u32;
     let mut scratch = Scratch::default();
     for source in sources {
+        stop()?;
         let segment = source.segment;
         let id = segment.segment_id();
         let flags = segment.rocompat_flags() & !KNOWN_ROCOMPAT_FLAGS;
@@ -189,6 +227,7 @@ pub fn merge(
         generation = generation.max(segment.merge_generation());
         let docids = copy_documents(&mut builder, source)?;
         for (field, target) in schema.fields().iter().zip(builder.fields.iter_mut()) {
+            stop()?;
             match target {
                 FieldBuilder::Text { inverted, .. } | FieldBuilder::Keyword { inverted } => {
                     copy_postings(segment, field.id(), &docids, inverted, &mut scratch)?;
