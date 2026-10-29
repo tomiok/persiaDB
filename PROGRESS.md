@@ -3,7 +3,7 @@
 
 **251/469 leaves done (54%)** · 0 in progress · `████████████████░░░░░░░░░░░░░░` · last snapshot: 2026-10-29
 
-MVP (M0–M15): the counts above. Post-MVP: **0/151 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
+MVP (M0–M15): the counts above. Post-MVP: **0/164 leaves done (0%)** · 0 in progress. Those leaves are not part of the percentage, the graph, the ready-next list, or the burn-up. In-progress ones are listed under Post-MVP.
 
 Status lives in [`ROADMAP.md`](./ROADMAP.md) checkboxes (`[ ]` todo · `[~]` in progress · `[x]` done).
 After changing one, run `cargo xtask progress --record`.
@@ -98,6 +98,7 @@ Not included in the headline, the graph, the ready-next list, or the burn-up. In
 | **M28** On-device (v2.3) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 9 | M2, M16 |
 | **M29** Geo filters and sorting (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 7 | M7, M15 |
 | **M30** Enterprise (v3.0) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 10 | M13, M20, M22, M25 |
+| **M31** Persia Studio (v1.1) | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 13 | M16 |
 
 ### In progress (post-MVP)
 

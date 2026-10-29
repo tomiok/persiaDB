@@ -152,7 +152,7 @@ M0–M15 are the MVP. The live percentage in [PROGRESS.md](https://github.com/to
 
 | Target | Milestones | Depends on |
 |---|---|---|
-| v1.1 | **M16** Embedded SDKs, **M17** Highlighting and snippets, **M18** Autocomplete, **M19** Import | M15, plus the feature's own deps |
+| v1.1 | **M16** Embedded SDKs, **M17** Highlighting and snippets, **M18** Autocomplete, **M19** Import, **M31** Persia Studio | M15, plus the feature's own deps |
 | v1.2 | **M20** Encryption at rest, **M21** Python SDK | M20 on storage (M2, M12) and v1.0 (M15); M21 on the network clients (M14) and the C ABI (M16) |
 | v2.0 | **M22** Multi-tenant, **M23** Persia Cloud, **M24** CDC connectors, **M25** Web dashboard | M22 before M23; M23 also needs Kubernetes (M13) and encryption (M20) |
 | v2.1 | **M26** UI components | Server HTTP, highlighting, autocomplete |
@@ -221,3 +221,7 @@ Blocked on query and v1.0. A `geo_point` field, a bounding box, a circle, and so
 ## M30 — Enterprise (v3.0)
 
 Blocked on Kubernetes (M13), encryption (M20), multi-tenant mode (M22), and the dashboard (M25). Per-document allow and deny rules, an audit log, OpenID Connect login, and an on-premises bundle that boots without calling Persia Cloud.
+
+## M31 — Persia Studio (v1.1)
+
+Blocked on the TypeScript SDK (M16). A read-only client that runs in the browser and does not talk to a server. The core is the WASM build that SDK work shares. The user picks the `database.persia/` directory with the File System Access API, which Chromium-based browsers provide. Firefox and Safari do not, and this version does not add a server for them. The page browses segments and the manifest, shows documents and tombstones, runs queries with the BM25 score breakdown, and shows WAL state. Write mode and a local `persia studio` server are out of scope. It is the seed of the v2.0 dashboard (M25).

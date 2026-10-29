@@ -786,7 +786,7 @@ M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone sti
 | Target | Milestones |
 |---|---|
 | v1.0 | M0–M15, the MVP |
-| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import |
+| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio |
 | v1.2 | M20 Encryption at rest, M21 Python SDK |
 | v2.0 | M22 Multi-tenant, M23 Persia Cloud, M24 CDC connectors, M25 Web dashboard |
 | v2.1 | M26 UI components |
@@ -1169,4 +1169,32 @@ Per-document access control, an audit log, SSO, and an on-prem bundle. Tenant is
 ## 30.4 On-premises packaging
 - [ ] 30.4.1 The M13 Helm chart, an air-gapped image bundle, the SBOM from 15.4.2, and the M20 key provider. Booting the chart does not call Persia Cloud
 - [ ] 30.4.2 An install guide for the cluster, single sign-on, backup (M22), and audit export. The guide says the hosted control plane (M23) is not in the bundle
+
+---
+
+# M31 — Persia Studio (target: v1.1)
+Deps: M16 (the WASM build of the core, shared with the TypeScript SDK).
+
+A browser client that inspects a Persia database. It lives entirely in the browser. There is no server. The core is compiled to WASM, the build shared with the TypeScript SDK work in this version (M16), so the page does not carry a second engine (ADR-0001). The user picks the `database.persia/` directory with the File System Access API. That API is available in Chromium-based browsers. Firefox and Safari do not offer it, and this version does not cover them with a server or an upload. Read-only: browse segments and the manifest, view documents, see tombstones, run queries and the BM25 score breakdown, and inspect WAL state. Write mode, and a local `persia studio` server, are out of scope. This milestone is the seed of the v2.0 dashboard (M25). It does not build that dashboard.
+
+## 31.1 Page and WASM
+- [ ] 31.1.1 A static page outside the Cargo workspace. It loads the WASM build shared with the TypeScript SDK (M16). No `build.rs` in a workspace crate (ADR-0003). After the page loads, it does not talk to a server
+- [ ] 31.1.2 The user picks the `database.persia/` directory with the File System Access API. The page reads the files and passes the bytes to the core. It does not compile the mmap container to WASM (ADR-0018, ADR-0010, SPEC §4.7). Firefox and Safari have no directory picker; the page says so
+- [ ] 31.1.3 The adapter is read-only. It does not fsync and it does not claim the local commit protocol (SPEC §4.5). Cancelling the picker leaves the page idle
+- [ ] 31.1.4 [T] A fixture directory is opened through a stand-in for the picker. The listed objects match the directory, and no file in it changes. A cancelled picker renders no database
+
+## 31.2 Inspect
+- [ ] 31.2.1 Segments and the manifest: segment ids, document counts, deletions, and the commit `seq` (SPEC §5, §8.7). A corrupt segment is an error on that row (SPEC §17), not an empty database
+- [ ] 31.2.2 A stored document by id (SPEC §6.4). A missing id is shown as missing
+- [ ] 31.2.3 Tombstones for a segment: the sidecar version and the deleted ids (SPEC §8.3). A segment with no sidecar shows none
+- [ ] 31.2.4 WAL state: `wal_start`, the frames still needed, and whether they would replay (SPEC §8.2, §8.6). The page does not append a record
+- [ ] 31.2.5 [T] On a fixture directory, the segment list, one document, one tombstone, and the WAL range match the engine reading the same bytes
+
+## 31.3 Query
+- [ ] 31.3.1 Run a query and list the hits. Ranking and the relaxation object come from the core (SPEC §7.2, §7.6)
+- [ ] 31.3.2 The BM25 score breakdown for a hit when explain is on (SPEC §7.2, §7.7, ROADMAP 7.7.1). The page does not recompute the score in JavaScript
+- [ ] 31.3.3 [T] The same query on the fixture returns the same ids and the same per-term contributions as the engine
+
+## 31.4 Boundary
+- [ ] 31.4.1 Document that write mode and a local `persia studio` server are not this version. The v2.0 dashboard remains M25, on `persia-server`
 
