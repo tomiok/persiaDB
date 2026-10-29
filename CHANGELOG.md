@@ -17,7 +17,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   field, with per-field weights, `k1` and `b` (a `combined` saturates with the weighted mean of its fields' `k1`; a
   `keyword` term scores its `idf`). Given a term's or a block's `max_tf` and `min_norm` it gives an exact upper
   bound for WAND. `score::static_rank` is the `log1p`/`linear` static rank contribution. Checked differentially against
-  a reference scorer (`tests/reference`) within `1e-9`.
+  a reference scorer (`tests/reference`) within `1e-9` of the word's largest score.
 - `persia-engine`: queries (ROADMAP 7.1, SPEC §7.1). `query::Query`, the programmatic AST (term, combined, phrase,
   prefix, fuzzy, bool, boost, constant score, match all), checked against a schema with `Query::validate`.
   `QueryCompiler::compile` turns user text into a query and never fails: default AND, `"phrases"`, `-` exclusion and

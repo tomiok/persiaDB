@@ -23,7 +23,7 @@
 //! let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
 //! let segment = Segment::open(ByteSource::new(SegmentWriter::new(&b, meta).finish()?.into()), &schema)?;
 //!
-//! let stats = SegmentStatistics::new(&[Arc::new(segment)]);
+//! let stats = SegmentStatistics::new(&Arc::new(schema), &[Arc::new(segment)]);
 //! assert_eq!(stats.doc_count(), 2);
 //! assert_eq!(stats.field(body).avglen(), 3.5);
 //! assert_eq!((stats.df(body, b"red")?, stats.df(body, b"blue")?), (2, 0));
@@ -34,12 +34,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::memtable::MemtableView;
-use crate::schema::FieldId;
+use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::segment::{FieldStats, ReadError, Segment};
-use crate::view::{PostingsIterator, SearchView};
+use crate::view::SearchView;
 
-/// Bytes of terms the `df` cache of a [`SegmentStatistics`] holds at most; past it, `df` is summed on each call.
+/// Approximate bytes of memory the `df` cache of a [`SegmentStatistics`] holds at most; past it, `df` is summed on
+/// each call.
 const DF_CACHE_BYTES: usize = 4 << 20;
+/// What an entry of the cache costs besides its term's bytes: the boxed key's header, the `df`, and hash-table slack.
+const DF_ENTRY_OVERHEAD: usize = 64;
 
 /// The statistics of one `text` or `keyword` field over a collection (SPEC §5.1, §7.2).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -93,26 +96,41 @@ pub trait StatisticsProvider {
 /// (ROADMAP 7.2.1). Segments are immutable, so they stay valid as long as the snapshot.
 #[derive(Debug)]
 pub struct SegmentStatistics {
+    schema: Arc<CollectionSchema>,
     segments: Vec<Arc<Segment>>,
     doc_count: u64,
     fields: BTreeMap<FieldId, FieldTotals>,
     df: RwLock<DfCache>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct DfCache {
-    terms: HashMap<(FieldId, Box<[u8]>), u64>,
+    terms: HashMap<FieldId, HashMap<Box<[u8]>, u64>>,
+    /// Approximate memory held: term bytes plus [`DF_ENTRY_OVERHEAD`] per entry.
     bytes: usize,
+    cap: usize,
 }
 
 impl SegmentStatistics {
-    /// The statistics of `segments`, which must share one schema (a collection snapshot's).
-    pub fn new(segments: &[Arc<Segment>]) -> Self {
+    /// The statistics of `segments`, opened with `schema` (a collection snapshot's segments and schema).
+    pub fn new(schema: &Arc<CollectionSchema>, segments: &[Arc<Segment>]) -> Self {
+        Self::with_cache_cap(schema, segments, DF_CACHE_BYTES)
+    }
+
+    fn with_cache_cap(
+        schema: &Arc<CollectionSchema>,
+        segments: &[Arc<Segment>],
+        cap: usize,
+    ) -> Self {
         let mut doc_count = 0_u64;
         let mut fields = BTreeMap::<FieldId, FieldTotals>::new();
         for segment in segments {
+            debug_assert!(
+                segment.schema().hash() == schema.hash(),
+                "a segment opened with another schema"
+            );
             doc_count = doc_count.saturating_add(u64::from(segment.doc_count()));
-            for field in segment.schema().fields() {
+            for field in schema.fields() {
                 if let Some(stats) = segment.field_stats(field.id()) {
                     let totals = fields.entry(field.id()).or_default();
                     *totals = totals.add(stats);
@@ -120,10 +138,32 @@ impl SegmentStatistics {
             }
         }
         Self {
+            schema: Arc::clone(schema),
             segments: segments.to_vec(),
             doc_count,
             fields,
-            df: RwLock::default(),
+            df: RwLock::new(DfCache {
+                terms: HashMap::new(),
+                bytes: 0,
+                cap,
+            }),
+        }
+    }
+
+    /// Checks `field` is a `text` or `keyword` field of the schema, as a segment's `terms` does, so the answer does
+    /// not depend on how many segments there are.
+    fn check_field(&self, field: FieldId) -> Result<(), ReadError> {
+        let f = self
+            .schema
+            .field_by_id(field)
+            .ok_or(ReadError::UnknownField { field })?;
+        match f.field_type() {
+            FieldType::Text | FieldType::Keyword => Ok(()),
+            field_type => Err(ReadError::FieldType {
+                field,
+                field_type,
+                what: "terms",
+            }),
         }
     }
 
@@ -148,21 +188,32 @@ impl StatisticsProvider for SegmentStatistics {
     }
 
     fn df(&self, field: FieldId, term: &[u8]) -> Result<u64, ReadError> {
-        let key = (field, Box::<[u8]>::from(term));
+        self.check_field(field)?;
         // A poisoned lock only means another reader panicked mid-insert; the map itself is consistent.
-        if let Some(&df) = self
+        let cached = self
             .df
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .terms
-            .get(&key)
-        {
+            .get(&field)
+            .and_then(|terms| terms.get(term).copied());
+        if let Some(df) = cached {
             return Ok(df);
         }
         let df = self.sum_df(field, term)?;
         let mut cache = self.df.write().unwrap_or_else(PoisonError::into_inner);
-        let bytes = cache.bytes.saturating_add(term.len());
-        if bytes <= DF_CACHE_BYTES && cache.terms.insert(key, df).is_none() {
+        let bytes = cache
+            .bytes
+            .saturating_add(term.len())
+            .saturating_add(DF_ENTRY_OVERHEAD);
+        if bytes <= cache.cap
+            && cache
+                .terms
+                .entry(field)
+                .or_default()
+                .insert(term.into(), df)
+                .is_none()
+        {
             cache.bytes = bytes;
         }
         Ok(df)
@@ -201,18 +252,80 @@ impl StatisticsProvider for SearchStatistics<'_> {
 
     fn df(&self, field: FieldId, term: &[u8]) -> Result<u64, ReadError> {
         let segments = self.segments.df(field, term)?;
-        // The memtable's postings hold its live documents only.
-        let memtable = self
-            .memtable
-            .postings(field, term)?
-            .map_or(0, |p| u64::from(p.df()));
+        // Its live documents only, as its postings.
+        let memtable = u64::from(self.memtable.df(field, term)?);
         Ok(segments.saturating_add(memtable))
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use persia_analysis::AnalyzerRegistry;
+    use persia_format::ByteSource;
+
     use super::*;
+    use crate::document::{Document, Value};
+    use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    use crate::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
+
+    fn collection() -> (Arc<CollectionSchema>, Arc<Segment>) {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .field("tag", FieldKind::Keyword(KeywordOptions::default()))
+            .field("n", FieldKind::I64 { stored: false })
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (id, text) in [("a", "aa bb"), ("b", "bb cc"), ("c", "cc dd")] {
+            b.add(&Document::new(id).with(body, Value::String(text.into())))
+                .unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&b, meta).finish().unwrap();
+        let segment = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+        (Arc::new(schema), Arc::new(segment))
+    }
+
+    #[test]
+    fn the_cache_stops_at_its_cap_and_answers_stay_right() {
+        let (schema, segment) = collection();
+        let body = schema.field("body").unwrap().id();
+        // Room for two entries of two-byte terms.
+        let cap = 2 * (2 + DF_ENTRY_OVERHEAD);
+        let stats = SegmentStatistics::with_cache_cap(&schema, &[segment], cap);
+        let expected = [("aa", 1), ("bb", 2), ("cc", 2), ("dd", 1), ("ee", 0)];
+        for _ in 0..2 {
+            for (term, df) in expected {
+                assert_eq!(stats.df(body, term.as_bytes()).unwrap(), df, "{term}");
+            }
+        }
+        let cache = stats.df.read().unwrap();
+        let entries: usize = cache.terms.values().map(HashMap::len).sum();
+        assert_eq!((entries, cache.bytes), (2, cap));
+    }
+
+    #[test]
+    fn df_checks_the_field_with_or_without_segments() {
+        let (schema, segment) = collection();
+        let id = |n| schema.field(n).unwrap().id();
+        for segments in [vec![], vec![segment]] {
+            let stats = SegmentStatistics::new(&schema, &segments);
+            assert!(matches!(
+                stats.df(id("n"), b"x"),
+                Err(ReadError::FieldType { .. })
+            ));
+            assert!(matches!(
+                stats.df(FieldId::new(9), b"x"),
+                Err(ReadError::UnknownField { .. })
+            ));
+            assert_eq!(stats.df(id("tag"), b"x").unwrap(), 0);
+        }
+    }
 
     #[test]
     fn avglen_of_an_absent_field_is_one() {

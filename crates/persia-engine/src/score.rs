@@ -89,7 +89,8 @@ pub struct FieldParams {
 
 impl FieldParams {
     /// The schema's parameters of `field`: a `text` field's `boost` (or `weight` instead, as a query's `fields`
-    /// sets it), `k1` and `b`; a `keyword` field's weight 1 (or `weight`), [`KEYWORD_K1`] and `b = 0`.
+    /// sets it), `k1` and `b`; a `keyword` field's weight 1 (`weight` is ignored: SPEC §7.2 fixes it), [`KEYWORD_K1`] and
+    /// `b = 0`.
     ///
     /// # Errors
     /// [`ScoreError::Field`] if `field` is not a `text` or `keyword` field of `schema`.
@@ -107,7 +108,7 @@ impl FieldParams {
             }),
             Some(FieldKind::Keyword(_)) => Ok(Self {
                 field,
-                weight: weight.unwrap_or(1.0),
+                weight: 1.0,
                 k1: KEYWORD_K1,
                 b: 0.0,
             }),

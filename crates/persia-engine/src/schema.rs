@@ -59,12 +59,18 @@ pub const MAX_SCHEMA_JSON_LEN: usize = 4 << 20;
 
 /// The number segments use for a field (SPEC §6.2.1). Ids of a schema are exactly `0..field_count`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FieldId(pub(crate) u32);
+pub struct FieldId(u32);
 
 impl FieldId {
     /// The id as a number.
     pub const fn get(self) -> u32 {
         self.0
+    }
+
+    /// Field id `id`, for tests of code that takes ids without a schema.
+    #[cfg(test)]
+    pub(crate) const fn new(id: u32) -> Self {
+        Self(id)
     }
 }
 

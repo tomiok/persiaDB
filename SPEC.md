@@ -1222,7 +1222,7 @@ For a `combined` query (§7.1), `t` is one query word and each field `f` has its
 `tf(t,d,f)` is the frequency of `t_f`, and `df` is `max_f df_f(t_f)` (a lower bound on the documents holding any of
 them, computable from per-field statistics alone). A `term` query on a `text` field is a `combined` over that field
 with its schema `boost` as `w_f`; one on a `keyword` field has `w_f = 1`, `b_f = 0` (no norms) and `k1 = 1.2`, so
-its score is `idf(t)` (a document holds a value once). `k1` is the fields' weighted mean `Σ_f w_f · k1_f / Σ_f w_f`:
+a document holding the value once scores `idf(t)` (one holding it `n` times has `tf = n`, as §5.3.4 counts values). `k1` is the fields' weighted mean `Σ_f w_f · k1_f / Σ_f w_f`:
 their common `k1` when they agree. `b_f` and `k1_f` are the schema's (§6.2.2).
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
@@ -1230,17 +1230,21 @@ Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are
 (§5.5), as in Lucene: a merge of segments without deletions leaves every score unchanged, and one that drops deleted
 documents may move scores toward what the live documents alone give (ROADMAP 6.5.5, 7.2.1). The memtable adds its
 live documents, as the segment it flushes to will count them. So `N` is the segments' `doc_count`s plus the
-memtable's live documents; `df` likewise, at most `N`; and `avglen_f = Σ sum_field_len / Σ docs_with_field` (the
+memtable's live documents; `df` is the segments' term `df`s plus the memtable's live documents holding the term
+(so at most `N`); and `avglen_f = Σ sum_field_len / Σ docs_with_field` (the
 mean over the documents that have the field, as Lucene; 1 when none has it). A snapshot computes its segments'
 statistics once; a search adds those of its memtable view.
 
 `len_f(d)` is the length the norm byte stores (§5.3.4), not the exact token count: up to 12.5 % lower from 40 tokens
-on. The score is evaluated as `idf·(k1+1) − idf·(k1+1)·k1 / (k1 + tf~)`, equal to the formula above, because every
+on. `tf~` is summed over the fields in a fixed order, a field without the term adding nothing, of correctly
+rounded non-negative products `tf · (w_f / denominator)`, the parenthesis one table entry per norm byte. The score is evaluated as `idf·(k1+1) − idf·(k1+1)·k1 / (k1 + tf~)`, equal to the formula above, because every
 floating-point step of that form is monotonic in `tf~`: so a term's (or a block's) `max_tf` and `min_norm` (§5.3.2),
 put in place of a document's frequency and norm byte, give an upper bound of every score in it, exactly, for
 MaxScore and block-max WAND (§7.3). A length-normalization denominator is at least `f64::EPSILON` (a damaged norm
 byte never divides by zero). The implementation MUST match the reference (`persia-engine/tests/reference`), which
-evaluates the formula above on the quantized lengths, within a relative epsilon of `1e-9`.
+evaluates the formula above on the quantized lengths, within `1e-9 · idf·(k1+1)` (absolute, scaled by the word's
+largest score): the subtraction loses relative precision when `tf~` is far below `k1`, but never more than a few ulps
+of `idf·(k1+1)`.
 
 ### 7.3 Execution
 - Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (MAXSCORE as fallback).

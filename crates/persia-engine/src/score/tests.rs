@@ -280,7 +280,7 @@ fn bad_parameters_are_rejected() {
         TermScorer::for_combined(&combined, &s, &stats),
         Err(ScoreError::Field { .. })
     ));
-    let missing = FieldParams::of(&s, FieldId(99), None);
+    let missing = FieldParams::of(&s, FieldId::new(99), None);
     assert!(matches!(missing, Err(ScoreError::Field { .. })));
 }
 
@@ -304,7 +304,7 @@ proptest! {
         let mut stats = Stats { n, ..Stats::default() };
         let mut ps = Vec::new();
         for (i, ((weight, k1, b), docs_with_field, sum)) in fields.iter().copied().enumerate() {
-            let field = FieldId(u32::try_from(i).unwrap());
+            let field = FieldId::new(u32::try_from(i).unwrap());
             stats.fields.insert(field, totals(docs_with_field, sum));
             ps.push(FieldParams { field, weight, k1, b });
         }

@@ -5,7 +5,7 @@
 //! 1. `N`, `df` and `avglen` over segments (deleted documents included) and a memtable view (live documents only)
 //!    are what the reference counts from the plain documents (7.2.1, 7.2.2).
 //! 2. Every live document's score for a `term` or `combined` query matches the reference within [`EPSILON`]
-//!    (relative): the engine reads frequencies from postings and lengths from norm bytes, the reference counts
+//!    (of the word's largest score): the engine reads frequencies from postings and lengths from norm bytes, the reference counts
 //!    tokens and quantizes their number (7.3.1, 7.3.4).
 //! 3. A term's `TermInfo` bounds (and a list's block bounds) bound the score of every document of the list (7.3.3).
 //! 4. A database snapshot computes its segments' statistics once, counts committed deletions until a merge drops
@@ -31,13 +31,14 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::Memtable;
+use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::{CombinedQuery, TermQuery, WeightedTerm};
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::score::{FieldHit, TermScorer};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
-use persia_engine::stats::{SearchStatistics, SegmentStatistics, StatisticsProvider};
+use persia_engine::stats::{FieldTotals, SearchStatistics, SegmentStatistics, StatisticsProvider};
 use persia_engine::view::{NormReader, PostingsIterator, SearchView, SegmentView};
 use persia_engine::wal::Durability;
 use persia_format::ByteSource;
@@ -46,8 +47,9 @@ use proptest::prelude::*;
 use reference::bm25f::{Clause, Corpus, Doc, Field as RefField};
 use roaring::RoaringBitmap;
 
-/// The largest relative difference allowed between the engine's score and the reference's: both evaluate the same
-/// formula on the same quantized lengths, in different floating-point forms (SPEC §7.2).
+/// The largest difference allowed between the engine's score and the reference's, relative to the word's largest
+/// score `idf·(k1+1)`: both evaluate the same formula on the same quantized lengths, in different floating-point
+/// forms, and the engine's loses relative precision when `tf~` is far below `k1` (SPEC §7.2).
 const EPSILON: f64 = 1e-9;
 
 const VOCAB: [&str; 6] = ["ant", "bee", "cat", "dog", "elk", "fox"];
@@ -146,9 +148,10 @@ fn hits<V: SearchView>(
     out
 }
 
-fn close(engine: f64, reference: f64, what: &str) {
+/// Whether `engine` is within [`EPSILON`] of `reference`, relative to `scale` (a word's largest score, SPEC §7.2).
+fn close(engine: f64, reference: f64, scale: f64, what: &str) {
     assert!(
-        (engine - reference).abs() <= EPSILON * reference.abs().max(1e-300),
+        (engine - reference).abs() <= EPSILON * scale,
         "{what}: engine {engine} vs reference {reference}"
     );
 }
@@ -165,26 +168,27 @@ struct Case {
 fn doc_strategy() -> impl Strategy<Value = Doc> {
     let words = |max| prop::collection::vec(prop::sample::select(&VOCAB[..]), 0..max);
     (
-        // Long titles too: lengths from 40 on are quantized (SPEC §5.3.4).
-        prop_oneof![words(8), words(90)],
+        // Long titles too: lengths from 40 on are quantized (SPEC §5.3.4); thousands of tokens against a short
+        // `avglen` give a tiny `tf~`.
+        prop_oneof![8 => words(8), 3 => words(90), 1 => words(3000)],
         words(12),
-        prop::collection::vec(any::<bool>(), 3),
+        // Repeats too: a keyword value held twice has `tf = 2`.
+        prop::collection::vec(prop::sample::select(&TAGS[..]), 0..4),
     )
         .prop_map(|(title, body, tags)| {
-            let tag = TAGS
-                .iter()
-                .zip(tags)
-                .filter(|(_, on)| *on)
-                .map(|(t, _)| (*t).to_owned())
-                .collect();
             let own = |w: Vec<&str>| w.into_iter().map(str::to_owned).collect();
-            vec![own(title), own(body), tag]
+            vec![own(title), own(body), own(tags)]
         })
+}
+
+/// A weight: usual ones, and ones far below `k1`, where the score loses relative precision (SPEC §7.2).
+fn weight() -> impl Strategy<Value = f64> {
+    prop_oneof![Just(1.0), 0.01..=1000.0_f64, 1e-9..=1e-3_f64]
 }
 
 fn field_params() -> impl Strategy<Value = (f64, f64, f64)> {
     (
-        prop_oneof![Just(1.0), 0.01..=1000.0_f64],
+        weight(),
         prop_oneof![Just(1.2), 0.0..=10.0_f64],
         prop_oneof![Just(0.75), Just(0.0), Just(1.0), 0.0..=1.0_f64],
     )
@@ -197,7 +201,7 @@ fn case() -> impl Strategy<Value = Case> {
         field_params(),
         prop::collection::vec(docs(25), 0..4),
         prop::collection::vec((doc_strategy(), prop::bool::weighted(0.2)), 0..10),
-        (0.01..=100.0_f64, 0.01..=100.0_f64),
+        (weight(), weight()),
     )
         .prop_map(|(title, body, segments, memtable, weights)| Case {
             params: Params { title, body },
@@ -269,7 +273,7 @@ fn check(case: &Case) {
         }
     }
     let view = mem.view();
-    let segment_stats = SegmentStatistics::new(&segments);
+    let segment_stats = SegmentStatistics::new(&Arc::new(schema.clone()), &segments);
     let stats = SearchStatistics::new(&segment_stats, &view);
 
     // Invariant 1.
@@ -282,7 +286,12 @@ fn check(case: &Case) {
             (totals.docs_with_field, totals.sum_field_len),
             (with, sum as u64)
         );
-        close(totals.avglen(), corpus.avglen(i), "avglen");
+        close(
+            totals.avglen(),
+            corpus.avglen(i),
+            corpus.avglen(i),
+            "avglen",
+        );
         let terms: &[&str] = if i == TAG { &TAGS } else { &VOCAB };
         for t in terms {
             assert_eq!(
@@ -366,7 +375,12 @@ fn check(case: &Case) {
         let mut check_view = |view: &dyn Fn() -> Vec<(String, f64, f64)>| {
             for (id, engine, bound) in view() {
                 let reference = corpus.score(clauses, &live[&id]);
-                close(engine, reference, &format!("{id} {clauses:?}"));
+                close(
+                    engine,
+                    reference,
+                    scorer.max_score(),
+                    &format!("{id} {clauses:?}"),
+                );
                 assert!(
                     engine <= bound,
                     "{id}: {engine} above its term bound {bound}"
@@ -504,4 +518,156 @@ fn snapshot_statistics_are_cached_and_count_deletions() {
     let next_stats = next.collection("c").unwrap().statistics();
     assert_eq!(next_stats.doc_count(), 4);
     assert_eq!(stats.doc_count(), 3);
+}
+
+/// A weight far below `k1` (legal: `0 < boost`): `tf~` is about 1e-9 of `k1`, where the monotonic form keeps only
+/// a few digits relative to the score but stays within [`EPSILON`] of the word's largest score (SPEC §7.2).
+#[test]
+fn tiny_tf_matches_reference_within_the_scaled_epsilon() {
+    let docs: Vec<(Doc, bool)> = (0..30_usize)
+        .map(|i| {
+            let title = vec![VOCAB[i % 2].to_owned(); 1 + i % 5];
+            (vec![title, vec![], vec![]], false)
+        })
+        .collect();
+    check(&Case {
+        params: Params {
+            title: (1e-9, 10.0, 0.0),
+            body: (1.0, 1.2, 0.75),
+        },
+        segments: vec![docs],
+        memtable: vec![],
+        weights: (1e-9, 1.0),
+    });
+}
+
+fn body_schema(extra: bool) -> CollectionSchema {
+    let ws = AnalyzerRef::new("whitespace", 1).unwrap();
+    let mut b = SchemaBuilder::new("c").field("body", text(&ws, (1.0, 1.2, 0.75)));
+    if extra {
+        b = b.field("title", text(&ws, (2.0, 1.2, 0.75)));
+    }
+    b.build().unwrap()
+}
+
+/// `N`, the `df` of each word, and the `body` totals, as a search over `snapshot` (and its memtable) scores with.
+fn search_stats(snapshot: &persia_engine::db::Snapshot) -> (u64, Vec<u64>, FieldTotals) {
+    let c = snapshot.collection("c").unwrap();
+    let body = c.schema().field("body").unwrap().id();
+    let memtable = c.memtable();
+    let stats = c.search_statistics(&memtable);
+    let df = VOCAB
+        .iter()
+        .map(|w| stats.df(body, w.as_bytes()).unwrap())
+        .collect();
+    (stats.doc_count(), df, stats.field(body))
+}
+
+fn merge_db() -> Database<SimFile> {
+    let options = DatabaseOptions {
+        segment_ids: SegmentIds::seeded(3),
+        merge: MergeOptions {
+            policy: MergePolicy {
+                segments_per_merge: 2,
+                ..MergePolicy::default()
+            },
+            threads: 0,
+        },
+        ..DatabaseOptions::default()
+    };
+    let mut db = Database::create_on(SimFile::new(), [2; 16], options).unwrap();
+    db.create_collection(body_schema(false)).unwrap();
+    db
+}
+
+fn put(db: &mut Database<SimFile>, id: &str, text: &str) {
+    let body = body_schema(false).field("body").unwrap().id();
+    let doc = Document::new(id).with(body, Value::String(text.into()));
+    db.put("c", &doc, Durability::Buffered).unwrap();
+}
+
+/// A search before a flush and one after score with the same statistics: the memtable counts what its segment will.
+#[test]
+fn a_flush_keeps_the_statistics() {
+    let mut db = merge_db();
+    put(&mut db, "a", "ant bee");
+    db.commit().unwrap();
+    put(&mut db, "b", "bee cat cat");
+    put(&mut db, "c", "dog");
+    put(&mut db, "c", "elk elk fox"); // replaced in the memtable: only the live version counts
+    let before = search_stats(&db.snapshot());
+    db.commit().unwrap();
+    let after = db.snapshot();
+    assert_eq!(after.collection("c").unwrap().memtable().live_count(), 0);
+    assert_eq!(search_stats(&after), before);
+    assert_eq!(before.0, 3);
+    assert_eq!(before.1, [1, 2, 1, 0, 1, 1]);
+}
+
+/// A merge without deletions keeps every statistic; one that drops deleted documents lowers them (SPEC §7.2).
+#[test]
+fn merges_keep_or_drop_the_statistics() {
+    let mut db = merge_db();
+    for (i, group) in [["ant bee", "cat"], ["bee dog", "ant ant"]]
+        .iter()
+        .enumerate()
+    {
+        for (j, text) in group.iter().enumerate() {
+            put(&mut db, &format!("{i}-{j}"), text);
+        }
+        db.commit().unwrap();
+    }
+    let before = search_stats(&db.snapshot());
+    db.finish_merges().unwrap();
+    let merged = db.snapshot();
+    assert_eq!(merged.collection("c").unwrap().segments().len(), 1);
+    assert_eq!(search_stats(&merged), before);
+
+    // A deletion is counted until a merge drops it.
+    db.delete("c", "0-0", Durability::Buffered).unwrap();
+    db.commit().unwrap();
+    assert_eq!(search_stats(&db.snapshot()), before);
+    for (j, text) in ["fox", "fox elk"].iter().enumerate() {
+        put(&mut db, &format!("2-{j}"), text);
+    }
+    db.commit().unwrap();
+    db.finish_merges().unwrap();
+    let (n, df, totals) = search_stats(&db.snapshot());
+    assert_eq!(db.snapshot().collection("c").unwrap().segments().len(), 1);
+    assert_eq!(n, before.0 + 1);
+    assert_eq!(df, [1, 1, 1, 1, 1, 2]);
+    assert_eq!(totals.sum_field_len, before.2.sum_field_len - 2 + 3);
+}
+
+/// A field added by an evolution counts the documents of the segments written since; older segments add to `N`
+/// only, and its `df` over them is 0, not an error.
+#[test]
+fn an_added_field_counts_new_segments_only() {
+    let mut db = merge_db();
+    put(&mut db, "a", "ant");
+    db.commit().unwrap();
+    db.evolve_collection(&body_schema(true)).unwrap();
+    let schema = body_schema(true);
+    let (body, title) = (
+        schema.field("body").unwrap().id(),
+        schema.field("title").unwrap().id(),
+    );
+    let doc = Document::new("b")
+        .with(body, Value::String("bee".into()))
+        .with(title, Value::String("ant cat".into()));
+    db.put("c", &doc, Durability::Buffered).unwrap();
+    db.commit().unwrap();
+    let snapshot = db.snapshot();
+    let stats = snapshot.collection("c").unwrap().statistics();
+    assert_eq!(stats.doc_count(), 2);
+    assert_eq!(
+        stats.field(title),
+        FieldTotals {
+            docs_with_field: 1,
+            sum_field_len: 2
+        }
+    );
+    assert_eq!(stats.df(title, b"ant").unwrap(), 1);
+    assert_eq!(stats.df(title, b"fox").unwrap(), 0);
+    assert_eq!(stats.df(body, b"ant").unwrap(), 1);
 }

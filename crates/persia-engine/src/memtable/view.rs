@@ -82,6 +82,39 @@ impl MemtableView {
         }
     }
 
+    /// The live documents of the view holding `term` in a `text` or `keyword` field: the `df` of
+    /// [`SearchView::postings`], counted without copying the postings (SPEC §7.2).
+    ///
+    /// # Errors
+    /// As [`SearchView::postings`].
+    pub fn df(&self, field: FieldId, term: &[u8]) -> Result<u32, ReadError> {
+        let inner = read(&self.shared);
+        let index = match indexed(&inner, field, false, "terms")? {
+            MemField::Text { index, .. } | MemField::Keyword { index } => index,
+            MemField::Other => return Ok(0),
+        };
+        let Some(mut at) = index
+            .inverted
+            .terms
+            .get(term)
+            .and_then(|t| index.heads.get(t as usize).copied())
+        else {
+            return Ok(0);
+        };
+        let mut df = 0_u32;
+        while let Some(p) = index.inverted.postings.get(at as usize) {
+            // A chain is in docid order: the rest came after the view.
+            if p.doc >= self.docs {
+                break;
+            }
+            if self.visible(&inner, p.doc) {
+                df = df.saturating_add(1);
+            }
+            at = index.next.get(at as usize).copied().unwrap_or(NONE);
+        }
+        Ok(df)
+    }
+
     fn visible(&self, inner: &Inner, docid: u32) -> bool {
         docid < self.docs
             && inner

@@ -113,7 +113,7 @@ impl CollectionSnapshot {
     /// once per snapshot, and `df`, cached as it is asked for.
     pub fn statistics(&self) -> &SegmentStatistics {
         self.statistics
-            .get_or_init(|| SegmentStatistics::new(&self.segments))
+            .get_or_init(|| SegmentStatistics::new(&self.schema, &self.segments))
     }
 
     /// What a search over the segments and `memtable` (a view of [`Self::memtable`]) scores with: the segments'
