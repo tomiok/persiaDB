@@ -39,7 +39,7 @@ head:
             "name": "How is Persia DB different from SQLite FTS5, Tantivy, and Meilisearch?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is an empty main function.\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. Those search features are specified in the SPEC. They are not shipped."
+              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is an empty main function.\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A search call and the relaxation cascade are not. That split is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/."
             }
           },
           {
@@ -132,7 +132,7 @@ Tantivy is a Rust full-text search library. Its index is a directory of segment 
 
 Meilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: `persia-server` is an empty main function.
 
-The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. Those search features are specified in the SPEC. They are not shipped.
+The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A search call and the relaxation cascade are not. That split is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Is Persia DB embedded or a server?
 

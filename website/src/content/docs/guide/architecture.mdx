@@ -40,7 +40,7 @@ Three rules shape the rest of the design:
 |---|---|---|
 | `persia-format` | Encodings, checksums, frames, block codecs. No I/O policy. | Implemented (M1) |
 | `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Memory, local file, and the container are implemented (M2). Cloud is M12. |
-| `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). It does not search. |
+| `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). The query compiler runs them. This crate does not search. |
 | `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | %%ENGINE_SHORT%% |
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | No API yet (M9) |
 | `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10). The crate exports no types. |
@@ -52,6 +52,7 @@ Dependencies point downward only (`persia-format` at the bottom). `cargo xtask c
 the graph. The public facade orders blob writes before the document commit so the engine never has
 to know about blob bytes (SPEC §9.5).
 
-On a query, once the engine exists: analyze the text, search each segment and the memtable, merge
+On a query, the design is: analyze the text, search each segment and the memtable, merge
 the per-segment top-k, and if there are too few hits run the relaxation cascade. The response
-includes which level matched.
+includes which level matched. The compiler and the BM25F scorer exist. Matching, the top-k merge,
+and the cascade do not. See [Typo-tolerant search](/guide/typo-tolerant-search/).

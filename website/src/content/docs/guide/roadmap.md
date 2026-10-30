@@ -92,6 +92,10 @@ reference scorer, boolean and phrase matching, top-k with block-max WAND, filter
 pagination, facets, parallel segment search, and explain. Benchmarks of this milestone may start
 the v1 performance work early (M15).
 
+In the tree today: the query AST and compiler, the filter DSL, query limits, collection statistics,
+and the BM25F scorer (ROADMAP 7.1–7.3). Matching, top-k, facets, and explain are not.
+[Typo-tolerant search](/guide/typo-tolerant-search/) is that split. The relaxation milestone below has not been started.
+
 ## M8 — Zero-results avoidance
 
 Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level score offsets, the

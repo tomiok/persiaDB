@@ -60,7 +60,7 @@ What the form stores is described on the [waitlist](/waitlist/) page.
 |---|---|---|
 | Zero friction | `Db::open("app.persia")` just works. No daemon and no config file for the embedded library. | Planned (M10) |
 | Own engine | Index format, analysis, BM25F scoring, and query execution are written in this repository. | %%PILLAR_ENGINE%% |
-| Never zero results | A query that matches nothing is relaxed step by step, and the response says what changed. | Planned (M8) |
+| Never zero results | A query that matches nothing is relaxed step by step, and the response says what changed. | Not started (M8). [How the cascade is designed](/guide/typo-tolerant-search/). |
 | Cloud-native | Immutable segments. The same bytes locally and in object storage. Stateless query nodes. | %%PILLAR_CLOUD%% |
 | Correctness, then speed | Checksums, crash-safe commits, and fuzzed parsers come before performance claims. | %%PILLAR_CORRECTNESS%% |
 
@@ -71,6 +71,7 @@ When this site and the SPEC disagree, the SPEC wins.
 
 - [Getting started](/guide/getting-started/) separates the codecs you can call from the database API, which is still illustrative.
 - [What is an embedded search database?](/guide/embedded-search/) explains in-process, single-file full-text search, and which parts of that design exist in the repository.
+- [Typo-tolerant search](/guide/typo-tolerant-search/) explains query relaxation, fuzzy matching, BM25F, and filters: what is designed, and what the engine implements.
 - [Comparison](/guide/comparison/) places the design next to SQLite FTS5, Tantivy, and Meilisearch. Persia DB does not search yet.
 - [Guide overview](/guide/overview/) is the full narrative, split from the repository guide.
 - [For AI agents](/guide/for-agents/) is the short list of constraints. [llms.txt](/llms.txt) indexes the pages.

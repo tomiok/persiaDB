@@ -1,6 +1,6 @@
 ---
 title: "Code"
-description: "What the Persia DB crates export today, with links to the source. The public Db API does not exist yet. The engine has a WAL, commit, and segment merging, and nothing searches."
+description: "What the Persia DB crates export today, with links to the source. The public Db API does not exist yet. The engine has a WAL, commit, segment merging, a query compiler, and a BM25F scorer. Nothing runs a search."
 head:
   - tag: title
     content: "Source guide to the Rust crates that exist today | PersiaDB"
@@ -73,7 +73,9 @@ pub use writer::Writer;
 
 Integer codecs (`delta`, `bitpack`, `postings`, `for_codec`), varints, zigzag, and the
 bounds-checked `Reader` / `Writer` live in those modules. They are library primitives. Segment
-writers in `persia-engine` use them (M5). There is still no query.
+writers in `persia-engine` use them (M5). A search that returns hits is still not there.
+The query compiler, the filter DSL, and the BM25F scorer are (ROADMAP 7.1–7.3). See
+[Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Checksums
 

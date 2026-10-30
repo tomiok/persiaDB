@@ -39,7 +39,10 @@ const diagram = `
     accent={['5. cascade']}
     accentAlt={['4. too few', 'no: return', 'yes: relax']}
 >
-    Planned query path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#7-search">SPEC §7</a>).
+    Designed query path (<a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#7-search">SPEC §7</a>).
+        The text compiler in step 1 and the BM25F scorer are in the tree. Searching segments, merging hits, and the cascade are not.
         Step 4 is the branch into zero-results relaxation. Filters stay strict unless the caller opts in.
-        The response names the level and what changed. {queryStatus}
+        The response names the level and what changed.
+        The longer account is <a href={`${import.meta.env.BASE_URL.replace(/\/$/, '')}/guide/typo-tolerant-search/`}>typo-tolerant search</a>.
+        {queryStatus}
 </AsciiFigure>

@@ -30,7 +30,7 @@ Names below are the ones used in code and in the SPEC. The short definitions are
 | **Frame** | One checksummed record in the local container (SPEC §4.4): WAL chunk, segment, manifest, padding, or tombstone sidecar. |
 | **Blob** | An opaque client file, addressed by the SHA-256 of its bytes and stored in chunks (SPEC §9, ADR-0002). |
 | **Shard** | An independent database that owns one hash range of document ids (SPEC §11). |
-| **Relaxation** | A controlled loosening of a query so the default experience is not an empty page (SPEC §7.6). |
+| **Relaxation** | A controlled loosening of a query so the default experience is not an empty page (SPEC §7.6). The cascade is not implemented. See [Typo-tolerant search](/guide/typo-tolerant-search/). |
 
 A few more words that show up in the roadmap and in contributor docs
 ([`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md)):
