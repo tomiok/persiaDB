@@ -26,6 +26,9 @@ Produce a short plan in the conversation:
 - Smallest change that satisfies the issue. No drive-by refactors; note them as follow-up issues instead.
 - Follow coding rules in `CLAUDE.md` (no `unwrap` on external data, checked arithmetic, `SAFETY` comments, English docs).
 - Commit in small logical steps with conventional commits.
+- A bug found on the way that is not part of the issue (a failing test elsewhere, a durability problem) is its own
+  issue: note it, finish or park the current batch, and fix it on its own branch off `main` with its own PR. A failing
+  crash, recovery or durability test is never assumed flaky: use the `crash-triage` skill.
 
 ## 4. Verify locally
 ```bash
@@ -38,7 +41,8 @@ Fix everything before delegating.
 
 ## 5. Delegate (batched, see CLAUDE.md "Workflow")
 Leaves are worked in batches (one ROADMAP subsection or a few related leaves per session).
-1. **Per leaf, yourself:** mutation sanity check — break the code (off-by-one, skipped check) and confirm a test fails; revert.
+1. **Per leaf, yourself:** mutation sanity check with the `mutation-check` skill: break the code (off-by-one, skipped
+   check) and confirm a test fails; restore from your own backup copy, never with `git checkout`/`restore`/`stash`.
 2. **`test-writer`** — only for leaves that parse untrusted bytes, change the on-disk format, or touch durability:
    "Add tests for <issue>: invariants <list>; layers: <unit/property/golden/fuzz/...>." Apply its findings; if it
    reports a bug, fix the code and keep its failing test.
@@ -54,9 +58,13 @@ When the batch is merged and pushed, suggest starting a fresh session for the ne
 ## 6. Finish
 - Tick the Definition of Done list from `CLAUDE.md`.
 - Mark the leaf `[x]` in `ROADMAP.md`, run `cargo xtask progress --record`, and include `ROADMAP.md`,
-  `PROGRESS.md` and `docs/progress-history.csv` in the PR. Add any follow-up work as new ROADMAP leaves.
+  `PROGRESS.md` and `docs/progress-history.csv` in the PR. Add any follow-up work as new ROADMAP leaves. Both generated
+  files conflict between branches that each ran it: never hand-merge them; take `main`'s versions
+  (`git checkout origin/main -- PROGRESS.md docs/progress-history.csv`) and run `cargo xtask progress --record` again.
 - Report the progress delta to the user (milestone %, what is now ready next).
 - Update `SPEC.md`, ADRs, `CHANGELOG.md`, docs/examples if behavior is user-visible.
-- Output a PR description: **Context** (issue + SPEC §), **What changed**, **How it was tested** (layers + commands + seeds),
-  **Risks / follow-ups**, **Reviewer notes**.
+- Run `just check` (it also formats and lints `fuzz/`, which `cargo fmt --all` misses) before pushing.
+- Output a PR description: **Context** (issue + SPEC §), **What changed**, **How it was tested** (layers + commands + seeds,
+  mutation-check results), **Risks / follow-ups** (including any failure seen and not explained), **Reviewer notes**
+  (what `code-reviewer` found, what was fixed, what was declined and why).
 - Do not mark the issue done if any DoD item is unmet; list what remains.
