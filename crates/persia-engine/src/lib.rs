@@ -11,6 +11,7 @@ pub mod merge;
 pub mod query;
 pub mod schema;
 pub mod score;
+pub mod search;
 pub mod segment;
 pub mod stats;
 pub mod tombstone;

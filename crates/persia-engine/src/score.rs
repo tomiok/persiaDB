@@ -35,7 +35,7 @@ mod static_rank;
 
 pub use static_rank::{static_rank, static_rank_value};
 
-use crate::query::{CombinedQuery, TermQuery};
+use crate::query::{CombinedQuery, PhraseQuery, TermQuery};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::segment::norms;
 use crate::segment::{BlockMax, ReadError, TermInfo};
@@ -191,9 +191,22 @@ impl TermScorer {
             let weights: f64 = fields.iter().map(|p| p.weight).sum();
             fields.iter().map(|p| p.weight * p.k1).sum::<f64>() / weights
         };
-        let idf = idf(stats.doc_count(), df);
+        Ok(Self::with_idf(
+            fields,
+            k1,
+            idf(stats.doc_count(), df),
+            stats,
+        ))
+    }
+
+    fn with_idf(
+        fields: &[FieldParams],
+        k1: f64,
+        idf: f64,
+        stats: &(impl StatisticsProvider + ?Sized),
+    ) -> Self {
         let top = idf * (k1 + 1.0);
-        Ok(Self {
+        Self {
             fields: fields.iter().map(|p| p.field).collect(),
             factors: fields
                 .iter()
@@ -203,7 +216,7 @@ impl TermScorer {
             k1,
             top,
             top_k1: top * k1,
-        })
+        }
     }
 
     /// The scorer of a `term` query: a `text` field's term as a `combined` over that field with its `boost`, a
@@ -247,6 +260,38 @@ impl TermScorer {
             df = df.max(stats.df(clause.field, clause.term.as_bytes())?);
         }
         Self::new(&params, df, stats)
+    }
+
+    /// The scorer of a `phrase` query: one term over its `text` field with the schema `boost`, scored from the
+    /// phrase frequency, whose `idf` is the sum of its terms' (SPEC §7.2). A phrase of one term scores as a `term`
+    /// query on it.
+    ///
+    /// # Errors
+    /// [`ScoreError::Field`] for a field that is not a `text` field; [`ScoreError::Params`] for a `boost`, `k1`
+    /// or `b` out of range; a failure to read a `df`.
+    pub fn for_phrase(
+        query: &PhraseQuery,
+        schema: &CollectionSchema,
+        stats: &(impl StatisticsProvider + ?Sized),
+    ) -> Result<Self, ScoreError> {
+        if !matches!(
+            schema.field_by_id(query.field).map(Field::kind),
+            Some(FieldKind::Text(_))
+        ) {
+            return Err(ScoreError::Field {
+                field: query.field,
+                what: "a phrase",
+            });
+        }
+        let params = FieldParams::of(schema, query.field, None)?;
+        if !params.valid() {
+            return Err(ScoreError::Params { field: query.field });
+        }
+        let mut sum = 0.0;
+        for t in &query.terms {
+            sum += idf(stats.doc_count(), stats.df(query.field, t.term.as_bytes())?);
+        }
+        Ok(Self::with_idf(&[params], params.k1, sum, stats))
     }
 
     /// The fields, in the order [`Self::score`] takes their hits.

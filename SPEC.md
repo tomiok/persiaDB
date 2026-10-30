@@ -1224,6 +1224,14 @@ them, computable from per-field statistics alone). A `term` query on a `text` fi
 with its schema `boost` as `w_f`; one on a `keyword` field has `w_f = 1`, `b_f = 0` (no norms) and `k1 = 1.2`, so
 a document holding the value once scores `idf(t)` (one holding it `n` times has `tf = n`, as §5.3.4 counts values). `k1` is the fields' weighted mean `Σ_f w_f · k1_f / Σ_f w_f`:
 their common `k1` when they agree. `b_f` and `k1_f` are the schema's (§6.2.2).
+A `phrase` is one term over its field, with the schema `boost` as `w_f` (as Lucene scores a phrase): `tf(t,d,f)` is
+the phrase frequency, the number of distinct positions `s` such that every phrase term holds position `s` plus its
+position relative to the first term, and `idf(t)` is the sum of its terms' `idf`s, each from that term's own `df`. So a phrase of one
+term scores as a `term` query (unless an analyzer stacks a token on itself, at one position: a start counts once),
+and a phrase matches what holds it at least once.
+A `bool` scores the sum of its `must` clauses plus the sum of its matching `should` clauses, each added in query order
+(so a document's score does not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
+score, and `match_all` scores 0.
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
