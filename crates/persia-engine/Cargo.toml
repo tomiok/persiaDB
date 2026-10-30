@@ -41,3 +41,7 @@ harness = false
 [[bench]]
 name = "database"
 harness = false
+
+[[bench]]
+name = "score"
+harness = false

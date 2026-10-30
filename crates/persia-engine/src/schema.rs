@@ -66,6 +66,12 @@ impl FieldId {
     pub const fn get(self) -> u32 {
         self.0
     }
+
+    /// Field id `id`, for tests of code that takes ids without a schema.
+    #[cfg(test)]
+    pub(crate) const fn new(id: u32) -> Self {
+        Self(id)
+    }
 }
 
 impl fmt::Display for FieldId {

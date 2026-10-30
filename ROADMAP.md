@@ -373,6 +373,7 @@ Deps: M2, M5.
 - [x] 6.1.4 Size/age flush triggers
 - [ ] 6.1.5 `SearchView` parity for queries: term enumeration (prefix, range, automaton) and column access over segments and the memtable, for 7.1 `Prefix`/`Fuzzy` and 7.4.5 filters (found in 6.1.2)
 - [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
+- [ ] 6.1.7 Cache `MemtableView::df` if term statistics become hot: it walks the posting chain under the read lock on every call. The count is the view's `(docs, version)` cutoff, so it cannot reuse a live counter on the term, and a cache has to be keyed by that cutoff and bounded (found in 7.2)
 
 ## 6.2 WAL (SPEC §8.2)
 - [x] 6.2.1 WAL record format: op (put/delete), collection name, payload, checksum
@@ -443,14 +444,14 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.1.4 Query limits (max terms/clauses/expansions) with explicit errors
 
 ## 7.2 Collection statistics
-- [ ] 7.2.1 Aggregate `N`, `avglen`, `df` across live segments (cached per snapshot)
-- [ ] 7.2.2 Statistics provider trait (enables global stats in M13)
+- [x] 7.2.1 Aggregate `N`, `avglen`, `df` across live segments (cached per snapshot)
+- [x] 7.2.2 Statistics provider trait (enables global stats in M13)
 
 ## 7.3 BM25F scorer (SPEC §7.2)
-- [ ] 7.3.1 Scorer implementation with per-field `k1`, `b`, weights; norm decode table
-- [ ] 7.3.2 Static rank contribution (log1p, linear, saturation functions)
-- [ ] 7.3.3 Score upper bounds per term/block (for WAND)
-- [ ] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
+- [x] 7.3.1 Scorer implementation with per-field `k1`, `b`, weights; norm decode table
+- [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
+- [x] 7.3.3 Score upper bounds per term/block (for WAND)
+- [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
 
 ## 7.4 Matching & top-k
 - [ ] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -1105,6 +1106,9 @@ Hybrid text and vector search, an embedding model shipped with the repo, an MCP 
 - [ ] 27.5.1 Chunks live in a collection: text, a vector, and a `blob_ref` or a source id (SPEC §9). Retrieval returns those chunks with snippets (M17)
 - [ ] 27.5.2 The command returns passages and citations. It does not call an external model. The docs say that generating an answer happens outside this process
 - [ ] 27.5.3 [T] Two blobs in one file. The returned chunk is the one that contains the query term, and the citation id is that blob
+
+## 27.6 Ranking features
+- [ ] 27.6.1 Static rank function `saturation`, `v / (v + pivot)` with a `pivot` key in `ranking.static_rank` (SPEC §6.2.3, §7.2); deferred from 7.3.2. SPEC and schema JSON first; a schema written with it is unsupported by older builds
 
 ---
 
