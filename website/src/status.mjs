@@ -5,8 +5,8 @@
 // Module and function names come from the crate sources.
 // Pages share the sentences below (%%TOKENS%%) instead of copying a crate list.
 // A claim is emitted only when the leaves that define it are checked and the
-// matching code is still in the tree. An unchecked follow-up (open/recovery
-// orchestration, query) stays unclaimed.
+// matching code is still in the tree. An unchecked follow-up (query execution,
+// relaxation) stays unclaimed.
 
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -57,6 +57,24 @@ const GROUPS = {
 		done: 'segment merging (a merge policy, a segment merger, a background scheduler, and deletion of obsolete objects)',
 		partial: 'segment merging (not every leaf is done)',
 	},
+	queryModel: {
+		leaves: ['7.1.1', '7.1.2.1', '7.1.2.2', '7.1.3', '7.1.4'],
+		code: (ctx) => ctx.modules.includes('query'),
+		done: 'a query AST, user-text compiler, filter DSL, and query limits',
+		partial: 'part of the query model (not every leaf is done)',
+	},
+	stats: {
+		leaves: ['7.2.1', '7.2.2'],
+		code: (ctx) => ctx.modules.includes('stats'),
+		done: 'collection statistics (document count, document frequency, average field length)',
+		partial: 'collection statistics (not every leaf is done)',
+	},
+	bm25: {
+		leaves: ['7.3.1', '7.3.2', '7.3.3', '7.3.4'],
+		code: (ctx) => ctx.modules.includes('score'),
+		done: 'BM25F scoring with static rank and score bounds',
+		partial: 'BM25F scoring (not every leaf is done)',
+	},
 };
 
 /** Section 6.6. Not part of the write-path claim until every leaf is checked. */
@@ -78,6 +96,7 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasPutBlob
  * @property {boolean} hasGetBlob
  * @property {boolean} hasQuery
+ * @property {boolean} hasSearch
  * @property {string[]} analyzers
  * @property {boolean} published
  * @property {string} version
@@ -329,14 +348,21 @@ export function buildStatus(ctx) {
 				: 'Open and recovery orchestration (single-writer enforcement, persia verify, and the crash-loop harness) is not done.',
 		);
 	}
-	if (m7.state === 'done') {
-		// Query milestone is finished.
-	} else if (ctx.hasQuery) {
-		gaps.push(`A query module is in the tree. The query milestone is ${isState(m7)}.`);
-	} else if (m7.done === 0 && m7.state !== 'in progress') {
-		gaps.push(`There is no query engine (${countState(m7)}).`);
-	} else {
-		gaps.push(`The query engine is ${isState(m7)}.`);
+	const queryModel = groupPhrase(ctx, 'queryModel');
+	const stats = groupPhrase(ctx, 'stats');
+	const bm25 = groupPhrase(ctx, 'bm25');
+	const queryPieces = [queryModel, stats, bm25].filter((item) => item !== null);
+	let querySentence = '';
+	if (m7.state !== 'done') {
+		if (queryPieces.length > 0) {
+			querySentence = `Its query path is ${isState(m7)}: ${englishList(queryPieces)}.`;
+		} else if (ctx.hasQuery) {
+			querySentence = `A query module is in the tree. The query milestone is ${isState(m7)}.`;
+		} else if (m7.done === 0 && m7.state !== 'in progress') {
+			querySentence = `There is no query engine (${countState(m7)}).`;
+		} else {
+			querySentence = `The query engine is ${isState(m7)}.`;
+		}
 	}
 	if (m8.state !== 'done') {
 		gaps.push(
@@ -345,10 +371,10 @@ export function buildStatus(ctx) {
 				: `Relaxation is ${isState(m8)}.`,
 		);
 	}
-	if (m7.state !== 'done' && !ctx.hasQuery) gaps.push('Nothing searches.');
+	if (m7.state !== 'done' && !ctx.hasSearch) gaps.push('Nothing searches.');
 
 	const engineShort = seal(
-		`persia-engine implements ${englishList(engineBits)}. ${writeSentence} ${gaps.join(' ')}`,
+		`persia-engine implements ${englishList(engineBits)}. ${writeSentence} ${querySentence} ${gaps.join(' ')}`,
 	);
 
 	const engineModules = seal(englishList(ctx.modules));
@@ -382,9 +408,9 @@ export function buildStatus(ctx) {
 	const openGap = !mentionOpen
 		? ''
 		: openState === 'done'
-			? 'Open and recovery orchestration is done.'
+			? 'Open and recovery orchestration is done (single-writer enforcement, persia verify, and the crash-loop harness).'
 			: 'Open and recovery orchestration (single-writer enforcement, persia verify, and the crash-loop harness) is not done.';
-	const searchGap = m7.state === 'done' || ctx.hasQuery ? '' : 'Nothing searches.';
+	const searchGap = m7.state === 'done' || ctx.hasSearch ? '' : 'Nothing searches.';
 	const writePathNow = seal(
 		`The container commit is ${isState(m2)} and is crash-tested. ${writeSentence.replace(/^Its /, 'The engine ')} ${openSentence} ${openGap} ${searchGap}`,
 	);
@@ -412,7 +438,7 @@ export function buildStatus(ctx) {
 	/** @type {string[]} */
 	const absent = [];
 	if (!ctx.persiaExports) absent.push('persia::Db');
-	if (!ctx.hasQuery) absent.push('search');
+	if (!ctx.hasSearch) absent.push('search');
 	if (!ctx.hasPutStruct) absent.push('put_struct');
 	if (!ctx.hasPutBlob) absent.push('put_blob');
 	if (!ctx.hasGetBlob) absent.push('get_blob');
@@ -426,12 +452,20 @@ export function buildStatus(ctx) {
 	const noPublicApi = seal(
 		ctx.persiaExports
 			? 'The persia crate exports a public API.'
-			: `The public persia crate exports no Db and no Collection.${m7.state === 'done' || ctx.hasQuery ? '' : ' Nothing runs a query.'}${unpublished}`,
+			: `The public persia crate exports no Db and no Collection.${m7.state === 'done' || ctx.hasSearch ? '' : ' Nothing runs a search.'}${unpublished}`,
 	);
 
 	const canWrite = ctx.dbFns.has('put') && ctx.dbFns.has('delete') && ctx.dbFns.has('commit');
+	const queryClause =
+		m7.state === 'done' || ctx.hasSearch
+			? 'A search call is in the tree.'
+			: bm25 && queryModel
+				? 'A query compiler and a BM25F scorer are in the tree. Nothing runs a search.'
+				: ctx.hasQuery || bm25
+					? 'Query code is in the tree. Nothing runs a search.'
+					: 'Nothing runs a search.';
 	const preAlpha = seal(
-		`Persia DB is pre-alpha. ${ctx.persiaExports ? 'The persia crate exports a public API.' : 'The public persia crate has no Db::open.'} ${canWrite ? 'persia-engine can put, delete, and commit a document.' : 'The engine does not yet put documents.'} ${m7.state === 'done' || ctx.hasQuery ? 'A query engine is in the tree.' : 'Nothing runs a query.'}`,
+		`Persia DB is pre-alpha. ${ctx.persiaExports ? 'The persia crate exports a public API.' : 'The public persia crate has no Db::open.'} ${canWrite ? 'persia-engine can put, delete, and commit a document.' : 'The engine does not yet put documents.'} ${queryClause}`,
 	);
 
 	const blocking = ['M6', 'M7', 'M8', 'M9']
@@ -466,7 +500,11 @@ export function buildStatus(ctx) {
 			? `The write path is ${isState(m6)}: ${englishList(pillarWrite)}.`
 			: `The write path is ${isState(m6)}.`;
 	const scoring =
-		m7.state === 'done' ? 'Scoring and query execution are done.' : 'Scoring and query execution do not.';
+		m7.state === 'done'
+			? 'Scoring and query execution are done.'
+			: bm25
+				? 'BM25F scoring is in the tree. Query execution does not return hits.'
+				: 'Scoring and query execution do not return hits.';
 	const pillarEngine = seal(
 		`${have.length > 0 ? `${englishList(have).charAt(0).toUpperCase()}${englishList(have).slice(1)} exist. ` : ''}${pillarWriteSentence} ${scoring}`,
 	);
@@ -551,7 +589,8 @@ function readInput() {
 		hasPutStruct: dbFns.has('put_struct') || /pub fn put_struct\b/.test(persiaLib),
 		hasPutBlob: dbFns.has('put_blob') || /pub fn put_blob\b/.test(persiaLib),
 		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib),
-		hasQuery: modules.includes('query') || dbFns.has('search'),
+		hasQuery: modules.includes('query'),
+		hasSearch: dbFns.has('search') || /pub fn search\b/.test(persiaLib),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),
 		published: pkg.published,
 		version: pkg.version,

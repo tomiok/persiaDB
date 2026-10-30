@@ -75,7 +75,7 @@ writers in `persia-engine` use them. %%ENGINE_SHORT%% The leaf count is on the [
 
 The engine is specified to see every backend as the same trait: get, ranged get, put, put-if-absent, list,
 delete (SPEC §10.1). The `Storage` trait and the memory and local-file backends are implemented (M2).
-S3, GCS, and Azure Blob are not (M12). The query engine that would call the trait is not written.
+S3, GCS, and Azure Blob are not (M12). The write path already uses the trait. Query execution that would search through it is not written.
 
 | Backend | How a database is addressed | Milestone |
 |---|---|---|

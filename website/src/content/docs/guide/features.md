@@ -14,17 +14,20 @@ head:
       content: "Reference for BM25F, schema, relaxation, blobs | PersiaDB"
 ---
 
-Search, ranking, relaxation, blobs, and the server are **planned**.
-Schema, analyzers, the container commit, segment bytes, and part of the write path exist as library code.
+The query compiler, the filter DSL, collection statistics, and BM25F scoring exist as library code.
+A search call, matching, facets, relaxation, blobs, and the server do not.
+Schema, analyzers, the container commit, segment bytes, and part of the write path also exist as library code.
 %%NO_PUBLIC_API%%
 
 | Capability | Status | Defined in |
 |---|---|---|
-| Open a file and search | Planned (M10) | SPEC §8, §10.2 |
-| Full-text search, filters, facets, sort | Planned (M7) | SPEC §7 |
-| Zero-results relaxation | Planned (M8) | SPEC §7.6 |
+| Open a file and search | Planned (M10). `persia::Db` does not exist. | SPEC §8, §10.2 |
+| Query AST, user-text compiler, filter DSL, limits | Done as library code (ROADMAP 7.1). Not a search call. | SPEC §7.1 |
+| Collection statistics and BM25F | Done as library code (ROADMAP 7.2, 7.3). A score is not a hit list. | SPEC §7.2 |
+| Matching, top-k, facets, sort | Not started (ROADMAP 7.4, 7.5). | SPEC §7.3–§7.5 |
+| Zero-results relaxation | Not started (M8). On by default in the design. | SPEC §7.6 |
 | Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
-| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). They do not run inside a query. | SPEC §6.3 |
+| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). The query compiler runs them when it compiles user text. They do not run a search. | SPEC §6.3 |
 | Segment writer and reader | %%M5_CELL%% | SPEC §5 |
 | Crash-safe commit and recovery | %%DURABILITY_CELL%% | SPEC §4.5, §8.6 |
 | Blob storage | Planned (M9) | SPEC §9 |
@@ -46,7 +49,10 @@ are separate from the text and are not relaxed unless you opt in.
 Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a collection may add a
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
-within a documented epsilon (SPEC §7.2). That model is part of the query milestone; it is not in the tree yet.
+within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
+for one term (ROADMAP 7.3.4). A search that returns ranked hits does not: matching and top-k are
+ROADMAP 7.4 and have not been started. The longer account of typos, relaxation, and this scorer is
+[Typo-tolerant search](/guide/typo-tolerant-search/).
 
 Execution, per segment and over the memtable, is block-max WAND (MAXSCORE as a fallback), with
 filters as bitmaps and tombstones applied last (SPEC §7.3). Segments are searched in parallel.
@@ -86,7 +92,8 @@ The response says what happened. This JSON is the shape in SPEC §7.6. It is ill
 
 Quality of this cascade is a product feature of the same milestone (ROADMAP M8): a synthetic typo
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
-planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
+planned as ROADMAP 8.4.4 (`docs/relaxation.md`). What is implemented today, and what is still only
+the design, is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Schema, documents, and analysis
 

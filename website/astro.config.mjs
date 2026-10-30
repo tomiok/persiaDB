@@ -130,6 +130,7 @@ export default defineConfig({
                         'guide/for-agents*',
                         'guide/overview*',
                         'guide/embedded-search*',
+                        'guide/typo-tolerant-search*',
                     ],
                 }),
             ],
@@ -152,6 +153,7 @@ export default defineConfig({
                     items: [
                         { label: 'Overview', slug: 'guide/overview' },
                         { label: 'Embedded search', slug: 'guide/embedded-search' },
+                        { label: 'Typo-tolerant search', slug: 'guide/typo-tolerant-search' },
                         { label: 'Comparison', slug: 'guide/comparison' },
                         { label: 'Getting started', slug: 'guide/getting-started' },
                         { label: 'FAQ', slug: 'guide/faq' },

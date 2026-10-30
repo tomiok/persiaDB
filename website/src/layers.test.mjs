@@ -61,8 +61,8 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(view.analysisStatus, 'done');
 	assert.equal(view.storageDetail, 'memory and local file');
 	assert.equal(view.storageStatus, 's3, gcs, azure planned');
-	assert.equal(view.engineStatus, 'M6, no query');
-	assert.equal(view.diagram.includes('segments and WAL'), true);
+	assert.equal(view.engineStatus, 'in progress');
+	assert.equal(view.diagram.includes('WAL and query'), true);
 	assert.equal(view.diagram.includes('M5 in progress'), false);
 	assert.equal(view.blobStatus, 'not started');
 	assert.equal(view.apiStatus, 'stub · no methods yet');
@@ -76,7 +76,9 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(m5?.state, 'done');
 	assert.equal(m6?.state, 'in progress');
 	assert.match(view.caption, /WAL with chunks, group commit, and replay/);
-	assert.match(view.caption, /no query engine/);
+	assert.match(view.caption, /query path is in progress/);
+	assert.match(view.caption, /Nothing searches/);
+	assert.equal(view.caption.includes('no query engine'), false);
 	assert.match(view.caption, /exports no Db or Collection/);
 	assert.equal(view.caption.includes('M5 in progress'), false);
 	assert.equal(view.caption.includes('no indexing API'), false);
@@ -84,7 +86,7 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.deepEqual(view.accent, ['persia-format', 'encodings, checksums']);
 	assert.deepEqual(view.accentAlt, ['persia-storage']);
 	assert.equal(layerDiagram().caption, view.caption);
-	assert.equal(layerView(loadProgress()).engineStatus, 'M6, no query');
+	assert.equal(layerView(loadProgress()).engineStatus, 'in progress');
 });
 
 test('figure captions follow the same snapshot', () => {
@@ -97,7 +99,8 @@ test('figure captions follow the same snapshot', () => {
 	assert.match(writePathCaption(parsed), /Nothing searches/);
 	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
-	assert.match(queryPathCaption(parsed), /Searching segments is not started \(M7/);
+	assert.match(queryPathCaption(parsed), /The query milestone is in progress \(M7/);
+	assert.match(queryPathCaption(parsed), /Zero-results relaxation is not started \(M8\)/);
 	assert.match(storageDiagramCaption(parsed), /Block framing is done \(M1,/);
 	assert.match(storageDiagramCaption(parsed), /S3, GCS, and Azure are not started \(M12\)/);
 	const llms = llmsStatusParagraph();

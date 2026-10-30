@@ -32,6 +32,7 @@ const docsOrder = ['index', 'features', 'architecture', 'roadmap', 'about', 'wai
 const guideOrder = [
 	'guide/overview',
 	'guide/embedded-search',
+	'guide/typo-tolerant-search',
 	'guide/comparison',
 	'guide/getting-started',
 	'guide/faq',

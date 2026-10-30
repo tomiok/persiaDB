@@ -358,7 +358,7 @@ export function queryPathCaption(progress = loadProgress()) {
 	const m4 = milestone(progress, 'M4');
 	const m7 = milestone(progress, 'M7');
 	const m8 = milestone(progress, 'M8');
-	return `Text analysis is ${stateClause(m4)}. Searching segments is ${stateClause(m7)}. Zero-results relaxation is ${stateClause(m8)}.`;
+	return `Text analysis is ${stateClause(m4)}. The query milestone is ${stateClause(m7)}. Zero-results relaxation is ${stateClause(m8)}.`;
 }
 
 /**

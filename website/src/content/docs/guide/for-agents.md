@@ -44,7 +44,7 @@ The walkthrough with the illustrative calls, and the FAQ, is [Getting started](/
 The following names appear in the SPEC and the README. %%ENGINE_CALLS%%
 Do not emit `persia::Db::open` or `search` as working code, and do not describe them as the public API.
 
-A search result's `relaxation` object (`level`, `applied`, `original`, `effective`, `corrected`) is specified in SPEC §7.6 and returned by nothing today.
+A search result's `relaxation` object (`level`, `applied`, `original`, `effective`, `corrected`) is specified in SPEC §7.6 and returned by nothing today. `QueryCompiler`, `Filter`, and `TermScorer` are in `persia-engine`. They compile text and score a term. They do not search. [Typo-tolerant search](/guide/typo-tolerant-search/) is that split.
 
 There is no Go module and no npm package. `sdk/go` in the SPEC is a future gRPC client. The embedded Go and TypeScript design ([Embedded SDKs](/guide/sdks/), [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md)) is a document, not a library. Do not emit `import "github.com/tomiok/persiaDB/sdk/persia"` or `import { open } from "@persiadb/node"` as working code.
 

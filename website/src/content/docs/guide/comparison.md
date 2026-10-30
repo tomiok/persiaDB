@@ -42,11 +42,12 @@ Counts on the [roadmap](/roadmap/) are read from PROGRESS.md when the site is bu
 
 Specified, and not something you can search with yet:
 
-- BM25F scoring and query execution are not implemented.
+- The query compiler, the filter DSL, and a BM25F scorer are library code (ROADMAP 7.1–7.3).
+  They do not return hits. Matching, top-k, facets, and a `search` call are not implemented.
   Analysis libraries are in the tree. The project does not wrap Tantivy, Lucene, or SQLite
   ([ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md)).
 - A query with too few hits is relaxed step by step, and the response says what changed (SPEC §7.6).
-  See [Features](/features/).
+  That cascade is not implemented. See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Features](/features/).
 - Segments are immutable. A local commit and an object-storage commit publish the same segment bytes.
   Query nodes are stateless. See [How it works](/architecture/) and [File format and storage](/guide/file-format/).
 - A local database is two files: `<name>.persia` and `<name>.persia.blobs` (SPEC §4, §9).
@@ -93,6 +94,7 @@ The shared idea is a search API that tolerates a small mistake in the query, and
 The mechanisms differ. Meilisearch's default is typo tolerance on the terms it searches.
 Persia DB's planned default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
 with the response naming the step (SPEC §7.6). That cascade is not implemented.
+[Typo-tolerant search](/guide/typo-tolerant-search/) is the longer account of that design, and of the compiler and scorer that do exist.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option
 ([Server, cloud, and Kubernetes](/guide/server/), M11).
@@ -118,6 +120,7 @@ For a search feature in production today, use one of the established tools. Pers
 
 ## Read next
 
+- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, fuzzy matching, BM25F, and filters, marked designed or implemented.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.

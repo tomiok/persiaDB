@@ -1,6 +1,6 @@
 ---
 title: "Getting started with PersiaDB"
-description: "Getting started with PersiaDB, a pre-alpha Rust search library. The public Db API is not in the crate. The engine has a WAL, commit, deletes, and segment merging. Nothing runs a query."
+description: "Getting started with PersiaDB, a pre-alpha Rust search library. The public Db API is not in the crate. The engine has a WAL, commit, a query compiler, and a BM25F scorer. Nothing runs a search."
 head:
   - tag: title
     content: "Getting started with PersiaDB: a Rust search library"
@@ -109,7 +109,7 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 
 ### Relaxation
 
-**Planned (M8).** Default on. If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6):
+**Not started (M8).** The query compiler and the BM25F scorer are library code; this cascade is not. Default on in the design. If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6). The longer page is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 | Level | Name | What changes |
 |---|---|---|
@@ -152,7 +152,7 @@ You don't, yet, through `persia::Db::open`. Those calls are the illustrative blo
 
 ### How do I read which relaxation was applied?
 
-On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. Nothing in the repository computes this.
+On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. Nothing in the repository computes this. See [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ### Is the on-disk format stable?
 
@@ -164,7 +164,7 @@ Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Ku
 
 ### Why is a query supposed to avoid empty results?
 
-That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. It is not implemented.
+That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. The cascade is not implemented. The query compiler and the BM25F scorer are. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two.
 
 ### Where is the source of truth?
 

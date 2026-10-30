@@ -3,32 +3,35 @@ title: Features
 description: What Persia DB is designed to do, and which of those features exist today.
 head:
   - tag: title
-    content: "Full-text search, filters, and facets (planned) | PersiaDB"
+    content: "Full-text search, filters, and zero results | PersiaDB"
   - tag: meta
     attrs:
       property: og:title
-      content: "Full-text search, filters, and facets (planned) | PersiaDB"
+      content: "Full-text search, filters, and zero results | PersiaDB"
   - tag: meta
     attrs:
       name: twitter:title
-      content: "Full-text search, filters, and facets (planned) | PersiaDB"
+      content: "Full-text search, filters, and zero results | PersiaDB"
 ---
 
 import RelaxationFlow from '../../components/RelaxationFlow.astro';
 import WinButton from '../../components/WinButton.astro';
 
 The product is a search database: ranked full-text search, filters, facets, and a default that
-avoids an empty page. Search, ranking, and relaxation are still **planned**. The write path is
+avoids an empty page. The query compiler, the filter DSL, and BM25F scoring exist as library code.
+Matching, facets, a search call, and relaxation do not. The write path is
 partly in the tree. The table says which milestone builds each row. The long form, including the
 schema sketch and the relaxation JSON, is the [feature reference](/guide/features/).
+How a typo is supposed to avoid an empty page is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 | Capability | Status |
 |---|---|
 | Open a file and search | Planned (M10) |
-| Full-text search, filters, facets, sort | Planned (M7) |
-| Zero-results relaxation | Planned (M8), on by default in the design |
+| Query text, filters, and BM25F | Compiler, filter DSL, and scorer are library code (M7). They do not return hits. |
+| Matching, facets, and sort | Not started (M7) |
+| Zero-results relaxation | Not started (M8), on by default in the design |
 | Schema and documents | Done as library code (M3). Not reachable through `Db`. |
-| Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. They do not run a query. |
+| Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. The query compiler runs them. They do not run a search. |
 | Segment writer and reader | %%M5_CELL%% |
 | Crash-safe commit and recovery | %%DURABILITY_CELL%% |
 | Blob storage | Planned (M9) |
