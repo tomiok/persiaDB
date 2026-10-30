@@ -38,7 +38,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod block_max_wand;
 mod boolean;
+mod max_score;
 mod phrase;
 mod plan;
 mod top_k;
@@ -52,6 +54,44 @@ use crate::score::ScoreError;
 use crate::segment::ReadError;
 #[cfg(doc)]
 use crate::view::SearchView;
+
+/// How a top-k search skips documents that cannot enter it (SPEC §7.3, ROADMAP 7.4.4). Every strategy returns
+/// the same hits, bit for bit: a score is always summed the same way, and a document is skipped only when an
+/// upper bound of its score, summed in that same order, is at most the worst hit kept.
+///
+/// Pruning reaches the matchers a threshold on the whole score applies to: a term, the `should` clauses of a
+/// `bool` without `must`, and what `must_not` or `boost` wraps. Conjunctions and their optional clauses are walked
+/// whole.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Pruning {
+    /// Every match is scored.
+    Exhaustive,
+    /// `MaxScore`: a disjunction leaves out the clauses whose bounds together cannot beat the threshold, and only
+    /// looks them up on the documents of the others; whole-list bounds (`max_tf`, `min_norm` of the term).
+    MaxScore,
+    /// Block-max WAND: a disjunction finds the first document whose clauses' bounds can beat the threshold, then
+    /// checks the bounds of their postings blocks (the Skip entries, SPEC §5.3.2) before scoring it; a term skips
+    /// the blocks that cannot.
+    #[default]
+    BlockMaxWand,
+}
+
+/// A bound of the score of every document a matcher matches from some target through `up_to`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreBound {
+    /// The last docid the bound covers.
+    pub up_to: u32,
+    /// The bound, at least 0.
+    pub score: f64,
+}
+
+/// `values` summed in order from `0.0`, as a disjunction or a conjunction sums its clauses' scores (SPEC §7.2).
+/// Floating-point addition is monotonic in each argument, so with each value at least the score in its place
+/// (0 for a clause that misses), the sum is at least the score: exactly, without rounding slack.
+fn sum_in_order(values: impl IntoIterator<Item = f64>) -> f64 {
+    values.into_iter().fold(0.0, |sum, v| sum + v)
+}
 
 /// Why a query cannot be planned.
 #[derive(Debug, thiserror::Error)]
@@ -103,6 +143,28 @@ pub trait Matcher {
     /// # Errors
     /// As [`Self::next`].
     fn score(&mut self) -> Result<f64, ReadError>;
+
+    /// An upper bound of [`Self::score`] on every document it matches in the view (SPEC §7.3): at least the score,
+    /// exactly, so a document whose bound is at most a threshold cannot score above it.
+    fn max_score(&self) -> f64;
+
+    /// An upper bound of the score of each document it matches from `target` through [`ScoreBound::up_to`]; `None`
+    /// when it matches none at or after `target`. Does not move the matcher. By default the whole view and
+    /// [`Self::max_score`]; a term narrows it to the postings block holding `target` (block-max WAND, SPEC §5.3.2).
+    ///
+    /// # Errors
+    /// As [`Self::next`].
+    fn block_bound(&mut self, _target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        Ok(Some(ScoreBound {
+            up_to: u32::MAX,
+            score: self.max_score(),
+        }))
+    }
+
+    /// From now on, [`Self::next`] and [`Self::advance`] may skip documents that score at most `score`: they cannot
+    /// enter a top-k whose worst hit scores `score`, because each hit it keeps has a lower docid and wins the tie
+    /// (ROADMAP 7.4.4). Only ever raised. By default nothing is skipped.
+    fn set_min_competitive(&mut self, _score: f64) {}
 }
 
 impl<M: Matcher + ?Sized> Matcher for Box<M> {
@@ -124,6 +186,18 @@ impl<M: Matcher + ?Sized> Matcher for Box<M> {
 
     fn score(&mut self) -> Result<f64, ReadError> {
         (**self).score()
+    }
+
+    fn max_score(&self) -> f64 {
+        (**self).max_score()
+    }
+
+    fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        (**self).block_bound(target)
+    }
+
+    fn set_min_competitive(&mut self, score: f64) {
+        (**self).set_min_competitive(score);
     }
 }
 
@@ -158,6 +232,8 @@ impl Pos {
 }
 
 /// Runs `matcher` to its end and keeps its best `k` hits, best first (score descending, then docid ascending).
+/// Once `k` are kept, the worst one's score goes to [`Matcher::set_min_competitive`] each time it rises, so a
+/// pruning matcher can skip what could not replace it.
 ///
 /// # Errors
 /// A corruption of the view the matcher reads.
@@ -166,8 +242,15 @@ pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hi
         return Ok(Vec::new());
     }
     let mut top = TopK::new(k);
+    let mut threshold = None;
     while let Some(docid) = matcher.next()? {
         top.push(docid, matcher.score()?);
+        if let Some(t) = top.threshold()
+            && threshold.is_none_or(|old| t > old)
+        {
+            threshold = Some(t);
+            matcher.set_min_competitive(t);
+        }
     }
     Ok(top.into_hits())
 }

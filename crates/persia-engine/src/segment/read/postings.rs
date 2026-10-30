@@ -221,6 +221,11 @@ impl<'s> Postings<'s> {
         self.info.df()
     }
 
+    /// The term's record: its `max_tf` and `min_norm` bound every score in the list (SPEC §5.3.1).
+    pub fn term_info(&self) -> &TermInfo {
+        &self.info
+    }
+
     /// The current document, `None` before the first and after the last.
     pub fn doc(&self) -> Option<u32> {
         match self.state {

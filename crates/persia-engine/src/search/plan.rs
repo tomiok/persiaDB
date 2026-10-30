@@ -8,12 +8,14 @@ use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 use crate::view::SearchView;
 
+use super::block_max_wand::BlockMaxWand;
 use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
+use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
 use super::word::{WordField, WordMatcher};
-use super::{Hit, Matcher, SearchError, collect};
+use super::{Hit, Matcher, Pruning, SearchError, collect};
 
 /// A query ready to run over any view of the collection whose statistics planned it: a segment, the memtable
 /// (SPEC §7.3).
@@ -64,7 +66,7 @@ impl SearchPlan {
         })
     }
 
-    /// The matcher of the plan over `view`.
+    /// The matcher of the plan over `view`: every match, scored ([`Pruning::Exhaustive`]).
     ///
     /// # Errors
     /// [`ReadError::UnknownField`] or [`ReadError::FieldType`] if `view` is not of the planned schema; a
@@ -73,15 +75,42 @@ impl SearchPlan {
         &'a self,
         view: &'a V,
     ) -> Result<BoxedMatcher<'a>, ReadError> {
-        build(&self.root, view)
+        self.matcher_with(view, Pruning::Exhaustive)
     }
 
-    /// The best `k` hits of the plan in `view`: score descending, then docid ascending (ROADMAP 7.4.3).
+    /// The matcher of the plan over `view` that prunes with `pruning` once given a threshold
+    /// ([`Matcher::set_min_competitive`]); until then it matches what [`Self::matcher`] does.
+    ///
+    /// # Errors
+    /// As [`Self::matcher`].
+    pub fn matcher_with<'a, V: SearchView>(
+        &'a self,
+        view: &'a V,
+        pruning: Pruning,
+    ) -> Result<BoxedMatcher<'a>, ReadError> {
+        build(&self.root, view, pruning)
+    }
+
+    /// The best `k` hits of the plan in `view`: score descending, then docid ascending (ROADMAP 7.4.3), with the
+    /// default [`Pruning`] (block-max WAND).
     ///
     /// # Errors
     /// As [`Self::matcher`].
     pub fn top_k<V: SearchView>(&self, view: &V, k: usize) -> Result<Vec<Hit>, ReadError> {
-        collect(&mut self.matcher(view)?, k)
+        self.top_k_with(view, k, Pruning::default())
+    }
+
+    /// The best `k` hits of the plan in `view`, pruning with `pruning`: the same hits whatever it is.
+    ///
+    /// # Errors
+    /// As [`Self::matcher`].
+    pub fn top_k_with<V: SearchView>(
+        &self,
+        view: &V,
+        k: usize,
+        pruning: Pruning,
+    ) -> Result<Vec<Hit>, ReadError> {
+        collect(&mut self.matcher_with(view, pruning)?, k)
     }
 }
 
@@ -166,7 +195,14 @@ fn plan_bool(
     })
 }
 
-fn build<'a, V: SearchView>(node: &'a Node, view: &'a V) -> Result<BoxedMatcher<'a>, ReadError> {
+/// The matcher of `node`. `pruning` is what a threshold on its score may skip with; the clauses a threshold on the
+/// whole score says nothing about (a conjunction's, optional ones, exclusions, under a constant score) are built
+/// [`Pruning::Exhaustive`].
+fn build<'a, V: SearchView>(
+    node: &'a Node,
+    view: &'a V,
+    pruning: Pruning,
+) -> Result<BoxedMatcher<'a>, ReadError> {
     Ok(match node {
         Node::Word { terms, scorer } => {
             let mut fields = Vec::with_capacity(terms.len());
@@ -188,7 +224,7 @@ fn build<'a, V: SearchView>(node: &'a Node, view: &'a V) -> Result<BoxedMatcher<
             if fields.is_empty() {
                 Box::new(Empty)
             } else {
-                Box::new(WordMatcher::<V>::new(fields, scorer))
+                Box::new(WordMatcher::<V>::new(fields, scorer, pruning))
             }
         }
         Node::Phrase {
@@ -216,8 +252,14 @@ fn build<'a, V: SearchView>(node: &'a Node, view: &'a V) -> Result<BoxedMatcher<
             must,
             should,
             must_not,
-        } => build_bool(must, should, must_not, view)?,
-        Node::Scaled(inner, scale) => Box::new(Scaled::new(build(inner, view)?, *scale)),
+        } => build_bool(must, should, must_not, view, pruning)?,
+        Node::Scaled(inner, scale) => {
+            let inner_pruning = match scale {
+                Scale::Boost(_) => pruning,
+                Scale::Constant(_) => Pruning::Exhaustive,
+            };
+            Box::new(Scaled::new(build(inner, view, inner_pruning)?, *scale))
+        }
         Node::All => Box::new(AllDocs::new(view)),
     })
 }
@@ -229,13 +271,20 @@ fn build_bool<'a, V: SearchView>(
     should: &'a [Node],
     must_not: &'a [Node],
     view: &'a V,
+    pruning: Pruning,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
-    let all = |nodes: &'a [Node]| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
-        nodes.iter().map(|n| build(n, view)).collect()
+    let all = |nodes: &'a [Node], pruning| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
+        nodes.iter().map(|n| build(n, view, pruning)).collect()
     };
-    let optional = disjunction(all(should)?);
+    // The score is the `should` clauses' when there is no `must`, or the one `must` clause's without `should`.
+    let (must_pruning, should_pruning) = match (must.len(), should.is_empty()) {
+        (0, _) => (Pruning::Exhaustive, pruning),
+        (1, true) => (pruning, Pruning::Exhaustive),
+        _ => (Pruning::Exhaustive, Pruning::Exhaustive),
+    };
+    let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
-        (conjunction(all(must)?), optional)
+        (conjunction(all(must, must_pruning)?), optional)
     } else if should.is_empty() {
         (Box::new(AllDocs::new(view)), None)
     } else {
@@ -246,7 +295,8 @@ fn build_bool<'a, V: SearchView>(
         Some(optional) => Box::new(Optional::new(required, optional)),
         None => required,
     };
-    Ok(match disjunction(all(must_not)?) {
+    let excluded = disjunction(all(must_not, Pruning::Exhaustive)?, Pruning::Exhaustive);
+    Ok(match excluded {
         Some(excluded) => Box::new(Exclusion::new(scored, excluded)),
         None => scored,
     })
@@ -265,13 +315,17 @@ fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>) -> BoxedMatcher<'_> {
     Box::new(Conjunction::new(clauses))
 }
 
-/// OR of the clauses that can match; `None` when none can.
-fn disjunction(mut clauses: Vec<BoxedMatcher<'_>>) -> Option<BoxedMatcher<'_>> {
+/// OR of the clauses that can match, pruning with `pruning`; `None` when none can.
+fn disjunction(mut clauses: Vec<BoxedMatcher<'_>>, pruning: Pruning) -> Option<BoxedMatcher<'_>> {
     clauses.retain(|c| c.cost() > 0);
     match clauses.len() {
         0 => None,
         1 => clauses.pop(),
-        _ => Some(Box::new(Disjunction::new(clauses))),
+        _ => Some(match pruning {
+            Pruning::Exhaustive => Box::new(Disjunction::new(clauses)),
+            Pruning::MaxScore => Box::new(MaxScore::new(clauses)),
+            Pruning::BlockMaxWand => Box::new(BlockMaxWand::new(clauses)),
+        }),
     }
 }
 

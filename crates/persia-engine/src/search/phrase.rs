@@ -46,6 +46,10 @@ impl<P: PostingsIterator> Matcher for PhrasePostings<P> {
     fn score(&mut self) -> Result<f64, ReadError> {
         Ok(0.0)
     }
+
+    fn max_score(&self) -> f64 {
+        0.0
+    }
 }
 
 /// The documents holding a phrase, at least one term.
@@ -56,6 +60,8 @@ pub(super) struct PhraseMatcher<'a, V: SearchView + 'a> {
     /// The phrase frequency of the current document, at least 1.
     freq: u32,
     pos: Pos,
+    /// [`Matcher::max_score`].
+    max: f64,
 }
 
 impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
@@ -64,7 +70,22 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
         norms: V::Norms<'a>,
         scorer: &'a TermScorer,
     ) -> Self {
+        // A start counts once and maps to one position of each term, so the phrase frequency is at most every
+        // term's frequency; a document holding every term has a norm at least each term's smallest.
+        let bound = FieldHit {
+            tf: terms
+                .iter()
+                .map(|t| t.postings.term_bound().tf)
+                .min()
+                .unwrap_or(0),
+            norm: terms
+                .iter()
+                .map(|t| t.postings.term_bound().norm)
+                .max()
+                .unwrap_or(0),
+        };
         Self {
+            max: scorer.score(&[Some(bound)]),
             terms: Conjunction::new(terms),
             norms,
             scorer,
@@ -125,6 +146,10 @@ impl<'a, V: SearchView + 'a> Matcher for PhraseMatcher<'a, V> {
             norm: self.norms.get(doc)?,
         };
         Ok(self.scorer.score(&[Some(hit)]))
+    }
+
+    fn max_score(&self) -> f64 {
+        self.max
     }
 }
 

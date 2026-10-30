@@ -1,4 +1,4 @@
-//! Query execution: matching and top-k (ROADMAP 7.4.1–7.4.3; SPEC §7.1, §7.2, §7.3), differentially against the
+//! Query execution: matching and top-k (ROADMAP 7.4.1–7.4.4; SPEC §7.1, §7.2, §7.3), differentially against the
 //! reference (`tests/reference/search.rs`).
 //!
 //! Invariants:
@@ -8,6 +8,7 @@
 //!    same documents as stepping (7.4.1).
 //! 3. `top_k(k)` is the first `k` of every hit sorted by score descending, then docid ascending, whatever `k`
 //!    (7.4.3); `TopK` keeps the same hits whatever order they are pushed in.
+//! 4. `top_k_with(k, p)` returns the same hits for every [`Pruning`], scores bit for bit (7.4.4.3).
 
 #![allow(
     clippy::unwrap_used,
@@ -33,7 +34,7 @@ use persia_engine::query::{
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
-use persia_engine::search::{Hit, Matcher, SearchError, SearchPlan, TopK};
+use persia_engine::search::{Hit, Matcher, Pruning, SearchError, SearchPlan, TopK};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::stats::{SearchStatistics, SegmentStatistics};
 use persia_engine::view::{SearchView, SegmentView};
@@ -325,7 +326,7 @@ fn ranked(mut hits: Vec<Hit>) -> Vec<Hit> {
     hits
 }
 
-/// Invariants 1–3 for one view: `docs[docid]` is its document when live.
+/// Invariants 1–4 for one view: `docs[docid]` is its document when live.
 fn check_view<V: SearchView>(
     view: &V,
     docs: &BTreeMap<u32, Doc>,
@@ -374,12 +375,27 @@ fn check_view<V: SearchView>(
         }
     }
 
-    // Invariant 3.
+    // Invariants 3 and 4: every pruning keeps the exhaustive top k, scores bit for bit.
     let all = ranked(hits);
-    for k in [0, 1, case.k, all.len(), all.len() + 3] {
-        let top = plan.top_k(view, k).unwrap();
-        assert_eq!(top, all[..k.min(all.len())], "top {k} of {q:?}");
+    for k in [0, 1, 2, case.k, all.len(), all.len() + 3] {
+        let want = &all[..k.min(all.len())];
+        assert_eq!(plan.top_k(view, k).unwrap(), want, "top {k} of {q:?}");
+        for pruning in PRUNINGS {
+            let top = plan.top_k_with(view, k, pruning).unwrap();
+            assert_eq!(bits(&top), bits(want), "top {k} of {q:?} with {pruning:?}");
+        }
     }
+}
+
+const PRUNINGS: [Pruning; 3] = [
+    Pruning::Exhaustive,
+    Pruning::MaxScore,
+    Pruning::BlockMaxWand,
+];
+
+/// Hits as docids and score bits: equal only when the scores are the same floats.
+fn bits(hits: &[Hit]) -> Vec<(u32, u64)> {
+    hits.iter().map(|h| (h.docid, h.score.to_bits())).collect()
 }
 
 fn check(case: &Case) {

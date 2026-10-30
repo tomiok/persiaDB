@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use super::{Inner, MemField, NONE, read};
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
+use crate::score::FieldHit;
 use crate::segment::{BlockMax, FieldStats, ReadError};
 use crate::view::{NormReader, PostingsIterator, SearchView};
 
@@ -394,6 +395,10 @@ impl PostingsIterator for MemtablePostings<'_> {
 
     fn shallow_advance(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError> {
         Ok((self.block.last_docid >= target).then_some(self.block))
+    }
+
+    fn term_bound(&self) -> FieldHit {
+        FieldHit::from(self.block)
     }
 }
 

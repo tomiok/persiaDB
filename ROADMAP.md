@@ -459,12 +459,14 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.4.2 Phrase matching using positions
 - [x] 7.4.3 Top-k collector (bounded heap, tie-break determinism: score desc, then docid)
 - 7.4.4 MaxScore/WAND, then block-max WAND
-  - [ ] 7.4.4.1 MaxScore baseline
-  - [ ] 7.4.4.2 Block-max WAND using skip metadata
-  - [ ] 7.4.4.3 [T] differential: pruned results == exhaustive results
+  - [~] 7.4.4.1 MaxScore baseline
+  - [~] 7.4.4.2 Block-max WAND using skip metadata
+  - [~] 7.4.4.3 [T] differential: pruned results == exhaustive results
 - [ ] 7.4.5 Filter evaluation to roaring bitmaps/column predicates; intersect with candidates
 - [ ] 7.4.6 Tombstone application; memtable as additional segment: an id the memtable has (put or delete, `MemtableView::lookup`) hides every segment copy of it, which the segments' tombstones do not yet delete before the commit (SPEC §8.3, found in the 6.4 review)
 - [ ] 7.4.7 A disjunction for many clauses (relaxation expansions, SPEC §7.6: up to 50 prefix or fuzzy terms): a heap instead of a scan of every clause per document, and phrase candidates that copy positions only while starts survive; bench `search_top10/or` with 50 clauses before and after (found in the 7.4 review)
+- [ ] 7.4.8 Prune conjunctions and `should` clauses beside `must` with block bounds (block-max AND, required plus optional as Lucene's ReqOpt): today a threshold reaches only a term, a pure `should` disjunction and what `must_not`/`boost` wrap (SPEC §7.3, found in 7.4.4)
+- [ ] 7.4.9 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 917 µs vs 1.17 ms, `or_rare` 266 vs 431 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4)
 
 ## 7.5 Sorting, pagination, facets
 - [ ] 7.5.1 Sort by column (asc/desc, missing handling) with top-k

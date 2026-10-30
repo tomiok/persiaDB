@@ -93,6 +93,15 @@ impl TopK {
         }
     }
 
+    /// The score a hit must beat to be kept, once `k` are: the worst kept one's. A later hit with that score and a
+    /// higher docid ranks below it. `None` while fewer than `k` are kept (and always for `k = 0`).
+    pub fn threshold(&self) -> Option<f64> {
+        if self.k == 0 || self.heap.len() < self.k {
+            return None;
+        }
+        self.heap.peek().map(|w| w.0.score)
+    }
+
     /// Hits kept so far.
     pub fn len(&self) -> usize {
         self.heap.len()

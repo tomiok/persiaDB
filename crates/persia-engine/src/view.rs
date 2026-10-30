@@ -8,6 +8,7 @@
 
 use crate::document::Document;
 use crate::schema::FieldId;
+use crate::score::FieldHit;
 use crate::segment::{BlockMax, FieldStats, NormsCursor, Postings, ReadError, Segment, Tombstones};
 
 /// The documents of one term, in docid order, with their frequencies and positions; the interface of
@@ -57,6 +58,10 @@ pub trait PostingsIterator {
     /// # Errors
     /// As [`Self::next`].
     fn shallow_advance(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError>;
+
+    /// The largest frequency and the smallest norm byte of the whole list, without reading it: they bound the
+    /// score of each of its documents (`MaxScore`, SPEC §7.3). They may cover deleted documents.
+    fn term_bound(&self) -> FieldHit;
 }
 
 /// The norm bytes of one `text` field (SPEC §5.3.4), by docid.
@@ -163,6 +168,10 @@ impl PostingsIterator for Postings<'_> {
 
     fn shallow_advance(&mut self, target: u32) -> Result<Option<BlockMax>, ReadError> {
         Postings::shallow_advance(self, target)
+    }
+
+    fn term_bound(&self) -> FieldHit {
+        FieldHit::from(self.term_info())
     }
 }
 

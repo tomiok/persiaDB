@@ -1259,6 +1259,15 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 
 ### 7.3 Execution
 - Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (MAXSCORE as fallback).
+  Pruning never changes results: a document is skipped only when an upper bound of its score, summed in the same
+  (query) order as the score with each clause's bound in its place (a term's or a block's `max_tf` and `min_norm`,
+  §7.2), is at most the score of the `k`-th hit kept. Floating-point addition is monotonic, so such a bound holds
+  exactly. Hits rank by score descending, then docid ascending, and a view is walked in docid order, so a document
+  scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
+  A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must`, a lone `must`
+  clause, and what `must_not` and `boost` wrap; other clauses are walked exhaustively. A disjunction prunes with
+  block-max WAND by default; `MaxScore` (whole-list bounds only) is the other strategy, and where a clause has no
+  block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list bound.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates; tombstones applied last.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns).
