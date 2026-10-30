@@ -340,7 +340,8 @@ fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
                 let ctx = format!("call {point}, apply first {apply_first}, {loss:?}");
                 let crashed = file.crash(loss);
                 let Some(found) = stray_manifest(&crashed) else {
-                    // A corrupt tail: the quarantining open of `reopen` covers it.
+                    // The container itself does not open read-only (a corrupt tail). This case needs a
+                    // readable Manifest; `reopen` in the other crash tests quarantines those tails.
                     torn += 1;
                     continue;
                 };
@@ -371,8 +372,9 @@ fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
 }
 
 /// WAL already logged behind a cut commit's Manifest — the kill-9 failure: the next writer appended
-/// acknowledged puts there and died before committing — is in the snapshot the following writer
-/// opens, and a commit then does not drop it (ROADMAP 6.6.9, SPEC §8.6).
+/// acknowledged puts there and died before committing — is visible to a read-only open while the
+/// superblock still leaves that Manifest after `log_end`, and to the writer that retires it. Dropping
+/// the writer without another flush must not move `wal_start` past that chunk (ROADMAP 6.6.9, SPEC §8.6).
 #[test]
 fn acknowledged_wal_behind_a_stray_manifest_is_replayed() {
     let crashed = one_stray_manifest();
@@ -383,29 +385,46 @@ fn acknowledged_wal_behind_a_stray_manifest_is_replayed() {
         "the appended chunk stays behind the cut commit's Manifest"
     );
 
-    let mut db = Database::open_on(crashed.clone(), options()).unwrap();
-    let present = |db: &Database<SimFile>, id: &str| {
-        db.snapshot()
-            .collection("a")
-            .unwrap()
-            .get(id)
-            .unwrap()
-            .is_some()
-    };
-    for id in ["a0", "a1", "hidden"] {
-        assert!(
-            present(&db, id),
-            "{id} missing at the open that retires the Manifest"
-        );
-    }
+    let ids = ["a0", "a1", "hidden"];
+    // No writer has retired the Manifest. Stopping here used to hide `hidden` and still pass `verify`.
+    let reader = ReadOnlyDatabase::open_on(crashed.clone(), &AnalyzerRegistry::builtin())
+        .unwrap_or_else(|e| panic!("read-only open of the damaged file: {e}"));
+    reader
+        .verify()
+        .unwrap_or_else(|e| panic!("verify of the damaged file: {e}"));
+    assert_has(&reader.snapshot(), &ids, "read-only open before retirement");
+    drop(reader);
+
+    let db = Database::open_on(crashed.clone(), options()).unwrap();
+    assert_has(&db.snapshot(), &ids, "the open that retires the Manifest");
     assert_eq!(stray_manifest(&crashed), Some(false));
-    // A flush covers the replayed records. Advancing `wal_start` past the chunk behind the Manifest
-    // before it was applied would drop `hidden`.
-    db.commit().unwrap();
+    // The retiring commit flushes nothing. A crash here keeps `hidden` only in its chunk: `wal_start`
+    // must still cover that chunk, or the next open drops an acknowledged put.
     drop(db);
-    let db = Database::open_on(crashed.crash(CrashLoss::All), options()).unwrap();
-    for id in ["a0", "a1", "hidden"] {
-        assert!(present(&db, id), "{id} missing after the commit");
+    let again = crashed.crash(CrashLoss::All);
+    let reader = ReadOnlyDatabase::open_on(again.clone(), &AnalyzerRegistry::builtin())
+        .unwrap_or_else(|e| panic!("read-only open after the retiring crash: {e}"));
+    reader
+        .verify()
+        .unwrap_or_else(|e| panic!("verify after the retiring crash: {e}"));
+    let writer = Database::open_on(again, options()).unwrap();
+    assert_has(
+        &reader.snapshot(),
+        &ids,
+        "read-only open after the retiring crash",
+    );
+    assert_has(
+        &writer.snapshot(),
+        &ids,
+        "writer open after the retiring crash",
+    );
+}
+
+/// Every `id` is live in collection `a`.
+fn assert_has(snapshot: &Snapshot, ids: &[&str], ctx: &str) {
+    let a = snapshot.collection("a").unwrap();
+    for id in ids {
+        assert!(a.get(id).unwrap().is_some(), "{ctx}: {id} missing");
     }
 }
 
