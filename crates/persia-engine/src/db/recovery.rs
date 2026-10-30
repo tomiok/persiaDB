@@ -7,7 +7,9 @@
 //! 3. Each collection's segments and tombstone sidecars, opened through the container's objects and checked against
 //!    their manifest entries, and an empty memtable per collection.
 //! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1), stopping at the
-//!    first Manifest frame after `log_end` whose `seq` is newer than the loaded manifest (SPEC §8.6).
+//!    first Manifest frame after `log_end` whose `seq` is newer than the loaded manifest (a read-only open, SPEC §8.6).
+//!    The writer holds the lock, so such a Manifest is a cut commit's: it replays past it, then commits once, flushing
+//!    nothing, if one is still after `log_end`, so the WAL it logs next is never behind it (ROADMAP 6.6.9).
 //! 5. Ready: the first snapshot shows the segments and the replayed memtables.
 //!
 //! Nothing before step 4 writes but the container's tail repair, and replay writes only to memtables, except that
@@ -26,10 +28,10 @@ use persia_storage::Storage;
 use persia_storage::container::{Container, ContainerFile};
 
 use super::{
-    Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment, objects,
-    open_source,
+    Collection, ContainerObjects, Database, DatabaseError, DatabaseOptions, LiveSegment,
+    Structural, objects, open_source,
 };
-use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, SegmentEntry};
+use crate::manifest::{Layout, MAX_MANIFEST_LEN, Manifest, ManifestDiff, SegmentEntry};
 use crate::memtable::{Memtable, MemtableError};
 use crate::schema::CollectionSchema;
 use crate::segment::SegmentError;
@@ -48,6 +50,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             .with_chunk_target(options.wal_chunk_target);
         let mut db = Self::assemble(wal, manifest, collections, options);
         db.replay()?;
+        db.retire_uncommitted_manifest()?;
         // Replayed operations count as written at the open: their age is not logged (SPEC §8.2).
         let now = db.options.clock.now();
         for c in db.collections.values_mut() {
@@ -59,11 +62,29 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(db)
     }
 
+    /// Step 4's end, for the writer: a Manifest frame still after `log_end` (no replay-time flush committed past it)
+    /// is a commit cut before its superblock slot (SPEC §4.5). A read-only open stops its replay at it ([`wal_chunks`]),
+    /// so it would not see what this writer logs next. So the writer commits at once, flushing nothing, before it
+    /// accepts writes: `log_end` moves past the Manifest, which no replay consults again (SPEC §8.6). That commit
+    /// takes `wal_start` as any commit does (SPEC §8.2.1): every replayed record stays needed.
+    fn retire_uncommitted_manifest(&mut self) -> Result<(), DatabaseError> {
+        let container = self.wal.log();
+        let log_end = container.superblock().log_end;
+        let found = container
+            .frames()
+            .iter()
+            .any(|f| f.kind == FrameKind::Manifest && f.offset >= log_end);
+        if found {
+            self.commit_guarded(Vec::new(), ManifestDiff::default(), Structural::None)?;
+        }
+        Ok(())
+    }
+
     /// Step 4: replays every chunk from `wal_start` that belongs to the loaded snapshot into the memtables,
     /// flushing as a write would.
     fn replay(&mut self) -> Result<(), DatabaseError> {
         let seq = self.manifest.seq();
-        for chunk in wal_chunks(self.wal.log(), seq)? {
+        for chunk in wal_chunks(self.wal.log(), seq, true)? {
             let frame = self
                 .wal
                 .log()
@@ -161,23 +182,28 @@ pub(super) fn load<F: ContainerFile + Sync>(
     Ok((manifest, collections))
 }
 
-/// The positions of the `WalChunk` frames of the snapshot loaded at `loaded_seq`, in log order (SPEC §8.6).
+/// The positions of the `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
+/// §8.6): every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`.
 ///
-/// That is every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`,
-/// until the first Manifest frame after `log_end` whose `seq` is greater than `loaded_seq`. A read-only open
-/// holds no lock, so a writer may commit while the tail is scanned: the new Manifest and the WAL logged after
-/// it (a collection that manifest creates, then a put) are the next snapshot's. Replaying them onto the loaded
-/// manifest fails with [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest
-/// were logged against the loaded snapshot and are replayed. A crash can leave the same Manifest after
-/// `log_end` without a finished superblock (SPEC §4.5); a read-write open stops there too.
+/// A read-only open (`writer` false) stops at the first Manifest frame after `log_end` whose `seq` is greater than
+/// `loaded_seq`. It holds no lock, so a writer may commit while the tail is scanned: the new Manifest and the WAL
+/// logged after it (a collection that manifest creates, then a put) are the next snapshot's. Replaying them onto the
+/// loaded manifest fails with [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest
+/// were logged against the loaded snapshot and are replayed.
+///
+/// A writer holds the lock, so no commit races its scan: a Manifest after `log_end` is one a crash cut before its
+/// superblock slot (SPEC §4.5), and every frame after it was logged by a later writer that loaded the same manifest
+/// (the cut commit never took effect). So the writer replays them all, then retires that Manifest
+/// (`Database::retire_uncommitted_manifest`, ROADMAP 6.6.9).
 pub(super) fn wal_chunks<F: ContainerFile>(
     container: &Container<F>,
     loaded_seq: u64,
+    writer: bool,
 ) -> Result<Vec<u64>, DatabaseError> {
     let log_end = container.superblock().log_end;
     let mut chunks = Vec::new();
     for frame in container.frames() {
-        if frame.offset >= log_end && frame.kind == FrameKind::Manifest {
+        if !writer && frame.offset >= log_end && frame.kind == FrameKind::Manifest {
             let source = container.read_frame_source(frame.offset, MAX_MANIFEST_LEN)?;
             let seq = Manifest::decode(&source.payload)?.seq();
             if seq > loaded_seq {

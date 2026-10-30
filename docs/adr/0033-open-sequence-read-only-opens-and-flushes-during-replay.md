@@ -47,6 +47,16 @@ only what it needs, and `Segment::verify` ran only on merged segments.
    corruption variants `DatabaseError::LiveTwice` and `CorruptTail`.
 6. **The writer lock is the container's** (SPEC §4.5.1): a second `Database::open` fails with
    `DatabaseError::Container(Locked)`; no database-level lock is added.
+7. **A writer replays past a cut commit's Manifest, then retires it** (amendment, ROADMAP 6.6.9). The stop of
+   item 4 used to apply to read-write opens too. It then also stopped at a Manifest a crash left after `log_end` (a
+   commit cut before its superblock slot). The writer appended its WAL behind that Manifest, and if it crashed
+   before its next commit, every later open stopped there and lost writes it had acknowledged. The kill-9 loop found
+   this: one child was killed inside a commit, and the next child only wrote. A writer holds the lock, so a Manifest
+   it finds after `log_end` is always a cut commit's, and what follows was logged against the loaded manifest. So it
+   no longer stops: it replays every chunk. Then, if a Manifest is still after `log_end`, it commits once, flushing
+   nothing, before it accepts writes. `log_end` moves past the Manifest, so a read-only open, which must keep the
+   stop for the race of item 4, never meets WAL behind it. A file an earlier build left in that state recovers its
+   hidden records at its next writer open.
 
 ## Consequences
 

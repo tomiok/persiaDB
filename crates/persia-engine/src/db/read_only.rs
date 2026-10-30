@@ -95,7 +95,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
         let mut replayed = 0u64;
         // Stop at a Manifest committed while this tail was scanned (SPEC §8.6).
-        for chunk in wal_chunks(&container, manifest.seq())? {
+        for chunk in wal_chunks(&container, manifest.seq(), false)? {
             let frame = container
                 .read_frame_source(chunk, MAX_CHUNK_LEN)
                 .map_err(ReplayError::from)?;

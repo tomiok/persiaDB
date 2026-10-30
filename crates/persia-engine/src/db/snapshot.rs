@@ -7,7 +7,7 @@
 //! memtable before the commit, in its segment after.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 
@@ -16,6 +16,7 @@ use crate::manifest::Manifest;
 use crate::memtable::{IdState, MemtableReader, MemtableView};
 use crate::schema::CollectionSchema;
 use crate::segment::{ReadError, Segment, Tombstones};
+use crate::stats::{SearchStatistics, SegmentStatistics};
 use crate::view::{SearchView, SegmentView};
 
 /// The state one commit published, plus each collection's memtable (SPEC §8.4).
@@ -55,6 +56,8 @@ pub struct CollectionSnapshot {
     /// The deletions of each segment, by its index in `segments`, as of the commit (SPEC §8.3).
     pub(super) tombstones: Vec<Option<Arc<Tombstones>>>,
     pub(super) memtable: MemtableReader,
+    /// The segments' collection statistics, computed on first use (ROADMAP 7.2.1).
+    pub(super) statistics: Arc<OnceLock<SegmentStatistics>>,
 }
 
 /// Where the live version of a document id is (SPEC §8.3, ROADMAP 6.4.1).
@@ -104,6 +107,19 @@ impl CollectionSnapshot {
     /// A view of the memtable's writes so far. Its versions of ids hide the segments' (SPEC §8.3).
     pub fn memtable(&self) -> MemtableView {
         self.memtable.view()
+    }
+
+    /// The collection statistics of the segments (SPEC §7.2, ROADMAP 7.2.1): `N` and the field totals, computed
+    /// once per snapshot, and `df`, cached as it is asked for.
+    pub fn statistics(&self) -> &SegmentStatistics {
+        self.statistics
+            .get_or_init(|| SegmentStatistics::new(&self.schema, &self.segments))
+    }
+
+    /// What a search over the segments and `memtable` (a view of [`Self::memtable`]) scores with: the segments'
+    /// [`Self::statistics`] plus the memtable's live documents (SPEC §7.2, §7.3).
+    pub fn search_statistics<'a>(&'a self, memtable: &'a MemtableView) -> SearchStatistics<'a> {
+        SearchStatistics::new(self.statistics(), memtable)
     }
 
     /// Where the live version of `id` is, as of `memtable` (a view of [`Self::memtable`]) and this snapshot's
