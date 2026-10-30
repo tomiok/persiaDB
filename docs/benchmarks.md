@@ -207,3 +207,14 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 | Recorded | `commit` | `commit_upserts` | `commit_inserts_4_segments` | `commit_inserts_64_segments` |
 |---|--:|--:|--:|--:|
 | 2026-10-28, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 6.4, 6750fe8) | 201 K | 153 K | 174 K | 97.4 K |
+
+## `persia-engine` query execution
+
+`cargo bench -p persia-engine --bench search`: one segment of 50 000 documents of 5 to 34 words drawn from 200
+(skewed toward low numbers, so `w3` is on about a sixth of the documents). Top 10 by exhaustive evaluation, before
+`MaxScore` and block-max WAND (ROADMAP 7.4.4): `term` is `w3`; `and` is `w3 AND w40`; `or` is `w3 OR w40 OR w120`;
+`phrase` is `"w0 w1"`. Time per query.
+
+| Recorded | `term` | `and` | `or` | `phrase` |
+|---|--:|--:|--:|--:|
+| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.1–7.4.3 baseline) | 393 µs | 373 µs | 1.44 ms | 635 µs |

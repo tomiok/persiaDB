@@ -455,9 +455,9 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
 
 ## 7.4 Matching & top-k
-- [ ] 7.4.1 Single-term, AND, OR, NOT iterators with skip
-- [ ] 7.4.2 Phrase matching using positions
-- [ ] 7.4.3 Top-k collector (bounded heap, tie-break determinism: score desc, then docid)
+- [~] 7.4.1 Single-term, AND, OR, NOT iterators with skip
+- [~] 7.4.2 Phrase matching using positions
+- [~] 7.4.3 Top-k collector (bounded heap, tie-break determinism: score desc, then docid)
 - 7.4.4 MaxScore/WAND, then block-max WAND
   - [ ] 7.4.4.1 MaxScore baseline
   - [ ] 7.4.4.2 Block-max WAND using skip metadata
