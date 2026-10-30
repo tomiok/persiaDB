@@ -429,10 +429,15 @@ fn check(case: &Case) {
                 })
                 .collect()
         });
-        // Every live document the reference scores above 0 was reached through the postings.
+        // Every live document that holds the word was reached through the postings. A score of 0 is also what a
+        // real match with a tiny weight can get (SPEC §7.2), so the count is the postings, not `score > 0`.
         let expected = live
             .values()
-            .filter(|d| corpus.score(clauses, d) > 0.0)
+            .filter(|d| {
+                clauses
+                    .iter()
+                    .any(|c| d[c.field].iter().any(|t| t == &c.term))
+            })
             .count();
         assert_eq!(scored, expected, "{clauses:?}");
     }

@@ -373,6 +373,7 @@ Deps: M2, M5.
 - [x] 6.1.4 Size/age flush triggers
 - [ ] 6.1.5 `SearchView` parity for queries: term enumeration (prefix, range, automaton) and column access over segments and the memtable, for 7.1 `Prefix`/`Fuzzy` and 7.4.5 filters (found in 6.1.2)
 - [ ] 6.1.6 Undo a failed `put` without rehashing the term arenas: `Arena::truncate` rebuilds the whole table under the write lock, O(terms) per rejected document (found in the 6.1 review)
+- [ ] 6.1.7 Cache `MemtableView::df` if term statistics become hot: it walks the posting chain under the read lock on every call. The count is the view's `(docs, version)` cutoff, so it cannot reuse a live counter on the term, and a cache has to be keyed by that cutoff and bounded (found in 7.2)
 
 ## 6.2 WAL (SPEC §8.2)
 - [x] 6.2.1 WAL record format: op (put/delete), collection name, payload, checksum

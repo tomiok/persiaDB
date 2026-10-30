@@ -265,9 +265,12 @@ impl TermScorer {
     }
 
     /// `tf~(t, d)` of SPEC §7.2: `hits[i]` is the document's hit in field `i` of [`Self::fields`], `None` (or a
-    /// frequency of 0) where the field lacks the term. Hits past the fields are ignored.
+    /// frequency of 0) where the field lacks the term. Hits past the fields are ignored; a shorter slice scores
+    /// the fields it names.
     #[allow(clippy::indexing_slicing)] // a u8 indexes a 256-entry table
     pub fn tf(&self, hits: &[Option<FieldHit>]) -> f64 {
+        // `fields` and `factors` are built together and stay aligned; a mismatch would score the wrong field.
+        debug_assert_eq!(self.fields.len(), self.factors.len());
         self.factors
             .iter()
             .zip(hits)
@@ -276,7 +279,20 @@ impl TermScorer {
             .sum()
     }
 
-    /// The document's score for the word (SPEC §7.2); 0 when it matches in no field.
+    /// Whether the document holds the word: some field of [`Self::fields`] has a frequency above 0.
+    ///
+    /// This is the match. [`Self::score`] can be `0.0` for a real match when `tf~` is positive but so far below
+    /// `k1` that the monotonic form in [`Self::score_tf`] rounds to 0, or just below, and `.max(0.0)` clamps it
+    /// (SPEC §7.2). A legal weight may be any finite value in `(0, 1000]`, so the score is not given a floor.
+    pub fn matches(&self, hits: &[Option<FieldHit>]) -> bool {
+        debug_assert_eq!(self.fields.len(), self.factors.len());
+        hits.iter()
+            .take(self.fields.len())
+            .any(|hit| hit.is_some_and(|h| h.tf > 0))
+    }
+
+    /// The document's score for the word (SPEC §7.2); 0 when it matches in no field, and also 0 for a match whose
+    /// `tf~` underflows the monotonic form (see [`Self::matches`]).
     ///
     /// Monotonic in every frequency and antitone in every norm byte, so given a block's or a term's bounds
     /// ([`FieldHit`] from a [`BlockMax`] or a [`TermInfo`]) it is an upper bound of the score of each document in
@@ -286,6 +302,10 @@ impl TermScorer {
     }
 
     /// The score of a document whose `tf~` is `tf`.
+    ///
+    /// `0.0` when `tf` is not positive, and also when a positive `tf` is so small that
+    /// `idf·(k1+1) − idf·(k1+1)·k1 / (k1 + tf)` rounds to 0 or just below. The `.max(0.0)` keeps the result
+    /// non-negative, which the term and block bounds rely on; it does not mean the document missed the term.
     pub fn score_tf(&self, tf: f64) -> f64 {
         if tf.is_nan() || tf <= 0.0 {
             return 0.0;

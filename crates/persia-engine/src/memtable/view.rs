@@ -85,6 +85,11 @@ impl MemtableView {
     /// The live documents of the view holding `term` in a `text` or `keyword` field: the `df` of
     /// [`SearchView::postings`], counted without copying the postings (SPEC §7.2).
     ///
+    /// The chain is walked under the read lock on every call, and the count is not cached. It is this view's
+    /// `(docs, version)` cutoff, not the memtable's current live set, so a counter stored on the term would be
+    /// wrong for an older view. A cache keyed by that cutoff would grow with every version and every term, and a
+    /// search asks each term once, when it builds a scorer (ROADMAP 6.1.7).
+    ///
     /// # Errors
     /// As [`SearchView::postings`].
     pub fn df(&self, field: FieldId, term: &[u8]) -> Result<u32, ReadError> {

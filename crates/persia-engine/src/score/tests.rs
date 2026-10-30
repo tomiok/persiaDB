@@ -171,6 +171,32 @@ fn keyword_term_scores_its_idf() {
     assert_eq!(scorer.k1(), KEYWORD_K1);
 }
 
+/// A legal weight far below `k1` makes the monotonic form round to 0, which `.max(0.0)` keeps. The score is then
+/// the same number a miss gets; [`TermScorer::matches`] is what tells them apart (SPEC §7.2).
+#[test]
+fn a_tiny_weight_scores_zero_and_still_matches() {
+    let (s, title, _, _) = schema();
+    let params = FieldParams::of(&s, title, Some(1e-300)).unwrap();
+    let stats = Stats {
+        n: 10,
+        fields: HashMap::from([(title, totals(10, 40))]),
+        df: HashMap::from([((title, b"shoe".to_vec()), 2)]),
+    };
+    let scorer = TermScorer::new(&[params], 2, &stats).unwrap();
+    let hit = [hit(1, 4)];
+    assert!(scorer.matches(&hit), "tf 1 is a match");
+    assert!(
+        scorer.tf(&hit) > 0.0,
+        "tf~ is positive; the zero comes from the monotonic form"
+    );
+    assert_eq!(scorer.score(&hit), 0.0);
+    assert!(!scorer.matches(&[None]));
+    assert!(!scorer.matches(&[]));
+    assert!(!scorer.matches(&[Some(FieldHit { tf: 0, norm: 4 })]));
+    // Identical scores: a caller that treats `score > 0` as "matched" drops this document.
+    assert_eq!(scorer.score(&hit), scorer.score(&[None]));
+}
+
 #[test]
 fn length_normalization_extremes() {
     let s = SchemaBuilder::new("c")

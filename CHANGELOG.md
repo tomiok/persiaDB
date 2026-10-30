@@ -16,8 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `score::TermScorer` scores a `term` or `combined` query word per document from its frequency and norm byte in each
   field, with per-field weights, `k1` and `b` (a `combined` saturates with the weighted mean of its fields' `k1`; a
   `keyword` term scores its `idf`). Given a term's or a block's `max_tf` and `min_norm` it gives an exact upper
-  bound for WAND. `score::static_rank` is the `log1p`/`linear` static rank contribution. Checked differentially against
-  a reference scorer (`tests/reference`) within `1e-9` of the word's largest score.
+  bound for WAND. A match whose weight is tiny enough can score `0.0`; `TermScorer::matches` reports the hit, and
+  a positive score is not how a match is detected. `score::static_rank` is the `log1p`/`linear` static rank
+  contribution. Checked differentially against a reference scorer (`tests/reference`) within `1e-9` of the word's
+  largest score.
 - `persia-engine`: queries (ROADMAP 7.1, SPEC §7.1). `query::Query`, the programmatic AST (term, combined, phrase,
   prefix, fuzzy, bool, boost, constant score, match all), checked against a schema with `Query::validate`.
   `QueryCompiler::compile` turns user text into a query and never fails: default AND, `"phrases"`, `-` exclusion and
@@ -324,7 +326,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 - `persia-engine`: acknowledged writes no longer get lost after two crashes in a row (ROADMAP 6.6.9, SPEC §8.6). A
-  commit cut after its Manifest frame left that Manifest after `log_end`. Every open stops replay there, so the WAL a
+  commit cut after its Manifest frame left that Manifest after `log_end`. Opens used to stop replay there, so the WAL a
   later writer logged behind it was dropped by the open after that writer's crash. A writer's open now replays past
   such a Manifest, then commits once, flushing nothing, so `log_end` moves past it. A file already in that state gets
   its records back at its next writer open.

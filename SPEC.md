@@ -1244,7 +1244,10 @@ MaxScore and block-max WAND (§7.3). A length-normalization denominator is at le
 byte never divides by zero). The implementation MUST match the reference (`persia-engine/tests/reference`), which
 evaluates the formula above on the quantized lengths, within `1e-9 · idf·(k1+1)` (absolute, scaled by the word's
 largest score): the subtraction loses relative precision when `tf~` is far below `k1`, but never more than a few ulps
-of `idf·(k1+1)`.
+of `idf·(k1+1)`. A score of 0 is what a document that misses the term scores, and also what a document that holds
+it can score when `tf~` is positive but this form rounds to 0 or just below (the implementation takes `max(0, …)`,
+so a bound stays non-negative). Whether a document matched is which postings it is on, not whether its score is
+positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is legal (§6.2.2).
 
 ### 7.3 Execution
 - Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (MAXSCORE as fallback).

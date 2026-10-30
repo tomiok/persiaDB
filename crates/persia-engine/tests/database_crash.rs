@@ -37,11 +37,11 @@ use persia_engine::db::{
     CommitPolicy, Database, DatabaseError, DatabaseOptions, ManualClock, ReadOnlyDatabase,
     SegmentIds, Snapshot,
 };
-use persia_engine::document::{Document, Value};
+use persia_engine::document::{Document, FieldSet, Value};
 use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
-use persia_engine::wal::Durability;
+use persia_engine::wal::{Durability, WalRecord, WalWriter};
 use persia_format::frame::FrameKind;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile, Error as ContainerError, Mode, Repair};
@@ -368,6 +368,89 @@ fn writes_after_a_reopen_survive_a_cut_commit_and_another_crash() {
     eprintln!(
         "{stray} stray Manifests, {retirement_faults} cut retirements, {torn} corrupt tails skipped"
     );
+}
+
+/// WAL already logged behind a cut commit's Manifest — the kill-9 failure: the next writer appended
+/// acknowledged puts there and died before committing — is in the snapshot the following writer
+/// opens, and a commit then does not drop it (ROADMAP 6.6.9, SPEC §8.6).
+#[test]
+fn acknowledged_wal_behind_a_stray_manifest_is_replayed() {
+    let crashed = one_stray_manifest();
+    append_synced_put_behind(&crashed, "hidden", "behind");
+    assert_eq!(
+        stray_manifest(&crashed),
+        Some(true),
+        "the appended chunk stays behind the cut commit's Manifest"
+    );
+
+    let mut db = Database::open_on(crashed.clone(), options()).unwrap();
+    let present = |db: &Database<SimFile>, id: &str| {
+        db.snapshot()
+            .collection("a")
+            .unwrap()
+            .get(id)
+            .unwrap()
+            .is_some()
+    };
+    for id in ["a0", "a1", "hidden"] {
+        assert!(
+            present(&db, id),
+            "{id} missing at the open that retires the Manifest"
+        );
+    }
+    assert_eq!(stray_manifest(&crashed), Some(false));
+    // A flush covers the replayed records. Advancing `wal_start` past the chunk behind the Manifest
+    // before it was applied would drop `hidden`.
+    db.commit().unwrap();
+    drop(db);
+    let db = Database::open_on(crashed.crash(CrashLoss::All), options()).unwrap();
+    for id in ["a0", "a1", "hidden"] {
+        assert!(present(&db, id), "{id} missing after the commit");
+    }
+}
+
+/// One file a commit cut before its superblock slot: a valid Manifest frame sits after `log_end`.
+fn one_stray_manifest() -> SimFile {
+    let created = SimFile::new();
+    let mut db = Database::create_on(created.clone(), [4; 16], options()).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.put("a", &doc("a0", "zero"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.put("a", &doc("a1", "one"), Durability::Fsync).unwrap();
+    let base = created.durable_bytes();
+    drop(db);
+    let commit_calls = {
+        let file = SimFile::from_bytes(base.clone());
+        let mut db = Database::open_on(file.clone(), options()).unwrap();
+        let start = file.mutations();
+        db.commit().unwrap();
+        file.mutations() - start
+    };
+    for point in 0..commit_calls {
+        for apply_first in [false, true] {
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(point)] {
+                let file = SimFile::from_bytes(base.clone());
+                let mut db = Database::open_on(file.clone(), options()).unwrap();
+                file.set_fault(Some(fault(file.mutations() + point, apply_first)));
+                assert!(db.commit().is_err(), "call {point}");
+                drop(db);
+                let crashed = file.crash(loss);
+                if stray_manifest(&crashed) == Some(true) {
+                    return crashed;
+                }
+            }
+        }
+    }
+    panic!("no cut commit left a Manifest after log_end");
+}
+
+/// Syncs one put of `id` onto `file` without committing, so the chunk lands after the stray Manifest.
+fn append_synced_put_behind(file: &SimFile, id: &str, text: &str) {
+    let container = Container::open_on(file.clone(), Mode::ReadWrite).unwrap();
+    let mut wal = WalWriter::resume(container, BTreeMap::new());
+    let encoded = doc(id, text).encode(&schema("a"), FieldSet::All).unwrap();
+    wal.append(&WalRecord::put("a", &encoded).unwrap(), Durability::Fsync)
+        .unwrap();
 }
 
 fn fault(at: u64, apply_first: bool) -> SimFault {
