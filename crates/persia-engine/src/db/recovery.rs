@@ -6,10 +6,11 @@
 //! 2. The committed manifest: its frame, decoded, checked against the slot and the local layout (ROADMAP 6.3.7).
 //! 3. Each collection's segments and tombstone sidecars, opened through the container's objects and checked against
 //!    their manifest entries, and an empty memtable per collection.
-//! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1), stopping at the
-//!    first Manifest frame after `log_end` whose `seq` is newer than the loaded manifest (a read-only open, SPEC §8.6).
-//!    The writer holds the lock, so such a Manifest is a cut commit's: it replays past it, then commits once, flushing
-//!    nothing, if one is still after `log_end`, so the WAL it logs next is never behind it (ROADMAP 6.6.9).
+//! 4. The WAL chunks from `wal_start` on, replayed in log order into the memtables (SPEC §8.2.1). A read-only open
+//!    stops at a Manifest after `log_end` only when a fresh superblock read names that frame as the committed
+//!    manifest (a writer committed during the scan, SPEC §8.6). One the slot still leaves after `log_end` is a cut
+//!    commit's: both opens replay the WAL after it. The writer then commits once, flushing nothing, if a Manifest
+//!    is still after `log_end`, so the WAL it logs next is never behind it (ROADMAP 6.6.9).
 //! 5. Ready: the first snapshot shows the segments and the replayed memtables.
 //!
 //! Nothing before step 4 writes but the container's tail repair, and replay writes only to memtables, except that
@@ -185,16 +186,21 @@ pub(super) fn load<F: ContainerFile + Sync>(
 /// The positions of the `WalChunk` frames to replay onto the manifest loaded at `loaded_seq`, in log order (SPEC
 /// §8.6): every `WalChunk` from the committed `wal_start` on, including those recovery found after `log_end`.
 ///
-/// A read-only open (`writer` false) stops at the first Manifest frame after `log_end` whose `seq` is greater than
-/// `loaded_seq`. It holds no lock, so a writer may commit while the tail is scanned: the new Manifest and the WAL
-/// logged after it (a collection that manifest creates, then a put) are the next snapshot's. Replaying them onto the
-/// loaded manifest fails with [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest
-/// were logged against the loaded snapshot and are replayed.
+/// A read-only open (`writer` false) holds no lock, so a writer may commit while the tail is scanned. It stops at
+/// the first Manifest frame after the loaded `log_end` whose `seq` is greater than `loaded_seq` and which a fresh
+/// superblock read names as the committed manifest ([`committed_manifest`]). The WAL logged after that Manifest (a
+/// collection it creates, then a put) is the next snapshot's: replaying it onto the loaded manifest fails with
+/// [`ReplayError::UnknownCollection`] or mixes two commits. Frames before that Manifest were logged against the
+/// loaded snapshot and are replayed.
+///
+/// A Manifest the fresh slot still leaves after `log_end` was cut before its superblock write (SPEC §4.5). It never
+/// took effect, so the WAL after it belongs to the loaded snapshot — including records a later writer acknowledged
+/// there before this fix retired such Manifests (ROADMAP 6.6.9). Stopping would drop them. A slot that names a
+/// later Manifest has covered this frame; the WAL up to that later one still belongs to the loaded snapshot.
 ///
 /// A writer holds the lock, so no commit races its scan: a Manifest after `log_end` is one a crash cut before its
-/// superblock slot (SPEC §4.5), and every frame after it was logged by a later writer that loaded the same manifest
-/// (the cut commit never took effect). So the writer replays them all, then retires that Manifest
-/// (`Database::retire_uncommitted_manifest`, ROADMAP 6.6.9).
+/// superblock slot, and every frame after it was logged by a later writer that loaded the same manifest. So the
+/// writer replays them all, then retires that Manifest (`Database::retire_uncommitted_manifest`).
 pub(super) fn wal_chunks<F: ContainerFile>(
     container: &Container<F>,
     loaded_seq: u64,
@@ -206,7 +212,7 @@ pub(super) fn wal_chunks<F: ContainerFile>(
         if !writer && frame.offset >= log_end && frame.kind == FrameKind::Manifest {
             let source = container.read_frame_source(frame.offset, MAX_MANIFEST_LEN)?;
             let seq = Manifest::decode(&source.payload)?.seq();
-            if seq > loaded_seq {
+            if seq > loaded_seq && committed_manifest(container, frame.offset)? {
                 break;
             }
         }
@@ -215,6 +221,19 @@ pub(super) fn wal_chunks<F: ContainerFile>(
         }
     }
     Ok(chunks)
+}
+
+/// Whether the Manifest frame at `offset` is the one a fresh superblock read commits (SPEC §8.6).
+///
+/// False when the slot still leaves it after `log_end` (a cut commit) or names a later Manifest that merely covers
+/// it. Replay then continues. True when the slot's `manifest_off` is this frame: the WAL after it is the next
+/// snapshot's, and a read-only open must not apply it to the manifest it loaded.
+fn committed_manifest<F: ContainerFile>(
+    container: &Container<F>,
+    offset: u64,
+) -> Result<bool, DatabaseError> {
+    let fresh = container.reread_superblock()?;
+    Ok(offset < fresh.log_end && fresh.manifest_off == offset)
 }
 
 /// Calls `f` with each record of the chunk at position `chunk`, and the record's offset in it, in order; returns how

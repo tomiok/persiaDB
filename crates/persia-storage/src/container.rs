@@ -499,6 +499,26 @@ impl<F: ContainerFile> Container<F> {
         &self.active.superblock
     }
 
+    /// Reads the active superblock from the file again (SPEC §4.3).
+    ///
+    /// [`Container::superblock`] is the slot from when this handle was opened. A read-only open holds no lock, so a
+    /// writer may have committed since (SPEC §4.5.1): replay uses a fresh read to tell a Manifest a cut commit left
+    /// after `log_end` from one a later commit has published (SPEC §8.6).
+    ///
+    /// # Errors
+    /// [`Error::Format`] if the header or neither slot is valid, or the active slot's offsets do not fit the file;
+    /// [`Error::Io`] if the prefix or the length cannot be read.
+    pub fn reread_superblock(&self) -> Result<Superblock> {
+        let prefix = read_at(&self.file, 0, FIRST_FRAME_OFFSET)?;
+        let mut r = Reader::new(&prefix);
+        // The same checks as open: a damaged header is not a superblock this build can trust.
+        let _header = Header::decode(&mut r)?;
+        let active = Superblock::read_active(&mut r)?;
+        let file_len = self.file.file_len().map_err(Error::io("stat"))?;
+        active.check_bounds(file_len)?;
+        Ok(active.superblock)
+    }
+
     /// Which slot holds the committed superblock; the next commit writes the other (SPEC §4.5).
     pub fn active_slot(&self) -> Slot {
         self.active.slot

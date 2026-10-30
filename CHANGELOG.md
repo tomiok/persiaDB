@@ -327,13 +327,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 - `persia-engine`: acknowledged writes no longer get lost after two crashes in a row (ROADMAP 6.6.9, SPEC §8.6). A
   commit cut after its Manifest frame left that Manifest after `log_end`. Opens used to stop replay there, so the WAL a
-  later writer logged behind it was dropped by the open after that writer's crash. A writer's open now replays past
-  such a Manifest, then commits once, flushing nothing, so `log_end` moves past it. A file already in that state gets
-  its records back at its next writer open.
+  later writer logged behind it was dropped by the open after that writer's crash — a read-only open and `persia
+  verify` included, with no error. A writer's open now replays past such a Manifest, then commits once, flushing
+  nothing, so `log_end` moves past it. A read-only open replays past it too while a fresh read of the superblock
+  still leaves it after `log_end`, and still stops when that read names the frame as the committed manifest (a
+  writer committed during the scan). A file already in that state gets its records back at its next open.
 - `persia-engine`: a read-only open (and `persia verify`) beside a live writer no longer fails with
   `ReplayError::UnknownCollection` when the writer creates a collection and logs to it while the reader's tail is
-  scanned. Replay stops at the first Manifest frame after the loaded `log_end` whose `seq` is newer, so the snapshot
-  stays the one the open loaded (SPEC §8.6, ADR-0033).
+  scanned. Replay stops at the first Manifest frame after the loaded `log_end` whose `seq` is newer and which a fresh
+  superblock read names as the committed manifest, so the snapshot stays the one the open loaded (SPEC §8.6, ADR-0033).
 - `persia-storage`: a read-only open whose corrupt-tail classify races a writer's truncation no longer fails with an
   I/O error; `stale_tail` stays clear.
 - `persia-engine`: `ReadOnlyDatabase::verify` on a container whose read-write open already quarantined and truncated

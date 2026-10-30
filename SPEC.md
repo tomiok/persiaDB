@@ -1530,10 +1530,10 @@ The open sequence (ROADMAP 6.6.1, ADR-0033), the same for a writer and a read-on
 3. Each collection's segments and tombstone sidecars, opened through the container and checked against their
    manifest entries (§8.3, §8.7.1), and an empty memtable per collection.
 4. The `WalChunk` frames from `wal_start` on (those after `log_end` included), in log order, each record applied to
-   its collection's memtable (§8.2.1). A read-only open stops at the first Manifest frame after the loaded `log_end`
-   whose `seq` is greater than the loaded manifest's, and does not apply the frames after it (below). A writer
-   replays every chunk, then, if a Manifest frame is still after `log_end`, commits once before it accepts writes
-   (below).
+   its collection's memtable (§8.2.1). A read-only open stops at a Manifest frame after the loaded `log_end` whose
+   `seq` is greater than the loaded manifest's only when a fresh read of the superblock names that frame as the
+   committed manifest, and does not apply the frames after it (below). A writer replays every chunk, then, if a
+   Manifest frame is still after `log_end`, commits once before it accepts writes (below).
 5. Ready: the first snapshot shows the segments and the replayed memtables. Replayed operations count as written at
    the open (§8.2).
 
@@ -1555,19 +1555,25 @@ operations) fails the open. A read-write open flushes at the threshold (above) a
 shows the snapshot it found and does not follow later commits; it is opened again for those. Because it holds no
 lock, a writer may commit while the tail is scanned (§4.5.1). The scan can then include that commit's Manifest
 frame, after the loaded `log_end`, and WAL frames logged after it — including records of a collection the loaded
-manifest does not have. Replay stops at the first such Manifest whose `seq` is greater than the loaded manifest's,
-so the snapshot stays the one the open loaded: the committed manifest, plus WAL from `wal_start` up to that
-Manifest. WAL between `log_end` and that Manifest was logged before the newer commit and belongs to the loaded
-snapshot. Applying what follows the Manifest would mix two commits, or fail the open on a collection the loaded
-manifest lacks.
+manifest does not have. At each Manifest frame after the loaded `log_end` whose `seq` is greater than the loaded
+manifest's, the open reads the superblock again. It stops when that read names the frame (`manifest_off` is the
+frame, so the frame is below the fresh `log_end`): the snapshot stays the one the open loaded, the committed
+manifest plus WAL from `wal_start` up to that Manifest. WAL between the loaded `log_end` and that Manifest was
+logged before the newer commit and belongs to the loaded snapshot. Applying what follows the Manifest would mix
+two commits, or fail the open on a collection the loaded manifest lacks. A Manifest the fresh slot still leaves
+after `log_end` was cut before its superblock write (§4.5) and never took effect, so the WAL after it belongs to
+the loaded snapshot and is replayed: that is where a writer used to acknowledge puts that a later open then
+dropped (ROADMAP 6.6.9). A fresh slot that names a later Manifest has covered this frame; the WAL up to that
+later Manifest was logged before it and is replayed too. The open then stops at the Manifest the slot names.
 
 A **writer** holds the lock, so nothing commits during its scan. A Manifest it finds after `log_end` is one a crash
 cut before its superblock slot (§4.5). That commit never took effect, so every frame after it was logged by a later
 writer that loaded the same manifest. The writer does not stop there: it replays every chunk. Then, if a Manifest
 frame is still after `log_end` (no replay-time flush committed past it), it commits once before it accepts writes.
 That commit flushes nothing and takes `wal_start` as any commit does (§8.2.1), so every replayed record stays needed.
-It moves `log_end` past the stray Manifest, which no open consults again. Without it, the writer would log behind the
-stray Manifest, and a read-only open, which must stop there, would not show those records (ROADMAP 6.6.9).
+It moves `log_end` past the stray Manifest. Without it the writer would log its next puts behind that Manifest.
+A read-only open replays those puts while the slot still leaves the Manifest after `log_end` (above), and the
+retiring commit makes that unnecessary: after it, no open consults the Manifest again (ROADMAP 6.6.9).
 
 **Verification** (ROADMAP 6.6.3, `persia verify`) is a read-only open plus what no open or lookup checks: every live
 segment's whole bytes (`Segment::verify`, §5.5), that no document id is live in two segments of a collection (§8.3),

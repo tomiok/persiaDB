@@ -54,9 +54,12 @@ only what it needs, and `Segment::verify` ran only on merged segments.
    this: one child was killed inside a commit, and the next child only wrote. A writer holds the lock, so a Manifest
    it finds after `log_end` is always a cut commit's, and what follows was logged against the loaded manifest. So it
    no longer stops: it replays every chunk. Then, if a Manifest is still after `log_end`, it commits once, flushing
-   nothing, before it accepts writes. `log_end` moves past the Manifest, so a read-only open, which must keep the
-   stop for the race of item 4, never meets WAL behind it. A file an earlier build left in that state recovers its
-   hidden records at its next writer open.
+   nothing, before it accepts writes. `log_end` moves past the Manifest, so a later open never meets WAL behind it.
+   A read-only open keeps the stop of item 4 for a Manifest a fresh superblock read names as committed, which is
+   the race with a live writer. A Manifest that read still leaves after `log_end` is a cut commit's, and the WAL
+   after it is replayed, so a file an earlier build left in that state shows its hidden records to a read-only
+   open as well as to the next writer. The writer's retiring commit remains: without it the next puts would land
+   behind the Manifest again, and every open would depend on the fresh read to find them.
 
 ## Consequences
 

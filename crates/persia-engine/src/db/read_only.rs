@@ -5,9 +5,10 @@
 //! and never writes, so it opens next to a live writer (and a second writer fails fast on the writer lock, SPEC
 //! §4.5.1). It holds the [`Snapshot`] of what it found: the committed segments, and memtables holding the WAL
 //! records from `wal_start` on, those written after the last commit included (written, not necessarily synced: an
-//! `Async` write a power loss may still drop), up to the first Manifest frame after `log_end` that a writer
-//! committed while the tail was scanned (SPEC §8.6). It does not follow the writer's later commits; open it
-//! again for those.
+//! `Async` write a power loss may still drop), up to the first Manifest frame after `log_end` that a fresh
+//! superblock read names as committed (a writer committed while the tail was scanned, SPEC §8.6). A Manifest the
+//! slot still leaves after `log_end` is a cut commit's: the WAL after it belongs to this snapshot and is replayed
+//! (ROADMAP 6.6.9). The open does not follow a writer's later commits; open it again for those.
 
 use std::fs::File;
 use std::path::Path;
@@ -94,7 +95,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     ) -> Result<Self, DatabaseError> {
         let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
         let mut replayed = 0u64;
-        // Stop at a Manifest committed while this tail was scanned (SPEC §8.6).
+        // Stop at a Manifest a fresh superblock read shows committed during this scan (SPEC §8.6).
         for chunk in wal_chunks(&container, manifest.seq(), false)? {
             let frame = container
                 .read_frame_source(chunk, MAX_CHUNK_LEN)
