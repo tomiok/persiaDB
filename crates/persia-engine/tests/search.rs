@@ -695,3 +695,142 @@ fn conjunctions_skip_over_long_lists() {
     let phrase = f.phrase(&[("ant", 0), ("bee", 1)]);
     assert_eq!(f.docids(&phrase), [0, 997, 1994, 2991, 3988, 4985]);
 }
+
+/// What `validate` rejects and would plan into different results is rejected by the plan too.
+#[test]
+fn plans_reject_what_would_change_results() {
+    let f = fixture(&["ant bee"]);
+    let plain = SchemaBuilder::new("c")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let no_positions = Query::Phrase(PhraseQuery {
+        field: plain.field("body").unwrap().id(),
+        terms: vec![
+            PhraseTerm {
+                term: "ant".into(),
+                position: 0,
+            },
+            PhraseTerm {
+                term: "bee".into(),
+                position: 1,
+            },
+        ],
+    });
+    let stats = SegmentStatistics::new(&Arc::new(plain.clone()), &[]);
+    assert!(matches!(
+        SearchPlan::new(&no_positions, &plain, &stats),
+        Err(SearchError::Query(_))
+    ));
+    let decreasing = f.phrase(&[("ant", 1), ("bee", 0)]);
+    assert!(matches!(
+        SearchPlan::new(&decreasing, &f.schema, &f.stats),
+        Err(SearchError::Query(_))
+    ));
+    for boost in [f64::NAN, 0.0, -1.0, 1001.0] {
+        let q = Query::Boost(BoostQuery {
+            query: Box::new(f.term("ant")),
+            boost,
+        });
+        assert!(matches!(
+            SearchPlan::new(&q, &f.schema, &f.stats),
+            Err(SearchError::Query(_))
+        ));
+    }
+    let q = Query::ConstantScore(ConstantScoreQuery {
+        query: Box::new(f.term("ant")),
+        score: f64::INFINITY,
+    });
+    assert!(matches!(
+        SearchPlan::new(&q, &f.schema, &f.stats),
+        Err(SearchError::Query(_))
+    ));
+}
+
+/// The same document scores the same bits in segments whose clause costs order a conjunction differently, and
+/// where a `should` term is missing (SPEC §7.2: clauses are added in query order).
+#[test]
+fn a_document_scores_the_same_in_any_segment() {
+    let schema = schema(&[(1.0, 1.2, 0.75), (1.0, 1.2, 0.75)]);
+    let body = ids(&schema)[BODY];
+    let doc = |id: &str, text: &str| {
+        let words = text.split_whitespace().map(str::to_owned).collect();
+        (id.to_owned(), vec![Vec::new(), words, Vec::new()])
+    };
+    // `elk` is rare in `a` and `ant` in `b`, so their conjunctions lead with different clauses.
+    let mut a = vec![doc("t", "ant bee elk")];
+    let mut b = vec![doc("t", "ant bee elk")];
+    for i in 0..40 {
+        a.push(doc(&format!("a{i}"), "ant bee cat"));
+        b.push(doc(&format!("b{i}"), "bee elk dog"));
+    }
+    let a = Arc::new(segment(&schema, 1, &a));
+    let b = Arc::new(segment(&schema, 2, &b));
+    let stats =
+        SegmentStatistics::new(&Arc::new(schema.clone()), &[Arc::clone(&a), Arc::clone(&b)]);
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    let boosted = |t: &str, boost| {
+        Query::Boost(BoostQuery {
+            query: Box::new(term(t)),
+            boost,
+        })
+    };
+    let q = Query::Bool(BoolQuery {
+        // Three scores of different magnitudes: their sum rounds differently in another order.
+        must: vec![
+            boosted("ant", 1.0),
+            boosted("bee", 0.003_141_6),
+            boosted("elk", 777.7),
+        ],
+        should: vec![term("cat"), term("ant")],
+        ..BoolQuery::default()
+    });
+    let plan = SearchPlan::new(&q, &schema, &stats).unwrap();
+    let score = |s: &Segment| {
+        let view = SegmentView::new(s, None);
+        let hits = plan.top_k(&view, 100).unwrap();
+        let t = view.docid_of("t").unwrap().unwrap();
+        hits.iter().find(|h| h.docid == t).unwrap().score
+    };
+    assert_eq!(score(&a).to_bits(), score(&b).to_bits());
+}
+
+/// A memtable's replaced versions are not live: `match_all` and a `must_not`-only bool see one version per id.
+#[test]
+fn memtable_replaced_versions_are_left_out() {
+    let schema = schema(&[(1.0, 1.2, 0.75), (1.0, 1.2, 0.75)]);
+    let body = ids(&schema)[BODY];
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    let doc = |text: &str| vec![Vec::new(), vec![text.to_owned()], Vec::new()];
+    mem.put(&document(&schema, "a", &doc("ant"))).unwrap();
+    mem.put(&document(&schema, "a", &doc("bee"))).unwrap();
+    mem.put(&document(&schema, "b", &doc("ant"))).unwrap();
+    let view = mem.view();
+    let segment_stats = SegmentStatistics::new(&Arc::new(schema.clone()), &[]);
+    let stats = SearchStatistics::new(&segment_stats, &view);
+    let ids_of = |q: &Query| -> Vec<String> {
+        let plan = SearchPlan::new(q, &schema, &stats).unwrap();
+        let mut ids: Vec<String> = plan
+            .top_k(&view, 10)
+            .unwrap()
+            .iter()
+            .map(|h| view.document(h.docid).unwrap().id().to_owned())
+            .collect();
+        ids.sort();
+        ids
+    };
+    assert_eq!(ids_of(&Query::MatchAll), ["a", "b"]);
+    let not_ant = Query::Bool(BoolQuery {
+        must_not: vec![Query::Term(TermQuery {
+            field: body,
+            term: "ant".into(),
+        })],
+        ..BoolQuery::default()
+    });
+    assert_eq!(ids_of(&not_ant), ["a"]);
+}

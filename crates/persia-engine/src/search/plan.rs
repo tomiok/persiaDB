@@ -1,7 +1,7 @@
 //! A query planned against the collection statistics (SPEC §7.3): its scorers built once, then a matcher tree per
 //! view.
 
-use crate::query::{BoolQuery, Query};
+use crate::query::{BoolQuery, PhraseQuery, Query, QueryError};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::score::TermScorer;
 use crate::segment::ReadError;
@@ -47,11 +47,13 @@ type BoxedMatcher<'a> = Box<dyn Matcher + 'a>;
 
 impl SearchPlan {
     /// Plans `query` over a collection of `schema` whose statistics `stats` gives (SPEC §7.2). The query should
-    /// have passed [`Query::validate`]; one that did not may still plan, or fail on a field's type.
+    /// have passed [`Query::validate`] (the limits are not checked again); what would plan into different results
+    /// is rejected here too.
     ///
     /// # Errors
     /// [`SearchError::Score`] for a field a query does not apply to or a statistic that cannot be read;
-    /// [`SearchError::Unsupported`] for a `prefix`, a `fuzzy` or a `bool` filter.
+    /// [`SearchError::Query`] for a phrase on a field without positions or with decreasing positions, and a boost
+    /// or constant score out of range; [`SearchError::Unsupported`] for a `prefix`, a `fuzzy` or a `bool` filter.
     pub fn new(
         query: &Query,
         schema: &CollectionSchema,
@@ -107,22 +109,31 @@ fn plan(
                 .map(|c| (c.field, c.term.as_bytes().to_vec(), true))
                 .collect(),
         },
-        Query::Phrase(q) => Node::Phrase {
-            scorer: TermScorer::for_phrase(q, schema, stats)?,
-            field: q.field,
-            // Positions are relative to the first term, which need not be at 0.
-            terms: q
-                .terms
-                .iter()
-                .map(|t| {
-                    let first = q.terms.first().map_or(0, |f| f.position);
-                    (t.term.as_bytes().to_vec(), t.position.saturating_sub(first))
-                })
-                .collect(),
-        },
+        Query::Phrase(q) => {
+            phrase_runs(q, schema)?;
+            Node::Phrase {
+                scorer: TermScorer::for_phrase(q, schema, stats)?,
+                field: q.field,
+                // Positions are relative to the first term, which need not be at 0.
+                terms: q
+                    .terms
+                    .iter()
+                    .map(|t| {
+                        let first = q.terms.first().map_or(0, |f| f.position);
+                        (t.term.as_bytes().to_vec(), t.position.saturating_sub(first))
+                    })
+                    .collect(),
+            }
+        }
         Query::Prefix(_) => return Err(SearchError::Unsupported { what: "prefix" }),
         Query::Fuzzy(_) => return Err(SearchError::Unsupported { what: "fuzzy" }),
         Query::Bool(q) => plan_bool(q, schema, stats)?,
+        Query::Boost(q) if !(q.boost.is_finite() && q.boost > 0.0 && q.boost <= 1000.0) => {
+            return Err(QueryError::InvalidBoost { value: q.boost }.into());
+        }
+        Query::ConstantScore(q) if !(q.score.is_finite() && q.score >= 0.0) => {
+            return Err(QueryError::InvalidScore { value: q.score }.into());
+        }
         Query::Boost(q) => Node::Scaled(
             Box::new(plan(&q.query, schema, stats)?),
             Scale::Boost(q.boost),
@@ -262,4 +273,28 @@ fn disjunction(mut clauses: Vec<BoxedMatcher<'_>>) -> Option<BoxedMatcher<'_>> {
         1 => clauses.pop(),
         _ => Some(Box::new(Disjunction::new(clauses))),
     }
+}
+
+/// Checks what would otherwise silently change what a phrase matches (SPEC §7.1): its field indexes positions,
+/// and its terms are in non-decreasing positions.
+fn phrase_runs(q: &PhraseQuery, schema: &CollectionSchema) -> Result<(), QueryError> {
+    let Some(field) = schema.field_by_id(q.field) else {
+        return Err(QueryError::UnknownFieldId { field: q.field });
+    };
+    if let FieldKind::Text(o) = field.kind()
+        && !o.positions
+    {
+        return Err(QueryError::NoPositions {
+            field: field.name().to_owned(),
+        });
+    }
+    if q.terms.windows(2).any(|w| match w {
+        [a, b] => a.position > b.position,
+        _ => false,
+    }) {
+        return Err(QueryError::InvalidPhrase {
+            field: field.name().to_owned(),
+        });
+    }
+    Ok(())
 }

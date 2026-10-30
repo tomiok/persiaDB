@@ -47,6 +47,7 @@ mod word;
 pub use plan::SearchPlan;
 pub use top_k::{Hit, TopK};
 
+use crate::query::QueryError;
 use crate::score::ScoreError;
 use crate::segment::ReadError;
 #[cfg(doc)]
@@ -66,12 +67,16 @@ pub enum SearchError {
         /// The query.
         what: &'static str,
     },
+    /// A query [`crate::query::Query::validate`] rejects and that would otherwise plan into different results: a
+    /// phrase on a field without positions or with decreasing positions, a boost or constant score out of range.
+    #[error(transparent)]
+    Query(#[from] QueryError),
 }
 
 /// The documents a query matches in one view, in docid order, with their scores.
 ///
 /// A new matcher is before its first document: [`Self::next`] or [`Self::advance`] moves it onto one. After the
-/// last document, or an error, it is exhausted.
+/// last document, or an error from [`Self::next`] or [`Self::advance`], it is exhausted.
 pub trait Matcher {
     /// An upper bound on the documents it matches, 0 only when it matches none; a conjunction leads with its
     /// cheapest clause.
@@ -157,10 +162,10 @@ impl Pos {
 /// # Errors
 /// A corruption of the view the matcher reads.
 pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hit>, ReadError> {
-    let mut top = TopK::new(k);
     if k == 0 {
         return Ok(Vec::new());
     }
+    let mut top = TopK::new(k);
     while let Some(docid) = matcher.next()? {
         top.push(docid, matcher.score()?);
     }

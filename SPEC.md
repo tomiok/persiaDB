@@ -1227,9 +1227,10 @@ their common `k1` when they agree. `b_f` and `k1_f` are the schema's (§6.2.2).
 A `phrase` is one term over its field, with the schema `boost` as `w_f` (as Lucene scores a phrase): `tf(t,d,f)` is
 the phrase frequency, the number of distinct positions `s` such that every phrase term holds position `s` plus its
 position relative to the first term, and `idf(t)` is the sum of its terms' `idf`s, each from that term's own `df`. So a phrase of one
-term scores as a `term` query, and a phrase matches what holds it at least once.
-A `bool` scores the sum of its matching `must` and `should` clauses, added in query order (so a document's score does
-not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
+term scores as a `term` query (unless an analyzer stacks a token on itself, at one position: a start counts once),
+and a phrase matches what holds it at least once.
+A `bool` scores the sum of its `must` clauses plus the sum of its matching `should` clauses, each added in query order
+(so a document's score does not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
 score, and `match_all` scores 0.
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics

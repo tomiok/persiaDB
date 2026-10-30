@@ -14,11 +14,10 @@ pub struct Hit {
 
 impl Hit {
     /// The rank order: a higher score first, then a lower docid; total, so the top `k` of a set of hits is always
-    /// the same, whatever order they come in.
+    /// the same, whatever order they come in. `-0.0` ties with `0.0`.
     pub fn rank(&self, other: &Self) -> Ordering {
-        other
-            .score
-            .total_cmp(&self.score)
+        (other.score + 0.0)
+            .total_cmp(&(self.score + 0.0))
             .then(self.docid.cmp(&other.docid))
     }
 }

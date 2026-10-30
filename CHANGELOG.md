@@ -16,7 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   checks positions on the documents holding every term and scores the phrase frequency (its `idf` is the sum of its
   terms', as Lucene; a one-term phrase scores as a `term`). A `bool` adds its clauses' scores in query order.
   `search::TopK` keeps the best `k` hits by score descending, then docid ascending (`SearchPlan::top_k`). `prefix`,
-  `fuzzy` and `bool` filters return `SearchError::Unsupported` until ROADMAP 6.1.5 and 7.4.5. Checked
+  `fuzzy` and `bool` filters return `SearchError::Unsupported` until ROADMAP 6.1.5 and 7.4.5; a phrase on a field
+  without positions, decreasing phrase positions and an out-of-range boost or constant score are `SearchError::Query`. Checked
   differentially against a reference evaluator (`tests/reference/search.rs`).
 - `persia-engine`: collection statistics and BM25F scoring (ROADMAP 7.2, 7.3, SPEC §7.2). `stats::StatisticsProvider`
   gives `N`, `df` and field totals (`avglen`); `SegmentStatistics` sums a snapshot's segments once
