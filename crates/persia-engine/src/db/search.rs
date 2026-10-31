@@ -15,8 +15,7 @@ use crate::search::{
     FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Matcher, Projection, Pruning,
     RequestError, SearchPlan, Sort, SortValue, Ties, collect_where, top_sorted,
 };
-use crate::segment::ReadError;
-use crate::view::SearchView;
+use crate::view::{SearchView, SegmentView};
 
 /// The hits a page returns unless asked otherwise (SPEC §7.4).
 pub const DEFAULT_LIMIT: usize = 20;
@@ -52,14 +51,30 @@ impl Default for SearchRequest {
     }
 }
 
-/// Where a page starts (SPEC §7.4): a hit's sort values and location, from [`SearchHit::cursor`]. Exact within the
-/// snapshot and memtable view that returned the hit.
+/// The snapshot and memtable view a [`Cursor`] was taken from (SPEC §7.4). A search on another one returns
+/// [`RequestError::CursorView`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CursorOrigin {
+    /// [`super::Snapshot::seq`] of that snapshot.
+    pub seq: u64,
+    /// [`crate::memtable::MemtableView::version`] of that view.
+    pub version: u64,
+    /// The collection the hit came from.
+    pub collection: String,
+}
+
+/// Where a page starts (SPEC §7.4): a hit's sort values, location and [`CursorOrigin`], from [`SearchHit::cursor`].
+/// Exact only for that snapshot, collection and memtable view. Another one is [`RequestError::CursorView`]: locations
+/// are indices into the view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one
+/// over.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// One value per sort key.
     pub values: Vec<SortValue>,
     /// The hit's document.
     pub location: Located,
+    /// The snapshot, collection and memtable view that produced the hit.
+    pub origin: CursorOrigin,
 }
 
 /// A hit of a search (SPEC §7.5.1).
@@ -73,14 +88,17 @@ pub struct SearchHit {
     pub sort: Vec<SortValue>,
     /// Its id, blob reference and projected stored fields.
     pub document: Document,
+    /// The snapshot, collection and memtable view. [`Self::cursor`] copies it.
+    pub origin: CursorOrigin,
 }
 
 impl SearchHit {
-    /// The cursor of the page after this hit.
+    /// The cursor of the page after this hit, including the view that produced it.
     pub fn cursor(&self) -> Cursor {
         Cursor {
             values: self.sort.clone(),
             location: self.location,
+            origin: self.origin.clone(),
         }
     }
 }
@@ -145,9 +163,11 @@ impl CollectionViews<'_> {
     ///
     /// # Errors
     /// [`RequestError::Window`] when `offset + limit` is above [`MAX_WINDOW`]; [`RequestError::Cursor`] for a
-    /// cursor that does not fit the sort; [`RequestError::TooManyFacets`] above [`MAX_FACETS`]; [`RequestError::Read`]
-    /// as [`SearchPlan::matcher`], or for a document that
-    /// cannot be read.
+    /// cursor that does not fit the sort; [`RequestError::CursorView`] for a cursor from another snapshot,
+    /// collection or memtable view; [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
+    /// [`RequestError::MismatchedSortValue`] if two sort values are not of the key's type;
+    /// [`RequestError::HitSegment`] if a hit names a segment the views do not have (the hit is not skipped);
+    /// [`RequestError::Read`] as [`SearchPlan::matcher`], or for a document that cannot be read.
     pub fn search(
         &self,
         plan: &SearchPlan,
@@ -165,6 +185,17 @@ impl CollectionViews<'_> {
             })?;
         if let Some(cursor) = &request.search_after {
             request.sort.check(&cursor.values)?;
+            let origin = self.cursor_origin();
+            if cursor.origin != origin {
+                return Err(RequestError::CursorView {
+                    cursor_seq: cursor.origin.seq,
+                    cursor_version: cursor.origin.version,
+                    cursor_collection: cursor.origin.collection.clone(),
+                    seq: origin.seq,
+                    version: origin.version,
+                    collection: origin.collection,
+                });
+            }
         }
         if request.facets.len() > MAX_FACETS {
             return Err(RequestError::TooManyFacets {
@@ -191,13 +222,13 @@ impl CollectionViews<'_> {
         }
         search.view(self.memtable(), usize::MAX, Located::Memtable)?;
 
+        let origin = self.cursor_origin();
         let mut hits = Vec::new();
         for hit in search.hits.into_iter().skip(request.offset) {
             let mut document = match hit.location {
-                Located::Segment { index, docid } => match segments.get(index) {
-                    Some(view) => view.document(docid)?,
-                    None => continue,
-                },
+                Located::Segment { index, docid } => {
+                    segment_view(&segments, index)?.document(docid)?
+                }
                 Located::Memtable(docid) => self.memtable().document(docid)?,
             };
             request.projection.apply(&mut document);
@@ -206,6 +237,7 @@ impl CollectionViews<'_> {
                 score: hit.score,
                 sort: hit.values,
                 document,
+                origin: origin.clone(),
             });
         }
         Ok(SearchResults {
@@ -216,6 +248,14 @@ impl CollectionViews<'_> {
                 .map(FacetCounter::finish)
                 .collect(),
         })
+    }
+
+    fn cursor_origin(&self) -> CursorOrigin {
+        CursorOrigin {
+            seq: self.snapshot_seq(),
+            version: self.memtable().version(),
+            collection: self.collection_name().to_owned(),
+        }
     }
 }
 
@@ -236,7 +276,7 @@ impl Search<'_> {
         view: &V,
         rank: usize,
         location: impl Fn(u32) -> Located,
-    ) -> Result<(), ReadError> {
+    ) -> Result<(), RequestError> {
         let sort = &self.request.sort;
         let counting = !self.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
@@ -306,9 +346,21 @@ impl Search<'_> {
         }
         // Both are sorted, and every hit of this view is placed after the kept ones on a full tie: merge them.
         let kept = core::mem::take(&mut self.hits);
-        self.hits = merge(sort, kept, hits, self.window);
+        self.hits = merge(sort, kept, hits, self.window)?;
         Ok(())
     }
+}
+
+/// The segment view at `index`. A hit that names another index is an error, not a skipped hit: skipping it would
+/// return a short page.
+fn segment_view<'a>(
+    segments: &'a [SegmentView<'a>],
+    index: usize,
+) -> Result<&'a SegmentView<'a>, RequestError> {
+    segments.get(index).ok_or(RequestError::HitSegment {
+        index,
+        segments: segments.len(),
+    })
 }
 
 /// Collection order of a location (SPEC §7.3): segment order with the memtable last, then docid.
@@ -331,13 +383,18 @@ fn ties(rank: usize, cursor: Located) -> Ties {
 }
 
 /// The first `window` of `a` and `b`, both sorted, by `sort` then location ([`order`]).
-fn merge(sort: &Sort, a: Vec<Ranked>, b: Vec<Ranked>, window: usize) -> Vec<Ranked> {
+fn merge(
+    sort: &Sort,
+    a: Vec<Ranked>,
+    b: Vec<Ranked>,
+    window: usize,
+) -> Result<Vec<Ranked>, RequestError> {
     let mut out = Vec::with_capacity(a.len().saturating_add(b.len()).min(window));
     let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
     while out.len() < window {
         let take_a = match (a.peek(), b.peek()) {
             (Some(x), Some(y)) => {
-                sort.compare(&x.values, &y.values)
+                sort.compare(&x.values, &y.values)?
                     .then_with(|| order(x.location).cmp(&order(y.location)))
                     != core::cmp::Ordering::Greater
             }
@@ -347,5 +404,25 @@ fn merge(sort: &Sort, a: Vec<Ranked>, b: Vec<Ranked>, window: usize) -> Vec<Rank
         };
         out.extend(if take_a { a.next() } else { b.next() });
     }
-    out
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::segment_view;
+    use crate::search::RequestError;
+    use crate::view::SegmentView;
+
+    #[test]
+    fn a_hit_whose_segment_index_has_no_view_is_an_error() {
+        let segments: &[SegmentView<'_>] = &[];
+        let err = segment_view(segments, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            RequestError::HitSegment {
+                index: 4,
+                segments: 0
+            }
+        ));
+    }
 }

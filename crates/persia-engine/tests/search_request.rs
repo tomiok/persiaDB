@@ -24,8 +24,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use persia_engine::db::{
-    CollectionSnapshot, Cursor, Database, DatabaseOptions, Located, ManualClock, SearchRequest,
-    SearchResults, SegmentIds,
+    CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions, Located, ManualClock,
+    SearchRequest, SearchResults, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
@@ -37,7 +37,8 @@ use persia_engine::search::{
     FacetRequest, MAX_WINDOW, Missing, Order, Projection, Pruning, RequestError, SearchPlan, Sort,
     SortKey, SortValue,
 };
-use persia_engine::view::SearchView;
+use persia_engine::segment::ReadError;
+use persia_engine::view::{KeywordReader, SearchView};
 use persia_engine::wal::Durability;
 use persia_format::{BlobId, BlobRef};
 use persia_storage::container::sim::SimFile;
@@ -117,6 +118,14 @@ fn document(views: &persia_engine::db::CollectionViews<'_>, location: Located) -
         Located::Memtable(docid) => views.memtable().document(docid),
     }
     .unwrap()
+}
+
+fn origin(snapshot: &Snapshot, memtable: &MemtableView) -> CursorOrigin {
+    CursorOrigin {
+        seq: snapshot.seq(),
+        version: memtable.version(),
+        collection: "c".into(),
+    }
 }
 
 fn order(location: Located) -> (usize, u32) {
@@ -742,6 +751,7 @@ fn bad_requests_are_errors() {
         Some(Cursor {
             values,
             location: Located::Memtable(0),
+            origin: origin(&snapshot, &memtable),
         })
     };
     let wrong_count = SearchRequest {
@@ -1032,6 +1042,7 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
         search_after: Some(Cursor {
             values: vec![SortValue::Key(persia_format::for_codec::i64_to_key(-1))],
             location,
+            origin: origin(&snapshot, &memtable),
         }),
         ..base.clone()
     };
@@ -1117,4 +1128,187 @@ fn a_page_past_the_matches_is_empty_and_still_counts_facets() {
             .len(),
         16
     );
+}
+
+/// Runs `request` after `cursor` on `collection` as of `memtable`.
+fn search_after(
+    collection: &CollectionSnapshot,
+    memtable: &MemtableView,
+    request: &SearchRequest,
+    cursor: &Cursor,
+) -> Result<SearchResults, RequestError> {
+    let plan = SearchPlan::new(
+        &Query::MatchAll,
+        collection.schema(),
+        &collection.search_statistics(memtable),
+    )
+    .unwrap();
+    collection.views(memtable).unwrap().search(
+        &plan,
+        &SearchRequest {
+            search_after: Some(cursor.clone()),
+            ..request.clone()
+        },
+        Pruning::default(),
+    )
+}
+
+#[test]
+fn a_cursor_from_another_snapshot_or_memtable_view_is_an_error() {
+    let f = fields();
+    let mut db = database(schema());
+    let doc = |id: &str| {
+        Document::new(id)
+            .with(f.n, Value::I64(1))
+            .with(f.tag, Value::String("red".into()))
+    };
+    // Two committed copies and one memtable copy, tied on `n`, so the cursor's location decides the page.
+    db.put("c", &doc("a"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.put("c", &doc("b"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.put("c", &doc("m"), Durability::Fsync).unwrap();
+
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let mem = c.memtable();
+    let plan = SearchPlan::new(&Query::MatchAll, c.schema(), &c.search_statistics(&mem)).unwrap();
+    let request = SearchRequest {
+        limit: 1,
+        ..sorted([SortKey::field(f.n, Order::Asc)])
+    };
+    let first = c
+        .views(&mem)
+        .unwrap()
+        .search(&plan, &request, Pruning::default())
+        .unwrap();
+    let cursor = first.hits[0].cursor();
+    let rest = search_after(
+        c,
+        &mem,
+        &SearchRequest {
+            limit: 10,
+            ..request.clone()
+        },
+        &cursor,
+    )
+    .unwrap();
+    let rest_ids: Vec<_> = rest.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(rest_ids.len(), 2);
+    assert!(!rest_ids.contains(&first.hits[0].document.id()));
+
+    // A later memtable view of the same snapshot adds a tie the cursor's location does not name.
+    db.put("c", &doc("m2"), Durability::Fsync).unwrap();
+    let mem2 = c.memtable();
+    assert_ne!(mem.version(), mem2.version());
+    assert!(matches!(
+        search_after(c, &mem2, &request, &cursor),
+        Err(RequestError::CursorView { .. })
+    ));
+    // The view that returned the cursor still pages with it.
+    assert!(search_after(c, &mem, &request, &cursor).is_ok());
+
+    db.commit().unwrap();
+    let later = db.snapshot();
+    assert_ne!(later.seq(), snapshot.seq());
+    let c2 = later.collection("c").unwrap();
+    let err = search_after(c2, &c2.memtable(), &request, &cursor).unwrap_err();
+    assert!(matches!(
+        err,
+        RequestError::CursorView { cursor_seq, seq, .. }
+            if cursor_seq == snapshot.seq() && seq == later.seq()
+    ));
+}
+
+#[test]
+fn a_cursor_from_another_collection_is_an_error() {
+    // Same snapshot seq and memtable version: the collection name is what rejects the cursor.
+    let other = SchemaBuilder::new("d")
+        .field("n", FieldKind::I64 { stored: true })
+        .build()
+        .unwrap();
+    let mut db = database(schema());
+    db.create_collection(other.clone()).unwrap();
+    let n = other.field("n").unwrap().id();
+    db.put(
+        "c",
+        &Document::new("a").with(fields().n, Value::I64(1)),
+        Durability::Fsync,
+    )
+    .unwrap();
+    db.put(
+        "d",
+        &Document::new("a").with(n, Value::I64(1)),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let d = snapshot.collection("d").unwrap();
+    let mem_c = c.memtable();
+    let mem_d = d.memtable();
+    assert_eq!(mem_c.version(), mem_d.version());
+    let request = SearchRequest {
+        limit: 1,
+        ..sorted([SortKey::field(fields().n, Order::Asc)])
+    };
+    let plan = SearchPlan::new(&Query::MatchAll, c.schema(), &c.search_statistics(&mem_c)).unwrap();
+    let cursor = c
+        .views(&mem_c)
+        .unwrap()
+        .search(&plan, &request, Pruning::default())
+        .unwrap()
+        .hits[0]
+        .cursor();
+    let err = search_after(
+        d,
+        &mem_d,
+        &SearchRequest {
+            sort: Sort::new([SortKey::field(n, Order::Asc)], d.schema()).unwrap(),
+            ..request
+        },
+        &cursor,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        err,
+        RequestError::CursorView { ref cursor_collection, ref collection, .. }
+            if cursor_collection == "c" && collection == "d"
+    ));
+}
+
+#[test]
+fn memtable_keyword_ords_reject_a_docid_past_the_view() {
+    let f = fields();
+    let mut db = database(schema());
+    db.put(
+        "c",
+        &Document::new("bare").with(f.body, Value::String("alpha".into())),
+        Durability::Fsync,
+    )
+    .unwrap();
+    db.put(
+        "c",
+        &Document::new("tagged").with(f.tag, Value::String("red".into())),
+        Durability::Fsync,
+    )
+    .unwrap();
+    let snapshot = db.snapshot();
+    let memtable = snapshot.collection("c").unwrap().memtable();
+    let mut words = memtable.keywords(f.tag).unwrap();
+    // The first document has no keyword: an empty slice, which is missing, not an error.
+    assert_eq!(words.ords(0).unwrap(), &[] as &[u64]);
+    let red = words.ords(1).unwrap()[0];
+    assert_eq!(words.value(red).unwrap(), b"red");
+    assert!(matches!(
+        words.ords(memtable.doc_count()),
+        Err(ReadError::DocOutOfRange { doc_count: 2, .. })
+    ));
+    assert!(matches!(
+        words.ords(u32::MAX),
+        Err(ReadError::DocOutOfRange {
+            docid: u32::MAX,
+            doc_count: 2
+        })
+    ));
 }

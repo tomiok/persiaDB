@@ -48,6 +48,38 @@ pub enum RequestError {
         /// Why.
         reason: &'static str,
     },
+    /// A cursor from another snapshot, collection, or memtable view (SPEC §7.4). Locations are indices into the
+    /// view that produced the cursor, so using it elsewhere can repeat a tied hit or pass one over.
+    #[error(
+        "cursor from collection {cursor_collection:?} at snapshot {cursor_seq}, memtable {cursor_version}; this search is collection {collection:?} at snapshot {seq}, memtable {version}"
+    )]
+    CursorView {
+        /// [`crate::db::Snapshot::seq`] recorded on the cursor.
+        cursor_seq: u64,
+        /// [`crate::memtable::MemtableView::version`] recorded on the cursor.
+        cursor_version: u64,
+        /// Collection the cursor was taken from.
+        cursor_collection: String,
+        /// [`crate::db::Snapshot::seq`] of this search.
+        seq: u64,
+        /// [`crate::memtable::MemtableView::version`] of this search.
+        version: u64,
+        /// Collection being searched.
+        collection: String,
+    },
+    /// Two values of types the sort key did not produce were compared (SPEC §7.4). [`super::Sort::check`] rejects
+    /// such a cursor. They are not a tie: that would skip or repeat a hit.
+    #[error("sort values of a type the key did not produce")]
+    MismatchedSortValue,
+    /// A hit names a segment index the views do not have. A search builds every location from those views, so this
+    /// is an invariant break: the hit is not dropped.
+    #[error("hit in segment {index}, and the search has {segments} segments")]
+    HitSegment {
+        /// The index the hit named.
+        index: usize,
+        /// How many segment views the search has.
+        segments: usize,
+    },
     /// A facet on a field that is not a `keyword` field with `facet: true` (SPEC §7.5).
     #[error("cannot facet on field {field:?}: {reason}")]
     FacetField {

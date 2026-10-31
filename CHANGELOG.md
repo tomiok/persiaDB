@@ -8,6 +8,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+- A search no longer drops a hit whose segment index is missing from the views
+  (`RequestError::HitSegment`). A memtable keyword whose term has no ordinal is
+  `ReadError::Section`, not ordinal 0. A keyword ordinal with no bytes is the same error, not an
+  empty value. A memtable docid past the view is `ReadError::DocOutOfRange`, not a missing keyword.
+  Sort values of a type the key did not produce are `RequestError::MismatchedSortValue`, not a tie.
+  A `search_after` cursor from another snapshot, collection or memtable view is
+  `RequestError::CursorView`.
+
 ### Added
 - `persia-engine`: search requests over a collection (ROADMAP 7.5, SPEC §7.4, §7.5, §7.5.1).
   `db::CollectionViews::search` takes a `SearchPlan` and a `db::SearchRequest` and returns `db::SearchResults`.
@@ -16,7 +25,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     multi-valued keyword sorts by its smallest value ascending and its largest descending. Ties go by segment order,
     the memtable last, then docid.
   - **Pages.** A page is `offset` and `limit` (default 20), with `offset + limit` at most `MAX_WINDOW` (10 000). A
-    `db::Cursor` from `SearchHit::cursor` starts the next page after a hit, exact within the same snapshot.
+    `db::Cursor` from `SearchHit::cursor` starts the next page after a hit. It records the snapshot
+    commit (`CursorOrigin::seq`), the collection and the memtable view version; a search on another
+    one returns `RequestError::CursorView` instead of skipping or repeating a tied hit.
   - **Facets.** A `search::FacetRequest` counts the values of a `keyword` field with `facet: true` over every match,
     exactly. It returns the `size` most frequent values (1 to 1 000, default 10), then ascending bytes. A request has
     at most 16 facets (`MAX_FACETS`).

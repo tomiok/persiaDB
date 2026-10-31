@@ -125,11 +125,12 @@ pub trait KeyReader {
 /// [`SearchView::keywords`]: what a sort and a facet read (ROADMAP 7.5.1, 7.5.3). The ordinals are the view's own: a
 /// lower ord is a smaller value in the same view, and values compare across views by their bytes.
 pub trait KeywordReader {
-    /// The ordinals of `docid`'s distinct values, ascending; empty for a document without one (or a docid past the
-    /// view).
+    /// The ordinals of `docid`'s distinct values, ascending; empty when the document has none.
     ///
     /// # Errors
-    /// A corruption of the source.
+    /// A corruption of the source. A docid at or above a memtable view's document count is
+    /// [`ReadError::DocOutOfRange`]: that is not an absent value, and it must not sort or facet as one. A segment
+    /// column returns an empty slice for a docid past the segment (its `starts` column defines the range).
     fn ords(&mut self, docid: u32) -> Result<&[u64], ReadError>;
 
     /// The value of `ord`; `None` past the dictionary.

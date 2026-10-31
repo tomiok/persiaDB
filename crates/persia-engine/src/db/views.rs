@@ -217,6 +217,16 @@ impl CollectionViews<'_> {
         self.memtable
     }
 
+    /// The commit that published the snapshot these views belong to ([`super::Snapshot::seq`]).
+    pub(crate) fn snapshot_seq(&self) -> u64 {
+        self.snapshot.seq
+    }
+
+    /// The collection these views search.
+    pub(crate) fn collection_name(&self) -> &str {
+        self.snapshot.schema().name()
+    }
+
     /// The best `k` hits of `plan` in the collection, pruning with `pruning` (ROADMAP 7.4.3, 7.4.4): score
     /// descending, then the segments in the order of [`CollectionSnapshot::segments`] and the memtable last, then
     /// docid. `plan` should be planned with [`CollectionSnapshot::search_statistics`] of the same memtable view.

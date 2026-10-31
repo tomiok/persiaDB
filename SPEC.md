@@ -1303,9 +1303,10 @@ The page is `offset` (default 0) hits from the top, then `limit` (default 20); `
 (a constant, not an option). `search_after` is the cursor of a hit returned before: its sort values (one per key: the score, the key, the
 keyword bytes, or missing) and its location (segment index or memtable, and docid). The page then starts after it:
 only hits that rank after the cursor count, `offset` included. A cursor whose values do not match the sort's keys in
-number and type is an error. Hits after a cursor are exact within the snapshot and memtable view that returned it; on
-another one, every hit ranks after it all the same, but locations differ, so a hit tied with the cursor on every
-key may repeat or be passed over.
+number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
+and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
+are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
+key or pass one over. The same snapshot and the same memtable view page exactly.
 
 Pruning (§7.3) applies when `sort` is `"score"` and no facet is asked for: then only the threshold of the hits after the
 cursor matters. Any other sort, and a facet, visits every match.

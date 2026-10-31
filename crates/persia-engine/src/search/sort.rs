@@ -233,35 +233,59 @@ impl Sort {
         }
     }
 
-    /// How `a` ranks against `b` by the keys: `Less` first. Values the sort did not produce compare equal.
-    pub(crate) fn compare(&self, a: &[SortValue], b: &[SortValue]) -> Ordering {
+    /// How `a` ranks against `b` by the keys: `Less` first.
+    ///
+    /// # Errors
+    /// [`RequestError::MismatchedSortValue`] when both values are present and not of the key's type. [`Self::check`]
+    /// rejects such a cursor, and a search does not produce one. They are not a tie: `Ordering::Equal` would skip or
+    /// repeat a hit. `unreachable!` is denied on this crate, so every build returns the error.
+    pub(crate) fn compare(
+        &self,
+        a: &[SortValue],
+        b: &[SortValue],
+    ) -> Result<Ordering, RequestError> {
         for ((key, _), (a, b)) in self.keys.iter().zip(a.iter().zip(b)) {
-            let o = by_key(*key, a.present(), b.present(), || match (a, b) {
-                (SortValue::Score(x), SortValue::Score(y)) => (x + 0.0).total_cmp(&(y + 0.0)),
-                (SortValue::Key(x), SortValue::Key(y)) => x.cmp(y),
-                (SortValue::Keyword(x), SortValue::Keyword(y)) => x.cmp(y),
-                _ => Ordering::Equal,
-            });
+            let o = order_present(*key, a.present(), b.present(), || match (a, b) {
+                (SortValue::Score(x), SortValue::Score(y)) => Ok((x + 0.0).total_cmp(&(y + 0.0))),
+                (SortValue::Key(x), SortValue::Key(y)) => Ok(x.cmp(y)),
+                (SortValue::Keyword(x), SortValue::Keyword(y)) => Ok(x.cmp(y)),
+                _ => Err(RequestError::MismatchedSortValue),
+            })?;
             if o != Ordering::Equal {
-                return o;
+                return Ok(o);
             }
         }
-        Ordering::Equal
+        Ok(Ordering::Equal)
     }
 
-    fn compare_local(&self, a: &[Local], b: &[Local]) -> Ordering {
+    fn compare_local(&self, a: &[Local], b: &[Local]) -> Result<Ordering, RequestError> {
         for ((key, _), (a, b)) in self.keys.iter().zip(a.iter().zip(b)) {
-            let o = by_key(*key, a.present(), b.present(), || match (a, b) {
-                (Local::Score(x), Local::Score(y)) => x.total_cmp(y),
-                (Local::Num(x), Local::Num(y)) => x.cmp(y),
-                _ => Ordering::Equal,
-            });
+            let o = order_present(*key, a.present(), b.present(), || match (a, b) {
+                (Local::Score(x), Local::Score(y)) => Ok(x.total_cmp(y)),
+                (Local::Num(x), Local::Num(y)) => Ok(x.cmp(y)),
+                _ => Err(RequestError::MismatchedSortValue),
+            })?;
             if o != Ordering::Equal {
-                return o;
+                return Ok(o);
             }
         }
-        Ordering::Equal
+        Ok(Ordering::Equal)
     }
+}
+
+/// `key`'s order of two values. `present` runs only when both have a value, and may reject a pair whose types
+/// the key did not produce.
+fn order_present(
+    key: SortKey,
+    a_present: bool,
+    b_present: bool,
+    present: impl FnOnce() -> Result<Ordering, RequestError>,
+) -> Result<Ordering, RequestError> {
+    if a_present && b_present {
+        let ordering = present()?;
+        return Ok(by_key(key, true, true, || ordering));
+    }
+    Ok(by_key(key, a_present, b_present, || Ordering::Equal))
 }
 
 /// `key`'s order of two values: a missing one where `missing` puts it, two present ones by `present`.
@@ -342,7 +366,8 @@ enum Reader<K, W> {
 /// ranking after the cursor's values (ties per [`Ties`]). `seen` is called with every match, in docid order.
 ///
 /// # Errors
-/// A corruption of the view; a field `view` does not have with the key's type.
+/// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes;
+/// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type.
 pub(crate) fn top_sorted<V: SearchView>(
     sort: &Sort,
     view: &V,
@@ -350,7 +375,7 @@ pub(crate) fn top_sorted<V: SearchView>(
     k: usize,
     after: Option<(&[SortValue], Ties)>,
     mut seen: impl FnMut(u32),
-) -> Result<Vec<SortedHit>, ReadError> {
+) -> Result<Vec<SortedHit>, RequestError> {
     let mut readers = sort
         .keys
         .iter()
@@ -384,96 +409,141 @@ pub(crate) fn top_sorted<V: SearchView>(
                         Order::Desc => ords.last(),
                     };
                     match ord.copied() {
-                        // Checked here, so every ord kept below has its bytes.
-                        Some(ord) if words.value(ord).is_none() => {
-                            return Err(past_dictionary(key, docid));
+                        // Fail before the heap keeps the ord. Materializing the hit checks again.
+                        Some(ord) => {
+                            keyword_bytes(words, ord, key, docid)?;
+                            Local::Num(ord)
                         }
-                        Some(ord) => Local::Num(ord),
                         None => Local::Missing,
                     }
                 }
             });
         }
         if let Some((cursor, ties)) = after {
-            match compare_to_cursor(sort, &scratch, cursor, &readers) {
+            match compare_to_cursor(sort, &scratch, cursor, &readers, docid)? {
                 Ordering::Less => continue,
                 Ordering::Equal if !ties.admit(docid) => continue,
                 Ordering::Equal | Ordering::Greater => {}
             }
         }
         // Docids ascend: a match tied with the worst kept one ranks after it.
-        if heap
-            .worst()
-            .is_some_and(|w| sort.compare_local(&scratch, &w.values) != Ordering::Less)
+        if let Some(worst) = heap.worst()
+            && sort.compare_local(&scratch, worst.locals())? != Ordering::Less
         {
             continue;
         }
-        heap.push(
-            Entry {
-                values: scratch.as_slice().into(),
-                docid,
-                score,
-            },
-            |a, b| rank(sort, a, b),
-        );
+        // The values are copied into the entry. A push does not allocate a `Box<[Local]>`.
+        let entry = Entry::new(&scratch, docid, score);
+        heap.push(&entry, |a, b| rank(sort, a, b))?;
     }
-    let entries = heap.into_sorted(|a, b| rank(sort, a, b));
-    Ok(entries
-        .into_iter()
-        .map(|e| SortedHit {
-            docid: e.docid,
-            score: e.score,
-            values: e
-                .values
-                .iter()
-                .zip(&readers)
-                .map(|(v, reader)| match (*v, reader) {
-                    (Local::Missing, _) => SortValue::Missing,
-                    (Local::Score(s), _) => SortValue::Score(s),
-                    (Local::Num(ord), Reader::Keywords(words)) => {
-                        SortValue::Keyword(words.value(ord).unwrap_or_default().to_vec())
-                    }
-                    (Local::Num(key), _) => SortValue::Key(key),
-                })
-                .collect(),
-        })
-        .collect())
+    let entries = heap.into_sorted(sort)?;
+    let mut hits = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let mut values = Vec::with_capacity(usize::from(entry.len));
+        for ((local, reader), &(key, _)) in entry.locals().iter().zip(&readers).zip(&sort.keys) {
+            values.push(to_sort_value(*local, reader, key, entry.docid)?);
+        }
+        hits.push(SortedHit {
+            docid: entry.docid,
+            score: entry.score,
+            values,
+        });
+    }
+    Ok(hits)
+}
+
+/// The bytes of keyword ordinal `ord`. `None` is corruption, never an empty value that sorts first.
+fn keyword_bytes<W: KeywordReader>(
+    words: &W,
+    ord: u64,
+    key: SortKey,
+    docid: u32,
+) -> Result<&[u8], ReadError> {
+    words.value(ord).ok_or_else(|| past_dictionary(key, docid))
+}
+
+/// `local` as a sort value. A keyword ordinal with no bytes is [`ReadError::Section`], not an empty keyword.
+fn to_sort_value<K, W: KeywordReader>(
+    local: Local,
+    reader: &Reader<K, W>,
+    key: SortKey,
+    docid: u32,
+) -> Result<SortValue, RequestError> {
+    Ok(match (local, reader) {
+        (Local::Missing, _) => SortValue::Missing,
+        (Local::Score(score), Reader::Score) => SortValue::Score(score),
+        (Local::Num(ord), Reader::Keywords(words)) => {
+            SortValue::Keyword(keyword_bytes(words, ord, key, docid)?.to_vec())
+        }
+        (Local::Num(value), Reader::Keys(_)) => SortValue::Key(value),
+        (Local::Score(_) | Local::Num(_), _) => return Err(RequestError::MismatchedSortValue),
+    })
 }
 
 /// How a view's values rank against a cursor's: `Greater` after it.
+///
+/// # Errors
+/// A keyword ordinal with no bytes, or a present value of a type the key did not produce.
 fn compare_to_cursor<K, W: KeywordReader>(
     sort: &Sort,
     values: &[Local],
     cursor: &[SortValue],
     readers: &[Reader<K, W>],
-) -> Ordering {
+    docid: u32,
+) -> Result<Ordering, RequestError> {
     for (((key, _), reader), (a, b)) in sort.keys.iter().zip(readers).zip(values.iter().zip(cursor))
     {
-        let o = by_key(*key, a.present(), b.present(), || match (a, b, reader) {
-            (Local::Score(x), SortValue::Score(y), _) => x.total_cmp(&(y + 0.0)),
+        let o = order_present(*key, a.present(), b.present(), || match (a, b, reader) {
+            (Local::Score(x), SortValue::Score(y), Reader::Score) => Ok(x.total_cmp(&(y + 0.0))),
             (Local::Num(ord), SortValue::Keyword(y), Reader::Keywords(words)) => {
-                words.value(*ord).unwrap_or_default().cmp(y.as_slice())
+                Ok(keyword_bytes(words, *ord, *key, docid)?.cmp(y.as_slice()))
             }
-            (Local::Num(x), SortValue::Key(y), _) => x.cmp(y),
-            _ => Ordering::Equal,
-        });
+            (Local::Num(x), SortValue::Key(y), Reader::Keys(_)) => Ok(x.cmp(y)),
+            _ => Err(RequestError::MismatchedSortValue),
+        })?;
         if o != Ordering::Equal {
-            return o;
+            return Ok(o);
         }
     }
-    Ordering::Equal
+    Ok(Ordering::Equal)
 }
 
-#[derive(Debug, Clone)]
+/// One kept hit. Sort values sit in the entry (`len` of them): a push copies the array and does not allocate.
+/// Column-sort pruning is ROADMAP 7.5.6 and is not this copy.
+#[derive(Debug, Clone, Copy)]
 struct Entry {
-    values: Box<[Local]>,
+    values: [Local; MAX_SORT_KEYS],
+    len: u8,
     docid: u32,
     score: f64,
 }
 
-fn rank(sort: &Sort, a: &Entry, b: &Entry) -> Ordering {
-    sort.compare_local(&a.values, &b.values)
-        .then(a.docid.cmp(&b.docid))
+impl Entry {
+    fn new(values: &[Local], docid: u32, score: f64) -> Self {
+        let mut stored = [Local::Missing; MAX_SORT_KEYS];
+        let n = values.len().min(stored.len());
+        debug_assert_eq!(n, values.len(), "a sort has more keys than MAX_SORT_KEYS");
+        if let (Some(dst), Some(src)) = (stored.get_mut(..n), values.get(..n)) {
+            dst.copy_from_slice(src);
+        }
+        Self {
+            values: stored,
+            len: u8::try_from(n).unwrap_or(u8::MAX),
+            docid,
+            score,
+        }
+    }
+
+    fn locals(&self) -> &[Local] {
+        let n = usize::from(self.len).min(self.values.len());
+        self.values.get(..n).unwrap_or(&[])
+    }
+}
+
+fn rank(sort: &Sort, a: &Entry, b: &Entry) -> Result<Ordering, RequestError> {
+    Ok(sort
+        .compare_local(a.locals(), b.locals())?
+        .then(a.docid.cmp(&b.docid)))
 }
 
 /// At most `k` entries, the one that ranks last on top: a binary heap ordered by a comparator that needs the sort.
@@ -501,34 +571,38 @@ impl Heap {
     }
 
     /// Keeps `entry`, dropping the worst when `k` are kept; the caller checked it ranks before the worst.
-    fn push(&mut self, entry: Entry, rank: impl Fn(&Entry, &Entry) -> Ordering) {
+    fn push(
+        &mut self,
+        entry: &Entry,
+        rank: impl Fn(&Entry, &Entry) -> Result<Ordering, RequestError>,
+    ) -> Result<(), RequestError> {
         if self.k == 0 {
-            return;
+            return Ok(());
         }
         if self.items.len() < self.k {
-            self.items.push(entry);
+            self.items.push(*entry);
             let mut i = self.items.len().saturating_sub(1);
             while i > 0 {
-                let parent = (i - 1) / 2;
-                if !self.later(i, parent, &rank) {
+                let parent = i.saturating_sub(1) / 2;
+                if !self.later(i, parent, &rank)? {
                     break;
                 }
                 self.items.swap(i, parent);
                 i = parent;
             }
-            return;
+            return Ok(());
         }
         if let Some(top) = self.items.first_mut() {
-            *top = entry;
+            *top = *entry;
         }
         let mut i = 0;
         loop {
             let (l, r) = (2 * i + 1, 2 * i + 2);
             let mut largest = i;
-            if l < self.items.len() && self.later(l, largest, &rank) {
+            if l < self.items.len() && self.later(l, largest, &rank)? {
                 largest = l;
             }
-            if r < self.items.len() && self.later(r, largest, &rank) {
+            if r < self.items.len() && self.later(r, largest, &rank)? {
                 largest = r;
             }
             if largest == i {
@@ -537,19 +611,34 @@ impl Heap {
             self.items.swap(i, largest);
             i = largest;
         }
+        Ok(())
     }
 
     /// Whether item `a` ranks after item `b`.
-    fn later(&self, a: usize, b: usize, rank: &impl Fn(&Entry, &Entry) -> Ordering) -> bool {
+    fn later(
+        &self,
+        a: usize,
+        b: usize,
+        rank: &impl Fn(&Entry, &Entry) -> Result<Ordering, RequestError>,
+    ) -> Result<bool, RequestError> {
         match (self.items.get(a), self.items.get(b)) {
-            (Some(a), Some(b)) => rank(a, b) == Ordering::Greater,
-            _ => false,
+            (Some(a), Some(b)) => Ok(rank(a, b)? == Ordering::Greater),
+            _ => Ok(false),
         }
     }
 
-    fn into_sorted(mut self, rank: impl Fn(&Entry, &Entry) -> Ordering) -> Vec<Entry> {
-        self.items.sort_by(|a, b| rank(a, b));
-        self.items
+    /// Best first. Present values at one key must share a type: `sort_by` cannot report an error, and a comparator
+    /// that sometimes fails is not a total order.
+    fn into_sorted(self, sort: &Sort) -> Result<Vec<Entry>, RequestError> {
+        if !locals_agree(&self.items) {
+            return Err(RequestError::MismatchedSortValue);
+        }
+        let mut items = self.items;
+        items.sort_by(|a, b| match rank(sort, a, b) {
+            Ok(ordering) => ordering,
+            Err(_) => a.docid.cmp(&b.docid),
+        });
+        Ok(items)
     }
 }
 
@@ -566,5 +655,192 @@ fn past_dictionary(key: SortKey, docid: u32) -> ReadError {
         reason: SegmentCorruption::Invalid {
             what: "a keyword ord past its dictionary",
         },
+    }
+}
+
+/// Whether every entry has the same number of values, and each key is at most one present type (`Score` or `Num`).
+/// A missing value may sit beside either; two present types at one key must not be sorted as a tie.
+fn locals_agree(entries: &[Entry]) -> bool {
+    let Some(width) = entries.first().map(|entry| entry.locals().len()) else {
+        return true;
+    };
+    if entries.iter().any(|entry| entry.locals().len() != width) {
+        return false;
+    }
+    for key in 0..width {
+        let mut score = false;
+        let mut num = false;
+        for entry in entries {
+            match entry.locals().get(key) {
+                Some(Local::Score(_)) => score = true,
+                Some(Local::Num(_)) => num = true,
+                _ => {}
+            }
+        }
+        if score && num {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+
+    fn keyword_sort() -> (Sort, SortKey) {
+        let schema = SchemaBuilder::new("c")
+            .field("tag", FieldKind::Keyword(KeywordOptions::default()))
+            .build()
+            .unwrap();
+        let tag = schema.field("tag").unwrap().id();
+        let key = SortKey::field(tag, Order::Asc);
+        let sort = Sort::new([key], &schema).unwrap();
+        (sort, key)
+    }
+
+    /// A dictionary that reports ordinals and then has no bytes for them.
+    struct NoBytes;
+
+    impl KeywordReader for NoBytes {
+        fn ords(&mut self, _: u32) -> Result<&[u64], ReadError> {
+            Ok(&[0])
+        }
+
+        fn value(&self, _: u64) -> Option<&[u8]> {
+            None
+        }
+
+        fn len(&self) -> u64 {
+            0
+        }
+    }
+
+    struct Bytes(&'static [u8]);
+
+    impl KeywordReader for Bytes {
+        fn ords(&mut self, _: u32) -> Result<&[u64], ReadError> {
+            Ok(&[0])
+        }
+
+        fn value(&self, ord: u64) -> Option<&[u8]> {
+            (ord == 0).then_some(self.0)
+        }
+
+        fn len(&self) -> u64 {
+            1
+        }
+    }
+
+    #[test]
+    fn compare_orders_missing_and_rejects_a_mismatched_type() {
+        let schema = SchemaBuilder::new("c")
+            .field("n", FieldKind::I64 { stored: true })
+            .build()
+            .unwrap();
+        let n = schema.field("n").unwrap().id();
+        let sort = Sort::new([SortKey::field(n, Order::Asc)], &schema).unwrap();
+        assert_eq!(
+            sort.compare(&[SortValue::Missing], &[SortValue::Key(1)])
+                .unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            sort.compare(&[SortValue::Key(1)], &[SortValue::Key(2)])
+                .unwrap(),
+            Ordering::Less
+        );
+        assert!(matches!(
+            sort.compare(&[SortValue::Key(1)], &[SortValue::Keyword(b"a".to_vec())]),
+            Err(RequestError::MismatchedSortValue)
+        ));
+
+        let scores = Sort::score();
+        assert_eq!(
+            scores
+                .compare(&[SortValue::Score(1.0)], &[SortValue::Score(2.0)])
+                .unwrap(),
+            Ordering::Greater
+        );
+        assert!(matches!(
+            scores.compare(&[SortValue::Score(1.0)], &[SortValue::Key(1)]),
+            Err(RequestError::MismatchedSortValue)
+        ));
+        assert!(matches!(
+            scores.compare_local(&[Local::Score(1.0)], &[Local::Num(1)]),
+            Err(RequestError::MismatchedSortValue)
+        ));
+        assert_eq!(
+            scores
+                .compare_local(&[Local::Missing], &[Local::Score(1.0)])
+                .unwrap(),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn a_keyword_ord_with_no_bytes_is_an_error() {
+        let (sort, key) = keyword_sort();
+        let err = keyword_bytes(&NoBytes, 0, key, 4).unwrap_err();
+        assert!(matches!(
+            err,
+            ReadError::Section {
+                reason: SegmentCorruption::Invalid { what },
+                ..
+            } if what == "a keyword ord past its dictionary"
+        ));
+
+        let readers: [Reader<(), NoBytes>; 1] = [Reader::Keywords(NoBytes)];
+        let err = compare_to_cursor(
+            &sort,
+            &[Local::Num(0)],
+            &[SortValue::Keyword(b"a".to_vec())],
+            &readers,
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RequestError::Read(ReadError::Section { .. })));
+
+        let err = to_sort_value(
+            Local::Num(0),
+            &Reader::<(), NoBytes>::Keywords(NoBytes),
+            key,
+            4,
+        )
+        .unwrap_err();
+        assert!(matches!(err, RequestError::Read(ReadError::Section { .. })));
+
+        let readers: [Reader<(), Bytes>; 1] = [Reader::Keywords(Bytes(b"m"))];
+        assert_eq!(
+            compare_to_cursor(
+                &sort,
+                &[Local::Num(0)],
+                &[SortValue::Keyword(b"a".to_vec())],
+                &readers,
+                4,
+            )
+            .unwrap(),
+            Ordering::Greater
+        );
+        assert_eq!(
+            to_sort_value(
+                Local::Num(0),
+                &Reader::<(), Bytes>::Keywords(Bytes(b"m")),
+                key,
+                4
+            )
+            .unwrap(),
+            SortValue::Keyword(b"m".to_vec())
+        );
+    }
+
+    #[test]
+    fn compare_to_cursor_rejects_a_value_of_the_wrong_type() {
+        let (sort, _) = keyword_sort();
+        let readers: [Reader<(), Bytes>; 1] = [Reader::Keywords(Bytes(b"m"))];
+        let err = compare_to_cursor(&sort, &[Local::Num(0)], &[SortValue::Key(1)], &readers, 0)
+            .unwrap_err();
+        assert!(matches!(err, RequestError::MismatchedSortValue));
     }
 }
