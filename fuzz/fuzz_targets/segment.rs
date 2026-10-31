@@ -513,6 +513,11 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
             for d in 0..=n {
                 let _ = (col.has_value(d), col.key(d), col.get(d), cursor.get(n - d));
             }
+            // The owning reader a sort gets (ROADMAP 7.5.1), alternating ends so it jumps between blocks.
+            let mut keys = col.into_keys();
+            for d in 0..=n {
+                let _ = keys.key(if d % 2 == 0 { d } else { n - d });
+            }
         }
         if let Ok(col) = seg.bool_column(fid) {
             let _ = col.trues().len();
@@ -531,6 +536,13 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
                 let _ = col.ords(d).map(|o| o.len());
                 let _ = cursor.ords(n - d).map(<[u64]>::len);
                 let _ = col.values(d).map(|v| v.len());
+            }
+            // The owning reader a sort or facet gets (ROADMAP 7.5.1, 7.5.3).
+            let mut ords = col.into_ords();
+            for d in 0..=n {
+                let _ = ords
+                    .ords(if d % 2 == 0 { d } else { n - d })
+                    .map(<[u64]>::len);
             }
         }
     }

@@ -184,6 +184,16 @@ impl Document {
         &self.extra
     }
 
+    /// Keeps the fields `field` accepts and the extra fields `extra` accepts, by name; drops the others.
+    pub fn retain(
+        &mut self,
+        mut field: impl FnMut(FieldId) -> bool,
+        mut extra: impl FnMut(&str) -> bool,
+    ) {
+        self.fields.retain(|id, _| field(*id));
+        self.extra.retain(|name, _| extra(name));
+    }
+
     /// Checks the document against `schema` (SPEC §6.4.1).
     ///
     /// # Errors

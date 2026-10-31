@@ -219,10 +219,10 @@ for {
 }
 ```
 
-`Hit.Cursor` is the `search_after` value from SPEC §7.4 (`score`, `segment_gen`, `docid`). The loop
-above reissues the query. A commit that lands between pages can change the next page. A cursor a merge
-has invalidated returns the core's error. `Offset` exists for shallow pages and is the wrong tool for
-a deep walk, which is why the SPEC prefers the cursor.
+`Hit.Cursor` is the `search_after` value from SPEC §7.4 (the hit's sort values, its location, and the
+snapshot and memtable view that produced it). The loop above reissues the query. A cursor from another
+snapshot or memtable view, including one a merge has invalidated, returns the core's error. `Offset`
+exists for shallow pages and is the wrong tool for a deep walk, which is why the SPEC prefers the cursor.
 
 `Search` does not return a total hit count. The engine collects top-k (SPEC §7.3). A count API waits
 until the Rust API has one.

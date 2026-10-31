@@ -474,10 +474,12 @@ Deps: M5 (M6 for end-to-end).
 - [ ] 7.4.13 Faster filters: a `range` scans every key of the column (~12 ns per document on `search_top10_filtered`); skip FOR blocks whose keys cannot match by their minimum and bit width (every key is at most `min + 2^width − 1`, no format change), and for a selective `must` check the column per candidate instead of building the whole bitmap (SPEC §7.3's "column predicates"), picked by cost (found in 7.4.5)
 
 ## 7.5 Sorting, pagination, facets
-- [ ] 7.5.1 Sort by column (asc/desc, missing handling) with top-k
-- [ ] 7.5.2 `offset/limit` and `search_after` cursor (SPEC §7.4)
-- [ ] 7.5.3 Facet counting over keyword columns with bitmap input; top-N merge across segments
-- [ ] 7.5.4 Result assembly: fetch stored fields, projection, blob_ref in hit
+- [x] 7.5.1 Sort by column (asc/desc, missing handling) with top-k
+- [x] 7.5.2 `offset/limit` and `search_after` cursor (SPEC §7.4)
+- [x] 7.5.3 Facet counting over keyword columns with bitmap input; top-N merge across segments
+- [x] 7.5.4 Result assembly: fetch stored fields, projection, blob_ref in hit
+- [ ] 7.5.5 Keep column dictionaries across requests: a segment's `keyword_column` decodes its whole dictionary on every sort or facet request (`SearchView::keywords`), and the memtable copies its keyword values and column keys per call; cache them per segment (beside the block cache) and per memtable view (as its norms), and bench `search_request/sort_price` and `score_facet` before and after (found in 7.5)
+- [ ] 7.5.6 Prune column sorts: `search_request/sort_price` visits every match (+21 % over a pruned score top-10 on 50 000 documents); skip FOR blocks whose keys cannot beat the worst kept hit (a block's minimum and bit width bound its keys, as 7.4.13) and stop a view early when its index sort matches (SPEC §5.4 `index_sort`, post-v1) (found in 7.5)
 
 ## 7.6 Parallel execution
 - [ ] 7.6.1 Per-segment search tasks on a thread pool; deterministic merge. A threshold shared across views (`CollectionViews::top_k`, 7.4.6) skips "at most t" only from views that win the tie (earlier ones); one from a later view must skip strictly below t (found in the 7.4.6 review)
@@ -506,6 +508,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
 - [ ] 8.1.7 Source span and original text of each compiled clause in `Compiled`, for `original`/`effective`/`corrected` and the L3/L4 length rules (found in the 7.1 review)
 - [ ] 8.1.8 Relaxed queries within `QueryLimits`: cut expansions to the remaining budget, report it in `applied` (SPEC §7.1.3, found in the 7.1 review)
+- [ ] 8.1.9 Facets under relaxation: specify in SPEC §7.5 which matches a facet counts when the cascade runs (§7.6: the strict query, the level returned, or the union `fill` collects) and implement it with M8 (found in the 7.5 review)
 
 ## 8.2 Levels
 - [ ] 8.2.1 L1 synonyms: expand terms with synonym groups
