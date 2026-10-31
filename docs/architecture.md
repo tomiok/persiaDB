@@ -69,8 +69,10 @@ flowchart TD
 ## Life of a query (SPEC §7)
 
 1. Query text is analyzed per field and compiled to a query AST.
-2. Each segment (and the memtable) is searched in parallel with block-max WAND over BM25F scores; filters are
-   bitmaps; tombstones are applied last.
+2. Each segment (and the memtable) is searched in parallel with block-max WAND over BM25F scores. Filters are
+   bitmaps intersected before scoring. A segment's tombstones are excluded by its postings iterator before a
+   document is scored or offered to the top-k collector, so a deleted document cannot raise the threshold. Block
+   bounds may still cover deleted documents.
 3. Per-segment top-k results are merged.
 4. If there are fewer hits than `min_results`, the **relaxation cascade** runs (synonyms → drop terms → prefix
    → fuzzy → fallback). The response says which level matched and what changed (SPEC §7.6).

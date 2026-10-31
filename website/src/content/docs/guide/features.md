@@ -15,7 +15,8 @@ head:
 ---
 
 The query compiler, the filter DSL, collection statistics, and BM25F scoring exist as library code.
-A search call, matching, facets, relaxation, blobs, and the server do not.
+Matching and score top-k over one segment or memtable view do too (ROADMAP 7.4.1–7.4.4).
+A search call, filter evaluation, facets, relaxation, blobs, and the server do not.
 Schema, analyzers, the container commit, segment bytes, and part of the write path also exist as library code.
 %%NO_PUBLIC_API%%
 
@@ -24,7 +25,8 @@ Schema, analyzers, the container commit, segment bytes, and part of the write pa
 | Open a file and search | Planned (M10). `persia::Db` does not exist. | SPEC §8, §10.2 |
 | Query AST, user-text compiler, filter DSL, limits | Done as library code (ROADMAP 7.1). Not a search call. | SPEC §7.1 |
 | Collection statistics and BM25F | Done as library code (ROADMAP 7.2, 7.3). A score is not a hit list. | SPEC §7.2 |
-| Matching, top-k, facets, sort | Not started (ROADMAP 7.4, 7.5). | SPEC §7.3–§7.5 |
+| Matching and score top-k over one view | Done as library code (ROADMAP 7.4.1–7.4.4). Not a search call. | SPEC §7.3 |
+| Filters, column sort, paging, facets | Not started (ROADMAP 7.4.5, 7.5). | SPEC §7.3–§7.5 |
 | Zero-results relaxation | Not started (M8). On by default in the design. | SPEC §7.6 |
 | Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
 | Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). The query compiler runs them when it compiles user text. They do not run a search. | SPEC §6.3 |
@@ -50,16 +52,19 @@ Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a col
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
 within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
-for one term (ROADMAP 7.3.4). A search that returns ranked hits does not: matching and top-k are
-ROADMAP 7.4 and have not been started. The longer account of typos, relaxation, and this scorer is
+for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
+(ROADMAP 7.4.1–7.4.4). A search call is not. The longer account of typos, relaxation, and this scorer is
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 
-Execution, per segment and over the memtable, collects the top k with block-max WAND by default
-(`MaxScore` is the other strategy). Pruning never changes the hits: pruned and exhaustive top k are
-the same, scores bit for bit. Filters are bitmaps and tombstones are applied last (SPEC §7.3).
-Segments are searched in parallel. Sort is by score or by a column. Deep paging prefers a
-`search_after` cursor over a large offset (SPEC §7.4). Facets count a keyword column and merge across segments (SPEC §7.5).
-`explain: true` returns a per-term score breakdown (SPEC §7.7). Highlighting is post-v1.
+Over one view — a segment, or the memtable — `SearchPlan` collects the top k by score, then docid,
+with block-max WAND by default (`MaxScore` is the other strategy) (ROADMAP 7.4.1–7.4.4, SPEC §7.3).
+Pruning does not change the hits: pruned and exhaustive top k are the same documents, scores bit for bit.
+A segment view drops tombstoned documents in the postings iterator, before a document is scored or
+offered to the collector, so a deleted document cannot raise the top-k threshold. Block bounds may
+still cover deleted documents; that only prunes less (SPEC §7.3). Not started: filter bitmaps
+(ROADMAP 7.4.5), the memtable hiding every older segment copy of an id (ROADMAP 7.4.6), searching
+segments in parallel (ROADMAP 7.6.1), sort by a column and a `search_after` cursor (ROADMAP 7.5.1,
+7.5.2), facets (ROADMAP 7.5.3), and `explain: true` (ROADMAP 7.7.1). Highlighting is post-v1.
 
 ## Zero-results relaxation
 

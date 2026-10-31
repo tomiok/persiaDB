@@ -1269,7 +1269,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
   strategy, and where a clause has no block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list
   bound.
-- Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates; tombstones applied last.
+- Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
+  scored. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
+  the top-k collector, so a deleted document cannot enter the heap or raise the competitive threshold. Block upper
+  bounds may still cover deleted documents; that only loosens pruning.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns).
 

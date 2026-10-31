@@ -75,6 +75,12 @@ const GROUPS = {
 		done: 'BM25F scoring with static rank and score bounds',
 		partial: 'BM25F scoring (not every leaf is done)',
 	},
+	matching: {
+		leaves: ['7.4.1', '7.4.2', '7.4.3', '7.4.4.1', '7.4.4.2', '7.4.4.3'],
+		code: (ctx) => ctx.modules.includes('search'),
+		done: 'matching and score top-k over one view',
+		partial: 'part of matching (not every leaf is done)',
+	},
 };
 
 /** Section 6.6. Not part of the write-path claim until every leaf is checked. */
@@ -351,7 +357,8 @@ export function buildStatus(ctx) {
 	const queryModel = groupPhrase(ctx, 'queryModel');
 	const stats = groupPhrase(ctx, 'stats');
 	const bm25 = groupPhrase(ctx, 'bm25');
-	const queryPieces = [queryModel, stats, bm25].filter((item) => item !== null);
+	const matching = groupPhrase(ctx, 'matching');
+	const queryPieces = [queryModel, stats, bm25, matching].filter((item) => item !== null);
 	let querySentence = '';
 	if (m7.state !== 'done') {
 		if (queryPieces.length > 0) {
@@ -460,7 +467,7 @@ export function buildStatus(ctx) {
 		m7.state === 'done' || ctx.hasSearch
 			? 'A search call is in the tree.'
 			: bm25 && queryModel
-				? 'A query compiler and a BM25F scorer are in the tree. Nothing runs a search.'
+				? `A query compiler and a BM25F scorer are in the tree.${matching ? ' Score top-k over one view is library code.' : ''} Nothing runs a search.`
 				: ctx.hasQuery || bm25
 					? 'Query code is in the tree. Nothing runs a search.'
 					: 'Nothing runs a search.';
@@ -479,10 +486,13 @@ export function buildStatus(ctx) {
 				: `The first release a caller is supposed to use is v0.1 (M10). That milestone is blocked on ${englishList(blocking.map((ms) => `${ms.id} (${ms.state === 'in progress' ? 'in progress' : 'not started'})`))}.`,
 	);
 
+	const segmentSearch = matching
+		? 'A segment view can be matched. There is no search call.'
+		: 'Nothing searches the segment.';
 	const m5Cell = seal(
 		m5.state === 'done'
-			? `Done (${m5.id}, ${m5.done}/${m5.leaves}). Nothing searches the segment.`
-			: `${countState(m5)}. Nothing searches the segment.`,
+			? `Done (${m5.id}, ${m5.done}/${m5.leaves}). ${segmentSearch}`
+			: `${countState(m5)}. ${segmentSearch}`,
 	);
 
 	/** @type {string[]} */
@@ -502,9 +512,11 @@ export function buildStatus(ctx) {
 	const scoring =
 		m7.state === 'done'
 			? 'Scoring and query execution are done.'
-			: bm25
-				? 'BM25F scoring is in the tree. Query execution does not return hits.'
-				: 'Scoring and query execution do not return hits.';
+			: bm25 && matching
+				? 'BM25F scoring is in the tree. Score top-k over one view returns hits. There is no search call.'
+				: bm25
+					? 'BM25F scoring is in the tree. Query execution does not return hits.'
+					: 'Scoring and query execution do not return hits.';
 	const pillarEngine = seal(
 		`${have.length > 0 ? `${englishList(have).charAt(0).toUpperCase()}${englishList(have).slice(1)} exist. ` : ''}${pillarWriteSentence} ${scoring}`,
 	);

@@ -27,7 +27,7 @@ head:
             "name": "Does Persia DB do typo-tolerant search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. Nothing runs a search, and the relaxation cascade has not been started (milestone M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, but no code lists the terms within that distance or returns hits."
+              "text": "No. The relaxation cascade has not been started (milestone M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, but no code lists the terms within that distance. Exact term, phrase, and boolean top-k over one view is library code. There is no search call."
             }
           },
           {
@@ -163,7 +163,7 @@ let filter = Filter::from_json(
 )?;
 ```
 
-The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required. Fuzzy matching is L4 of the cascade, which is not written. Executing any of these clauses — term iterators, phrases, boolean combination, top-k — is ROADMAP 7.4 and has not been started.
+The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required. Fuzzy matching is L4 of the cascade, which is not written. `SearchPlan` rejects `prefix`, `fuzzy`, and `bool` filters. Term iterators, phrases, boolean combination, and top-k over one segment or memtable view are library code (ROADMAP 7.4.1–7.4.4). There is no search call.
 
 ## BM25F scoring and filters
 
@@ -193,7 +193,8 @@ What scoring does not do: walk postings, apply tombstones, collect a top-k, face
 | Collection statistics | Library code (ROADMAP 7.2). |
 | BM25F scorer, static rank, score upper bounds | Library code (ROADMAP 7.3), checked against the reference scorer. |
 | `RelaxationConfig` and `SynonymMap` | Stored and looked up. Not called from a search. |
-| Matching, top-k, filter evaluation, facets, sort, explain | Not started (ROADMAP 7.4–7.7). |
+| Term, phrase, and boolean matching; score top-k over one view | Library code (ROADMAP 7.4.1–7.4.4). Not a search call. |
+| Filter evaluation, facets, sort, explain | Not started (ROADMAP 7.4.5, 7.5, 7.7). |
 | Relaxation cascade | Not started (M8). |
 | `persia::Db::open` and `search` | Not in the crate (M10). |
 
@@ -219,7 +220,7 @@ let relaxation = &results.relaxation;
 
 ### Does Persia DB do typo-tolerant search today?
 
-No. Nothing runs a search, and the relaxation cascade has not been started (M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, but no code lists the terms within that distance or returns hits.
+No. The relaxation cascade has not been started (M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, but no code lists the terms within that distance. Exact term, phrase, and boolean top-k over one view is library code. There is no search call.
 
 ### What is query relaxation?
 
