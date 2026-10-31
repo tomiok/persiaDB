@@ -128,7 +128,8 @@ pub enum SearchError {
     /// phrase on a field without positions or with decreasing positions, a boost or constant score out of range.
     #[error(transparent)]
     Query(#[from] QueryError),
-    /// The terms a `prefix` or `fuzzy` expands over cannot be read: a corruption of a view.
+    /// The terms a `prefix` or `fuzzy` expands over, or their collection `df`s, cannot be read: a corruption of a
+    /// view.
     #[error(transparent)]
     Read(#[from] ReadError),
 }

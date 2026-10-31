@@ -32,6 +32,7 @@ pub use columns::{
 pub use error::{ReadError, SegmentCorruption, UnsupportedSegment};
 pub use footer::FieldStats;
 pub use postings::{BlockMax, Postings, Tombstones};
+pub(crate) use terms::prefix_successor;
 pub use terms::{TermIndex, TermInfo, TermStream};
 
 use super::MAX_TERM_LEN;

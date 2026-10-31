@@ -28,6 +28,7 @@ pub(crate) mod builder;
 mod kind;
 pub(crate) mod norms;
 mod read;
+pub(crate) use read::prefix_successor;
 mod write;
 
 pub use builder::{MAX_DOCS, MAX_TERM_LEN, POSITION_GAP, SegmentBuilder};

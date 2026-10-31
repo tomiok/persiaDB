@@ -60,13 +60,22 @@ impl<M: Matcher> BlockMaxWand<M> {
             self.started = true;
             moved.extend(0..self.clauses.len());
         }
+        // Each insertion shifts the rest: when most clauses move (the first step, a long skip), one sort is cheaper.
+        let resort = moved.len() > 8 && moved.len() * 4 > self.clauses.len();
         for &i in &moved {
             if let Some(clause) = self.clauses.get_mut(i)
                 && let Some(doc) = clause.advance(target)?
             {
-                let at = self.order.partition_point(|&e| e < (doc, i));
-                self.order.insert(at, (doc, i));
+                if resort {
+                    self.order.push((doc, i));
+                } else {
+                    let at = self.order.partition_point(|&e| e < (doc, i));
+                    self.order.insert(at, (doc, i));
+                }
             }
+        }
+        if resort {
+            self.order.sort_unstable();
         }
         self.moved = moved;
         Ok(())

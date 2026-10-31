@@ -237,19 +237,6 @@ impl Automaton for Expansion {
     }
 }
 
-/// The first byte string after every one that starts with `prefix`; `None` when there is none (`prefix` all
-/// `0xFF`).
-pub(super) fn prefix_end(prefix: &[u8]) -> Option<Vec<u8>> {
-    let mut end = prefix.to_vec();
-    while let Some(last) = end.pop() {
-        if let Some(next) = last.checked_add(1) {
-            end.push(next);
-            return Some(end);
-        }
-    }
-    None
-}
-
 /// The terms of `field` in range that `expansion` takes from `terms`, at most `cap`: the highest collection `df`
 /// (`stats`) first, ties by bytes; returned in byte order with their `df`s (SPEC §7.1).
 ///
@@ -292,7 +279,7 @@ pub(super) fn expand(
 mod tests {
     use fst::Automaton;
 
-    use super::{Expansion, prefix_end};
+    use super::Expansion;
 
     fn accepts(a: &Expansion, term: &[u8]) -> bool {
         let mut s = a.start();
@@ -393,7 +380,25 @@ mod tests {
     /// The automaton agrees with the table on every pair over a small alphabet, invalid UTF-8 included.
     #[test]
     fn fuzzy_matches_the_table() {
-        let alphabet: [&[u8]; 6] = [b"a", b"b", "é".as_bytes(), &[0xC3], &[0xFF], &[0x80]];
+        // Valid 1- to 4-byte characters; a lone lead, a stray continuation, a byte never in UTF-8; overlong 3- and
+        // 4-byte forms, a surrogate, a value past U+10FFFF, and sequences cut short.
+        let alphabet: [&[u8]; 15] = [
+            b"a",
+            b"b",
+            "é".as_bytes(),
+            "€".as_bytes(),
+            "😀".as_bytes(),
+            &[0xC3],
+            &[0xFF],
+            &[0x80],
+            &[0xE0, 0x80, 0x80],
+            &[0xE0, 0xA0],
+            &[0xED, 0xA0, 0x80],
+            &[0xF0, 0x80, 0x80, 0x80],
+            &[0xF4, 0x90, 0x80, 0x80],
+            &[0xE2, 0x82],
+            &[0xF0, 0x9F, 0x98],
+        ];
         let mut x = 0x9E37_79B9_7F4A_7C15_u64;
         let mut next = move |n: usize| {
             x ^= x << 13;
@@ -418,13 +423,5 @@ mod tests {
                 assert_eq!(accepts(&a, &term), want, "{query:?} ~{distance} {term:?}");
             }
         }
-    }
-
-    #[test]
-    fn prefix_ends() {
-        assert_eq!(prefix_end(b"ab"), Some(b"ac".to_vec()));
-        assert_eq!(prefix_end(&[b'a', 0xFF, 0xFF]), Some(b"b".to_vec()));
-        assert_eq!(prefix_end(&[0xFF]), None);
-        assert_eq!(prefix_end(b""), None);
     }
 }

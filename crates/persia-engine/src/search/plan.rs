@@ -8,7 +8,7 @@ use crate::query::{
 };
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::score::{FieldParams, ScoreError, TermScorer};
-use crate::segment::ReadError;
+use crate::segment::{ReadError, prefix_successor};
 use crate::stats::StatisticsProvider;
 use crate::view::SearchView;
 
@@ -16,7 +16,7 @@ use super::block_max_wand::BlockMaxWand;
 use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
-use super::expand::{Expansion, TermSource, expand, prefix_end};
+use super::expand::{Expansion, TermSource, expand};
 use super::filter::{FilterDocs, Filtered, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
@@ -284,7 +284,7 @@ fn plan_prefix<S: StatisticsProvider + ?Sized>(
         .into());
     }
     let start = q.prefix.as_bytes();
-    let end = prefix_end(start);
+    let end = prefix_successor(start);
     let upper = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
     let range = (Bound::Included(start), upper);
     plan_expansion(
