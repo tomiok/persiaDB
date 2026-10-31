@@ -78,7 +78,9 @@ impl SearchPlan {
 
     /// As [`Self::new`], and expands each `prefix` and `fuzzy` over the terms of `terms`, the views the plan will
     /// run on (SPEC §7.1): at most `max_expansions` terms each, the highest collection `df` (`stats`) first, then
-    /// by bytes. Every view then scores the same terms.
+    /// by bytes. Every view then scores the same terms, all with the largest of those `df`s. A `fuzzy` term is
+    /// also multiplied by `(distance + 1 − d) / (distance + 1)`, `d` its edit distance. The prefix and the fuzzy
+    /// term are raw bytes: the field analyzer is not run (a prefix `Run` does not match indexed `running`).
     ///
     /// ```
     /// use std::sync::Arc;
@@ -293,7 +295,7 @@ fn plan_prefix<S: StatisticsProvider + ?Sized>(
         range,
         &Expansion::all(),
         q.max_expansions,
-        "prefix",
+        ExpansionScore::Prefix,
         p,
     )
 }
@@ -318,7 +320,9 @@ fn plan_fuzzy<S: StatisticsProvider + ?Sized>(
         range,
         &expansion,
         q.max_expansions,
-        "fuzzy",
+        ExpansionScore::Fuzzy {
+            distance: q.distance,
+        },
         p,
     )
 }
@@ -335,29 +339,77 @@ fn searchable<'s>(
     }
 }
 
-/// A `prefix` or `fuzzy` as SPEC §7.1 plans it: the `should` `term`s of its kept expansions, in byte order; no
-/// document when none is kept.
+/// How a `prefix` or `fuzzy` scores the terms it kept (SPEC §7.1).
+#[derive(Clone, Copy)]
+enum ExpansionScore {
+    /// One shared `idf`; each term weighs 1.
+    Prefix,
+    /// One shared `idf`, then `(distance + 1 − d) / (distance + 1)` for a term at edit distance `d`.
+    Fuzzy { distance: u8 },
+}
+
+impl ExpansionScore {
+    fn what(self) -> &'static str {
+        match self {
+            Self::Prefix => "prefix",
+            Self::Fuzzy { .. } => "fuzzy",
+        }
+    }
+
+    /// The multiplier of a kept `term` (SPEC §7.1). A prefix weighs 1. A fuzzy term farther than the query allows
+    /// is not produced by the expansion; a missing distance weighs as the farthest accepted edit.
+    fn weight(self, expansion: &Expansion, term: &[u8]) -> f64 {
+        let Self::Fuzzy { distance } = self else {
+            return 1.0;
+        };
+        let edits = expansion.distance(term).unwrap_or(distance).min(distance);
+        edit_weight(distance, edits)
+    }
+}
+
+/// `(max_distance + 1 − edits) / (max_distance + 1)` (SPEC §7.1). `edits` is at most `max_distance`, so the weight
+/// is 1 for an exact term and at least `1 / (max_distance + 1)` for a kept edit.
+fn edit_weight(max_distance: u8, edits: u8) -> f64 {
+    let span = f64::from(max_distance) + 1.0;
+    (span - f64::from(edits)) / span
+}
+
+/// A `prefix` or `fuzzy` as SPEC §7.1 plans it: the kept terms, in byte order, each a `term` with the largest of
+/// their `df`s, a `fuzzy` term multiplied by its edit-distance weight. No document when none is kept. The bytes
+/// are not analyzed.
 fn plan_expansion<S: StatisticsProvider + ?Sized>(
     schema: &CollectionSchema,
     field: &Field,
     range: (Bound<&[u8]>, Bound<&[u8]>),
     expansion: &Expansion,
     max_expansions: u32,
-    what: &'static str,
+    score: ExpansionScore,
     p: &Planner<'_, S>,
 ) -> Result<Node, SearchError> {
     let Some(terms) = p.terms else {
-        return Err(SearchError::NeedsTerms { what });
+        return Err(SearchError::NeedsTerms { what: score.what() });
     };
     let cap = usize::try_from(max_expansions).unwrap_or(usize::MAX);
     let kept = expand(field.id(), range, expansion, cap, terms, p.stats)?;
+    // The most common kept term. Every expansion then shares its `idf`, so a rarer one is not boosted by its own.
+    let Some(blended) = kept.iter().map(|(_, df)| *df).max() else {
+        return Ok(Node::Nothing);
+    };
     let params = FieldParams::of(schema, field.id(), None)?;
     let text = matches!(field.kind(), FieldKind::Text(_));
     let mut words = Vec::with_capacity(kept.len());
-    for (term, df) in kept {
-        words.push(Node::Word {
-            scorer: TermScorer::new(&[params], df, p.stats)?,
-            terms: vec![(field.id(), term, text)],
+    for (term, _) in kept {
+        let word = Node::Word {
+            scorer: TermScorer::new(&[params], blended, p.stats)?,
+            terms: vec![(field.id(), term.clone(), text)],
+        };
+        let weight = score.weight(expansion, &term);
+        // 1.0 is exact when the weight formula gives it (an exact fuzzy term, every prefix). Multiplying by it
+        // would not be the same bits.
+        words.push(if weight.to_bits() == 1.0_f64.to_bits() {
+            word
+        } else {
+            Node::Scaled(Box::new(word), Scale::Boost(weight))
         });
     }
     Ok(match words.len() {

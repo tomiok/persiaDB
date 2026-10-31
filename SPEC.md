@@ -1148,16 +1148,29 @@ engine builds them, §7.6); `boost` and field weights are in `0 < w ≤ 1000` (a
 finite and ≥ 0.
 
 `prefix` and `fuzzy` expand once, when the query is planned, over the terms of their field in every view the plan
-runs on (each segment and the memtable view), so every view scores the same terms (ROADMAP 7.4.12). A `prefix` takes
-the terms that start with its bytes. A `fuzzy` takes the terms within its `distance` of its term, the term itself
-included: the optimal string alignment distance over Unicode scalar values (an insertion, a deletion, a substitution,
-or a swap of two adjacent characters each count 1, and no character is edited twice; Lucene's default). A byte of a
+runs on (each segment and the memtable view), so every view scores the same terms (ROADMAP 7.4.12). The prefix and
+the fuzzy term are raw bytes, compared to the terms the index stores. The field's analyzer is not run on them. A
+prefix `Run` does not match a `text` field whose analyzer stored `running`. A fuzzy term is not normalized either:
+`RUNNING` is seven substitutions from `running`, so distance 2 does not match it, while `Running` is one substitution
+and distance 1 does. M8 typo tolerance (ROADMAP 8.2.3, 8.2.4) must run the field's query-time analyzer (§6.3.4) and
+only then build the `prefix` or `fuzzy`, so the bytes it expands are the form the index holds. Planning does not.
+
+A `prefix` takes the terms that start with its bytes. A `fuzzy` takes the terms within its `distance` of its term,
+the term itself included: the optimal string alignment distance over Unicode scalar values (an insertion, a deletion,
+a substitution, or a swap of two adjacent characters each count 1, and no character is edited twice). A byte of a
 term that is not part of valid UTF-8 counts as a character no query character equals. When more than
 `max_expansions` terms qualify, those with the highest collection `df` (§7.2: the `df` scoring uses, not a view's
-own) are kept, ties broken by byte order. The query then matches and scores as a `bool` of `should` `term` queries
-over the terms kept, in byte order, each with its own `idf` (so a document holding several scores their sum, as
-Lucene's scoring rewrite); with no term kept it matches nothing. A plan without the views' terms
-(`SearchPlan::new`) rejects both.
+own) are kept, ties broken by byte order. With no term kept the query matches nothing. A plan without the views'
+terms (`SearchPlan::new`) rejects both.
+
+The terms kept are one query. Each is scored as a `term` (§7.2) with the same document frequency: the largest `df`
+among them, a lower bound on the documents holding any kept term and the `df` of the most common one. `idf` is §7.2's
+of that `df`. A term's own `idf` is not used: at the same frequency and field length it would rank a rare
+misspelling, or a rare prefix completion, above the common term. Frequency and field length still count. A `fuzzy` score is then multiplied by
+`(distance + 1 − d) / (distance + 1)`, where `d` is that term's optimal string alignment distance from the query term
+and `distance` is the query's. An exact term weighs 1, and each further edit weighs strictly less, down to
+`1 / (distance + 1)`. A `prefix` term is not multiplied. A document matches when it holds any kept term. Its score is
+the sum of those scores, added in byte order of the terms, as a `bool` of `should` clauses (§7.2).
 
 #### 7.1.1 User text
 `q` is compiled to the AST and **never fails**: syntax that does not parse is read as plain text. Clauses are separated
@@ -1247,7 +1260,8 @@ term scores as a `term` query (unless an analyzer stacks a token on itself, at o
 and a phrase matches what holds it at least once.
 A `bool` scores the sum of its `must` clauses plus the sum of its matching `should` clauses, each added in query order
 (so a document's score does not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
-score, and `match_all` scores 0.
+score, and `match_all` scores 0. A `prefix` or `fuzzy` is that sum over the terms it kept, each with the shared `idf`
+and, for `fuzzy`, the edit-distance weight of §7.1.
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them

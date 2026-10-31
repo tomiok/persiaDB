@@ -1,5 +1,9 @@
 //! `prefix` and `fuzzy` expansion over the collection's terms, once per plan (SPEC §7.1, ROADMAP 7.4.12): every
 //! view's terms are walked, and the `max_expansions` with the highest collection `df` are kept, ties by bytes.
+//!
+//! The prefix and the fuzzy term are raw bytes. This walk does not run the field analyzer: a prefix `Run` does not
+//! meet a term the analyzer stored as `running`. Scoring of the terms kept (one shared `idf`, and a fuzzy
+//! edit-distance weight) is in `plan`. M8 typo tolerance must analyze before it builds these queries.
 
 use core::cmp::Reverse;
 use core::ops::Bound;
@@ -71,6 +75,20 @@ impl Expansion {
                 distance,
             })),
         }
+    }
+
+    /// The optimal string alignment distance of `term` when this is a fuzzy expansion that accepts it (SPEC §7.1).
+    /// `None` for a prefix, or for a term farther than the distance. The query bytes are not analyzed.
+    pub(super) fn distance(&self, term: &[u8]) -> Option<u8> {
+        let fuzzy = self.fuzzy.as_ref()?;
+        let mut state = fuzzy.start();
+        for &byte in term {
+            state = fuzzy.accept(&state, byte);
+        }
+        let mut end = state;
+        fuzzy.flush(&mut end);
+        let d = end.row.last().copied()?;
+        (d <= fuzzy.distance).then_some(d)
     }
 }
 
@@ -375,6 +393,15 @@ mod tests {
         assert!(!accepts(&Expansion::fuzzy("ca", 2), b"abc"));
         assert!(accepts(&Expansion::fuzzy("ca", 2), b"ac"));
         assert!(accepts(&Expansion::all(), b"anything"));
+        // The distance the score multiplies by, not only accept or reject.
+        let apple = Expansion::fuzzy("apple", 1);
+        assert_eq!(apple.distance(b"apple"), Some(0));
+        assert_eq!(apple.distance(b"appel"), Some(1)); // a swap
+        assert_eq!(apple.distance(b"apply"), Some(1));
+        assert_eq!(apple.distance(b"zzzz"), None);
+        assert_eq!(Expansion::all().distance(b"apple"), None);
+        assert_eq!(Expansion::fuzzy("ca", 2).distance(b"abc"), None);
+        assert_eq!(Expansion::fuzzy("ca", 2).distance(b"ac"), Some(1));
     }
 
     /// The automaton agrees with the table on every pair over a small alphabet, invalid UTF-8 included.

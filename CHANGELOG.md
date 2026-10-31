@@ -20,9 +20,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 - `persia-engine`: `prefix` and `fuzzy` queries run (ROADMAP 7.4.12, SPEC §7.1). `SearchPlan::with_terms` expands
   each over the terms of the views it will run on (`search::TermSource`: a view, or `db::CollectionViews`), once, so
-  every view scores the same terms. A `fuzzy` takes the terms within its distance (optimal string alignment over
-  characters: a swap of two adjacent characters is one edit). At most `max_expansions` terms are kept, the highest
-  collection `df` first, then byte order; the query scores as a `bool` of `should` `term`s over them.
+  every view scores the same terms. The prefix and the fuzzy term are raw bytes: the field analyzer is not run
+  (`Run` does not match indexed `running`). A `fuzzy` takes the terms within its distance (optimal string alignment
+  over characters: a swap of two adjacent characters is one edit). At most `max_expansions` terms are kept, the
+  highest collection `df` first, then byte order. Every kept term scores with that largest `df` (one shared `idf`);
+  a `fuzzy` term is then multiplied by `(distance + 1 − d) / (distance + 1)`. The scores add in byte order.
   `SearchPlan::new` still cannot expand and returns `SearchError::NeedsTerms` (was `SearchError::Unsupported`).
   An empty prefix or a distance other than 1 or 2 is `SearchError::Query`; an unreadable term dictionary is the new
   `SearchError::Read`.
