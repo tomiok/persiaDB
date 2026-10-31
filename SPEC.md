@@ -1289,10 +1289,38 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   docid; a view starts from the threshold of the hits kept from the views before it, which win its ties.
 
 ### 7.4 Sorting, pagination
-Sort by score or by a column. `offset/limit` supported; `search_after` cursor `(score, segment_gen, docid)` preferred for deep paging.
+`sort` is `"score"` or a list of at most 16 keys, each `"score"` or `{"field", "order", "missing"}`; `[]` is `"score"`.
+A field key names a field with a column (§5.3.5): `keyword`, `i64`, `f64`, `datetime` or `bool`. `order` is `"asc"` or
+`"desc"` (default: `"desc"` for `score`, `"asc"` for a field); `missing` is `"last"` (default) or `"first"`, wherever
+`order` puts the values. Values compare as their type does: numbers and datetimes by value (as the column's
+order-preserving keys, §5.2.1), `false` before `true`, keywords by bytes. A document with several keyword values sorts
+by its smallest one ascending and by its largest one descending. Scores compare with `-0.0` equal to `0.0`. Hits rank
+by the keys in order, then as §7.3 breaks ties: segment order (the manifest's) with the memtable last, then docid. Every
+hit has its score, sorted by it or not.
+
+The page is `offset` (default 0) hits from the top, then `limit` (default 20); `offset + limit` is at most `max_window`
+(10 000). `search_after` is the cursor of a hit returned before: its sort values (one per key: the score, the key, the
+keyword bytes, or missing) and its location (segment index or memtable, and docid). The page then starts after it:
+only hits that rank after the cursor count, `offset` included. A cursor whose values do not match the sort's keys in
+number and type is an error. Hits after a cursor are exact within the snapshot and memtable view that returned it; on
+another one, every hit ranks after it all the same, but locations differ, so a hit tied with the cursor on every
+key may repeat or be passed over.
+
+Pruning (§7.3) applies when `sort` is `"score"` and no facet is asked for: then only the threshold of the hits after the
+cursor matters. Any other sort, and a facet, visits every match.
 
 ### 7.5 Facets
-Count over a keyword column for the matching bitmap (exact, per segment, then merged). Top-N values returned.
+`facets` lists `keyword` fields with `facet: true` (§6.2.2), each with `size` (top-N values, 1 to 1 000, default 10).
+A facet counts, per value, the live documents the query matches that hold it (a document counts once per distinct value),
+over every match, whatever the page: per segment from its keyword column (§5.3.5) for the matching bitmap, in the
+memtable from its postings, then merged by value bytes, so counts are exact. The values returned are the `size` with the
+highest count, then ascending bytes; a value no match holds is not returned.
+
+#### 7.5.1 Hits
+A hit returns its location, score, sort values (§7.4: its cursor) and document: the id, the blob reference when it has
+one (§9.1), and its stored fields (§6.4.2) after the projection. The projection is every stored and extra field
+(default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
+`strict` an extra field; another name is an error. A document lacking a projected field returns without it.
 
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,
