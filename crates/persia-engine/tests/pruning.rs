@@ -263,7 +263,7 @@ fn shape() -> impl Strategy<Value = Shape> {
             1 => prop::collection::vec(inner.clone(), 1..3).prop_map(Shape::And),
             1 => (inner.clone(), clauses).prop_map(|(m, s)| Shape::AndOr(Box::new(m), s)),
             2 => (inner.clone(), prop_oneof![Just(0.5), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
-            1 => (inner, prop_oneof![Just(0.0), 0.0..5.0_f64]).prop_map(|(s, c)| Shape::Constant(Box::new(s), c)),
+            1 => (inner, prop_oneof![Just(0.0), Just(-0.0), 0.0..5.0_f64]).prop_map(|(s, c)| Shape::Constant(Box::new(s), c)),
         ]
     })
 }
@@ -407,8 +407,22 @@ fn build(seed: u64, n: usize, deleted_per_mille: u64) -> Case {
         .collect();
     let tombstones = (!deleted.is_empty()).then(|| segment.tombstones(deleted).unwrap());
     let mut memtable = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
-    for d in documents(seed ^ 0x5eed, n / 4, &fields, "m") {
-        memtable.put(&d).unwrap();
+    // Some ids written twice and some deleted, so the memtable's bounds come from its visible versions only.
+    let mem_docs = documents(seed ^ 0x5eed, n / 4, &fields, "m");
+    for d in &mem_docs {
+        memtable.put(d).unwrap();
+    }
+    for (i, d) in documents(seed ^ 0xface, n / 4, &fields, "m")
+        .iter()
+        .enumerate()
+    {
+        match rng.below(8) {
+            0 => {
+                memtable.put(d).unwrap();
+            }
+            1 => assert!(memtable.delete(mem_docs[i].id()).unwrap()),
+            _ => {}
+        }
     }
     Case {
         schema,
@@ -531,7 +545,8 @@ fn pruning_skips_most_documents() {
     assert_eq!(count, all);
 }
 
-/// A threshold no document beats ends every pruned walk at once; one below every score skips nothing.
+/// A threshold no document beats ends every pruned walk at once, and a lower one or NaN set later is ignored; one
+/// below every score skips nothing, and NaN is ignored.
 #[test]
 fn extreme_thresholds() {
     let case = build(11, 1500, 50);
@@ -554,8 +569,12 @@ fn extreme_thresholds() {
     for pruning in PRUNED {
         let mut m = plan.matcher_with(&view, pruning).unwrap();
         m.set_min_competitive(f64::MAX);
+        // A lower threshold, or NaN, does not undo it.
+        m.set_min_competitive(0.0);
+        m.set_min_competitive(f64::NAN);
         assert_eq!(m.next().unwrap(), None, "{pruning:?}");
         let mut m = plan.matcher_with(&view, pruning).unwrap();
+        m.set_min_competitive(f64::NAN);
         m.set_min_competitive(-1.0);
         let mut got = BTreeMap::new();
         while let Some(d) = m.next().unwrap() {

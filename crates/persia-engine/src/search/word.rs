@@ -10,7 +10,7 @@ use crate::score::{FieldHit, TermScorer};
 use crate::segment::ReadError;
 use crate::view::{NormReader, PostingsIterator, SearchView};
 
-use super::{Matcher, Pos, Pruning, ScoreBound};
+use super::{Matcher, Pos, Pruning, ScoreBound, raise};
 
 /// One field of the word that the view holds the term in.
 pub(super) struct WordField<'a, V: SearchView + 'a> {
@@ -61,7 +61,27 @@ impl<'a, V: SearchView + 'a> WordMatcher<'a, V> {
         }
     }
 
+    /// [`Matcher::block_bound`], on any error leaving some field's postings exhausted.
+    fn field_blocks(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        self.hits.fill(None);
+        let mut up_to = None::<u32>;
+        for field in &mut self.fields {
+            let Some(block) = field.postings.shallow_advance(target)? else {
+                continue;
+            };
+            up_to = Some(up_to.map_or(block.last_docid, |u| u.min(block.last_docid)));
+            if let Some(slot) = self.hits.get_mut(field.slot) {
+                *slot = Some(FieldHit::from(block));
+            }
+        }
+        Ok(up_to.map(|up_to| ScoreBound {
+            up_to,
+            score: self.scorer.score(&self.hits),
+        }))
+    }
+
     /// The first document at or after `target` of any field, stepping each field's postings only when behind.
+    #[inline]
     fn step(&mut self, target: u32, started: bool) -> Result<Option<u32>, ReadError> {
         let mut min = None::<u32>;
         for field in &mut self.fields {
@@ -102,10 +122,12 @@ impl<'a, V: SearchView + 'a> WordMatcher<'a, V> {
             if region.score > min {
                 return Ok(Some((target, region.up_to)));
             }
-            let Some(after) = region.up_to.checked_add(1) else {
+            // `up_to` is at least `target` (a block from `target` on ends there or later); `max` keeps the walk moving
+            // whatever a bound says.
+            let Some(after) = region.up_to.max(target).checked_add(1) else {
                 return Ok(None);
             };
-            target = target.max(after);
+            target = after;
         }
     }
 }
@@ -137,17 +159,17 @@ impl<'a, V: SearchView + 'a> Matcher for WordMatcher<'a, V> {
             Pos::At(_) => true,
         };
         self.pos = Pos::Done;
+        let Some(min) = self.min else {
+            // No threshold: the plain union of the fields, as in a conjunction's leapfrog.
+            let doc = self.step(target, started)?;
+            self.pos = Pos::of(doc);
+            return Ok(doc);
+        };
         loop {
-            let up_to = match self.min {
-                Some(min) => match self.competitive(target, min)? {
-                    Some((from, up_to)) => {
-                        target = from;
-                        up_to
-                    }
-                    None => return Ok(None),
-                },
-                None => u32::MAX,
+            let Some((from, up_to)) = self.competitive(target, min)? else {
+                return Ok(None);
             };
+            target = from;
             let Some(doc) = self.step(target, started)? else {
                 return Ok(None);
             };
@@ -191,26 +213,17 @@ impl<'a, V: SearchView + 'a> Matcher for WordMatcher<'a, V> {
     /// The fields' blocks holding their first document at or after `target`: through the first of those blocks to
     /// end, each field's documents in that range are in its block, so its `max_tf` and `min_norm` bound them.
     fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
-        self.hits.fill(None);
-        let mut up_to = None::<u32>;
-        for field in &mut self.fields {
-            let Some(block) = field.postings.shallow_advance(target)? else {
-                continue;
-            };
-            up_to = Some(up_to.map_or(block.last_docid, |u| u.min(block.last_docid)));
-            if let Some(slot) = self.hits.get_mut(field.slot) {
-                *slot = Some(FieldHit::from(block));
-            }
+        let bound = self.field_blocks(target);
+        if bound.is_err() {
+            // A field whose postings failed is exhausted: so is the word, rather than scoring without it.
+            self.pos = Pos::Done;
         }
-        Ok(up_to.map(|up_to| ScoreBound {
-            up_to,
-            score: self.scorer.score(&self.hits),
-        }))
+        bound
     }
 
     fn set_min_competitive(&mut self, score: f64) {
         if self.pruning != Pruning::Exhaustive {
-            self.min = Some(score);
+            raise(&mut self.min, score);
         }
     }
 }

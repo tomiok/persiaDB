@@ -218,7 +218,8 @@ block-max WAND): `term` is `w3`; `and` is `w3 AND w40`; `or` is `w3 OR w40 OR w1
 | Recorded | `term` | `and` | `or` | `phrase` |
 |---|--:|--:|--:|--:|
 | 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.1–7.4.3 baseline) | 393 µs | 373 µs | 1.44 ms | 635 µs |
-| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4, block-max WAND by default) | 398 µs | 411 µs | 1.15 ms | 628 µs |
+| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4, block-max WAND by default) | 401 µs | 375 µs | 1.16 ms | 633 µs |
+| 2026-10-30, same machine and session as the row above, the 7.4.3 baseline commit (aa803d0) | 455 µs | 369 µs | 1.42 ms | 617 µs |
 
 `search_top10_pruning`: the same top 10 with each `Pruning` (ROADMAP 7.4.4); `or_rare` is `w3 OR w150 OR w190`, a
 common word beside two rare ones. The corpus's blocks are much alike (every block holds short documents and
@@ -226,6 +227,6 @@ repeated words), so a term alone skips few blocks. Time per query.
 
 | Recorded | query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
 |---|---|--:|--:|--:|
-| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4) | `term` | 395 µs | 407 µs | 405 µs |
-| | `or` | 1.44 ms | 917 µs | 1.17 ms |
-| | `or_rare` | 859 µs | 266 µs | 431 µs |
+| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4) | `term` | 388 µs | 397 µs | 403 µs |
+| | `or` | 1.36 ms | 902 µs | 1.17 ms |
+| | `or_rare` | 780 µs | 270 µs | 432 µs |

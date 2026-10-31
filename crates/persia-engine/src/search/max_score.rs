@@ -7,7 +7,7 @@
 
 use crate::segment::ReadError;
 
-use super::{Matcher, Pos, sum_in_order};
+use super::{Matcher, Pos, raise, sum_in_order};
 
 /// What a clause adds to the current document's bound.
 #[derive(Debug, Clone, Copy)]
@@ -194,16 +194,23 @@ impl<M: Matcher> Matcher for MaxScore<M> {
     /// Moves clauses into the non-essential set while their bounds together, in query order, stay at most `score`:
     /// a document only they match cannot beat it.
     fn set_min_competitive(&mut self, score: f64) {
-        self.min = Some(score);
-        while self.essential < self.by_bound.len() {
-            let next = self.essential + 1;
-            let Some(set) = self.by_bound.get(..next) else {
-                break;
-            };
-            if self.bound_of(|i| set.contains(&i)) > score {
+        if !raise(&mut self.min, score) {
+            return;
+        }
+        let mut in_set = vec![false; self.clauses.len()];
+        for &i in self.by_bound.get(..self.essential).unwrap_or_default() {
+            if let Some(slot) = in_set.get_mut(i) {
+                *slot = true;
+            }
+        }
+        while let Some(&i) = self.by_bound.get(self.essential) {
+            if let Some(slot) = in_set.get_mut(i) {
+                *slot = true;
+            }
+            if self.bound_of(|j| in_set.get(j).copied().unwrap_or(false)) > score {
                 break;
             }
-            self.essential = next;
+            self.essential += 1;
         }
     }
 }

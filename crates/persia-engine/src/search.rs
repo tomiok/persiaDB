@@ -60,8 +60,8 @@ use crate::view::SearchView;
 /// upper bound of its score, summed in that same order, is at most the worst hit kept.
 ///
 /// Pruning reaches the matchers a threshold on the whole score applies to: a term, the `should` clauses of a
-/// `bool` without `must`, and what `must_not` or `boost` wraps. Conjunctions and their optional clauses are walked
-/// whole.
+/// `bool` without `must`, the `must` clause of a `bool` with one and no `should`, and what `must_not` or `boost`
+/// wraps. Conjunctions and their optional clauses are walked whole.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pruning {
@@ -150,10 +150,11 @@ pub trait Matcher {
 
     /// An upper bound of the score of each document it matches from `target` through [`ScoreBound::up_to`]; `None`
     /// when it matches none at or after `target`. Does not move the matcher. By default the whole view and
-    /// [`Self::max_score`]; a term narrows it to the postings block holding `target` (block-max WAND, SPEC §5.3.2).
+    /// [`Self::max_score`]; a term narrows it to its postings blocks holding the first document at or after `target`
+    /// (block-max WAND, SPEC §5.3.2). `up_to` is at least `target`.
     ///
     /// # Errors
-    /// As [`Self::next`].
+    /// As [`Self::next`]; the matcher is exhausted after one.
     fn block_bound(&mut self, _target: u32) -> Result<Option<ScoreBound>, ReadError> {
         Ok(Some(ScoreBound {
             up_to: u32::MAX,
@@ -163,7 +164,7 @@ pub trait Matcher {
 
     /// From now on, [`Self::next`] and [`Self::advance`] may skip documents that score at most `score`: they cannot
     /// enter a top-k whose worst hit scores `score`, because each hit it keeps has a lower docid and wins the tie
-    /// (ROADMAP 7.4.4). Only ever raised. By default nothing is skipped.
+    /// (ROADMAP 7.4.4). A threshold at or below the one in force, or NaN, is ignored. By default nothing is skipped.
     fn set_min_competitive(&mut self, _score: f64) {}
 }
 
@@ -244,8 +245,9 @@ pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hi
     let mut top = TopK::new(k);
     let mut threshold = None;
     while let Some(docid) = matcher.next()? {
-        top.push(docid, matcher.score()?);
-        if let Some(t) = top.threshold()
+        // The threshold only moves when a hit is kept; most are not, once the heap is warm.
+        if top.push(docid, matcher.score()?)
+            && let Some(t) = top.threshold()
             && threshold.is_none_or(|old| t > old)
         {
             threshold = Some(t);
@@ -253,4 +255,14 @@ pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hi
         }
     }
     Ok(top.into_hits())
+}
+
+/// Raises the threshold `min` to `score`; `false`, leaving it, when `score` is NaN or not above it, so a
+/// threshold only rises and a pruning matcher never needs to step back ([`Matcher::set_min_competitive`]).
+fn raise(min: &mut Option<f64>, score: f64) -> bool {
+    if score.is_nan() || min.is_some_and(|m| score <= m) {
+        return false;
+    }
+    *min = Some(score);
+    true
 }

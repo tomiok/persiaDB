@@ -8,7 +8,7 @@
 
 use crate::segment::ReadError;
 
-use super::{Matcher, Pos, ScoreBound, sum_in_order};
+use super::{Matcher, Pos, ScoreBound, raise, sum_in_order};
 
 /// A disjunction of at least two clauses, scored as [`super::boolean::Disjunction`].
 pub(super) struct BlockMaxWand<M> {
@@ -151,6 +151,10 @@ impl<M: Matcher> BlockMaxWand<M> {
                     (None, Some(n)) => n,
                     (None, None) => return Ok(None),
                 };
+                // Past `pivot` whatever the bounds say (`up_to` is at least `pivot`), so the walk always moves on.
+                let Some(skip_to) = pivot.checked_add(1).map(|p| skip_to.max(p)) else {
+                    return Ok(None);
+                };
                 self.catch_up(skip_to)?;
                 continue;
             }
@@ -210,6 +214,6 @@ impl<M: Matcher> Matcher for BlockMaxWand<M> {
     }
 
     fn set_min_competitive(&mut self, score: f64) {
-        self.min = Some(score);
+        raise(&mut self.min, score);
     }
 }

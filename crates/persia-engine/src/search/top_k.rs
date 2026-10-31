@@ -75,10 +75,10 @@ impl TopK {
     }
 
     /// Offers a hit; it is kept if fewer than `k` are, or if it ranks above the worst kept one, which it replaces.
-    /// A score of `-0.0` counts as `0.0`, so equal scores tie on docid.
-    pub fn push(&mut self, docid: u32, score: f64) {
+    /// A score of `-0.0` counts as `0.0`, so equal scores tie on docid. Returns whether it was kept.
+    pub fn push(&mut self, docid: u32, score: f64) -> bool {
         if self.k == 0 {
-            return;
+            return false;
         }
         let hit = Worst(Hit {
             docid,
@@ -86,11 +86,15 @@ impl TopK {
         });
         if self.heap.len() < self.k {
             self.heap.push(hit);
-        } else if let Some(mut worst) = self.heap.peek_mut()
+            return true;
+        }
+        if let Some(mut worst) = self.heap.peek_mut()
             && hit < *worst
         {
             *worst = hit;
+            return true;
         }
+        false
     }
 
     /// The score a hit must beat to be kept, once `k` are: the worst kept one's. A later hit with that score and a
