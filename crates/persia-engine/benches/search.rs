@@ -1,6 +1,6 @@
-//! Query execution (ROADMAP 7.4): exhaustive top-10 over one segment of 50 000 synthetic documents, for a term, an
-//! AND, an OR and a phrase, before `MaxScore` and block-max WAND prune (7.4.4). Deterministic input (a fixed-seed
-//! generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
+//! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR
+//! and a phrase with the default pruning (block-max WAND), and each strategy of 7.4.4 side by side. Deterministic
+//! input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
 
@@ -12,7 +12,7 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{BoolQuery, PhraseQuery, PhraseTerm, Query, TermQuery};
 use persia_engine::schema::{FieldId, FieldKind, SchemaBuilder, TextOptions};
-use persia_engine::search::SearchPlan;
+use persia_engine::search::{Pruning, SearchPlan};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::stats::SegmentStatistics;
 use persia_engine::view::SegmentView;
@@ -115,6 +115,32 @@ fn bench(c: &mut Criterion) {
         group.bench_function(*name, |b| {
             b.iter(|| black_box(plan.top_k(&view, 10).unwrap()));
         });
+    }
+    group.finish();
+
+    // The strategies side by side; `or_rare` is a common word beside two rare ones.
+    let or_rare = Query::Bool(BoolQuery {
+        should: vec![term("w3"), term("w150"), term("w190")],
+        ..BoolQuery::default()
+    });
+    let pruned = [
+        ("term", &queries[0].1),
+        ("or", &queries[2].1),
+        ("or_rare", &or_rare),
+    ];
+    let strategies = [
+        ("exhaustive", Pruning::Exhaustive),
+        ("max_score", Pruning::MaxScore),
+        ("block_max_wand", Pruning::BlockMaxWand),
+    ];
+    let mut group = c.benchmark_group("search_top10_pruning");
+    for (name, query) in pruned {
+        let plan = SearchPlan::new(query, &schema, &stats).unwrap();
+        for (strategy, pruning) in strategies {
+            group.bench_function(format!("{name}/{strategy}"), |b| {
+                b.iter(|| black_box(plan.top_k_with(&view, 10, pruning).unwrap()));
+            });
+        }
     }
     group.finish();
 }

@@ -1258,8 +1258,21 @@ so a bound stays non-negative). Whether a document matched is which postings it 
 positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is legal (§6.2.2).
 
 ### 7.3 Execution
-- Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (MAXSCORE as fallback).
-- Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates; tombstones applied last.
+- Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (or `MaxScore`).
+  Pruning never changes results: a document is skipped only when an upper bound of its score, summed in the same
+  (query) order as the score with each clause's bound in its place (a term's or a block's `max_tf` and `min_norm`,
+  §7.2), is at most the score of the `k`-th hit kept. Floating-point addition is monotonic, so such a bound holds
+  exactly. Hits rank by score descending, then docid ascending, and a view is walked in docid order, so a document
+  scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
+  A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must`, the `must`
+  clause of a `bool` with one and no `should`, and what `must_not` and `boost` wrap; other clauses are walked
+  exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
+  strategy, and where a clause has no block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list
+  bound.
+- Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
+  scored. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
+  the top-k collector, so a deleted document cannot enter the heap or raise the competitive threshold. Block upper
+  bounds may still cover deleted documents; that only loosens pruning.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns).
 

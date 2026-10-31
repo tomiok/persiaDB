@@ -148,13 +148,20 @@ are separate from the text and are not relaxed unless you opt in.
 Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a collection may add a
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
-within a documented epsilon (SPEC §7.2). That model is part of the query milestone; it is not in the tree yet.
+within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
+for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
+(ROADMAP 7.4.1–7.4.4). A search call is not.
 
-Execution, per segment and over the memtable, is block-max WAND (MAXSCORE as a fallback), with
-filters as bitmaps and tombstones applied last (SPEC §7.3). Segments are searched in parallel.
-Sort is by score or by a column. Deep paging prefers a `search_after` cursor over a large offset
-(SPEC §7.4). Facets count a keyword column and merge across segments (SPEC §7.5).
-`explain: true` returns a per-term score breakdown (SPEC §7.7). Highlighting is post-v1.
+Over one view — a segment, or the memtable — the engine collects the top k by score, then docid,
+with block-max WAND by default (`MaxScore` is the other strategy). That is library code
+(ROADMAP 7.4.1–7.4.4, SPEC §7.3). Pruning does not change the hits: pruned and exhaustive top k are
+the same documents, scores bit for bit. A segment view drops tombstoned documents in the postings
+iterator, before a document is scored or offered to the collector, so a deleted document cannot raise
+the top-k threshold (SPEC §7.3). Block bounds may still cover deleted documents; that only prunes less.
+Still planned: filters as bitmaps (ROADMAP 7.4.5), the memtable hiding older copies in every segment
+(ROADMAP 7.4.6), parallel search across segments (ROADMAP 7.6.1), sort by a column and a `search_after`
+cursor (ROADMAP 7.5, SPEC §7.4), facets (ROADMAP 7.5.3, SPEC §7.5), and `explain: true`
+(ROADMAP 7.7.1, SPEC §7.7). Highlighting is post-v1.
 
 ### Zero-results relaxation
 

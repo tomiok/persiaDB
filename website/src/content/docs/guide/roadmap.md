@@ -93,7 +93,8 @@ pagination, facets, parallel segment search, and explain. Benchmarks of this mil
 the v1 performance work early (M15).
 
 In the tree today: the query AST and compiler, the filter DSL, query limits, collection statistics,
-and the BM25F scorer (ROADMAP 7.1–7.3). Matching, top-k, facets, and explain are not.
+the BM25F scorer (ROADMAP 7.1–7.3), and matching with score top-k over one view, including block-max
+WAND (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, sort, parallel segment search, and explain are not.
 [Typo-tolerant search](/guide/typo-tolerant-search/) is that split. The relaxation milestone below has not been started.
 
 ## M8 — Zero-results avoidance

@@ -82,10 +82,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.m10Blocked, /M6 \(in progress\)/);
 	assert.match(status.m10Blocked, /M7 \(in progress\)/);
 	assert.match(status.m5Cell, /Done \(M5,/);
-	assert.match(status.m5Cell, /Nothing searches the segment/);
+	assert.match(status.m5Cell, /A segment view can be matched/);
+	assert.match(status.m5Cell, /There is no search call/);
 	assert.match(status.pillarEngine, /WAL, commit, and segment merging/);
 	assert.match(status.pillarEngine, /BM25F scoring is in the tree/);
-	assert.match(status.pillarEngine, /Query execution does not return hits/);
+	assert.match(status.pillarEngine, /Score top-k over one view returns hits/);
+	assert.match(status.pillarEngine, /There is no search call/);
 	assert.equal(status.pillarEngine.includes('Scoring and query execution do not.'), false);
 	assert.equal(status.pillarCorrectness.includes('no document write path'), false);
 	assert.match(status.pillarCloud, /Object storage has not been started \(M12\)/);
@@ -132,11 +134,19 @@ test('an unstarted query milestone says there is no query engine', () => {
 		'7.3.2',
 		'7.3.3',
 		'7.3.4',
+		'7.4.1',
+		'7.4.2',
+		'7.4.3',
+		'7.4.4.1',
+		'7.4.4.2',
+		'7.4.4.3',
 	]) {
 		live.set(id, false);
 	}
 	const input = currentInput(live);
-	input.modules = input.modules.filter((name) => name !== 'query' && name !== 'score' && name !== 'stats');
+	input.modules = input.modules.filter(
+		(name) => name !== 'query' && name !== 'score' && name !== 'stats' && name !== 'search',
+	);
 	input.hasQuery = false;
 	input.hasSearch = false;
 	const progressCopy = structuredClone(input.progress);
@@ -163,6 +173,7 @@ test('public modules follow lib.rs order', () => {
 		'query',
 		'schema',
 		'score',
+		'search',
 		'segment',
 		'stats',
 		'tombstone',
@@ -235,6 +246,7 @@ function currentInput(leaves) {
 			'query',
 			'schema',
 			'score',
+			'search',
 			'segment',
 			'stats',
 			'tombstone',

@@ -43,7 +43,7 @@ Counts on the [roadmap](/roadmap/) are read from PROGRESS.md when the site is bu
 Specified, and not something you can search with yet:
 
 - The query compiler, the filter DSL, and a BM25F scorer are library code (ROADMAP 7.1–7.3).
-  They do not return hits. Matching, top-k, facets, and a `search` call are not implemented.
+  They do not return hits by themselves. Matching and score top-k over one view are library code (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, and a `search` call are not implemented.
   Analysis libraries are in the tree. The project does not wrap Tantivy, Lucene, or SQLite
   ([ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md)).
 - A query with too few hits is relaxed step by step, and the response says what changed (SPEC §7.6).

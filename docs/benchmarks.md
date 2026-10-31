@@ -211,10 +211,22 @@ Commits that tombstone older copies (ROADMAP 6.4.3): `commit_upserts` commits 2 
 ## `persia-engine` query execution
 
 `cargo bench -p persia-engine --bench search`: one segment of 50 000 documents of 5 to 34 words drawn from 200
-(skewed toward low numbers, so `w3` is on about a sixth of the documents). Top 10 by exhaustive evaluation, before
-`MaxScore` and block-max WAND (ROADMAP 7.4.4): `term` is `w3`; `and` is `w3 AND w40`; `or` is `w3 OR w40 OR w120`;
+(skewed toward low numbers, so `w3` is on about a sixth of the documents). Top 10 (exhaustive before ROADMAP 7.4.4, then
+block-max WAND): `term` is `w3`; `and` is `w3 AND w40`; `or` is `w3 OR w40 OR w120`;
 `phrase` is `"w0 w1"`. Time per query.
 
 | Recorded | `term` | `and` | `or` | `phrase` |
 |---|--:|--:|--:|--:|
 | 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.1–7.4.3 baseline) | 393 µs | 373 µs | 1.44 ms | 635 µs |
+| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4, block-max WAND by default) | 401 µs | 375 µs | 1.16 ms | 633 µs |
+| 2026-10-30, same machine and session as the row above, the 7.4.3 baseline commit (aa803d0) | 455 µs | 369 µs | 1.42 ms | 617 µs |
+
+`search_top10_pruning`: the same top 10 with each `Pruning` (ROADMAP 7.4.4); `or_rare` is `w3 OR w150 OR w190`, a
+common word beside two rare ones. The corpus's blocks are much alike (every block holds short documents and
+repeated words), so a term alone skips few blocks. Time per query.
+
+| Recorded | query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
+|---|---|--:|--:|--:|
+| 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4) | `term` | 388 µs | 397 µs | 403 µs |
+| | `or` | 1.36 ms | 902 µs | 1.17 ms |
+| | `or_rare` | 780 µs | 270 µs | 432 µs |

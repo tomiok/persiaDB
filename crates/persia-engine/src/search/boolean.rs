@@ -4,7 +4,7 @@
 use crate::segment::ReadError;
 use crate::view::SearchView;
 
-use super::{Matcher, Pos};
+use super::{Matcher, Pos, ScoreBound, sum_in_order};
 
 /// The documents every clause matches (AND), leapfrogging from the cheapest clause; the score is the sum of the
 /// clauses', added in query order (SPEC §7.2).
@@ -105,6 +105,14 @@ impl<M: Matcher> Matcher for Conjunction<M> {
         }
         Ok(sum)
     }
+
+    fn max_score(&self) -> f64 {
+        sum_in_order(
+            self.order
+                .iter()
+                .filter_map(|&i| self.clauses.get(i).map(Matcher::max_score)),
+        )
+    }
 }
 
 /// The documents any clause matches (OR); the score is the sum of the matching clauses', in query order.
@@ -177,6 +185,10 @@ impl<M: Matcher> Matcher for Disjunction<M> {
         }
         Ok(sum)
     }
+
+    fn max_score(&self) -> f64 {
+        sum_in_order(self.clauses.iter().map(Matcher::max_score))
+    }
 }
 
 /// The documents `required` matches and `excluded` does not (NOT); scored by `required` alone.
@@ -241,6 +253,19 @@ impl<R: Matcher, E: Matcher> Matcher for Exclusion<R, E> {
         }
         self.required.score()
     }
+
+    fn max_score(&self) -> f64 {
+        self.required.max_score()
+    }
+
+    fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        self.required.block_bound(target)
+    }
+
+    /// The score is `required`'s, so what it may skip, this may too.
+    fn set_min_competitive(&mut self, score: f64) {
+        self.required.set_min_competitive(score);
+    }
 }
 
 /// The documents `required` matches, scored by it plus `optional` where that matches too (a `bool`'s `should`
@@ -283,6 +308,10 @@ impl<R: Matcher, O: Matcher> Matcher for Optional<R, O> {
             score += self.optional.score()?;
         }
         Ok(score)
+    }
+
+    fn max_score(&self) -> f64 {
+        self.required.max_score() + self.optional.max_score()
     }
 }
 
@@ -332,6 +361,10 @@ impl<V: SearchView> Matcher for AllDocs<'_, V> {
     fn score(&mut self) -> Result<f64, ReadError> {
         Ok(0.0)
     }
+
+    fn max_score(&self) -> f64 {
+        0.0
+    }
 }
 
 /// No document: a term the view does not hold, or a conjunction with such a clause.
@@ -356,6 +389,10 @@ impl Matcher for Empty {
 
     fn score(&mut self) -> Result<f64, ReadError> {
         Ok(0.0)
+    }
+
+    fn max_score(&self) -> f64 {
+        0.0
     }
 }
 
@@ -405,5 +442,80 @@ impl<M: Matcher> Matcher for Scaled<M> {
             Scale::Boost(boost) => Ok(self.inner.score()? * boost),
             Scale::Constant(score) => Ok(score),
         }
+    }
+
+    fn max_score(&self) -> f64 {
+        match self.scale {
+            Scale::Boost(boost) => self.inner.max_score() * boost,
+            Scale::Constant(score) => score,
+        }
+    }
+
+    fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        Ok(match self.scale {
+            // A positive factor keeps the order of scores, rounding included.
+            Scale::Boost(boost) => self.inner.block_bound(target)?.map(|b| ScoreBound {
+                up_to: b.up_to,
+                score: b.score * boost,
+            }),
+            Scale::Constant(score) => Some(ScoreBound {
+                up_to: u32::MAX,
+                score,
+            }),
+        })
+    }
+
+    /// A boost passes on the largest inner score whose product is at most `score`: any inner score at most that
+    /// one gives a product at most `score` too.
+    fn set_min_competitive(&mut self, score: f64) {
+        if let Scale::Boost(boost) = self.scale
+            && let Some(inner) = unboosted(score, boost)
+        {
+            self.inner.set_min_competitive(inner);
+        }
+    }
+}
+
+/// The largest `x` found with `x · boost ≤ score` (as computed); `None` when the quotient is not finite.
+fn unboosted(score: f64, boost: f64) -> Option<f64> {
+    let mut x = score / boost;
+    // `score / boost` is correctly rounded, so its product overshoots `score` by at most an ulp or two.
+    for _ in 0..4 {
+        if !x.is_finite() {
+            return None;
+        }
+        if x * boost <= score {
+            return Some(x);
+        }
+        x = x.next_down();
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unboosted;
+
+    /// The threshold a boost passes on never lets through an inner score whose product beats the outer one.
+    #[test]
+    #[allow(clippy::cast_precision_loss)] // 53-bit values, exact
+    fn unboosted_products_stay_at_most_the_threshold() {
+        let mut x = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut unit = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut found = 0;
+        for _ in 0..100_000 {
+            let score = unit() * 50.0;
+            let boost = 0.01 + unit() * 20.0;
+            if let Some(inner) = unboosted(score, boost) {
+                found += 1;
+                assert!(inner * boost <= score, "{inner} · {boost} > {score}");
+            }
+        }
+        assert!(found > 99_000);
     }
 }
