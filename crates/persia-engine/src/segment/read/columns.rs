@@ -584,6 +584,15 @@ impl<'s> NumericColumn<'s> {
         present && docid < self.doc_count && self.keys.is_some()
     }
 
+    /// The documents that have a value.
+    pub fn present(&self) -> RoaringBitmap {
+        match (&self.keys, &self.presence) {
+            (None, _) => RoaringBitmap::new(),
+            (Some(_), Some(present)) => present.clone(),
+            (Some(_), None) => every_doc(self.doc_count),
+        }
+    }
+
     /// `docid`'s order-preserving key (SPEC §5.2.1): unsigned order is value order, for range filters and sorting.
     ///
     /// # Errors
@@ -712,6 +721,13 @@ impl BoolColumn {
         let present =
             docid < self.doc_count && self.presence.as_ref().is_none_or(|p| p.contains(docid));
         present.then(|| self.trues.contains(docid))
+    }
+
+    /// The documents that have a value.
+    pub fn present(&self) -> RoaringBitmap {
+        self.presence
+            .clone()
+            .unwrap_or_else(|| every_doc(self.doc_count))
     }
 
     /// The documents whose value is `true`.
@@ -991,6 +1007,13 @@ fn minimal(block: &ForBlock<'_>) -> bool {
         .fold((u64::MAX, 0), |(lo, hi), k| (lo.min(k), hi.max(k)));
     let width = u8::try_from(max.wrapping_sub(min).bit_width()).unwrap_or(u8::MAX);
     min == block.min() && width == block.width()
+}
+
+/// Docids `0..doc_count`: what a presence bitmap of length 0 stands for (SPEC §5.3.5).
+pub(crate) fn every_doc(doc_count: u32) -> RoaringBitmap {
+    let mut all = RoaringBitmap::new();
+    all.insert_range(0..doc_count);
+    all
 }
 
 #[cfg(test)]

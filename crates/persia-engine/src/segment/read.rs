@@ -11,6 +11,7 @@ mod error;
 mod footer;
 mod fst_check;
 mod postings;
+mod scan;
 mod store;
 mod stream;
 mod terms;

@@ -15,6 +15,8 @@ use std::ops::Bound;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use fst::Automaton;
+use fst::automaton::{AlwaysMatch, Str, Subsequence};
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, DocumentError, Value};
 use persia_engine::memtable::{IdState, Memtable, MemtableError, MemtableView};
@@ -24,9 +26,10 @@ use persia_engine::schema::{
 use persia_engine::segment::{
     MAX_TERM_LEN, ReadError, Segment, SegmentBuilder, SegmentError, SegmentMeta, SegmentWriter,
 };
-use persia_engine::view::{NormReader, PostingsIterator, SearchView, SegmentView};
+use persia_engine::view::{NormReader, PostingsIterator, SearchView, SegmentView, TermEnum};
 use persia_format::ByteSource;
 use proptest::prelude::*;
+use roaring::RoaringBitmap;
 
 const WORDS: [&str; 6] = ["alpha", "beta", "gamma", "delta", "common", "omega"];
 const TAGS: [&str; 3] = ["x", "y", "z"];
@@ -36,6 +39,7 @@ struct Fields {
     title: FieldId,
     tag: FieldId,
     n: FieldId,
+    flag: FieldId,
 }
 
 fn schema() -> (CollectionSchema, Fields) {
@@ -57,6 +61,7 @@ fn schema() -> (CollectionSchema, Fields) {
         )
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("n", FieldKind::I64 { stored: true })
+        .field("flag", FieldKind::Bool { stored: false })
         .build()
         .unwrap();
     let id = |name: &str| schema.field(name).unwrap().id();
@@ -65,6 +70,7 @@ fn schema() -> (CollectionSchema, Fields) {
         title: id("title"),
         tag: id("tag"),
         n: id("n"),
+        flag: id("flag"),
     };
     (schema, fields)
 }
@@ -99,6 +105,10 @@ fn document(f: &Fields, op: &Op) -> Option<Document> {
         return None;
     };
     let mut doc = Document::new(format!("d{id}")).with(f.n, Value::I64(*n));
+    // Some documents lack it, so the column has a presence bitmap.
+    if n % 3 != 0 {
+        drop(doc.insert(f.flag, Value::Bool(n % 2 == 0)));
+    }
     match body.as_slice() {
         [] => {}
         [one] => doc
@@ -194,6 +204,60 @@ fn all_terms(segment: &Segment, field: FieldId) -> Vec<Vec<u8>> {
     out
 }
 
+/// Every term `terms` lists, with its `df`.
+fn enumerate<V: SearchView, A: Automaton>(
+    view: &V,
+    field: FieldId,
+    lower: Bound<&[u8]>,
+    upper: Bound<&[u8]>,
+    automaton: A,
+) -> Vec<(Vec<u8>, u32)> {
+    let mut terms = view.terms(field, lower, upper, automaton).unwrap();
+    let mut out = Vec::new();
+    while let Some((term, df)) = terms.next().unwrap() {
+        out.push((term.to_vec(), df));
+    }
+    out
+}
+
+/// The memtable lists the terms (and `df`s) the segment of its live documents does, by range and by automaton.
+fn assert_enumerations_match(f: &Fields, view: &MemtableView, seg: Option<&SegmentView<'_>>) {
+    use Bound::{Excluded, Included, Unbounded};
+    type Range<'a> = (Bound<&'a [u8]>, Bound<&'a [u8]>);
+    let ranges: [Range<'_>; 5] = [
+        (Unbounded, Unbounded),
+        (Included(b"c"), Excluded(b"d")),
+        (Excluded(b"beta"), Included(b"gamma")),
+        (Included(b"y"), Unbounded),
+        (Included(b"z"), Excluded(b"a")),
+    ];
+    for field in [f.body, f.title, f.tag] {
+        for (lower, upper) in ranges {
+            let mem = enumerate(view, field, lower, upper, AlwaysMatch);
+            let expected =
+                seg.map_or_else(Vec::new, |s| enumerate(s, field, lower, upper, AlwaysMatch));
+            assert_eq!(mem, expected, "{field:?} {lower:?}..{upper:?}");
+            let prefix = || Str::new("a").starts_with();
+            let mem = enumerate(view, field, lower, upper, prefix());
+            let expected =
+                seg.map_or_else(Vec::new, |s| enumerate(s, field, lower, upper, prefix()));
+            assert_eq!(mem, expected, "{field:?} {lower:?}..{upper:?} prefix a");
+            let mem = enumerate(view, field, lower, upper, Subsequence::new("ma"));
+            let expected = seg.map_or_else(Vec::new, |s| {
+                enumerate(s, field, lower, upper, Subsequence::new("ma"))
+            });
+            assert_eq!(
+                mem, expected,
+                "{field:?} {lower:?}..{upper:?} subsequence ma"
+            );
+        }
+        // Exactly the terms with postings.
+        for (term, _) in enumerate(view, field, Unbounded, Unbounded, AlwaysMatch) {
+            assert!(view.postings(field, &term).unwrap().is_some());
+        }
+    }
+}
+
 /// `view` holds exactly what a segment of `model.live` would.
 fn assert_matches(schema: &CollectionSchema, f: &Fields, view: &MemtableView, model: &Model) {
     let seg = segment(schema, &model.live);
@@ -233,6 +297,48 @@ fn assert_matches(schema: &CollectionSchema, f: &Fields, view: &MemtableView, mo
                 String::from_utf8_lossy(&term)
             );
         }
+    }
+    assert_enumerations_match(f, view, seg_view.as_ref());
+    assert_eq!(
+        view.deleted(),
+        (0..view.doc_count())
+            .filter(|&d| !view.is_live(d))
+            .collect()
+    );
+    // Values and column keys, live documents only, in segment docids.
+    let live_only = |b: RoaringBitmap| -> Vec<u32> {
+        b.iter().filter(|&d| view.is_live(d)).map(to_seg).collect()
+    };
+    for field in [f.body, f.title, f.tag, f.n, f.flag] {
+        let expected: Vec<u32> = seg_view
+            .as_ref()
+            .map(|s| s.present(field).unwrap().iter().collect())
+            .unwrap_or_default();
+        let present = view.present(field).unwrap();
+        assert!(
+            present.max().is_none_or(|d| d < view.doc_count()),
+            "only the view's documents"
+        );
+        assert_eq!(live_only(present), expected, "{field:?}");
+    }
+    for field in [f.n, f.flag] {
+        let mut mem = Vec::new();
+        view.column_keys(field, |d, k| mem.push((d, k))).unwrap();
+        assert!(mem.windows(2).all(|w| w[0].0 < w[1].0), "docid order");
+        assert!(
+            mem.last().is_none_or(|&(d, _)| d < view.doc_count()),
+            "only the view's documents"
+        );
+        let mem: Vec<(u32, u64)> = mem
+            .into_iter()
+            .filter(|&(d, _)| view.is_live(d))
+            .map(|(d, k)| (to_seg(d), k))
+            .collect();
+        let mut expected = Vec::new();
+        if let Some(s) = &seg_view {
+            s.column_keys(field, |d, k| expected.push((d, k))).unwrap();
+        }
+        assert_eq!(mem, expected, "{field:?}");
     }
     for (i, &d) in (0_u32..).zip(&live) {
         let s = seg_view.as_ref().unwrap();
@@ -405,6 +511,53 @@ fn field_errors_match_a_segment() {
         Some(ReadError::DocOutOfRange { .. })
     ));
     assert_eq!(view.field_stats(f.n), None);
+
+    // Enumeration and columns refuse the same fields.
+    let all = || (Bound::Unbounded, Bound::Unbounded);
+    let column_errors =
+        |v: &dyn Fn(FieldId) -> Option<ReadError>| (v(f.body), v(f.tag), v(unknown));
+    let mem_columns = column_errors(&|field| view.column_keys(field, |_, _| ()).err());
+    let seg_columns = column_errors(&|field| seg_view.column_keys(field, |_, _| ()).err());
+    assert_eq!(mem_columns, seg_columns);
+    assert!(matches!(mem_columns.0, Some(ReadError::FieldType { .. })));
+    let (lower, upper) = all();
+    assert_eq!(
+        view.terms(f.n, lower, upper, AlwaysMatch).err(),
+        seg_view.terms(f.n, lower, upper, AlwaysMatch).err()
+    );
+    assert!(view.terms(f.n, lower, upper, AlwaysMatch).is_err());
+    assert_eq!(view.present(unknown).err(), seg_view.present(unknown).err());
+}
+
+#[test]
+fn segment_views_list_deleted_documents_terms() {
+    let (schema, f) = schema();
+    let docs: Vec<Document> = ["alpha", "beta"]
+        .iter()
+        .enumerate()
+        .map(|(i, w)| Document::new(format!("d{i}")).with(f.body, Value::String((*w).into())))
+        .collect();
+    let seg = segment(&schema, &docs).unwrap();
+    let tombstones = seg.tombstones(RoaringBitmap::from_iter([0])).unwrap();
+    let view = SegmentView::new(&seg, Some(&tombstones));
+    assert_eq!(view.deleted(), RoaringBitmap::from_iter([0]));
+    // `alpha` only holds a deleted document: still listed, with the df its postings report.
+    let listed = enumerate(
+        &view,
+        f.body,
+        Bound::Unbounded,
+        Bound::Unbounded,
+        AlwaysMatch,
+    );
+    assert_eq!(listed, [(b"alpha".to_vec(), 1), (b"beta".to_vec(), 1)]);
+    let mut alpha = view.postings(f.body, b"alpha").unwrap().unwrap();
+    assert_eq!(alpha.next().unwrap(), None);
+    // Present counts the deleted document too.
+    assert_eq!(
+        view.present(f.body).unwrap(),
+        RoaringBitmap::from_iter([0, 1])
+    );
+    assert_eq!(SegmentView::new(&seg, None).deleted(), RoaringBitmap::new());
 }
 
 #[test]

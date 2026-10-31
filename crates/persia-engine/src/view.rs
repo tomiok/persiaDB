@@ -1,15 +1,26 @@
-//! What a search runs over, whatever holds the documents (ROADMAP 6.1.2): a [`SearchView`] gives a field's
-//! postings as a [`PostingsIterator`], norms, statistics and stored documents. A [`SegmentView`] (a segment and
-//! its tombstones, SPEC §8.3) and a [`crate::memtable::MemtableView`] (SPEC §8.2) both implement it, so the query
-//! engine treats the memtable as one more segment (ROADMAP 7.4.6).
+//! What a search runs over, whatever holds the documents (ROADMAP 6.1.2, 6.1.5): a [`SearchView`] gives a field's
+//! postings as a [`PostingsIterator`], its terms by range or automaton as a [`TermEnum`], norms, column values,
+//! statistics and stored documents. A [`SegmentView`] (a segment and its tombstones, SPEC §8.3) and a
+//! [`crate::memtable::MemtableView`] (SPEC §8.2) both implement it, so the query engine treats the memtable as one
+//! more segment (ROADMAP 7.4.6).
 //!
 //! Both leave out deleted documents: a view's postings, [`SearchView::is_live`] and [`SearchView::docid_of`] only
-//! see the documents a search may return.
+//! see the documents a search may return. Column scans ([`SearchView::present`], [`SearchView::column_keys`])
+//! include them; [`SearchView::deleted`] is what to take out.
+
+use core::ops::Bound;
+
+use fst::Automaton;
+#[cfg(doc)]
+use fst::automaton::AlwaysMatch;
+use roaring::RoaringBitmap;
 
 use crate::document::Document;
 use crate::schema::FieldId;
 use crate::score::FieldHit;
-use crate::segment::{BlockMax, FieldStats, NormsCursor, Postings, ReadError, Segment, Tombstones};
+use crate::segment::{
+    BlockMax, FieldStats, NormsCursor, Postings, ReadError, Segment, TermStream, Tombstones,
+};
 
 /// The documents of one term, in docid order, with their frequencies and positions; the interface of
 /// [`Postings`].
@@ -79,6 +90,25 @@ impl NormReader for NormsCursor<'_> {
     }
 }
 
+/// A field's terms in byte order, each with the `df` of its postings, from [`SearchView::terms`]; a lending stream:
+/// the term borrows it.
+pub trait TermEnum {
+    /// The next term and its `df` ([`PostingsIterator::df`]: a segment's counts deleted documents too), or `None`
+    /// after the last.
+    ///
+    /// # Errors
+    /// A corruption of the source.
+    fn next(&mut self) -> Result<Option<(&[u8], u32)>, ReadError>;
+}
+
+impl<A: Automaton> TermEnum for TermStream<'_, A> {
+    fn next(&mut self) -> Result<Option<(&[u8], u32)>, ReadError> {
+        TermStream::next(self)
+            .transpose()
+            .map(|t| t.map(|(term, info)| (term, info.df())))
+    }
+}
+
 /// A searchable set of documents with docids `0..doc_count()`: a segment, or the memtable.
 pub trait SearchView {
     /// The norms reader of this view.
@@ -90,6 +120,12 @@ pub trait SearchView {
     type Postings<'a>: PostingsIterator
     where
         Self: 'a;
+
+    /// The term stream of this view.
+    type Terms<'a, A>: TermEnum
+    where
+        Self: 'a,
+        A: Automaton + 'a;
 
     /// Every docid is below this; deleted documents included (a memtable's replaced versions too), so not the
     /// BM25 document count, which the collection statistics give (ROADMAP 7.2.1).
@@ -116,6 +152,40 @@ pub trait SearchView {
         field: FieldId,
         term: &[u8],
     ) -> Result<Option<Self::Postings<'_>>, ReadError>;
+
+    /// The terms of a `text` or `keyword` field between `lower` and `upper` (byte order) that `automaton` accepts
+    /// ([`AlwaysMatch`] for every one), in byte order: a prefix, a range, a Levenshtein automaton (SPEC §7.6). A term
+    /// is listed exactly when [`Self::postings`] gives it an iterator, so a segment lists a term whose documents are
+    /// all deleted, and the memtable only terms with a live document in the view.
+    ///
+    /// # Errors
+    /// As [`Self::postings`].
+    fn terms<'a, A: Automaton + 'a>(
+        &'a self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        automaton: A,
+    ) -> Result<Self::Terms<'a, A>, ReadError>;
+
+    /// The documents below [`Self::doc_count`] a search may not return: deleted, or replaced in the memtable.
+    fn deleted(&self) -> RoaringBitmap;
+
+    /// The documents that have a value in `field`, deleted ones included (see [`Self::deleted`]): a `text` field's
+    /// with at least one token, a `keyword` field's with at least one value, a column's with a value.
+    ///
+    /// # Errors
+    /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a `stored` field; a corruption of the source.
+    fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError>;
+
+    /// Calls `f` with each document that has a value in an `i64`, `f64`, `datetime` or `bool` field, deleted ones
+    /// included, and its key, in docid order: the order-preserving key of the value (SPEC §5.2.1; for `f64`,
+    /// `-0.0` is never stored), 0 or 1 for a `bool`.
+    ///
+    /// # Errors
+    /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
+    /// source.
+    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError>;
 
     /// The norms of a `text` field (SPEC §5.3.4), for scoring each candidate document: a reader that keeps what it
     /// read (a segment's [`NormsCursor`]; the memtable's norms as of the view, copied once per view and field).
@@ -233,6 +303,12 @@ impl SearchView for SegmentView<'_> {
     where
         Self: 'a;
 
+    type Terms<'a, A>
+        = TermStream<'a, A>
+    where
+        Self: 'a,
+        A: Automaton + 'a;
+
     fn doc_count(&self) -> u32 {
         self.segment.doc_count()
     }
@@ -255,6 +331,33 @@ impl SearchView for SegmentView<'_> {
             Some(t) => postings.with_tombstones(t),
             None => postings,
         }))
+    }
+
+    fn terms<'a, A: Automaton + 'a>(
+        &'a self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        automaton: A,
+    ) -> Result<TermStream<'a, A>, ReadError> {
+        Ok(self
+            .segment
+            .terms(field)?
+            .search_range(automaton, lower, upper))
+    }
+
+    fn deleted(&self) -> RoaringBitmap {
+        self.tombstones
+            .map(|t| t.docids().clone())
+            .unwrap_or_default()
+    }
+
+    fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
+        self.segment.present(field)
+    }
+
+    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
+        self.segment.column_keys(field, f)
     }
 
     fn norms(&self, field: FieldId) -> Result<NormsCursor<'_>, ReadError> {

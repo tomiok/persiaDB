@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: term enumeration and column access on every search view (ROADMAP 6.1.5). `view::SearchView`
+  gains `terms` (a field's terms between two bounds that an `fst::Automaton` accepts, in byte order, each with its
+  `df`, as a `view::TermEnum`), `deleted`, `present` (the documents with a value in a field) and `column_keys` (each
+  document's order-preserving key in an `i64`, `f64`, `datetime` or `bool` field). The memtable keeps its column
+  values as it indexes, and lists the same terms and values as the segment its live documents flush to. `Segment`
+  gains `present` and `column_keys`, `NumericColumn` and `BoolColumn` gain `present`.
 - `persia-engine`: search over a whole collection (ROADMAP 7.4.6, SPEC §7.3, §8.3). `db::CollectionSnapshot::views`
   gives a memtable view's `db::CollectionViews`: each segment without its tombstoned documents nor the copies of ids
   the memtable has a put or a delete of (not tombstoned until the commit that flushes it), then the memtable as one
