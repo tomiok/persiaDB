@@ -9,7 +9,9 @@
 //! Opening a database recovers the container, checks the committed manifest against the superblock (ROADMAP
 //! 6.3.7), opens the segments through [`ContainerObjects`] (ROADMAP 6.3.6) and replays the WAL into fresh
 //! memtables, flushing a memtable that fills up (SPEC §8.6, ROADMAP 6.6.1, 6.6.5). [`ReadOnlyDatabase`] opens a
-//! database beside its writer and verifies it (ROADMAP 6.6.2, 6.6.3).
+//! database beside its writer and verifies it (ROADMAP 6.6.2, 6.6.3). Dropping a [`Database`] joins its merge
+//! workers first (they do not hold the container file), then drops the container, which unlocks the writer lock
+//! before closing it (SPEC §4.5.1, ROADMAP 6.6.11).
 //!
 //! ```
 //! use persia_engine::db::{Database, DatabaseOptions};

@@ -46,7 +46,11 @@ only what it needs, and `Segment::verify` ran only on merged segments.
    leaves `stale_tail` clear and does not fail the open. New
    corruption variants `DatabaseError::LiveTwice` and `CorruptTail`.
 6. **The writer lock is the container's** (SPEC §4.5.1): a second `Database::open` fails with
-   `DatabaseError::Container(Locked)`; no database-level lock is added.
+   `DatabaseError::Container(Locked)`; no database-level lock is added. Dropping the database joins its merge
+   workers, then drops the container, which unlocks that lock before closing the descriptor. `close` does not
+   release `flock` (or `LockFileEx`) while a duplicated or inherited descriptor is still open — a child between
+   `fork` and `exec` holds every descriptor the parent had — so an explicit unlock is what makes the next open
+   succeed at once (ROADMAP 6.6.11). Workers do not hold the container file: a job's inputs are segment bytes.
 7. **A writer replays past a cut commit's Manifest, then retires it** (amendment, ROADMAP 6.6.9). The stop of
    item 4 used to apply to read-write opens too. It then also stopped at a Manifest a crash left after `log_end` (a
    commit cut before its superblock slot). The writer appended its WAL behind that Manifest, and if it crashed

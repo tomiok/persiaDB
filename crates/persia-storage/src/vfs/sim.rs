@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsString;
 use std::io;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use super::{DirEntry, EntryKind, FileType, Vfs};
@@ -177,6 +178,7 @@ impl State {
             handle,
             writable,
             state: Arc::clone(state),
+            unlocked: AtomicBool::new(false),
         })
     }
 }
@@ -505,6 +507,9 @@ pub struct SimFsFile {
     /// Opened for writing: writes through a read-only handle fail, as on a real file.
     writable: bool,
     state: Arc<Mutex<State>>,
+    /// [`ContainerFile::unlock`] already released this handle's lock. [`Drop`] must not release it again:
+    /// another handle may have taken it.
+    unlocked: AtomicBool,
 }
 
 impl SimFsFile {
@@ -561,6 +566,15 @@ impl ContainerFile for SimFsFile {
         Ok(per_process || *holder == self.handle)
     }
 
+    fn unlock(&self) -> io::Result<()> {
+        let mut state = lock(&self.state);
+        if state.per_process_locks || state.locks.get(&self.ino) == Some(&self.handle) {
+            state.locks.remove(&self.ino);
+        }
+        self.unlocked.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+
     fn locks_per_handle(&self) -> bool {
         !lock(&self.state).per_process_locks
     }
@@ -568,6 +582,9 @@ impl ContainerFile for SimFsFile {
 
 impl Drop for SimFsFile {
     fn drop(&mut self) {
+        if self.unlocked.load(Ordering::Relaxed) {
+            return;
+        }
         let mut state = lock(&self.state);
         if state.per_process_locks || state.locks.get(&self.ino) == Some(&self.handle) {
             state.locks.remove(&self.ino);

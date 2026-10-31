@@ -6,8 +6,10 @@
 //! [`append`](Container::append)s frames, makes them durable with one [`sync`](Container::sync) per group, and
 //! publishes them with [`commit`](Container::commit), which writes the inactive slot (SPEC §4.5).
 //!
-//! A read-write open holds an exclusive lock on the file (SPEC §8.4). Any failed write or sync poisons the handle:
-//! what reached the disk is unknown until the container is reopened ([`Error::Poisoned`]).
+//! A read-write open holds an exclusive lock on the file (SPEC §8.4). Dropping the writer unlocks it before the
+//! descriptor is closed: `flock` stays held after `close` while any duplicated or inherited descriptor is open
+//! (a child between `fork` and `exec`). Any failed write or sync poisons the handle: what reached the disk is
+//! unknown until the container is reopened ([`Error::Poisoned`]).
 
 mod error;
 pub mod file;
@@ -178,6 +180,75 @@ pub struct Container<F = File> {
     location: Option<path::Location<F>>,
     /// Set by [`Container::enable_mapped_reads`].
     mapped: Option<Mapped<F>>,
+    /// This handle took [`ContainerFile::try_lock`] on `file` (Unix). On Windows the lock is
+    /// [`path::Location::lock`] beside the container, and `file` is not locked (SPEC §4.5.1).
+    file_locked: bool,
+    /// [`release_writer_lock`] for this `F`. Stored so [`Drop`] needs no trait bound: a `Drop` impl cannot
+    /// require more than the struct does, and [`Container`] is generic over any file.
+    unlock_file: fn(&F),
+}
+
+/// Unlocks `file` on drop while `armed`. Close alone does not: `flock` / `LockFileEx` stay held until every
+/// duplicated or inherited descriptor is closed (SPEC §4.5.1).
+struct UnlockGuard<'a, F: ContainerFile> {
+    file: &'a F,
+    armed: bool,
+}
+
+impl<F: ContainerFile> Drop for UnlockGuard<'_, F> {
+    fn drop(&mut self) {
+        if self.armed {
+            release_writer_lock(self.file);
+        }
+    }
+}
+
+/// Unlocks the file on drop unless [`UnlockOnDrop::take`] removed it first. Holds the Windows writer lock
+/// (`<name>.lock`) until it is stored on the container or the create/open fails.
+struct UnlockOnDrop<F: ContainerFile> {
+    file: Option<F>,
+}
+
+impl<F: ContainerFile> UnlockOnDrop<F> {
+    fn new(file: Option<F>) -> Self {
+        Self { file }
+    }
+
+    fn take(&mut self) -> Option<F> {
+        self.file.take()
+    }
+}
+
+impl<F: ContainerFile> Drop for UnlockOnDrop<F> {
+    fn drop(&mut self) {
+        if let Some(file) = self.file.as_ref() {
+            release_writer_lock(file);
+        }
+    }
+}
+
+/// [`ContainerFile::unlock`], reported when it fails. [`Drop`] cannot return the error; closing the descriptor
+/// afterwards still releases the lock when no duplicate remains, and a duplicate would keep it.
+fn release_writer_lock<F: ContainerFile>(file: &F) {
+    if let Err(err) = file.unlock() {
+        let mut err_out = io::stderr().lock();
+        let _written = io::Write::write_all(
+            &mut err_out,
+            format!("persia: releasing the writer lock failed: {err}\n").as_bytes(),
+        );
+    }
+}
+
+impl<F> Drop for Container<F> {
+    fn drop(&mut self) {
+        // The beside-file lock (Windows) and the lock on `file` (Unix) are different descriptors.
+        if let Some(lock) = self.location.as_ref().and_then(|l| l.lock.as_ref()) {
+            (self.unlock_file)(lock);
+        }
+        if self.file_locked {
+            (self.unlock_file)(&self.file);
+        }
+    }
 }
 
 /// Mapped reads of the committed frames (SPEC §4.7, ADR-0017).
@@ -241,9 +312,16 @@ impl<F: ContainerFile> Container<F> {
 
     /// [`Container::create_on`], taking the lock on `file` unless the caller holds one beside it.
     fn create_locked_by(file: F, db_uuid: [u8; 16], lock: LockedBy) -> Result<Self> {
-        if lock == LockedBy::File {
+        let file_locked = lock == LockedBy::File;
+        if file_locked {
             take_lock(&file)?;
         }
+        // Armed until the container below owns the lock: a failed header write must not leave it held by a
+        // descriptor a `fork` inherited.
+        let mut guard = UnlockGuard {
+            file: &file,
+            armed: file_locked,
+        };
         let len = file.file_len().map_err(Error::io("stat"))?;
         if len != 0 {
             return Err(Error::InvalidInput(format!(
@@ -264,6 +342,8 @@ impl<F: ContainerFile> Container<F> {
         file.write_all_at(w.as_slice(), 0)
             .map_err(Error::io("write header"))?;
         file.sync_data().map_err(Error::io("sync"))?;
+        guard.armed = false;
+        drop(guard);
         Ok(Self {
             file,
             header,
@@ -287,6 +367,8 @@ impl<F: ContainerFile> Container<F> {
             },
             location: None,
             mapped: None,
+            file_locked,
+            unlock_file: release_writer_lock,
         })
     }
 
@@ -306,14 +388,20 @@ impl<F: ContainerFile> Container<F> {
     /// for a read-write open whose scan from `log_end` ends in corruption (ROADMAP 2.4.10), [`Error::Locked`],
     /// [`Error::ReadOnly`] for a read-write open of a container with unknown `rocompat_flags`, or [`Error::Io`].
     pub fn open_on(file: F, mode: Mode) -> Result<Self> {
-        if mode == Mode::ReadWrite {
+        let file_locked = mode == Mode::ReadWrite;
+        if file_locked {
             take_lock(&file)?;
         }
-        Self::recover(file, mode, TailPolicy::default())
+        Self::recover(file, mode, TailPolicy::default(), file_locked)
     }
 
     /// [`Container::open_on`] after the lock, if any, was taken.
-    fn recover(file: F, mode: Mode, policy: TailPolicy<'_, F>) -> Result<Self> {
+    fn recover(file: F, mode: Mode, policy: TailPolicy<'_, F>, file_locked: bool) -> Result<Self> {
+        // Until `file` moves into the container: a failed check must unlock, not only close.
+        let mut guard = UnlockGuard {
+            file: &file,
+            armed: file_locked,
+        };
         let prefix_len = file
             .file_len()
             .map_err(Error::io("stat"))?
@@ -340,6 +428,9 @@ impl<F: ContainerFile> Container<F> {
             check_manifest(&file, &sb)?;
         }
         let mut frames = committed_frames(&file, &sb)?;
+        // The container owns the lock from here, including when `recover_tail` fails and drops it.
+        guard.armed = false;
+        drop(guard);
         let mut container = Self {
             file,
             header,
@@ -358,6 +449,8 @@ impl<F: ContainerFile> Container<F> {
             },
             location: None,
             mapped: None,
+            file_locked,
+            unlock_file: release_writer_lock,
         };
         container.recover_tail(file_len, &mut frames, &policy)?;
         container.frames = frames;
@@ -877,9 +970,15 @@ impl<F: ContainerFile> Container<F> {
     ) -> Result<(Container<G>, Relocation)> {
         self.writable()?;
         self.sync()?;
-        if lock == LockedBy::File {
+        let file_locked = lock == LockedBy::File;
+        if file_locked {
             take_lock(&target)?;
         }
+        // Armed until the new container owns the lock, including every `?` below.
+        let mut guard = UnlockGuard {
+            file: &target,
+            armed: file_locked,
+        };
         let target_len = target.file_len().map_err(Error::io("stat"))?;
         if target_len != 0 {
             return Err(Error::InvalidInput(format!(
@@ -937,44 +1036,88 @@ impl<F: ContainerFile> Container<F> {
             .map_err(Error::io("write header"))?;
         target.sync_data().map_err(Error::io("sync"))?;
 
-        let (end, next_frame_seq) = (out.end, out.next_frame_seq);
-        let mut frames: Vec<FrameRef> = out
-            .moved
-            .get(wal_first..)
-            .unwrap_or_default()
-            .iter()
-            .map(|(_, new)| *new)
-            .filter(|f| f.offset >= wal_start)
-            .collect();
-        if manifest.offset >= wal_start {
-            frames.push(manifest);
-        }
-        frames.sort_by_key(|f| f.offset);
-        let relocation = Relocation { moved: out.moved };
-        let container = Container {
-            file: target,
+        let parts = CompactedParts {
+            end: out.end,
+            next_frame_seq: out.next_frame_seq,
+            moved: std::mem::take(&mut out.moved),
+            wal_first,
+            wal_start,
+            manifest,
             header,
-            mode: Mode::ReadWrite,
-            active: ActiveSuperblock {
-                slot: Slot::A,
-                superblock,
-            },
-            end,
-            next_frame_seq,
-            frames,
-            dirty: false,
-            poisoned: false,
-            recovery: Recovery {
-                scan_end: ScanEnd::Clean { offset: end },
-                truncated_from: None,
-                quarantined: None,
-                stale_tail: false,
-            },
-            location: None,
-            mapped: None,
+            superblock,
         };
-        Ok((container, relocation))
+        // End `out`'s borrow of `target` before the container takes the file.
+        drop(out);
+        guard.armed = false;
+        drop(guard);
+        Ok(assemble_compacted(target, file_locked, parts))
     }
+}
+
+/// What [`assemble_compacted`] needs besides the file it opens.
+struct CompactedParts {
+    end: u64,
+    next_frame_seq: u64,
+    moved: Vec<(FrameRef, FrameRef)>,
+    wal_first: usize,
+    wal_start: u64,
+    manifest: FrameRef,
+    header: Header,
+    superblock: Superblock,
+}
+
+/// The container a compaction just wrote into `target`, and where each frame moved.
+fn assemble_compacted<G: ContainerFile>(
+    target: G,
+    file_locked: bool,
+    parts: CompactedParts,
+) -> (Container<G>, Relocation) {
+    let CompactedParts {
+        end,
+        next_frame_seq,
+        moved,
+        wal_first,
+        wal_start,
+        manifest,
+        header,
+        superblock,
+    } = parts;
+    let mut frames: Vec<FrameRef> = moved
+        .get(wal_first..)
+        .unwrap_or_default()
+        .iter()
+        .map(|(_, new)| *new)
+        .filter(|frame| frame.offset >= wal_start)
+        .collect();
+    if manifest.offset >= wal_start {
+        frames.push(manifest);
+    }
+    frames.sort_by_key(|frame| frame.offset);
+    let container = Container {
+        file: target,
+        header,
+        mode: Mode::ReadWrite,
+        active: ActiveSuperblock {
+            slot: Slot::A,
+            superblock,
+        },
+        end,
+        next_frame_seq,
+        frames,
+        dirty: false,
+        poisoned: false,
+        recovery: Recovery {
+            scan_end: ScanEnd::Clean { offset: end },
+            truncated_from: None,
+            quarantined: None,
+            stale_tail: false,
+        },
+        location: None,
+        mapped: None,
+        file_locked,
+        unlock_file: release_writer_lock,
+    };
+    (container, Relocation { moved })
 }
 
 /// Reads `len` bytes at `offset`, which the caller has bounded by the file length.
@@ -1270,4 +1413,47 @@ impl<F> Default for TailPolicy<'_, F> {
 enum LockedBy {
     File,
     Beside,
+}
+
+#[cfg(all(test, unix))]
+mod lock_release {
+    use super::*;
+
+    /// `flock` belongs to the open file description. A duplicate (`dup`, or a child between `fork` and `exec`)
+    /// keeps the lock after `close`. Drop must unlock explicitly, or the next writer waits on a handle that is
+    /// already gone (nightly `kill_9_loop_keeps_every_acknowledged_write`).
+    #[test]
+    fn dropping_the_writer_unlocks_while_a_duplicate_descriptor_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let writer = Container::create(&path).unwrap();
+        let dup = writer.file.try_clone().unwrap();
+        let blocked = Container::open(&path, Mode::ReadWrite);
+        assert!(
+            matches!(blocked, Err(Error::Locked)),
+            "the duplicate must share the writer lock, or this test proves nothing: {blocked:?}"
+        );
+        drop(writer);
+        let again = Container::open(&path, Mode::ReadWrite).unwrap_or_else(|err| {
+            panic!("drop must release the lock while the duplicate is still open: {err}")
+        });
+        drop(again);
+        // The duplicate is still open here: the assertion above already required the reopen to succeed first.
+        drop(dup);
+    }
+
+    /// A read-only open takes no lock, so it does not keep a writer out after the writer is dropped, and dropping
+    /// the reader does not unlock a lock it never held.
+    #[test]
+    fn a_read_only_handle_does_not_hold_the_writer_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let writer = Container::create(&path).unwrap();
+        drop(writer);
+        let reader = Container::open(&path, Mode::ReadOnly).unwrap();
+        let writer = Container::open(&path, Mode::ReadWrite).unwrap();
+        drop(reader);
+        drop(writer);
+        Container::open(&path, Mode::ReadWrite).unwrap();
+    }
 }

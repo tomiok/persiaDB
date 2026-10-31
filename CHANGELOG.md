@@ -396,6 +396,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
+- `persia-storage`: dropping a writer releases the container's writer lock before the file is closed (ROADMAP 6.6.11,
+  SPEC §4.5.1). `flock` stays held after `close` while any duplicated or inherited descriptor is open, so a second
+  `Database::open` in the same process could fail with `container is locked by another writer` for as long as
+  another thread's `fork` (a test child, between `fork` and `exec`) still had a copy. Drop unlocks explicitly.
+  Merge workers are joined first; they do not hold the container file.
 - `persia-engine`: a postings block whose documents have a norm below its Skip `min_norm` no longer ranks or drops
   hits silently under pruning (ROADMAP 7.4.10, SPEC §7.3): scoring such a document is a `ReadError::Section` corruption
   of the field's `Norms`, whatever the strategy. (A frequency above the block's `max_tf` already was one, at block
