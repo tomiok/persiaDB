@@ -1269,12 +1269,20 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
   strategy, and where a clause has no block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list
   bound.
+  A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
+  (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
+  corruption: a search that scores such a document fails instead of ranking it above a bound another document was
+  skipped by. Blocks pruning skips are not read, so their bounds are checked only by `Segment::verify`.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
   scored. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
   the top-k collector, so a deleted document cannot enter the heap or raise the competitive threshold. Block upper
   bounds may still cover deleted documents; that only loosens pruning.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
-- Memtable is searched like a tiny segment (near-real-time visibility after `put` returns).
+- Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
+  Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
+  put or a delete of are left out like deleted documents, as of the memtable view searched, so each id shows once.
+  Across views, hits rank by score descending, then segment order (the manifest's) with the memtable last, then
+  docid; a view starts from the threshold of the hits kept from the views before it, which win its ties.
 
 ### 7.4 Sorting, pagination
 Sort by score or by a column. `offset/limit` supported; `search_after` cursor `(score, segment_gen, docid)` preferred for deep paging.

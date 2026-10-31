@@ -3987,3 +3987,69 @@ fn a_damaged_norms_block_fails_only_the_reads_that_reach_it() {
     let err = open(&schema, &s.to_bytes()).unwrap_err();
     assert!(norms_corruption(&err), "{err:?}");
 }
+
+/// A norm below its postings block's `min_norm` scores above the bound pruning skips by: a search that scores the
+/// document fails as a corruption of the norms under every strategy, rather than dropping or misranking the hit
+/// (ROADMAP 7.4.10). `verify` catches it too, as a norm other than the field length.
+#[test]
+fn a_norm_below_its_block_min_norm_fails_the_search() {
+    use std::sync::Arc;
+
+    use persia_engine::query::{PhraseQuery, PhraseTerm, Query, TermQuery};
+    use persia_engine::search::{Pruning, SearchPlan};
+    use persia_engine::stats::SegmentStatistics;
+    use persia_engine::view::SegmentView;
+
+    let (schema, bytes) = fixture();
+    let title = id(&schema, "title");
+    let mut seg = Seg::parse(&bytes);
+    // Doc 1's title has 6 tokens, and its block holds 3-token titles: 0 is below the block's smallest norm.
+    seg.edit_stream(SectionKind::Norms, title.get(), |b| {
+        assert!(b[1] > 3);
+        b[1] = 0;
+    });
+    let segment = Arc::new(open(&schema, &seg.to_bytes()).unwrap());
+    assert!(segment.verify().is_err());
+    let schema = Arc::new(schema);
+    let stats = SegmentStatistics::new(&schema, &[Arc::clone(&segment)]);
+    let view = SegmentView::new(&segment, None);
+    let term = |t: &str| PhraseTerm {
+        term: t.into(),
+        position: 0,
+    };
+    let queries = [
+        Query::Term(TermQuery {
+            field: title,
+            term: "alpha".into(),
+        }),
+        Query::Phrase(PhraseQuery {
+            field: title,
+            terms: vec![
+                term("alpha"),
+                PhraseTerm {
+                    position: 1,
+                    ..term("beta")
+                },
+            ],
+        }),
+    ];
+    for query in &queries {
+        let plan = SearchPlan::new(query, &schema, &stats).unwrap();
+        for pruning in [
+            Pruning::Exhaustive,
+            Pruning::MaxScore,
+            Pruning::BlockMaxWand,
+        ] {
+            let err = plan.top_k_with(&view, DOCS as usize, pruning).unwrap_err();
+            assert!(err.is_corruption(), "{query:?} {pruning:?}: {err}");
+            assert!(
+                matches!(
+                    &err,
+                    ReadError::Section { kind: SectionKind::Norms, field, position: 1, reason }
+                        if *field == title.get() && invalid("min_norm")(reason)
+                ),
+                "{query:?} {pruning:?}: {err:?}"
+            );
+        }
+    }
+}

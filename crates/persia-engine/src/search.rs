@@ -50,8 +50,10 @@ pub use plan::SearchPlan;
 pub use top_k::{Hit, TopK};
 
 use crate::query::QueryError;
+use crate::schema::FieldId;
 use crate::score::ScoreError;
-use crate::segment::ReadError;
+use crate::segment::{ReadError, SectionKind, SegmentCorruption};
+use crate::view::NormReader;
 #[cfg(doc)]
 use crate::view::SearchView;
 
@@ -265,4 +267,27 @@ fn raise(min: &mut Option<f64>, score: f64) -> bool {
     }
     *min = Some(score);
     true
+}
+
+/// The norm byte of `docid` in `field`, checked against `min_norm`, the smallest norm of a postings block holding it
+/// (SPEC §5.3.2): a norm below it scores above the bound pruning skips by, so a document scored and one skipped
+/// would disagree. It is corruption, never a hit dropped silently (ROADMAP 7.4.10).
+fn bounded_norm(
+    norms: &mut impl NormReader,
+    field: FieldId,
+    docid: u32,
+    min_norm: Option<u8>,
+) -> Result<u8, ReadError> {
+    let norm = norms.get(docid)?;
+    if min_norm.is_some_and(|m| norm < m) {
+        return Err(ReadError::Section {
+            kind: SectionKind::Norms,
+            field: field.get(),
+            position: u64::from(docid),
+            reason: SegmentCorruption::Invalid {
+                what: "a norm below its postings block's min_norm",
+            },
+        });
+    }
+    Ok(norm)
 }

@@ -1,0 +1,289 @@
+//! A search over a whole collection (SPEC §7.3, §8.3, ROADMAP 7.4.6): its segments, each without the documents its
+//! committed tombstones delete and the copies the memtable hides, and the memtable as one more segment.
+//!
+//! Before the commit that flushes it, the memtable's put or delete of an id hides every segment copy of that id,
+//! which no tombstone deletes yet. [`CollectionSnapshot::views`] adds those copies to each segment's tombstones, so
+//! a search sees each id at most once, as [`CollectionSnapshot::lookup`] does.
+//!
+//! A snapshot keeps a log of the copies hidden so far, by the version of the operation that first named their id: a
+//! view of any version takes a prefix of it, and only a version past the log looks ids up, those first named since.
+//! It also keeps the deletions of the newest version searched, which a newer view extends.
+
+use std::sync::{Arc, Mutex, PoisonError};
+
+use roaring::RoaringBitmap;
+
+use super::snapshot::{CollectionSnapshot, Located};
+use crate::memtable::MemtableView;
+use crate::search::{Matcher, Pruning, SearchPlan, collect};
+use crate::segment::{ReadError, Tombstones};
+use crate::view::{SearchView, SegmentView};
+
+/// Each segment's deletions as of a memtable version: its committed tombstones plus the docids of the ids
+/// operations `1..=version` named (SPEC §8.3).
+#[derive(Debug)]
+pub(super) struct Hidden {
+    version: u64,
+    /// By the segment's index in [`CollectionSnapshot::segments`]; `None` for a segment without any.
+    tombstones: Vec<Option<Arc<Tombstones>>>,
+}
+
+/// The segment copies the memtable hides that no committed tombstone deletes, as `(version, segment index, docid)`,
+/// `version` the one of the operation that first named the id; in version order, every id first named through
+/// `version` in it.
+#[derive(Debug, Default)]
+pub(super) struct HiddenLog {
+    version: u64,
+    copies: Vec<(u64, usize, u32)>,
+}
+
+/// What a snapshot keeps of the copies its memtable hides.
+#[derive(Debug, Default)]
+pub(super) struct HiddenState {
+    log: Arc<HiddenLog>,
+    /// The deletions of the newest version searched.
+    newest: Option<Arc<Hidden>>,
+}
+
+/// A snapshot's [`HiddenState`].
+pub(super) type HiddenCache = Arc<Mutex<HiddenState>>;
+
+/// A hit of a search over a collection (ROADMAP 7.4.6): where its document is, and its score (SPEC §7.2).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CollectionHit {
+    /// The document: a segment's (by its index in [`CollectionSnapshot::segments`]) or the memtable's.
+    pub location: Located,
+    /// Its score.
+    pub score: f64,
+}
+
+/// What a search over a collection runs on, as of one view of its memtable ([`CollectionSnapshot::views`]): each
+/// segment with every document deleted or hidden left out, then the memtable.
+#[derive(Debug, Clone)]
+pub struct CollectionViews<'a> {
+    snapshot: &'a CollectionSnapshot,
+    memtable: &'a MemtableView,
+    hidden: Arc<Hidden>,
+}
+
+impl CollectionSnapshot {
+    /// The views a search over the collection runs on as of `memtable`, a view of [`Self::memtable`] (SPEC §8.3,
+    /// ROADMAP 7.4.6): each segment without the documents its committed tombstones delete, nor the copies of ids
+    /// `memtable` has a put or a delete of, then `memtable`. Writes after `memtable` was taken hide nothing.
+    ///
+    /// The first view past every version searched before looks each id first named since up in every segment's
+    /// `IdMap`; any other reuses what the snapshot kept (the module docs). A view of another memtable is computed
+    /// whole and leaves the snapshot's cache alone.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions, Located};
+    /// use persia_engine::document::{Document, Value};
+    /// use persia_engine::query::{Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::{Pruning, SearchPlan};
+    /// use persia_engine::wal::Durability;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let schema = SchemaBuilder::new("notes").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let note = |text: &str| Document::new("n1").with(body, Value::String(text.into()));
+    /// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// db.create_collection(schema)?;
+    /// db.put("notes", &note("red shoes"), Durability::Fsync)?;
+    /// db.commit()?;
+    /// // The upsert hides the committed copy before its tombstone is committed.
+    /// db.put("notes", &note("red hat"), Durability::Fsync)?;
+    ///
+    /// let snapshot = db.snapshot();
+    /// let notes = snapshot.collection("notes").ok_or("no collection")?;
+    /// let memtable = notes.memtable();
+    /// let query = Query::Term(TermQuery { field: body, term: "red".into() });
+    /// let plan = SearchPlan::new(&query, notes.schema(), &notes.search_statistics(&memtable))?;
+    /// let hits = notes.views(&memtable)?.top_k(&plan, 10, Pruning::default())?;
+    /// assert_eq!(hits.iter().map(|h| h.location).collect::<Vec<_>>(), [Located::Memtable(0)]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// A corruption of a segment's `IdMap`.
+    pub fn views<'a>(
+        &'a self,
+        memtable: &'a MemtableView,
+    ) -> Result<CollectionViews<'a>, ReadError> {
+        let version = memtable.version();
+        let views = |hidden| CollectionViews {
+            snapshot: self,
+            memtable,
+            hidden,
+        };
+        if !memtable.is_of(&self.memtable) {
+            // Another memtable's versions mean nothing to this snapshot's cache: computed whole, and not kept.
+            let log = self.extend(&HiddenLog::default(), memtable)?;
+            return Ok(views(Arc::new(self.materialize(None, &log, version)?)));
+        }
+        let (log, newest) = {
+            let state = lock(&self.hidden);
+            (Arc::clone(&state.log), state.newest.clone())
+        };
+        if let Some(hidden) = newest.as_ref().filter(|h| h.version == version) {
+            return Ok(views(Arc::clone(hidden)));
+        }
+        // The lookups run without the lock: a search on another thread is not held up by them.
+        let log = if log.version < version {
+            let log = Arc::new(self.extend(&log, memtable)?);
+            let mut state = lock(&self.hidden);
+            if state.log.version < log.version {
+                state.log = Arc::clone(&log);
+            }
+            log
+        } else {
+            log
+        };
+        let base = newest.filter(|h| h.version < version);
+        let hidden = Arc::new(self.materialize(base.as_deref(), &log, version)?);
+        let mut state = lock(&self.hidden);
+        if state.newest.as_ref().is_none_or(|n| n.version < version) {
+            state.newest = Some(Arc::clone(&hidden));
+        }
+        Ok(views(hidden))
+    }
+
+    /// `log` extended through `memtable`'s version: the segment copies of the ids first named after `log`'s.
+    fn extend(&self, log: &HiddenLog, memtable: &MemtableView) -> Result<HiddenLog, ReadError> {
+        // A copy per new version; the log holds one entry per hidden copy, far fewer than the operations.
+        let mut copies = log.copies.clone();
+        for (version, id) in memtable.ids_first_named_after(log.version) {
+            for (index, (segment, deleted)) in
+                self.segments.iter().zip(&self.tombstones).enumerate()
+            {
+                if let Some(docid) = segment.docid_of(&id)?
+                    && !deleted.as_ref().is_some_and(|t| t.contains(docid))
+                {
+                    copies.push((version, index, docid));
+                }
+            }
+        }
+        Ok(HiddenLog {
+            version: memtable.version(),
+            copies,
+        })
+    }
+
+    /// The deletions as of `version`: `base` (or the commit's tombstones) plus the copies of `log` hidden after
+    /// `base`'s version and through `version`, which `log` must cover.
+    fn materialize(
+        &self,
+        base: Option<&Hidden>,
+        log: &HiddenLog,
+        version: u64,
+    ) -> Result<Hidden, ReadError> {
+        let from = base.map_or(0, |b| b.version);
+        let mut tombstones = base.map_or_else(|| self.tombstones.clone(), |b| b.tombstones.clone());
+        let start = log.copies.partition_point(|&(v, ..)| v <= from);
+        let end = log.copies.partition_point(|&(v, ..)| v <= version);
+        let mut added: Vec<Option<RoaringBitmap>> = vec![None; tombstones.len()];
+        for &(_, index, docid) in log.copies.get(start..end).unwrap_or_default() {
+            let deleted = tombstones.get(index).and_then(Option::as_deref);
+            if let Some(slot) = added.get_mut(index) {
+                slot.get_or_insert_with(|| deleted.map(|t| t.docids().clone()).unwrap_or_default())
+                    .insert(docid);
+            }
+        }
+        for ((segment, deleted), added) in self.segments.iter().zip(&mut tombstones).zip(added) {
+            if let Some(all) = added {
+                *deleted = Some(Arc::new(segment.tombstones(all)?));
+            }
+        }
+        Ok(Hidden {
+            version,
+            tombstones,
+        })
+    }
+}
+
+impl CollectionViews<'_> {
+    /// Each segment with its deletions and the copies the memtable hides, in the order of
+    /// [`CollectionSnapshot::segments`].
+    pub fn segments(&self) -> impl ExactSizeIterator<Item = SegmentView<'_>> {
+        self.snapshot
+            .segments
+            .iter()
+            .zip(&self.hidden.tombstones)
+            .map(|(s, t)| SegmentView::new(s, t.as_deref()))
+    }
+
+    /// The memtable.
+    pub fn memtable(&self) -> &MemtableView {
+        self.memtable
+    }
+
+    /// The best `k` hits of `plan` in the collection, pruning with `pruning` (ROADMAP 7.4.3, 7.4.4): score
+    /// descending, then the segments in the order of [`CollectionSnapshot::segments`] and the memtable last, then
+    /// docid. `plan` should be planned with [`CollectionSnapshot::search_statistics`] of the same memtable view.
+    ///
+    /// The views are searched one after the other (ROADMAP 7.6.1 runs them in parallel). Once `k` hits are kept,
+    /// the next view starts from the worst one's score as its threshold: every hit kept wins a tie against a later
+    /// view's, so the hits are the same whatever `pruning` is.
+    ///
+    /// # Errors
+    /// As [`SearchPlan::matcher`], for any view.
+    pub fn top_k(
+        &self,
+        plan: &SearchPlan,
+        k: usize,
+        pruning: Pruning,
+    ) -> Result<Vec<CollectionHit>, ReadError> {
+        let mut hits = Vec::new();
+        if k == 0 {
+            return Ok(hits);
+        }
+        for (index, view) in self.segments().enumerate() {
+            search_view(plan, &view, k, pruning, &mut hits, |docid| {
+                Located::Segment { index, docid }
+            })?;
+        }
+        search_view(
+            plan,
+            self.memtable,
+            k,
+            pruning,
+            &mut hits,
+            Located::Memtable,
+        )?;
+        Ok(hits)
+    }
+}
+
+/// Merges the best `k` hits of `plan` in `view` into `hits`, the best `k` of the views before it, best first.
+fn search_view<V: SearchView>(
+    plan: &SearchPlan,
+    view: &V,
+    k: usize,
+    pruning: Pruning,
+    hits: &mut Vec<CollectionHit>,
+    location: impl Fn(u32) -> Located,
+) -> Result<(), ReadError> {
+    let mut matcher = plan.matcher_with(view, pruning)?;
+    if hits.len() >= k
+        && let Some(worst) = hits.last()
+    {
+        matcher.set_min_competitive(worst.score);
+    }
+    hits.extend(
+        collect(&mut matcher, k)?
+            .into_iter()
+            .map(|h| CollectionHit {
+                location: location(h.docid),
+                score: h.score,
+            }),
+    );
+    // Stable: on a tie the earlier view's hit stays first, and a view's own hits are already in docid order.
+    hits.sort_by(|a, b| (b.score + 0.0).total_cmp(&(a.score + 0.0)));
+    hits.truncate(k);
+    Ok(())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    // The cache is only ever replaced whole, so a panic elsewhere cannot leave it half written.
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}

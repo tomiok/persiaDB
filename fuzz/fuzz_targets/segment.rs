@@ -15,9 +15,11 @@
 //! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
 //! `advance` and `shallow_advance` to a few targets, norms, columns (directly and through cursors), every document,
 //! id and blob reference, then `Segment::verify`; then it is merged (ROADMAP 6.5.2) alone and with every other
-//! document deleted, and each merged segment written. Half the inputs are read through a 4 KiB block cache, and
-//! positions are also read for every 7th document only. Errors are ignored, except that a segment that verifies must
-//! merge into one that opens and verifies; otherwise the only failure is a panic (or a hang).
+//! document deleted, and each merged segment written; then it is searched (ROADMAP 7.4.10) with a few queries under
+//! each pruning strategy, alone and with every other document deleted. Half the inputs are read through a 4 KiB block
+//! cache, and positions are also read for every 7th document only. Errors are ignored, except that a segment that
+//! verifies must merge into one that opens and verifies, and give the same hits under every pruning strategy;
+//! otherwise the only failure is a panic (or a hang).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -28,13 +30,17 @@ use libfuzzer_sys::fuzz_target;
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::merge::{MergeError, MergeSource, merge};
+use persia_engine::query::{BoolQuery, BoostQuery, PhraseQuery, PhraseTerm, Query, TermQuery};
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
+use persia_engine::search::{Pruning, SearchPlan};
 use persia_engine::segment::{
     BlockCache, ReadError, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter,
     TermIndex, WriteOptions,
 };
+use persia_engine::stats::SegmentStatistics;
+use persia_engine::view::SegmentView;
 use persia_format::block::{BlockReader, BlockWriter, Compression};
 use persia_format::checksum::crc32c;
 use persia_format::{BlobId, BlobRef, ByteSource};
@@ -174,7 +180,7 @@ type Entries = Vec<(Vec<u8>, u64)>;
 /// The fixed segment, split into its footer body (without CRC and locator) and its sections in table order
 /// (SPEC §5.1). Only the harness's own, valid bytes are parsed here.
 struct Fixed {
-    schema: CollectionSchema,
+    schema: Arc<CollectionSchema>,
     body: Vec<u8>,
     sections: Vec<Vec<u8>>,
     /// Indices into `sections` of the block-framed ones, with their decoded stream and block size.
@@ -237,7 +243,7 @@ impl Fixed {
             sections.push(section);
         }
         Self {
-            schema,
+            schema: Arc::new(schema),
             body,
             sections,
             framed,
@@ -566,6 +572,101 @@ fn merge_all(seg: &Segment, schema: &CollectionSchema) {
     }
 }
 
+/// Runs a few queries over `seg`, alone and with every other document deleted, under each pruning strategy
+/// (ROADMAP 7.4.10): an `Err` or hits, never a panic or a hang. A segment that verifies gives the same hits, scores
+/// bit for bit, whatever the strategy (SPEC §7.3).
+fn search_all(seg: Segment, schema: &Arc<CollectionSchema>) {
+    let valid = seg.verify().is_ok();
+    let seg = Arc::new(seg);
+    let stats = SegmentStatistics::new(schema, &[Arc::clone(&seg)]);
+    let odd = seg
+        .tombstones((1..seg.doc_count()).step_by(2).collect())
+        .ok();
+    for tombstones in [None, odd.as_ref()] {
+        let view = SegmentView::new(&seg, tombstones);
+        for query in queries(schema) {
+            let Ok(plan) = SearchPlan::new(&query, schema, &stats) else {
+                continue;
+            };
+            for k in [1, 3, 10] {
+                let hits = [
+                    Pruning::Exhaustive,
+                    Pruning::MaxScore,
+                    Pruning::BlockMaxWand,
+                ]
+                .map(|p| {
+                    plan.top_k_with(&view, k, p).map(|hits| {
+                        hits.iter()
+                            .map(|h| (h.docid, h.score.to_bits()))
+                            .collect::<Vec<_>>()
+                    })
+                });
+                if valid {
+                    let [exhaustive, max_score, wand] =
+                        hits.map(|h| h.expect("a valid segment searches"));
+                    assert_eq!(exhaustive, max_score, "{query:?} k={k}: MaxScore");
+                    assert_eq!(exhaustive, wand, "{query:?} k={k}: block-max WAND");
+                }
+            }
+        }
+    }
+}
+
+/// Terms, disjunctions (the pruned ones), a conjunction with an optional clause, a phrase and a boost over the
+/// `documents` vocabulary.
+fn queries(schema: &CollectionSchema) -> Vec<Query> {
+    let term = |field: &str, t: &str| {
+        Query::Term(TermQuery {
+            field: id(schema, field),
+            term: t.into(),
+        })
+    };
+    let should = |should: Vec<Query>| {
+        Query::Bool(BoolQuery {
+            should,
+            ..BoolQuery::default()
+        })
+    };
+    vec![
+        term("title", "alpha"),
+        term("body", "run"),
+        should(vec![
+            term("title", "the"),
+            term("title", "alpha"),
+            term("body", "run"),
+            term("title", "beta"),
+            term("tag", "red"),
+        ]),
+        should(vec![
+            Query::Boost(BoostQuery {
+                query: Box::new(term("title", "x")),
+                boost: 2.5,
+            }),
+            term("title", "gamma"),
+            term("body", "of"),
+        ]),
+        Query::Bool(BoolQuery {
+            must: vec![term("title", "the")],
+            should: vec![term("title", "alpha")],
+            must_not: vec![term("tag", "green")],
+            ..BoolQuery::default()
+        }),
+        Query::Phrase(PhraseQuery {
+            field: id(schema, "title"),
+            terms: vec![
+                PhraseTerm {
+                    term: "the".into(),
+                    position: 0,
+                },
+                PhraseTerm {
+                    term: "alpha".into(),
+                    position: 1,
+                },
+            ],
+        }),
+    ]
+}
+
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
@@ -593,5 +694,6 @@ fuzz_target!(|data: &[u8]| {
     if let Ok(seg) = opened {
         read_all(&seg, &fixed.schema);
         merge_all(&seg, &fixed.schema);
+        search_all(seg, &fixed.schema);
     }
 });

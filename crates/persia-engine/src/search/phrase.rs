@@ -1,12 +1,13 @@
 //! Phrase matching with positions (ROADMAP 7.4.2): the documents holding every term of a phrase, leapfrogged as a
 //! conjunction, where the terms also stand at their relative positions; scored from the phrase frequency (SPEC §7.2).
 
+use crate::schema::FieldId;
 use crate::score::{FieldHit, TermScorer};
 use crate::segment::ReadError;
-use crate::view::{NormReader, PostingsIterator, SearchView};
+use crate::view::{PostingsIterator, SearchView};
 
 use super::boolean::Conjunction;
-use super::{Matcher, Pos};
+use super::{Matcher, Pos, bounded_norm};
 
 /// The postings of one phrase term as a [`Matcher`] (it scores nothing), with its relative position.
 pub(super) struct PhrasePostings<P> {
@@ -55,6 +56,7 @@ impl<P: PostingsIterator> Matcher for PhrasePostings<P> {
 /// The documents holding a phrase, at least one term.
 pub(super) struct PhraseMatcher<'a, V: SearchView + 'a> {
     terms: Conjunction<PhrasePostings<V::Postings<'a>>>,
+    field: FieldId,
     norms: V::Norms<'a>,
     scorer: &'a TermScorer,
     /// The phrase frequency of the current document, at least 1.
@@ -67,6 +69,7 @@ pub(super) struct PhraseMatcher<'a, V: SearchView + 'a> {
 impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
     pub(super) fn new(
         terms: Vec<PhrasePostings<V::Postings<'a>>>,
+        field: FieldId,
         norms: V::Norms<'a>,
         scorer: &'a TermScorer,
     ) -> Self {
@@ -87,6 +90,7 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
         Self {
             max: scorer.score(&[Some(bound)]),
             terms: Conjunction::new(terms),
+            field,
             norms,
             scorer,
             freq: 0,
@@ -141,9 +145,17 @@ impl<'a, V: SearchView + 'a> Matcher for PhraseMatcher<'a, V> {
         let Some(doc) = self.pos.doc() else {
             return Ok(0.0);
         };
+        // Each term is on `doc`: its block's smallest norm bounds the document's.
+        let min_norm = self
+            .terms
+            .clauses_mut()
+            .iter()
+            .filter_map(|t| t.postings.block_max())
+            .map(|b| b.min_norm)
+            .max();
         let hit = FieldHit {
             tf: self.freq,
-            norm: self.norms.get(doc)?,
+            norm: bounded_norm(&mut self.norms, self.field, doc, min_norm)?,
         };
         Ok(self.scorer.score(&[Some(hit)]))
     }

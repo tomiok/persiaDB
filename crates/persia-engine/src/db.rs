@@ -50,6 +50,7 @@ mod read_only;
 mod recovery;
 mod snapshot;
 mod verify;
+mod views;
 
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -74,6 +75,7 @@ pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::ReadOnlyDatabase;
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
 pub use verify::{Tail, VerifyReport};
+pub use views::{CollectionHit, CollectionViews};
 
 use crate::document::Document;
 use crate::manifest::{
@@ -1347,6 +1349,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                         .collect(),
                     memtable: c.memtable.reader(),
                     statistics: Arc::default(),
+                    hidden: Arc::default(),
                 };
                 (name.clone(), snapshot)
             })

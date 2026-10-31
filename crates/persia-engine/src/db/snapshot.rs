@@ -19,6 +19,8 @@ use crate::segment::{ReadError, Segment, Tombstones};
 use crate::stats::{SearchStatistics, SegmentStatistics};
 use crate::view::{SearchView, SegmentView};
 
+use super::views::HiddenCache;
+
 /// The state one commit published, plus each collection's memtable (SPEC §8.4).
 #[derive(Debug)]
 pub struct Snapshot {
@@ -58,6 +60,8 @@ pub struct CollectionSnapshot {
     pub(super) memtable: MemtableReader,
     /// The segments' collection statistics, computed on first use (ROADMAP 7.2.1).
     pub(super) statistics: Arc<OnceLock<SegmentStatistics>>,
+    /// The copies the memtable hides, as of the newest memtable view searched (ROADMAP 7.4.6).
+    pub(super) hidden: HiddenCache,
 }
 
 /// Where the live version of a document id is (SPEC §8.3, ROADMAP 6.4.1).
@@ -93,8 +97,8 @@ impl CollectionSnapshot {
     }
 
     /// Each segment with its committed deletions, oldest first. Before a commit, the memtable's versions and deletes of
-    /// ids also hide segment copies the tombstones do not yet delete: a search over these views and the memtable
-    /// must apply that too (SPEC §8.3, ROADMAP 7.4.6); [`Self::lookup`] does.
+    /// ids also hide segment copies the tombstones do not yet delete: [`Self::views`] leaves those out too, and
+    /// [`Self::lookup`] never returns them (SPEC §8.3, ROADMAP 7.4.6).
     pub fn segment_views(
         &self,
     ) -> impl DoubleEndedIterator<Item = SegmentView<'_>> + ExactSizeIterator {
