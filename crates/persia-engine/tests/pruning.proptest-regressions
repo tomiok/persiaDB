@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5ac6b175908d68dfeb8ba7878a45df4f6c9516c6c0a1742341b422a1118cbf2a # shrinks to seed = 0, n = 381, deleted = 230, shapes = [Or([Phrase(2, 0), Term(3), Term(37), Term(3), Combined(38, 5, 6.3306592651053615)]), Or([Term(38), Term(40), Term(7), Term(36), Term(40), Term(11), Term(13), Term(1), Term(9), Term(29), Term(31), Term(4), Term(15), Term(4), Term(2), Term(1), Term(4), Term(40), Term(7), Term(22), Term(6), Term(5), Term(1), Term(0), Term(40), Term(13), Term(5), Term(2), Term(6), Term(19), Term(4), Term(40), Term(2), Term(2), Term(1), Term(2), Term(40), Term(40), Term(9), Term(4), Term(40), Term(4), Term(0)]), OrNot([Combined(40, 1, 1.0), Or([Term(6), Term(4), Term(0), Term(34), Term(0), Term(32), Term(3), Term(40), Term(40), Term(6), Term(6), Term(3), Term(3), Term(6), Term(17), Term(5), Term(9), Term(6), Term(15), Term(9), Term(27), Term(3), Term(35), Term(5), Term(28), Term(4), Term(4), Term(3), Term(4), Term(23), Term(3), Term(40), Term(28), Term(4), Term(32), Term(5), Term(2), Term(4), Term(16)]), Title(2), Title(35), Combined(6, 2, 1.0), Term(6)], Combined(10, 1, 1.0)), And([Combined(11, 0, 1.0), Title(40)])], k = 9, quantiles = [0.17410670226413644, 0.30971670568005816], every = 2

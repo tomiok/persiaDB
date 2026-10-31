@@ -259,6 +259,8 @@ fn shape() -> impl Strategy<Value = Shape> {
         let clauses = prop::collection::vec(inner.clone(), 2..8);
         prop_oneof![
             6 => clauses.clone().prop_map(Shape::Or),
+            // Wide, as a relaxation expansion (ROADMAP 7.4.7): past the few-clause scan of a disjunction.
+            1 => prop::collection::vec(word().prop_map(Shape::Term), 9..50).prop_map(Shape::Or),
             2 => (clauses.clone(), inner.clone()).prop_map(|(s, n)| Shape::OrNot(s, Box::new(n))),
             1 => prop::collection::vec(inner.clone(), 1..3).prop_map(Shape::And),
             1 => (inner.clone(), clauses).prop_map(|(m, s)| Shape::AndOr(Box::new(m), s)),

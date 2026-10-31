@@ -1,4 +1,5 @@
-//! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR
+//! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR (of 3
+//! and of 50 clauses, as a relaxation expansion builds, 7.4.7)
 //! and a phrase with the default pruning (block-max WAND), each strategy of 7.4.4 side by side, and a term under
 //! filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted by a column,
 //! with a facet, and a page after a cursor. Deterministic
@@ -103,6 +104,11 @@ fn bench(c: &mut Criterion) {
             term: w.into(),
         })
     };
+    // 50 clauses, as a relaxation expansion builds (SPEC §7.6): every fourth word, common to rare.
+    let or50 = Query::Bool(BoolQuery {
+        should: (0..50).map(|i| term(&format!("w{}", i * 4))).collect(),
+        ..BoolQuery::default()
+    });
     let queries = [
         ("term", term("w3")),
         (
@@ -119,6 +125,7 @@ fn bench(c: &mut Criterion) {
                 ..BoolQuery::default()
             }),
         ),
+        ("or50", or50.clone()),
         (
             "phrase",
             Query::Phrase(PhraseQuery {
@@ -152,6 +159,7 @@ fn bench(c: &mut Criterion) {
         ("term", &queries[0].1),
         ("or", &queries[2].1),
         ("or_rare", &or_rare),
+        ("or50", &or50),
     ];
     let strategies = [
         ("exhaustive", Pruning::Exhaustive),
