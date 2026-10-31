@@ -83,20 +83,34 @@ impl MemtableView {
         }
     }
 
-    /// The ids that operations `after + 1..=` [`Self::version`] named, put or delete, in operation order (an id once
-    /// per operation; none when `after` is not below the version): what this view hides of older segments beyond what
-    /// a view at version `after` does (SPEC §8.3, ROADMAP 7.4.6).
-    pub fn ids_after(&self, after: u64) -> Vec<String> {
+    /// The ids whose first operation, put or delete, is one of `after + 1..=` [`Self::version`], each with that
+    /// operation's version, in operation order; none when `after` is not below the version. An id hides its older
+    /// segment copies from its first operation on (SPEC §8.3, ROADMAP 7.4.6), so these are what this view hides beyond
+    /// what a view at version `after` does, and an id upserted many times is listed once.
+    pub fn ids_first_named_after(&self, after: u64) -> Vec<(u64, String)> {
         let inner = read(&self.shared);
         let ops = usize::try_from(after)
             .ok()
             .zip(usize::try_from(self.version).ok())
             .and_then(|(from, to)| inner.ops.get(from..to))
             .unwrap_or_default();
-        ops.iter()
-            .filter_map(|op| std::str::from_utf8(inner.ids.key(op.id)).ok())
-            .map(str::to_owned)
+        (after.saturating_add(1)..)
+            .zip(ops)
+            // No earlier operation on the id: its first.
+            .filter(|(_, op)| op.prev == 0)
+            // Ids are interned from `&str` only (`put` and `delete`), so every key is UTF-8.
+            .filter_map(|(version, op)| {
+                Some((
+                    version,
+                    std::str::from_utf8(inner.ids.key(op.id)).ok()?.to_owned(),
+                ))
+            })
             .collect()
+    }
+
+    /// Whether this is a view of the memtable `reader` reads.
+    pub(crate) fn is_of(&self, reader: &super::MemtableReader) -> bool {
+        Arc::ptr_eq(&self.shared, reader.shared())
     }
 
     /// The live documents of the view holding `term` in a `text` or `keyword` field: the `df` of

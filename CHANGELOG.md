@@ -14,7 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the memtable has a put or a delete of (not tombstoned until the commit that flushes it), then the memtable as one
   more segment. `CollectionViews::top_k` returns `db::CollectionHit`s (a `Located` and a score) by score, then segment
   order with the memtable last, then docid; each view starts from the threshold of the hits kept, and pruned and
-  exhaustive results stay identical. `memtable::MemtableView::ids_after` lists the ids a view's operations name.
+  exhaustive results stay identical. `memtable::MemtableView::ids_first_named_after` lists the ids a view's
+  operations first name.
 - `persia-engine`: top-k pruning with `MaxScore` and block-max WAND (ROADMAP 7.4.4, SPEC §7.3).
   `SearchPlan::top_k` now prunes with block-max WAND by default; `SearchPlan::top_k_with` and `matcher_with` take a
   `search::Pruning` (`Exhaustive`, `MaxScore`, `BlockMaxWand`). Every strategy returns the same hits as exhaustive

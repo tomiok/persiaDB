@@ -3,10 +3,15 @@
 //!
 //! Before the commit that flushes it, the memtable's put or delete of an id hides every segment copy of that id,
 //! which no tombstone deletes yet. [`CollectionSnapshot::views`] adds those copies to each segment's tombstones, so
-//! a search sees each id at most once, as [`CollectionSnapshot::lookup`] does. A snapshot keeps what it computed for
-//! the newest memtable version it was asked about, and extends it by the operations after that one.
+//! a search sees each id at most once, as [`CollectionSnapshot::lookup`] does.
+//!
+//! A snapshot keeps a log of the copies hidden so far, by the version of the operation that first named their id: a
+//! view of any version takes a prefix of it, and only a version past the log looks ids up, those first named since.
+//! It also keeps the deletions of the newest version searched, which a newer view extends.
 
 use std::sync::{Arc, Mutex, PoisonError};
+
+use roaring::RoaringBitmap;
 
 use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
@@ -23,8 +28,25 @@ pub(super) struct Hidden {
     tombstones: Vec<Option<Arc<Tombstones>>>,
 }
 
-/// The [`Hidden`] a snapshot computed last.
-pub(super) type HiddenCache = Arc<Mutex<Option<Arc<Hidden>>>>;
+/// The segment copies the memtable hides that no committed tombstone deletes, as `(version, segment index, docid)`,
+/// `version` the one of the operation that first named the id; in version order, every id first named through
+/// `version` in it.
+#[derive(Debug, Default)]
+pub(super) struct HiddenLog {
+    version: u64,
+    copies: Vec<(u64, usize, u32)>,
+}
+
+/// What a snapshot keeps of the copies its memtable hides.
+#[derive(Debug, Default)]
+pub(super) struct HiddenState {
+    log: Arc<HiddenLog>,
+    /// The deletions of the newest version searched.
+    newest: Option<Arc<Hidden>>,
+}
+
+/// A snapshot's [`HiddenState`].
+pub(super) type HiddenCache = Arc<Mutex<HiddenState>>;
 
 /// A hit of a search over a collection (ROADMAP 7.4.6): where its document is, and its score (SPEC §7.2).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -49,8 +71,9 @@ impl CollectionSnapshot {
     /// ROADMAP 7.4.6): each segment without the documents its committed tombstones delete, nor the copies of ids
     /// `memtable` has a put or a delete of, then `memtable`. Writes after `memtable` was taken hide nothing.
     ///
-    /// The first call for a memtable version looks each id named since the last one computed up in every
-    /// segment's `IdMap`; the snapshot keeps the newest result.
+    /// The first view past every version searched before looks each id first named since up in every segment's
+    /// `IdMap`; any other reuses what the snapshot kept (the module docs). A view of another memtable is computed
+    /// whole and leaves the snapshot's cache alone.
     ///
     /// ```
     /// use persia_engine::db::{Database, DatabaseOptions, Located};
@@ -88,60 +111,91 @@ impl CollectionSnapshot {
         memtable: &'a MemtableView,
     ) -> Result<CollectionViews<'a>, ReadError> {
         let version = memtable.version();
-        let cached = lock(&self.hidden).clone();
-        let base = match cached {
-            Some(h) if h.version <= version => h,
-            // None yet, or one for a newer view than this one: start from the commit's.
-            _ => Arc::new(Hidden {
-                version: 0,
-                tombstones: self.tombstones.clone(),
-            }),
-        };
-        let hidden = if base.version == version {
-            base
-        } else {
-            // Computed without the lock: a search on another thread is not held up by these lookups.
-            let hidden = Arc::new(self.hide(&base, memtable)?);
-            let mut slot = lock(&self.hidden);
-            if slot.as_ref().is_none_or(|s| s.version < version) {
-                *slot = Some(Arc::clone(&hidden));
-            }
-            hidden
-        };
-        Ok(CollectionViews {
+        let views = |hidden| CollectionViews {
             snapshot: self,
             memtable,
             hidden,
+        };
+        if !memtable.is_of(&self.memtable) {
+            // Another memtable's versions mean nothing to this snapshot's cache: computed whole, and not kept.
+            let log = self.extend(&HiddenLog::default(), memtable)?;
+            return Ok(views(Arc::new(self.materialize(None, &log, version)?)));
+        }
+        let (log, newest) = {
+            let state = lock(&self.hidden);
+            (Arc::clone(&state.log), state.newest.clone())
+        };
+        if let Some(hidden) = newest.as_ref().filter(|h| h.version == version) {
+            return Ok(views(Arc::clone(hidden)));
+        }
+        // The lookups run without the lock: a search on another thread is not held up by them.
+        let log = if log.version < version {
+            let log = Arc::new(self.extend(&log, memtable)?);
+            let mut state = lock(&self.hidden);
+            if state.log.version < log.version {
+                state.log = Arc::clone(&log);
+            }
+            log
+        } else {
+            log
+        };
+        let base = newest.filter(|h| h.version < version);
+        let hidden = Arc::new(self.materialize(base.as_deref(), &log, version)?);
+        let mut state = lock(&self.hidden);
+        if state.newest.as_ref().is_none_or(|n| n.version < version) {
+            state.newest = Some(Arc::clone(&hidden));
+        }
+        Ok(views(hidden))
+    }
+
+    /// `log` extended through `memtable`'s version: the segment copies of the ids first named after `log`'s.
+    fn extend(&self, log: &HiddenLog, memtable: &MemtableView) -> Result<HiddenLog, ReadError> {
+        // A copy per new version; the log holds one entry per hidden copy, far fewer than the operations.
+        let mut copies = log.copies.clone();
+        for (version, id) in memtable.ids_first_named_after(log.version) {
+            for (index, (segment, deleted)) in
+                self.segments.iter().zip(&self.tombstones).enumerate()
+            {
+                if let Some(docid) = segment.docid_of(&id)?
+                    && !deleted.as_ref().is_some_and(|t| t.contains(docid))
+                {
+                    copies.push((version, index, docid));
+                }
+            }
+        }
+        Ok(HiddenLog {
+            version: memtable.version(),
+            copies,
         })
     }
 
-    /// `base` plus the segment copies of the ids `memtable` named after `base`'s version.
-    fn hide(&self, base: &Hidden, memtable: &MemtableView) -> Result<Hidden, ReadError> {
-        let ids = memtable.ids_after(base.version);
-        let mut tombstones = base.tombstones.clone();
-        for (segment, deleted) in self.segments.iter().zip(&mut tombstones) {
-            let mut all = None;
-            for id in &ids {
-                let Some(docid) = segment.docid_of(id)? else {
-                    continue;
-                };
-                if deleted.as_ref().is_some_and(|t| t.contains(docid)) {
-                    continue;
-                }
-                all.get_or_insert_with(|| {
-                    deleted
-                        .as_ref()
-                        .map(|t| t.docids().clone())
-                        .unwrap_or_default()
-                })
-                .insert(docid);
+    /// The deletions as of `version`: `base` (or the commit's tombstones) plus the copies of `log` hidden after
+    /// `base`'s version and through `version`, which `log` must cover.
+    fn materialize(
+        &self,
+        base: Option<&Hidden>,
+        log: &HiddenLog,
+        version: u64,
+    ) -> Result<Hidden, ReadError> {
+        let from = base.map_or(0, |b| b.version);
+        let mut tombstones = base.map_or_else(|| self.tombstones.clone(), |b| b.tombstones.clone());
+        let start = log.copies.partition_point(|&(v, ..)| v <= from);
+        let end = log.copies.partition_point(|&(v, ..)| v <= version);
+        let mut added: Vec<Option<RoaringBitmap>> = vec![None; tombstones.len()];
+        for &(_, index, docid) in log.copies.get(start..end).unwrap_or_default() {
+            let deleted = tombstones.get(index).and_then(Option::as_deref);
+            if let Some(slot) = added.get_mut(index) {
+                slot.get_or_insert_with(|| deleted.map(|t| t.docids().clone()).unwrap_or_default())
+                    .insert(docid);
             }
-            if let Some(all) = all {
+        }
+        for ((segment, deleted), added) in self.segments.iter().zip(&mut tombstones).zip(added) {
+            if let Some(all) = added {
                 *deleted = Some(Arc::new(segment.tombstones(all)?));
             }
         }
         Ok(Hidden {
-            version: memtable.version(),
+            version,
             tombstones,
         })
     }

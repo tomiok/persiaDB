@@ -363,3 +363,194 @@ fn searches_see_each_live_id_once() {
         },
     );
 }
+
+#[test]
+fn ids_first_named_after_lists_each_new_id_once() {
+    let mut db = database();
+    db.put("c", &doc("x", "a", "one"), Durability::Fsync)
+        .unwrap(); // 1
+    db.put("c", &doc("x", "a", "two"), Durability::Fsync)
+        .unwrap(); // 2
+    db.delete("c", "unseen", Durability::Fsync).unwrap(); // 3
+    db.put("c", &doc("y", "a", "one"), Durability::Fsync)
+        .unwrap(); // 4
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let view = c.memtable();
+    db.put("c", &doc("z", "a", "one"), Durability::Fsync)
+        .unwrap(); // 5, after the view
+    db.delete("c", "x", Durability::Fsync).unwrap();
+    let owned = |v: Vec<(u64, &str)>| -> Vec<(u64, String)> {
+        v.into_iter().map(|(n, s)| (n, s.to_owned())).collect()
+    };
+    assert_eq!(view.version(), 4);
+    assert_eq!(
+        view.ids_first_named_after(0),
+        owned(vec![(1, "x"), (3, "unseen"), (4, "y")])
+    );
+    assert_eq!(
+        view.ids_first_named_after(1),
+        owned(vec![(3, "unseen"), (4, "y")])
+    );
+    assert_eq!(view.ids_first_named_after(4), []);
+    assert_eq!(view.ids_first_named_after(9), []);
+    assert_eq!(c.memtable().ids_first_named_after(4), owned(vec![(5, "z")]));
+}
+
+/// A view of another snapshot's memtable is the caller's mistake: it must not change what correct searches of the
+/// snapshot return.
+#[test]
+fn a_view_of_another_memtable_does_not_poison_the_cache() {
+    let mut db = database();
+    db.put("c", &doc("x", "a", "one"), Durability::Fsync)
+        .unwrap();
+    db.put("c", &doc("y", "a", "one"), Durability::Fsync)
+        .unwrap();
+    let before = db.snapshot();
+    db.commit().unwrap();
+    db.put("c", &doc("z", "a", "one"), Durability::Fsync)
+        .unwrap();
+    let after = db.snapshot();
+    let c = after.collection("c").unwrap();
+    let foreign = before.collection("c").unwrap().memtable();
+    let _ = c.views(&foreign).unwrap();
+    let mut got = tagged(c, &c.memtable(), "a");
+    got.sort();
+    assert_eq!(got, ["x", "y", "z"]);
+}
+
+/// Searches of interleaved older and newer views on several threads, while the writer keeps writing, return what each
+/// view alone shows.
+#[test]
+fn concurrent_views_agree_with_a_fresh_snapshot() {
+    let mut db = database();
+    for i in 0..20 {
+        db.put(
+            "c",
+            &doc(&format!("d{i}"), "a", "one"),
+            Durability::Buffered,
+        )
+        .unwrap();
+    }
+    db.commit().unwrap();
+    let shared = db.snapshot();
+    let mut views = Vec::new();
+    for i in 0..20 {
+        let d = if i % 3 == 0 {
+            db.delete("c", &format!("d{i}"), Durability::Buffered)
+        } else {
+            db.put(
+                "c",
+                &doc(&format!("d{i}"), "b", "two"),
+                Durability::Buffered,
+            )
+        };
+        d.unwrap();
+        views.push(shared.collection("c").unwrap().memtable());
+    }
+    // After operation `i`, ids `d0..=di` are deleted or retagged.
+    let want: Vec<Vec<String>> = (0..20)
+        .map(|i| {
+            let mut ids: Vec<_> = (i + 1..20).map(|j| format!("d{j}")).collect();
+            ids.sort();
+            ids
+        })
+        .collect();
+    std::thread::scope(|s| {
+        for t in 0..4 {
+            let (views, want, shared) = (&views, &want, &shared);
+            s.spawn(move || {
+                let c = shared.collection("c").unwrap();
+                for round in 0..10 {
+                    for (i, v) in views
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .skip(t)
+                        .step_by(1 + round % 3)
+                    {
+                        let mut ids = tagged(c, v, "a");
+                        ids.sort();
+                        assert_eq!(&ids, &want[i], "view {i}");
+                    }
+                }
+            });
+        }
+        for i in 0..20 {
+            db.put(
+                "c",
+                &doc(&format!("w{i}"), "a", "three"),
+                Durability::Buffered,
+            )
+            .unwrap();
+        }
+    });
+}
+
+/// Postings of several blocks in each of three segments, with upserts and deletes in the memtable: block-max WAND
+/// skips blocks under thresholds seeded from earlier views, and still returns the exhaustive hits, each live id once.
+#[test]
+fn multi_block_segments_and_memtable_prune_to_the_exhaustive_hits() {
+    let seed: u64 = std::env::var("PERSIA_SEED")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0x7406);
+    let mut state = seed;
+    let mut next = move |n: u64| {
+        // SplitMix64: deterministic, seeded.
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        (z ^ (z >> 31)) % n
+    };
+    let body = |next: &mut dyn FnMut(u64) -> u64| -> String {
+        (0..=next(6))
+            .map(|_| WORDS[usize::try_from(next(WORDS.len() as u64)).unwrap()])
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut db = database();
+    let mut model = BTreeSet::new();
+    for segment in 0..3 {
+        for i in 0..300 {
+            let id = format!("s{segment}-{i}");
+            db.put("c", &doc(&id, "a", &body(&mut next)), Durability::Buffered)
+                .unwrap();
+            model.insert(id);
+        }
+        db.commit().unwrap();
+    }
+    for _ in 0..150 {
+        let id = format!("s{}-{}", next(3), next(300));
+        if next(3) == 0 {
+            db.delete("c", &id, Durability::Buffered).unwrap();
+            model.remove(&id);
+        } else {
+            db.put("c", &doc(&id, "a", &body(&mut next)), Durability::Buffered)
+                .unwrap();
+            model.insert(id);
+        }
+    }
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    assert_eq!(c.segments().len(), 3);
+    let memtable = c.memtable();
+    let (body_field, _) = fields();
+    for query in [any_word(), term(body_field, "common")] {
+        let all = search(c, &memtable, &query, 2000);
+        let ids_all = ids(c, &memtable, &all);
+        let set: BTreeSet<_> = ids_all.iter().cloned().collect();
+        assert_eq!(set.len(), ids_all.len(), "seed {seed}: an id twice");
+        if matches!(query, Query::Bool(_)) {
+            assert_eq!(set, model, "seed {seed}");
+        }
+        for k in [1, 10, 50] {
+            assert_eq!(
+                search(c, &memtable, &query, k),
+                all[..k],
+                "seed {seed}, k = {k}"
+            );
+        }
+    }
+}

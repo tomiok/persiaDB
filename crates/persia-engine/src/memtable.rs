@@ -109,6 +109,10 @@ pub struct MemtableReader {
 }
 
 impl MemtableReader {
+    pub(crate) fn shared(&self) -> &Arc<RwLock<Inner>> {
+        &self.shared
+    }
+
     /// A view of every write applied so far.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
