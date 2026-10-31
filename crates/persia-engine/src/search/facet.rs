@@ -8,7 +8,7 @@ use roaring::RoaringBitmap;
 
 use super::request::RequestError;
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
-use crate::segment::ReadError;
+use crate::segment::{ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeywordReader, SearchView};
 
 /// The most values a facet returns (SPEC §7.5).
@@ -16,6 +16,9 @@ pub const MAX_FACET_SIZE: usize = 1_000;
 
 /// The values a facet returns unless asked otherwise (SPEC §7.5).
 pub const DEFAULT_FACET_SIZE: usize = 10;
+
+/// The most facets a request counts (SPEC §7.5).
+pub const MAX_FACETS: usize = 16;
 
 /// A facet to count: a `keyword` field with `facet: true`, and how many values to return.
 ///
@@ -138,9 +141,9 @@ impl FacetCounter {
             return Ok(());
         }
         let mut words = view.keywords(self.request.field)?;
-        // By ordinal: a dense array when the dictionary is no larger than the matches (or small), else a map.
+        // By ordinal: a dense array when the dictionary is small beside the matches, else a map.
         let len = words.len();
-        let dense = len <= docs.len().max(1 << 16);
+        let dense = len <= docs.len().saturating_mul(4).max(1024);
         let mut by_ord = vec![
             0_u64;
             if dense {
@@ -162,7 +165,14 @@ impl FacetCounter {
         let counted = (0_u64..).zip(by_ord).filter(|&(_, n)| n > 0).chain(sparse);
         for (ord, n) in counted {
             let Some(value) = words.value(ord) else {
-                continue;
+                return Err(ReadError::Section {
+                    kind: SectionKind::Columns,
+                    field: self.request.field.get(),
+                    position: ord,
+                    reason: SegmentCorruption::Invalid {
+                        what: "a keyword ord past its dictionary",
+                    },
+                });
             };
             match self.totals.get_mut(value) {
                 Some(total) => *total = total.saturating_add(n),

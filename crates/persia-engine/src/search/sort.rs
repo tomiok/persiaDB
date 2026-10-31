@@ -10,7 +10,7 @@ use core::cmp::Ordering;
 use super::Matcher;
 use super::request::RequestError;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
-use crate::segment::ReadError;
+use crate::segment::{ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeyReader, KeywordReader, SearchView};
 
 /// The most keys a [`Sort`] has (SPEC §7.4).
@@ -99,7 +99,9 @@ pub enum SortValue {
     Missing,
     /// Its score; `-0.0` ranks as `0.0`.
     Score(f64),
-    /// Its column key (SPEC §5.2.1; `bool`: 0 or 1): unsigned order is value order.
+    /// Its column key (SPEC §5.2.1; `bool`: 0 or 1): unsigned order is value order. It is what a cursor compares,
+    /// not a display value: `persia_format::for_codec::key_to_i64` (`i64`, `datetime`) and `key_to_f64` decode it,
+    /// and the hit's document holds the value as stored.
     Key(u64),
     /// Its keyword value: the smallest it holds for an ascending key, the largest for a descending one.
     Keyword(Vec<u8>),
@@ -381,7 +383,14 @@ pub(crate) fn top_sorted<V: SearchView>(
                         Order::Asc => ords.first(),
                         Order::Desc => ords.last(),
                     };
-                    ord.copied().map_or(Local::Missing, Local::Num)
+                    match ord.copied() {
+                        // Checked here, so every ord kept below has its bytes.
+                        Some(ord) if words.value(ord).is_none() => {
+                            return Err(past_dictionary(key, docid));
+                        }
+                        Some(ord) => Local::Num(ord),
+                        None => Local::Missing,
+                    }
                 }
             });
         }
@@ -541,5 +550,21 @@ impl Heap {
     fn into_sorted(mut self, rank: impl Fn(&Entry, &Entry) -> Ordering) -> Vec<Entry> {
         self.items.sort_by(|a, b| rank(a, b));
         self.items
+    }
+}
+
+/// A keyword ord of `docid` with no value in its view's dictionary: corruption, never an empty value ranked.
+fn past_dictionary(key: SortKey, docid: u32) -> ReadError {
+    let field = match key {
+        SortKey::Field { field, .. } => field.get(),
+        SortKey::Score { .. } => 0,
+    };
+    ReadError::Section {
+        kind: SectionKind::Columns,
+        field,
+        position: u64::from(docid),
+        reason: SegmentCorruption::Invalid {
+            what: "a keyword ord past its dictionary",
+        },
     }
 }

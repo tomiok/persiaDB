@@ -12,7 +12,7 @@ use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
-    FacetCounter, FacetCounts, FacetRequest, MAX_WINDOW, Matcher, Projection, Pruning,
+    FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Matcher, Projection, Pruning,
     RequestError, SearchPlan, Sort, SortValue, Ties, collect_where, top_sorted,
 };
 use crate::segment::ReadError;
@@ -145,7 +145,8 @@ impl CollectionViews<'_> {
     ///
     /// # Errors
     /// [`RequestError::Window`] when `offset + limit` is above [`MAX_WINDOW`]; [`RequestError::Cursor`] for a
-    /// cursor that does not fit the sort; [`RequestError::Read`] as [`SearchPlan::matcher`], or for a document that
+    /// cursor that does not fit the sort; [`RequestError::TooManyFacets`] above [`MAX_FACETS`]; [`RequestError::Read`]
+    /// as [`SearchPlan::matcher`], or for a document that
     /// cannot be read.
     pub fn search(
         &self,
@@ -164,6 +165,12 @@ impl CollectionViews<'_> {
             })?;
         if let Some(cursor) = &request.search_after {
             request.sort.check(&cursor.values)?;
+        }
+        if request.facets.len() > MAX_FACETS {
+            return Err(RequestError::TooManyFacets {
+                count: request.facets.len(),
+                max: MAX_FACETS,
+            });
         }
         let mut search = Search {
             plan,
@@ -297,12 +304,9 @@ impl Search<'_> {
                 facet.add(view, &docs)?;
             }
         }
-        self.hits.extend(hits);
-        self.hits.sort_by(|a, b| {
-            sort.compare(&a.values, &b.values)
-                .then_with(|| order(a.location).cmp(&order(b.location)))
-        });
-        self.hits.truncate(self.window);
+        // Both are sorted, and every hit of this view is placed after the kept ones on a full tie: merge them.
+        let kept = core::mem::take(&mut self.hits);
+        self.hits = merge(sort, kept, hits, self.window);
         Ok(())
     }
 }
@@ -324,4 +328,24 @@ fn ties(rank: usize, cursor: Located) -> Ties {
         core::cmp::Ordering::Less => Ties::None,
         core::cmp::Ordering::Equal => Ties::Above(docid),
     }
+}
+
+/// The first `window` of `a` and `b`, both sorted, by `sort` then location ([`order`]).
+fn merge(sort: &Sort, a: Vec<Ranked>, b: Vec<Ranked>, window: usize) -> Vec<Ranked> {
+    let mut out = Vec::with_capacity(a.len().saturating_add(b.len()).min(window));
+    let (mut a, mut b) = (a.into_iter().peekable(), b.into_iter().peekable());
+    while out.len() < window {
+        let take_a = match (a.peek(), b.peek()) {
+            (Some(x), Some(y)) => {
+                sort.compare(&x.values, &y.values)
+                    .then_with(|| order(x.location).cmp(&order(y.location)))
+                    != core::cmp::Ordering::Greater
+            }
+            (Some(_), None) => true,
+            (None, Some(_)) => false,
+            (None, None) => break,
+        };
+        out.extend(if take_a { a.next() } else { b.next() });
+    }
+    out
 }

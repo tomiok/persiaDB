@@ -56,6 +56,14 @@ pub enum RequestError {
         /// Why.
         reason: &'static str,
     },
+    /// More facets than [`super::MAX_FACETS`].
+    #[error("{count} facets, more than the {max} allowed")]
+    TooManyFacets {
+        /// The facets asked for.
+        count: usize,
+        /// The most allowed.
+        max: usize,
+    },
     /// A facet size outside `1..=`[`super::MAX_FACET_SIZE`].
     #[error("facet size {size} is outside 1..={max}")]
     FacetSize {

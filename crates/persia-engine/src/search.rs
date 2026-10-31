@@ -52,7 +52,9 @@ mod top_k;
 mod word;
 
 pub(crate) use facet::FacetCounter;
-pub use facet::{DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE};
+pub use facet::{
+    DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
+};
 pub use plan::SearchPlan;
 pub use request::{MAX_WINDOW, Projection, RequestError};
 pub use sort::{MAX_SORT_KEYS, Missing, Order, Sort, SortKey, SortValue};

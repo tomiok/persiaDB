@@ -1010,3 +1010,111 @@ fn beyond() -> FieldId {
     }
     b.build().unwrap().field("f").unwrap().id()
 }
+
+#[test]
+fn a_cursor_from_a_location_no_view_has_is_well_defined() {
+    let db = fixture();
+    let f = fields();
+    let base = sorted([SortKey::field(f.n, Order::Asc)]);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(
+        &Query::MatchAll,
+        c.schema(),
+        &c.search_statistics(&memtable),
+    )
+    .unwrap();
+    let views = c.views(&memtable).unwrap();
+    // n = -1 is c's; a tie at a segment index past every segment ranks the memtable's ties after it, the
+    // segments' before it.
+    let at = |location| SearchRequest {
+        search_after: Some(Cursor {
+            values: vec![SortValue::Key(persia_format::for_codec::i64_to_key(-1))],
+            location,
+        }),
+        ..base.clone()
+    };
+    for location in [
+        Located::Segment {
+            index: usize::MAX - 1,
+            docid: u32::MAX,
+        },
+        Located::Segment { index: 7, docid: 0 },
+    ] {
+        let hits = views
+            .search(&plan, &at(location), Pruning::default())
+            .unwrap()
+            .hits;
+        let ids: Vec<_> = hits.iter().map(|h| h.document.id()).collect();
+        assert_eq!(ids, ["a", "b"], "{location:?}");
+    }
+}
+
+#[test]
+fn keywords_compare_by_bytes_across_segments_with_different_dictionaries() {
+    let f = fields();
+    let mut db = database(schema());
+    // Segment 0 holds only "zz" (ord 0), segment 1 "blue" and "zz" (ords 0, 1), the memtable "green".
+    let tagged = |id: &str, tag: &str| Document::new(id).with(f.tag, Value::String(tag.into()));
+    db.put("c", &tagged("s0", "zz"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.put("c", &tagged("s1z", "zz"), Durability::Fsync)
+        .unwrap();
+    db.put("c", &tagged("s1b", "blue"), Durability::Fsync)
+        .unwrap();
+    db.commit().unwrap();
+    db.put("c", &tagged("m", "green"), Durability::Fsync)
+        .unwrap();
+    let asc = sorted([SortKey::field(f.tag, Order::Asc)]);
+    assert_eq!(ids(&db, &Query::MatchAll, &asc), ["s1b", "m", "s0", "s1z"]);
+    let desc = sorted([SortKey::field(f.tag, Order::Desc)]);
+    assert_eq!(ids(&db, &Query::MatchAll, &desc), ["s0", "s1z", "m", "s1b"]);
+}
+
+#[test]
+fn a_page_past_the_matches_is_empty_and_still_counts_facets() {
+    let db = fixture();
+    let f = fields();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(
+        &Query::MatchAll,
+        c.schema(),
+        &c.search_statistics(&memtable),
+    )
+    .unwrap();
+    let views = c.views(&memtable).unwrap();
+    let facet = FacetRequest::new(f.tag, 1, c.schema()).unwrap();
+    let request = SearchRequest {
+        offset: 50,
+        facets: vec![facet],
+        ..SearchRequest::default()
+    };
+    let results = views.search(&plan, &request, Pruning::default()).unwrap();
+    assert_eq!(results.hits, []);
+    assert_eq!(results.facets[0].values[0].value, b"red");
+    assert_eq!(results.facets[0].values[0].count, 2);
+
+    let many = SearchRequest {
+        facets: vec![facet; 17],
+        ..SearchRequest::default()
+    };
+    assert!(matches!(
+        views.search(&plan, &many, Pruning::default()),
+        Err(RequestError::TooManyFacets { .. })
+    ));
+    let most = SearchRequest {
+        facets: vec![facet; 16],
+        ..SearchRequest::default()
+    };
+    assert_eq!(
+        views
+            .search(&plan, &most, Pruning::default())
+            .unwrap()
+            .facets
+            .len(),
+        16
+    );
+}

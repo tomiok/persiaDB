@@ -18,7 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   - **Pages.** A page is `offset` and `limit` (default 20), with `offset + limit` at most `MAX_WINDOW` (10 000). A
     `db::Cursor` from `SearchHit::cursor` starts the next page after a hit, exact within the same snapshot.
   - **Facets.** A `search::FacetRequest` counts the values of a `keyword` field with `facet: true` over every match,
-    exactly. It returns the `size` most frequent values (1 to 1 000, default 10), then ascending bytes.
+    exactly. It returns the `size` most frequent values (1 to 1 000, default 10), then ascending bytes. A request has
+    at most 16 facets (`MAX_FACETS`).
   - **Hits.** Each hit carries its location, score, sort values and document (id, blob reference, stored fields),
     projected by `search::Projection` (`All`, `None`, or named stored or extra fields).
   - **Errors and pruning.** Bad requests are `search::RequestError`s. Pruning still applies to a plain score sort
