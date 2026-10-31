@@ -39,6 +39,7 @@ use persia_engine::manifest::{
     CollectionDiff, Layout, Location, Manifest, ManifestDiff, SegmentEntry, SegmentId,
 };
 use persia_engine::memtable::{FlushPolicy, MemtableError};
+use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::segment::SegmentError;
 use persia_engine::view::SearchView;
@@ -786,6 +787,85 @@ fn opens_a_container_file_by_path() {
     assert_eq!(documents(&db.snapshot(), "a").len(), 2);
     let c = Container::open(&path, Mode::ReadOnly);
     assert!(c.is_ok());
+}
+
+/// Drop releases the writer lock after replay, a flush and a background merge, before the descriptor is closed.
+///
+/// The nightly kill-9 loop failed the second reopen with `container is locked by another writer`: another test in
+/// this process had `fork`ed, so the child still held a copy of the descriptor, and `close` does not drop `flock`
+/// until that copy is gone. The duplicate-descriptor case itself is
+/// `dropping_the_writer_unlocks_while_a_duplicate_descriptor_is_open` (persia-storage). This test is the database
+/// sequence that reopen runs: a backlog replayed into a flush, a merge still in flight, then drop, then an open
+/// that must succeed at once — including while a snapshot of the dropped database is still alive.
+#[test]
+fn drop_after_replay_flush_and_merge_releases_the_writer_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let open = |bytes: usize| DatabaseOptions {
+        clock: Arc::new(ManualClock::new(1_700_000_000_000_000)),
+        segment_ids: SegmentIds::seeded(7),
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: bytes,
+                ..FlushPolicy::default()
+            },
+            ..CommitPolicy::default()
+        },
+        merge: MergeOptions {
+            policy: MergePolicy {
+                segments_per_merge: 2,
+                ..MergePolicy::default()
+            },
+            threads: 1,
+        },
+        ..DatabaseOptions::default()
+    };
+
+    let mut db = Database::create(&path, open(FlushPolicy::DEFAULT_MEMTABLE_BYTES)).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    // Two committed segments: the policy plans one merge of them.
+    for id in ["a0", "a1"] {
+        db.put("a", &doc(id, "alpha beta"), Durability::Fsync)
+            .unwrap();
+        db.commit().unwrap();
+    }
+    db.merge_step().unwrap();
+    assert_eq!(
+        db.merges_running(),
+        1,
+        "a background merge is in flight when the database is dropped"
+    );
+    // Synced, uncommitted. The default threshold does not flush them; the next open's does.
+    for n in 0..8 {
+        let body = "gamma ".repeat(40);
+        db.put("a", &doc(&format!("w{n}"), &body), Durability::Fsync)
+            .unwrap();
+    }
+    let seq_before_replay = db.seq();
+    drop(db);
+
+    let mut db = Database::open(&path, open(1))
+        .unwrap_or_else(|err| panic!("reopen that replays and flushes failed: {err}"));
+    assert!(
+        db.seq() > seq_before_replay,
+        "replay flushed the backlog: seq {seq_before_replay} -> {}",
+        db.seq()
+    );
+    db.merge_step().unwrap();
+    assert_eq!(
+        db.merges_running(),
+        1,
+        "drop joins a merge worker that still holds its inputs"
+    );
+    let snapshot = db.snapshot();
+    let present = documents(&snapshot, "a");
+    assert!(present.iter().any(|(id, _)| id == "w7"));
+    assert!(present.iter().any(|(id, _)| id == "a0"));
+    drop(db);
+    let db = Database::open(&path, open(FlushPolicy::DEFAULT_MEMTABLE_BYTES))
+        .unwrap_or_else(|err| panic!("open after drop, with a snapshot still held, failed: {err}"));
+    assert_eq!(documents(&db.snapshot(), "a"), present);
+    drop(snapshot);
 }
 
 #[test]

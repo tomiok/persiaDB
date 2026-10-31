@@ -94,7 +94,7 @@ impl<F: ContainerFile + 'static> Container<F> {
     pub fn create_in(vfs: Arc<dyn Vfs<File = F>>, path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let dir = parent_or_cwd(path);
-        let lock = match lock_beside(&*vfs, path) {
+        let mut beside = super::UnlockOnDrop::new(match lock_beside(&*vfs, path) {
             // A writer holds the lock beside the path: a container is open there, or being created.
             Err(Error::Locked) => {
                 return Err(Error::AlreadyExists {
@@ -102,10 +102,11 @@ impl<F: ContainerFile + 'static> Container<F> {
                 });
             }
             other => other?,
-        };
+        });
+        let lock_held = beside.file.is_some();
         let temp = temp_path(path, ".tmp")?;
         let file = vfs.create_new(&temp).map_err(Error::io("create"))?;
-        let locked_by = if lock.is_some() {
+        let locked_by = if lock_held {
             LockedBy::Beside
         } else {
             LockedBy::File
@@ -131,10 +132,11 @@ impl<F: ContainerFile + 'static> Container<F> {
         let mut container = result?;
         removed?;
         synced?;
+        let canon = vfs.canonicalize(path).map_err(Error::io("canonicalize"))?;
         container.location = Some(Location {
-            path: vfs.canonicalize(path).map_err(Error::io("canonicalize"))?,
             vfs,
-            lock,
+            path: canon,
+            lock: beside.take(),
         });
         Ok(container)
     }
@@ -168,32 +170,39 @@ impl<F: ContainerFile + 'static> Container<F> {
     ) -> Result<Self> {
         // Canonical, so compaction renames over the real file, not over a symbolic link to it.
         let path = vfs.canonicalize(path.as_ref()).map_err(Error::io("open"))?;
-        let mut lock = match mode {
+        let mut beside = super::UnlockOnDrop::new(match mode {
             Mode::ReadWrite => lock_beside(&*vfs, &path)?,
             Mode::ReadOnly => None,
-        };
+        });
         for _ in 0..OPEN_ATTEMPTS {
             let file = vfs
                 .open(&path, mode == Mode::ReadWrite)
                 .map_err(Error::io("open"))?;
             // With a lock beside the container (Windows), the path cannot change under it: it is never renamed.
-            if mode == Mode::ReadWrite && lock.is_none() {
+            let locks_file = mode == Mode::ReadWrite && beside.file.is_none();
+            if locks_file {
                 take_lock(&file)?;
-                // A compaction may have renamed a new file over the path between our open and our lock; the lock
-                // we got is then on the old, unlinked file, which its writer has just released. Open again.
-                if !vfs.same_file(&file, &path).map_err(Error::io("stat"))? {
-                    continue;
-                }
             }
+            let mut guard = super::UnlockGuard {
+                file: &file,
+                armed: locks_file,
+            };
+            // A compaction may have renamed a new file over the path between our open and our lock; the lock
+            // we got is then on the old, unlinked file, which its writer has just released. Open again.
+            if locks_file && !vfs.same_file(&file, &path).map_err(Error::io("stat"))? {
+                continue;
+            }
+            guard.armed = false;
+            drop(guard);
             let policy = TailPolicy {
                 quarantine: Some((&*vfs, &path)),
                 repair,
             };
-            let mut container = Self::recover(file, mode, policy)?;
+            let mut container = Self::recover(file, mode, policy, locks_file)?;
             container.location = Some(Location {
                 vfs,
                 path,
-                lock: lock.take(),
+                lock: beside.take(),
             });
             return Ok(container);
         }

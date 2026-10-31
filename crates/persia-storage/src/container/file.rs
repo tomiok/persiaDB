@@ -49,11 +49,26 @@ pub trait ContainerFile: Send + Sync + std::fmt::Debug {
     fn set_len(&self, len: u64) -> io::Result<()>;
 
     /// Takes the exclusive writer lock without waiting: `Ok(false)` if another handle holds it, in this process or
-    /// another. The lock lasts until the file is closed.
+    /// another. The lock lasts until [`unlock`](Self::unlock), or until every descriptor duplicated or inherited
+    /// from this one is closed. Closing this handle alone does not release it while a `fork` still holds a copy
+    /// (SPEC §4.5.1).
     ///
     /// # Errors
     /// The OS error.
     fn try_lock(&self) -> io::Result<bool>;
+
+    /// Releases the lock [`try_lock`](Self::try_lock) took, including while another descriptor duplicated or
+    /// inherited from this one is still open.
+    ///
+    /// The default does nothing. A simulated file with no lock of its own, and a wrapper around one, keep that:
+    /// their [`Drop`] releases what they track, and they have no duplicated descriptor to outlive it.
+    ///
+    /// # Errors
+    /// The OS error. Unlocking a handle that holds no lock may succeed or fail, depending on the platform, so
+    /// callers unlock only a handle they locked.
+    fn unlock(&self) -> io::Result<()> {
+        Ok(())
+    }
 
     /// Whether [`try_lock`](Self::try_lock) excludes other handles of this process too. Where a lock belongs to the
     /// process instead (`flock` emulated with POSIX locks: Linux NFS, some FUSE and CIFS mounts), a listing or sweep in
@@ -97,6 +112,12 @@ impl ContainerFile for File {
             Err(std::fs::TryLockError::WouldBlock) => Ok(false),
             Err(std::fs::TryLockError::Error(err)) => Err(err),
         }
+    }
+
+    /// `flock(LOCK_UN)` on Unix, `UnlockFileEx` on Windows. One call releases the lock for every descriptor that
+    /// shares this open file description, which `close` does not do while any of them is still open.
+    fn unlock(&self) -> io::Result<()> {
+        File::unlock(self)
     }
 
     /// Only known on a local disk file system (ADR-0021): anywhere else, or if the file system cannot be queried,

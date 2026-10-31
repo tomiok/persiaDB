@@ -283,7 +283,11 @@ nothing. The container is reopened, and recovery decides what survived.
   have renamed a new file over it, and the old one's lock is released when its writer moves on. On Windows,
   `LockFileEx` locks are mandatory, so a lock on the container would keep every reader out: the lock is on a file
   `<name>.lock` next to the container instead, created if missing and never removed (removing it would race with a
-  writer taking it); since it is never renamed, no recheck is needed (ADR-0016). Read-only opens take no lock. Limit: on NFS,
+  writer taking it); since it is never renamed, no recheck is needed (ADR-0016). Read-only opens take no lock.
+  Dropping the writer releases the lock before the descriptor is closed. `close` alone does not: the lock stays
+  held while any descriptor duplicated or inherited from it is open, including a child process between `fork` and
+  `exec` (it receives a copy of every descriptor). The release is an explicit unlock on that descriptor, so the
+  next read-write open succeeds at once (ROADMAP 6.6.11). Limit: on NFS,
   Linux emulates `flock` with per-process POSIX locks, so two handles of one process are not excluded from each
   other.
 - **Read-only open.** Never writes, truncates or locks. A torn tail or corruption after `log_end` is truncated only
