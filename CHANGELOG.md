@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: `bool` filters execute (ROADMAP 7.4.5, SPEC §7.1.2, §7.3). `SearchPlan::new` no longer rejects a
+  `BoolQuery::filter`. It checks each filter against the schema (`Filter::validate`, size limits aside). Each view then
+  evaluates the filters to a roaring bitmap of its live documents before any document is scored: `term` and
+  `terms` on a `keyword` field from the postings, on other fields and for `range` from the column's order-preserving
+  keys, `exists` from which documents have a value, `not` as the complement. Filters score 0 and leave scores
+  unchanged; with a filter, `should` clauses are optional. A threshold still reaches a `bool`'s one `must` clause and,
+  when there is no `must`, its `should` clauses (a filter scores 0). `should` beside `must` stays exhaustive.
+  Pruned and exhaustive top-k stay identical. A `doc_count` above `2^31` is rejected before a filter builds the
+  `0..doc_count` range. New `search_top10_filtered` benchmarks.
+- `persia-engine`: term enumeration and column access on every search view (ROADMAP 6.1.5). `view::SearchView`
+  gains `terms` (a field's terms between two bounds that an `fst::Automaton` accepts, in byte order, each with its
+  `df`, as a `view::TermEnum`), `deleted`, `present` (the documents with a value in a field), `trues` (the documents
+  whose `bool` field is true) and `column_keys` (each document's order-preserving key in an `i64`, `f64`, `datetime`
+  or `bool` field). The memtable keeps its column values as it indexes, and lists the same terms and values as the
+  segment its live documents flush to. `Segment` gains `present`, `trues` and `column_keys`; `NumericColumn` and
+  `BoolColumn` gain `present`.
 - `persia-engine`: search over a whole collection (ROADMAP 7.4.6, SPEC §7.3, §8.3). `db::CollectionSnapshot::views`
   gives a memtable view's `db::CollectionViews`: each segment without its tombstoned documents nor the copies of ids
   the memtable has a put or a delete of (not tombstoned until the commit that flushes it), then the memtable as one

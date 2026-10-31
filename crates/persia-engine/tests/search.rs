@@ -668,7 +668,7 @@ fn bool_edges_by_hand() {
 }
 
 #[test]
-fn unsupported_queries_are_errors() {
+fn unsupported_queries_are_errors_and_filters_run() {
     let f = fixture(&["ant"]);
     let prefix = Query::Prefix(persia_engine::query::PrefixQuery {
         field: f.body(),
@@ -683,10 +683,13 @@ fn unsupported_queries_are_errors() {
         filter: vec![persia_engine::query::Filter::And(Vec::new())],
         ..BoolQuery::default()
     });
-    assert!(matches!(
-        SearchPlan::new(&filtered, &f.schema, &f.stats),
-        Err(SearchError::Unsupported { .. })
-    ));
+    // Filters run since ROADMAP 7.4.5: an empty `and` selects every document, scoring 0.
+    let plan = SearchPlan::new(&filtered, &f.schema, &f.stats).unwrap();
+    let hits = plan.top_k(&SegmentView::new(&f.segment, None), 10).unwrap();
+    assert_eq!(
+        hits.iter().map(|h| (h.docid, h.score)).collect::<Vec<_>>(),
+        [(0, 0.0)]
+    );
 }
 
 /// Long lists, whose skip entries `advance` uses (SPEC §5.3.2): a conjunction of a rare and a common term.

@@ -255,14 +255,10 @@ impl SegmentBuilder {
                     index_keywords(inverted, docid, values, &mut self.occurrences)?;
                 }
                 (FieldBuilder::Column(column), value) => {
-                    let key = match *value {
-                        Value::I64(v) | Value::Datetime(v) => i64_to_key(v),
-                        Value::F64(v) => f64_to_key(v),
-                        Value::Bool(v) => u64::from(v),
-                        // `encode` validated the document: no other value reaches a column field.
-                        _ => continue,
-                    };
-                    column.values.push((docid, key));
+                    // `encode` validated the document: no other value reaches a column field.
+                    if let Some(key) = column_key(value) {
+                        column.values.push((docid, key));
+                    }
                 }
                 // `stored` values live in the row only; validation rules out any other pairing.
                 _ => {}
@@ -415,6 +411,17 @@ pub(crate) fn index_text<'a>(
             .saturating_add(u64::from(POSITION_GAP));
     }
     inverted.add_doc(docid, occurrences, len)
+}
+
+/// The column key of a column field's value: its order-preserving key (SPEC §5.2.1), 0 or 1 for a `bool`; `None`
+/// for a value no column holds.
+pub(crate) fn column_key(value: &Value) -> Option<u64> {
+    Some(match *value {
+        Value::I64(v) | Value::Datetime(v) => i64_to_key(v),
+        Value::F64(v) => f64_to_key(v),
+        Value::Bool(v) => u64::from(v),
+        _ => return None,
+    })
 }
 
 /// Indexes the values of one `keyword` field of document `docid`: each value is one term, as is.

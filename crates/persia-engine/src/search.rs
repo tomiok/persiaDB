@@ -4,7 +4,8 @@
 //!
 //! Matchers walk documents in docid order and skip with [`Matcher::advance`]: a term's postings, a conjunction
 //! that leapfrogs its clauses from the cheapest, a disjunction, an exclusion, and a phrase that checks positions on
-//! the documents holding all its terms. Views already leave deleted documents out (SPEC §8.3).
+//! the documents holding all its terms. A `bool`'s filters become a bitmap per view, which its matcher keeps to
+//! (SPEC §7.3). Views already leave deleted documents out (SPEC §8.3).
 //!
 //! ```
 //! use std::sync::Arc;
@@ -40,6 +41,7 @@
 
 mod block_max_wand;
 mod boolean;
+mod filter;
 mod max_score;
 mod phrase;
 mod plan;
@@ -62,8 +64,9 @@ use crate::view::SearchView;
 /// upper bound of its score, summed in that same order, is at most the worst hit kept.
 ///
 /// Pruning reaches the matchers a threshold on the whole score applies to: a term, the `should` clauses of a
-/// `bool` without `must`, the `must` clause of a `bool` with one and no `should`, and what `must_not` or `boost`
-/// wraps. Conjunctions and their optional clauses are walked whole.
+/// `bool` without `must` (a filter scores 0, so with filters too), the `must` clause of a `bool` with one and no
+/// `should` (filters or not), and what `must_not` or `boost` wraps. Conjunctions and `should` clauses beside `must`
+/// are walked whole.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pruning {
@@ -102,8 +105,8 @@ pub enum SearchError {
     /// A scorer cannot be built: a field of the wrong type, parameters out of range, a statistic unreadable.
     #[error(transparent)]
     Score(#[from] ScoreError),
-    /// A query the engine does not execute yet: `prefix` and `fuzzy` (term enumeration, ROADMAP 6.1.5) and `bool`
-    /// filters (ROADMAP 7.4.5).
+    /// A query the engine does not execute yet: `prefix` and `fuzzy` (their expansion over the collection's terms,
+    /// ROADMAP 7.4.12).
     #[error("{what} queries are not executed yet")]
     Unsupported {
         /// The query.

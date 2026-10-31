@@ -50,13 +50,13 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
 
 pub use flush::{FlushPolicy, FlushReason};
-pub use view::{IdState, MemtableNorms, MemtablePostings, MemtableView};
+pub use view::{IdState, MemtableNorms, MemtablePostings, MemtableTerms, MemtableView};
 
 use crate::document::{Document, DocumentError, FieldSet, MAX_ID_LEN, Value};
 use crate::schema::{CollectionSchema, FieldKind};
 use crate::segment::arena::Arena;
 use crate::segment::builder::inverted::{Inverted, Mark};
-use crate::segment::builder::{index_keywords, index_text};
+use crate::segment::builder::{column_key, index_keywords, index_text};
 use crate::segment::{FieldStats, MAX_DOCS, SegmentError, norms};
 
 /// No posting / no document.
@@ -175,7 +175,12 @@ pub(crate) enum MemField {
     Keyword {
         index: FieldIndex,
     },
-    /// Columns and stored fields live in the document encodings only.
+    /// An `i64`, `f64`, `datetime` or `bool` field: `(docid, key)` in docid order, one per document with a value, its
+    /// key as a segment's column holds it ([`column_key`]).
+    Column {
+        keys: Vec<(u32, u64)>,
+    },
+    /// A `stored` field: the document encodings only.
     Other,
 }
 
@@ -252,14 +257,14 @@ impl MemField {
     pub(crate) fn index(&self) -> Option<&FieldIndex> {
         match self {
             Self::Text { index, .. } | Self::Keyword { index } => Some(index),
-            Self::Other => None,
+            Self::Column { .. } | Self::Other => None,
         }
     }
 
     fn index_mut(&mut self) -> Option<&mut FieldIndex> {
         match self {
             Self::Text { index, .. } | Self::Keyword { index } => Some(index),
-            Self::Other => None,
+            Self::Column { .. } | Self::Other => None,
         }
     }
 }
@@ -299,7 +304,11 @@ impl Memtable {
                     },
                     Some(FieldStats::default()),
                 ),
-                _ => (MemField::Other, None),
+                FieldKind::I64 { .. }
+                | FieldKind::F64 { .. }
+                | FieldKind::Bool { .. }
+                | FieldKind::Datetime { .. } => (MemField::Column { keys: Vec::new() }, None),
+                FieldKind::Stored => (MemField::Other, None),
             };
             fields.push(memfield);
             stats.push(stat);
@@ -425,6 +434,7 @@ impl Memtable {
         // Nothing fails from here on. `&mut self` kept every other write out since the stage, so the docid and the
         // version are still the next ones.
         inner.link(staged.docid, &staged.marks);
+        inner.add_columns(staged.docid, doc);
         inner.docs.extend_from_slice(&staged.encoded);
         let end = inner.docs.len();
         inner.doc_ends.push(end);
@@ -739,13 +749,26 @@ impl Inner {
                     index.link(mark.postings());
                     index.length(docid)
                 }
-                MemField::Other => continue,
+                MemField::Column { .. } | MemField::Other => continue,
             };
             if let Some(stats) = stats
                 && len > 0
             {
                 stats.docs_with_field = stats.docs_with_field.saturating_add(1);
                 stats.sum_field_len = stats.sum_field_len.saturating_add(u64::from(len));
+            }
+        }
+    }
+
+    /// Records the column keys of document `docid`, the last one added. Cannot fail: it runs once the `put` is logged.
+    fn add_columns(&mut self, docid: u32, doc: &Document) {
+        for (field, value) in doc.fields() {
+            let column = usize::try_from(field.get())
+                .ok()
+                .and_then(|i| self.fields.get_mut(i));
+            // `encode` validated the document: a column field holds a value with a key.
+            if let (Some(MemField::Column { keys }), Some(key)) = (column, column_key(value)) {
+                keys.push((docid, key));
             }
         }
     }
@@ -757,6 +780,9 @@ impl Inner {
                     index.size_in_bytes().saturating_add(norms.capacity())
                 }
                 MemField::Keyword { index } => index.size_in_bytes(),
+                MemField::Column { keys } => {
+                    keys.capacity().saturating_mul(size_of::<(u32, u64)>())
+                }
                 MemField::Other => 0,
             };
             sum.saturating_add(bytes)

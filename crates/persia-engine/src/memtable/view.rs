@@ -2,12 +2,18 @@
 
 use std::sync::{Arc, OnceLock, RwLock};
 
-use super::{Inner, MemField, NONE, read};
+use core::ops::{Bound, RangeBounds};
+
+use fst::Automaton;
+use roaring::RoaringBitmap;
+
+use super::{FieldIndex, Inner, MemField, NONE, read};
+use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::score::FieldHit;
 use crate::segment::{BlockMax, FieldStats, ReadError};
-use crate::view::{NormReader, PostingsIterator, SearchView};
+use crate::view::{NormReader, PostingsIterator, SearchView, TermEnum};
 
 /// What the memtable knew of an id when a view was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -125,30 +131,32 @@ impl MemtableView {
     /// As [`SearchView::postings`].
     pub fn df(&self, field: FieldId, term: &[u8]) -> Result<u32, ReadError> {
         let inner = read(&self.shared);
-        let index = match indexed(&inner, field, false, "terms")? {
-            MemField::Text { index, .. } | MemField::Keyword { index } => index,
-            MemField::Other => return Ok(0),
+        let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
+            return Ok(0);
         };
-        let Some(mut at) = index
+        Ok(index
             .inverted
             .terms
             .get(term)
-            .and_then(|t| index.heads.get(t as usize).copied())
-        else {
-            return Ok(0);
-        };
+            .map_or(0, |t| self.live_df(&inner, index, t)))
+    }
+
+    /// The live documents of the view on the chain of term `term` (its id in `index`).
+    fn live_df(&self, inner: &Inner, index: &FieldIndex, term: u32) -> u32 {
+        // A term interned by a document not linked yet has no chain.
+        let mut at = index.heads.get(term as usize).copied().unwrap_or(NONE);
         let mut df = 0_u32;
         while let Some(p) = index.inverted.postings.get(at as usize) {
             // A chain is in docid order: the rest came after the view.
             if p.doc >= self.docs {
                 break;
             }
-            if self.visible(&inner, p.doc) {
+            if self.visible(inner, p.doc) {
                 df = df.saturating_add(1);
             }
             at = index.next.get(at as usize).copied().unwrap_or(NONE);
         }
-        Ok(df)
+        df
     }
 
     fn visible(&self, inner: &Inner, docid: u32) -> bool {
@@ -158,6 +166,31 @@ impl MemtableView {
                 .get(docid as usize)
                 .is_some_and(|&k| k > self.version)
     }
+}
+
+/// The field `field` of `inner`'s schema, and its type.
+fn field_of(inner: &Inner, field: FieldId) -> Result<(FieldType, &MemField), ReadError> {
+    let f = inner
+        .schema
+        .field_by_id(field)
+        .ok_or(ReadError::UnknownField { field })?;
+    usize::try_from(field.get())
+        .ok()
+        .and_then(|i| inner.fields.get(i))
+        .map(|m| (f.field_type(), m))
+        .ok_or(ReadError::UnknownField { field })
+}
+
+/// Whether `automaton` accepts `term`, as an FST search walks it: byte by byte from its start state.
+fn accepts<A: Automaton>(automaton: &A, term: &[u8]) -> bool {
+    let mut state = automaton.start();
+    for &b in term {
+        if !automaton.can_match(&state) {
+            return false;
+        }
+        state = automaton.accept(&state, b);
+    }
+    automaton.is_match(&state)
 }
 
 /// The field `field` of `inner`'s schema, which must be a `text` or `keyword` field (`text` only with `text_only`).
@@ -197,6 +230,12 @@ impl SearchView for MemtableView {
     where
         Self: 'a;
 
+    type Terms<'a, A>
+        = MemtableTerms
+    where
+        Self: 'a,
+        A: Automaton + 'a;
+
     fn doc_count(&self) -> u32 {
         self.docs
     }
@@ -221,7 +260,7 @@ impl SearchView for MemtableView {
         let (index, norms) = match memfield {
             MemField::Text { index, norms, .. } => (index, Some(norms)),
             MemField::Keyword { index } => (index, None),
-            MemField::Other => return Ok(None),
+            MemField::Column { .. } | MemField::Other => return Ok(None),
         };
         let Some(mut at) = index
             .inverted
@@ -231,6 +270,7 @@ impl SearchView for MemtableView {
         else {
             return Ok(None);
         };
+        // Copy this term's chain under the read lock. The caller iterates the copy; the guard ends with this call.
         let mut entries = Vec::new();
         let (mut max_tf, mut min_norm) = (0_u32, u8::MAX);
         while let Some(p) = index.inverted.postings.get(at as usize) {
@@ -258,15 +298,162 @@ impl SearchView for MemtableView {
             max_tf,
             min_norm,
         };
+        let has_positions = index.inverted.positions.is_some();
+        drop(inner);
         Ok(Some(MemtablePostings {
             view: self,
             field,
-            has_positions: index.inverted.positions.is_some(),
+            has_positions,
             entries,
             cur: None,
             block,
             positions: Vec::new(),
         }))
+    }
+
+    fn terms<'a, A: Automaton + 'a>(
+        &'a self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        automaton: A,
+    ) -> Result<MemtableTerms, ReadError> {
+        // Copy the terms in range, then run `automaton` without the lock. `df` is counted afterward, still at
+        // this view's `(docs, version)` cutoff, so a write between the two locks cannot add or hide a document
+        // the view should see.
+        let in_range = {
+            let inner = read(&self.shared);
+            let mut terms = Vec::new();
+            // The term arena is a hash table: every term is tried, then the matches are sorted.
+            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
+                let arena = &index.inverted.terms;
+                for id in (0..=u32::MAX).take(arena.len()) {
+                    let term = arena.key(id);
+                    if RangeBounds::<[u8]>::contains(&(lower, upper), term) {
+                        terms.push(term.to_vec());
+                    }
+                }
+            }
+            terms
+        };
+        let matched: Vec<Vec<u8>> = in_range
+            .into_iter()
+            .filter(|term| accepts(&automaton, term))
+            .collect();
+        let mut terms = Vec::new();
+        if !matched.is_empty() {
+            let inner = read(&self.shared);
+            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
+                for term in matched {
+                    let Some(id) = index.inverted.terms.get(&term) else {
+                        continue;
+                    };
+                    let df = self.live_df(&inner, index, id);
+                    if df > 0 {
+                        terms.push((term, df));
+                    }
+                }
+            }
+        }
+        terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        Ok(MemtableTerms { terms, next: 0 })
+    }
+
+    fn deleted(&self) -> RoaringBitmap {
+        // Copy the kill versions, then build the bitmap without the read lock. Same rule as `visible`: a document
+        // is live when its killing operation is after the view.
+        let killed = {
+            let inner = read(&self.shared);
+            let n = usize::try_from(self.docs).unwrap_or(0);
+            inner
+                .killed_at
+                .get(..n)
+                .map(<[u64]>::to_vec)
+                .unwrap_or_default()
+        };
+        let mut deleted = Ascending::default();
+        for docid in 0..self.docs {
+            // `docid` is below `docs`, which fits in `usize` (at most [`crate::segment::MAX_DOCS`]).
+            let i = usize::try_from(docid).unwrap_or(usize::MAX);
+            let live = killed.get(i).is_some_and(|&k| k > self.version);
+            if !live {
+                deleted.push(docid);
+            }
+        }
+        deleted.finish()
+    }
+
+    fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
+        let inner = read(&self.shared);
+        match field_of(&inner, field)? {
+            (FieldType::Bool, MemField::Column { keys }) => {
+                let mut trues = Ascending::default();
+                for &(docid, _) in keys
+                    .iter()
+                    .take_while(|&&(docid, _)| docid < self.docs)
+                    .filter(|&&(_, key)| key == 1)
+                {
+                    trues.push(docid);
+                }
+                Ok(trues.finish())
+            }
+            (field_type, _) => Err(ReadError::FieldType {
+                field,
+                field_type,
+                what: "bool column",
+            }),
+        }
+    }
+
+    fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
+        let inner = read(&self.shared);
+        Ok(match field_of(&inner, field)? {
+            // Lengths are recorded only for documents with a token or value, in docid order.
+            (_, MemField::Text { index, .. } | MemField::Keyword { index }) => index
+                .inverted
+                .lengths
+                .iter()
+                .map(|&(docid, _)| docid)
+                .take_while(|&docid| docid < self.docs)
+                .collect(),
+            (_, MemField::Column { keys }) => keys
+                .iter()
+                .map(|&(docid, _)| docid)
+                .take_while(|&docid| docid < self.docs)
+                .collect(),
+            (field_type, MemField::Other) => {
+                return Err(ReadError::FieldType {
+                    field,
+                    field_type,
+                    what: "values",
+                });
+            }
+        })
+    }
+
+    fn column_keys(&self, field: FieldId, mut f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
+        // Copied out: `f` runs without the lock.
+        let keys: Vec<(u32, u64)> = {
+            let inner = read(&self.shared);
+            match field_of(&inner, field)? {
+                (_, MemField::Column { keys }) => keys
+                    .iter()
+                    .take_while(|&&(docid, _)| docid < self.docs)
+                    .copied()
+                    .collect(),
+                (field_type, _) => {
+                    return Err(ReadError::FieldType {
+                        field,
+                        field_type,
+                        what: "column",
+                    });
+                }
+            }
+        };
+        for (docid, key) in keys {
+            f(docid, key);
+        }
+        Ok(())
     }
 
     fn norms(&self, field: FieldId) -> Result<MemtableNorms, ReadError> {
@@ -439,5 +626,23 @@ pub struct MemtableNorms(Arc<[u8]>);
 impl NormReader for MemtableNorms {
     fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
         Ok(self.0.get(docid as usize).copied().unwrap_or(0))
+    }
+}
+
+/// The terms of one field of a [`MemtableView`] that a [`SearchView::terms`] call selected, in byte order: copied out
+/// under the read lock, each with its live `df` in the view.
+#[derive(Debug, Clone)]
+pub struct MemtableTerms {
+    terms: Vec<(Vec<u8>, u32)>,
+    next: usize,
+}
+
+impl TermEnum for MemtableTerms {
+    fn next(&mut self) -> Result<Option<(&[u8], u32)>, ReadError> {
+        let Some((term, df)) = self.terms.get(self.next) else {
+            return Ok(None);
+        };
+        self.next = self.next.saturating_add(1);
+        Ok(Some((term, *df)))
     }
 }
