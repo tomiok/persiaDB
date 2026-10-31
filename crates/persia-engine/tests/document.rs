@@ -947,9 +947,11 @@ fn field_kind() -> impl Strategy<Value = FieldKind> {
     ]
 }
 
-fn schema() -> impl Strategy<Value = CollectionSchema> {
+/// `fields` is how many fields the schema has. `0..10` includes an empty schema; a test that needs a field
+/// passes `1..10` so the strategy never yields one, instead of rejecting it with `prop_assume`.
+fn schema_of(fields: std::ops::Range<usize>) -> impl Strategy<Value = CollectionSchema> {
     (
-        prop::collection::btree_map("[A-Za-z][A-Za-z0-9_]{0,8}", field_kind(), 0..10),
+        prop::collection::btree_map("[A-Za-z][A-Za-z0-9_]{0,8}", field_kind(), fields),
         any::<bool>(),
     )
         .prop_filter("reserved names", |(fields, _)| {
@@ -965,6 +967,10 @@ fn schema() -> impl Strategy<Value = CollectionSchema> {
                 .build()
                 .unwrap()
         })
+}
+
+fn schema() -> impl Strategy<Value = CollectionSchema> {
+    schema_of(0..10)
 }
 
 fn json_value() -> impl Strategy<Value = serde_json::Value> {
@@ -1023,7 +1029,20 @@ fn value(t: FieldType) -> BoxedStrategy<Value> {
 
 /// A schema and a valid document for it.
 fn schema_and_doc() -> impl Strategy<Value = (CollectionSchema, Document)> {
-    schema().prop_flat_map(|schema| {
+    docs_for(schema())
+}
+
+/// As [`schema_and_doc`], with at least one field. [`wrong_types_are_rejected`] needs a field to put a value
+/// of another type in; filtering here keeps that case out of the global reject budget (`PROPTEST_CASES=10000`
+/// and the default 1024 global rejects abort on `prop_assume!(!schema.fields().is_empty())`).
+fn schema_and_doc_with_field() -> impl Strategy<Value = (CollectionSchema, Document)> {
+    docs_for(schema_of(1..10))
+}
+
+fn docs_for(
+    schemas: impl Strategy<Value = CollectionSchema>,
+) -> impl Strategy<Value = (CollectionSchema, Document)> {
+    schemas.prop_flat_map(|schema| {
         let fields: Vec<_> = schema
             .fields()
             .iter()
@@ -1106,8 +1125,7 @@ proptest! {
 
     /// A value of another type is rejected, naming the field.
     #[test]
-    fn wrong_types_are_rejected((schema, doc) in schema_and_doc(), pick in any::<prop::sample::Index>(), other in any::<prop::sample::Index>()) {
-        prop_assume!(!schema.fields().is_empty());
+    fn wrong_types_are_rejected((schema, doc) in schema_and_doc_with_field(), pick in any::<prop::sample::Index>(), other in any::<prop::sample::Index>()) {
         let field = &schema.fields()[pick.index(schema.fields().len())];
         let wrong: Vec<Value> = [
             Value::String("s".into()), Value::I64(1), Value::F64(1.0), Value::Bool(true),
