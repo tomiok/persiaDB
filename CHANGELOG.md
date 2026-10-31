@@ -18,6 +18,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: `prefix` and `fuzzy` queries run (ROADMAP 7.4.12, SPEC §7.1). `SearchPlan::with_terms` expands
+  each over the terms of the views it will run on (`search::TermSource`: a view, or `db::CollectionViews`), once, so
+  every view scores the same terms. A `fuzzy` takes the terms within its distance (optimal string alignment over
+  characters: a swap of two adjacent characters is one edit). At most `max_expansions` terms are kept, the highest
+  collection `df` first, then byte order; the query scores as a `bool` of `should` `term`s over them.
+  `SearchPlan::new` still cannot expand and returns `SearchError::NeedsTerms` (was `SearchError::Unsupported`).
+  An empty prefix or a distance other than 1 or 2 is `SearchError::Query`; an unreadable term dictionary is the new
+  `SearchError::Read`.
+- `persia-engine`: faster disjunctions with many clauses (ROADMAP 7.4.7): an OR of 50 terms takes 24 ms instead of
+  55 ms on `search_top10/or50` (block-max WAND), with the same hits.
 - `persia-engine`: search requests over a collection (ROADMAP 7.5, SPEC §7.4, §7.5, §7.5.1).
   `db::CollectionViews::search` takes a `SearchPlan` and a `db::SearchRequest` and returns `db::SearchResults`.
   - **Sort.** A `search::Sort` is the score or up to 16 `SortKey`s, each the score or a `keyword`, `i64`, `f64`,

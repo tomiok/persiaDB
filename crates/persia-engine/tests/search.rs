@@ -671,7 +671,7 @@ fn bool_edges_by_hand() {
 }
 
 #[test]
-fn unsupported_queries_are_errors_and_filters_run() {
+fn expansions_need_terms_and_filters_run() {
     let f = fixture(&["ant"]);
     let prefix = Query::Prefix(persia_engine::query::PrefixQuery {
         field: f.body(),
@@ -680,7 +680,7 @@ fn unsupported_queries_are_errors_and_filters_run() {
     });
     assert!(matches!(
         SearchPlan::new(&prefix, &f.schema, &f.stats),
-        Err(SearchError::Unsupported { what: "prefix" })
+        Err(SearchError::NeedsTerms { what: "prefix" })
     ));
     let filtered = Query::Bool(BoolQuery {
         filter: vec![persia_engine::query::Filter::And(Vec::new())],

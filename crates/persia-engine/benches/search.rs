@@ -1,9 +1,9 @@
-//! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR (of 3
-//! and of 50 clauses, as a relaxation expansion builds, 7.4.7)
-//! and a phrase with the default pruning (block-max WAND), each strategy of 7.4.4 side by side, and a term under
-//! filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted by a column,
-//! with a facet, and a page after a cursor. Deterministic
-//! input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
+//! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR
+//! (of 3 clauses, and of 50 as a relaxation expansion builds, 7.4.7) and a phrase with the default pruning
+//! (block-max WAND), each strategy of 7.4.4 side by side, prefix and fuzzy expansions planned and searched (7.4.12),
+//! and a term under filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted
+//! by a column, with a facet, and a page after a cursor. Deterministic input (a fixed-seed generator), so runs
+//! compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
 
@@ -19,7 +19,8 @@ use persia_engine::db::{
     Database, DatabaseOptions, ManualClock, SearchHit, SearchRequest, SegmentIds,
 };
 use persia_engine::query::{
-    BoolQuery, Filter, FilterValue, PhraseQuery, PhraseTerm, Query, TermQuery,
+    BoolQuery, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery, Query,
+    TermQuery,
 };
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
@@ -177,12 +178,54 @@ fn bench(c: &mut Criterion) {
     }
     group.finish();
 
+    expansions(c, &schema, &stats, &view, body);
+
     filters(
         c,
         &|q| SearchPlan::new(q, &schema, &stats).unwrap(),
         &view,
         fields,
     );
+}
+
+/// Expanded at plan time over the segment's terms (7.4.12), then searched: `w1` starts 111 words, capped at 50; `w15`
+/// is one edit from 21.
+fn expansions(
+    c: &mut Criterion,
+    schema: &CollectionSchema,
+    stats: &SegmentStatistics,
+    view: &SegmentView<'_>,
+    body: FieldId,
+) {
+    let expansions = [
+        (
+            "prefix",
+            Query::Prefix(PrefixQuery {
+                field: body,
+                prefix: "w1".into(),
+                max_expansions: 50,
+            }),
+        ),
+        (
+            "fuzzy",
+            Query::Fuzzy(FuzzyQuery {
+                field: body,
+                term: "w15".into(),
+                distance: 1,
+                max_expansions: 50,
+            }),
+        ),
+    ];
+    let mut group = c.benchmark_group("search_top10_expansion");
+    for (name, query) in &expansions {
+        group.bench_function(*name, |b| {
+            b.iter(|| {
+                let plan = SearchPlan::with_terms(query, schema, stats, view).unwrap();
+                black_box(plan.top_k(view, 10).unwrap())
+            });
+        });
+    }
+    group.finish();
 }
 
 /// A term under filters: `price < 100` selects about 10 %, `price < 500` about half, a `tag` about 10 %; and a

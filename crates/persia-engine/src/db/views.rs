@@ -9,13 +9,15 @@
 //! view of any version takes a prefix of it, and only a version past the log looks ids up, those first named since.
 //! It also keeps the deletions of the newest version searched, which a newer view extends.
 
+use core::ops::Bound;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use roaring::RoaringBitmap;
 
 use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
-use crate::search::{Matcher, Pruning, SearchPlan, collect};
+use crate::schema::FieldId;
+use crate::search::{Expansion, Matcher, Pruning, SearchPlan, TermSource, collect};
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
 
@@ -198,6 +200,25 @@ impl CollectionSnapshot {
             version,
             tombstones,
         })
+    }
+}
+
+/// The terms of every segment, then of the memtable: what a `prefix` or `fuzzy` planned for these views expands
+/// over ([`SearchPlan::with_terms`], SPEC §7.1).
+impl TermSource for CollectionViews<'_> {
+    fn each_term(
+        &self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        expansion: &Expansion,
+        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        for segment in self.segments() {
+            segment.each_term(field, lower, upper, expansion, each)?;
+        }
+        self.memtable()
+            .each_term(field, lower, upper, expansion, each)
     }
 }
 

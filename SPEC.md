@@ -1147,6 +1147,18 @@ empty; `fuzzy` distance is 1 or 2; `prefix` and `fuzzy` expand to at most `max_e
 engine builds them, §7.6); `boost` and field weights are in `0 < w ≤ 1000` (as §6.2.2's `boost`), a constant score is
 finite and ≥ 0.
 
+`prefix` and `fuzzy` expand once, when the query is planned, over the terms of their field in every view the plan
+runs on (each segment and the memtable view), so every view scores the same terms (ROADMAP 7.4.12). A `prefix` takes
+the terms that start with its bytes. A `fuzzy` takes the terms within its `distance` of its term, the term itself
+included: the optimal string alignment distance over Unicode scalar values (an insertion, a deletion, a substitution,
+or a swap of two adjacent characters each count 1, and no character is edited twice; Lucene's default). A byte of a
+term that is not part of valid UTF-8 counts as a character no query character equals. When more than
+`max_expansions` terms qualify, those with the highest collection `df` (§7.2: the `df` scoring uses, not a view's
+own) are kept, ties broken by byte order. The query then matches and scores as a `bool` of `should` `term` queries
+over the terms kept, in byte order, each with its own `idf` (so a document holding several scores their sum, as
+Lucene's scoring rewrite); with no term kept it matches nothing. A plan without the views' terms
+(`SearchPlan::new`) rejects both.
+
 #### 7.1.1 User text
 `q` is compiled to the AST and **never fails**: syntax that does not parse is read as plain text. Clauses are separated
 by Unicode whitespace and all required (default AND); each is `[-][field:](word | "phrase")`:

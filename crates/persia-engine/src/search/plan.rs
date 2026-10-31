@@ -1,9 +1,13 @@
 //! A query planned against the collection statistics (SPEC §7.3): its scorers built once, then a matcher tree per
 //! view.
 
-use crate::query::{BoolQuery, Filter, PhraseQuery, Query, QueryError, QueryLimits};
+use core::ops::Bound;
+
+use crate::query::{
+    BoolQuery, Filter, FuzzyQuery, PhraseQuery, PrefixQuery, Query, QueryError, QueryLimits,
+};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
-use crate::score::TermScorer;
+use crate::score::{FieldParams, ScoreError, TermScorer};
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 use crate::view::SearchView;
@@ -12,6 +16,7 @@ use super::block_max_wand::BlockMaxWand;
 use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
+use super::expand::{Expansion, TermSource, expand, prefix_end};
 use super::filter::{FilterDocs, Filtered, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
@@ -45,6 +50,8 @@ enum Node {
     },
     Scaled(Box<Node>, Scale),
     All,
+    /// No document: an expansion that kept no term.
+    Nothing,
 }
 
 type BoxedMatcher<'a> = Box<dyn Matcher + 'a>;
@@ -58,14 +65,73 @@ impl SearchPlan {
     /// [`SearchError::Score`] for a field a query does not apply to or a statistic that cannot be read;
     /// [`SearchError::Query`] for a phrase on a field without positions or with decreasing positions, and a boost
     /// or constant score out of range, and a filter that does not fit the schema ([`Filter::validate`], limits
-    /// aside); [`SearchError::Unsupported`] for a `prefix` or a `fuzzy`.
+    /// aside); [`SearchError::NeedsTerms`] for a `prefix` or a `fuzzy`, which only [`Self::with_terms`] plans.
     pub fn new(
         query: &Query,
         schema: &CollectionSchema,
         stats: &(impl StatisticsProvider + ?Sized),
     ) -> Result<Self, SearchError> {
         Ok(Self {
-            root: plan(query, schema, stats)?,
+            root: plan(query, schema, &Planner { stats, terms: None })?,
+        })
+    }
+
+    /// As [`Self::new`], and expands each `prefix` and `fuzzy` over the terms of `terms`, the views the plan will
+    /// run on (SPEC §7.1): at most `max_expansions` terms each, the highest collection `df` (`stats`) first, then
+    /// by bytes. Every view then scores the same terms.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::document::{Document, Value};
+    /// use persia_engine::query::{FuzzyQuery, PrefixQuery, Query};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::SearchPlan;
+    /// use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// use persia_engine::stats::SegmentStatistics;
+    /// use persia_engine::view::SegmentView;
+    /// use persia_format::ByteSource;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// for (id, text) in [("a", "running shoes"), ("b", "runner"), ("c", "red hat")] {
+    ///     b.add(&Document::new(id).with(body, Value::String(text.into())))?;
+    /// }
+    /// let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// let segment = Arc::new(Segment::open(ByteSource::new(SegmentWriter::new(&b, meta).finish()?.into()), &schema)?);
+    /// let schema = Arc::new(schema);
+    /// let stats = SegmentStatistics::new(&schema, &[Arc::clone(&segment)]);
+    /// let view = SegmentView::new(&segment, None);
+    ///
+    /// let prefix = Query::Prefix(PrefixQuery { field: body, prefix: "run".into(), max_expansions: 50 });
+    /// let hits = SearchPlan::with_terms(&prefix, &schema, &stats, &view)?.top_k(&view, 10)?;
+    /// assert_eq!(hits.len(), 2);
+    /// // `hut` is one substitution from `hat`.
+    /// let fuzzy = Query::Fuzzy(FuzzyQuery { field: body, term: "hut".into(), distance: 1, max_expansions: 50 });
+    /// let hits = SearchPlan::with_terms(&fuzzy, &schema, &stats, &view)?.top_k(&view, 10)?;
+    /// assert_eq!(hits.iter().map(|h| h.docid).collect::<Vec<_>>(), [2]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::new`], but never [`SearchError::NeedsTerms`]; [`SearchError::Query`] for an empty prefix or a
+    /// distance other than 1 or 2; [`SearchError::Read`] if `terms` cannot be read.
+    pub fn with_terms(
+        query: &Query,
+        schema: &CollectionSchema,
+        stats: &(impl StatisticsProvider + ?Sized),
+        terms: &dyn TermSource,
+    ) -> Result<Self, SearchError> {
+        Ok(Self {
+            root: plan(
+                query,
+                schema,
+                &Planner {
+                    stats,
+                    terms: Some(terms),
+                },
+            )?,
         })
     }
 
@@ -117,11 +183,18 @@ impl SearchPlan {
     }
 }
 
-fn plan(
+/// What planning reads: the statistics, and the views' terms when it may expand.
+struct Planner<'a, S: ?Sized> {
+    stats: &'a S,
+    terms: Option<&'a dyn TermSource>,
+}
+
+fn plan<S: StatisticsProvider + ?Sized>(
     query: &Query,
     schema: &CollectionSchema,
-    stats: &(impl StatisticsProvider + ?Sized),
+    p: &Planner<'_, S>,
 ) -> Result<Node, SearchError> {
+    let stats = p.stats;
     let is_text = |field| {
         matches!(
             schema.field_by_id(field).map(Field::kind),
@@ -157,31 +230,30 @@ fn plan(
                     .collect(),
             }
         }
-        Query::Prefix(_) => return Err(SearchError::Unsupported { what: "prefix" }),
-        Query::Fuzzy(_) => return Err(SearchError::Unsupported { what: "fuzzy" }),
-        Query::Bool(q) => plan_bool(q, schema, stats)?,
+        Query::Prefix(q) => plan_prefix(q, schema, p)?,
+        Query::Fuzzy(q) => plan_fuzzy(q, schema, p)?,
+        Query::Bool(q) => plan_bool(q, schema, p)?,
         Query::Boost(q) if !(q.boost.is_finite() && q.boost > 0.0 && q.boost <= 1000.0) => {
             return Err(QueryError::InvalidBoost { value: q.boost }.into());
         }
         Query::ConstantScore(q) if !(q.score.is_finite() && q.score >= 0.0) => {
             return Err(QueryError::InvalidScore { value: q.score }.into());
         }
-        Query::Boost(q) => Node::Scaled(
-            Box::new(plan(&q.query, schema, stats)?),
-            Scale::Boost(q.boost),
-        ),
+        Query::Boost(q) => {
+            Node::Scaled(Box::new(plan(&q.query, schema, p)?), Scale::Boost(q.boost))
+        }
         Query::ConstantScore(q) => Node::Scaled(
-            Box::new(plan(&q.query, schema, stats)?),
+            Box::new(plan(&q.query, schema, p)?),
             Scale::Constant(q.score),
         ),
         Query::MatchAll => Node::All,
     })
 }
 
-fn plan_bool(
+fn plan_bool<S: StatisticsProvider + ?Sized>(
     q: &BoolQuery,
     schema: &CollectionSchema,
-    stats: &(impl StatisticsProvider + ?Sized),
+    p: &Planner<'_, S>,
 ) -> Result<Node, SearchError> {
     // A value of another type than its field would select by the wrong keys. The limits are the caller's to check
     // (`Query::validate`), as for every other clause.
@@ -189,7 +261,7 @@ fn plan_bool(
         filter.validate(schema, &UNLIMITED)?;
     }
     let all = |clauses: &[Query]| -> Result<Vec<Node>, SearchError> {
-        clauses.iter().map(|c| plan(c, schema, stats)).collect()
+        clauses.iter().map(|c| plan(c, schema, p)).collect()
     };
     Ok(Node::Bool {
         must: all(&q.must)?,
@@ -199,6 +271,106 @@ fn plan_bool(
     })
 }
 
+fn plan_prefix<S: StatisticsProvider + ?Sized>(
+    q: &PrefixQuery,
+    schema: &CollectionSchema,
+    p: &Planner<'_, S>,
+) -> Result<Node, SearchError> {
+    let field = searchable(schema, q.field, "a prefix query")?;
+    if q.prefix.is_empty() {
+        return Err(QueryError::EmptyPrefix {
+            field: field.name().to_owned(),
+        }
+        .into());
+    }
+    let start = q.prefix.as_bytes();
+    let end = prefix_end(start);
+    let upper = end.as_deref().map_or(Bound::Unbounded, Bound::Excluded);
+    let range = (Bound::Included(start), upper);
+    plan_expansion(
+        schema,
+        field,
+        range,
+        &Expansion::all(),
+        q.max_expansions,
+        "prefix",
+        p,
+    )
+}
+
+fn plan_fuzzy<S: StatisticsProvider + ?Sized>(
+    q: &FuzzyQuery,
+    schema: &CollectionSchema,
+    p: &Planner<'_, S>,
+) -> Result<Node, SearchError> {
+    let field = searchable(schema, q.field, "a fuzzy query")?;
+    if !matches!(q.distance, 1 | 2) {
+        return Err(QueryError::InvalidDistance {
+            distance: q.distance,
+        }
+        .into());
+    }
+    let expansion = Expansion::fuzzy(&q.term, q.distance);
+    let range = (Bound::Unbounded, Bound::Unbounded);
+    plan_expansion(
+        schema,
+        field,
+        range,
+        &expansion,
+        q.max_expansions,
+        "fuzzy",
+        p,
+    )
+}
+
+/// The `text` or `keyword` field `field`, which a `prefix` or `fuzzy` takes (SPEC §7.1).
+fn searchable<'s>(
+    schema: &'s CollectionSchema,
+    field: FieldId,
+    what: &'static str,
+) -> Result<&'s Field, SearchError> {
+    match schema.field_by_id(field) {
+        Some(f) if matches!(f.kind(), FieldKind::Text(_) | FieldKind::Keyword(_)) => Ok(f),
+        _ => Err(ScoreError::Field { field, what }.into()),
+    }
+}
+
+/// A `prefix` or `fuzzy` as SPEC §7.1 plans it: the `should` `term`s of its kept expansions, in byte order; no
+/// document when none is kept.
+fn plan_expansion<S: StatisticsProvider + ?Sized>(
+    schema: &CollectionSchema,
+    field: &Field,
+    range: (Bound<&[u8]>, Bound<&[u8]>),
+    expansion: &Expansion,
+    max_expansions: u32,
+    what: &'static str,
+    p: &Planner<'_, S>,
+) -> Result<Node, SearchError> {
+    let Some(terms) = p.terms else {
+        return Err(SearchError::NeedsTerms { what });
+    };
+    let cap = usize::try_from(max_expansions).unwrap_or(usize::MAX);
+    let kept = expand(field.id(), range, expansion, cap, terms, p.stats)?;
+    let params = FieldParams::of(schema, field.id(), None)?;
+    let text = matches!(field.kind(), FieldKind::Text(_));
+    let mut words = Vec::with_capacity(kept.len());
+    for (term, df) in kept {
+        words.push(Node::Word {
+            scorer: TermScorer::new(&[params], df, p.stats)?,
+            terms: vec![(field.id(), term, text)],
+        });
+    }
+    Ok(match words.len() {
+        0 => Node::Nothing,
+        1 => words.pop().unwrap_or(Node::Nothing),
+        _ => Node::Bool {
+            must: Vec::new(),
+            should: words,
+            must_not: Vec::new(),
+            filter: Vec::new(),
+        },
+    })
+}
 /// Limits no filter reaches: planning checks a filter's fields and values, not its size.
 const UNLIMITED: QueryLimits = QueryLimits {
     max_terms: usize::MAX,
@@ -286,6 +458,7 @@ fn build<'a, V: SearchView>(
             Box::new(Scaled::new(build(inner, view, inner_pruning)?, *scale))
         }
         Node::All => Box::new(AllDocs::new(view)),
+        Node::Nothing => Box::new(Empty),
     })
 }
 
