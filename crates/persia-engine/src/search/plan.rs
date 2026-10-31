@@ -216,6 +216,7 @@ fn build<'a, V: SearchView>(
                     None
                 };
                 fields.push(WordField {
+                    field: *field,
                     slot,
                     postings,
                     norms,
@@ -244,6 +245,7 @@ fn build<'a, V: SearchView>(
             }
             Box::new(PhraseMatcher::<V>::new(
                 postings,
+                *field,
                 view.norms(*field)?,
                 scorer,
             ))

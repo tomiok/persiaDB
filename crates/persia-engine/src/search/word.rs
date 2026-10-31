@@ -6,17 +6,20 @@
 //! cannot beat it: under [`Pruning::BlockMaxWand`] the blocks whose bound is at most the threshold, under
 //! [`Pruning::MaxScore`] the whole list when its bound is.
 
+use crate::schema::FieldId;
 use crate::score::{FieldHit, TermScorer};
 use crate::segment::ReadError;
-use crate::view::{NormReader, PostingsIterator, SearchView};
+use crate::view::{PostingsIterator, SearchView};
 
-use super::{Matcher, Pos, Pruning, ScoreBound, raise};
+use super::{Matcher, Pos, Pruning, ScoreBound, bounded_norm, raise};
 
 /// One field of the word that the view holds the term in.
 pub(super) struct WordField<'a, V: SearchView + 'a> {
     /// The field's index in the scorer's fields.
     pub(super) slot: usize,
     pub(super) postings: V::Postings<'a>,
+    /// The field, for errors.
+    pub(super) field: FieldId,
     /// `None` for a `keyword` field, which has no norms.
     pub(super) norms: Option<V::Norms<'a>>,
 }
@@ -195,7 +198,10 @@ impl<'a, V: SearchView + 'a> Matcher for WordMatcher<'a, V> {
             let hit = FieldHit {
                 tf: field.postings.freq()?,
                 norm: match field.norms.as_mut() {
-                    Some(norms) => norms.get(doc)?,
+                    Some(norms) => {
+                        let min_norm = field.postings.block_max().map(|b| b.min_norm);
+                        bounded_norm(norms, field.field, doc, min_norm)?
+                    }
                     None => 0,
                 },
             };
