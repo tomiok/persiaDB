@@ -179,7 +179,7 @@ idf(t) = ln(1 + (N − df + 0.5) / (df + 0.5))
 
 `StatisticsProvider` is the trait those numbers come from. `SegmentStatistics` sums the segments of one snapshot, deleted documents included until a merge drops them. `SearchStatistics` adds the memtable's live documents. A snapshot computes the segment part once.
 
-The same function, given a block's maximum term frequency and minimum norm, is an upper bound used later by MaxScore and block-max WAND (SPEC §7.3). The bound is implemented (ROADMAP 7.3.3). The iterators that would use it are not (ROADMAP 7.4.4).
+The same function, given a block's maximum term frequency and minimum norm, is an upper bound used by MaxScore and block-max WAND (SPEC §7.3, ROADMAP 7.3.3 and 7.4.4) to skip documents that cannot reach the top k.
 
 `persia-engine/tests/reference` evaluates the formula on the quantized field lengths. The scorer must match it within `1e-9 · idf·(k1+1)` (SPEC §7.2, ROADMAP 7.3.4). A differential suite over random corpora and full queries is ROADMAP 7.8.1 and is not written. [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency figures and labels them as targets, not promises. This project does not publish search benchmarks.
 

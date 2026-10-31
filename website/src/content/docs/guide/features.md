@@ -54,10 +54,11 @@ for one term (ROADMAP 7.3.4). A search that returns ranked hits does not: matchi
 ROADMAP 7.4 and have not been started. The longer account of typos, relaxation, and this scorer is
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 
-Execution, per segment and over the memtable, is block-max WAND (MAXSCORE as a fallback), with
-filters as bitmaps and tombstones applied last (SPEC §7.3). Segments are searched in parallel.
-Sort is by score or by a column. Deep paging prefers a `search_after` cursor over a large offset
-(SPEC §7.4). Facets count a keyword column and merge across segments (SPEC §7.5).
+Execution, per segment and over the memtable, collects the top k with block-max WAND by default
+(`MaxScore` is the other strategy). Pruning never changes the hits: pruned and exhaustive top k are
+the same, scores bit for bit. Filters are bitmaps and tombstones are applied last (SPEC §7.3).
+Segments are searched in parallel. Sort is by score or by a column. Deep paging prefers a
+`search_after` cursor over a large offset (SPEC §7.4). Facets count a keyword column and merge across segments (SPEC §7.5).
 `explain: true` returns a per-term score breakdown (SPEC §7.7). Highlighting is post-v1.
 
 ## Zero-results relaxation
