@@ -7,7 +7,7 @@ use core::ops::{Bound, RangeBounds};
 use fst::Automaton;
 use roaring::RoaringBitmap;
 
-use super::{FieldIndex, Inner, MemField, NONE, read};
+use super::{FieldIndex, Inner, MemField, MemtableKeys, MemtableKeywords, NONE, read};
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
@@ -169,7 +169,7 @@ impl MemtableView {
 }
 
 /// The field `field` of `inner`'s schema, and its type.
-fn field_of(inner: &Inner, field: FieldId) -> Result<(FieldType, &MemField), ReadError> {
+pub(super) fn field_of(inner: &Inner, field: FieldId) -> Result<(FieldType, &MemField), ReadError> {
     let f = inner
         .schema
         .field_by_id(field)
@@ -224,6 +224,10 @@ fn indexed<'i>(
 
 impl SearchView for MemtableView {
     type Norms<'a> = MemtableNorms;
+
+    type Keys<'a> = MemtableKeys;
+
+    type Keywords<'a> = MemtableKeywords;
 
     type Postings<'a>
         = MemtablePostings<'a>
@@ -454,6 +458,14 @@ impl SearchView for MemtableView {
             f(docid, key);
         }
         Ok(())
+    }
+
+    fn keys(&self, field: FieldId) -> Result<MemtableKeys, ReadError> {
+        MemtableKeys::new(&read(&self.shared), field, self.docs)
+    }
+
+    fn keywords(&self, field: FieldId) -> Result<MemtableKeywords, ReadError> {
+        MemtableKeywords::new(&read(&self.shared), field, self.docs)
     }
 
     fn norms(&self, field: FieldId) -> Result<MemtableNorms, ReadError> {

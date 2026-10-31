@@ -143,8 +143,10 @@ Collected here. The language docs repeat one only when the answer changes that l
    uses a different split, the bindings follow it.
 6. **Empty document id.** SPEC §6.1 says `id` is a string of at most 512 bytes. It does not forbid empty.
    The SDK passes the id through and surfaces the core's error.
-7. **Cursor across a merge.** SPEC §7.4's `search_after` cursor is `(score, segment_gen, docid)`. A merge
-   rewrites segments. What a stale cursor returns is a core question. The SDK returns that error as-is.
+7. **Cursor across a merge.** SPEC §7.4's `search_after` cursor carries the hit's sort values, its
+   location, and the snapshot commit, collection and memtable view that produced it. A search on
+   another snapshot, collection or memtable view — including after a merge publishes a new commit —
+   returns an error. The SDK returns that error as-is.
 8. **Cancellation.** The engine is synchronous (SPEC §3 principle 3, [storage.rs L12–L14](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/storage.rs#L12-L14)).
    `context.Context` and `AbortSignal` are checked before the native call. A cancel that arrives during
    the call does not stop it, until the Rust API grows a cancel flag. See the Go and TypeScript docs.

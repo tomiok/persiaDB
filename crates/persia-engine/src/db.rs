@@ -50,6 +50,7 @@ mod obsolete;
 mod policy;
 mod read_only;
 mod recovery;
+mod search;
 mod snapshot;
 mod verify;
 mod views;
@@ -75,6 +76,7 @@ use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::ReadOnlyDatabase;
+pub use search::{Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults};
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
 pub use verify::{Tail, VerifyReport};
 pub use views::{CollectionHit, CollectionViews};
@@ -1342,6 +1344,7 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
             .iter()
             .map(|(name, c)| {
                 let snapshot = CollectionSnapshot {
+                    seq: manifest.seq(),
                     schema: Arc::clone(&c.schema),
                     segments: c.segments.iter().map(|s| Arc::clone(&s.segment)).collect(),
                     tombstones: c

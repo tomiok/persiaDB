@@ -41,14 +41,24 @@
 
 mod block_max_wand;
 mod boolean;
+mod facet;
 mod filter;
 mod max_score;
 mod phrase;
 mod plan;
+mod request;
+mod sort;
 mod top_k;
 mod word;
 
+pub(crate) use facet::FacetCounter;
+pub use facet::{
+    DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
+};
 pub use plan::SearchPlan;
+pub use request::{MAX_WINDOW, Projection, RequestError};
+pub use sort::{MAX_SORT_KEYS, Missing, Order, Sort, SortKey, SortValue};
+pub(crate) use sort::{Ties, top_sorted};
 pub use top_k::{Hit, TopK};
 
 use crate::query::QueryError;
@@ -252,6 +262,38 @@ pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hi
     while let Some(docid) = matcher.next()? {
         // The threshold only moves when a hit is kept; most are not, once the heap is warm.
         if top.push(docid, matcher.score()?)
+            && let Some(t) = top.threshold()
+            && threshold.is_none_or(|old| t > old)
+        {
+            threshold = Some(t);
+            matcher.set_min_competitive(t);
+        }
+    }
+    Ok(top.into_hits())
+}
+
+/// As [`collect`], keeping only the matches `keep` accepts (a cursor's, SPEC §7.4); `keep` sees every match the
+/// matcher yields, in docid order. Without `prune`, no threshold is passed on, so the matcher yields every match (a
+/// facet counts them all, SPEC §7.5), and it runs to its end even for `k = 0`.
+///
+/// # Errors
+/// A corruption of the view the matcher reads.
+pub(crate) fn collect_where(
+    matcher: &mut (impl Matcher + ?Sized),
+    k: usize,
+    prune: bool,
+    mut keep: impl FnMut(u32, f64) -> bool,
+) -> Result<Vec<Hit>, ReadError> {
+    if k == 0 && prune {
+        return Ok(Vec::new());
+    }
+    let mut top = TopK::new(k);
+    let mut threshold = None;
+    while let Some(docid) = matcher.next()? {
+        let score = matcher.score()?;
+        if keep(docid, score)
+            && top.push(docid, score)
+            && prune
             && let Some(t) = top.threshold()
             && threshold.is_none_or(|old| t > old)
         {

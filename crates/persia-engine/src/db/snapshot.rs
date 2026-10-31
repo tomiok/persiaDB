@@ -53,6 +53,8 @@ impl Snapshot {
 /// One collection in a [`Snapshot`].
 #[derive(Debug, Clone)]
 pub struct CollectionSnapshot {
+    /// The commit that published the snapshot ([`Snapshot::seq`]). A cursor records it (SPEC §7.4).
+    pub(super) seq: u64,
     pub(super) schema: Arc<CollectionSchema>,
     pub(super) segments: Vec<Arc<Segment>>,
     /// The deletions of each segment, by its index in `segments`, as of the commit (SPEC §8.3).

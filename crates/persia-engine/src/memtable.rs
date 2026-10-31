@@ -41,6 +41,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod columns;
 mod flush;
 mod view;
 
@@ -49,6 +50,7 @@ use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
 
+pub use columns::{MemtableKeys, MemtableKeywords};
 pub use flush::{FlushPolicy, FlushReason};
 pub use view::{IdState, MemtableNorms, MemtablePostings, MemtableTerms, MemtableView};
 
