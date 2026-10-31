@@ -687,8 +687,9 @@ fn complements_never_select_deleted_documents() {
     );
 }
 
-/// Postings of several blocks in three segments, with upserts and deletes in the memtable: a filtered `must` prunes
-/// under thresholds and returns the exhaustive hits, which are the reference's.
+/// Postings of several blocks in three segments, with upserts and deletes in the memtable: a filtered `must`, and
+/// `should` clauses beside a filter with no `must`, prune under thresholds and return the exhaustive hits, which
+/// are the reference's.
 #[test]
 fn multi_block_filtered_search_prunes_to_the_exhaustive_hits() {
     let seed: u64 = std::env::var("PERSIA_SEED")
@@ -778,6 +779,23 @@ fn multi_block_filtered_search_prunes_to_the_exhaustive_hits() {
                 "seed {seed}, k = {k}"
             );
         }
+    }
+    // `should` beside a filter, no `must`: the filter scores 0, so the threshold reaches the disjunction.
+    // `search` checks every pruning strategy against exhaustive top-k.
+    let should_q = with_filter(
+        BoolQuery {
+            should: vec![term("alpha"), term("beta"), term("common")],
+            ..BoolQuery::default()
+        },
+        &filters[0],
+    );
+    let full = search(c, &memtable, &should_q, 2000);
+    for k in [1_usize, 10, 50] {
+        assert_eq!(
+            search(c, &memtable, &should_q, k),
+            full[..k.min(full.len())],
+            "should beside a filter, seed {seed}, k = {k}"
+        );
     }
 }
 

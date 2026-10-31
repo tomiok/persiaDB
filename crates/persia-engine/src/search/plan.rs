@@ -300,7 +300,8 @@ struct Clauses<'a> {
 
 /// A `bool` (SPEC §7.1): every `must` and `filter`, at least one `should` when there is neither, no `must_not`; an
 /// empty one matches every document. Filters select before anything is scored (SPEC §7.3) and score 0, so a
-/// threshold on the `bool` still reaches its one `must` clause.
+/// threshold on the `bool` still reaches its one `must` clause, and the `should` clauses when there is no `must`
+/// (their score is the whole score). `should` beside `must` stays exhaustive (ROADMAP 7.4.8).
 fn build_bool<'a, V: SearchView>(
     clauses: Clauses<'a>,
     view: &'a V,
@@ -316,8 +317,11 @@ fn build_bool<'a, V: SearchView>(
         nodes.iter().map(|n| build(n, view, pruning)).collect()
     };
     // The score is the `should` clauses' when they are required, or the one `must` clause's without `should`.
+    // No `must`: a filter adds 0, so the threshold reaches `should` whether or not a filter is present.
+    // One `must` and no `should`: the threshold reaches that clause. Anything else, including `should` beside
+    // `must`, is exhaustive — the slack depends on the document (ROADMAP 7.4.8).
     let (must_pruning, should_pruning) = match (must.len(), should.is_empty()) {
-        (0, _) if filter.is_empty() => (Pruning::Exhaustive, pruning),
+        (0, _) => (Pruning::Exhaustive, pruning),
         (1, true) => (pruning, Pruning::Exhaustive),
         _ => (Pruning::Exhaustive, Pruning::Exhaustive),
     };

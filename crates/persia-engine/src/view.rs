@@ -159,8 +159,8 @@ pub trait SearchView {
     /// all deleted, and the memtable only terms with a live document in the view. So the `df`s are each view's own
     /// (a segment's count its deleted documents): rank expansions by the collection's statistics, not by these.
     ///
-    /// The memtable runs `automaton` on every term it holds under its read lock, so `automaton` must not use the
-    /// memtable.
+    /// The memtable copies the term bytes in range under its read lock, runs `automaton` on that copy, then takes
+    /// the lock again to count each match's `df`. `automaton` is not called under the lock.
     ///
     /// # Errors
     /// As [`Self::postings`].

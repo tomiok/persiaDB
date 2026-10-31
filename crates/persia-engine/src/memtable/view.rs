@@ -270,6 +270,7 @@ impl SearchView for MemtableView {
         else {
             return Ok(None);
         };
+        // Copy this term's chain under the read lock. The caller iterates the copy; the guard ends with this call.
         let mut entries = Vec::new();
         let (mut max_tf, mut min_norm) = (0_u32, u8::MAX);
         while let Some(p) = index.inverted.postings.get(at as usize) {
@@ -297,10 +298,12 @@ impl SearchView for MemtableView {
             max_tf,
             min_norm,
         };
+        let has_positions = index.inverted.positions.is_some();
+        drop(inner);
         Ok(Some(MemtablePostings {
             view: self,
             field,
-            has_positions: index.inverted.positions.is_some(),
+            has_positions,
             entries,
             cur: None,
             block,
@@ -315,35 +318,67 @@ impl SearchView for MemtableView {
         upper: Bound<&[u8]>,
         automaton: A,
     ) -> Result<MemtableTerms, ReadError> {
-        let inner = read(&self.shared);
-        let mut terms = Vec::new();
-        // The term arena is a hash table: every term is tried, then the matches are sorted.
-        if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
-            let arena = &index.inverted.terms;
-            for id in (0..=u32::MAX).take(arena.len()) {
-                let term = arena.key(id);
-                if !RangeBounds::<[u8]>::contains(&(lower, upper), term)
-                    || !accepts(&automaton, term)
-                {
-                    continue;
+        // Copy the terms in range, then run `automaton` without the lock. `df` is counted afterward, still at
+        // this view's `(docs, version)` cutoff, so a write between the two locks cannot add or hide a document
+        // the view should see.
+        let in_range = {
+            let inner = read(&self.shared);
+            let mut terms = Vec::new();
+            // The term arena is a hash table: every term is tried, then the matches are sorted.
+            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
+                let arena = &index.inverted.terms;
+                for id in (0..=u32::MAX).take(arena.len()) {
+                    let term = arena.key(id);
+                    if RangeBounds::<[u8]>::contains(&(lower, upper), term) {
+                        terms.push(term.to_vec());
+                    }
                 }
-                let df = self.live_df(&inner, index, id);
-                if df > 0 {
-                    terms.push((term.to_vec(), df));
+            }
+            terms
+        };
+        let matched: Vec<Vec<u8>> = in_range
+            .into_iter()
+            .filter(|term| accepts(&automaton, term))
+            .collect();
+        let mut terms = Vec::new();
+        if !matched.is_empty() {
+            let inner = read(&self.shared);
+            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
+                for term in matched {
+                    let Some(id) = index.inverted.terms.get(&term) else {
+                        continue;
+                    };
+                    let df = self.live_df(&inner, index, id);
+                    if df > 0 {
+                        terms.push((term, df));
+                    }
                 }
             }
         }
-        drop(inner);
         terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(MemtableTerms { terms, next: 0 })
     }
 
     fn deleted(&self) -> RoaringBitmap {
-        let inner = read(&self.shared);
-        // The complement of `is_live` by construction.
+        // Copy the kill versions, then build the bitmap without the read lock. Same rule as `visible`: a document
+        // is live when its killing operation is after the view.
+        let killed = {
+            let inner = read(&self.shared);
+            let n = usize::try_from(self.docs).unwrap_or(0);
+            inner
+                .killed_at
+                .get(..n)
+                .map(<[u64]>::to_vec)
+                .unwrap_or_default()
+        };
         let mut deleted = Ascending::default();
-        for docid in (0..self.docs).filter(|&d| !self.visible(&inner, d)) {
-            deleted.push(docid);
+        for docid in 0..self.docs {
+            // `docid` is below `docs`, which fits in `usize` (at most [`crate::segment::MAX_DOCS`]).
+            let i = usize::try_from(docid).unwrap_or(usize::MAX);
+            let live = killed.get(i).is_some_and(|&k| k > self.version);
+            if !live {
+                deleted.push(docid);
+            }
         }
         deleted.finish()
     }

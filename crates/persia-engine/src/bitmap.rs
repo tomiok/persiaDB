@@ -3,6 +3,26 @@
 
 use roaring::RoaringBitmap;
 
+use crate::segment::{MAX_DOCS, ReadError, SegmentCorruption};
+
+/// Docids `0..doc_count` as roaring runs: one container per 2^16 ids, not one entry per document.
+///
+/// # Errors
+/// [`ReadError::Corrupt`] ([`SegmentCorruption::DocCount`]) when `doc_count` is above [`MAX_DOCS`] (`2^31`,
+/// SPEC §5.4). The range is not built. A segment footer is rejected at open above that cap, and a memtable
+/// stops at [`MAX_DOCS`]; this is the same check at the allocation.
+pub(crate) fn doc_range(doc_count: u32) -> Result<RoaringBitmap, ReadError> {
+    if doc_count > MAX_DOCS {
+        return Err(ReadError::Corrupt {
+            offset: 0,
+            reason: SegmentCorruption::DocCount { count: doc_count },
+        });
+    }
+    let mut all = RoaringBitmap::new();
+    all.insert_range(0..doc_count);
+    Ok(all)
+}
+
 /// Docids buffered before they are appended: appending a run is many times faster than inserting each, and a roaring
 /// `push` into a bitmap container is slower still.
 const CHUNK: usize = 4096;
@@ -51,5 +71,26 @@ mod tests {
         }
         assert_eq!(a.finish(), ids.into_iter().collect::<RoaringBitmap>());
         assert!(Ascending::default().finish().is_empty());
+    }
+
+    /// A count above [`MAX_DOCS`] is an error. A legal full range is runs, not a slot per document.
+    #[test]
+    fn doc_range_caps_the_count_and_stores_runs() {
+        use crate::segment::{MAX_DOCS, ReadError, SegmentCorruption};
+
+        let over = MAX_DOCS.saturating_add(1);
+        match doc_range(over) {
+            Err(ReadError::Corrupt {
+                reason: SegmentCorruption::DocCount { count },
+                ..
+            }) => assert_eq!(count, over),
+            other => panic!("expected DocCount, got {other:?}"),
+        }
+
+        let n = 1_u32 << 20;
+        let all = doc_range(n).unwrap();
+        assert_eq!(all.len(), u64::from(n));
+        assert!(all.serialized_size() < usize::try_from(n / 8).unwrap());
+        assert!(doc_range(0).unwrap().is_empty());
     }
 }

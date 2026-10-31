@@ -14,8 +14,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   evaluates the filters to a roaring bitmap of its live documents before any document is scored: `term` and
   `terms` on a `keyword` field from the postings, on other fields and for `range` from the column's order-preserving
   keys, `exists` from which documents have a value, `not` as the complement. Filters score 0 and leave scores
-  unchanged; with a filter, `should` clauses are optional. A threshold still reaches a `bool`'s one `must` clause, and
-  pruned and exhaustive top-k stay identical. New `search_top10_filtered` benchmarks.
+  unchanged; with a filter, `should` clauses are optional. A threshold still reaches a `bool`'s one `must` clause and,
+  when there is no `must`, its `should` clauses (a filter scores 0). `should` beside `must` stays exhaustive.
+  Pruned and exhaustive top-k stay identical. A `doc_count` above `2^31` is rejected before a filter builds the
+  `0..doc_count` range. New `search_top10_filtered` benchmarks.
 - `persia-engine`: term enumeration and column access on every search view (ROADMAP 6.1.5). `view::SearchView`
   gains `terms` (a field's terms between two bounds that an `fst::Automaton` accepts, in byte order, each with its
   `df`, as a `view::TermEnum`), `deleted`, `present` (the documents with a value in a field), `trues` (the documents

@@ -64,8 +64,9 @@ use crate::view::SearchView;
 /// upper bound of its score, summed in that same order, is at most the worst hit kept.
 ///
 /// Pruning reaches the matchers a threshold on the whole score applies to: a term, the `should` clauses of a
-/// `bool` without `must` or `filter`, the `must` clause of a `bool` with one and no `should` (filters or not), and
-/// what `must_not` or `boost` wraps. Conjunctions and their optional clauses are walked whole.
+/// `bool` without `must` (a filter scores 0, so with filters too), the `must` clause of a `bool` with one and no
+/// `should` (filters or not), and what `must_not` or `boost` wraps. Conjunctions and `should` clauses beside `must`
+/// are walked whole.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pruning {

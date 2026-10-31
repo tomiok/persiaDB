@@ -313,6 +313,15 @@ impl<R: Matcher, O: Matcher> Matcher for Optional<R, O> {
     fn max_score(&self) -> f64 {
         self.required.max_score() + self.optional.max_score()
     }
+
+    /// When `required` cannot score above 0 (a filter bitmap), the total is the optional score, so the
+    /// threshold reaches a pruned `should` disjunction. When `required` can score above 0, that slack depends on
+    /// the document (ROADMAP 7.4.8) and the optional side is left exhaustive.
+    fn set_min_competitive(&mut self, score: f64) {
+        if self.required.max_score() <= 0.0 {
+            self.optional.set_min_competitive(score);
+        }
+    }
 }
 
 /// Every live document of a view, each scoring 0 (`match_all`, or a `bool` of `must_not` clauses alone).

@@ -585,10 +585,16 @@ impl<'s> NumericColumn<'s> {
     }
 
     /// The documents that have a value.
-    pub fn present(&self) -> RoaringBitmap {
+    ///
+    /// # Errors
+    /// [`ReadError::Corrupt`] when `doc_count` is above [`crate::segment::MAX_DOCS`]: the full-presence range is
+    /// not built. A segment [`super::Segment::open`] accepted is within that cap.
+    pub fn present(&self) -> Result<RoaringBitmap, ReadError> {
         match (&self.keys, &self.presence) {
-            (None, _) => RoaringBitmap::new(),
-            (Some(_), Some(present)) => present.clone(),
+            (None, _) => Ok(RoaringBitmap::new()),
+            (Some(_), Some(present)) => Ok(present.clone()),
+            // Length 0: every document (SPEC §5.3.5). The keys column was opened with `doc_count` values, so the
+            // section holds them; the range itself is capped at `MAX_DOCS`.
             (Some(_), None) => every_doc(self.doc_count),
         }
     }
@@ -724,10 +730,16 @@ impl BoolColumn {
     }
 
     /// The documents that have a value.
-    pub fn present(&self) -> RoaringBitmap {
-        self.presence
-            .clone()
-            .unwrap_or_else(|| every_doc(self.doc_count))
+    ///
+    /// # Errors
+    /// [`ReadError::Corrupt`] when `doc_count` is above [`crate::segment::MAX_DOCS`]: the full-presence range is
+    /// not built. A segment [`super::Segment::open`] accepted is within that cap.
+    pub fn present(&self) -> Result<RoaringBitmap, ReadError> {
+        match &self.presence {
+            Some(present) => Ok(present.clone()),
+            // Length 0: every document (SPEC §5.3.5), a roaring run-range capped at `MAX_DOCS`.
+            None => every_doc(self.doc_count),
+        }
     }
 
     /// The documents whose value is `true`.
@@ -1009,11 +1021,13 @@ fn minimal(block: &ForBlock<'_>) -> bool {
     min == block.min() && width == block.width()
 }
 
-/// Docids `0..doc_count`: what a presence bitmap of length 0 stands for (SPEC §5.3.5).
-pub(crate) fn every_doc(doc_count: u32) -> RoaringBitmap {
-    let mut all = RoaringBitmap::new();
-    all.insert_range(0..doc_count);
-    all
+/// Docids `0..doc_count`: what a presence bitmap of length 0 stands for (SPEC §5.3.5). One roaring run per 2^16
+/// docids. A count above [`crate::segment::MAX_DOCS`] is corruption and builds nothing.
+///
+/// # Errors
+/// As [`crate::bitmap::doc_range`].
+pub(crate) fn every_doc(doc_count: u32) -> Result<RoaringBitmap, ReadError> {
+    crate::bitmap::doc_range(doc_count)
 }
 
 #[cfg(test)]

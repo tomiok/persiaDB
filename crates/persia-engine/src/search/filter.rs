@@ -4,7 +4,9 @@
 //!
 //! A `term` or `terms` filter on a `keyword` field reads the field's postings; on another field, and a `range`, it
 //! scans the column's order-preserving keys (SPEC §5.2.1); `exists` reads which documents have a value. `not` takes
-//! the complement among the view's documents, and deleted ones are taken out once, at the end.
+//! the complement among the view's documents (`0..doc_count`, one roaring run per 2^16 ids). A count above
+//! [`crate::segment::MAX_DOCS`] is corruption returned before that range is built. Deleted documents are taken out
+//! once, at the end.
 
 use core::ops::Bound;
 
@@ -34,7 +36,7 @@ pub(super) fn select<V: SearchView>(
 
 /// The documents every filter selects, deleted ones included.
 fn all<V: SearchView>(filters: &[Filter], view: &V) -> Result<RoaringBitmap, ReadError> {
-    let mut docs = every_doc(view);
+    let mut docs = every_doc(view)?;
     for filter in filters {
         if docs.is_empty() {
             break;
@@ -44,10 +46,9 @@ fn all<V: SearchView>(filters: &[Filter], view: &V) -> Result<RoaringBitmap, Rea
     Ok(docs)
 }
 
-fn every_doc<V: SearchView>(view: &V) -> RoaringBitmap {
-    let mut docs = RoaringBitmap::new();
-    docs.insert_range(0..view.doc_count());
-    docs
+fn every_doc<V: SearchView>(view: &V) -> Result<RoaringBitmap, ReadError> {
+    // `doc_count` above `MAX_DOCS` is refused before the range is built (SPEC §5.4).
+    crate::bitmap::doc_range(view.doc_count())
 }
 
 /// The documents `filter` selects, deleted ones included.
@@ -69,7 +70,7 @@ fn eval<V: SearchView>(filter: &Filter, view: &V) -> Result<RoaringBitmap, ReadE
             }
             Ok(docs)
         }
-        Filter::Not(filter) => Ok(every_doc(view) - eval(filter, view)?),
+        Filter::Not(filter) => Ok(every_doc(view)? - eval(filter, view)?),
     }
 }
 

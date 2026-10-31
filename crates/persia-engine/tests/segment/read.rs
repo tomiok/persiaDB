@@ -952,6 +952,27 @@ fn locator_and_padding() {
     );
 }
 
+/// A footer that claims `2^31` documents, the largest count the footer allows, on a small segment. Open reports
+/// corruption (`DocStore` and `IdMap` are sized for the real count) instead of letting `present` scan or allocate
+/// that many. If open ever succeeded, text, keyword and numeric presence would still be corruption: those sections
+/// do not hold `doc_count` entries.
+#[test]
+fn huge_doc_count_is_rejected_before_presence_is_scanned() {
+    let schema = schema();
+    let bytes = build(&schema, &golden_docs(&schema), WriteOptions::default());
+    let corrupt = with_footer(&bytes, |b| put_u32(b, 64, 1_u32 << 31));
+    match open(&schema, &corrupt) {
+        Err(err) => assert!(err.is_corruption(), "{err}"),
+        Ok(segment) => {
+            for name in ["title", "body", "tag", "price", "qty", "at"] {
+                let field = schema.field(name).unwrap().id();
+                let err = segment.present(field).expect_err(name);
+                assert!(err.is_corruption(), "{name}: {err}");
+            }
+        }
+    }
+}
+
 /// A segment inside a larger buffer: error offsets are absolute.
 #[test]
 fn offsets_are_absolute() {
