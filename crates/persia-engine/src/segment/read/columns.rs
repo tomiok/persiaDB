@@ -437,32 +437,24 @@ impl Clone for LastBlock {
     }
 }
 
-/// Reads a [`ForColumn`] keeping the last FOR block it decoded in a buffer of its own (ROADMAP 5.3.16): unlike
-/// [`ForColumn::get`], no lock per value, and no allocation once the buffer holds a block.
-#[derive(Debug, Clone)]
-struct ForCursor<'c, 's> {
-    column: &'c ForColumn<'s>,
+/// The last FOR block a reader decoded, in a buffer of its own (ROADMAP 5.3.16): unlike [`ForColumn::get`], no lock
+/// per value, and no allocation once the buffer holds a block. It takes its column on every call, so a reader can
+/// own the column beside it ([`NumericKeys`], [`KeywordOrds`]).
+#[derive(Debug, Clone, Default)]
+struct ForBuf {
     /// The block `values` holds.
     block: Option<u64>,
     values: Vec<u64>,
 }
 
-impl<'c, 's> ForCursor<'c, 's> {
-    fn new(column: &'c ForColumn<'s>) -> Self {
-        Self {
-            column,
-            block: None,
-            values: Vec::new(),
-        }
-    }
-
+impl ForBuf {
     /// Block `b`'s values.
-    fn load(&mut self, b: u64) -> Result<&[u64], ReadError> {
+    fn load(&mut self, column: &ForColumn<'_>, b: u64) -> Result<&[u64], ReadError> {
         if self.block != Some(b) {
             self.block = None;
             let values = &mut self.values;
             values.clear();
-            self.column.with_block(b, |block, _| {
+            column.with_block(b, |block, _| {
                 block.decode_into(values);
                 Ok(())
             })?;
@@ -473,7 +465,7 @@ impl<'c, 's> ForCursor<'c, 's> {
 
     /// As [`ForColumn::get`].
     #[inline]
-    fn get(&mut self, i: u64) -> Result<u64, ReadError> {
+    fn get(&mut self, column: &ForColumn<'_>, i: u64) -> Result<u64, ReadError> {
         // The hot path of a scan: the value is in the block already decoded.
         if self.block == Some(i / PER_BLOCK)
             && let Some(&v) = usize::try_from(i % PER_BLOCK)
@@ -482,18 +474,17 @@ impl<'c, 's> ForCursor<'c, 's> {
         {
             return Ok(v);
         }
-        self.get_slow(i)
+        self.get_slow(column, i)
     }
 
     #[inline(never)]
-    fn get_slow(&mut self, i: u64) -> Result<u64, ReadError> {
-        let column = self.column;
+    fn get_slow(&mut self, column: &ForColumn<'_>, i: u64) -> Result<u64, ReadError> {
         if column.all.is_some() || i >= column.count {
             return column.get(i);
         }
         let within = usize::try_from(i % PER_BLOCK).unwrap_or(usize::MAX);
         // `with_block` checked the block holds what its place in the column says.
-        self.load(i / PER_BLOCK)?
+        self.load(column, i / PER_BLOCK)?
             .get(within)
             .copied()
             .ok_or_else(|| column.bad(column.at, "a FOR block count"))
@@ -501,7 +492,12 @@ impl<'c, 's> ForCursor<'c, 's> {
 
     /// As [`ForColumn::get_range`].
     #[inline]
-    fn get_range(&mut self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
+    fn get_range(
+        &mut self,
+        column: &ForColumn<'_>,
+        range: Range<u64>,
+        out: &mut Vec<u64>,
+    ) -> Result<(), ReadError> {
         // The hot path of a scan: the range is in the block already decoded.
         let b = range.start / PER_BLOCK;
         if self.block == Some(b)
@@ -515,12 +511,16 @@ impl<'c, 's> ForCursor<'c, 's> {
             out.extend_from_slice(values);
             return Ok(());
         }
-        self.get_range_slow(range, out)
+        self.get_range_slow(column, range, out)
     }
 
     #[inline(never)]
-    fn get_range_slow(&mut self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
-        let column = self.column;
+    fn get_range_slow(
+        &mut self,
+        column: &ForColumn<'_>,
+        range: Range<u64>,
+        out: &mut Vec<u64>,
+    ) -> Result<(), ReadError> {
         if column.all.is_some() || range.end > column.count {
             return column.get_range(range, out);
         }
@@ -529,13 +529,41 @@ impl<'c, 's> ForCursor<'c, 's> {
             let b = i / PER_BLOCK;
             let block_start = b.saturating_mul(PER_BLOCK);
             let to = range.end.min(block_start.saturating_add(PER_BLOCK));
-            let values = self.load(b)?;
+            let values = self.load(column, b)?;
             let from = usize::try_from(i.saturating_sub(block_start)).unwrap_or(usize::MAX);
             let upto = usize::try_from(to.saturating_sub(block_start)).unwrap_or(usize::MAX);
             out.extend_from_slice(values.get(from..upto).unwrap_or_default());
             i = to;
         }
         Ok(())
+    }
+}
+
+/// Reads a [`ForColumn`] through a [`ForBuf`] of its own.
+#[derive(Debug, Clone)]
+struct ForCursor<'c, 's> {
+    column: &'c ForColumn<'s>,
+    buf: ForBuf,
+}
+
+impl<'c, 's> ForCursor<'c, 's> {
+    fn new(column: &'c ForColumn<'s>) -> Self {
+        Self {
+            column,
+            buf: ForBuf::default(),
+        }
+    }
+
+    /// As [`ForColumn::get`].
+    #[inline]
+    fn get(&mut self, i: u64) -> Result<u64, ReadError> {
+        self.buf.get(self.column, i)
+    }
+
+    /// As [`ForColumn::get_range`].
+    #[inline]
+    fn get_range(&mut self, range: Range<u64>, out: &mut Vec<u64>) -> Result<(), ReadError> {
+        self.buf.get_range(self.column, range, out)
     }
 }
 
@@ -618,6 +646,15 @@ impl<'s> NumericColumn<'s> {
         Ok(self.key(docid)?.map(|key| self.value(key)))
     }
 
+    /// A reader of the keys that owns the column (ROADMAP 7.5.1): as [`Self::cursor`], for a caller with nowhere to
+    /// keep the column.
+    pub fn into_keys(self) -> NumericKeys<'s> {
+        NumericKeys {
+            column: self,
+            buf: ForBuf::default(),
+        }
+    }
+
     /// A reader for scans (filters, sorting): it keeps the FOR block it last decoded to itself, so reading the keys
     /// in docid order decodes each block once, without a lock or an allocation per value (ROADMAP 5.3.16).
     ///
@@ -683,6 +720,30 @@ impl NumericCursor<'_, '_> {
     /// As [`NumericColumn::key`].
     pub fn get(&mut self, docid: u32) -> Result<Option<Value>, ReadError> {
         Ok(self.key(docid)?.map(|key| self.column.value(key)))
+    }
+}
+
+/// A [`NumericColumn`] reader that owns the column, from [`NumericColumn::into_keys`]: what a view hands a sort
+/// (ROADMAP 7.5.1), which reads keys in docid order, with no column to borrow from.
+#[derive(Debug, Clone)]
+pub struct NumericKeys<'s> {
+    column: NumericColumn<'s>,
+    buf: ForBuf,
+}
+
+impl NumericKeys<'_> {
+    /// As [`NumericColumn::key`].
+    ///
+    /// # Errors
+    /// As [`NumericColumn::key`].
+    #[inline]
+    pub fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
+        match &self.column.keys {
+            Some(keys) if self.column.has_value(docid) => {
+                self.buf.get(keys, u64::from(docid)).map(Some)
+            }
+            _ => Ok(None),
+        }
     }
 }
 
@@ -887,6 +948,17 @@ impl<'s> KeywordColumn<'s> {
         Ok(out)
     }
 
+    /// A reader of the ords that owns the column (ROADMAP 7.5.1, 7.5.3): as [`Self::cursor`], for a caller with
+    /// nowhere to keep the column.
+    pub fn into_ords(self) -> KeywordOrds<'s> {
+        KeywordOrds {
+            column: self,
+            starts: ForBuf::default(),
+            ords: ForBuf::default(),
+            out: Vec::new(),
+        }
+    }
+
     /// A reader for scans (filters, facets): it keeps the FOR blocks it last decoded and its output buffer to itself,
     /// so reading every document's ords in docid order decodes each block once, without a lock or an allocation per
     /// document (ROADMAP 5.3.16).
@@ -1009,6 +1081,47 @@ impl<'c> KeywordCursor<'c, '_> {
     /// The column it reads, for [`KeywordColumn::value`].
     pub fn column(&self) -> &'c KeywordColumn<'_> {
         self.column
+    }
+}
+
+/// A [`KeywordColumn`] reader that owns the column, from [`KeywordColumn::into_ords`]: what a view hands a sort or a
+/// facet (ROADMAP 7.5.1, 7.5.3), as [`KeywordCursor`] without a column to borrow from.
+#[derive(Debug, Clone)]
+pub struct KeywordOrds<'s> {
+    column: KeywordColumn<'s>,
+    starts: ForBuf,
+    ords: ForBuf,
+    out: Vec<u64>,
+}
+
+impl<'s> KeywordOrds<'s> {
+    /// As [`KeywordColumn::ords`], into a buffer the reader reuses.
+    ///
+    /// # Errors
+    /// As [`KeywordColumn::ords`].
+    #[inline]
+    pub fn ords(&mut self, docid: u32) -> Result<&[u64], ReadError> {
+        let Self {
+            column,
+            starts: starts_buf,
+            ords: ords_buf,
+            out,
+        } = self;
+        out.clear();
+        if let Some((starts, ords)) = &column.lists {
+            column.ords_into(
+                docid,
+                (starts, |i| starts_buf.get(starts, i)),
+                (ords, |r, o| ords_buf.get_range(ords, r, o)),
+                out,
+            )?;
+        }
+        Ok(out)
+    }
+
+    /// The column it reads, for [`KeywordColumn::value`].
+    pub fn column(&self) -> &KeywordColumn<'s> {
+        &self.column
     }
 }
 

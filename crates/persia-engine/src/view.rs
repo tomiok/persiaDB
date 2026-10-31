@@ -16,10 +16,11 @@ use fst::automaton::AlwaysMatch;
 use roaring::RoaringBitmap;
 
 use crate::document::Document;
-use crate::schema::FieldId;
+use crate::schema::{FieldId, FieldType};
 use crate::score::FieldHit;
 use crate::segment::{
-    BlockMax, FieldStats, NormsCursor, Postings, ReadError, Segment, TermStream, Tombstones,
+    BlockMax, BoolColumn, FieldStats, KeywordOrds, NormsCursor, NumericKeys, Postings, ReadError,
+    Segment, TermStream, Tombstones,
 };
 
 /// The documents of one term, in docid order, with their frequencies and positions; the interface of
@@ -109,6 +110,78 @@ impl<A: Automaton> TermEnum for TermStream<'_, A> {
     }
 }
 
+/// A column's order-preserving keys by docid (SPEC §5.2.1), from [`SearchView::keys`]: what a sort compares
+/// (ROADMAP 7.5.1). Reading docids in ascending order is the fast path.
+pub trait KeyReader {
+    /// The key of `docid`: for an `i64`, `f64` or `datetime` field the column's key, for a `bool` 0 or 1; `None` for
+    /// a document without a value (or a docid past the view).
+    ///
+    /// # Errors
+    /// A corruption of the source.
+    fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError>;
+}
+
+/// A `keyword` field's values by docid, as ordinals of a dictionary in byte order (SPEC §5.3.5), from
+/// [`SearchView::keywords`]: what a sort and a facet read (ROADMAP 7.5.1, 7.5.3). The ordinals are the view's own: a
+/// lower ord is a smaller value in the same view, and values compare across views by their bytes.
+pub trait KeywordReader {
+    /// The ordinals of `docid`'s distinct values, ascending; empty for a document without one (or a docid past the
+    /// view).
+    ///
+    /// # Errors
+    /// A corruption of the source.
+    fn ords(&mut self, docid: u32) -> Result<&[u64], ReadError>;
+
+    /// The value of `ord`; `None` past the dictionary.
+    fn value(&self, ord: u64) -> Option<&[u8]>;
+
+    /// The number of values in the dictionary: every ord is below it.
+    fn len(&self) -> u64;
+
+    /// Whether the dictionary is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl KeyReader for NumericKeys<'_> {
+    fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
+        NumericKeys::key(self, docid)
+    }
+}
+
+impl KeywordReader for KeywordOrds<'_> {
+    fn ords(&mut self, docid: u32) -> Result<&[u64], ReadError> {
+        KeywordOrds::ords(self, docid)
+    }
+
+    fn value(&self, ord: u64) -> Option<&[u8]> {
+        self.column().value(ord)
+    }
+
+    fn len(&self) -> u64 {
+        self.column().len()
+    }
+}
+
+/// The keys of a segment's column, from [`SegmentView::keys`].
+#[derive(Debug, Clone)]
+pub enum SegmentKeys<'s> {
+    /// An `i64`, `f64` or `datetime` field.
+    Numeric(NumericKeys<'s>),
+    /// A `bool` field.
+    Bool(BoolColumn),
+}
+
+impl KeyReader for SegmentKeys<'_> {
+    fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
+        match self {
+            Self::Numeric(keys) => keys.key(docid),
+            Self::Bool(column) => Ok(column.get(docid).map(u64::from)),
+        }
+    }
+}
+
 /// A searchable set of documents with docids `0..doc_count()`: a segment, or the memtable.
 pub trait SearchView {
     /// The norms reader of this view.
@@ -126,6 +199,16 @@ pub trait SearchView {
     where
         Self: 'a,
         A: Automaton + 'a;
+
+    /// The column key reader of this view.
+    type Keys<'a>: KeyReader
+    where
+        Self: 'a;
+
+    /// The keyword value reader of this view.
+    type Keywords<'a>: KeywordReader
+    where
+        Self: 'a;
 
     /// Every docid is below this; deleted documents included (a memtable's replaced versions too), so not the
     /// BM25 document count, which the collection statistics give (ROADMAP 7.2.1).
@@ -205,6 +288,22 @@ pub trait SearchView {
     /// # Errors
     /// As [`Self::postings`], for a field that is not `text`; a corruption of the source.
     fn norms(&self, field: FieldId) -> Result<Self::Norms<'_>, ReadError>;
+
+    /// The keys of an `i64`, `f64`, `datetime` or `bool` field by docid, for sorting (ROADMAP 7.5.1); deleted
+    /// documents keep theirs.
+    ///
+    /// # Errors
+    /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
+    /// source.
+    fn keys(&self, field: FieldId) -> Result<Self::Keys<'_>, ReadError>;
+
+    /// The values of a `keyword` field by docid, for sorting and facets (ROADMAP 7.5.1, 7.5.3); deleted documents
+    /// keep theirs. The memtable copies the field's values as of the view once per call.
+    ///
+    /// # Errors
+    /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
+    /// source.
+    fn keywords(&self, field: FieldId) -> Result<Self::Keywords<'_>, ReadError>;
 
     /// Document `docid` as stored: its id, blob reference and stored fields (SPEC §6.4.2).
     ///
@@ -321,6 +420,16 @@ impl SearchView for SegmentView<'_> {
         Self: 'a,
         A: Automaton + 'a;
 
+    type Keys<'a>
+        = SegmentKeys<'a>
+    where
+        Self: 'a;
+
+    type Keywords<'a>
+        = KeywordOrds<'a>
+    where
+        Self: 'a;
+
     fn doc_count(&self) -> u32 {
         self.segment.doc_count()
     }
@@ -374,6 +483,23 @@ impl SearchView for SegmentView<'_> {
 
     fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
         self.segment.column_keys(field, f)
+    }
+
+    fn keys(&self, field: FieldId) -> Result<SegmentKeys<'_>, ReadError> {
+        let is_bool = self
+            .segment
+            .schema()
+            .field_by_id(field)
+            .is_some_and(|f| f.field_type() == FieldType::Bool);
+        Ok(if is_bool {
+            SegmentKeys::Bool(self.segment.bool_column(field)?)
+        } else {
+            SegmentKeys::Numeric(self.segment.numeric_column(field)?.into_keys())
+        })
+    }
+
+    fn keywords(&self, field: FieldId) -> Result<KeywordOrds<'_>, ReadError> {
+        Ok(self.segment.keyword_column(field)?.into_ords())
     }
 
     fn norms(&self, field: FieldId) -> Result<NormsCursor<'_>, ReadError> {
