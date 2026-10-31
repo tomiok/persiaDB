@@ -13,6 +13,7 @@ use roaring::RoaringBitmap;
 use roaring::bitmap::IntoIter;
 
 use super::{Matcher, Pos, ScoreBound};
+use crate::bitmap::Ascending;
 use crate::query::{Filter, FilterValue};
 use crate::schema::FieldId;
 use crate::segment::ReadError;
@@ -80,19 +81,29 @@ fn holding<V: SearchView>(
 ) -> Result<RoaringBitmap, ReadError> {
     let mut docs = RoaringBitmap::new();
     let mut keys = Vec::new();
+    let (mut trues, mut falses) = (false, false);
     for value in values {
         match value {
             FilterValue::Keyword(term) => {
                 if let Some(mut postings) = view.postings(field, term.as_bytes())? {
-                    let mut list = Vec::new();
+                    let mut list = Ascending::default();
                     while let Some(docid) = postings.next()? {
                         list.push(docid);
                     }
-                    docs |= sorted(list);
+                    docs |= list.finish();
                 }
             }
+            // From the column's bitmaps, without a key per document.
+            FilterValue::Bool(true) => trues = true,
+            FilterValue::Bool(false) => falses = true,
             other => keys.extend(key(other)),
         }
+    }
+    match (trues, falses) {
+        (true, true) => docs |= view.present(field)?,
+        (true, false) => docs |= view.trues(field)?,
+        (false, true) => docs |= view.present(field)? - view.trues(field)?,
+        (false, false) => {}
     }
     if !keys.is_empty() {
         keys.sort_unstable();
@@ -132,20 +143,13 @@ fn scan<V: SearchView>(
     field: FieldId,
     keep: impl Fn(u64) -> bool,
 ) -> Result<RoaringBitmap, ReadError> {
-    let mut docids = Vec::new();
+    let mut docs = Ascending::default();
     view.column_keys(field, |docid, k| {
         if keep(k) {
-            docids.push(docid);
+            docs.push(docid);
         }
     })?;
-    Ok(sorted(docids))
-}
-
-/// `docids` as a bitmap, built in bulk: postings and column scans give them in increasing order, which is many times
-/// faster to build from than inserting each.
-fn sorted(docids: Vec<u32>) -> RoaringBitmap {
-    RoaringBitmap::from_sorted_iter(docids.iter().copied())
-        .unwrap_or_else(|_| docids.into_iter().collect())
+    Ok(docs.finish())
 }
 
 /// The column key of `value` (SPEC §5.2.1), as the builder stores it: `-0.0` is `0.0` (SPEC §6.4.1); `None` for a

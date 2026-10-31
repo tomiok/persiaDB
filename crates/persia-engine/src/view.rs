@@ -156,7 +156,11 @@ pub trait SearchView {
     /// The terms of a `text` or `keyword` field between `lower` and `upper` (byte order) that `automaton` accepts
     /// ([`AlwaysMatch`] for every one), in byte order: a prefix, a range, a Levenshtein automaton (SPEC §7.6). A term
     /// is listed exactly when [`Self::postings`] gives it an iterator, so a segment lists a term whose documents are
-    /// all deleted, and the memtable only terms with a live document in the view.
+    /// all deleted, and the memtable only terms with a live document in the view. So the `df`s are each view's own
+    /// (a segment's count its deleted documents): rank expansions by the collection's statistics, not by these.
+    ///
+    /// The memtable runs `automaton` on every term it holds under its read lock, so `automaton` must not use the
+    /// memtable.
     ///
     /// # Errors
     /// As [`Self::postings`].
@@ -177,6 +181,14 @@ pub trait SearchView {
     /// # Errors
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a `stored` field; a corruption of the source.
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError>;
+
+    /// The documents whose `bool` field is `true`, deleted ones included: with [`Self::present`], a `bool` filter's
+    /// answer without a key per document.
+    ///
+    /// # Errors
+    /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
+    /// source.
+    fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError>;
 
     /// Calls `f` with each document that has a value in an `i64`, `f64`, `datetime` or `bool` field, deleted ones
     /// included, and its key, in docid order: the order-preserving key of the value (SPEC §5.2.1; for `f64`,
@@ -354,6 +366,10 @@ impl SearchView for SegmentView<'_> {
 
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
         self.segment.present(field)
+    }
+
+    fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
+        self.segment.trues(field)
     }
 
     fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError> {

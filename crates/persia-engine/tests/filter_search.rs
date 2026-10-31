@@ -529,7 +529,8 @@ fn edge_filters() {
             n: Some(n),
             x: Some(x),
             at: None,
-            flag: None,
+            // In every document: the committed segment's columns have no presence bitmap (SPEC §5.3.5).
+            flag: Some(i % 2 == 0),
         };
         let id = format!("d{i}");
         db.put("c", &v.document(&id), Durability::Buffered).unwrap();
@@ -602,6 +603,33 @@ fn edge_filters() {
     assert_eq!(ids(&Filter::Or(vec![])), Vec::<String>::new());
     for (id, v) in &model {
         assert!(selects(&Filter::And(vec![]), &v.document(id), &SCHEMA));
+    }
+    // Full columns, in the segment (d0, d1) and the memtable (d2, d3).
+    let flag = |b| FilterValue::Bool(b);
+    let term = |field, value| Filter::Term { field, value };
+    assert_eq!(ids(&term(f.flag, flag(true))), ["d0", "d2"]);
+    assert_eq!(ids(&term(f.flag, flag(false))), ["d1", "d3"]);
+    let both = Filter::Terms {
+        field: f.flag,
+        values: vec![flag(false), flag(true)],
+    };
+    assert_eq!(ids(&both).len(), 4);
+    assert_eq!(ids(&Filter::Not(Box::new(both))), Vec::<String>::new());
+    assert_eq!(ids(&Filter::Exists { field: f.flag }).len(), 4);
+    assert_eq!(
+        ids(&Filter::Not(Box::new(Filter::Exists { field: f.n }))),
+        Vec::<String>::new()
+    );
+    assert_eq!(ids(&term(f.n, int(0))), ["d2"]);
+    assert_eq!(
+        ids(&i64s(Excluded(int(-1)), Included(int(1)))),
+        ["d2", "d3"]
+    );
+    for (id, v) in &model {
+        for filter in [term(f.flag, flag(true)), term(f.n, int(0))] {
+            let want = ids(&filter).contains(id);
+            assert_eq!(selects(&filter, &v.document(id), &SCHEMA), want, "{id}");
+        }
     }
 }
 
@@ -796,4 +824,82 @@ fn plans_reject_filters_that_do_not_fit_the_schema() {
         .is_ok()
     );
     assert_eq!(memtable.doc_count(), 0);
+}
+
+/// A memtable view taken before more writes (upserts, deletes, new documents) filters as it did when taken: the new
+/// methods read only what its `(docs, version)` cutoff covers, and a newer view sees the writes.
+#[test]
+fn older_memtable_views_filter_as_when_taken() {
+    let f = &*FIELDS;
+    let v = |n: u8, flag: bool| Values {
+        words: Some(vec![2]),
+        tags: vec![0],
+        n: Some(n),
+        x: None,
+        at: None,
+        flag: Some(flag),
+    };
+    let mut db = database();
+    let mut model = BTreeMap::new();
+    for (i, id) in ["a", "b", "c"].into_iter().enumerate() {
+        let values = v(u8::try_from(i).unwrap(), i == 0);
+        db.put("c", &values.document(id), Durability::Buffered)
+            .unwrap();
+        model.insert(id.to_owned(), values);
+    }
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let old = c.memtable();
+    let filters = [
+        Filter::Term {
+            field: f.flag,
+            value: FilterValue::Bool(true),
+        },
+        Filter::Not(Box::new(Filter::Term {
+            field: f.flag,
+            value: FilterValue::Bool(true),
+        })),
+        Filter::Exists { field: f.tag },
+        Filter::Range {
+            field: f.n,
+            lower: Bound::Included(FilterValue::I64(NS[1])),
+            upper: Bound::Unbounded,
+        },
+    ];
+    let before: Vec<_> = filters
+        .iter()
+        .map(|filter| {
+            check(c, &old, &model, filter).unwrap();
+            let q = with_filter(BoolQuery::default(), filter);
+            search(c, &old, &q, 100)
+        })
+        .collect();
+    let deleted = old.deleted();
+    let present = old.present(f.tag).unwrap();
+    // Writes after the view: an upsert that flips `flag`, a delete, a new document.
+    db.put("c", &v(5, true).document("b"), Durability::Buffered)
+        .unwrap();
+    db.delete("c", "a", Durability::Buffered).unwrap();
+    db.put("c", &v(4, true).document("d"), Durability::Buffered)
+        .unwrap();
+    for (filter, hits) in filters.iter().zip(&before) {
+        check(c, &old, &model, filter).unwrap();
+        let q = with_filter(BoolQuery::default(), filter);
+        assert_eq!(&search(c, &old, &q, 100), hits, "{filter:?}");
+    }
+    assert_eq!(old.deleted(), deleted);
+    assert_eq!(old.present(f.tag).unwrap(), present);
+    let mut keys = Vec::new();
+    old.column_keys(f.flag, |d, k| keys.push((d, k))).unwrap();
+    assert_eq!(keys, [(0, 1), (1, 0), (2, 0)]);
+    assert_eq!(old.trues(f.flag).unwrap().iter().collect::<Vec<_>>(), [0]);
+    // A newer view sees the writes.
+    let newer = db.snapshot();
+    let c = newer.collection("c").unwrap();
+    model.remove("a");
+    model.insert("b".to_owned(), v(5, true));
+    model.insert("d".to_owned(), v(4, true));
+    for filter in &filters {
+        check(c, &c.memtable(), &model, filter).unwrap();
+    }
 }

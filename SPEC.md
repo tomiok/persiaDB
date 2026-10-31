@@ -1266,9 +1266,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
   A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must` or `filter`, the
   `must` clause of a `bool` with one and no `should` (a filter scores 0, so with filters too), and what `must_not`
-  and `boost` wrap; other clauses are walked exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
-  strategy, and where a clause has no block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list
-  bound.
+  and `boost` wrap; other clauses are walked exhaustively. A disjunction prunes with block-max WAND by default;
+  `MaxScore` (whole-list bounds only) is the other strategy, and where a clause has no block bounds (a nested `bool`,
+  a phrase) block-max WAND uses its whole-list bound.
   A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
@@ -1277,9 +1277,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
   key inward), `exists` from which documents have a value, and `not` as the complement among the view's documents;
-  the deleted ones are then left out, so no filter selects one. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
-  the top-k collector, so a deleted document cannot enter the heap or raise the competitive threshold. Block upper
-  bounds may still cover deleted documents; that only loosens pruning.
+  the deleted ones are then left out, so no filter selects one. A segment's tombstones are excluded by its postings
+  iterator before a document is scored or offered to the top-k collector, so a deleted document cannot enter the
+  heap or raise the competitive threshold. Block upper bounds may still cover deleted documents; that only loosens
+  pruning.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a

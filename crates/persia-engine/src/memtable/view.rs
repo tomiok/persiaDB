@@ -8,6 +8,7 @@ use fst::Automaton;
 use roaring::RoaringBitmap;
 
 use super::{FieldIndex, Inner, MemField, NONE, read};
+use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::score::FieldHit;
@@ -339,11 +340,34 @@ impl SearchView for MemtableView {
 
     fn deleted(&self) -> RoaringBitmap {
         let inner = read(&self.shared);
-        (0..self.docs)
-            .zip(&inner.killed_at)
-            .filter(|&(_, &killed)| killed <= self.version)
-            .map(|(docid, _)| docid)
-            .collect()
+        // The complement of `is_live` by construction.
+        let mut deleted = Ascending::default();
+        for docid in (0..self.docs).filter(|&d| !self.visible(&inner, d)) {
+            deleted.push(docid);
+        }
+        deleted.finish()
+    }
+
+    fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
+        let inner = read(&self.shared);
+        match field_of(&inner, field)? {
+            (FieldType::Bool, MemField::Column { keys }) => {
+                let mut trues = Ascending::default();
+                for &(docid, _) in keys
+                    .iter()
+                    .take_while(|&&(docid, _)| docid < self.docs)
+                    .filter(|&&(_, key)| key == 1)
+                {
+                    trues.push(docid);
+                }
+                Ok(trues.finish())
+            }
+            (field_type, _) => Err(ReadError::FieldType {
+                field,
+                field_type,
+                what: "bool column",
+            }),
+        }
     }
 
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {

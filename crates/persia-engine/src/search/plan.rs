@@ -51,8 +51,8 @@ type BoxedMatcher<'a> = Box<dyn Matcher + 'a>;
 
 impl SearchPlan {
     /// Plans `query` over a collection of `schema` whose statistics `stats` gives (SPEC §7.2). The query should
-    /// have passed [`Query::validate`] (the limits are not checked again); what would plan into different results
-    /// is rejected here too.
+    /// have passed [`Query::validate`]: the limits are not checked again, and planning, like matching, recurses as
+    /// deep as the query and its filters nest. What would plan into different results is rejected here too.
     ///
     /// # Errors
     /// [`SearchError::Score`] for a field a query does not apply to or a statistic that cannot be read;

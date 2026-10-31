@@ -629,8 +629,10 @@ fn readers_see_consistent_views_during_writes() {
             } else {
                 last[(i % 150) as usize] = Some(Some(i));
                 let body = format!("common w{i}");
-                mem.put(&Document::new(id).with(f.body, Value::String(body)))
-                    .unwrap();
+                let doc = Document::new(id)
+                    .with(f.body, Value::String(body))
+                    .with(f.n, Value::I64(i64::from(i)));
+                mem.put(&doc).unwrap();
             }
             // Readers also hold views from before this write while it runs.
             *published.lock().unwrap() = mem.view();
@@ -681,6 +683,29 @@ fn check_consistent(view: &MemtableView, f: &Fields) {
     let stats = view.field_stats(f.body).unwrap();
     assert_eq!(stats.docs_with_field, live);
     assert_eq!(stats.sum_field_len, 2 * u64::from(live));
+    // The enumeration and column methods agree with the same cutoff, whatever the writer does meanwhile.
+    let deleted = view.deleted();
+    assert_eq!(u64::from(view.doc_count()) - deleted.len(), u64::from(live));
+    let present = view.present(f.body).unwrap();
+    assert!(present.max().is_none_or(|d| d < view.doc_count()));
+    assert_eq!((present - &deleted).len(), u64::from(live));
+    let mut terms = view
+        .terms(
+            f.body,
+            Bound::Included(b"common"),
+            Bound::Included(b"common"),
+            AlwaysMatch,
+        )
+        .unwrap();
+    let df = terms.next().unwrap().map_or(0, |(_, df)| df);
+    assert_eq!(df, live);
+    let mut keys = 0_u32;
+    view.column_keys(f.n, |d, _| {
+        assert!(d < view.doc_count());
+        keys += 1;
+    })
+    .unwrap();
+    assert_eq!(keys, view.doc_count());
 }
 
 #[test]

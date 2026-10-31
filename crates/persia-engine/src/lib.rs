@@ -3,6 +3,7 @@
 //! Synchronous and storage-agnostic: all I/O goes through `persia_storage::Storage`.
 #![forbid(unsafe_code)]
 
+mod bitmap;
 pub mod db;
 pub mod document;
 pub mod manifest;
