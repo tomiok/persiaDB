@@ -16,6 +16,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   order with the memtable last, then docid; each view starts from the threshold of the hits kept, and pruned and
   exhaustive results stay identical. `memtable::MemtableView::ids_first_named_after` lists the ids a view's
   operations first name.
+- Roadmap only: TypeScript network client `@persiadb/client` (14.5, v1.0); term proximity (7.3.5), typo and exactness ranking (8.2.7), and a configurable tie-break (7.4.11); an nDCG@10 CI gate (7.8.4); ranking rules (M32, v1.1, with a v1.2 BM25+/BM25L leaf); search features (M33, v1.1); backup, export, and zero-result analytics (M34, v1.2); a read-only WASM build (16.6) for Persia Studio. M0–M15 stay the MVP. The progress percentage still counts only those leaves.
 - `persia-engine`: top-k pruning with `MaxScore` and block-max WAND (ROADMAP 7.4.4, SPEC §7.3).
   `SearchPlan::top_k` now prunes with block-max WAND by default; `SearchPlan::top_k_with` and `matcher_with` take a
   `search::Pruning` (`Exhaustive`, `MaxScore`, `BlockMaxWand`). Every strategy returns the same hits as exhaustive
