@@ -453,6 +453,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
 - [x] 7.3.3 Score upper bounds per term/block (for WAND)
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
+- [ ] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3)
 
 ## 7.4 Matching & top-k
 - [x] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -466,8 +467,9 @@ Deps: M5 (M6 for end-to-end).
 - [ ] 7.4.6 Tombstone application; memtable as additional segment: an id the memtable has (put or delete, `MemtableView::lookup`) hides every segment copy of it, which the segments' tombstones do not yet delete before the commit (SPEC §8.3, found in the 6.4 review)
 - [ ] 7.4.7 A disjunction for many clauses (relaxation expansions, SPEC §7.6: up to 50 prefix or fuzzy terms): a heap instead of a scan of every clause per document, and phrase candidates that copy positions only while starts survive; bench `search_top10/or` with 50 clauses before and after (found in the 7.4 review)
 - [ ] 7.4.8 Prune conjunctions and `should` clauses beside `must` with block bounds (block-max AND, required plus optional as Lucene's ReqOpt): today a threshold reaches only a term, a pure `should` disjunction and what `must_not`/`boost` wrap (SPEC §7.3, found in 7.4.4)
-- [ ] 7.4.9 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4)
+- [ ] 7.4.9 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4). Moves to M15.2 (where it's measured)
 - [ ] 7.4.10 Pruning trusts block bounds on the read path: a block whose decoded `tf` exceeds its Skip `max_tf` (or a norm below `min_norm`) drops hits silently instead of `Corrupt`; check `tf <= max_tf` at block decode, and add a fuzz arm that runs pruned `top_k_with` (both strategies) over corrupted segment bytes: `Err` or a result, never a hang (`Segment::verify` already checks it; found in the 7.4.4 review)
+- [ ] 7.4.11 (v1.0) Configurable tie-break: a secondary key by column (for example `updated_at` descending) before docid. Today the order is score descending, then docid (7.4.3)
 
 ## 7.5 Sorting, pagination, facets
 - [ ] 7.5.1 Sort by column (asc/desc, missing handling) with top-k
@@ -486,6 +488,7 @@ Deps: M5 (M6 for end-to-end).
 - [ ] 7.8.1 Differential suite vs. reference engine (random corpora/queries)
 - [ ] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
 - [ ] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
+- [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
 
 ---
 
@@ -509,13 +512,14 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
   - [ ] 8.2.2.2 `minimum_should_match` ladder 100/75/50/1
   - [ ] 8.2.2.3 Single-term queries skip L2
 - [ ] 8.2.3 L3 prefix expansion (FST range, cap expansions, rank by df)
-- 8.2.4 L4 fuzzy
+- 8.2.4 L4 fuzzy (depends on 6.1.5)
   - [ ] 8.2.4.1 Levenshtein automaton builder (distance 1–2, transpositions)
   - [ ] 8.2.4.2 FST ∩ automaton term enumeration with cap + df ranking
   - [ ] 8.2.4.3 "Did you mean" corrected-query synthesis
   - [ ] 8.2.4.4 Length-based distance policy (SPEC §7.6 L4)
 - [ ] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
 - [ ] 8.2.6 Optional filter relaxation (`last_resort`) with explicit opt-in
+- [ ] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)
 
 ## 8.3 Controls & API
 - [ ] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
@@ -727,6 +731,8 @@ Deps: M11, M12.
 # M14 — SDKs (Rust & Go)
 Deps: M11 (stable proto); M13 for shard-awareness.
 
+M14's scope now includes TypeScript. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go & TypeScript)". The network client is 14.5 (`@persiadb/client`). Embedded TypeScript stays 16.3 (`@persiadb/node`).
+
 ## 14.1 Conformance suite
 - [ ] 14.1.1 Language-neutral scenario format (YAML): setup, calls, expected results
 - [ ] 14.1.2 Scenarios: CRUD, search+filters, relaxation, facets, blobs (range), errors, read-your-writes
@@ -751,6 +757,10 @@ Deps: M11 (stable proto); M13 for shard-awareness.
 ## 14.4 Compatibility
 - [ ] 14.4.1 Compatibility matrix (SDK ↔ server) + version negotiation RPC
 - [ ] 14.4.2 Release automation for both SDKs
+
+## 14.5 TypeScript network client (`@persiadb/client`) (v1.0)
+- [ ] 14.5.1 (v1.0) HTTP/JSON client `@persiadb/client` per SPEC §12, with a 14.1 conformance-suite adapter
+- [ ] 14.5.2 (v1.0) Release automation for `@persiadb/client`, alongside 14.4.2
 
 ---
 
@@ -797,8 +807,8 @@ M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone sti
 | Target | Milestones |
 |---|---|
 | v1.0 | M0–M15, the MVP |
-| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio |
-| v1.2 | M20 Encryption at rest, M21 Python SDK |
+| v1.1 | M16 Embedded SDKs, M17 Highlighting and snippets, M18 Autocomplete, M19 Import, M31 Persia Studio, M32 Ranking rules, M33 Search features |
+| v1.2 | M20 Encryption at rest, M21 Python SDK, M34 Backup, export, and query analytics |
 | v2.0 | M22 Multi-tenant, M23 Persia Cloud, M24 CDC connectors, M25 Web dashboard |
 | v2.1 | M26 UI components |
 | v2.2 | M27 AI search |
@@ -807,12 +817,14 @@ M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone sti
 
 Two orderings differ from a straight list of the features. Multi-tenant is M22 and Persia Cloud is M23, so the hosted service can depend on one file per tenant. v2.1, v2.2, and v2.3 are separate targets so the UI kit does not wait on embeddings, and embeddings do not wait on a portable storage backend. Geo (M29) has no dependency on M26–M28; it stays on v3.0 beside the enterprise format work, and it can move earlier later without renumbering M16–M28. Encryption (M20) is a dependency of Persia Cloud. That only orders work inside the table above: v1.2 still comes before v2.0.
 
+M32 is ranking rules (v1.1). Its BM25+/BM25L leaf (32.3.1) is v1.2 and ships only if the nDCG baseline justifies it. M33 (v1.1) is the search features v1.0 does not cover: CJK segmentation and pluggable tokenizers, reindex with an alias swap, delete-by-query, numeric and range facets, and distinct/group-by. M34 (v1.2) is user-facing backup and export, and analytics of zero-result queries. The read-only WASM build Persia Studio loads is 16.6.
+
 ---
 
 # M16 — Embedded SDKs (target: v1.1)
 Deps: M15 (format 1.0 and the M10 facade).
 
-The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). This milestone schedules that design. It does not restate it. Network clients stay M14. The browser package is M28.
+The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). This milestone schedules that design. It does not restate it. Network clients stay M14. The browser package is M28. A read-only WASM build for Persia Studio is 16.6 (v1.1); it is not the M28 package.
 
 ## 16.1 C ABI (`persia-ffi`)
 - [ ] 16.1.1 Add `persia-ffi` (crate types `lib`, `staticlib`, `cdylib`) depending only on `persia`; record the edge in `ALLOWED` and the C-export module in `UNSAFE_ALLOWED` (ADR-0018, ADR-0003)
@@ -839,6 +851,9 @@ The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). Th
 - [ ] 16.4.1 Publish only after the v1.0 tag. File format, C ABI, and package versions stay distinct numbers (ADR-0018, SPEC §15, `docs/sdk/distribution.md`)
 - [ ] 16.4.2 Compatibility table for the Go module and `@persiadb/node` against the core tag they were built from
 - [ ] 16.4.3 CI builds the static libraries and the `.node` packages. Users of the engine do not run that matrix (ADR-0018)
+
+## 16.6 Read-only WASM build (v1.1)
+- [ ] 16.6.1 (v1.1) Read-only WASM build of the core for Persia Studio (M31). It does not wait on the M28.2 package or the 28.1 portable backend. It does not fsync and it does not claim the local commit protocol (SPEC §4.5, ADR-0018). [T] The M31 fixture directory opens and a query returns the same ids as the native engine; a write API is absent
 
 ---
 
@@ -1095,7 +1110,7 @@ Hybrid text and vector search, an embedding model shipped with the repo, an MCP 
 - [ ] 27.1.4 [T] A round-trip property. Fuzz the section. Truncation and a NaN are `Corrupt`
 
 ## 27.2 Hybrid query
-- [ ] 27.2.1 SPEC §7: a query may carry text, a vector, or both. Document how the two rankings combine. Filters still apply and are not relaxed (SPEC §7.6)
+- [ ] 27.2.1 SPEC §7: a query may carry text, a vector, or both. Document how the two rankings combine. Filters still apply and are not relaxed (SPEC §7.6). Hybrid combination uses RRF (reciprocal rank fusion)
 - [ ] 27.2.2 [T] Differential against a brute-force scan on the reference model, within a stated epsilon. A filter removes a near neighbor
 
 ## 27.3 Embeddings
@@ -1113,7 +1128,7 @@ Hybrid text and vector search, an embedding model shipped with the repo, an MCP 
 - [ ] 27.5.3 [T] Two blobs in one file. The returned chunk is the one that contains the query term, and the citation id is that blob
 
 ## 27.6 Ranking features
-- [ ] 27.6.1 Static rank function `saturation`, `v / (v + pivot)` with a `pivot` key in `ranking.static_rank` (SPEC §6.2.3, §7.2); deferred from 7.3.2. SPEC and schema JSON first; a schema written with it is unsupported by older builds
+- [ ] 27.6.1 Static rank function `saturation`, `v / (v + pivot)` with a `pivot` key in `ranking.static_rank` (SPEC §6.2.3, §7.2); deferred from 7.3.2. SPEC and schema JSON first; a schema written with it is unsupported by older builds. Moves to the M32 function-score item (32.2.1); this leaf stays
 
 ---
 
@@ -1189,10 +1204,10 @@ Per-document access control, an audit log, SSO, and an on-prem bundle. Tenant is
 # M31 — Persia Studio (target: v1.1)
 Deps: M16 (the WASM build of the core, shared with the TypeScript SDK).
 
-A browser client that inspects a Persia database. It lives entirely in the browser. There is no server. The core is compiled to WASM, the build shared with the TypeScript SDK work in this version (M16), so the page does not carry a second engine (ADR-0001). The user picks the `database.persia/` directory with the File System Access API. That API is available in Chromium-based browsers. Firefox and Safari do not offer it, and this version does not cover them with a server or an upload. Read-only: browse segments and the manifest, view documents, see tombstones, run queries and the BM25 score breakdown, and inspect WAL state. Write mode, and a local `persia studio` server, are out of scope. This milestone is the seed of the v2.0 dashboard (M25). It does not build that dashboard.
+A browser client that inspects a Persia database. It lives entirely in the browser. There is no server. The core is compiled to WASM, the build shared with the TypeScript SDK work in this version (M16), so the page does not carry a second engine (ADR-0001). The user picks the `database.persia/` directory with the File System Access API. That API is available in Chromium-based browsers. Firefox and Safari do not offer it, and this version does not cover them with a server or an upload. Read-only: browse segments and the manifest, view documents, see tombstones, run queries and the BM25 score breakdown, and inspect WAL state. Write mode, and a local `persia studio` server, are out of scope. This milestone is the seed of the v2.0 dashboard (M25). It does not build that dashboard. The read-only WASM build this page loads is 16.6 (v1.1). This milestone does not wait on M28.2.
 
 ## 31.1 Page and WASM
-- [ ] 31.1.1 A static page outside the Cargo workspace. It loads the WASM build shared with the TypeScript SDK (M16). No `build.rs` in a workspace crate (ADR-0003). After the page loads, it does not talk to a server
+- [ ] 31.1.1 A static page outside the Cargo workspace. It loads the WASM build shared with the TypeScript SDK (M16). No `build.rs` in a workspace crate (ADR-0003). After the page loads, it does not talk to a server. The read-only build is 16.6
 - [ ] 31.1.2 The user picks the `database.persia/` directory with the File System Access API. The page reads the files and passes the bytes to the core. It does not compile the mmap container to WASM (ADR-0018, ADR-0010, SPEC §4.7). Firefox and Safari have no directory picker; the page says so
 - [ ] 31.1.3 The adapter is read-only. It does not fsync and it does not claim the local commit protocol (SPEC §4.5). Cancelling the picker leaves the page idle
 - [ ] 31.1.4 [T] A fixture directory is opened through a stand-in for the picker. The listed objects match the directory, and no file in it changes. A cancelled picker renders no database
@@ -1211,4 +1226,58 @@ A browser client that inspects a Persia database. It lives entirely in the brows
 
 ## 31.4 Boundary
 - [ ] 31.4.1 Document that write mode and a local `persia studio` server are not this version. The v2.0 dashboard remains M25, on `persia-server`
+
+---
+
+# M32 — Ranking rules (target: v1.1)
+Deps: M7, M8, M15.
+
+Ordered ranking rules, applied as a lexicographic bucket sort. The default order is words, typo, proximity, attribute, exactness, then sort. BM25F is one rule in that order, not a score the other rules only break ties on. The v1.0 proximity bonus is 7.3.5. The v1.0 typo and exactness signal is 8.2.7. Leaf 32.3.1 is v1.2.
+
+## 32.1 Rules
+- [ ] 32.1.1 (v1.1) Default ranking rules, in order: words, typo, proximity, attribute, exactness, sort. Hits are ordered by a lexicographic bucket sort on those rules. BM25F is one rule a collection can place in the list. Proximity uses positions already indexed (5.3.4). [T] Two documents that differ on an earlier rule keep that order when a later rule, including BM25F, would reverse them
+
+## 32.2 Function score
+- [ ] 32.2.1 (v1.1) Function score: date decay (gauss, exp, linear), a popularity term, and a combine over numeric fields. The `saturation` function deferred in 27.6.1 (`v / (v + pivot)`) moves here. [T] A fixed `now` makes gauss, exp, and linear decay monotone in distance from the origin, and saturation matches `v / (v + pivot)`
+
+## 32.3 Optional BM25 variants
+- [ ] 32.3.1 (v1.2) Optional BM25+ or BM25L per collection, only if the nDCG@10 baseline (7.8.2) and the CI gate (7.8.4) justify it. The default scorer stays BM25F (SPEC §7.2). [T] With the option off, scores match the reference BM25F scorer
+
+## 32.4 Rescore
+- [ ] 32.4.1 (v1.1) A rescore top-N hook on the query API: after the first pass, a caller-supplied rescorer may reorder the top N hits. It exists so a later learning-to-rank model (v2.x) can plug in. This leaf does not ship a model. [T] A rescorer that reverses the top N changes only those hits; hits outside N stay in the first-pass order
+
+---
+
+# M33 — Search features (target: v1.1)
+Deps: M4, M6, M7, M15.
+
+v1.0 ships per-character CJK (4.1.1.2), keyword facets (7.5.3), and delete-by-id (SPEC §8.1). These leaves are the gaps. Each one is v1.1.
+
+## 33.1 Analysis
+- [ ] 33.1.1 (v1.1) CJK segmentation beyond the per-character fallback (4.1.1.2), and pluggable tokenizers a collection can register beside the built-in analyzers (SPEC §6.3). A pluggable tokenizer is code in this repo or registered by the host; it is not another search engine. [T] A CJK string segments the same way on index and on query, and a registered tokenizer's tokens round-trip into postings
+
+## 33.2 Reindex
+- [ ] 33.2.1 (v1.1) Reindex a collection and swap an alias so readers move to the new collection in one commit. SPEC §6.2.4 already requires a reindex when analysis changes; it does not name the alias. Any new on-disk record follows the format discipline (SPEC §15). [T] Readers see the old collection until the swap commits, then the new one, and a crash during the swap leaves one of the two, not a mix
+
+## 33.3 Deletes
+- [ ] 33.3.1 (v1.1) Delete-by-query: delete the documents a query matches, through the same tombstones and commit as delete-by-id (SPEC §8.1, §8.3). [T] A query that matches two of three documents leaves the third searchable after commit, and a crash before commit leaves all three
+
+## 33.4 Facets
+- [ ] 33.4.1 (v1.1) Numeric and range facets, and facet search (narrow the returned facet values), in addition to keyword counts (7.5.3, SPEC §7.5). [T] A range counts only documents inside it, and a facet search hides values that do not match the facet query
+
+## 33.5 Grouping
+- [ ] 33.5.1 (v1.1) Distinct / group-by: at most one hit per distinct value of a column, with a documented rule for which document represents the group. [T] Three documents sharing a value return one hit, and the representative is the one the rule names
+
+---
+
+# M34 — Backup, export, and query analytics (target: v1.2)
+Deps: M8, M10, M15.
+
+User-facing operations for one database. Tenant backups on object storage stay 22.2 (v2.0). The dashboard's zero-result list stays 25.4. The relaxation histogram stays 8.3.3.
+
+## 34.1 Backup and export
+- [ ] 34.1.1 (v1.2) User-facing backup and export of one database from the CLI and the embedded API: a copy a later open can search. It does not upload a tenant file (22.2). [T] An exported copy opens and returns the same hits as the source; a crash during the copy does not truncate the source
+
+## 34.2 Zero-result analytics
+- [ ] 34.2.1 (v1.2) Analytics of zero-result queries: record queries that stayed empty, including after relaxation (SPEC §7.6). This is the record; the v2.0 dashboard list remains 25.4, and the metric histogram remains 8.3.3. [T] A query that is still empty after relaxation is recorded. A query that matched is not
 
