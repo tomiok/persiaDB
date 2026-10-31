@@ -15,11 +15,11 @@
 //! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
 //! `advance` and `shallow_advance` to a few targets, norms, columns (directly and through cursors), every document,
 //! id and blob reference, then `Segment::verify`; then it is merged (ROADMAP 6.5.2) alone and with every other
-//! document deleted, and each merged segment written; then it is searched (ROADMAP 7.4.10) with a few queries under
-//! each pruning strategy, alone and with every other document deleted. Half the inputs are read through a 4 KiB block
-//! cache, and positions are also read for every 7th document only. Errors are ignored, except that a segment that
-//! verifies must merge into one that opens and verifies, and give the same hits under every pruning strategy;
-//! otherwise the only failure is a panic (or a hang).
+//! document deleted, and each merged segment written; then it is searched (ROADMAP 7.4.10) with a few queries (some
+//! with filters over every column kind, ROADMAP 7.4.5) under each pruning strategy, alone and with every other
+//! document deleted. Half the inputs are read through a 4 KiB block cache, and positions are also read for every 7th
+//! document only. Errors are ignored, except that a segment that verifies must merge into one that opens and
+//! verifies, and give the same hits under every pruning strategy; otherwise the only failure is a panic (or a hang).
 #![no_main]
 
 use std::collections::BTreeMap;
@@ -30,7 +30,9 @@ use libfuzzer_sys::fuzz_target;
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::merge::{MergeError, MergeSource, merge};
-use persia_engine::query::{BoolQuery, BoostQuery, PhraseQuery, PhraseTerm, Query, TermQuery};
+use persia_engine::query::{
+    BoolQuery, BoostQuery, Filter, FilterValue, PhraseQuery, PhraseTerm, Query, TermQuery,
+};
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -492,6 +494,9 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
     for field in schema.fields() {
         let fid = field.id();
         let _ = seg.field_stats(fid);
+        // The whole-field scans filters run (ROADMAP 6.1.5).
+        let _ = seg.present(fid).map(|p| p.len());
+        let _ = seg.column_keys(fid, |_, _| ());
         // Every accessor on every field: the wrong-kind ones are caller errors, also never panics.
         if let Ok(mut terms) = seg.terms(fid) {
             let _ = read_terms(&mut terms, n);
@@ -612,8 +617,8 @@ fn search_all(seg: Segment, schema: &Arc<CollectionSchema>) {
     }
 }
 
-/// Terms, disjunctions (the pruned ones), a conjunction with an optional clause, a phrase and a boost over the
-/// `documents` vocabulary.
+/// Terms, disjunctions (the pruned ones), a conjunction with an optional clause, a phrase, a boost, and filtered
+/// `bool`s that read every column kind (ROADMAP 7.4.5) over the `documents` vocabulary.
 fn queries(schema: &CollectionSchema) -> Vec<Query> {
     let term = |field: &str, t: &str| {
         Query::Term(TermQuery {
@@ -627,7 +632,66 @@ fn queries(schema: &CollectionSchema) -> Vec<Query> {
             ..BoolQuery::default()
         })
     };
+    let filtered = |must: Vec<Query>, should: Vec<Query>, filter: Vec<Filter>| {
+        Query::Bool(BoolQuery {
+            must,
+            should,
+            filter,
+            ..BoolQuery::default()
+        })
+    };
+    let exists = |field: &str| Filter::Exists {
+        field: id(schema, field),
+    };
     vec![
+        filtered(
+            vec![term("title", "the")],
+            vec![],
+            vec![Filter::Range {
+                field: id(schema, "price"),
+                lower: Bound::Excluded(FilterValue::F64(-0.0)),
+                upper: Bound::Unbounded,
+            }],
+        ),
+        filtered(
+            vec![],
+            vec![term("title", "alpha"), term("body", "run")],
+            vec![Filter::Or(vec![
+                Filter::Terms {
+                    field: id(schema, "tag"),
+                    values: vec![
+                        FilterValue::Keyword("green".into()),
+                        FilterValue::Keyword("blue".into()),
+                    ],
+                },
+                Filter::Not(Box::new(exists("flag"))),
+            ])],
+        ),
+        filtered(
+            vec![],
+            vec![],
+            vec![
+                Filter::Terms {
+                    field: id(schema, "qty"),
+                    values: (-150..-100).map(FilterValue::I64).collect(),
+                },
+                Filter::Term {
+                    field: id(schema, "flag"),
+                    value: FilterValue::Bool(true),
+                },
+                Filter::Range {
+                    field: id(schema, "at"),
+                    lower: Bound::Unbounded,
+                    upper: Bound::Excluded(FilterValue::Datetime(1_600_000_100_000_000)),
+                },
+                exists("title"),
+                exists("tag"),
+            ],
+        ),
+        should(vec![
+            filtered(vec![term("body", "run")], vec![], vec![exists("price")]),
+            term("title", "beta"),
+        ]),
         term("title", "alpha"),
         term("body", "run"),
         should(vec![

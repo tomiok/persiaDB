@@ -1,7 +1,7 @@
 //! A query planned against the collection statistics (SPEC §7.3): its scorers built once, then a matcher tree per
 //! view.
 
-use crate::query::{BoolQuery, PhraseQuery, Query, QueryError};
+use crate::query::{BoolQuery, Filter, PhraseQuery, Query, QueryError, QueryLimits};
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::score::TermScorer;
 use crate::segment::ReadError;
@@ -12,6 +12,7 @@ use super::block_max_wand::BlockMaxWand;
 use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
+use super::filter::{FilterDocs, Filtered, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
 use super::word::{WordField, WordMatcher};
@@ -40,6 +41,7 @@ enum Node {
         must: Vec<Node>,
         should: Vec<Node>,
         must_not: Vec<Node>,
+        filter: Vec<Filter>,
     },
     Scaled(Box<Node>, Scale),
     All,
@@ -55,7 +57,8 @@ impl SearchPlan {
     /// # Errors
     /// [`SearchError::Score`] for a field a query does not apply to or a statistic that cannot be read;
     /// [`SearchError::Query`] for a phrase on a field without positions or with decreasing positions, and a boost
-    /// or constant score out of range; [`SearchError::Unsupported`] for a `prefix`, a `fuzzy` or a `bool` filter.
+    /// or constant score out of range, and a filter that does not fit the schema ([`Filter::validate`], limits
+    /// aside); [`SearchError::Unsupported`] for a `prefix` or a `fuzzy`.
     pub fn new(
         query: &Query,
         schema: &CollectionSchema,
@@ -180,10 +183,10 @@ fn plan_bool(
     schema: &CollectionSchema,
     stats: &(impl StatisticsProvider + ?Sized),
 ) -> Result<Node, SearchError> {
-    if !q.filter.is_empty() {
-        return Err(SearchError::Unsupported {
-            what: "bool filter",
-        });
+    // A value of another type than its field would select by the wrong keys. The limits are the caller's to check
+    // (`Query::validate`), as for every other clause.
+    for filter in &q.filter {
+        filter.validate(schema, &UNLIMITED)?;
     }
     let all = |clauses: &[Query]| -> Result<Vec<Node>, SearchError> {
         clauses.iter().map(|c| plan(c, schema, stats)).collect()
@@ -192,8 +195,18 @@ fn plan_bool(
         must: all(&q.must)?,
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
+        filter: q.filter.clone(),
     })
 }
+
+/// Limits no filter reaches: planning checks a filter's fields and values, not its size.
+const UNLIMITED: QueryLimits = QueryLimits {
+    max_terms: usize::MAX,
+    max_clauses: usize::MAX,
+    max_expansions: usize::MAX,
+    max_depth: usize::MAX,
+    max_text_len: usize::MAX,
+};
 
 /// The matcher of `node`. `pruning` is what a threshold on its score may skip with; the clauses a threshold on the
 /// whole score says nothing about (a conjunction's, optional ones, exclusions, under a constant score) are built
@@ -254,7 +267,17 @@ fn build<'a, V: SearchView>(
             must,
             should,
             must_not,
-        } => build_bool(must, should, must_not, view, pruning)?,
+            filter,
+        } => build_bool(
+            Clauses {
+                must,
+                should,
+                must_not,
+                filter,
+            },
+            view,
+            pruning,
+        )?,
         Node::Scaled(inner, scale) => {
             let inner_pruning = match scale {
                 Scale::Boost(_) => pruning,
@@ -266,27 +289,50 @@ fn build<'a, V: SearchView>(
     })
 }
 
-/// A `bool` (SPEC §7.1): every `must`, at least one `should` when there is no `must` (`filter` is not planned
-/// yet), no `must_not`; an empty one matches every document.
-fn build_bool<'a, V: SearchView>(
+/// The clauses of a planned `bool`.
+#[derive(Clone, Copy)]
+struct Clauses<'a> {
     must: &'a [Node],
     should: &'a [Node],
     must_not: &'a [Node],
+    filter: &'a [Filter],
+}
+
+/// A `bool` (SPEC §7.1): every `must` and `filter`, at least one `should` when there is neither, no `must_not`; an
+/// empty one matches every document. Filters select before anything is scored (SPEC §7.3) and score 0, so a
+/// threshold on the `bool` still reaches its one `must` clause.
+fn build_bool<'a, V: SearchView>(
+    clauses: Clauses<'a>,
     view: &'a V,
     pruning: Pruning,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
+    let Clauses {
+        must,
+        should,
+        must_not,
+        filter,
+    } = clauses;
     let all = |nodes: &'a [Node], pruning| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
         nodes.iter().map(|n| build(n, view, pruning)).collect()
     };
-    // The score is the `should` clauses' when there is no `must`, or the one `must` clause's without `should`.
+    // The score is the `should` clauses' when they are required, or the one `must` clause's without `should`.
     let (must_pruning, should_pruning) = match (must.len(), should.is_empty()) {
-        (0, _) => (Pruning::Exhaustive, pruning),
+        (0, _) if filter.is_empty() => (Pruning::Exhaustive, pruning),
         (1, true) => (pruning, Pruning::Exhaustive),
         _ => (Pruning::Exhaustive, Pruning::Exhaustive),
     };
     let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
-        (conjunction(all(must, must_pruning)?), optional)
+        let required = conjunction(all(must, must_pruning)?);
+        (filtered(required, filter, view)?, optional)
+    } else if !filter.is_empty() {
+        let docs = select(filter, view)?;
+        let required: BoxedMatcher<'a> = if docs.is_empty() {
+            Box::new(Empty)
+        } else {
+            Box::new(FilterDocs::new(docs))
+        };
+        (required, optional)
     } else if should.is_empty() {
         (Box::new(AllDocs::new(view)), None)
     } else {
@@ -301,6 +347,24 @@ fn build_bool<'a, V: SearchView>(
     Ok(match excluded {
         Some(excluded) => Box::new(Exclusion::new(scored, excluded)),
         None => scored,
+    })
+}
+
+/// The documents of `required` that every filter selects; the filters are not read when there are none, or when
+/// `required` matches nothing in the view.
+fn filtered<'a, V: SearchView>(
+    required: BoxedMatcher<'a>,
+    filter: &[Filter],
+    view: &V,
+) -> Result<BoxedMatcher<'a>, ReadError> {
+    if filter.is_empty() || required.cost() == 0 {
+        return Ok(required);
+    }
+    let docs = select(filter, view)?;
+    Ok(if docs.is_empty() {
+        Box::new(Empty)
+    } else {
+        Box::new(Filtered::new(required, docs))
     })
 }
 

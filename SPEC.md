@@ -1264,9 +1264,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   §7.2), is at most the score of the `k`-th hit kept. Floating-point addition is monotonic, so such a bound holds
   exactly. Hits rank by score descending, then docid ascending, and a view is walked in docid order, so a document
   scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
-  A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must`, the `must`
-  clause of a `bool` with one and no `should`, and what `must_not` and `boost` wrap; other clauses are walked
-  exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
+  A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must` or `filter`, the
+  `must` clause of a `bool` with one and no `should` (a filter scores 0, so with filters too), and what `must_not`
+  and `boost` wrap; other clauses are walked exhaustively. A disjunction prunes with block-max WAND by default; `MaxScore` (whole-list bounds only) is the other
   strategy, and where a clause has no block bounds (a nested `bool`, a phrase) block-max WAND uses its whole-list
   bound.
   A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
@@ -1274,7 +1274,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
   skipped by. Blocks pruning skips are not read, so their bounds are checked only by `Segment::verify`.
 - Filters evaluate to roaring bitmaps (or column predicates) intersected with candidates before a document is
-  scored. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
+  scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
+  on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
+  key inward), `exists` from which documents have a value, and `not` as the complement among the view's documents;
+  the deleted ones are then left out, so no filter selects one. A segment's tombstones are excluded by its postings iterator before a document is scored or offered to
   the top-k collector, so a deleted document cannot enter the heap or raise the competitive threshold. Block upper
   bounds may still cover deleted documents; that only loosens pruning.
 - Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
