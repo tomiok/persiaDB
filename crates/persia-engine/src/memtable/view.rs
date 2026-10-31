@@ -83,6 +83,22 @@ impl MemtableView {
         }
     }
 
+    /// The ids that operations `after + 1..=` [`Self::version`] named, put or delete, in operation order (an id once
+    /// per operation; none when `after` is not below the version): what this view hides of older segments beyond what
+    /// a view at version `after` does (SPEC §8.3, ROADMAP 7.4.6).
+    pub fn ids_after(&self, after: u64) -> Vec<String> {
+        let inner = read(&self.shared);
+        let ops = usize::try_from(after)
+            .ok()
+            .zip(usize::try_from(self.version).ok())
+            .and_then(|(from, to)| inner.ops.get(from..to))
+            .unwrap_or_default();
+        ops.iter()
+            .filter_map(|op| std::str::from_utf8(inner.ids.key(op.id)).ok())
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// The live documents of the view holding `term` in a `text` or `keyword` field: the `df` of
     /// [`SearchView::postings`], counted without copying the postings (SPEC §7.2).
     ///

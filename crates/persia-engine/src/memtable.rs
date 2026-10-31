@@ -155,6 +155,8 @@ pub(crate) struct Op {
     docid: u32,
     /// The version of the previous operation on the same id; 0 for none.
     prev: u64,
+    /// The id it named: its index in [`Inner::ids`].
+    id: u32,
 }
 
 /// What a memtable holds for one field.
@@ -594,7 +596,7 @@ impl Inner {
             .map(|op| op.docid)
             .filter(|&d| d != NONE);
         let replaced = previous.is_some_and(|d| self.kill(d, version));
-        self.ops.push(Op { docid, prev });
+        self.ops.push(Op { docid, prev, id });
         if let Some(l) = self.latest.get_mut(id as usize) {
             *l = version;
         }

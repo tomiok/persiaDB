@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: search over a whole collection (ROADMAP 7.4.6, SPEC §7.3, §8.3). `db::CollectionSnapshot::views`
+  gives a memtable view's `db::CollectionViews`: each segment without its tombstoned documents nor the copies of ids
+  the memtable has a put or a delete of (not tombstoned until the commit that flushes it), then the memtable as one
+  more segment. `CollectionViews::top_k` returns `db::CollectionHit`s (a `Located` and a score) by score, then segment
+  order with the memtable last, then docid; each view starts from the threshold of the hits kept, and pruned and
+  exhaustive results stay identical. `memtable::MemtableView::ids_after` lists the ids a view's operations name.
 - `persia-engine`: top-k pruning with `MaxScore` and block-max WAND (ROADMAP 7.4.4, SPEC §7.3).
   `SearchPlan::top_k` now prunes with block-max WAND by default; `SearchPlan::top_k_with` and `matcher_with` take a
   `search::Pruning` (`Exhaustive`, `MaxScore`, `BlockMaxWand`). Every strategy returns the same hits as exhaustive
@@ -342,6 +348,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   development build wrote with those names meant other chains (nothing was released with them) and must be reindexed.
 
 ### Fixed
+- `persia-engine`: a postings block whose documents have a norm below its Skip `min_norm` no longer ranks or drops
+  hits silently under pruning (ROADMAP 7.4.10, SPEC §7.3): scoring such a document is a `ReadError::Section` corruption
+  of the field's `Norms`, whatever the strategy. (A frequency above the block's `max_tf` already was one, at block
+  decode.) The `segment` fuzz target now searches every input under each strategy.
 - `persia-engine`: acknowledged writes no longer get lost after two crashes in a row (ROADMAP 6.6.9, SPEC §8.6). A
   commit cut after its Manifest frame left that Manifest after `log_end`. Opens used to stop replay there, so the WAL a
   later writer logged behind it was dropped by the open after that writer's crash — a read-only open and `persia
