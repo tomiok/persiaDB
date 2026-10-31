@@ -1,6 +1,7 @@
 //! Query execution (ROADMAP 7.4): top-10 over one segment of 50 000 synthetic documents, for a term, an AND, an OR
 //! and a phrase with the default pruning (block-max WAND), each strategy of 7.4.4 side by side, and a term under
-//! filters (7.4.5): a numeric range, a keyword, and a filter alone. Deterministic
+//! filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted by a column,
+//! with a facet, and a page after a cursor. Deterministic
 //! input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
@@ -13,17 +14,22 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use std::ops::Bound;
 
+use persia_engine::db::{
+    Database, DatabaseOptions, ManualClock, SearchHit, SearchRequest, SegmentIds,
+};
 use persia_engine::query::{
     BoolQuery, Filter, FilterValue, PhraseQuery, PhraseTerm, Query, TermQuery,
 };
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
-use persia_engine::search::{Pruning, SearchPlan};
+use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::stats::SegmentStatistics;
 use persia_engine::view::SegmentView;
+use persia_engine::wal::Durability;
 use persia_format::ByteSource;
+use persia_storage::container::sim::SimFile;
 
 const DOCS: u64 = 50_000;
 /// Words `w0`.. `w199`, drawn skewed toward low numbers so lists range from long to short.
@@ -216,5 +222,99 @@ fn filters(
     group.finish();
 }
 
-criterion_group!(benches, bench);
+/// A collection of the same documents, committed, for whole requests (ROADMAP 7.5): its fields `body`, `price`, `tag`
+/// (`facet: true`).
+fn collection() -> (Database<SimFile>, [FieldId; 3]) {
+    let schema = SchemaBuilder::new("bench")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field("price", FieldKind::I64 { stored: true })
+        .field(
+            "tag",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let id = |name| schema.field(name).unwrap().id();
+    let (body, price, tag) = (id("body"), id("price"), id("tag"));
+    let options = DatabaseOptions {
+        clock: Arc::new(ManualClock::new(1_700_000_000_000_000)) as _,
+        segment_ids: SegmentIds::seeded(1),
+        ..DatabaseOptions::default()
+    };
+    let mut db = Database::create_on(SimFile::new(), [1; 16], options).unwrap();
+    db.create_collection(schema).unwrap();
+    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
+    for i in 0..DOCS {
+        let len = 5 + rng.next() % 30;
+        let text: Vec<String> = (0..len).map(|_| format!("w{}", rng.word())).collect();
+        let doc = Document::new(format!("d{i}"))
+            .with(body, Value::String(text.join(" ")))
+            .with(price, Value::I64(i64::try_from(rng.next() % 1000).unwrap()))
+            .with(tag, Value::String(format!("t{}", rng.next() % 10)));
+        db.put("bench", &doc, Durability::Buffered).unwrap();
+    }
+    db.commit().unwrap();
+    (db, [body, price, tag])
+}
+
+/// Whole requests over a committed collection: 10 hits of a term by score (pruned) and by a column, a facet beside
+/// them (every match visited), and a deep page by cursor.
+fn requests(c: &mut Criterion) {
+    let (db, [body, price, tag]) = collection();
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let query = Query::Term(TermQuery {
+        field: body,
+        term: "w3".into(),
+    });
+    let plan = SearchPlan::new(&query, schema, &coll.search_statistics(&memtable)).unwrap();
+    let by_price = Sort::new([SortKey::field(price, Order::Asc)], schema).unwrap();
+    let facet = vec![FacetRequest::new(tag, 10, schema).unwrap()];
+    let page = |sort: &Sort, facets: &[FacetRequest]| SearchRequest {
+        sort: sort.clone(),
+        limit: 10,
+        facets: facets.to_vec(),
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let deep = views
+        .search(
+            &plan,
+            &SearchRequest {
+                offset: 990,
+                limit: 10,
+                ..page(&by_price, &[])
+            },
+            Pruning::default(),
+        )
+        .unwrap();
+    let cursor = deep.hits.last().map(SearchHit::cursor);
+    let requests = [
+        ("score", page(&Sort::score(), &[])),
+        ("sort_price", page(&by_price, &[])),
+        ("score_facet", page(&Sort::score(), &facet)),
+        (
+            "sort_price_after_1000",
+            SearchRequest {
+                search_after: cursor,
+                ..page(&by_price, &[])
+            },
+        ),
+    ];
+    let mut group = c.benchmark_group("search_request");
+    for (name, request) in &requests {
+        group.bench_function(*name, |b| {
+            b.iter(|| black_box(views.search(&plan, request, Pruning::default()).unwrap()));
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, requests);
 criterion_main!(benches);

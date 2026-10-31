@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: search requests over a collection (ROADMAP 7.5, SPEC §7.4, §7.5, §7.5.1).
+  `db::CollectionViews::search` takes a `SearchPlan` and a `db::SearchRequest` and returns `db::SearchResults`.
+  - **Sort.** A `search::Sort` is the score or up to 16 `SortKey`s, each the score or a `keyword`, `i64`, `f64`,
+    `datetime` or `bool` field, ascending or descending, missing values `Last` (the default) or `First`. A
+    multi-valued keyword sorts by its smallest value ascending and its largest descending. Ties go by segment order,
+    the memtable last, then docid.
+  - **Pages.** A page is `offset` and `limit` (default 20), with `offset + limit` at most `MAX_WINDOW` (10 000). A
+    `db::Cursor` from `SearchHit::cursor` starts the next page after a hit, exact within the same snapshot.
+  - **Facets.** A `search::FacetRequest` counts the values of a `keyword` field with `facet: true` over every match,
+    exactly. It returns the `size` most frequent values (1 to 1 000, default 10), then ascending bytes.
+  - **Hits.** Each hit carries its location, score, sort values and document (id, blob reference, stored fields),
+    projected by `search::Projection` (`All`, `None`, or named stored or extra fields).
+  - **Errors and pruning.** Bad requests are `search::RequestError`s. Pruning still applies to a plain score sort
+    without facets; every other request visits every match.
+  - **Views.** `view::SearchView` gains `keys` and `keywords`, per-document readers of a column's keys and of a
+    keyword field's ordinals (`view::KeyReader`, `view::KeywordReader`). `NumericColumn::into_keys` and
+    `KeywordColumn::into_ords` own their column, and `Document::retain` drops fields.
+  - **Benchmarks.** New `search_request` benchmarks.
 - `persia-engine`: `bool` filters execute (ROADMAP 7.4.5, SPEC §7.1.2, §7.3). `SearchPlan::new` no longer rejects a
   `BoolQuery::filter`. It checks each filter against the schema (`Filter::validate`, size limits aside). Each view then
   evaluates the filters to a roaring bitmap of its live documents before any document is scored: `term` and
