@@ -337,7 +337,7 @@ impl<'s> TermIndex<'s> {
 
 /// The smallest byte string above every string that starts with `prefix`; `None` if there is none (`prefix` is
 /// empty or all `0xFF`).
-fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
+pub(crate) fn prefix_successor(prefix: &[u8]) -> Option<Vec<u8>> {
     let keep = prefix.iter().rposition(|&b| b != u8::MAX)?;
     let mut out = prefix.get(..=keep)?.to_vec();
     let last = out.last_mut()?;

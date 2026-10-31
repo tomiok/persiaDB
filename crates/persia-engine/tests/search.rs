@@ -237,7 +237,7 @@ fn leaf(params: Params) -> impl Strategy<Value = RefQuery> {
 }
 
 fn query(params: Params) -> impl Strategy<Value = RefQuery> {
-    leaf(params).prop_recursive(3, 24, 4, |inner| {
+    leaf(params).prop_recursive(3, 24, 4, move |inner| {
         prop_oneof![
             4 => (
                 prop::collection::vec(inner.clone(), 0..3),
@@ -245,6 +245,9 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
                 prop::collection::vec(inner.clone(), 0..2),
             )
                 .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not }),
+            // Wide, as a relaxation expansion (ROADMAP 7.4.7): a disjunction past its few-clause scan.
+            1 => prop::collection::vec(leaf(params), 9..24)
+                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new() }),
             1 => (inner.clone(), 0.5..4.0_f64).prop_map(|(q, b)| RefQuery::Boost(Box::new(q), b)),
             1 => (inner, prop_oneof![Just(0.0), 0.0..5.0_f64])
                 .prop_map(|(q, s)| RefQuery::Constant(Box::new(q), s)),
@@ -668,7 +671,7 @@ fn bool_edges_by_hand() {
 }
 
 #[test]
-fn unsupported_queries_are_errors_and_filters_run() {
+fn expansions_need_terms_and_filters_run() {
     let f = fixture(&["ant"]);
     let prefix = Query::Prefix(persia_engine::query::PrefixQuery {
         field: f.body(),
@@ -677,7 +680,7 @@ fn unsupported_queries_are_errors_and_filters_run() {
     });
     assert!(matches!(
         SearchPlan::new(&prefix, &f.schema, &f.stats),
-        Err(SearchError::Unsupported { what: "prefix" })
+        Err(SearchError::NeedsTerms { what: "prefix" })
     ));
     let filtered = Query::Bool(BoolQuery {
         filter: vec![persia_engine::query::Filter::And(Vec::new())],

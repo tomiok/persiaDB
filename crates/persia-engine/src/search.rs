@@ -41,6 +41,7 @@
 
 mod block_max_wand;
 mod boolean;
+mod expand;
 mod facet;
 mod filter;
 mod max_score;
@@ -51,6 +52,7 @@ mod sort;
 mod top_k;
 mod word;
 
+pub use expand::{Expansion, TermSource};
 pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
@@ -115,10 +117,10 @@ pub enum SearchError {
     /// A scorer cannot be built: a field of the wrong type, parameters out of range, a statistic unreadable.
     #[error(transparent)]
     Score(#[from] ScoreError),
-    /// A query the engine does not execute yet: `prefix` and `fuzzy` (their expansion over the collection's terms,
-    /// ROADMAP 7.4.12).
-    #[error("{what} queries are not executed yet")]
-    Unsupported {
+    /// A `prefix` or `fuzzy` planned without the views' terms to expand over ([`SearchPlan::new`]; plan it with
+    /// [`SearchPlan::with_terms`], SPEC §7.1).
+    #[error("a {what} query expands over the collection's terms: plan it with them")]
+    NeedsTerms {
         /// The query.
         what: &'static str,
     },
@@ -126,6 +128,10 @@ pub enum SearchError {
     /// phrase on a field without positions or with decreasing positions, a boost or constant score out of range.
     #[error(transparent)]
     Query(#[from] QueryError),
+    /// The terms a `prefix` or `fuzzy` expands over, or their collection `df`s, cannot be read: a corruption of a
+    /// view.
+    #[error(transparent)]
+    Read(#[from] ReadError),
 }
 
 /// The documents a query matches in one view, in docid order, with their scores.

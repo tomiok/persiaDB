@@ -17,8 +17,12 @@ pub(super) struct BlockMaxWand<M> {
     /// Each clause's [`Matcher::max_score`].
     bounds: Vec<f64>,
     min: Option<f64>,
-    /// Scratch: clause indices on a document, by document.
+    /// The clauses on a document, by document then index (query order); once started, every one with a document.
     order: Vec<(u32, usize)>,
+    /// Whether `order` holds the clauses yet.
+    started: bool,
+    /// Scratch: the clauses [`Self::catch_up`] moves.
+    moved: Vec<usize>,
     /// Scratch: per clause, what it adds to a bound.
     parts: Vec<f64>,
     /// Per clause, the last [`Matcher::block_bound`] and the target it was taken at: it still holds for a later
@@ -33,6 +37,8 @@ impl<M: Matcher> BlockMaxWand<M> {
         Self {
             bounds: clauses.iter().map(Matcher::max_score).collect(),
             order: Vec::with_capacity(clauses.len()),
+            started: false,
+            moved: Vec::with_capacity(clauses.len()),
             parts: vec![0.0; clauses.len()],
             blocks: vec![None; clauses.len()],
             clauses,
@@ -42,37 +48,54 @@ impl<M: Matcher> BlockMaxWand<M> {
         }
     }
 
-    /// Moves every clause before `target` to its first document at or after it.
+    /// Moves every clause before `target` to its first document at or after it, keeping `order` sorted: only the
+    /// clauses that move are placed again (ROADMAP 7.4.7), so a step costs what moves, not every clause.
     fn catch_up(&mut self, target: u32) -> Result<(), ReadError> {
-        for clause in &mut self.clauses {
-            if clause.doc().is_none_or(|d| d < target) {
-                clause.advance(target)?;
+        let mut moved = std::mem::take(&mut self.moved);
+        moved.clear();
+        if self.started {
+            let behind = self.order.partition_point(|&(d, _)| d < target);
+            moved.extend(self.order.drain(..behind).map(|(_, i)| i));
+        } else {
+            self.started = true;
+            moved.extend(0..self.clauses.len());
+        }
+        // Each insertion shifts the rest: when most clauses move (the first step, a long skip), one sort is cheaper.
+        let resort = moved.len() > 8 && moved.len() * 4 > self.clauses.len();
+        for &i in &moved {
+            if let Some(clause) = self.clauses.get_mut(i)
+                && let Some(doc) = clause.advance(target)?
+            {
+                if resort {
+                    self.order.push((doc, i));
+                } else {
+                    let at = self.order.partition_point(|&e| e < (doc, i));
+                    self.order.insert(at, (doc, i));
+                }
             }
         }
+        if resort {
+            self.order.sort_unstable();
+        }
+        self.moved = moved;
         Ok(())
-    }
-
-    /// The clauses still on a document, sorted by it (then query order).
-    fn sort(&mut self) {
-        self.order.clear();
-        self.order.extend(
-            self.clauses
-                .iter()
-                .enumerate()
-                .filter_map(|(i, c)| c.doc().map(|d| (d, i))),
-        );
-        self.order.sort_unstable();
     }
 
     /// The pivot: the smallest `p` such that the clauses `order[..=p]` can beat `min` together. Every document
     /// before `order[p]`'s matches only clauses of `order[..p]`, whose bounds cannot.
+    ///
+    /// The sum that decides is in query order ([`sum_in_order`]), O(clauses) each; a running sum in pivot order
+    /// rules out a `p` first, so with many clauses (ROADMAP 7.4.7) it is computed only where it can beat `min`.
     fn pivot(&mut self, min: f64) -> Option<usize> {
         self.parts.fill(0.0);
+        let slack = order_slack(self.clauses.len());
+        let mut running = 0.0;
         for (p, &(_, i)) in self.order.iter().enumerate() {
             if let (Some(part), Some(&bound)) = (self.parts.get_mut(i), self.bounds.get(i)) {
                 *part = bound;
+                running += bound;
             }
-            if sum_in_order(self.parts.iter().copied()) > min {
+            if running * slack > min && sum_in_order(self.parts.iter().copied()) > min {
                 return Some(p);
             }
         }
@@ -97,11 +120,18 @@ impl<M: Matcher> BlockMaxWand<M> {
         Ok(bound)
     }
 
-    /// The exact score of `doc`, which every clause is at or after: the matching clauses' scores in query order.
+    /// The exact score of `doc`, the first document of `order`: the matching clauses' scores in query order.
     fn score_of(&mut self, doc: u32) -> Result<f64, ReadError> {
+        // `order` breaks ties by index: the clauses on `doc` are already in query order.
+        let on = self.order.partition_point(|&(d, _)| d <= doc);
         let mut sum = 0.0;
-        for clause in &mut self.clauses {
-            if clause.doc() == Some(doc) {
+        for n in 0..on {
+            let Some(&(d, i)) = self.order.get(n) else {
+                continue;
+            };
+            if d == doc
+                && let Some(clause) = self.clauses.get_mut(i)
+            {
                 sum += clause.score()?;
             }
         }
@@ -112,7 +142,6 @@ impl<M: Matcher> BlockMaxWand<M> {
     fn find(&mut self, target: u32) -> Result<Option<u32>, ReadError> {
         self.catch_up(target)?;
         loop {
-            self.sort();
             let Some(&(first, _)) = self.order.first() else {
                 return Ok(None);
             };
@@ -215,5 +244,52 @@ impl<M: Matcher> Matcher for BlockMaxWand<M> {
 
     fn set_min_competitive(&mut self, score: f64) {
         raise(&mut self.min, score);
+    }
+}
+
+/// A factor that lifts a sum of at most `n` non-negative values, added in any order, to at least the same values
+/// summed in any other order. Each order is within `γ = (n − 1)·u / (1 − (n − 1)·u)` of the exact sum (`u` the unit
+/// roundoff, `ε / 2`), so the ratio of two is at most `(1 + γ) / (1 − γ)`, about `1 + n·ε`; `1 + 4·n·ε` covers that
+/// and the rounding of the product, for any `n` below 2⁴⁰.
+#[allow(clippy::cast_precision_loss)] // a clause count, far below 2^53
+fn order_slack(n: usize) -> f64 {
+    1.0 + 4.0 * (n as f64) * f64::EPSILON
+}
+
+#[cfg(test)]
+mod tests {
+    use super::order_slack;
+    use crate::search::sum_in_order;
+
+    /// A running sum lifted by the slack is never below the same values summed in another order.
+    #[test]
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )] // small generated values
+    fn the_slack_covers_any_order() {
+        let mut x = 0x2545_f491_4f6c_dd1d_u64;
+        let mut unit = || {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            (x >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for _ in 0..20_000 {
+            let n = 2 + (unit() * 60.0) as usize;
+            // Mixed magnitudes, so the order matters.
+            let values: Vec<f64> = (0..n)
+                .map(|_| unit() * 10_f64.powi((unit() * 8.0) as i32 - 4))
+                .collect();
+            let mut reversed = values.clone();
+            reversed.reverse();
+            let mut sorted = values.clone();
+            sorted.sort_by(f64::total_cmp);
+            for other in [&reversed, &sorted] {
+                let running = sum_in_order(other.iter().copied());
+                assert!(running * order_slack(n) >= sum_in_order(values.iter().copied()));
+            }
+        }
     }
 }

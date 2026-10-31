@@ -78,25 +78,35 @@ pub struct PhraseQuery {
     pub terms: Vec<PhraseTerm>,
 }
 
-/// [`Query::Prefix`].
+/// [`Query::Prefix`]: documents holding a term of [`Self::field`] that starts with [`Self::prefix`].
+///
+/// `prefix` is raw bytes. The field analyzer is not applied, so `Run` does not match a `text` field indexed as
+/// `running` (SPEC §7.1). M8 typo tolerance (ROADMAP 8.2.3) must analyze with the field's query-time analyzer
+/// before it builds this query. Every term kept scores with one `idf`, from the largest `df` among them, so a
+/// rare completion is not boosted over a common one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrefixQuery {
     /// The field: `text` or `keyword`.
     pub field: FieldId,
-    /// The prefix, not empty.
+    /// The prefix, not empty, compared as raw bytes to indexed terms.
     pub prefix: String,
     /// Most terms it expands to (at least 1); the rest are left out (SPEC §7.6, L3).
     pub max_expansions: u32,
 }
 
-/// [`Query::Fuzzy`].
+/// [`Query::Fuzzy`]: documents holding a term of [`Self::field`] within [`Self::distance`] of [`Self::term`].
+///
+/// `term` is raw bytes. The field analyzer is not applied (SPEC §7.1): `RUNNING` is not the indexed term
+/// `running`. M8 typo tolerance (ROADMAP 8.2.4) must analyze before it builds this query. Every term kept scores
+/// with one `idf`, from the largest `df` among them, then multiplied by `(distance + 1 − d) / (distance + 1)`,
+/// where `d` is that term's edit distance.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FuzzyQuery {
     /// The field: `text` or `keyword`.
     pub field: FieldId,
-    /// The term.
+    /// The term, compared as raw bytes to indexed terms.
     pub term: String,
-    /// The Levenshtein distance: 1 or 2 (SPEC §7.6, L4).
+    /// Optimal string alignment distance: 1 or 2 (SPEC §7.1).
     pub distance: u8,
     /// Most terms it expands to (at least 1).
     pub max_expansions: u32,

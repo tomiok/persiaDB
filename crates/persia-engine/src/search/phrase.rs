@@ -13,17 +13,11 @@ use super::{Matcher, Pos, bounded_norm};
 pub(super) struct PhrasePostings<P> {
     pub(super) postings: P,
     pub(super) position: u32,
-    /// Its positions in the current candidate, copied from `postings`.
-    buffer: Vec<u32>,
 }
 
 impl<P: PostingsIterator> PhrasePostings<P> {
     pub(super) fn new(postings: P, position: u32) -> Self {
-        Self {
-            postings,
-            position,
-            buffer: Vec::new(),
-        }
+        Self { postings, position }
     }
 }
 
@@ -61,6 +55,8 @@ pub(super) struct PhraseMatcher<'a, V: SearchView + 'a> {
     scorer: &'a TermScorer,
     /// The phrase frequency of the current document, at least 1.
     freq: u32,
+    /// Scratch: the starts of the current candidate (see [`phrase_freq`]).
+    starts: Vec<u32>,
     pos: Pos,
     /// [`Matcher::max_score`].
     max: f64,
@@ -94,6 +90,7 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
             norms,
             scorer,
             freq: 0,
+            starts: Vec::new(),
             pos: Pos::Unstarted,
         }
     }
@@ -101,7 +98,7 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
     /// From `candidate` on, the first document of the conjunction that holds the phrase.
     fn find(&mut self, mut candidate: Option<u32>) -> Result<Option<u32>, ReadError> {
         while candidate.is_some() {
-            self.freq = phrase_freq(self.terms.clauses_mut())?;
+            self.freq = phrase_freq(self.terms.clauses_mut(), &mut self.starts)?;
             if self.freq > 0 {
                 return Ok(candidate);
             }
@@ -167,41 +164,51 @@ impl<'a, V: SearchView + 'a> Matcher for PhraseMatcher<'a, V> {
 
 /// The phrase frequency of the document every term is on: how many distinct starts `s` have each term at
 /// `s + position` (SPEC §7.2). Starts below 0 or past `u32::MAX` hold nothing.
-fn phrase_freq<P: PostingsIterator>(terms: &mut [PhrasePostings<P>]) -> Result<u32, ReadError> {
-    for term in terms.iter_mut() {
+///
+/// Only the starts of the term with the lowest frequency are copied, into `starts`; each other term then keeps
+/// those its positions hold, and the positions of the terms after the last start is gone are not read
+/// (ROADMAP 7.4.7).
+fn phrase_freq<P: PostingsIterator>(
+    terms: &mut [PhrasePostings<P>],
+    starts: &mut Vec<u32>,
+) -> Result<u32, ReadError> {
+    let mut anchor = None::<(usize, u32)>;
+    for (i, term) in terms.iter_mut().enumerate() {
+        let freq = term.postings.freq()?;
+        if anchor.is_none_or(|(_, f)| freq < f) {
+            anchor = Some((i, freq));
+        }
+    }
+    let Some((anchor, _)) = anchor else {
+        return Ok(0);
+    };
+    starts.clear();
+    if let Some(term) = terms.get_mut(anchor) {
+        let offset = term.position;
+        // Stacked tokens repeat a position: each start once.
+        for &p in term.postings.positions()? {
+            if let Some(start) = p.checked_sub(offset)
+                && starts.last() != Some(&start)
+            {
+                starts.push(start);
+            }
+        }
+    }
+    for (i, term) in terms.iter_mut().enumerate() {
+        if starts.is_empty() {
+            break;
+        }
+        if i == anchor {
+            continue;
+        }
+        let offset = term.position;
         let positions = term.postings.positions()?;
-        term.buffer.clear();
-        term.buffer.extend_from_slice(positions);
-    }
-    // Starts come from the term with the fewest positions; the others are checked by binary search.
-    let Some(anchor) = (0..terms.len()).min_by_key(|&i| terms.get(i).map_or(0, |t| t.buffer.len()))
-    else {
-        return Ok(0);
-    };
-    let Some(anchor) = terms.get(anchor) else {
-        return Ok(0);
-    };
-    let mut freq = 0_u32;
-    let mut last = None;
-    for &p in &anchor.buffer {
-        let Some(start) = p.checked_sub(anchor.position) else {
-            continue;
-        };
-        // Stacked tokens repeat a position: count each start once.
-        if last == Some(start) {
-            continue;
-        }
-        last = Some(start);
-        let all = terms.iter().all(|t| {
-            start
-                .checked_add(t.position)
-                .is_some_and(|at| t.buffer.binary_search(&at).is_ok())
+        starts.retain(|&s| {
+            s.checked_add(offset)
+                .is_some_and(|at| positions.binary_search(&at).is_ok())
         });
-        if all {
-            freq = freq.saturating_add(1);
-        }
     }
-    Ok(freq)
+    Ok(u32::try_from(starts.len()).unwrap_or(u32::MAX))
 }
 
 #[cfg(test)]

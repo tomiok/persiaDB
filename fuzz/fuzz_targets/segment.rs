@@ -31,7 +31,8 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::merge::{MergeError, MergeSource, merge};
 use persia_engine::query::{
-    BoolQuery, BoostQuery, Filter, FilterValue, PhraseQuery, PhraseTerm, Query, TermQuery,
+    BoolQuery, BoostQuery, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery,
+    Query, TermQuery,
 };
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
@@ -602,7 +603,8 @@ fn search_all(seg: Segment, schema: &Arc<CollectionSchema>) {
     for tombstones in [None, odd.as_ref()] {
         let view = SegmentView::new(&seg, tombstones);
         for query in queries(schema) {
-            let Ok(plan) = SearchPlan::new(&query, schema, &stats) else {
+            // Expansions walk the view's term dictionary, damaged or not (ROADMAP 7.4.12).
+            let Ok(plan) = SearchPlan::with_terms(&query, schema, &stats, &view) else {
                 continue;
             };
             for k in [1, 3, 10] {
@@ -629,8 +631,9 @@ fn search_all(seg: Segment, schema: &Arc<CollectionSchema>) {
     }
 }
 
-/// Terms, disjunctions (the pruned ones), a conjunction with an optional clause, a phrase, a boost, and filtered
-/// `bool`s that read every column kind (ROADMAP 7.4.5) over the `documents` vocabulary.
+/// Terms, disjunctions (the pruned ones), a conjunction with an optional clause, a phrase, a boost, filtered
+/// `bool`s that read every column kind (ROADMAP 7.4.5), and prefix and fuzzy expansions (7.4.12) over the
+/// `documents` vocabulary.
 fn queries(schema: &CollectionSchema) -> Vec<Query> {
     let term = |field: &str, t: &str| {
         Query::Term(TermQuery {
@@ -727,6 +730,30 @@ fn queries(schema: &CollectionSchema) -> Vec<Query> {
             must_not: vec![term("tag", "green")],
             ..BoolQuery::default()
         }),
+        Query::Prefix(PrefixQuery {
+            field: id(schema, "title"),
+            prefix: "al".into(),
+            max_expansions: 50,
+        }),
+        should(vec![
+            Query::Fuzzy(FuzzyQuery {
+                field: id(schema, "body"),
+                term: "rum".into(),
+                distance: 1,
+                max_expansions: 50,
+            }),
+            Query::Fuzzy(FuzzyQuery {
+                field: id(schema, "title"),
+                term: "betta".into(),
+                distance: 2,
+                max_expansions: 3,
+            }),
+            Query::Prefix(PrefixQuery {
+                field: id(schema, "tag"),
+                prefix: "g".into(),
+                max_expansions: 1,
+            }),
+        ]),
         Query::Phrase(PhraseQuery {
             field: id(schema, "title"),
             terms: vec![

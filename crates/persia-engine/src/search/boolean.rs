@@ -1,6 +1,9 @@
 //! Boolean matchers (ROADMAP 7.4.1): AND, OR, NOT, a required clause with optional ones, every document, none,
 //! and the score modifiers of `boost` and `constant_score`.
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
+
 use crate::segment::ReadError;
 use crate::view::SearchView;
 
@@ -115,18 +118,101 @@ impl<M: Matcher> Matcher for Conjunction<M> {
     }
 }
 
+/// Up to this many clauses, a [`Disjunction`] looks at each to move on; above it, it keeps a heap.
+const SCAN_MAX: usize = 8;
+
 /// The documents any clause matches (OR); the score is the sum of the matching clauses', in query order.
+///
+/// Above [`SCAN_MAX`] clauses, those after the current document wait in a min-heap by document, so moving on
+/// touches only the clauses that were on it or are passed over, not every clause (ROADMAP 7.4.7: relaxation
+/// expansions reach 50, SPEC §7.6).
 pub(super) struct Disjunction<M> {
+    /// In query order.
     clauses: Vec<M>,
+    /// Above [`SCAN_MAX`] clauses, those after the current document, by document then index.
+    queue: BinaryHeap<Reverse<(u32, usize)>>,
+    /// The clauses on the current document, in query order.
+    current: Vec<usize>,
     pos: Pos,
 }
 
 impl<M: Matcher> Disjunction<M> {
     pub(super) fn new(clauses: Vec<M>) -> Self {
         Self {
+            queue: BinaryHeap::with_capacity(clauses.len()),
+            current: Vec::with_capacity(clauses.len()),
             clauses,
             pos: Pos::Unstarted,
         }
+    }
+
+    /// Moves clause `i` to its first document at or after `target` and queues it, unless it has none.
+    fn requeue(&mut self, i: usize, target: u32) -> Result<(), ReadError> {
+        if let Some(clause) = self.clauses.get_mut(i)
+            && let Some(doc) = clause.advance(target)?
+        {
+            self.queue.push(Reverse((doc, i)));
+        }
+        Ok(())
+    }
+
+    /// [`Matcher::advance`] past the current document by looking at every clause, which beats the heap's upkeep
+    /// for a few clauses.
+    fn scan(&mut self, target: u32, started: bool) -> Result<Option<u32>, ReadError> {
+        self.current.clear();
+        let mut min = None::<u32>;
+        for (i, clause) in self.clauses.iter_mut().enumerate() {
+            // Once started, a clause without a document is exhausted; one at or after `target` stays.
+            let doc = match clause.doc() {
+                None if started => None,
+                Some(d) if d >= target => Some(d),
+                _ => clause.advance(target)?,
+            };
+            let Some(d) = doc else {
+                continue;
+            };
+            if min.is_none_or(|m| d < m) {
+                min = Some(d);
+                self.current.clear();
+            }
+            if min == Some(d) {
+                self.current.push(i);
+            }
+        }
+        Ok(min)
+    }
+
+    /// [`Matcher::advance`] past the current document with the heap: only the clauses on it, and those the heap
+    /// holds before `target`, move.
+    fn dequeue(&mut self, target: u32, started: bool) -> Result<Option<u32>, ReadError> {
+        let mut current = std::mem::take(&mut self.current);
+        if started {
+            // The clauses on the current document are before `target`.
+            for &i in &current {
+                self.requeue(i, target)?;
+            }
+        } else {
+            for i in 0..self.clauses.len() {
+                self.requeue(i, target)?;
+            }
+        }
+        current.clear();
+        while let Some(&Reverse((doc, i))) = self.queue.peek()
+            && doc < target
+        {
+            self.queue.pop();
+            self.requeue(i, target)?;
+        }
+        let first = self.queue.peek().map(|&Reverse((doc, _))| doc);
+        while let Some(&Reverse((d, i))) = self.queue.peek()
+            && Some(d) == first
+        {
+            // Popped by index too, so in query order.
+            self.queue.pop();
+            current.push(i);
+        }
+        self.current = current;
+        Ok(first)
     }
 }
 
@@ -157,29 +243,22 @@ impl<M: Matcher> Matcher for Disjunction<M> {
             Pos::At(_) => true,
         };
         self.pos = Pos::Done;
-        let mut min = None::<u32>;
-        for clause in &mut self.clauses {
-            // Once started, a clause without a document is exhausted; one at or after `target` stays.
-            let doc = match clause.doc() {
-                None if started => None,
-                Some(d) if d >= target => Some(d),
-                _ => clause.advance(target)?,
-            };
-            if let Some(d) = doc {
-                min = Some(min.map_or(d, |m| m.min(d)));
-            }
-        }
-        self.pos = Pos::of(min);
-        Ok(min)
+        let doc = if self.clauses.len() <= SCAN_MAX {
+            self.scan(target, started)?
+        } else {
+            self.dequeue(target, started)?
+        };
+        self.pos = Pos::of(doc);
+        Ok(doc)
     }
 
     fn score(&mut self) -> Result<f64, ReadError> {
-        let Some(doc) = self.pos.doc() else {
+        if self.pos.doc().is_none() {
             return Ok(0.0);
-        };
+        }
         let mut sum = 0.0;
-        for clause in &mut self.clauses {
-            if clause.doc() == Some(doc) {
+        for &i in &self.current {
+            if let Some(clause) = self.clauses.get_mut(i) {
                 sum += clause.score()?;
             }
         }
