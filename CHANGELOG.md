@@ -23,11 +23,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `persia-engine`: a collection search runs its views in parallel (ROADMAP 7.6.1, SPEC §7.3). `CollectionViews::top_k`
-  and `search` run on rayon's global pool; `top_k_with` and `search_with` take a `db::Execution` with the pruning, the
-  threads (`Threads::Current`, `Threads::Global`, or `Threads::Pool(SearchPool::new(n)?)`), a deadline and a
-  `CancelToken` (ROADMAP 7.6.2). Hits, scores and facet counts are the same on any thread. A cancelled or expired
-  search returns `search::ExecError::Interrupted` (from `top_k_with`) or `RequestError::Interrupted` (from
-  `search_with`) and no hits; it is checked before each view and every 256 matches.
+  and `search` run on rayon's global pool (or, called from a thread of another rayon pool, on that pool);
+  `top_k_with` and `search_with` take a `db::Execution` with the pruning, the threads (`Threads::Current`,
+  `Threads::Global`, or `Threads::Pool(SearchPool::new(n)?)`), a deadline and a `CancelToken` (ROADMAP 7.6.2). Hits,
+  scores and facet counts are the same on any thread. On a pool, whether a search over a corrupt segment fails can
+  depend on the timing: pruning may skip a corrupt block unread, by a threshold from another view. A cancelled or
+  expired search returns `search::ExecError::Interrupted` (from `top_k_with`) or `RequestError::Interrupted` (from
+  `search_with`) and no hits; it is checked before the search, as each view's collector starts, every 256 matches,
+  before each facet of a view, and before the page's documents are read.
+
 
 - `persia-engine`: `prefix` and `fuzzy` queries run (ROADMAP 7.4.12, SPEC §7.1). `SearchPlan::with_terms` expands
   each over the terms of the views it will run on (`search::TermSource`: a view, or `db::CollectionViews`), once, so

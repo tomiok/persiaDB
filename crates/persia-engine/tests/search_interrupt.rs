@@ -146,6 +146,11 @@ fn a_cancelled_or_expired_search_returns_interrupted() {
                 Err(ExecError::Interrupted(i)) => assert_eq!(i, interrupt, "{threads:?}"),
                 other => panic!("{threads:?}: {other:?}"),
             }
+            // No hit to keep is no reason to skip the check.
+            match views.top_k_with(&plan, 0, &exec) {
+                Err(ExecError::Interrupted(i)) => assert_eq!(i, interrupt, "{threads:?}, k = 0"),
+                other => panic!("{threads:?}, k = 0: {other:?}"),
+            }
             match views.search_with(&plan, &SearchRequest::default(), &exec) {
                 Err(RequestError::Interrupted(i)) => assert_eq!(i, interrupt, "{threads:?}"),
                 other => panic!("{threads:?}: {other:?}"),

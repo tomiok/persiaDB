@@ -367,7 +367,8 @@ enum Reader<K, W> {
 ///
 /// # Errors
 /// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes;
-/// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type.
+/// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type; [`RequestError::Interrupted`] when
+/// `watch` reports the search cancelled or past its deadline.
 pub(crate) fn top_sorted<V: SearchView>(
     sort: &Sort,
     view: &V,

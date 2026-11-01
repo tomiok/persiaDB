@@ -289,11 +289,11 @@ impl CollectionViews<'_> {
         k: usize,
         exec: &Execution,
     ) -> Result<Vec<CollectionHit>, ExecError> {
+        // Read once before any view: a search with no view to run, or no hit to keep, stops too.
+        exec.interrupt()?;
         if k == 0 {
             return Ok(Vec::new());
         }
-        // Read once before any view: a search with no view to run stops too.
-        exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
         let thresholds = Thresholds::new(segments.len().saturating_add(1));
         let found = exec.run(&self.with_documents(&segments), |index| {
