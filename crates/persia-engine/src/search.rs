@@ -355,6 +355,10 @@ pub(crate) trait Watch {
 
     /// This view keeps `k` hits and the worst scores `score`, higher than before.
     fn publish(&mut self, score: f64);
+
+    /// This view finished pruning with `hits` kept, best first: its share of a threshold merged over the views
+    /// before the ones still running (ROADMAP 7.6.4).
+    fn finish(&mut self, hits: &[Hit]);
 }
 
 /// Counts matches towards the next look at a [`Watch`].
@@ -410,7 +414,11 @@ pub(crate) fn collect_where(
             watch.publish(t);
         }
     }
-    Ok(top.into_hits())
+    let hits = top.into_hits();
+    if prune {
+        watch.finish(&hits);
+    }
+    Ok(hits)
 }
 
 /// Looks at `watch`, applying the threshold it gives when the collector prunes.

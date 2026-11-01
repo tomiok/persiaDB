@@ -25,6 +25,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
+  are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
+  best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.
 - `persia-engine`: `SearchPlan::explain_all(view, docids)` explains many documents of a view in one pass (ROADMAP
   7.7.2, SPEC §7.7): the tree is built once and advanced in docid order, each `bool` selecting its filters once. A
   search with `explain: true` explains its page that way, one pass per view holding hits, and reads the deadline and

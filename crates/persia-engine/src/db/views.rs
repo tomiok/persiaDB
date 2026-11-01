@@ -297,8 +297,9 @@ impl CollectionViews<'_> {
             return Ok(Vec::new());
         }
         let segments: Vec<_> = self.segments().collect();
-        let thresholds = Thresholds::new(segments.len().saturating_add(1));
-        let found = exec.run(&self.with_documents(&segments), |index| {
+        let run = self.with_documents(&segments);
+        let thresholds = Thresholds::new(segments.len().saturating_add(1), &run, k);
+        let found = exec.run(&run, |index| {
             let mut watch = thresholds.watch(exec, index);
             match segments.get(index) {
                 Some(view) => view_top_k(plan, view, k, exec, &mut watch, |docid| {

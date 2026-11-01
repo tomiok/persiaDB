@@ -236,8 +236,9 @@ impl CollectionViews<'_> {
         // Read once before any view: a search with no view to run stops too.
         exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
-        let thresholds = Thresholds::new(segments.len().saturating_add(1));
-        let found = exec.run(&self.with_documents(&segments), |index| {
+        let run = self.with_documents(&segments);
+        let thresholds = Thresholds::new(segments.len().saturating_add(1), &run, window);
+        let found = exec.run(&run, |index| {
             let mut watch = thresholds.watch(exec, index);
             match segments.get(index) {
                 Some(view) => search.view(view, index, &mut watch, |docid| Located::Segment {

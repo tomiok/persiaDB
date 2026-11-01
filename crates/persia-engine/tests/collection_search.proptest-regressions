@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 99e6adf4dba4400f873192fa3384ebf320735b0c94a908b67d7bf851bb896213 # shrinks to [Put { id: 4, tag: false, words: [1, 3] }, Put { id: 0, tag: false, words: [4] }, Put { id: 0, tag: false, words: [0] }, Commit, Put { id: 1, tag: false, words: [2, 0] }]
