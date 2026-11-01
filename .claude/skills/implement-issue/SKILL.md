@@ -53,7 +53,7 @@ Leaves are worked in batches (one ROADMAP subsection or a few related leaves per
    or relaxation quality. Pass the scenario list that applies.
 
 Re-run step 4 of "Verify locally" after changes. Leaves stay `[~]` until the batch review passes.
-When the batch is merged and pushed, suggest starting a fresh session for the next one.
+When the batch's PR is open, suggest starting a fresh session for the next one.
 
 ## 6. Finish
 - Tick the Definition of Done list from `CLAUDE.md`.
@@ -67,4 +67,7 @@ When the batch is merged and pushed, suggest starting a fresh session for the ne
 - Output a PR description: **Context** (issue + SPEC §), **What changed**, **How it was tested** (layers + commands + seeds,
   mutation-check results), **Risks / follow-ups** (including any failure seen and not explained), **Reviewer notes**
   (what `code-reviewer` found, what was fixed, what was declined and why).
+- **Open the PR** (part of the Definition of Done): push the branch, `gh pr create --base main` with that description
+  (ending with the attribution line), and end the session by reporting its link. Do not open changed files in any
+  editor or app.
 - Do not mark the issue done if any DoD item is unmet; list what remains.
