@@ -1311,12 +1311,30 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   iterator before a document is scored or offered to the top-k collector, so a deleted document cannot enter the
   heap or raise the competitive threshold. Block upper bounds may still cover deleted documents; that only loosens
   pruning.
-- Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
+- Segments are searched in parallel: each non-empty view (a segment or the memtable with a document; an empty one
+  matches nothing) is a task on a thread pool (the caller's choice: the calling thread, a shared default pool, or its
+  own pool). Each view keeps its own top-k; they merge in view order into the global top-k (the order below), so the
+  hits, scores bit for bit, do not depend on the threads or the timing. A view that keeps `k` hits shares the worst one's score `t` with the others while they run:
+  a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
+  scoring below `t` (its tie would rank first). With facets every match is counted, and each view counts its own; the
+  counts are summed. When several views fail, the error returned is that of the first of them in order. Whether a
+  view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
+  checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
+  are the same either way.
+- A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
+  search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
+  matcher is built), every 256 matches a view yields, before each facet a view counts, and before the page's
+  documents are read. At the first read that finds the token cancelled or the clock at or past the deadline, the
+  search stops with an error (cancelled, or deadline exceeded; a cancellation wins) and returns no hits: a page cut
+  short would rank hits a full search does not return. Between two reads nothing is interrupted: planning (§7.1
+  expansion), building a view's matcher, a matcher's walk between two matches it yields, counting one facet over a
+  view's matches, and reading the page's documents run to their end first.
+  Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
   put or a delete of are left out like deleted documents, as of the memtable view searched, so each id shows once.
   Across views, hits rank by score descending, then segment order (the manifest's) with the memtable last, then
-  docid; a view starts from the threshold of the hits kept from the views before it, which win its ties.
+  docid.
 
 ### 7.4 Sorting, pagination
 `sort` is `"score"` or a list of at most 16 keys, each `"score"`, `{"score": {"order"}}` or `{"field", "order", "missing"}`; `[]`

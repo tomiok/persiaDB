@@ -163,6 +163,9 @@ Always run fmt, clippy and tests before declaring a task done.
      commit. Exception: a leaf that changes the on-disk format or crash safety gets its own review before the next leaf.
    - `integration-tester` — only for items touching storage, durability, server, SDKs, distribution.
    - Leaves stay `[~]` until the batch review passes; then tick them `[x]` and push.
+   - **Every implementation session ends with an open PR** (one that changes the repo on a branch; a review-only or
+     question-only session reports its findings instead): push the branch, open it with `gh pr create` (description
+     as in the `implement-issue` skill), and reply with its link. Unmet DoD items make it a draft that lists them.
 4. One issue = one PR = one focused change. Conventional commits (`feat(engine): ...`, `fix(format): ...`).
 5. Update `SPEC.md` / ADRs in the same PR when a decision changes.
 6. Progress: mark the leaf `[~]` in `ROADMAP.md` when starting, `[x]` when the DoD is met, then run
@@ -179,6 +182,7 @@ Always run fmt, clippy and tests before declaring a task done.
 - [ ] Benchmarks added/updated if on a hot path (query, indexing, block decode)
 - [ ] Reviewed by `code-reviewer` (in its batch, or alone for format/crash-safety changes) with no unresolved blockers
 - [ ] ROADMAP leaf ticked and `PROGRESS.md` regenerated (`cargo xtask progress --check` passes)
+- [ ] `just check` passes, the branch is pushed, and the PR is open on GitHub (its link is the last thing reported)
 
 ## Things Claude must never do
 
@@ -188,3 +192,4 @@ Always run fmt, clippy and tests before declaring a task done.
 - Swallow errors (`let _ =`) on I/O paths, or fsync "later".
 - Invent behavior not in SPEC: ask or propose a SPEC change instead.
 - Commit secrets, real credentials, or large binary fixtures (> 1 MB; generate them instead).
+- Open files in Zed, an IDE or any other app after a task: report the PR link instead.

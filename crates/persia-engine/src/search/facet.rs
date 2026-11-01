@@ -184,6 +184,14 @@ impl FacetCounter {
         Ok(())
     }
 
+    /// Adds the counts of `other`, a counter of the same request over other views.
+    pub(crate) fn merge(&mut self, other: Self) {
+        for (value, n) in other.totals {
+            let total = self.totals.entry(value).or_default();
+            *total = total.saturating_add(n);
+        }
+    }
+
     /// The values with the highest counts, then ascending bytes.
     pub(crate) fn finish(self) -> FacetCounts {
         let mut values: Vec<FacetValue> = self

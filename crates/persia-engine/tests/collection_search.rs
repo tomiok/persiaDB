@@ -6,7 +6,8 @@
 //! 2. A memtable view hides only what its own operations name: a write after it changes nothing it returns, even
 //!    after a newer view was searched (the snapshot's cache of hidden copies).
 //! 3. Hits rank by score descending, then segment order with the memtable last, then docid; pruned and exhaustive
-//!    top-k are the same hits, scores bit for bit (SPEC §7.3).
+//!    top-k are the same hits, scores bit for bit (SPEC §7.3), whether the views run on the calling thread or on a
+//!    pool (ROADMAP 7.6.1).
 
 #![allow(
     clippy::unwrap_used,
@@ -17,11 +18,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock};
 
 use persia_engine::db::{
-    CollectionHit, CollectionSnapshot, Database, DatabaseOptions, Located, ManualClock, SegmentIds,
-    Snapshot,
+    CollectionHit, CollectionSnapshot, Database, DatabaseOptions, Execution, Located, ManualClock,
+    SearchPool, SegmentIds, Snapshot, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
@@ -102,7 +104,19 @@ fn ids(c: &CollectionSnapshot, memtable: &MemtableView, hits: &[CollectionHit]) 
         .collect()
 }
 
-/// The best `k` hits of `query` as of `memtable`, the same under every pruning strategy.
+/// Every way the views can run: the calling thread, rayon's global pool, and a pool of 4 (ROADMAP 7.6.1).
+fn threads() -> [Threads; 3] {
+    static POOL: OnceLock<SearchPool> = OnceLock::new();
+    let pool = POOL.get_or_init(|| SearchPool::new(NonZeroUsize::new(4).unwrap()).unwrap());
+    [
+        Threads::Current,
+        Threads::Global,
+        Threads::Pool(pool.clone()),
+    ]
+}
+
+/// The best `k` hits of `query` as of `memtable`, the same under every pruning strategy and on every thread (ROADMAP
+/// 7.6.1).
 fn search(
     c: &CollectionSnapshot,
     memtable: &MemtableView,
@@ -116,10 +130,23 @@ fn search(
             .map(|h| (h.location, h.score.to_bits()))
             .collect()
     };
-    let exhaustive = views.top_k(&plan, k, Pruning::Exhaustive).unwrap();
+    let exhaustive = views
+        .top_k_with(
+            &plan,
+            k,
+            &Execution::new(Pruning::Exhaustive).threads(Threads::Current),
+        )
+        .unwrap();
     for pruning in STRATEGIES {
-        let hits = views.top_k(&plan, k, pruning).unwrap();
-        assert_eq!(bits(&hits), bits(&exhaustive), "{pruning:?}, k = {k}");
+        for threads in threads() {
+            let exec = Execution::new(pruning).threads(threads.clone());
+            let hits = views.top_k_with(&plan, k, &exec).unwrap();
+            assert_eq!(
+                bits(&hits),
+                bits(&exhaustive),
+                "{pruning:?} on {threads:?}, k = {k}"
+            );
+        }
     }
     exhaustive
 }

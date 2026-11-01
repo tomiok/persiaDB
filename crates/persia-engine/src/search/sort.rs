@@ -7,8 +7,8 @@
 
 use core::cmp::Ordering;
 
-use super::Matcher;
 use super::request::RequestError;
+use super::{Matcher, Ticks, Watch};
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::segment::{ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeyReader, KeywordReader, SearchView};
@@ -367,7 +367,8 @@ enum Reader<K, W> {
 ///
 /// # Errors
 /// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes;
-/// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type.
+/// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type; [`RequestError::Interrupted`] when
+/// `watch` reports the search cancelled or past its deadline.
 pub(crate) fn top_sorted<V: SearchView>(
     sort: &Sort,
     view: &V,
@@ -375,7 +376,11 @@ pub(crate) fn top_sorted<V: SearchView>(
     k: usize,
     after: Option<(&[SortValue], Ties)>,
     mut seen: impl FnMut(u32),
+    watch: &mut impl Watch,
 ) -> Result<Vec<SortedHit>, RequestError> {
+    // No bounds to prune a column sort by: only an interrupt matters.
+    watch.check()?;
+    let mut ticks = Ticks::default();
     let mut readers = sort
         .keys
         .iter()
@@ -392,6 +397,9 @@ pub(crate) fn top_sorted<V: SearchView>(
     let mut heap = Heap::new(k);
     let mut scratch: Vec<Local> = Vec::with_capacity(sort.keys.len());
     while let Some(docid) = matcher.next()? {
+        if ticks.due() {
+            watch.check()?;
+        }
         seen(docid);
         if k == 0 {
             continue;

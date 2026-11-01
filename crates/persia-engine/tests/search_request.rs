@@ -21,11 +21,12 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::sync::Arc;
+use std::num::NonZeroUsize;
+use std::sync::{Arc, OnceLock};
 
 use persia_engine::db::{
-    CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions, Located, ManualClock,
-    SearchRequest, SearchResults, SegmentIds, Snapshot,
+    CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions, Execution, Located,
+    ManualClock, SearchPool, SearchRequest, SearchResults, SegmentIds, Snapshot, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
@@ -241,6 +242,30 @@ fn model_facet(
     counts
 }
 
+/// A pool of 4 threads, shared by the tests.
+fn pool() -> SearchPool {
+    static POOL: OnceLock<SearchPool> = OnceLock::new();
+    POOL.get_or_init(|| SearchPool::new(NonZeroUsize::new(4).unwrap()).unwrap())
+        .clone()
+}
+
+/// `results` is what `request` returns whatever thread the views run on: the same page and counts (ROADMAP 7.6.1).
+fn same_on_every_thread(
+    views: &persia_engine::db::CollectionViews<'_>,
+    plan: &SearchPlan,
+    request: &SearchRequest,
+    pruning: Pruning,
+    results: &SearchResults,
+) -> Result<(), TestCaseError> {
+    for threads in [Threads::Current, Threads::Pool(pool())] {
+        let exec = Execution::new(pruning).threads(threads);
+        let other = views.search_with(plan, request, &exec).unwrap();
+        prop_assert_eq!(&located(&other), &located(results));
+        prop_assert_eq!(&other, results);
+    }
+    Ok(())
+}
+
 fn located(results: &SearchResults) -> Vec<(Located, u64)> {
     results
         .hits
@@ -435,6 +460,7 @@ fn requests_match_a_model() {
                         ..request.clone()
                     };
                     let results = views.search(&plan, &request, pruning).unwrap();
+                    same_on_every_thread(&views, &plan, &request, pruning, &results)?;
                     prop_assert_eq!(
                         &located(&results),
                         &expected,

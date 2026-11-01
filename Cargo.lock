@@ -598,6 +598,7 @@ dependencies = [
  "persia-format",
  "persia-storage",
  "proptest",
+ "rayon",
  "roaring",
  "serde",
  "serde_json",

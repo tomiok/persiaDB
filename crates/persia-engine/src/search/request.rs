@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 
+use super::{ExecError, Interrupt};
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId};
 use crate::segment::ReadError;
@@ -116,6 +117,18 @@ pub enum RequestError {
     /// A view could not be read.
     #[error(transparent)]
     Read(#[from] ReadError),
+    /// The search was cancelled or ran past its deadline (ROADMAP 7.6.2).
+    #[error(transparent)]
+    Interrupted(#[from] Interrupt),
+}
+
+impl From<ExecError> for RequestError {
+    fn from(e: ExecError) -> Self {
+        match e {
+            ExecError::Read(e) => Self::Read(e),
+            ExecError::Interrupted(i) => Self::Interrupted(i),
+        }
+    }
 }
 
 /// Which stored fields a hit returns (SPEC §7.5.1); its id and blob reference always come back.

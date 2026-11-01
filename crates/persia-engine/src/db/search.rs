@@ -7,13 +7,14 @@
 
 use roaring::RoaringBitmap;
 
+use super::exec::{Execution, Thresholds, ViewWatch};
 use super::snapshot::Located;
 use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
-    FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Matcher, Projection, Pruning,
-    RequestError, SearchPlan, Sort, SortValue, Ties, collect_where, top_sorted,
+    FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Projection, Pruning,
+    RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -174,6 +175,22 @@ impl CollectionViews<'_> {
         request: &SearchRequest,
         pruning: Pruning,
     ) -> Result<SearchResults, RequestError> {
+        self.search_with(plan, request, &Execution::new(pruning))
+    }
+
+    /// As [`Self::search`], run as `exec` says (SPEC §7.3, ROADMAP 7.6): each view a task on its threads, keeping
+    /// its own best `offset + limit` hits and counting its own facets. They merge in view order, so the page and the
+    /// counts are the same whatever the threads or the timing.
+    ///
+    /// # Errors
+    /// As [`Self::search`], for the first view in order that fails; [`RequestError::Interrupted`] once `exec`'s token
+    /// is cancelled or its deadline passes, before the page's documents are read.
+    pub fn search_with(
+        &self,
+        plan: &SearchPlan,
+        request: &SearchRequest,
+        exec: &Execution,
+    ) -> Result<SearchResults, RequestError> {
         let window = request
             .offset
             .checked_add(request.limit)
@@ -203,28 +220,46 @@ impl CollectionViews<'_> {
                 max: MAX_FACETS,
             });
         }
-        let mut search = Search {
+        let search = Search {
             plan,
             request,
-            pruning,
+            pruning: exec.pruning,
             window,
-            hits: Vec::new(),
-            facets: request
-                .facets
-                .iter()
-                .copied()
-                .map(FacetCounter::new)
-                .collect(),
         };
+        // Read once before any view: a search with no view to run stops too.
+        exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
-        for (index, view) in segments.iter().enumerate() {
-            search.view(view, index, |docid| Located::Segment { index, docid })?;
+        let thresholds = Thresholds::new(segments.len().saturating_add(1));
+        let found = exec.run(&self.with_documents(&segments), |index| {
+            let mut watch = thresholds.watch(exec, index);
+            match segments.get(index) {
+                Some(view) => search.view(view, index, &mut watch, |docid| Located::Segment {
+                    index,
+                    docid,
+                }),
+                None => search.view(self.memtable(), usize::MAX, &mut watch, Located::Memtable),
+            }
+        });
+        // In view order: every hit of a view is placed after the earlier views' on a full tie.
+        let mut ranked = Vec::new();
+        let mut facets: Vec<FacetCounter> = request
+            .facets
+            .iter()
+            .copied()
+            .map(FacetCounter::new)
+            .collect();
+        for (hits, counted) in found? {
+            ranked = merge(&request.sort, ranked, hits, window)?;
+            for (facet, counted) in facets.iter_mut().zip(counted) {
+                facet.merge(counted);
+            }
         }
-        search.view(self.memtable(), usize::MAX, Located::Memtable)?;
+        // Reading the page's documents is the last stage a deadline stops.
+        exec.interrupt()?;
 
         let origin = self.cursor_origin();
         let mut hits = Vec::new();
-        for hit in search.hits.into_iter().skip(request.offset) {
+        for hit in ranked.into_iter().skip(request.offset) {
             let mut document = match hit.location {
                 Located::Segment { index, docid } => {
                     segment_view(&segments, index)?.document(docid)?
@@ -242,11 +277,7 @@ impl CollectionViews<'_> {
         }
         Ok(SearchResults {
             hits,
-            facets: search
-                .facets
-                .into_iter()
-                .map(FacetCounter::finish)
-                .collect(),
+            facets: facets.into_iter().map(FacetCounter::finish).collect(),
         })
     }
 
@@ -259,26 +290,26 @@ impl CollectionViews<'_> {
     }
 }
 
-/// A search in progress: the best `window` hits of the views searched so far, and the facet counts.
+/// A search's request, run over one view at a time.
 struct Search<'r> {
     plan: &'r SearchPlan,
     request: &'r SearchRequest,
     pruning: Pruning,
     window: usize,
-    hits: Vec<Ranked>,
-    facets: Vec<FacetCounter>,
 }
 
 impl Search<'_> {
-    /// Merges the hits of `view`, at `rank` in collection order ([`order`]), and counts its matches for the facets.
+    /// The best `window` hits of `view`, at `rank` in collection order ([`order`]), and its matches counted for each
+    /// facet.
     fn view<V: SearchView>(
-        &mut self,
+        &self,
         view: &V,
         rank: usize,
+        watch: &mut ViewWatch<'_>,
         location: impl Fn(u32) -> Located,
-    ) -> Result<(), RequestError> {
+    ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
         let sort = &self.request.sort;
-        let counting = !self.facets.is_empty();
+        let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;
         let mut matcher = self.plan.matcher_with(
@@ -301,18 +332,11 @@ impl Search<'_> {
             }
         };
         let hits: Vec<Ranked> = if sort.is_score() {
-            if prune
-                && self.hits.len() >= self.window
-                && let Some(worst) = self.hits.last()
-            {
-                // Every hit kept wins a tie against this later view's (SPEC §7.3).
-                matcher.set_min_competitive(worst.score);
-            }
             let cursor = after.and_then(|(values, ties)| match values.first() {
                 Some(SortValue::Score(s)) => Some((s + 0.0, ties)),
                 _ => None,
             });
-            collect_where(&mut matcher, self.window, prune, |docid, score| {
+            let keep = |docid, score: f64| {
                 seen(docid);
                 // A score ranks after the cursor below its score, or tied and placed after it.
                 cursor.is_none_or(|(c, ties)| match (score + 0.0).total_cmp(&c) {
@@ -320,16 +344,17 @@ impl Search<'_> {
                     core::cmp::Ordering::Equal => ties.admit(docid),
                     core::cmp::Ordering::Greater => false,
                 })
-            })?
-            .into_iter()
-            .map(|h| Ranked {
-                location: location(h.docid),
-                score: h.score,
-                values: vec![SortValue::Score(h.score)],
-            })
-            .collect()
+            };
+            collect_where(&mut matcher, self.window, prune, keep, watch)?
+                .into_iter()
+                .map(|h| Ranked {
+                    location: location(h.docid),
+                    score: h.score,
+                    values: vec![SortValue::Score(h.score)],
+                })
+                .collect()
         } else {
-            top_sorted(sort, view, &mut matcher, self.window, after, seen)?
+            top_sorted(sort, view, &mut matcher, self.window, after, seen, watch)?
                 .into_iter()
                 .map(|h| Ranked {
                     location: location(h.docid),
@@ -338,16 +363,17 @@ impl Search<'_> {
                 })
                 .collect()
         };
+        let mut facets = Vec::with_capacity(self.request.facets.len());
         if counting {
             let docs: RoaringBitmap = docs.finish();
-            for facet in &mut self.facets {
+            for &request in &self.request.facets {
+                watch.check()?;
+                let mut facet = FacetCounter::new(request);
                 facet.add(view, &docs)?;
+                facets.push(facet);
             }
         }
-        // Both are sorted, and every hit of this view is placed after the kept ones on a full tie: merge them.
-        let kept = core::mem::take(&mut self.hits);
-        self.hits = merge(sort, kept, hits, self.window)?;
-        Ok(())
+        Ok((hits, facets))
     }
 }
 
