@@ -1408,7 +1408,7 @@ the frequency, the norm byte and the length it stands for (none for a `keyword` 
 `w_f / (1 − b_f + b_f · len_f(d)/avglen_f)` and the contribution `tf · factor`; the contributions summed in that
 order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length, factor, `tf~`, `k1` and summed `idf`.
 A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
-nothing and are not listed); a `boost` its factor (a `fuzzy` term's edit-distance weight, §7.1, is one); a
+nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. Explaining a hit costs about one unpruned
 search of its view, so it is done for the page's hits only, and a deadline or a cancellation is read before each
