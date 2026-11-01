@@ -19,7 +19,7 @@ use super::clock::Clock;
 use super::views::CollectionViews;
 use crate::schema::FieldId;
 use crate::search::{
-    Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, TermSource, Watch,
+    Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource, Watch,
 };
 use crate::segment::ReadError;
 
@@ -100,7 +100,7 @@ impl CancelToken {
     }
 
     /// Cancels every search given this token or a clone: each stops with [`Interrupt::Cancelled`] within 256
-    /// matches of a view, or 1024 reads of one of its postings, terms or columns (ROADMAP 7.6.3).
+    /// matches of a view, or 1024 steps of the readers of one (postings, terms, columns; ROADMAP 7.6.3).
     pub fn cancel(&self) {
         // Relaxed: nothing is published through the flag, a search only has to see it soon.
         self.0.store(true, Ordering::Relaxed);
@@ -159,8 +159,8 @@ impl Execution {
     }
 
     /// Stops the search with [`Interrupt::DeadlineExceeded`] once `clock` reads `at` or later. The clock is read
-    /// before each view, every 256 matches of one, and every 1024 reads of one of its postings, terms or columns
-    /// (SPEC §7.3).
+    /// before each view, every 256 matches of one, and every 1024 steps of its readers together (postings, terms,
+    /// columns, a scan for live documents; SPEC §7.3).
     #[must_use]
     pub fn deadline(mut self, clock: Arc<dyn Clock>, at: Instant) -> Self {
         self.deadline = Some((clock, at));
@@ -275,11 +275,12 @@ impl TermSource for ExecTerms<'_> {
     ) -> Result<(), ReadError> {
         // Read once first: a walk shorter than one look stops too.
         self.exec.interrupt().map_err(ReadError::Interrupted)?;
+        // One count over every view: many views of few terms each still look.
+        let steps = Steps::new(self.exec);
         for segment in self.views.segments() {
-            Interruptible::new(&segment, self.exec)
-                .each_term(field, lower, upper, expansion, each)?;
+            Interruptible::new(&segment, &steps).each_term(field, lower, upper, expansion, each)?;
         }
-        Interruptible::new(self.views.memtable(), self.exec)
+        Interruptible::new(self.views.memtable(), &steps)
             .each_term(field, lower, upper, expansion, each)
     }
 }
@@ -449,7 +450,7 @@ mod tests {
         // View 1 finishes first: not a prefix yet, so nothing is merged.
         thresholds.watch(&exec, 1).finish(&hits(&[4.0, 3.0]));
         assert_eq!(thresholds.watch(&exec, 3).check(), Ok(None));
-        // View 0 finishes: views 0 to 2 are the prefix, and their 2nd best score of all is 4.0, above either view's own.
+        // View 0 finishes: views 0 to 2 are the prefix; their 2nd best score of all is 4.0, above either view's.
         thresholds.watch(&exec, 0).finish(&hits(&[5.0, 1.0]));
         assert_eq!(thresholds.watch(&exec, 3).check(), Ok(Some(4.0)));
         // A view's own published threshold still counts where it is higher.

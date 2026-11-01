@@ -441,7 +441,7 @@ impl<V: SearchView> Matcher for AllDocs<'_, V> {
             Pos::Done => return Ok(None),
             Pos::Unstarted | Pos::At(_) => {}
         }
-        let doc = (target..self.view.doc_count()).find(|&d| self.view.is_live(d));
+        let doc = self.view.next_live(target)?;
         self.pos = Pos::of(doc);
         Ok(doc)
     }

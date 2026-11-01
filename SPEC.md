@@ -1326,9 +1326,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
   search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
-  documents are read, and before the hits of each view are explained (§7.7). Every reader of a view a search opens reads them too,
-  every 1024 steps: a postings list (a document moved to, a block bound skipped to), a term stream, a column scan,
-  and a column's keys or values read by docid. So a matcher's walk between two matches (a phrase whose terms never
+  documents are read, and before the hits of each view are explained (§7.7). The readers of a view a search opens read them too, every
+  1024 steps of all of them together: a postings list (a document moved to, a block bound skipped to), a term stream,
+  a column scan, a column's keys or values read by docid, and a scan for the next live document (`match_all`); a
+  §7.1 expansion walked through the search counts its steps over every view as one. So a matcher's walk between two matches (a phrase whose terms never
   line up, a conjunction or a pruning disjunction skipping), a filter's scan while a view's matcher is built,
   counting a facet, a column sort, explaining a hit and, when planning walks the terms through the search's
   execution, a §7.1 expansion stop too. At the first read that finds the token cancelled or

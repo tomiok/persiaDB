@@ -60,7 +60,7 @@ pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
 };
-pub(crate) use interrupt::{Interruptible, Interrupts};
+pub(crate) use interrupt::{Interruptible, Interrupts, Steps};
 pub use plan::SearchPlan;
 pub use request::{MAX_WINDOW, Projection, RequestError};
 pub use sort::{MAX_SORT_KEYS, Missing, Order, Sort, SortKey, SortValue};
@@ -120,7 +120,7 @@ fn sum_in_order(values: impl IntoIterator<Item = f64>) -> f64 {
 pub enum SearchError {
     /// A scorer cannot be built: a field of the wrong type, parameters out of range, a statistic unreadable.
     #[error(transparent)]
-    Score(#[from] ScoreError),
+    Score(ScoreError),
     /// A `prefix` or `fuzzy` planned without the views' terms to expand over ([`SearchPlan::new`]; plan it with
     /// [`SearchPlan::with_terms`], SPEC §7.1).
     #[error("a {what} query expands over the collection's terms: plan it with them")]
@@ -132,14 +132,24 @@ pub enum SearchError {
     /// phrase on a field without positions or with decreasing positions, a boost or constant score out of range.
     #[error(transparent)]
     Query(#[from] QueryError),
-    /// The terms a `prefix` or `fuzzy` expands over, or their collection `df`s, cannot be read: a corruption of a
-    /// view.
+    /// The terms a `prefix` or `fuzzy` expands over, or their collection `df`s, cannot be read: a view could not
+    /// be read (corrupt, or not of the planned schema).
     #[error(transparent)]
     Read(ReadError),
     /// Planning was cancelled or ran past its deadline (ROADMAP 7.6.3): the terms were walked with
     /// [`crate::db::Execution::terms`].
     #[error(transparent)]
     Interrupted(Interrupt),
+}
+
+impl From<ScoreError> for SearchError {
+    fn from(e: ScoreError) -> Self {
+        match e {
+            // Statistics are not read through a search's interrupts today; were they, a stop is still a stop.
+            ScoreError::Read(ReadError::Interrupted(i)) => Self::Interrupted(i),
+            e => Self::Score(e),
+        }
+    }
 }
 
 impl From<ReadError> for SearchError {
@@ -466,4 +476,54 @@ fn bounded_norm(
         });
     }
     Ok(norm)
+}
+
+#[cfg(test)]
+mod tests {
+    use roaring::RoaringBitmap;
+
+    use super::filter::FilterDocs;
+    use super::*;
+
+    /// Records what a collector tells it.
+    #[derive(Default)]
+    struct Recorder {
+        published: Vec<f64>,
+        finished: Option<Vec<u32>>,
+    }
+
+    impl Watch for Recorder {
+        fn check(&mut self) -> Result<Option<f64>, Interrupt> {
+            Ok(None)
+        }
+
+        fn publish(&mut self, score: f64) {
+            self.published.push(score);
+        }
+
+        fn finish(&mut self, hits: &[Hit]) {
+            self.finished = Some(hits.iter().map(|h| h.docid).collect());
+        }
+    }
+
+    fn docs() -> FilterDocs {
+        FilterDocs::new([1, 2, 3].into_iter().collect::<RoaringBitmap>())
+    }
+
+    #[test]
+    fn a_pruning_collector_hands_its_hits_to_the_merged_threshold() {
+        let mut watch = Recorder::default();
+        let hits = collect_where(&mut docs(), 2, true, |_, _| true, &mut watch).unwrap();
+        assert_eq!(hits.len(), 2);
+        assert_eq!(watch.finished, Some(vec![1, 2]));
+        assert_eq!(watch.published, [0.0]);
+    }
+
+    #[test]
+    fn a_collector_that_does_not_prune_hands_nothing() {
+        let mut watch = Recorder::default();
+        collect_where(&mut docs(), 2, false, |_, _| true, &mut watch).unwrap();
+        assert_eq!(watch.finished, None);
+        assert_eq!(watch.published, [] as [f64; 0]);
+    }
 }

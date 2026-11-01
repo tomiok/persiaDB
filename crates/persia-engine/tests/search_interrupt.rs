@@ -261,11 +261,11 @@ fn a_deadline_passing_mid_view_stops_a_column_sort() {
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
     assert_eq!(reads, 4, "stopped inside the first view");
-    // One read before the search, 3 before the views, 7 + 7 within them by the collector, 1 + 1 by the postings and
-    // 1 + 1 by the sort column (every 1 024 reads each), and one before the page's documents are read.
+    // One read before the search, 3 before the views, 7 + 7 within them by the collector, 3 + 3 by the readers (2 000
+    // postings and 2 000 sort keys per segment, one count of 1 024 steps per view), and one before the documents.
     let (finished, reads) = run(1_000);
     assert_eq!(finished.unwrap().hits.len(), 20);
-    assert_eq!(reads, 1 + 3 + 7 + 7 + 2 + 2 + 1);
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 3 + 3 + 1);
 }
 
 #[test]
@@ -328,13 +328,13 @@ fn a_deadline_passing_mid_view_stops_a_facet_request() {
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
     assert_eq!(reads, 4, "stopped inside the first view");
-    // One read before the search, 3 as the views start, 7 + 7 within them by the collector, 1 + 1 by the postings and
-    // 1 + 1 by the facet's values (every 1 024 reads each), one before each view's facet, and one before the page's
-    // documents are read.
+    // One read before the search, 3 as the views start, 7 + 7 within them by the collector, 3 + 3 by the readers (2 000
+    // postings and 2 000 facet values per segment, one count of 1 024 steps per view), one before each view's facet,
+    // and one before the page's documents are read.
     let (finished, reads) = run(1_000);
     let counts = &finished.unwrap().facets[0].values;
     assert_eq!(counts.iter().map(|v| v.count).sum::<u64>(), 4_010);
-    assert_eq!(reads, 1 + 3 + 7 + 7 + 2 + 2 + 3 + 1);
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 3 + 3 + 3 + 1);
 }
 
 #[test]

@@ -19,7 +19,7 @@ use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::search::{
-    ExecError, Expansion, Interruptible, Pruning, SearchPlan, TermSource, collect_where,
+    ExecError, Expansion, Interruptible, Pruning, SearchPlan, Steps, TermSource, collect_where,
 };
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
@@ -325,7 +325,8 @@ fn view_top_k<V: SearchView>(
     watch: &mut ViewWatch<'_>,
     location: impl Fn(u32) -> Located,
 ) -> Result<Vec<CollectionHit>, ExecError> {
-    let view = Interruptible::new(view, exec);
+    let steps = Steps::new(exec);
+    let view = Interruptible::new(view, &steps);
     let mut matcher = plan.matcher_with(&view, exec.pruning)?;
     Ok(collect_where(&mut matcher, k, true, |_, _| true, watch)?
         .into_iter()

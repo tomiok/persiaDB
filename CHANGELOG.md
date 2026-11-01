@@ -13,7 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
 - `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
   callback can stop the scan with an error (`Segment::try_column_keys` too). `ReadError` has an `Interrupted` variant
-  and `SearchError` an `Interrupted` one (ROADMAP 7.6.3).
+  and `SearchError` an `Interrupted` one; `SearchView::next_live` is a new provided method, the scan `match_all`
+  walks (ROADMAP 7.6.3).
 
 ### Fixed
 - A search no longer drops a hit whose segment index is missing from the views
@@ -33,8 +34,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   search with `explain: true` explains its page that way, one pass per view holding hits, and reads the deadline and
   the token before each view instead of before each hit.
 - `persia-engine`: a deadline or a cancellation now also stops a search between two matches (ROADMAP 7.6.3, SPEC
-  §7.3). Every postings list, term stream, column scan and column reader a collection search opens reads them every
-  1024 steps: a phrase whose terms never line up, a conjunction or a pruning disjunction that skips, a filter scan, a
+  §7.3). The postings lists, term streams, column scans, column readers and live-document scans a collection search
+  opens on a view read them every 1024 steps of them all together: a phrase whose terms never line up, a conjunction or a pruning disjunction that skips, a filter scan, a
   facet count, a column sort and explaining a hit stop too. `Execution::terms(&views)` gives the terms for
   `SearchPlan::with_terms` under the same deadline and token, so planning a `prefix` or `fuzzy` returns
   `SearchError::Interrupted`.

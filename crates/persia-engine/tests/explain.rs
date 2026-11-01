@@ -508,3 +508,39 @@ fn a_filter_beside_should_clauses() {
     let (_, _, score, e) = hits.iter().find(|h| h.0 == "c").unwrap();
     assert_eq!((e, score.to_bits()), (&Explanation::All, 0.0_f64.to_bits()));
 }
+
+#[test]
+fn one_pass_explains_repeats_deleted_and_excluded_documents_as_each_alone() {
+    let f = fixture();
+    let snapshot = f.db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let stats = c.search_statistics(&memtable);
+    // a, b, gone at docids 0, 1, 2; `gone` deleted, and b hidden by the memtable's copy.
+    let segment = views.segments().next().unwrap();
+    // A nested `bool` whose `must_not` short-circuits on some documents, beside a filter and a `should`.
+    let query = Query::Bool(BoolQuery {
+        must: vec![Query::Bool(BoolQuery {
+            should: vec![term(f.body, "red"), term(f.title, "shoes")],
+            must_not: vec![term(f.body, "hat")],
+            ..BoolQuery::default()
+        })],
+        should: vec![term(f.body, "running")],
+        filter: vec![Filter::Term {
+            field: f.tag,
+            value: FilterValue::Keyword("x".into()),
+        }],
+        ..BoolQuery::default()
+    });
+    for query in [query, term(f.body, "red"), Query::MatchAll] {
+        let plan = SearchPlan::new(&query, c.schema(), &stats).unwrap();
+        // Repeats, a deleted docid between live ones, one past the view, out of order.
+        let docids = [1, 0, 0, 2, 1, 99, 0, 2];
+        let together = plan.explain_all(&segment, &docids).unwrap();
+        for (&docid, e) in docids.iter().zip(&together) {
+            assert_eq!(e, &plan.explain(&segment, docid).unwrap(), "docid {docid}");
+        }
+        assert!(together[1].is_some(), "a matches {query:?}");
+    }
+}

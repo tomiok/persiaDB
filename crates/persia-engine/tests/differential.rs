@@ -473,9 +473,8 @@ fn same_segments(c: &CollectionSnapshot, model: &Model) -> Result<(), TestCaseEr
     Ok(())
 }
 
-/// Checks a Word explanation's fields against the document: frequencies the reference counts, contributions
-/// summing to `tf~`; recurses through the tree.
-/// Every docid of `view`, and one past it, explained in one pass from the last: the same as each alone (ROADMAP 7.7.2).
+/// Every docid of `view`, and one past it, explained in one pass from the last: the same as each alone (ROADMAP
+/// 7.7.2).
 fn one_pass<V: SearchView>(plan: &SearchPlan, view: &V) -> Result<(), TestCaseError> {
     let docids: Vec<u32> = (0..=view.doc_count()).rev().collect();
     let together = plan.explain_all(view, &docids).unwrap();
@@ -485,6 +484,8 @@ fn one_pass<V: SearchView>(plan: &SearchPlan, view: &V) -> Result<(), TestCaseEr
     Ok(())
 }
 
+/// Checks a Word explanation's fields against the document: frequencies the reference counts, contributions
+/// summing to `tf~`; recurses through the tree.
 fn check_explanation(
     e: &Explanation,
     doc: &Doc,

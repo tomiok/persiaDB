@@ -14,8 +14,8 @@ use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
-    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where,
-    top_sorted,
+    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Steps, Ties, Watch,
+    collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -321,11 +321,12 @@ impl CollectionViews<'_> {
             exec.interrupt()?;
             let docids: Vec<u32> = group.iter().map(|&(_, docid, _)| docid).collect();
             let explained = match group.first().map(|&(view, ..)| view) {
-                Some(usize::MAX) => {
-                    plan.explain_all(&Interruptible::new(self.memtable(), exec), &docids)?
-                }
+                Some(usize::MAX) => plan.explain_all(
+                    &Interruptible::new(self.memtable(), &Steps::new(exec)),
+                    &docids,
+                )?,
                 Some(index) => plan.explain_all(
-                    &Interruptible::new(segment_view(segments, index)?, exec),
+                    &Interruptible::new(segment_view(segments, index)?, &Steps::new(exec)),
                     &docids,
                 )?,
                 None => continue,
@@ -369,7 +370,8 @@ impl Search<'_> {
         location: impl Fn(u32) -> Located,
     ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
         let sort = &self.request.sort;
-        let view = &Interruptible::new(view, self.exec);
+        let steps = Steps::new(self.exec);
+        let view = &Interruptible::new(view, &steps);
         let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;

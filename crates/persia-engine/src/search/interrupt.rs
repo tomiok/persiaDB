@@ -6,6 +6,7 @@
 //! that never line up, a pruning disjunction skipping blocks, a conjunction leapfrogging), a filter's scan, a facet's
 //! count and a `prefix` expansion all advance one of these readers, so they stop too.
 
+use core::cell::Cell;
 use core::ops::Bound;
 
 use fst::Automaton;
@@ -31,49 +32,62 @@ pub(crate) trait Interrupts: Sync {
     fn check(&self) -> Result<(), Interrupt>;
 }
 
-/// `view`, its reads stopped by `stop`.
+/// `view`, its reads counted in `steps`.
 pub(crate) struct Interruptible<'s, V> {
     view: &'s V,
-    stop: &'s dyn Interrupts,
+    steps: &'s Steps<'s>,
 }
 
 impl<'s, V> Interruptible<'s, V> {
-    pub(crate) fn new(view: &'s V, stop: &'s dyn Interrupts) -> Self {
-        Self { view, stop }
+    pub(crate) fn new(view: &'s V, steps: &'s Steps<'s>) -> Self {
+        Self { view, steps }
+    }
+}
+
+/// One count of the steps of every reader of a view, or of several views walked in turn (an expansion over a
+/// collection's segments): the interrupts are read every [`READ_EVERY`] steps of them all, however many readers
+/// share the walk.
+pub(crate) struct Steps<'s> {
+    stop: &'s dyn Interrupts,
+    count: Cell<u32>,
+}
+
+impl<'s> Steps<'s> {
+    pub(crate) fn new(stop: &'s dyn Interrupts) -> Self {
+        Self {
+            stop,
+            count: Cell::new(0),
+        }
+    }
+
+    /// One step: every [`READ_EVERY`]th looks at the interrupts.
+    #[inline]
+    fn step(&self) -> Result<(), ReadError> {
+        let n = self.count.get() + 1;
+        if n < READ_EVERY {
+            self.count.set(n);
+            return Ok(());
+        }
+        self.count.set(0);
+        self.stop.check().map_err(ReadError::Interrupted)
     }
 }
 
 /// A reader of an [`Interruptible`] view.
 pub(crate) struct Watched<'s, R> {
     inner: R,
-    stop: &'s dyn Interrupts,
-    steps: u32,
+    steps: &'s Steps<'s>,
 }
 
 impl<'s, R> Watched<'s, R> {
-    fn new(inner: R, stop: &'s dyn Interrupts) -> Self {
-        Self {
-            inner,
-            stop,
-            steps: 0,
-        }
+    fn new(inner: R, steps: &'s Steps<'s>) -> Self {
+        Self { inner, steps }
     }
 
-    /// One step: every [`READ_EVERY`]th looks at the interrupts.
     #[inline]
-    fn step(&mut self) -> Result<(), ReadError> {
-        step(&mut self.steps, self.stop)
+    fn step(&self) -> Result<(), ReadError> {
+        self.steps.step()
     }
-}
-
-#[inline]
-fn step(steps: &mut u32, stop: &dyn Interrupts) -> Result<(), ReadError> {
-    *steps += 1;
-    if *steps < READ_EVERY {
-        return Ok(());
-    }
-    *steps = 0;
-    stop.check().map_err(ReadError::Interrupted)
 }
 
 impl<P: PostingsIterator> PostingsIterator for Watched<'_, P> {
@@ -177,6 +191,16 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         self.view.is_live(docid)
     }
 
+    fn next_live(&self, from: u32) -> Result<Option<u32>, ReadError> {
+        for docid in from..self.view.doc_count() {
+            self.steps.step()?;
+            if self.view.is_live(docid) {
+                return Ok(Some(docid));
+            }
+        }
+        Ok(None)
+    }
+
     fn field_stats(&self, field: FieldId) -> Option<FieldStats> {
         self.view.field_stats(field)
     }
@@ -189,7 +213,7 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         Ok(self
             .view
             .postings(field, term)?
-            .map(|p| Watched::new(p, self.stop)))
+            .map(|p| Watched::new(p, self.steps)))
     }
 
     fn terms<'a, A: Automaton + 'a>(
@@ -200,7 +224,7 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         automaton: A,
     ) -> Result<Self::Terms<'a, A>, ReadError> {
         let terms = self.view.terms(field, lower, upper, automaton)?;
-        Ok(Watched::new(terms, self.stop))
+        Ok(Watched::new(terms, self.steps))
     }
 
     fn deleted(&self) -> RoaringBitmap {
@@ -220,9 +244,8 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         field: FieldId,
         mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
-        let mut steps = 0;
         self.view.try_column_keys(field, |docid, key| {
-            step(&mut steps, self.stop)?;
+            self.steps.step()?;
             f(docid, key)
         })
     }
@@ -232,11 +255,11 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
     }
 
     fn keys(&self, field: FieldId) -> Result<Self::Keys<'_>, ReadError> {
-        Ok(Watched::new(self.view.keys(field)?, self.stop))
+        Ok(Watched::new(self.view.keys(field)?, self.steps))
     }
 
     fn keywords(&self, field: FieldId) -> Result<Self::Keywords<'_>, ReadError> {
-        Ok(Watched::new(self.view.keywords(field)?, self.stop))
+        Ok(Watched::new(self.view.keywords(field)?, self.steps))
     }
 
     fn document(&self, docid: u32) -> Result<Document, ReadError> {
@@ -380,11 +403,12 @@ mod tests {
         // No match at all: a collector would never look.
         assert_eq!(plan.top_k(&view, 10).unwrap(), []);
         let stop = StopAfter::new(1);
-        interrupted(&plan.top_k(&Interruptible::new(&view, &stop), 10));
+        interrupted(&plan.top_k(&Interruptible::new(&view, &Steps::new(&stop)), 10));
         // A stop that never comes changes nothing; 3 000 candidates read twice each look a few times.
         let never = StopAfter::new(u32::MAX);
         assert_eq!(
-            plan.top_k(&Interruptible::new(&view, &never), 10).unwrap(),
+            plan.top_k(&Interruptible::new(&view, &Steps::new(&never)), 10)
+                .unwrap(),
             []
         );
         assert!(never.looks() >= 2, "{}", never.looks());
@@ -407,7 +431,10 @@ mod tests {
         });
         let plan = SearchPlan::new(&query, &f.schema, &stats).unwrap();
         assert_eq!(plan.top_k(&view, 10).unwrap(), []);
-        interrupted(&plan.top_k(&Interruptible::new(&view, &StopAfter::new(1)), 10));
+        interrupted(&plan.top_k(
+            &Interruptible::new(&view, &Steps::new(&StopAfter::new(1))),
+            10,
+        ));
     }
 
     #[test]
@@ -427,7 +454,7 @@ mod tests {
         assert!(plan.matcher(&view).is_ok());
         interrupted(
             &plan
-                .matcher(&Interruptible::new(&view, &StopAfter::new(1)))
+                .matcher(&Interruptible::new(&view, &Steps::new(&StopAfter::new(1))))
                 .map(|_| ()),
         );
     }
@@ -441,7 +468,10 @@ mod tests {
         let mut facet = FacetCounter::new(request);
         assert!(facet.add(&view, &docs).is_ok());
         let mut facet = FacetCounter::new(request);
-        interrupted(&facet.add(&Interruptible::new(&view, &StopAfter::new(1)), &docs));
+        interrupted(&facet.add(
+            &Interruptible::new(&view, &Steps::new(&StopAfter::new(1))),
+            &docs,
+        ));
     }
 
     #[test]
@@ -460,7 +490,7 @@ mod tests {
             &prefix,
             &f.schema,
             &stats,
-            &Interruptible::new(&view, &stop),
+            &Interruptible::new(&view, &Steps::new(&stop)),
         );
         assert!(
             matches!(
@@ -472,14 +502,54 @@ mod tests {
     }
 
     #[test]
-    fn a_reader_looks_every_read_every_steps() {
+    fn a_view_looks_every_read_every_steps() {
         let never = StopAfter::new(u32::MAX);
-        let mut steps = 0;
+        let steps = Steps::new(&never);
         for _ in 0..READ_EVERY * 3 - 1 {
-            step(&mut steps, &never).unwrap();
+            steps.step().unwrap();
         }
         assert_eq!(never.looks(), 2);
-        step(&mut steps, &never).unwrap();
+        steps.step().unwrap();
         assert_eq!(never.looks(), 3);
+    }
+
+    #[test]
+    fn many_short_readers_share_one_count() {
+        let f = fixture();
+        let stats = SegmentStatistics::new(&f.schema, &[Arc::clone(&f.segment)]);
+        let view = SegmentView::new(&f.segment, None);
+        // 3 000 terms of one document each: no reader takes 1 024 steps, the view's readers together do.
+        let prefix = Query::Prefix(PrefixQuery {
+            field: f.tag,
+            prefix: "t".into(),
+            max_expansions: DOCS,
+        });
+        let plan = SearchPlan::with_terms(&prefix, &f.schema, &stats, &view).unwrap();
+        let never = StopAfter::new(u32::MAX);
+        let hits = plan
+            .top_k_with(
+                &Interruptible::new(&view, &Steps::new(&never)),
+                10,
+                crate::search::Pruning::Exhaustive,
+            )
+            .unwrap();
+        assert_eq!(hits.len(), 10);
+        assert!(never.looks() >= 2, "{}", never.looks());
+    }
+
+    #[test]
+    fn match_all_over_deleted_documents_stops() {
+        let f = fixture();
+        let stats = SegmentStatistics::new(&f.schema, &[Arc::clone(&f.segment)]);
+        // Every document deleted but the last: `match_all` walks 2 999 docids to its first.
+        let deleted: RoaringBitmap = (0..DOCS - 1).collect();
+        let tombstones = f.segment.tombstones(deleted).unwrap();
+        let view = SegmentView::new(&f.segment, Some(&tombstones));
+        let plan = SearchPlan::new(&Query::MatchAll, &f.schema, &stats).unwrap();
+        assert_eq!(plan.top_k(&view, 10).unwrap().len(), 1);
+        interrupted(&plan.top_k(
+            &Interruptible::new(&view, &Steps::new(&StopAfter::new(1))),
+            10,
+        ));
     }
 }
