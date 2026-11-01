@@ -1,0 +1,19 @@
+0.9023  running shoes
+0.8238  trail running
+1.0000  waterproof boots
+0.9468  espresso machine
+0.8609  coffee grinder
+1.0000  french press
+0.7648  tent
+0.8176  backpacking tent
+0.9173  sleeping bag
+1.0000  cast iron
+0.8152  knife
+0.7453  "cast iron" pan
+0.9468  grow tomatoes
+0.7173  garden
+1.0000  headlamp hiking
+0.9173  camping stove
+0.7364  bread
+0.9721  tea
+0.8824  mean nDCG@10

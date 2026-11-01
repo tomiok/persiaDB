@@ -490,12 +490,13 @@ Deps: M5 (M6 for end-to-end).
 - [ ] 7.6.4 A merged threshold across views: a view shares only its own `k`-th score, so on the calling thread a later view starts from the best single earlier view instead of the `k`-th of all earlier hits merged (what sequential search used before 7.6.1); publish a merged threshold where the views finished are a prefix, and bench `search_top10` over several segments (found in 7.6.1)
 
 ## 7.7 Explain
-- [ ] 7.7.1 Per-hit score breakdown (per term/field) when `explain: true`
+- [x] 7.7.1 Per-hit score breakdown (per term/field) when `explain: true`
+- [ ] 7.7.2 Explain a page in one pass per view: today each hit builds its leaf matchers again and a filtered `bool` selects its filters over the whole view again (`search_suite/explain_filtered` 2.14 ms vs 463 µs for `filtered`); sort the view's hits by docid, build the tree once and advance it, selecting each filter once (SPEC §7.7, found in the 7.7 review)
 
 ## 7.8 Tests & benchmarks
-- [ ] 7.8.1 Differential suite vs. reference engine (random corpora/queries)
-- [ ] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
-- [ ] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
+- [x] 7.8.1 Differential suite vs. reference engine (random corpora/queries)
+- [x] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
+- [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
 - [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
 
 ---
@@ -534,6 +535,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
 - [ ] 8.3.2 `fill` mode (continue to fill `limit` from looser levels)
 - [ ] 8.3.3 Metrics: relaxation level histogram, % queries relaxed, % still empty
+- [ ] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)
 
 ## 8.4 Quality evaluation
 - [ ] 8.4.1 Synthetic typo/term-drop query generator (from corpus) with known ground truth

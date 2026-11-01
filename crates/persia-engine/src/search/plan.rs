@@ -17,6 +17,7 @@ use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
 use super::expand::{Expansion, TermSource, expand};
+use super::explain::{Explanation, explain};
 use super::filter::{FilterDocs, Filtered, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
@@ -31,7 +32,7 @@ pub struct SearchPlan {
 }
 
 #[derive(Debug, Clone)]
-enum Node {
+pub(super) enum Node {
     /// A `term` or `combined`: per field of the scorer, its term and whether it is a `text` field (has norms).
     Word {
         terms: Vec<(FieldId, Vec<u8>, bool)>,
@@ -182,6 +183,54 @@ impl SearchPlan {
         pruning: Pruning,
     ) -> Result<Vec<Hit>, ReadError> {
         collect(&mut self.matcher_with(view, pruning)?, k)
+    }
+
+    /// How `docid` of `view` scores under the plan (SPEC §7.7): per word, its `idf`, `k1`, `tf~` and each field's
+    /// frequency, norm and part of `tf~`; `None` when the plan does not match it (a deleted document included). The
+    /// score is the one a search gives the hit, bit for bit. It costs about an unpruned search of `view`, so it is
+    /// meant for the hits of a page.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::document::{Document, Value};
+    /// use persia_engine::query::{Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::{Explanation, SearchPlan};
+    /// use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// use persia_engine::stats::SegmentStatistics;
+    /// use persia_engine::view::SegmentView;
+    /// use persia_format::ByteSource;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// for (id, text) in [("a", "red shoes"), ("b", "blue hat")] {
+    ///     b.add(&Document::new(id).with(body, Value::String(text.into())))?;
+    /// }
+    /// let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// let segment = Arc::new(Segment::open(ByteSource::new(SegmentWriter::new(&b, meta).finish()?.into()), &schema)?);
+    /// let schema = Arc::new(schema);
+    /// let stats = SegmentStatistics::new(&schema, &[Arc::clone(&segment)]);
+    /// let view = SegmentView::new(&segment, None);
+    ///
+    /// let plan = SearchPlan::new(&Query::Term(TermQuery { field: body, term: "red".into() }), &schema, &stats)?;
+    /// let hit = plan.top_k(&view, 1)?[0];
+    /// let Some(Explanation::Word(word)) = plan.explain(&view, hit.docid)? else { panic!("a word") };
+    /// assert_eq!(word.score.to_bits(), hit.score.to_bits());
+    /// assert_eq!((word.fields[0].tf, word.fields[0].length), (1, Some(2)));
+    /// assert!(plan.explain(&view, 1)?.is_none()); // `blue hat` does not match
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::matcher`].
+    pub fn explain<V: SearchView>(
+        &self,
+        view: &V,
+        docid: u32,
+    ) -> Result<Option<Explanation>, ReadError> {
+        explain(&self.root, view, docid)
     }
 }
 
@@ -441,52 +490,18 @@ fn build<'a, V: SearchView>(
     pruning: Pruning,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     Ok(match node {
-        Node::Word { terms, scorer } => {
-            let mut fields = Vec::with_capacity(terms.len());
-            for (slot, (field, term, text)) in terms.iter().enumerate() {
-                let Some(postings) = view.postings(*field, term)? else {
-                    continue;
-                };
-                let norms = if *text {
-                    Some(view.norms(*field)?)
-                } else {
-                    None
-                };
-                fields.push(WordField {
-                    field: *field,
-                    slot,
-                    postings,
-                    norms,
-                });
-            }
-            if fields.is_empty() {
-                Box::new(Empty)
-            } else {
-                Box::new(WordMatcher::<V>::new(fields, scorer, pruning))
-            }
-        }
+        Node::Word { terms, scorer } => match word_matcher(terms, scorer, view, pruning)? {
+            Some(m) => Box::new(m),
+            None => Box::new(Empty),
+        },
         Node::Phrase {
             field,
             terms,
             scorer,
-        } => {
-            let mut postings = Vec::with_capacity(terms.len());
-            for (term, position) in terms {
-                let Some(p) = view.postings(*field, term)? else {
-                    return Ok(Box::new(Empty));
-                };
-                postings.push(PhrasePostings::new(p, *position));
-            }
-            if postings.is_empty() {
-                return Ok(Box::new(Empty));
-            }
-            Box::new(PhraseMatcher::<V>::new(
-                postings,
-                *field,
-                view.norms(*field)?,
-                scorer,
-            ))
-        }
+        } => match phrase_matcher(*field, terms, scorer, view)? {
+            Some(m) => Box::new(m),
+            None => Box::new(Empty),
+        },
         Node::Bool {
             must,
             should,
@@ -512,6 +527,58 @@ fn build<'a, V: SearchView>(
         Node::All => Box::new(AllDocs::new(view)),
         Node::Nothing => Box::new(Empty),
     })
+}
+
+/// The matcher of a planned word over `view`; `None` when the view holds its term in none of its fields.
+pub(super) fn word_matcher<'a, V: SearchView>(
+    terms: &'a [(FieldId, Vec<u8>, bool)],
+    scorer: &'a TermScorer,
+    view: &'a V,
+    pruning: Pruning,
+) -> Result<Option<WordMatcher<'a, V>>, ReadError> {
+    let mut fields = Vec::with_capacity(terms.len());
+    for (slot, (field, term, text)) in terms.iter().enumerate() {
+        let Some(postings) = view.postings(*field, term)? else {
+            continue;
+        };
+        let norms = if *text {
+            Some(view.norms(*field)?)
+        } else {
+            None
+        };
+        fields.push(WordField {
+            field: *field,
+            slot,
+            postings,
+            norms,
+        });
+    }
+    Ok((!fields.is_empty()).then(|| WordMatcher::<V>::new(fields, scorer, pruning)))
+}
+
+/// The matcher of a planned phrase over `view`; `None` when the view lacks one of its terms.
+pub(super) fn phrase_matcher<'a, V: SearchView>(
+    field: FieldId,
+    terms: &'a [(Vec<u8>, u32)],
+    scorer: &'a TermScorer,
+    view: &'a V,
+) -> Result<Option<PhraseMatcher<'a, V>>, ReadError> {
+    let mut postings = Vec::with_capacity(terms.len());
+    for (term, position) in terms {
+        let Some(p) = view.postings(field, term)? else {
+            return Ok(None);
+        };
+        postings.push(PhrasePostings::new(p, *position));
+    }
+    if postings.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(PhraseMatcher::<V>::new(
+        postings,
+        field,
+        view.norms(field)?,
+        scorer,
+    )))
 }
 
 /// The clauses of a planned `bool`.

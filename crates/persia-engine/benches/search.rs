@@ -2,8 +2,8 @@
 //! (of 3 clauses, and of 50 as a relaxation expansion builds, 7.4.7) and a phrase with the default pruning
 //! (block-max WAND), each strategy of 7.4.4 side by side, prefix and fuzzy expansions planned and searched (7.4.12),
 //! and a term under filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted
-//! by a column, with a facet, and a page after a cursor. Deterministic input (a fixed-seed generator), so runs
-//! compare. Run: `cargo bench -p persia-engine --bench search`.
+//! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`).
+//! Deterministic input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
 
@@ -20,8 +20,8 @@ use persia_engine::db::{
     Threads,
 };
 use persia_engine::query::{
-    BoolQuery, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery, Query,
-    TermQuery,
+    BoolQuery, DefaultFields, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm,
+    PrefixQuery, Query, QueryCompiler, QueryLimits, TermQuery,
 };
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
@@ -275,11 +275,16 @@ fn filters(
 }
 
 /// A collection of the same documents, committed in `segments` segments, for whole requests (ROADMAP 7.5): its
-/// fields `body`, `price`, `tag`
-/// (`facet: true`).
-fn collection(segments: u64) -> (Database<SimFile>, [FieldId; 3]) {
+/// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`).
+fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 3]) {
     let schema = SchemaBuilder::new("bench")
-        .field("body", FieldKind::Text(TextOptions::default()))
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                positions,
+                ..TextOptions::default()
+            }),
+        )
         .field("price", FieldKind::I64 { stored: true })
         .field(
             "tag",
@@ -319,7 +324,7 @@ fn collection(segments: u64) -> (Database<SimFile>, [FieldId; 3]) {
 /// Whole requests over a committed collection: 10 hits of a term by score (pruned) and by a column, a facet beside
 /// them (every match visited), and a deep page by cursor.
 fn requests(c: &mut Criterion) {
-    let (db, [body, price, tag]) = collection(1);
+    let (db, [body, price, tag]) = collection(1, false);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     let memtable = coll.memtable();
@@ -375,7 +380,7 @@ fn requests(c: &mut Criterion) {
 /// The same collection in 4 segments: 10 hits by score and by a column, the views on the calling thread and on rayon's
 /// global pool (ROADMAP 7.6.1).
 fn parallel(c: &mut Criterion) {
-    let (db, [body, price, _]) = collection(4);
+    let (db, [body, price, _]) = collection(4, false);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     assert_eq!(coll.segments().len(), 4);
@@ -407,5 +412,111 @@ fn parallel(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench, requests, parallel);
+/// The query suite (ROADMAP 7.8.3), each a whole request end to end over 4 segments, on the default pool: search,
+/// merge, and the page's 10 documents read (planned once, outside the loop). `term` is `w3`, `and` is `w3 w40` as user text (SPEC §7.1.1),
+/// `or` is `w3 OR w40 OR w120`, `phrase` is `"w0 w1"`, `filtered` is `w3` with `price < 100`, `sorted` is `w3` by
+/// price, `facets` is `w3` with a `tag` facet, `explain` is `term` with every hit explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, a
+/// filter selected again per hit.
+fn suite(c: &mut Criterion) {
+    let (db, [body, price, tag]) = collection(4, true);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let stats = coll.search_statistics(&memtable);
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let fields = DefaultFields::all(schema);
+    let term = |w: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: w.into(),
+        })
+    };
+    let page = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let filtered = Query::Bool(BoolQuery {
+        must: vec![term("w3")],
+        filter: vec![Filter::Range {
+            field: price,
+            lower: Bound::Unbounded,
+            upper: Bound::Excluded(FilterValue::I64(100)),
+        }],
+        ..BoolQuery::default()
+    });
+    let cases = [
+        ("term", term("w3"), page.clone()),
+        (
+            "and",
+            compiler
+                .compile("w3 w40", &fields, &QueryLimits::default())
+                .query,
+            page.clone(),
+        ),
+        (
+            "or",
+            Query::Bool(BoolQuery {
+                should: vec![term("w3"), term("w40"), term("w120")],
+                ..BoolQuery::default()
+            }),
+            page.clone(),
+        ),
+        (
+            "phrase",
+            compiler
+                .compile("\"w0 w1\"", &fields, &QueryLimits::default())
+                .query,
+            page.clone(),
+        ),
+        ("filtered", filtered.clone(), page.clone()),
+        (
+            "sorted",
+            term("w3"),
+            SearchRequest {
+                sort: Sort::new([SortKey::field(price, Order::Asc)], schema).unwrap(),
+                ..page.clone()
+            },
+        ),
+        (
+            "facets",
+            term("w3"),
+            SearchRequest {
+                facets: vec![FacetRequest::new(tag, 10, schema).unwrap()],
+                ..page.clone()
+            },
+        ),
+        (
+            "explain",
+            term("w3"),
+            SearchRequest {
+                explain: true,
+                ..page.clone()
+            },
+        ),
+        (
+            "explain_filtered",
+            filtered.clone(),
+            SearchRequest {
+                explain: true,
+                ..page
+            },
+        ),
+    ];
+    let mut group = c.benchmark_group("search_suite");
+    for (name, query, request) in &cases {
+        let plan = SearchPlan::new(query, schema, &stats).unwrap();
+        let hits = views
+            .search(&plan, request, Pruning::default())
+            .unwrap()
+            .hits;
+        assert_eq!(hits.len(), 10, "{name}");
+        group.bench_function(*name, |b| {
+            b.iter(|| black_box(views.search(&plan, request, Pruning::default()).unwrap()));
+        });
+    }
+    group.finish();
+}
+criterion_group!(benches, bench, requests, parallel, suite);
 criterion_main!(benches);

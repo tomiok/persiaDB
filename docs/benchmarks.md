@@ -230,3 +230,26 @@ repeated words), so a term alone skips few blocks. Time per query.
 | 2026-10-30, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.4) | `term` | 388 µs | 397 µs | 403 µs |
 | | `or` | 1.36 ms | 902 µs | 1.17 ms |
 | | `or_rare` | 780 µs | 270 µs | 432 µs |
+
+`search_suite` (ROADMAP 7.8.3): whole requests end to end over the same 50 000 documents in 4 segments (`body` with
+positions), on rayon's global pool: search, merge, and the page's 10 documents read (each planned once, outside the timed loop). `term` is `w3`; `and` is the
+user text `w3 w40` (SPEC §7.1.1); `or` is `w3 OR w40 OR w120`; `phrase` is the user text `"w0 w1"`; `filtered` is
+`w3` with `price < 100`; `sorted` is `w3` by `price` ascending; `facets` is `w3` with a `tag` facet; `explain` is
+`term` with every hit explained (SPEC §7.7), and `explain_filtered` is `filtered` explained (each hit selects the
+filter over its view again, ROADMAP 7.7.2). Command: `cargo bench -p persia-engine --bench search -- search_suite
+--warm-up-time 1 --measurement-time 3`. Time per request.
+
+| Recorded | `term` | `and` | `or` | `phrase` | `filtered` | `sorted` | `facets` | `explain` | `explain_filtered` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| 2026-11-01, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.8.3) | 242 µs | 220 µs | 637 µs | 304 µs | 463 µs | 344 µs | 544 µs | 280 µs | 2.14 ms |
+
+## `persia-engine` relevance
+
+`cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54
+store items and how-to articles (`crates/persia-engine/tests/relevance/`), BM25F over `title` (boost 2) and `body`,
+`en` analyzer. Per-query values are in `tests/relevance/baseline.txt`, which the test checks to four decimals; a row
+is added here when the mean moves.
+
+| Recorded | mean nDCG@10 | lowest |
+|---|--:|---|
+| 2026-11-01 (ROADMAP 7.8.2) | 0.8824 | 0.7173 `garden`, 0.7364 `bread`, 0.7453 `"cast iron" pan`, 0.7648 `tent` |

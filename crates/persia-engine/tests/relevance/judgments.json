@@ -1,0 +1,20 @@
+[
+  {"q": "running shoes", "grades": {"r1": 3, "r2": 3, "r6": 2, "r5": 1, "r3": 1}},
+  {"q": "trail running", "grades": {"r1": 3, "r7": 2, "r6": 2, "x13": 1}},
+  {"q": "waterproof boots", "grades": {"r4": 3, "x4": 2}},
+  {"q": "espresso machine", "grades": {"c1": 3, "c4": 2, "c3": 1}},
+  {"q": "coffee grinder", "grades": {"c3": 3, "c2": 1, "c5": 1}},
+  {"q": "french press", "grades": {"c2": 3, "c3": 1}},
+  {"q": "tent", "grades": {"k1": 3, "k2": 3, "k6": 2, "x3": 1}},
+  {"q": "backpacking tent", "grades": {"k1": 3, "k4": 1, "k5": 1, "k8": 1}},
+  {"q": "sleeping bag", "grades": {"k3": 3, "k4": 1}},
+  {"q": "cast iron", "grades": {"f1": 3, "f3": 2, "f7": 2}},
+  {"q": "knife", "grades": {"f4": 3, "f5": 2, "x6": 2, "f6": 1}},
+  {"q": "\"cast iron\" pan", "grades": {"f3": 3, "f1": 2, "f2": 1}},
+  {"q": "grow tomatoes", "grades": {"g3": 3, "g2": 2, "x14": 1}},
+  {"q": "garden", "grades": {"g5": 3, "g1": 2, "g7": 2, "g2": 1, "x9": 1}},
+  {"q": "headlamp hiking", "grades": {"k7": 3}},
+  {"q": "camping stove", "grades": {"k5": 3, "k2": 1}},
+  {"q": "bread", "grades": {"f8": 3, "f7": 2, "x8": 1}},
+  {"q": "tea", "grades": {"c7": 3, "c6": 2, "x7": 1}}
+]
