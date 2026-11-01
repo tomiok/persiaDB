@@ -1311,12 +1311,24 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   iterator before a document is scored or offered to the top-k collector, so a deleted document cannot enter the
   heap or raise the competitive threshold. Block upper bounds may still cover deleted documents; that only loosens
   pruning.
-- Segments are searched in parallel (thread pool, configurable); per-segment top-k heaps merge into the global top-k.
+- Segments are searched in parallel: each view (every segment, and the memtable) is a task on a thread pool (the
+  caller's choice: the calling thread, a shared default pool, or its own pool). Each view keeps its own top-k; they
+  merge in view order into the global top-k (the order below), so the hits, scores bit for bit, do not depend on the
+  threads or the timing. A view that keeps `k` hits shares the worst one's score `t` with the others while they run:
+  a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
+  scoring below `t` (its tie would rank first). With facets every match is counted, and each view counts its own; the
+  counts are summed. When views fail, the error is the one of the first view in order.
+- A search may carry a deadline (an instant of an injected clock) and a cancellation token. Each view reads them
+  before it starts and every 256 matches it yields, and the search reads them once more before it reads the page's
+  documents. Once the token is cancelled or the clock reaches the deadline, the search stops with an error
+  (cancelled, or deadline exceeded; a cancellation wins) and returns no hits: a page cut short would rank hits a
+  full search does not return. Planning (§7.1 expansion) is not covered. Returning the best so far is relaxation's
+  budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
   put or a delete of are left out like deleted documents, as of the memtable view searched, so each id shows once.
   Across views, hits rank by score descending, then segment order (the manifest's) with the memtable last, then
-  docid; a view starts from the threshold of the hits kept from the views before it, which win its ties.
+  docid.
 
 ### 7.4 Sorting, pagination
 `sort` is `"score"` or a list of at most 16 keys, each `"score"`, `{"score": {"order"}}` or `{"field", "order", "missing"}`; `[]`

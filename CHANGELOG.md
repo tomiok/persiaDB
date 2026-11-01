@@ -18,6 +18,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: a collection search runs its views in parallel (ROADMAP 7.6.1, SPEC §7.3). `CollectionViews::top_k`
+  and `search` run on rayon's global pool; `top_k_with` and `search_with` take a `db::Execution` with the pruning, the
+  threads (`Threads::Current`, `Threads::Global`, or `Threads::Pool(SearchPool::new(n)?)`), a deadline and a
+  `CancelToken` (ROADMAP 7.6.2). Hits, scores and facet counts are the same on any thread. A cancelled or expired
+  search returns `search::ExecError::Interrupted` (from `top_k_with`) or `RequestError::Interrupted` (from
+  `search_with`) and no hits; it is checked before each view and every 256 matches. `CollectionViews::top_k` now
+  returns `search::ExecError` instead of `ReadError`.
+
 - `persia-engine`: `prefix` and `fuzzy` queries run (ROADMAP 7.4.12, SPEC §7.1). `SearchPlan::with_terms` expands
   each over the terms of the views it will run on (`search::TermSource`: a view, or `db::CollectionViews`), once, so
   every view scores the same terms. The prefix and the fuzzy term are raw bytes: the field analyzer is not run

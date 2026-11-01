@@ -14,10 +14,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use roaring::RoaringBitmap;
 
+use super::exec::{Execution, Thresholds, ViewWatch};
 use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
-use crate::search::{Expansion, Matcher, Pruning, SearchPlan, TermSource, collect};
+use crate::search::{ExecError, Expansion, Pruning, SearchPlan, TermSource, collect_where};
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
 
@@ -233,6 +234,16 @@ impl CollectionViews<'_> {
             .map(|(s, t)| SegmentView::new(s, t.as_deref()))
     }
 
+    /// The views of `segments` (these views' [`Self::segments`]) and the memtable, `segments.len()`, that have a
+    /// document: an empty one matches nothing, and is not worth a task.
+    pub(super) fn with_documents(&self, segments: &[SegmentView<'_>]) -> Vec<usize> {
+        let memtable = (self.memtable.doc_count() > 0).then_some(segments.len());
+        (0..segments.len())
+            .filter(|&i| segments.get(i).is_some_and(|s| s.doc_count() > 0))
+            .chain(memtable)
+            .collect()
+    }
+
     /// The memtable.
     pub fn memtable(&self) -> &MemtableView {
         self.memtable
@@ -251,70 +262,146 @@ impl CollectionViews<'_> {
     /// The best `k` hits of `plan` in the collection, pruning with `pruning` (ROADMAP 7.4.3, 7.4.4): score
     /// descending, then the segments in the order of [`CollectionSnapshot::segments`] and the memtable last, then
     /// docid. `plan` should be planned with [`CollectionSnapshot::search_statistics`] of the same memtable view.
-    ///
-    /// The views are searched one after the other (ROADMAP 7.6.1 runs them in parallel). Once `k` hits are kept,
-    /// the next view starts from the worst one's score as its threshold: every hit kept wins a tie against a later
-    /// view's, so the hits are the same whatever `pruning` is.
+    /// As [`Self::top_k_with`] with [`Execution::new`]`(pruning)`: the views run on rayon's global pool.
     ///
     /// # Errors
-    /// As [`SearchPlan::matcher`], for any view.
+    /// As [`Self::top_k_with`]; never [`ExecError::Interrupted`].
     pub fn top_k(
         &self,
         plan: &SearchPlan,
         k: usize,
         pruning: Pruning,
-    ) -> Result<Vec<CollectionHit>, ReadError> {
-        let mut hits = Vec::new();
+    ) -> Result<Vec<CollectionHit>, ExecError> {
+        self.top_k_with(plan, k, &Execution::new(pruning))
+    }
+
+    /// As [`Self::top_k`], run as `exec` says (SPEC §7.3, ROADMAP 7.6): each view a task on its threads, keeping
+    /// its own best `k` and sharing its threshold with the others (the [`super::exec`] docs). The hits merge in view
+    /// order, so they are the same whatever the threads, the timing or the pruning.
+    ///
+    /// # Errors
+    /// [`ExecError::Read`] as [`SearchPlan::matcher`], for the first view in order that fails;
+    /// [`ExecError::Interrupted`] once `exec`'s token is cancelled or its deadline passes.
+    pub fn top_k_with(
+        &self,
+        plan: &SearchPlan,
+        k: usize,
+        exec: &Execution,
+    ) -> Result<Vec<CollectionHit>, ExecError> {
         if k == 0 {
-            return Ok(hits);
+            return Ok(Vec::new());
         }
-        for (index, view) in self.segments().enumerate() {
-            search_view(plan, &view, k, pruning, &mut hits, |docid| {
-                Located::Segment { index, docid }
-            })?;
-        }
-        search_view(
-            plan,
-            self.memtable,
-            k,
-            pruning,
-            &mut hits,
-            Located::Memtable,
-        )?;
+        // Read once before any view: a search with no view to run stops too.
+        exec.interrupt()?;
+        let segments: Vec<_> = self.segments().collect();
+        let thresholds = Thresholds::new(segments.len().saturating_add(1));
+        let found = exec.run(&self.with_documents(&segments), |index| {
+            let mut watch = thresholds.watch(exec, index);
+            match segments.get(index) {
+                Some(view) => view_top_k(plan, view, k, exec.pruning, &mut watch, |docid| {
+                    Located::Segment { index, docid }
+                }),
+                None => view_top_k(
+                    plan,
+                    self.memtable,
+                    k,
+                    exec.pruning,
+                    &mut watch,
+                    Located::Memtable,
+                ),
+            }
+        });
+        let mut hits: Vec<_> = found?.into_iter().flatten().collect();
+        // Stable: on a tie the earlier view's hit stays first, and a view's own hits are already in docid order.
+        hits.sort_by(|a, b| (b.score + 0.0).total_cmp(&(a.score + 0.0)));
+        hits.truncate(k);
         Ok(hits)
     }
 }
 
-/// Merges the best `k` hits of `plan` in `view` into `hits`, the best `k` of the views before it, best first.
-fn search_view<V: SearchView>(
+/// The best `k` hits of `plan` in `view`, best first.
+fn view_top_k<V: SearchView>(
     plan: &SearchPlan,
     view: &V,
     k: usize,
     pruning: Pruning,
-    hits: &mut Vec<CollectionHit>,
+    watch: &mut ViewWatch<'_>,
     location: impl Fn(u32) -> Located,
-) -> Result<(), ReadError> {
+) -> Result<Vec<CollectionHit>, ExecError> {
     let mut matcher = plan.matcher_with(view, pruning)?;
-    if hits.len() >= k
-        && let Some(worst) = hits.last()
-    {
-        matcher.set_min_competitive(worst.score);
-    }
-    hits.extend(
-        collect(&mut matcher, k)?
-            .into_iter()
-            .map(|h| CollectionHit {
-                location: location(h.docid),
-                score: h.score,
-            }),
-    );
-    // Stable: on a tie the earlier view's hit stays first, and a view's own hits are already in docid order.
-    hits.sort_by(|a, b| (b.score + 0.0).total_cmp(&(a.score + 0.0)));
-    hits.truncate(k);
-    Ok(())
+    Ok(collect_where(&mut matcher, k, true, |_, _| true, watch)?
+        .into_iter()
+        .map(|h| CollectionHit {
+            location: location(h.docid),
+            score: h.score,
+        })
+        .collect())
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     // The cache is only ever replaced whole, so a panic elsewhere cannot leave it half written.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{Database, DatabaseOptions, SearchRequest};
+    use crate::document::{Document, Value};
+    use crate::query::{Query, TermQuery};
+    use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+    use crate::wal::Durability;
+    use persia_storage::container::sim::SimFile;
+
+    /// Two segments and the memtable, each holding one document of the same score.
+    fn three_tied_views() -> (Database<SimFile>, Query) {
+        let schema = SchemaBuilder::new("c")
+            .field("tag", FieldKind::Keyword(KeywordOptions::default()))
+            .build()
+            .unwrap();
+        let tag = schema.field("tag").unwrap().id();
+        let mut db =
+            Database::create_on(SimFile::new(), [3; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(schema).unwrap();
+        for (id, commit) in [("s0", true), ("s1", true), ("m", false)] {
+            let doc = Document::new(id).with(tag, Value::String("a".into()));
+            db.put("c", &doc, Durability::Fsync).unwrap();
+            if commit {
+                db.commit().unwrap();
+            }
+        }
+        let query = Query::Term(TermQuery {
+            field: tag,
+            term: "a".into(),
+        });
+        (db, query)
+    }
+
+    #[test]
+    fn an_earlier_view_keeps_a_tie_with_a_later_views_threshold() {
+        let (db, query) = three_tied_views();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        assert_eq!(c.segments.len(), 2);
+        let memtable = c.memtable();
+        let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+        let views = c.views(&memtable).unwrap();
+        for pruning in [Pruning::MaxScore, Pruning::BlockMaxWand] {
+            // The memtable publishes its hit's score first; each segment may skip only below it.
+            let mut exec = Execution::new(pruning);
+            exec.last_first = true;
+            let first = Located::Segment { index: 0, docid: 0 };
+            let hits = views.top_k_with(&plan, 1, &exec).unwrap();
+            assert_eq!(hits.iter().map(|h| h.location).collect::<Vec<_>>(), [first]);
+            let request = SearchRequest {
+                limit: 1,
+                ..SearchRequest::default()
+            };
+            let page = views.search_with(&plan, &request, &exec).unwrap();
+            assert_eq!(
+                page.hits.iter().map(|h| h.location).collect::<Vec<_>>(),
+                [first]
+            );
+        }
+    }
 }

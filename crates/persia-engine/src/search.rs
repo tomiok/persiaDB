@@ -278,24 +278,90 @@ pub fn collect(matcher: &mut (impl Matcher + ?Sized), k: usize) -> Result<Vec<Hi
     Ok(top.into_hits())
 }
 
+/// Why a search stopped before its end (SPEC §7.3, ROADMAP 7.6.2). It returns no hits then: a page cut short would
+/// rank hits a full search would not return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum Interrupt {
+    /// Its cancellation token was cancelled.
+    #[error("the search was cancelled")]
+    Cancelled,
+    /// Its deadline passed.
+    #[error("the search ran past its deadline")]
+    DeadlineExceeded,
+}
+
+/// Why running a plan over a collection's views failed.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ExecError {
+    /// A corruption of a view.
+    #[error(transparent)]
+    Read(#[from] ReadError),
+    /// The search was cancelled or ran past its deadline.
+    #[error(transparent)]
+    Interrupted(#[from] Interrupt),
+}
+
+/// How many matches a collector yields between two looks at its [`Watch`]: an interrupt is seen within that many
+/// matches, and reading a clock per match would cost more than most matches do.
+pub(crate) const WATCH_EVERY: u32 = 256;
+
+/// What a collector over one view of a collection looks at while it runs (ROADMAP 7.6): whether to stop, and the
+/// threshold the other views' hits give it.
+pub(crate) trait Watch {
+    /// An interrupt, or the threshold the other views' hits allow this view to skip by ([`Matcher::set_min_competitive`]),
+    /// if any. Called before the first match and every [`WATCH_EVERY`] matches.
+    ///
+    /// # Errors
+    /// The search was cancelled or ran past its deadline.
+    fn check(&mut self) -> Result<Option<f64>, Interrupt>;
+
+    /// This view keeps `k` hits and the worst scores `score`, higher than before.
+    fn publish(&mut self, score: f64);
+}
+
+/// Counts matches towards the next look at a [`Watch`].
+#[derive(Debug, Default)]
+pub(crate) struct Ticks(u32);
+
+impl Ticks {
+    /// Whether the [`WATCH_EVERY`]th match since the last look was just yielded.
+    pub(crate) fn due(&mut self) -> bool {
+        self.0 += 1;
+        if self.0 < WATCH_EVERY {
+            return false;
+        }
+        self.0 = 0;
+        true
+    }
+}
+
 /// As [`collect`], keeping only the matches `keep` accepts (a cursor's, SPEC §7.4); `keep` sees every match the
 /// matcher yields, in docid order. Without `prune`, no threshold is passed on, so the matcher yields every match (a
-/// facet counts them all, SPEC §7.5), and it runs to its end even for `k = 0`.
+/// facet counts them all, SPEC §7.5), and it runs to its end even for `k = 0`. With `prune`, each rise of the
+/// threshold is published to `watch`, and the threshold `watch` gives is applied too.
 ///
 /// # Errors
-/// A corruption of the view the matcher reads.
+/// A corruption of the view the matcher reads; the interrupt `watch` reports.
 pub(crate) fn collect_where(
     matcher: &mut (impl Matcher + ?Sized),
     k: usize,
     prune: bool,
     mut keep: impl FnMut(u32, f64) -> bool,
-) -> Result<Vec<Hit>, ReadError> {
+    watch: &mut impl Watch,
+) -> Result<Vec<Hit>, ExecError> {
     if k == 0 && prune {
         return Ok(Vec::new());
     }
+    look(watch, matcher, prune)?;
     let mut top = TopK::new(k);
     let mut threshold = None;
+    let mut ticks = Ticks::default();
     while let Some(docid) = matcher.next()? {
+        if ticks.due() {
+            look(watch, matcher, prune)?;
+        }
         let score = matcher.score()?;
         if keep(docid, score)
             && top.push(docid, score)
@@ -305,9 +371,24 @@ pub(crate) fn collect_where(
         {
             threshold = Some(t);
             matcher.set_min_competitive(t);
+            watch.publish(t);
         }
     }
     Ok(top.into_hits())
+}
+
+/// Looks at `watch`, applying the threshold it gives when the collector prunes.
+fn look(
+    watch: &mut impl Watch,
+    matcher: &mut (impl Matcher + ?Sized),
+    prune: bool,
+) -> Result<(), Interrupt> {
+    if let Some(t) = watch.check()?
+        && prune
+    {
+        matcher.set_min_competitive(t);
+    }
+    Ok(())
 }
 
 /// Raises the threshold `min` to `score`; `false`, leaving it, when `score` is NaN or not above it, so a

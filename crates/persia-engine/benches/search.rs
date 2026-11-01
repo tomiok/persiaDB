@@ -16,7 +16,8 @@ use persia_engine::document::{Document, Value};
 use std::ops::Bound;
 
 use persia_engine::db::{
-    Database, DatabaseOptions, ManualClock, SearchHit, SearchRequest, SegmentIds,
+    Database, DatabaseOptions, Execution, ManualClock, SearchHit, SearchRequest, SegmentIds,
+    Threads,
 };
 use persia_engine::query::{
     BoolQuery, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery, Query,
@@ -273,9 +274,10 @@ fn filters(
     group.finish();
 }
 
-/// A collection of the same documents, committed, for whole requests (ROADMAP 7.5): its fields `body`, `price`, `tag`
+/// A collection of the same documents, committed in `segments` segments, for whole requests (ROADMAP 7.5): its
+/// fields `body`, `price`, `tag`
 /// (`facet: true`).
-fn collection() -> (Database<SimFile>, [FieldId; 3]) {
+fn collection(segments: u64) -> (Database<SimFile>, [FieldId; 3]) {
     let schema = SchemaBuilder::new("bench")
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("price", FieldKind::I64 { stored: true })
@@ -306,6 +308,9 @@ fn collection() -> (Database<SimFile>, [FieldId; 3]) {
             .with(price, Value::I64(i64::try_from(rng.next() % 1000).unwrap()))
             .with(tag, Value::String(format!("t{}", rng.next() % 10)));
         db.put("bench", &doc, Durability::Buffered).unwrap();
+        if (i + 1) % (DOCS / segments) == 0 {
+            db.commit().unwrap();
+        }
     }
     db.commit().unwrap();
     (db, [body, price, tag])
@@ -314,7 +319,7 @@ fn collection() -> (Database<SimFile>, [FieldId; 3]) {
 /// Whole requests over a committed collection: 10 hits of a term by score (pruned) and by a column, a facet beside
 /// them (every match visited), and a deep page by cursor.
 fn requests(c: &mut Criterion) {
-    let (db, [body, price, tag]) = collection();
+    let (db, [body, price, tag]) = collection(1);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     let memtable = coll.memtable();
@@ -367,5 +372,40 @@ fn requests(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench, requests);
+/// The same collection in 4 segments: 10 hits by score and by a column, the views on the calling thread and on rayon's
+/// global pool (ROADMAP 7.6.1).
+fn parallel(c: &mut Criterion) {
+    let (db, [body, price, _]) = collection(4);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    assert_eq!(coll.segments().len(), 4);
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let query = Query::Term(TermQuery {
+        field: body,
+        term: "w3".into(),
+    });
+    let plan = SearchPlan::new(&query, schema, &coll.search_statistics(&memtable)).unwrap();
+    let by_price = Sort::new([SortKey::field(price, Order::Asc)], schema).unwrap();
+    let mut group = c.benchmark_group("search_parallel");
+    for (name, sort) in [("score", Sort::score()), ("sort_price", by_price)] {
+        let request = SearchRequest {
+            sort,
+            limit: 10,
+            projection: Projection::None,
+            ..SearchRequest::default()
+        };
+        for (threads_name, threads) in [("current", Threads::Current), ("global", Threads::Global)]
+        {
+            let exec = Execution::default().threads(threads);
+            group.bench_function(format!("{name}/{threads_name}"), |b| {
+                b.iter(|| black_box(views.search_with(&plan, &request, &exec).unwrap()));
+            });
+        }
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench, requests, parallel);
 criterion_main!(benches);
