@@ -163,8 +163,9 @@ Always run fmt, clippy and tests before declaring a task done.
      commit. Exception: a leaf that changes the on-disk format or crash safety gets its own review before the next leaf.
    - `integration-tester` — only for items touching storage, durability, server, SDKs, distribution.
    - Leaves stay `[~]` until the batch review passes; then tick them `[x]` and push.
-   - **Every session ends with an open PR**: push the branch and open it with `gh pr create` (description as in the
-     `implement-issue` skill), then reply with its link. A session that cannot finish says what is left in the PR.
+   - **Every implementation session ends with an open PR** (one that changes the repo on a branch; a review-only or
+     question-only session reports its findings instead): push the branch, open it with `gh pr create` (description
+     as in the `implement-issue` skill), and reply with its link. Unmet DoD items make it a draft that lists them.
 4. One issue = one PR = one focused change. Conventional commits (`feat(engine): ...`, `fix(format): ...`).
 5. Update `SPEC.md` / ADRs in the same PR when a decision changes.
 6. Progress: mark the leaf `[~]` in `ROADMAP.md` when starting, `[x]` when the DoD is met, then run

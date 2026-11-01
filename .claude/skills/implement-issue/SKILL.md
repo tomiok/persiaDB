@@ -53,10 +53,10 @@ Leaves are worked in batches (one ROADMAP subsection or a few related leaves per
    or relaxation quality. Pass the scenario list that applies.
 
 Re-run step 4 of "Verify locally" after changes. Leaves stay `[~]` until the batch review passes.
-When the batch's PR is open, suggest starting a fresh session for the next one.
+When every PR of the batch is open (one per leaf, or one for leaves that ship together), suggest starting a fresh
+session for the next batch.
 
 ## 6. Finish
-- Tick the Definition of Done list from `CLAUDE.md`.
 - Mark the leaf `[x]` in `ROADMAP.md`, run `cargo xtask progress --record`, and include `ROADMAP.md`,
   `PROGRESS.md` and `docs/progress-history.csv` in the PR. Add any follow-up work as new ROADMAP leaves. Both generated
   files conflict between branches that each ran it: never hand-merge them; take `main`'s versions
@@ -67,7 +67,9 @@ When the batch's PR is open, suggest starting a fresh session for the next one.
 - Output a PR description: **Context** (issue + SPEC §), **What changed**, **How it was tested** (layers + commands + seeds,
   mutation-check results), **Risks / follow-ups** (including any failure seen and not explained), **Reviewer notes**
   (what `code-reviewer` found, what was fixed, what was declined and why).
-- **Open the PR** (part of the Definition of Done): push the branch, `gh pr create --base main` with that description
-  (ending with the attribution line), and end the session by reporting its link. Do not open changed files in any
-  editor or app.
-- Do not mark the issue done if any DoD item is unmet; list what remains.
+- **Open the PR** (part of the Definition of Done): push the branch and run `gh pr create --base main` with that
+  description. While any other DoD item is unmet (checks failing, review pending), open it with `--draft` and list what
+  remains in it; run `gh pr ready` once they are met. End the session by reporting its link. Do not open changed files
+  in any editor or app.
+- Last, tick the Definition of Done list from `CLAUDE.md`, the open PR included. Do not mark the issue done if any DoD
+  item is unmet; list what remains.
