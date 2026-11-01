@@ -13,8 +13,9 @@ use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
-    Explanation, FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Projection,
-    Pruning, RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where, top_sorted,
+    Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
+    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where,
+    top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -229,7 +230,7 @@ impl CollectionViews<'_> {
         let search = Search {
             plan,
             request,
-            pruning: exec.pruning,
+            exec,
             window,
         };
         // Read once before any view: a search with no view to run stops too.
@@ -276,10 +277,13 @@ impl CollectionViews<'_> {
                 // An explanation costs about an unpruned search of its view: each one is stoppable (SPEC §7.3).
                 exec.interrupt()?;
                 let explained = match hit.location {
-                    Located::Segment { index, docid } => {
-                        plan.explain(segment_view(&segments, index)?, docid)?
+                    Located::Segment { index, docid } => plan.explain(
+                        &Interruptible::new(segment_view(&segments, index)?, exec),
+                        docid,
+                    )?,
+                    Located::Memtable(docid) => {
+                        plan.explain(&Interruptible::new(self.memtable(), exec), docid)?
                     }
-                    Located::Memtable(docid) => plan.explain(self.memtable(), docid)?,
                 };
                 // Every hit matched the plan in its view, so it has one.
                 debug_assert!(explained.is_some(), "a hit the plan does not explain");
@@ -316,7 +320,7 @@ impl CollectionViews<'_> {
 struct Search<'r> {
     plan: &'r SearchPlan,
     request: &'r SearchRequest,
-    pruning: Pruning,
+    exec: &'r Execution,
     window: usize,
 }
 
@@ -331,13 +335,14 @@ impl Search<'_> {
         location: impl Fn(u32) -> Located,
     ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
         let sort = &self.request.sort;
+        let view = &Interruptible::new(view, self.exec);
         let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;
         let mut matcher = self.plan.matcher_with(
             view,
             if prune {
-                self.pruning
+                self.exec.pruning
             } else {
                 Pruning::Exhaustive
             },

@@ -3,8 +3,9 @@
 //! Invariants:
 //! 1. A search whose token is cancelled, or whose deadline has passed, returns `Interrupted` and no hits, on every
 //!    thread; a cancellation wins over a passed deadline.
-//! 2. The clock is read before the search, before each view and every 256 matches: a deadline that passes mid-view
-//!    stops the search.
+//! 2. The clock is read before the search, before each view, every 256 matches, and every 1 024 reads of a view's
+//!    postings, terms or columns (ROADMAP 7.6.3): a deadline that passes mid-view stops the search, even in a walk
+//!    that yields no match, and while a `prefix` is planned with `Execution::terms`.
 //! 3. A deadline that does not pass and a token never cancelled change nothing: the same hits, bit for bit.
 
 #![allow(clippy::unwrap_used, clippy::panic, missing_docs)] // Tests: inputs are fixed.
@@ -19,10 +20,11 @@ use persia_engine::db::{
     SearchPool, SearchRequest, Threads,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::query::{Query, TermQuery};
+use persia_engine::query::{PhraseQuery, PhraseTerm, PrefixQuery, Query, TermQuery};
 use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 use persia_engine::search::{
-    ExecError, FacetRequest, Interrupt, Order, Pruning, RequestError, SearchPlan, Sort, SortKey,
+    ExecError, FacetRequest, Interrupt, Order, Pruning, RequestError, SearchError, SearchPlan,
+    Sort, SortKey,
 };
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
@@ -194,8 +196,9 @@ fn a_deadline_passing_mid_view_stops_the_search() {
         )
         .unwrap();
     assert_eq!(bits(&finished.unwrap()), bits(&expected));
-    // 3 views, 2 000 + 2 000 + 10 matches: one read before the search, 3 before the views, 7 + 7 + 0 within them.
-    assert_eq!(reads, 1 + 3 + 7 + 7);
+    // 3 views, 2 000 + 2 000 + 10 matches: one read before the search, 3 before the views, 7 + 7 + 0 within them
+    // by the collector, and 1 + 1 + 0 by the postings (every 1 024 reads, ROADMAP 7.6.3).
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 1 + 1);
 }
 
 #[test]
@@ -258,11 +261,11 @@ fn a_deadline_passing_mid_view_stops_a_column_sort() {
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
     assert_eq!(reads, 4, "stopped inside the first view");
-    // One read before the search, 3 before the views, 7 + 7 within them, and one before the page's documents are
-    // read.
+    // One read before the search, 3 before the views, 7 + 7 within them by the collector, 1 + 1 by the postings and
+    // 1 + 1 by the sort column (every 1 024 reads each), and one before the page's documents are read.
     let (finished, reads) = run(1_000);
     assert_eq!(finished.unwrap().hits.len(), 20);
-    assert_eq!(reads, 1 + 3 + 7 + 7 + 1);
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 2 + 2 + 1);
 }
 
 #[test]
@@ -325,12 +328,13 @@ fn a_deadline_passing_mid_view_stops_a_facet_request() {
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
     assert_eq!(reads, 4, "stopped inside the first view");
-    // One read before the search, 3 as the views start, 7 + 7 within them, one before each view's facet, and one
-    // before the page's documents are read.
+    // One read before the search, 3 as the views start, 7 + 7 within them by the collector, 1 + 1 by the postings and
+    // 1 + 1 by the facet's values (every 1 024 reads each), one before each view's facet, and one before the page's
+    // documents are read.
     let (finished, reads) = run(1_000);
     let counts = &finished.unwrap().facets[0].values;
     assert_eq!(counts.iter().map(|v| v.count).sum::<u64>(), 4_010);
-    assert_eq!(reads, 1 + 3 + 7 + 7 + 3 + 1);
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 2 + 2 + 3 + 1);
 }
 
 #[test]
@@ -372,4 +376,107 @@ fn a_deadline_stops_explaining_a_page() {
         stopped,
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
+}
+
+/// One segment of 3 000 documents "alpha x beta" and distinct tags: the phrase "alpha beta" never lines up.
+fn unaligned() -> (Database<SimFile>, Query, Query) {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                positions: true,
+                ..TextOptions::default()
+            }),
+        )
+        .field("tag", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let body = schema.field("body").unwrap().id();
+    let tag = schema.field("tag").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [8; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    for i in 0..3_000 {
+        let doc = Document::new(format!("d{i}"))
+            .with(body, Value::String("alpha x beta".into()))
+            .with(tag, Value::String(format!("t{i:05}")));
+        db.put("c", &doc, Durability::Buffered).unwrap();
+    }
+    db.commit().unwrap();
+    let phrase = Query::Phrase(PhraseQuery {
+        field: body,
+        terms: vec![
+            PhraseTerm {
+                term: "alpha".into(),
+                position: 0,
+            },
+            PhraseTerm {
+                term: "beta".into(),
+                position: 1,
+            },
+        ],
+    });
+    let prefix = Query::Prefix(PrefixQuery {
+        field: tag,
+        prefix: "t".into(),
+        max_expansions: 50,
+    });
+    (db, phrase, prefix)
+}
+
+#[test]
+fn a_walk_that_yields_no_match_stops_at_the_deadline() {
+    let (db, phrase, _) = unaligned();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(&phrase, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let views = c.views(&memtable).unwrap();
+    let run = |deadline_ms: u64| {
+        let clock = Arc::new(TickingClock::new());
+        let at = clock.start + Duration::from_millis(deadline_ms);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), at);
+        (views.top_k_with(&plan, 10, &exec), clock.reads())
+    };
+    // One read before the search, one as the view's collector starts; then only the postings read the clock.
+    let (finished, reads) = run(1_000);
+    assert_eq!(finished.unwrap(), []);
+    assert!(reads > 2, "{reads}");
+    let (stopped, reads) = run(2);
+    assert!(matches!(
+        stopped,
+        Err(ExecError::Interrupted(Interrupt::DeadlineExceeded))
+    ));
+    assert_eq!(reads, 3, "the postings' first look saw the deadline");
+}
+
+#[test]
+fn planning_a_prefix_stops_at_the_deadline() {
+    let (db, _, prefix) = unaligned();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let stats = c.search_statistics(&memtable);
+    let views = c.views(&memtable).unwrap();
+    let plan = |deadline_ms: u64| {
+        let clock = Arc::new(TickingClock::new());
+        let at = clock.start + Duration::from_millis(deadline_ms);
+        let exec = Execution::default().deadline(clock.clone(), at);
+        let planned = SearchPlan::with_terms(&prefix, c.schema(), &stats, &exec.terms(&views));
+        (planned.map(|_| ()), clock.reads())
+    };
+    // One read as the walk starts, then one per 1 024 terms of the 3 000.
+    let (planned, reads) = plan(1_000);
+    planned.unwrap();
+    assert_eq!(reads, 1 + 2);
+    let (planned, reads) = plan(1);
+    assert!(
+        matches!(
+            planned,
+            Err(SearchError::Interrupted(Interrupt::DeadlineExceeded))
+        ),
+        "{planned:?}"
+    );
+    assert_eq!(reads, 2);
 }

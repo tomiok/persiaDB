@@ -11,6 +11,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
+- `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
+  callback can stop the scan with an error (`Segment::try_column_keys` too). `ReadError` has an `Interrupted` variant
+  and `SearchError` an `Interrupted` one (ROADMAP 7.6.3).
 
 ### Fixed
 - A search no longer drops a hit whose segment index is missing from the views
@@ -22,6 +25,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: a deadline or a cancellation now also stops a search between two matches (ROADMAP 7.6.3, SPEC
+  §7.3). Every postings list, term stream, column scan and column reader a collection search opens reads them every
+  1024 steps: a phrase whose terms never line up, a conjunction or a pruning disjunction that skips, a filter scan, a
+  facet count, a column sort and explaining a hit stop too. `Execution::terms(&views)` gives the terms for
+  `SearchPlan::with_terms` under the same deadline and token, so planning a `prefix` or `fuzzy` returns
+  `SearchError::Interrupted`.
 - `persia-engine`: per-hit score breakdowns (ROADMAP 7.7.1, SPEC §7.7). `SearchRequest::explain` makes each hit of
   the page return `SearchHit::explanation`, a `search::Explanation` tree; `SearchPlan::explain(view, docid)` explains
   one document. A word gives its `idf`, `k1`, `tf~` and, per field holding it, the term, frequency, norm byte, length,

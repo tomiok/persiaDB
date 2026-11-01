@@ -45,6 +45,7 @@ mod expand;
 mod explain;
 mod facet;
 mod filter;
+mod interrupt;
 mod max_score;
 mod phrase;
 mod plan;
@@ -59,6 +60,7 @@ pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
 };
+pub(crate) use interrupt::{Interruptible, Interrupts};
 pub use plan::SearchPlan;
 pub use request::{MAX_WINDOW, Projection, RequestError};
 pub use sort::{MAX_SORT_KEYS, Missing, Order, Sort, SortKey, SortValue};
@@ -133,7 +135,20 @@ pub enum SearchError {
     /// The terms a `prefix` or `fuzzy` expands over, or their collection `df`s, cannot be read: a corruption of a
     /// view.
     #[error(transparent)]
-    Read(#[from] ReadError),
+    Read(ReadError),
+    /// Planning was cancelled or ran past its deadline (ROADMAP 7.6.3): the terms were walked with
+    /// [`crate::db::Execution::terms`].
+    #[error(transparent)]
+    Interrupted(Interrupt),
+}
+
+impl From<ReadError> for SearchError {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Interrupted(i) => Self::Interrupted(i),
+            e => Self::Read(e),
+        }
+    }
 }
 
 /// The documents a query matches in one view, in docid order, with their scores.
@@ -299,10 +314,19 @@ pub enum Interrupt {
 pub enum ExecError {
     /// A corruption of a view.
     #[error(transparent)]
-    Read(#[from] ReadError),
+    Read(ReadError),
     /// The search was cancelled or ran past its deadline.
     #[error(transparent)]
     Interrupted(#[from] Interrupt),
+}
+
+impl From<ReadError> for ExecError {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Interrupted(i) => Self::Interrupted(i),
+            e => Self::Read(e),
+        }
+    }
 }
 
 impl ExecError {

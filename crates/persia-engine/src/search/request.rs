@@ -116,16 +116,25 @@ pub enum RequestError {
     },
     /// A view could not be read.
     #[error(transparent)]
-    Read(#[from] ReadError),
+    Read(ReadError),
     /// The search was cancelled or ran past its deadline (ROADMAP 7.6.2).
     #[error(transparent)]
     Interrupted(#[from] Interrupt),
 }
 
+impl From<ReadError> for RequestError {
+    fn from(e: ReadError) -> Self {
+        match e {
+            ReadError::Interrupted(i) => Self::Interrupted(i),
+            e => Self::Read(e),
+        }
+    }
+}
+
 impl From<ExecError> for RequestError {
     fn from(e: ExecError) -> Self {
         match e {
-            ExecError::Read(e) => Self::Read(e),
+            ExecError::Read(e) => e.into(),
             ExecError::Interrupted(i) => Self::Interrupted(i),
         }
     }

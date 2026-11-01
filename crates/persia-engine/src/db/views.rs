@@ -18,7 +18,9 @@ use super::exec::{Execution, Thresholds, ViewWatch};
 use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
-use crate::search::{ExecError, Expansion, Pruning, SearchPlan, TermSource, collect_where};
+use crate::search::{
+    ExecError, Expansion, Interruptible, Pruning, SearchPlan, TermSource, collect_where,
+};
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
 
@@ -299,17 +301,10 @@ impl CollectionViews<'_> {
         let found = exec.run(&self.with_documents(&segments), |index| {
             let mut watch = thresholds.watch(exec, index);
             match segments.get(index) {
-                Some(view) => view_top_k(plan, view, k, exec.pruning, &mut watch, |docid| {
+                Some(view) => view_top_k(plan, view, k, exec, &mut watch, |docid| {
                     Located::Segment { index, docid }
                 }),
-                None => view_top_k(
-                    plan,
-                    self.memtable,
-                    k,
-                    exec.pruning,
-                    &mut watch,
-                    Located::Memtable,
-                ),
+                None => view_top_k(plan, self.memtable, k, exec, &mut watch, Located::Memtable),
             }
         });
         let mut hits: Vec<_> = found?.into_iter().flatten().collect();
@@ -320,16 +315,17 @@ impl CollectionViews<'_> {
     }
 }
 
-/// The best `k` hits of `plan` in `view`, best first.
+/// The best `k` hits of `plan` in `view`, best first, its reads stopped by `exec`'s interrupts.
 fn view_top_k<V: SearchView>(
     plan: &SearchPlan,
     view: &V,
     k: usize,
-    pruning: Pruning,
+    exec: &Execution,
     watch: &mut ViewWatch<'_>,
     location: impl Fn(u32) -> Located,
 ) -> Result<Vec<CollectionHit>, ExecError> {
-    let mut matcher = plan.matcher_with(view, pruning)?;
+    let view = Interruptible::new(view, exec);
+    let mut matcher = plan.matcher_with(&view, exec.pruning)?;
     Ok(collect_where(&mut matcher, k, true, |_, _| true, watch)?
         .into_iter()
         .map(|h| CollectionHit {

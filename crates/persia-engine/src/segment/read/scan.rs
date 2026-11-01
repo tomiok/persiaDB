@@ -81,6 +81,21 @@ impl Segment {
         field: FieldId,
         mut f: impl FnMut(u32, u64),
     ) -> Result<(), ReadError> {
+        self.try_column_keys(field, |docid, key| {
+            f(docid, key);
+            Ok(())
+        })
+    }
+
+    /// As [`Self::column_keys`], stopping at the first error `f` returns.
+    ///
+    /// # Errors
+    /// As [`Self::column_keys`]; what `f` returns.
+    pub fn try_column_keys(
+        &self,
+        field: FieldId,
+        mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
         match self.field(field)?.field_type() {
             FieldType::I64 | FieldType::F64 | FieldType::Datetime => {
                 let column = self.numeric_column(field)?;
@@ -88,7 +103,7 @@ impl Segment {
                 let present = column.present()?;
                 for docid in &present {
                     if let Some(key) = keys.key(docid)? {
-                        f(docid, key);
+                        f(docid, key)?;
                     }
                 }
             }
@@ -97,7 +112,7 @@ impl Segment {
                 let trues = column.trues();
                 let present = column.present()?;
                 for docid in &present {
-                    f(docid, u64::from(trues.contains(docid)));
+                    f(docid, u64::from(trues.contains(docid)))?;
                 }
             }
             other => return Err(type_error(field, other, "column")),

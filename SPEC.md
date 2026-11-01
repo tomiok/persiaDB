@@ -1324,12 +1324,16 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
   search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
-  documents are read, and before each hit is explained (§7.7). At the first read that finds the token cancelled or
+  documents are read, and before each hit is explained (§7.7). Every reader of a view a search opens reads them too,
+  every 1024 steps: a postings list (a document moved to, a block bound skipped to), a term stream, a column scan,
+  and a column's keys or values read by docid. So a matcher's walk between two matches (a phrase whose terms never
+  line up, a conjunction or a pruning disjunction skipping), a filter's scan while a view's matcher is built,
+  counting a facet, a column sort, explaining a hit and, when planning walks the terms through the search's
+  execution, a §7.1 expansion stop too. At the first read that finds the token cancelled or
   the clock at or past the deadline, the search stops with an error (cancelled, or deadline exceeded; a cancellation
   wins) and returns no hits: a page cut short would rank hits a full search does not return. Between two reads
-  nothing is interrupted: planning (§7.1 expansion), building a view's matcher, a matcher's walk between two
-  matches it yields, counting one facet over a view's matches, reading the page's documents, and explaining one
-  hit run to their end first.
+  nothing is interrupted: a step of a reader (one block decoded, one term of an automaton's walk over the
+  dictionary), set operations on bitmaps, and reading the page's documents run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a

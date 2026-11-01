@@ -12,7 +12,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use super::clock::Clock;
-use crate::search::{Interrupt, Pruning, Watch};
+use std::ops::Bound;
+
+use super::views::CollectionViews;
+use crate::schema::FieldId;
+use crate::search::{Expansion, Interrupt, Interruptible, Interrupts, Pruning, TermSource, Watch};
+use crate::segment::ReadError;
 
 /// Where the views of a search run.
 #[derive(Debug, Clone, Default)]
@@ -90,8 +95,8 @@ impl CancelToken {
         Self::default()
     }
 
-    /// Cancels every search given this token or a clone: each stops within 256 matches
-    /// of a view, or before its next view, with [`Interrupt::Cancelled`].
+    /// Cancels every search given this token or a clone: each stops with [`Interrupt::Cancelled`] within 256
+    /// matches of a view, or 1024 reads of one of its postings, terms or columns (ROADMAP 7.6.3).
     pub fn cancel(&self) {
         // Relaxed: nothing is published through the flag, a search only has to see it soon.
         self.0.store(true, Ordering::Relaxed);
@@ -150,7 +155,8 @@ impl Execution {
     }
 
     /// Stops the search with [`Interrupt::DeadlineExceeded`] once `clock` reads `at` or later. The clock is read
-    /// before each view and every 256 matches of one.
+    /// before each view, every 256 matches of one, and every 1024 reads of one of its postings, terms or columns
+    /// (SPEC §7.3).
     #[must_use]
     pub fn deadline(mut self, clock: Arc<dyn Clock>, at: Instant) -> Self {
         self.deadline = Some((clock, at));
@@ -175,6 +181,37 @@ impl Execution {
             return Err(Interrupt::DeadlineExceeded);
         }
         Ok(())
+    }
+
+    /// The terms of `views` for [`crate::search::SearchPlan::with_terms`], walked under this execution's deadline
+    /// and token (ROADMAP 7.6.3): planning a `prefix` or `fuzzy` then stops with
+    /// [`crate::search::SearchError::Interrupted`] too.
+    ///
+    /// ```
+    /// use persia_engine::db::{CancelToken, Database, DatabaseOptions, Execution};
+    /// use persia_engine::query::{PrefixQuery, Query};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+    /// use persia_engine::search::{Interrupt, SearchError, SearchPlan};
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("tag", FieldKind::Keyword(KeywordOptions::default())).build()?;
+    /// let tag = schema.field("tag").map(|f| f.id()).ok_or("no field")?;
+    /// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// db.create_collection(schema)?;
+    /// let snapshot = db.snapshot();
+    /// let c = snapshot.collection("c").ok_or("no collection")?;
+    /// let memtable = c.memtable();
+    /// let views = c.views(&memtable)?;
+    /// let token = CancelToken::new();
+    /// token.cancel();
+    /// let exec = Execution::default().cancel(token);
+    /// let query = Query::Prefix(PrefixQuery { field: tag, prefix: "a".into(), max_expansions: 50 });
+    /// let planned = SearchPlan::with_terms(&query, c.schema(), &c.search_statistics(&memtable), &exec.terms(&views));
+    /// assert!(matches!(planned, Err(SearchError::Interrupted(Interrupt::Cancelled))));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn terms<'a>(&'a self, views: &'a CollectionViews<'a>) -> ExecTerms<'a> {
+        ExecTerms { exec: self, views }
     }
 
     /// Runs `task` for each of `views` (view indices, ascending), on [`Self::threads`], and returns their results in
@@ -207,6 +244,39 @@ impl Execution {
                 .install(|| views.par_iter().copied().map(task).collect()),
         };
         all.into_iter().collect()
+    }
+}
+
+impl Interrupts for Execution {
+    fn check(&self) -> Result<(), Interrupt> {
+        self.interrupt()
+    }
+}
+
+/// The terms of a collection's views, walked under an [`Execution`]'s interrupts ([`Execution::terms`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ExecTerms<'a> {
+    exec: &'a Execution,
+    views: &'a CollectionViews<'a>,
+}
+
+impl TermSource for ExecTerms<'_> {
+    fn each_term(
+        &self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        expansion: &Expansion,
+        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        // Read once first: a walk shorter than one look stops too.
+        self.exec.interrupt().map_err(ReadError::Interrupted)?;
+        for segment in self.views.segments() {
+            Interruptible::new(&segment, self.exec)
+                .each_term(field, lower, upper, expansion, each)?;
+        }
+        Interruptible::new(self.views.memtable(), self.exec)
+            .each_term(field, lower, upper, expansion, each)
     }
 }
 

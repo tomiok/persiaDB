@@ -281,7 +281,22 @@ pub trait SearchView {
     /// # Errors
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
     /// source.
-    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError>;
+    fn column_keys(&self, field: FieldId, mut f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
+        self.try_column_keys(field, |docid, key| {
+            f(docid, key);
+            Ok(())
+        })
+    }
+
+    /// As [`Self::column_keys`], stopping at the first error `f` returns.
+    ///
+    /// # Errors
+    /// As [`Self::column_keys`]; what `f` returns.
+    fn try_column_keys(
+        &self,
+        field: FieldId,
+        f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError>;
 
     /// The norms of a `text` field (SPEC §5.3.4), for scoring each candidate document: a reader that keeps what it
     /// read (a segment's [`NormsCursor`]; the memtable's norms as of the view, copied once per view and field).
@@ -482,8 +497,12 @@ impl SearchView for SegmentView<'_> {
         self.segment.trues(field)
     }
 
-    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
-        self.segment.column_keys(field, f)
+    fn try_column_keys(
+        &self,
+        field: FieldId,
+        f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        self.segment.try_column_keys(field, f)
     }
 
     fn keys(&self, field: FieldId) -> Result<SegmentKeys<'_>, ReadError> {
