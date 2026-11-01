@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc a249b882803f86f0655e5ed1e5ac5f236bb990d75f8d4e8601f1dda44802570a # shrinks to Case { params: [(1.0, 1.2, 0.75), (1.0, 1.2, 0.9505371187540455)], ops: [Put(0, Values { doc: [["bee", "ant", "ant"], [], []], n: None })], queries: [(Bool { must: [Word([Clause { field: 0, term: "ant", weight: 1.0 }])], should: [], must_not: [] }, Some(Not(Term { field: FieldId(2), value: Keyword("y") })))], k: 1 }

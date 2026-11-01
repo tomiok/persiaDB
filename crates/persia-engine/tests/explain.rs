@@ -422,6 +422,30 @@ fn what_does_not_match_is_not_explained() {
     });
     let not_red = SearchPlan::new(&not_red, c.schema(), &stats).unwrap();
     assert!(not_red.explain(&segment, 0).unwrap().is_none(), "excluded");
+    let tagged = |tag: &str| {
+        let q = Query::Bool(BoolQuery {
+            must: vec![term(f.body, "red")],
+            filter: vec![Filter::Term {
+                field: f.tag,
+                value: FilterValue::Keyword(tag.into()),
+            }],
+            ..BoolQuery::default()
+        });
+        SearchPlan::new(&q, c.schema(), &stats).unwrap()
+    };
+    assert!(tagged("x").explain(&segment, 0).unwrap().is_some());
+    assert!(
+        tagged("y").explain(&segment, 0).unwrap().is_none(),
+        "filtered out"
+    );
+    // A `should` is required without `must` or `filter`.
+    let either = Query::Bool(BoolQuery {
+        should: vec![term(f.body, "hat"), term(f.title, "blue")],
+        ..BoolQuery::default()
+    });
+    let either = SearchPlan::new(&either, c.schema(), &stats).unwrap();
+    assert!(either.explain(&segment, 0).unwrap().is_none(), "no should");
+    assert!(either.explain(&segment, 1).unwrap().is_some());
 
     // Without `explain`, hits carry none.
     let page = views
