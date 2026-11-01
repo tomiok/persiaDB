@@ -22,7 +22,7 @@ flowchart LR
   M4["✅ done<br/><b>M4</b> Text analysis<br/>29/29 · 100%"]:::done
   M5["✅ done<br/><b>M5</b> Segment writer & reader<br/>48/48 · 100%"]:::done
   M6["🔨 in progress<br/><b>M6</b> Write path, durability, merging<br/>40/52 · 77%"]:::doing
-  M7["🔨 in progress<br/><b>M7</b> Query engine & ranking<br/>32/44 · 73%"]:::doing
+  M7["🔨 in progress<br/><b>M7</b> Query engine & ranking<br/>32/43 · 74%"]:::doing
   M8["⏳ blocked<br/><b>M8</b> Zero-results avoidance<br/>0/29 · 0%"]:::blocked
   M9["▶️ ready<br/><b>M9</b> Blob store<br/>0/20 · 0%"]:::ready
   M10["⏳ blocked<br/><b>M10</b> Embedded API<br/>0/19 · 0%"]:::blocked
@@ -30,7 +30,7 @@ flowchart LR
   M12["⏳ blocked<br/><b>M12</b> Cloud storage backends<br/>0/29 · 0%"]:::blocked
   M13["⏳ blocked<br/><b>M13</b> Distribution & Kubernetes<br/>0/24 · 0%"]:::blocked
   M14["⏳ blocked<br/><b>M14</b> SDKs<br/>0/19 · 0%"]:::blocked
-  M15["⏳ blocked<br/><b>M15</b> Benchmarks, hardening, v1.0<br/>0/21 · 0%"]:::blocked
+  M15["⏳ blocked<br/><b>M15</b> Benchmarks, hardening, v1.0<br/>0/22 · 0%"]:::blocked
   M0 --> M1
   M1 --> M2
   M1 --> M3
@@ -67,7 +67,7 @@ flowchart LR
 | **M4** Text analysis | ✅ done | `████████████████████` 100% | 29 | 0 | 29 | M0 |
 | **M5** Segment writer & reader | ✅ done | `████████████████████` 100% | 48 | 0 | 48 | M1, M3, M4 |
 | **M6** Write path, durability, merging | 🔨 in progress | `███████████████░░░░░` 77% | 40 | 0 | 52 | M2, M5 |
-| **M7** Query engine & ranking | 🔨 in progress | `███████████████░░░░░` 73% | 32 | 0 | 44 | M5 |
+| **M7** Query engine & ranking | 🔨 in progress | `███████████████░░░░░` 74% | 32 | 0 | 43 | M5 |
 | **M8** Zero-results avoidance | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M7 |
 | **M9** Blob store | ▶️ ready | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 20 | M1, M2 |
 | **M10** Embedded API | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 19 | M6, M7, M8, M9 |
@@ -75,7 +75,7 @@ flowchart LR
 | **M12** Cloud storage backends | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 29 | M2, M6, M9, M11 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 24 | M11, M12 |
 | **M14** SDKs | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 19 | M11, M13 |
-| **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 21 | M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14 |
+| **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | `░░░░░░░░░░░░░░░░░░░░` 0% | 0 | 0 | 22 | M1, M2, M3, M4, M5, M6, M7, M8, M9, M10, M11, M12, M13, M14 |
 
 ## Post-MVP
 
@@ -131,8 +131,8 @@ _Nothing in progress._
 - `6.6.10` `persia inspect container` (CLI, read-only): the superblock (`seq`, `wal_start`, `log_end`), every frame from `wal_start` (kind, offset, length, `frame_seq`, whether after `log_end`), Manifest frames after `log_end` with their `seq`, and with `--id` the WAL records naming a document id. Replaces the throwaway debug test the 6.6.9 triage needed (crash-triage skill) (M6)
 - `7.3.5` (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3) (M7)
 - `7.4.8` Prune conjunctions and `should` clauses beside `must` with block bounds (block-max AND, required plus optional as Lucene's ReqOpt): today a threshold reaches only a term, a pure `should` disjunction and what `must_not`/`boost` wrap (SPEC §7.3, found in 7.4.4) (M7)
-- `7.4.9` Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4); `MaxScore` still scans every essential clause per candidate and sums every bound per lookup, O(clauses²): 41.6 ms vs 24.5 ms for block-max WAND on `search_top10_pruning/or50` (7.4.7). Moves to M15.2 (where it's measured) (M7)
-- … and 29 more
+- `7.4.11` (v1.0) Configurable tie-break: a secondary key by column (for example `updated_at` descending) before docid. Today the order is score descending, then docid (7.4.3) (M7)
+- … and 28 more
 
 ## Burn-up
 
