@@ -1324,7 +1324,7 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
   search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
-  documents are read, and before each hit is explained (§7.7). Every reader of a view a search opens reads them too,
+  documents are read, and before the hits of each view are explained (§7.7). Every reader of a view a search opens reads them too,
   every 1024 steps: a postings list (a document moved to, a block bound skipped to), a term stream, a column scan,
   and a column's keys or values read by docid. So a matcher's walk between two matches (a phrase whose terms never
   line up, a conjunction or a pruning disjunction skipping), a filter's scan while a view's matcher is built,
@@ -1414,9 +1414,11 @@ order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length
 A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
 nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
-bit: it reads the same postings and norms, and sums in the same order. Explaining a hit costs about one unpruned
-search of its view, so it is done for the page's hits only, and a deadline or a cancellation is read before each
-(§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
+bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
+time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters selected the
+first time they are needed) and advanced over its hits in docid order, so a page costs about one unpruned search of
+each view holding its hits. It is done for the page's hits only, and a deadline or a cancellation is read before
+each view and while its readers walk (§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
 
 ---
 

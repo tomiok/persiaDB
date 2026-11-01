@@ -360,18 +360,22 @@ fn a_deadline_stops_explaining_a_page() {
     let (unexplained, reads) = run(false, 1_000);
     let hits = unexplained.unwrap().hits.len();
     assert_eq!(hits, 20);
-    // One more read before each hit is explained (SPEC §7.3).
+    // One more read before each view holding hits is explained, in one pass (SPEC §7.3, ROADMAP 7.7.2).
     let (explained, with) = run(true, 1_000);
-    assert!(
-        explained
-            .unwrap()
-            .hits
-            .iter()
-            .all(|h| h.explanation.is_some())
-    );
-    assert_eq!(with, reads + 20);
+    let explained = explained.unwrap();
+    assert!(explained.hits.iter().all(|h| h.explanation.is_some()));
+    let views: std::collections::BTreeSet<_> = explained
+        .hits
+        .iter()
+        .map(|h| match h.location {
+            persia_engine::db::Located::Segment { index, .. } => index,
+            persia_engine::db::Located::Memtable(_) => usize::MAX,
+        })
+        .collect();
+    assert!(views.len() > 1, "{views:?}");
+    assert_eq!(with, reads + u64::try_from(views.len()).unwrap());
     // A deadline that passes while the page is explained: an error, no page.
-    let (stopped, _) = run(true, reads + 5);
+    let (stopped, _) = run(true, reads + 1);
     assert!(matches!(
         stopped,
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))

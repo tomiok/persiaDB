@@ -11,7 +11,9 @@
 //! 3. Every pruning strategy, on the calling thread and on a pool, returns the same page, scores bit for bit; a page
 //!    of `k` is the first `k` of the full ranking, and the page after its last cursor is the next `k`.
 //! 4. Each hit's explanation scores the hit, bit for bit; each field of a word lists the frequency the reference
-//!    counts, and the contributions sum to its `tf~` (SPEC §7.7).
+//!    counts, and the contributions sum to its `tf~` (SPEC §7.7). Explaining every docid of a view in one pass
+//!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
+//!    gives each of them, matched or not.
 
 #![allow(
     clippy::unwrap_used,
@@ -44,6 +46,7 @@ use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::search::{Explanation, Pruning, SearchPlan};
+use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 use proptest::prelude::*;
@@ -472,6 +475,16 @@ fn same_segments(c: &CollectionSnapshot, model: &Model) -> Result<(), TestCaseEr
 
 /// Checks a Word explanation's fields against the document: frequencies the reference counts, contributions
 /// summing to `tf~`; recurses through the tree.
+/// Every docid of `view`, and one past it, explained in one pass from the last: the same as each alone (ROADMAP 7.7.2).
+fn one_pass<V: SearchView>(plan: &SearchPlan, view: &V) -> Result<(), TestCaseError> {
+    let docids: Vec<u32> = (0..=view.doc_count()).rev().collect();
+    let together = plan.explain_all(view, &docids).unwrap();
+    for (&docid, e) in docids.iter().zip(together) {
+        prop_assert_eq!(e, plan.explain(view, docid).unwrap(), "docid {}", docid);
+    }
+    Ok(())
+}
+
 fn check_explanation(
     e: &Explanation,
     doc: &Doc,
@@ -612,6 +625,10 @@ fn check(
             prop_assert_eq!(e.score().to_bits(), h.score.to_bits());
             check_explanation(e, &live[h.document.id()].doc, &fields)?;
         }
+        for segment in views.segments() {
+            one_pass(&plan, &segment)?;
+        }
+        one_pass(&plan, views.memtable())?;
 
         // Invariant 3: every strategy and thread, pages and cursors.
         for pruning in STRATEGIES {

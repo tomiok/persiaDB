@@ -39,7 +39,7 @@ pub struct SearchRequest {
     /// The fields each hit returns.
     pub projection: Projection,
     /// Whether each hit returns how its score adds up ([`SearchHit::explanation`], SPEC §7.7). It costs about one
-    /// unpruned search of the hit's view per hit.
+    /// unpruned search of each view holding hits of the page ([`SearchPlan::explain_all`]).
     pub explain: bool,
 }
 
@@ -264,32 +264,21 @@ impl CollectionViews<'_> {
         // Reading the page's documents is the last stage a deadline stops.
         exec.interrupt()?;
 
+        let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
+        let mut explanations = if request.explain {
+            self.explain_page(plan, &segments, &page, exec)?
+        } else {
+            Vec::new()
+        }
+        .into_iter();
         let origin = self.cursor_origin();
-        let mut hits = Vec::new();
-        for hit in ranked.into_iter().skip(request.offset) {
+        let mut hits = Vec::with_capacity(page.len());
+        for hit in page {
             let mut document = match hit.location {
                 Located::Segment { index, docid } => {
                     segment_view(&segments, index)?.document(docid)?
                 }
                 Located::Memtable(docid) => self.memtable().document(docid)?,
-            };
-            let explanation = if request.explain {
-                // An explanation costs about an unpruned search of its view: each one is stoppable (SPEC §7.3).
-                exec.interrupt()?;
-                let explained = match hit.location {
-                    Located::Segment { index, docid } => plan.explain(
-                        &Interruptible::new(segment_view(&segments, index)?, exec),
-                        docid,
-                    )?,
-                    Located::Memtable(docid) => {
-                        plan.explain(&Interruptible::new(self.memtable(), exec), docid)?
-                    }
-                };
-                // Every hit matched the plan in its view, so it has one.
-                debug_assert!(explained.is_some(), "a hit the plan does not explain");
-                explained
-            } else {
-                None
             };
             request.projection.apply(&mut document);
             hits.push(SearchHit {
@@ -297,7 +286,7 @@ impl CollectionViews<'_> {
                 score: hit.score,
                 sort: hit.values,
                 document,
-                explanation,
+                explanation: explanations.next().flatten(),
                 origin: origin.clone(),
             });
         }
@@ -305,6 +294,50 @@ impl CollectionViews<'_> {
             hits,
             facets: facets.into_iter().map(FacetCounter::finish).collect(),
         })
+    }
+
+    /// The explanation of each hit of `page`, in page order (SPEC §7.7): one pass per view holding hits, in view
+    /// order, each stoppable before it starts and while it reads (SPEC §7.3).
+    fn explain_page(
+        &self,
+        plan: &SearchPlan,
+        segments: &[SegmentView<'_>],
+        page: &[Ranked],
+        exec: &Execution,
+    ) -> Result<Vec<Option<Explanation>>, RequestError> {
+        // (view order, docid, page index), so each view's hits are together and in docid order.
+        let mut by_view: Vec<(usize, u32, usize)> = page
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| {
+                let (view, docid) = order(hit.location);
+                (view, docid, i)
+            })
+            .collect();
+        by_view.sort_unstable();
+        let mut out = vec![None; page.len()];
+        for group in by_view.chunk_by(|a, b| a.0 == b.0) {
+            exec.interrupt()?;
+            let docids: Vec<u32> = group.iter().map(|&(_, docid, _)| docid).collect();
+            let explained = match group.first().map(|&(view, ..)| view) {
+                Some(usize::MAX) => {
+                    plan.explain_all(&Interruptible::new(self.memtable(), exec), &docids)?
+                }
+                Some(index) => plan.explain_all(
+                    &Interruptible::new(segment_view(segments, index)?, exec),
+                    &docids,
+                )?,
+                None => continue,
+            };
+            for (&(.., i), explanation) in group.iter().zip(explained) {
+                // Every hit matched the plan in its view, so it has one.
+                debug_assert!(explanation.is_some(), "a hit the plan does not explain");
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = explanation;
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn cursor_origin(&self) -> CursorOrigin {

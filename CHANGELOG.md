@@ -25,6 +25,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: `SearchPlan::explain_all(view, docids)` explains many documents of a view in one pass (ROADMAP
+  7.7.2, SPEC §7.7): the tree is built once and advanced in docid order, each `bool` selecting its filters once. A
+  search with `explain: true` explains its page that way, one pass per view holding hits, and reads the deadline and
+  the token before each view instead of before each hit.
 - `persia-engine`: a deadline or a cancellation now also stops a search between two matches (ROADMAP 7.6.3, SPEC
   §7.3). Every postings list, term stream, column scan and column reader a collection search opens reads them every
   1024 steps: a phrase whose terms never line up, a conjunction or a pruning disjunction that skips, a filter scan, a
