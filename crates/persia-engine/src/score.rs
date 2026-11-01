@@ -309,8 +309,8 @@ impl TermScorer {
         self.k1
     }
 
-    /// `w_f / (1 − b_f + b_f · len/avglen_f)` of field `slot` of [`Self::fields`] for norm byte `norm`: a frequency
-    /// times it is the field's term of [`Self::tf`]. `None` past the fields.
+    /// `w_f / max(1 − b_f + b_f · len/avglen_f, ε)` of field `slot` of [`Self::fields`] for norm byte `norm`;
+    /// multiplying a field frequency by it gives that field's contribution to [`Self::tf`]. Returns `None` past the fields.
     pub fn factor(&self, slot: usize, norm: u8) -> Option<f64> {
         self.factors
             .get(slot)
