@@ -20,7 +20,8 @@ use crate::search::{Interrupt, Pruning, Watch};
 pub enum Threads {
     /// On the calling thread, one view after another.
     Current,
-    /// On rayon's global pool (one thread per CPU unless configured otherwise).
+    /// On rayon's global pool (one thread per CPU unless configured otherwise). Called from a thread of another
+    /// rayon pool (a [`SearchPool`] or the caller's own), on that pool instead.
     #[default]
     Global,
     /// On this pool.
@@ -34,10 +35,22 @@ pub struct SearchPool(Arc<rayon::ThreadPool>);
 /// The threads of a [`SearchPool`] could not be started.
 #[derive(Debug, thiserror::Error)]
 #[error("cannot start the search threads: {0}")]
-pub struct PoolError(#[from] rayon::ThreadPoolBuildError);
+pub struct PoolError(String);
 
 impl SearchPool {
     /// A pool of `threads` threads.
+    ///
+    /// ```
+    /// use std::num::NonZeroUsize;
+    /// use persia_engine::db::{Execution, SearchPool, Threads};
+    ///
+    /// let pool = SearchPool::new(NonZeroUsize::new(2).ok_or("zero")?)?;
+    /// assert_eq!(pool.threads(), 2);
+    /// // Clones share the threads: one pool for every search.
+    /// let exec = Execution::default().threads(Threads::Pool(pool.clone()));
+    /// # let _ = exec;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     ///
     /// # Errors
     /// The operating system did not start the threads.
@@ -45,7 +58,8 @@ impl SearchPool {
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(threads.get())
             .thread_name(|i| format!("persia-search-{i}"))
-            .build()?;
+            .build()
+            .map_err(|e| PoolError(e.to_string()))?;
         Ok(Self(Arc::new(pool)))
     }
 
@@ -57,6 +71,16 @@ impl SearchPool {
 
 /// Stops the searches it is given to once [`Self::cancel`] is called (ROADMAP 7.6.2). Clones share the state, so one
 /// thread can cancel a search another runs.
+///
+/// ```
+/// use persia_engine::db::CancelToken;
+///
+/// let token = CancelToken::new();
+/// let other = token.clone();
+/// std::thread::spawn(move || other.cancel()).join().map_err(|_| "panicked")?;
+/// assert!(token.is_cancelled());
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, Default)]
 pub struct CancelToken(Arc<AtomicBool>);
 
@@ -69,6 +93,7 @@ impl CancelToken {
     /// Cancels every search given this token or a clone: each stops within 256 matches
     /// of a view, or before its next view, with [`Interrupt::Cancelled`].
     pub fn cancel(&self) {
+        // Relaxed: nothing is published through the flag, a search only has to see it soon.
         self.0.store(true, Ordering::Relaxed);
     }
 
@@ -153,8 +178,9 @@ impl Execution {
     }
 
     /// Runs `task` for each of `views` (view indices, ascending), on [`Self::threads`], and returns their results in
-    /// that order, or the error of the first view in that order that fails: the same error whatever the timing. On
-    /// the calling thread (always for a single view) no view starts after one fails.
+    /// that order, or the error of the first view in that order that fails. Whether a view fails can depend on the
+    /// timing (a pruned view does not read the blocks a threshold from another view skips, SPEC §7.3); hits returned
+    /// without an error do not. On the calling thread (always for a single view) no view starts after one fails.
     pub(super) fn run<T: Send, E: Send>(
         &self,
         views: &[usize],

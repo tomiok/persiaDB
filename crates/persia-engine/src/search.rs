@@ -303,6 +303,16 @@ pub enum ExecError {
     Interrupted(#[from] Interrupt),
 }
 
+impl ExecError {
+    /// Whether a view's bytes are corrupt ([`ReadError::is_corruption`]); an interrupt is not.
+    pub fn is_corruption(&self) -> bool {
+        match self {
+            Self::Read(e) => e.is_corruption(),
+            Self::Interrupted(_) => false,
+        }
+    }
+}
+
 /// How many matches a collector yields between two looks at its [`Watch`]: an interrupt is seen within that many
 /// matches, and reading a clock per match would cost more than most matches do.
 pub(crate) const WATCH_EVERY: u32 = 256;

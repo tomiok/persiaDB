@@ -8,6 +8,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+- `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
+  `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
+
 ### Fixed
 - A search no longer drops a hit whose segment index is missing from the views
   (`RequestError::HitSegment`). A memtable keyword whose term has no ordinal is
@@ -23,8 +27,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   threads (`Threads::Current`, `Threads::Global`, or `Threads::Pool(SearchPool::new(n)?)`), a deadline and a
   `CancelToken` (ROADMAP 7.6.2). Hits, scores and facet counts are the same on any thread. A cancelled or expired
   search returns `search::ExecError::Interrupted` (from `top_k_with`) or `RequestError::Interrupted` (from
-  `search_with`) and no hits; it is checked before each view and every 256 matches. `CollectionViews::top_k` now
-  returns `search::ExecError` instead of `ReadError`.
+  `search_with`) and no hits; it is checked before each view and every 256 matches.
 
 - `persia-engine`: `prefix` and `fuzzy` queries run (ROADMAP 7.4.12, SPEC §7.1). `SearchPlan::with_terms` expands
   each over the terms of the views it will run on (`search::TermSource`: a view, or `db::CollectionViews`), once, so

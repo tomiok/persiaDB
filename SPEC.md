@@ -1317,9 +1317,12 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   threads or the timing. A view that keeps `k` hits shares the worst one's score `t` with the others while they run:
   a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
   scoring below `t` (its tie would rank first). With facets every match is counted, and each view counts its own; the
-  counts are summed. When views fail, the error is the one of the first view in order.
+  counts are summed. When several views fail, the error returned is that of the first of them in order. Whether a
+  view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
+  checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
+  are the same either way.
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. Each view reads them
-  before it starts and every 256 matches it yields, and the search reads them once more before it reads the page's
+  as its collector starts (after its matcher is built) and every 256 matches it yields, and the search reads them once more before it reads the page's
   documents. Once the token is cancelled or the clock reaches the deadline, the search stops with an error
   (cancelled, or deadline exceeded; a cancellation wins) and returns no hits: a page cut short would rank hits a
   full search does not return. Planning (§7.1 expansion) is not covered. Returning the best so far is relaxation's

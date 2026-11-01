@@ -235,7 +235,8 @@ impl CollectionViews<'_> {
     }
 
     /// The views of `segments` (these views' [`Self::segments`]) and the memtable, `segments.len()`, that have a
-    /// document: an empty one matches nothing, and is not worth a task.
+    /// document: an empty one matches nothing, and is not worth a task. `doc_count` counts deleted documents, so only a
+    /// view with no document at all is left out (and its dictionary is not read).
     pub(super) fn with_documents(&self, segments: &[SegmentView<'_>]) -> Vec<usize> {
         let memtable = (self.memtable.doc_count() > 0).then_some(segments.len());
         (0..segments.len())
@@ -401,6 +402,17 @@ mod tests {
             assert_eq!(
                 page.hits.iter().map(|h| h.location).collect::<Vec<_>>(),
                 [first]
+            );
+            // After the first hit, the tie in segment 1 ranks next: the memtable's published score must not skip it.
+            let next = SearchRequest {
+                limit: 1,
+                search_after: page.hits.first().map(crate::db::SearchHit::cursor),
+                ..SearchRequest::default()
+            };
+            let page = views.search_with(&plan, &next, &exec).unwrap();
+            assert_eq!(
+                page.hits.iter().map(|h| h.location).collect::<Vec<_>>(),
+                [Located::Segment { index: 1, docid: 0 }]
             );
         }
     }

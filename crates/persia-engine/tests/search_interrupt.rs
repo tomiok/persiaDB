@@ -20,9 +20,9 @@ use persia_engine::db::{
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{Query, TermQuery};
-use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 use persia_engine::search::{
-    ExecError, Interrupt, Order, Pruning, RequestError, SearchPlan, Sort, SortKey,
+    ExecError, FacetRequest, Interrupt, Order, Pruning, RequestError, SearchPlan, Sort, SortKey,
 };
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
@@ -73,10 +73,18 @@ fn database(per_segment: usize) -> (Database<SimFile>, Query) {
     let schema = SchemaBuilder::new("c")
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("n", FieldKind::I64 { stored: false })
+        .field(
+            "tag",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
         .build()
         .unwrap();
     let body = schema.field("body").unwrap().id();
     let n_field = schema.field("n").unwrap().id();
+    let tag = schema.field("tag").unwrap().id();
     let mut db = Database::create_on(SimFile::new(), [5; 16], DatabaseOptions::default()).unwrap();
     db.create_collection(schema).unwrap();
     for segment in 0..3 {
@@ -86,7 +94,8 @@ fn database(per_segment: usize) -> (Database<SimFile>, Query) {
             let text = format!("common{}", " filler".repeat(i % 7));
             let doc = Document::new(format!("{segment}-{i}"))
                 .with(body, Value::String(text))
-                .with(n_field, Value::I64(i64::try_from(i).unwrap()));
+                .with(n_field, Value::I64(i64::try_from(i).unwrap()))
+                .with(tag, Value::String(format!("t{}", i % 5)));
             db.put("c", &doc, Durability::Buffered).unwrap();
         }
         if segment < 2 {
@@ -281,4 +290,40 @@ fn a_search_with_no_document_is_interrupted_too() {
         views.search_with(&plan, &SearchRequest::default(), &exec),
         Err(RequestError::Interrupted(Interrupt::Cancelled))
     ));
+}
+
+#[test]
+fn a_deadline_passing_mid_view_stops_a_facet_request() {
+    let (db, query) = database(2_000);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let views = c.views(&memtable).unwrap();
+    let tag = c.schema().field("tag").unwrap().id();
+    // A facet visits every match: no threshold, every 256 matches read the clock all the same.
+    let request = SearchRequest {
+        facets: vec![FacetRequest::new(tag, 5, c.schema()).unwrap()],
+        ..SearchRequest::default()
+    };
+    let run = |deadline_ms: u64| {
+        let clock = Arc::new(TickingClock::new());
+        let at = clock.start + Duration::from_millis(deadline_ms);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), at);
+        (views.search_with(&plan, &request, &exec), clock.reads())
+    };
+    let (stopped, reads) = run(3);
+    assert!(matches!(
+        stopped,
+        Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
+    ));
+    assert_eq!(reads, 4, "stopped inside the first view");
+    // One read before the search, 3 as the views start, 7 + 7 within them, one before each view's facet, and one
+    // before the page's documents are read.
+    let (finished, reads) = run(1_000);
+    let counts = &finished.unwrap().facets[0].values;
+    assert_eq!(counts.iter().map(|v| v.count).sum::<u64>(), 4_010);
+    assert_eq!(reads, 1 + 3 + 7 + 7 + 3 + 1);
 }
