@@ -309,6 +309,15 @@ impl TermScorer {
         self.k1
     }
 
+    /// `w_f / (1 − b_f + b_f · len/avglen_f)` of field `slot` of [`Self::fields`] for norm byte `norm`: a frequency
+    /// times it is the field's term of [`Self::tf`]. `None` past the fields.
+    pub fn factor(&self, slot: usize, norm: u8) -> Option<f64> {
+        self.factors
+            .get(slot)
+            .and_then(|table| table.get(usize::from(norm)))
+            .copied()
+    }
+
     /// `tf~(t, d)` of SPEC §7.2: `hits[i]` is the document's hit in field `i` of [`Self::fields`], `None` (or a
     /// frequency of 0) where the field lacks the term. Hits past the fields are ignored; a shorter slice scores
     /// the fields it names.

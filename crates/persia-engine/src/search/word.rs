@@ -83,6 +83,35 @@ impl<'a, V: SearchView + 'a> WordMatcher<'a, V> {
         }))
     }
 
+    /// The current document's hit in each field of the scorer (`None` where it lacks the term), what
+    /// [`Matcher::score`] scores; every field `None` when not on a document. A norm below its block's `min_norm` is
+    /// corruption.
+    pub(super) fn field_hits(&mut self) -> Result<&[Option<FieldHit>], ReadError> {
+        self.hits.fill(None);
+        let Some(doc) = self.pos.doc() else {
+            return Ok(&self.hits);
+        };
+        for field in &mut self.fields {
+            if field.postings.doc() != Some(doc) {
+                continue;
+            }
+            let hit = FieldHit {
+                tf: field.postings.freq()?,
+                norm: match field.norms.as_mut() {
+                    Some(norms) => {
+                        let min_norm = field.postings.block_max().map(|b| b.min_norm);
+                        bounded_norm(norms, field.field, doc, min_norm)?
+                    }
+                    None => 0,
+                },
+            };
+            if let Some(slot) = self.hits.get_mut(field.slot) {
+                *slot = Some(hit);
+            }
+        }
+        Ok(&self.hits)
+    }
+
     /// The first document at or after `target` of any field, stepping each field's postings only when behind.
     #[inline]
     fn step(&mut self, target: u32, started: bool) -> Result<Option<u32>, ReadError> {
@@ -187,29 +216,11 @@ impl<'a, V: SearchView + 'a> Matcher for WordMatcher<'a, V> {
     }
 
     fn score(&mut self) -> Result<f64, ReadError> {
-        let Some(doc) = self.pos.doc() else {
+        if self.pos.doc().is_none() {
             return Ok(0.0);
-        };
-        self.hits.fill(None);
-        for field in &mut self.fields {
-            if field.postings.doc() != Some(doc) {
-                continue;
-            }
-            let hit = FieldHit {
-                tf: field.postings.freq()?,
-                norm: match field.norms.as_mut() {
-                    Some(norms) => {
-                        let min_norm = field.postings.block_max().map(|b| b.min_norm);
-                        bounded_norm(norms, field.field, doc, min_norm)?
-                    }
-                    None => 0,
-                },
-            };
-            if let Some(slot) = self.hits.get_mut(field.slot) {
-                *slot = Some(hit);
-            }
         }
-        Ok(self.scorer.score(&self.hits))
+        let scorer = self.scorer;
+        Ok(scorer.score(self.field_hits()?))
     }
 
     fn max_score(&self) -> f64 {

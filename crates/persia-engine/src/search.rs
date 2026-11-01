@@ -42,6 +42,7 @@
 mod block_max_wand;
 mod boolean;
 mod expand;
+mod explain;
 mod facet;
 mod filter;
 mod max_score;
@@ -53,6 +54,7 @@ mod top_k;
 mod word;
 
 pub use expand::{Expansion, TermSource};
+pub use explain::{Explanation, FieldExplanation, PhraseExplanation, WordExplanation};
 pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,

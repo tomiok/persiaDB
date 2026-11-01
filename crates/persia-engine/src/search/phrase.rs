@@ -95,6 +95,26 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
         }
     }
 
+    /// The current document's phrase frequency and norm byte, what [`Matcher::score`] scores; `None` when not on a
+    /// document. A norm below a term's block `min_norm` is corruption.
+    pub(super) fn field_hit(&mut self) -> Result<Option<FieldHit>, ReadError> {
+        let Some(doc) = self.pos.doc() else {
+            return Ok(None);
+        };
+        // Each term is on `doc`: its block's smallest norm bounds the document's.
+        let min_norm = self
+            .terms
+            .clauses_mut()
+            .iter()
+            .filter_map(|t| t.postings.block_max())
+            .map(|b| b.min_norm)
+            .max();
+        Ok(Some(FieldHit {
+            tf: self.freq,
+            norm: bounded_norm(&mut self.norms, self.field, doc, min_norm)?,
+        }))
+    }
+
     /// From `candidate` on, the first document of the conjunction that holds the phrase.
     fn find(&mut self, mut candidate: Option<u32>) -> Result<Option<u32>, ReadError> {
         while candidate.is_some() {
@@ -139,22 +159,10 @@ impl<'a, V: SearchView + 'a> Matcher for PhraseMatcher<'a, V> {
     }
 
     fn score(&mut self) -> Result<f64, ReadError> {
-        let Some(doc) = self.pos.doc() else {
-            return Ok(0.0);
-        };
-        // Each term is on `doc`: its block's smallest norm bounds the document's.
-        let min_norm = self
-            .terms
-            .clauses_mut()
-            .iter()
-            .filter_map(|t| t.postings.block_max())
-            .map(|b| b.min_norm)
-            .max();
-        let hit = FieldHit {
-            tf: self.freq,
-            norm: bounded_norm(&mut self.norms, self.field, doc, min_norm)?,
-        };
-        Ok(self.scorer.score(&[Some(hit)]))
+        let scorer = self.scorer;
+        Ok(self
+            .field_hit()?
+            .map_or(0.0, |hit| scorer.score(&[Some(hit)])))
     }
 
     fn max_score(&self) -> f64 {

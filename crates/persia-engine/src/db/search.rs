@@ -13,8 +13,8 @@ use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
-    FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Projection, Pruning,
-    RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where, top_sorted,
+    Explanation, FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Projection,
+    Pruning, RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -37,6 +37,9 @@ pub struct SearchRequest {
     pub facets: Vec<FacetRequest>,
     /// The fields each hit returns.
     pub projection: Projection,
+    /// Whether each hit returns how its score adds up ([`SearchHit::explanation`], SPEC §7.7). It costs about one
+    /// unpruned search of the hit's view per hit.
+    pub explain: bool,
 }
 
 impl Default for SearchRequest {
@@ -48,6 +51,7 @@ impl Default for SearchRequest {
             search_after: None,
             facets: Vec::new(),
             projection: Projection::All,
+            explain: false,
         }
     }
 }
@@ -89,6 +93,8 @@ pub struct SearchHit {
     pub sort: Vec<SortValue>,
     /// Its id, blob reference and projected stored fields.
     pub document: Document,
+    /// How its score adds up, when the request set [`SearchRequest::explain`] (SPEC §7.7).
+    pub explanation: Option<Explanation>,
     /// The snapshot, collection and memtable view. [`Self::cursor`] copies it.
     pub origin: CursorOrigin,
 }
@@ -266,12 +272,23 @@ impl CollectionViews<'_> {
                 }
                 Located::Memtable(docid) => self.memtable().document(docid)?,
             };
+            let explanation = if request.explain {
+                match hit.location {
+                    Located::Segment { index, docid } => {
+                        plan.explain(segment_view(&segments, index)?, docid)?
+                    }
+                    Located::Memtable(docid) => plan.explain(self.memtable(), docid)?,
+                }
+            } else {
+                None
+            };
             request.projection.apply(&mut document);
             hits.push(SearchHit {
                 location: hit.location,
                 score: hit.score,
                 sort: hit.values,
                 document,
+                explanation,
                 origin: origin.clone(),
             });
         }

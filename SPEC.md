@@ -1328,7 +1328,7 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   search stops with an error (cancelled, or deadline exceeded; a cancellation wins) and returns no hits: a page cut
   short would rank hits a full search does not return. Between two reads nothing is interrupted: planning (§7.1
   expansion), building a view's matcher, a matcher's walk between two matches it yields, counting one facet over a
-  view's matches, and reading the page's documents run to their end first.
+  view's matches, and reading (and explaining, §7.7) the page's documents run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1399,8 +1399,19 @@ Rules:
 - Relaxation has a time/work budget (`relax.budget_ms`, default 50 ms); exceeding it returns best-so-far with `truncated: true`.
 - Disable per query with `relax: false`.
 
-### 7.7 Highlighting / explain (optional, post-MVP)
-`explain: true` returns per-term BM25 contributions and which relaxation level matched. Highlights are post-v1.
+### 7.7 Highlighting / explain
+`explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the
+clauses that match the document. A word (a `term`, a `combined`, or a term a `prefix` or `fuzzy` kept) gives its
+score, `idf`, `k1` and `tf~` (§7.2), and for each field holding it, in query order: the field, its analyzed term,
+the frequency, the norm byte and the length it stands for (none for a `keyword` field), the factor
+`w_f / (1 − b_f + b_f · len_f(d)/avglen_f)` and the contribution `tf · factor`; the contributions summed in that
+order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length, factor, `tf~`, `k1` and summed `idf`.
+A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
+nothing and are not listed); a `boost` its factor (a `fuzzy` term's edit-distance weight, §7.1, is one); a
+`constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
+bit: it reads the same postings and norms, and sums in the same order. Explaining a hit costs about one unpruned
+search of its view, so it is done for the page's hits only, after the last interrupt read (§7.3), like reading
+their documents. Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
 
 ---
 
