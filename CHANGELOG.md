@@ -26,7 +26,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the page return `SearchHit::explanation`, a `search::Explanation` tree; `SearchPlan::explain(view, docid)` explains
   one document. A word gives its `idf`, `k1`, `tf~` and, per field holding it, the term, frequency, norm byte, length,
   factor and contribution; a phrase its frequency; a `bool` its `must` clauses and the `should` clauses that matched;
-  a `boost` its factor; a `constant_score` its score. The explanation's score is the hit's, bit for bit.
+  a `boost` its factor; a `constant_score` its score. The explanation's score is the hit's, bit for bit. A deadline or
+  a cancellation is read before each hit is explained.
   `score::TermScorer::factor` returns a field's length-normalization factor for a norm byte.
 - `persia-engine`: a collection search runs its views in parallel (ROADMAP 7.6.1, SPEC §7.3). `CollectionViews::top_k`
   and `search` run on rayon's global pool (or, called from a thread of another rayon pool, on that pool);

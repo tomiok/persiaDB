@@ -480,3 +480,31 @@ fn a_replaced_copy_is_not_explained() {
     let b = hits.iter().find(|h| h.0 == "b").unwrap();
     assert!(matches!(b.1, Located::Memtable(_)));
 }
+
+#[test]
+fn a_filter_beside_should_clauses() {
+    let f = fixture();
+    let snapshot = f.db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    // No `must`: the filter selects `b` and `c` (tag `y`), and the `should` clauses only score.
+    let query = Query::Bool(BoolQuery {
+        should: vec![term(f.body, "hat"), term(f.body, "running")],
+        filter: vec![Filter::Term {
+            field: f.tag,
+            value: FilterValue::Keyword("y".into()),
+        }],
+        ..BoolQuery::default()
+    });
+    let hits = explained(c, &memtable, &query);
+    assert_eq!(hits.len(), 2);
+    let (_, _, score, b) = hits.iter().find(|h| h.0 == "b").unwrap();
+    let Explanation::Bool { must, should, .. } = b else {
+        panic!("a bool: {b:?}")
+    };
+    assert_eq!((must.len(), should.len()), (0, 1));
+    assert_eq!(score.to_bits(), should[0].score().to_bits());
+    // `c` matches no `should`: selected, scoring 0.
+    let (_, _, score, e) = hits.iter().find(|h| h.0 == "c").unwrap();
+    assert_eq!((e, score.to_bits()), (&Explanation::All, 0.0_f64.to_bits()));
+}

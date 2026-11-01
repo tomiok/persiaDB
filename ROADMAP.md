@@ -491,6 +491,7 @@ Deps: M5 (M6 for end-to-end).
 
 ## 7.7 Explain
 - [~] 7.7.1 Per-hit score breakdown (per term/field) when `explain: true`
+- [ ] 7.7.2 Explain a page in one pass per view: today each hit builds its leaf matchers again and a filtered `bool` selects its filters over the whole view again (`search_suite/explain_filtered` 2.14 ms vs 463 µs for `filtered`); sort the view's hits by docid, build the tree once and advance it, selecting each filter once (SPEC §7.7, found in the 7.7 review)
 
 ## 7.8 Tests & benchmarks
 - [~] 7.8.1 Differential suite vs. reference engine (random corpora/queries)

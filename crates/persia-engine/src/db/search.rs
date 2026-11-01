@@ -273,12 +273,17 @@ impl CollectionViews<'_> {
                 Located::Memtable(docid) => self.memtable().document(docid)?,
             };
             let explanation = if request.explain {
-                match hit.location {
+                // An explanation costs about an unpruned search of its view: each one is stoppable (SPEC §7.3).
+                exec.interrupt()?;
+                let explained = match hit.location {
                     Located::Segment { index, docid } => {
                         plan.explain(segment_view(&segments, index)?, docid)?
                     }
                     Located::Memtable(docid) => plan.explain(self.memtable(), docid)?,
-                }
+                };
+                // Every hit matched the plan in its view, so it has one.
+                debug_assert!(explained.is_some(), "a hit the plan does not explain");
+                explained
             } else {
                 None
             };

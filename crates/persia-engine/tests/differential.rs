@@ -265,6 +265,9 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
                 prop::collection::vec(inner.clone(), 0..2),
             )
                 .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not }),
+            // Wide: a disjunction past its few-clause scan, onto its heap (ROADMAP 7.4.7).
+            1 => prop::collection::vec(leaf(params), 9..14)
+                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new() }),
             1 => (inner.clone(), 0.5..4.0_f64).prop_map(|(q, b)| RefQuery::Boost(Box::new(q), b)),
             1 => (inner, 0.0..5.0_f64).prop_map(|(q, s)| RefQuery::Constant(Box::new(q), s)),
         ]
@@ -310,8 +313,9 @@ fn params() -> impl Strategy<Value = Params> {
 struct Case {
     params: Params,
     ops: Vec<Op>,
-    /// Each with an optional filter.
-    queries: Vec<(RefQuery, Option<Filter>)>,
+    /// Each with an optional filter, and whether the query is beside it as a `should` (optional: every selected
+    /// document matches, scoring the query or 0) rather than as the `must`.
+    queries: Vec<(RefQuery, Option<(Filter, bool)>)>,
     k: usize,
 }
 
@@ -323,7 +327,10 @@ fn case() -> impl Strategy<Value = Case> {
             Just(p),
             prop::collection::vec(op(), 1..20),
             prop::collection::vec(
-                (query(p), prop::option::weighted(0.4, filter(tag, n))),
+                (
+                    query(p),
+                    prop::option::weighted(0.5, (filter(tag, n), any::<bool>())),
+                ),
                 1..4,
             ),
             1..6_usize,
@@ -523,13 +530,25 @@ fn check(
     let all = live.len().max(1);
     for (q, filter) in &case.queries {
         let mut query = engine_query(q, &fields);
-        if let Some(f) = filter {
-            query = Query::Bool(BoolQuery {
-                must: vec![query],
-                filter: vec![f.clone()],
-                ..BoolQuery::default()
-            });
+        match filter {
+            Some((f, false)) => {
+                query = Query::Bool(BoolQuery {
+                    must: vec![query],
+                    filter: vec![f.clone()],
+                    ..BoolQuery::default()
+                });
+            }
+            // No `must`: the filter alone selects, and the `should` only scores (SPEC §7.1).
+            Some((f, true)) => {
+                query = Query::Bool(BoolQuery {
+                    should: vec![query],
+                    filter: vec![f.clone()],
+                    ..BoolQuery::default()
+                });
+            }
+            None => {}
         }
+        let optional = matches!(filter, Some((_, true)));
         query.validate(schema, &QueryLimits::default()).unwrap();
         let plan = SearchPlan::new(&query, schema, &stats).unwrap();
 
@@ -539,9 +558,12 @@ fn check(
             .filter(|(id, v)| {
                 filter
                     .as_ref()
-                    .is_none_or(|f| selects(f, &v.document(&fields, id), schema))
+                    .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
             })
-            .filter_map(|(id, v)| corpus.eval(q, &v.doc).map(|s| (id, s)))
+            .filter_map(|(id, v)| match corpus.eval(q, &v.doc) {
+                None if optional => Some((id, (0.0, 0.0))),
+                s => s.map(|s| (id, s)),
+            })
             .collect();
         let request = SearchRequest {
             limit: all,

@@ -166,12 +166,7 @@ pub(super) fn explain<V: SearchView>(
                 },
             })
         }
-        Node::All => {
-            if docid >= view.doc_count() || view.deleted().contains(docid) {
-                return Ok(None);
-            }
-            Some(Explanation::All)
-        }
+        Node::All => view.is_live(docid).then_some(Explanation::All),
         Node::Nothing => None,
     })
 }
@@ -280,8 +275,7 @@ fn boolean<V: SearchView>(
     }
     if musts.is_empty() && shoulds.is_empty() {
         // Every live document of the view, or those the filters select (already live).
-        let live =
-            !filter.is_empty() || (docid < view.doc_count() && !view.deleted().contains(docid));
+        let live = !filter.is_empty() || view.is_live(docid);
         return Ok(live.then_some(Explanation::All));
     }
     // As the matchers add: the conjunction's sum, then the optional disjunction's when it matches.

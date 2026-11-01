@@ -11,7 +11,8 @@
 //! 2. nDCG@10 per query and its mean are the baseline recorded in `tests/relevance/baseline.txt`, to four decimals.
 //!    A change to analysis or scoring that moves any of them fails here: if it is intended, replace the file with
 //!    the table the failure prints, and say in the PR which queries moved and why. The regression gate with a
-//!    tolerance is ROADMAP 7.8.4.
+//!    tolerance is ROADMAP 7.8.4. Four decimals depend on `ln`, `log2` and `powf`, which need not round the same on
+//!    every platform: a value on a rounding boundary could flip there, which 7.8.4's tolerance will absorb.
 //!
 //! nDCG@10 is `DCG@10 / IDCG@10`, with `DCG@10 = Σ_{i=1..10} (2^grade_i − 1) / log2(i + 1)` over the hits in rank
 //! order, and `IDCG@10` the same over the judgments sorted by grade.

@@ -332,3 +332,44 @@ fn a_deadline_passing_mid_view_stops_a_facet_request() {
     assert_eq!(counts.iter().map(|v| v.count).sum::<u64>(), 4_010);
     assert_eq!(reads, 1 + 3 + 7 + 7 + 3 + 1);
 }
+
+#[test]
+fn a_deadline_stops_explaining_a_page() {
+    let (db, query) = database(100);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let views = c.views(&memtable).unwrap();
+    let run = |explain: bool, deadline_ms: u64| {
+        let clock = Arc::new(TickingClock::new());
+        let at = clock.start + Duration::from_millis(deadline_ms);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), at);
+        let request = SearchRequest {
+            explain,
+            ..SearchRequest::default()
+        };
+        (views.search_with(&plan, &request, &exec), clock.reads())
+    };
+    let (unexplained, reads) = run(false, 1_000);
+    let hits = unexplained.unwrap().hits.len();
+    assert_eq!(hits, 20);
+    // One more read before each hit is explained (SPEC §7.3).
+    let (explained, with) = run(true, 1_000);
+    assert!(
+        explained
+            .unwrap()
+            .hits
+            .iter()
+            .all(|h| h.explanation.is_some())
+    );
+    assert_eq!(with, reads + 20);
+    // A deadline that passes while the page is explained: an error, no page.
+    let (stopped, _) = run(true, reads + 5);
+    assert!(matches!(
+        stopped,
+        Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
+    ));
+}

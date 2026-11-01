@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc a249b882803f86f0655e5ed1e5ac5f236bb990d75f8d4e8601f1dda44802570a # shrinks to Case { params: [(1.0, 1.2, 0.75), (1.0, 1.2, 0.9505371187540455)], ops: [Put(0, Values { doc: [["bee", "ant", "ant"], [], []], n: None })], queries: [(Bool { must: [Word([Clause { field: 0, term: "ant", weight: 1.0 }])], should: [], must_not: [] }, Some(Not(Term { field: FieldId(2), value: Keyword("y") })))], k: 1 }
+cc 91e07f7544b4923771d97aaa4b3240c0e0fb43cceb318e2c410ba2f898e0b323 # shrinks to Case { params: [(1.0, 1.2, 0.0), (1.0, 1.2, 0.75)], ops: [Put(0, Values { doc: [[], [], []], n: None })], queries: [(Constant(Word([Clause { field: 2, term: "x", weight: 1.0 }]), 4.938464135181659), Some((Not(Exists { field: FieldId(1) }), true)))], k: 2 }

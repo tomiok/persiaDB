@@ -2,8 +2,8 @@
 //! (of 3 clauses, and of 50 as a relaxation expansion builds, 7.4.7) and a phrase with the default pruning
 //! (block-max WAND), each strategy of 7.4.4 side by side, prefix and fuzzy expansions planned and searched (7.4.12),
 //! and a term under filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted
-//! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`). Deterministic input (a fixed-seed generator), so runs
-//! compare. Run: `cargo bench -p persia-engine --bench search`.
+//! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`).
+//! Deterministic input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
 
@@ -412,10 +412,11 @@ fn parallel(c: &mut Criterion) {
     group.finish();
 }
 
-/// The query suite (ROADMAP 7.8.3), each a whole request end to end over 4 segments, on the default pool: plan,
-/// search, merge, and the page's 10 documents read. `term` is `w3`, `and` is `w3 w40` as user text (SPEC §7.1.1),
+/// The query suite (ROADMAP 7.8.3), each a whole request end to end over 4 segments, on the default pool: search,
+/// merge, and the page's 10 documents read (planned once, outside the loop). `term` is `w3`, `and` is `w3 w40` as user text (SPEC §7.1.1),
 /// `or` is `w3 OR w40 OR w120`, `phrase` is `"w0 w1"`, `filtered` is `w3` with `price < 100`, `sorted` is `w3` by
-/// price, `facets` is `w3` with a `tag` facet, and `explain` is `term` with every hit explained (SPEC §7.7).
+/// price, `facets` is `w3` with a `tag` facet, `explain` is `term` with every hit explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, a
+/// filter selected again per hit.
 fn suite(c: &mut Criterion) {
     let (db, [body, price, tag]) = collection(4, true);
     let snapshot = db.snapshot();
@@ -436,6 +437,15 @@ fn suite(c: &mut Criterion) {
         limit: 10,
         ..SearchRequest::default()
     };
+    let filtered = Query::Bool(BoolQuery {
+        must: vec![term("w3")],
+        filter: vec![Filter::Range {
+            field: price,
+            lower: Bound::Unbounded,
+            upper: Bound::Excluded(FilterValue::I64(100)),
+        }],
+        ..BoolQuery::default()
+    });
     let cases = [
         ("term", term("w3"), page.clone()),
         (
@@ -460,19 +470,7 @@ fn suite(c: &mut Criterion) {
                 .query,
             page.clone(),
         ),
-        (
-            "filtered",
-            Query::Bool(BoolQuery {
-                must: vec![term("w3")],
-                filter: vec![Filter::Range {
-                    field: price,
-                    lower: Bound::Unbounded,
-                    upper: Bound::Excluded(FilterValue::I64(100)),
-                }],
-                ..BoolQuery::default()
-            }),
-            page.clone(),
-        ),
+        ("filtered", filtered.clone(), page.clone()),
         (
             "sorted",
             term("w3"),
@@ -492,6 +490,14 @@ fn suite(c: &mut Criterion) {
         (
             "explain",
             term("w3"),
+            SearchRequest {
+                explain: true,
+                ..page.clone()
+            },
+        ),
+        (
+            "explain_filtered",
+            filtered.clone(),
             SearchRequest {
                 explain: true,
                 ..page

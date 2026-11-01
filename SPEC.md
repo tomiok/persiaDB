@@ -1323,12 +1323,13 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   are the same either way.
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
   search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
-  matcher is built), every 256 matches a view yields, before each facet a view counts, and before the page's
-  documents are read. At the first read that finds the token cancelled or the clock at or past the deadline, the
-  search stops with an error (cancelled, or deadline exceeded; a cancellation wins) and returns no hits: a page cut
-  short would rank hits a full search does not return. Between two reads nothing is interrupted: planning (§7.1
-  expansion), building a view's matcher, a matcher's walk between two matches it yields, counting one facet over a
-  view's matches, and reading (and explaining, §7.7) the page's documents run to their end first.
+  matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
+  documents are read, and before each hit is explained (§7.7). At the first read that finds the token cancelled or
+  the clock at or past the deadline, the search stops with an error (cancelled, or deadline exceeded; a cancellation
+  wins) and returns no hits: a page cut short would rank hits a full search does not return. Between two reads
+  nothing is interrupted: planning (§7.1 expansion), building a view's matcher, a matcher's walk between two
+  matches it yields, counting one facet over a view's matches, reading the page's documents, and explaining one
+  hit run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1410,8 +1411,8 @@ A `bool` lists every `must` clause and the `should` clauses that match, in query
 nothing and are not listed); a `boost` its factor (a `fuzzy` term's edit-distance weight, §7.1, is one); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. Explaining a hit costs about one unpruned
-search of its view, so it is done for the page's hits only, after the last interrupt read (§7.3), like reading
-their documents. Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
+search of its view, so it is done for the page's hits only, and a deadline or a cancellation is read before each
+(§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
 
 ---
 
