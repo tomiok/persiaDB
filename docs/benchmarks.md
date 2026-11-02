@@ -242,7 +242,8 @@ reusing the search's filter selections (ROADMAP 7.7.3). Command: `cargo bench -p
 | Recorded | `term` | `and` | `or` | `phrase` | `filtered` | `sorted` | `facets` | `explain` | `explain_filtered` |
 |---|--:|--:|--:|--:|--:|--:|--:|--:|--:|
 | 2026-11-01, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.8.3) | 242 µs | 220 µs | 637 µs | 304 µs | 463 µs | 344 µs | 544 µs | 280 µs | 2.14 ms |
-| 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.7.3; only `explain_filtered` remeasured) | — | — | — | — | — | — | — | — | 566 µs |
+| 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.7.3; only `explain_filtered`) | — | — | — | — | — | — | — | — | 566 µs |
+| 2026-11-02, same machine and session as the row above, main before this change (only `explain_filtered`) | — | — | — | — | — | — | — | — | 1.42 ms |
 
 ## `persia-engine` relevance
 
