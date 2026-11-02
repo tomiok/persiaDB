@@ -1316,7 +1316,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   own pool). Each view keeps its own top-k; they merge in view order into the global top-k (the order below), so the
   hits, scores bit for bit, do not depend on the threads or the timing. A view that keeps `k` hits shares the worst one's score `t` with the others while they run:
   a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
-  scoring below `t` (its tie would rank first). With facets every match is counted, and each view counts its own; the
+  scoring below `t` (its tie would rank first). When the views that have finished are a prefix of the view order
+  (always on the calling thread, where they run in order), the `k`-th best score of all their hits merged is shared
+  as well; every view still running comes after them, so it may skip a document scoring at most that. With facets every match is counted, and each view counts its own; the
   counts are summed. When several views fail, the error returned is that of the first of them in order. Whether a
   view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
   checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
@@ -1324,12 +1326,19 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 - A search may carry a deadline (an instant of an injected clock) and a cancellation token. They are read before the
   search starts (so a search with no view to run, or `k = 0`, stops too), as each view's collector starts (after its
   matcher is built), every 256 matches a view yields, before each facet a view counts, before the page's
-  documents are read, and before each hit is explained (§7.7). At the first read that finds the token cancelled or
+  documents are read, and before the hits of each view are explained (§7.7). The readers of a view a search opens read them too, every
+  1024 steps of all of them together: a postings list (a document moved to, a block bound skipped to), a term stream,
+  a column scan, a column's keys or values read by docid, and a scan for the next live document (`match_all`); a
+  §7.1 expansion walked through the search counts its steps over every view as one. So a matcher's walk between two matches (a phrase whose terms never
+  line up, a conjunction or a pruning disjunction skipping), a filter's scan while a view's matcher is built,
+  counting a facet, a column sort, explaining a hit and, when planning walks the terms through the search's
+  execution, a §7.1 expansion stop too. At the first read that finds the token cancelled or
   the clock at or past the deadline, the search stops with an error (cancelled, or deadline exceeded; a cancellation
   wins) and returns no hits: a page cut short would rank hits a full search does not return. Between two reads
-  nothing is interrupted: planning (§7.1 expansion), building a view's matcher, a matcher's walk between two
-  matches it yields, counting one facet over a view's matches, reading the page's documents, and explaining one
-  hit run to their end first.
+  nothing is interrupted: a step of a reader (one block decoded, one term of an automaton's walk over the
+  dictionary), set operations on bitmaps, the memtable's copy of a field's terms in range (before the automaton runs)
+  or of its column keys (a bulk copy under its lock, bounded by the memtable's size), and reading the page's documents
+  run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1410,9 +1419,12 @@ order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length
 A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
 nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
-bit: it reads the same postings and norms, and sums in the same order. Explaining a hit costs about one unpruned
-search of its view, so it is done for the page's hits only, and a deadline or a cancellation is read before each
-(§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
+bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
+time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters selected the
+first time they are needed) and advanced over its hits in docid order, so a page costs about one unpruned search of
+each view holding its hits, plus one more selection of each `bool`'s filters per view: the explanation selects them
+again rather than reuse the search's selection (ROADMAP 7.7.3). It is done for the page's hits only, and a deadline or a cancellation is read before
+each view and while its readers walk (§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
 
 ---
 

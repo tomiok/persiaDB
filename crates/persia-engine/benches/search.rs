@@ -16,8 +16,8 @@ use persia_engine::document::{Document, Value};
 use std::ops::Bound;
 
 use persia_engine::db::{
-    Database, DatabaseOptions, Execution, ManualClock, SearchHit, SearchRequest, SegmentIds,
-    Threads,
+    CancelToken, Clock, Database, DatabaseOptions, Execution, ManualClock, SearchHit,
+    SearchRequest, SegmentIds, SystemClock, Threads,
 };
 use persia_engine::query::{
     BoolQuery, DefaultFields, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm,
@@ -408,15 +408,26 @@ fn parallel(c: &mut Criterion) {
                 b.iter(|| black_box(views.search_with(&plan, &request, &exec).unwrap()));
             });
         }
+        // The cost of a deadline that never passes: the system clock read every 256 matches and 1024 reads of a
+        // view's readers (ROADMAP 7.6.3).
+        let far = SystemClock.now() + std::time::Duration::from_secs(3600);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(Arc::new(SystemClock), far)
+            .cancel(CancelToken::new());
+        group.bench_function(format!("{name}/current_deadline"), |b| {
+            b.iter(|| black_box(views.search_with(&plan, &request, &exec).unwrap()));
+        });
     }
     group.finish();
 }
 
 /// The query suite (ROADMAP 7.8.3), each a whole request end to end over 4 segments, on the default pool: search,
-/// merge, and the page's 10 documents read (planned once, outside the loop). `term` is `w3`, `and` is `w3 w40` as user text (SPEC §7.1.1),
-/// `or` is `w3 OR w40 OR w120`, `phrase` is `"w0 w1"`, `filtered` is `w3` with `price < 100`, `sorted` is `w3` by
-/// price, `facets` is `w3` with a `tag` facet, `explain` is `term` with every hit explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, a
-/// filter selected again per hit.
+/// merge, and the page's 10 documents read (planned once, outside the loop). `term` is `w3`, `and` is `w3 w40` as
+/// user text (SPEC §7.1.1), `or` is `w3 OR w40 OR w120`, `phrase` is `"w0 w1"`, `filtered` is `w3` with
+/// `price < 100`, `sorted` is `w3` by price, `facets` is `w3` with a `tag` facet, `explain` is `term` with every hit
+/// explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, one pass per view selecting the filter once
+/// (ROADMAP 7.7.2).
 fn suite(c: &mut Criterion) {
     let (db, [body, price, tag]) = collection(4, true);
     let snapshot = db.snapshot();

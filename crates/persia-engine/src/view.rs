@@ -219,6 +219,16 @@ pub trait SearchView {
     /// already leave deleted documents out; this is for documents reached otherwise (a filter, a sort).
     fn is_live(&self, docid: u32) -> bool;
 
+    /// The first document at or after `from` that [`Self::is_live`] accepts, `None` when there is none: what
+    /// `match_all` and a `bool` without `must` or `should` walk. A search's interrupts read it as it scans
+    /// (ROADMAP 7.6.3).
+    ///
+    /// # Errors
+    /// None from a segment or the memtable; [`ReadError::Interrupted`] from a view a search wraps.
+    fn next_live(&self, from: u32) -> Result<Option<u32>, ReadError> {
+        Ok((from..self.doc_count()).find(|&d| self.is_live(d)))
+    }
+
     /// The statistics of a `text` or `keyword` field (SPEC §5.1); `None` for another type or a field the source
     /// has no statistics for. A segment counts its deleted documents too; the memtable counts live ones, which is
     /// what the segment it flushes to will count.
@@ -281,7 +291,22 @@ pub trait SearchView {
     /// # Errors
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
     /// source.
-    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError>;
+    fn column_keys(&self, field: FieldId, mut f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
+        self.try_column_keys(field, |docid, key| {
+            f(docid, key);
+            Ok(())
+        })
+    }
+
+    /// As [`Self::column_keys`], stopping at the first error `f` returns.
+    ///
+    /// # Errors
+    /// As [`Self::column_keys`]; what `f` returns.
+    fn try_column_keys(
+        &self,
+        field: FieldId,
+        f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError>;
 
     /// The norms of a `text` field (SPEC §5.3.4), for scoring each candidate document: a reader that keeps what it
     /// read (a segment's [`NormsCursor`]; the memtable's norms as of the view, copied once per view and field).
@@ -482,8 +507,12 @@ impl SearchView for SegmentView<'_> {
         self.segment.trues(field)
     }
 
-    fn column_keys(&self, field: FieldId, f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
-        self.segment.column_keys(field, f)
+    fn try_column_keys(
+        &self,
+        field: FieldId,
+        f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        self.segment.try_column_keys(field, f)
     }
 
     fn keys(&self, field: FieldId) -> Result<SegmentKeys<'_>, ReadError> {

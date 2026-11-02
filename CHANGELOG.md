@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
+- `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
+  callback can stop the scan with an error (`Segment::try_column_keys` too). `ReadError` has an `Interrupted` variant
+  and `SearchError` an `Interrupted` one; `SearchView::next_live` is a new provided method, the scan `match_all`
+  walks (ROADMAP 7.6.3).
 
 ### Fixed
 - A search no longer drops a hit whose segment index is missing from the views
@@ -22,6 +26,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
+  are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
+  best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.
+- `persia-engine`: `SearchPlan::explain_all(view, docids)` explains many documents of a view in one pass (ROADMAP
+  7.7.2, SPEC §7.7): the tree is built once and advanced in docid order, each `bool` selecting its filters once. A
+  search with `explain: true` explains its page that way, one pass per view holding hits, and reads the deadline and
+  the token before each view instead of before each hit.
+- `persia-engine`: a deadline or a cancellation now also stops a search between two matches (ROADMAP 7.6.3, SPEC
+  §7.3). The readers a collection search opens on a view (postings lists, term streams, column scans, column
+  readers, live-document scans) share one count and read them every 1024 steps. So a phrase whose terms never line
+  up, a conjunction or a pruning disjunction that skips, a filter scan, a facet count, a column sort and explaining
++  a hit stop too. Explain still selects a `bool`'s filters once more per view (ROADMAP 7.7.3). Not interrupted: one block decode, set operations on bitmaps, the memtable's copy of a field's
+  terms or column keys, and reading the page's documents. `Execution::terms(&views)` gives the terms for
+  `SearchPlan::with_terms` under the same deadline and token, so planning a `prefix` or `fuzzy` returns
+  `SearchError::Interrupted`.
 - `persia-engine`: per-hit score breakdowns (ROADMAP 7.7.1, SPEC §7.7). `SearchRequest::explain` makes each hit of
   the page return `SearchHit::explanation`, a `search::Explanation` tree; `SearchPlan::explain(view, docid)` explains
   one document. A word gives its `idf`, `k1`, `tf~` and, per field holding it, the term, frequency, norm byte, length,

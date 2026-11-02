@@ -17,7 +17,7 @@ use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
 use super::expand::{Expansion, TermSource, expand};
-use super::explain::{Explanation, explain};
+use super::explain::{Explanation, explain_all};
 use super::filter::{FilterDocs, Filtered, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
@@ -187,8 +187,8 @@ impl SearchPlan {
 
     /// How `docid` of `view` scores under the plan (SPEC §7.7): per word, its `idf`, `k1`, `tf~` and each field's
     /// frequency, norm and part of `tf~`; `None` when the plan does not match it (a deleted document included). The
-    /// score is the one a search gives the hit, bit for bit. It costs about an unpruned search of `view`, so it is
-    /// meant for the hits of a page.
+    /// score is the one a search gives the hit, bit for bit. It costs about an unpruned search of `view`: explain
+    /// the hits of a page in a view together with [`Self::explain_all`].
     ///
     /// ```
     /// use std::sync::Arc;
@@ -230,7 +230,53 @@ impl SearchPlan {
         view: &V,
         docid: u32,
     ) -> Result<Option<Explanation>, ReadError> {
-        explain(&self.root, view, docid)
+        Ok(explain_all(&self.root, view, &[docid])?.pop().flatten())
+    }
+
+    /// As [`Self::explain`] for each of `docids`, in that order, in one pass over `view` (ROADMAP 7.7.2): the tree is
+    /// built once and walked in docid order, and each `bool` selects its filters once. Explaining the hits of a page
+    /// in a view costs about one unpruned search of it, not one per hit.
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::document::{Document, Value};
+    /// use persia_engine::query::{Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::SearchPlan;
+    /// use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// use persia_engine::stats::SegmentStatistics;
+    /// use persia_engine::view::SegmentView;
+    /// use persia_format::ByteSource;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// for (id, text) in [("a", "red shoes"), ("b", "blue hat"), ("c", "red red hat")] {
+    ///     b.add(&Document::new(id).with(body, Value::String(text.into())))?;
+    /// }
+    /// let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// let segment = Arc::new(Segment::open(ByteSource::new(SegmentWriter::new(&b, meta).finish()?.into()), &schema)?);
+    /// let schema = Arc::new(schema);
+    /// let stats = SegmentStatistics::new(&schema, &[Arc::clone(&segment)]);
+    /// let view = SegmentView::new(&segment, None);
+    ///
+    /// let plan = SearchPlan::new(&Query::Term(TermQuery { field: body, term: "red".into() }), &schema, &stats)?;
+    /// // Any order: the answers come back in the order asked.
+    /// let explained = plan.explain_all(&view, &[2, 1, 0])?;
+    /// assert_eq!(explained.iter().map(Option::is_some).collect::<Vec<_>>(), [true, false, true]);
+    /// assert_eq!(explained[2], plan.explain(&view, 0)?);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::matcher`].
+    pub fn explain_all<V: SearchView>(
+        &self,
+        view: &V,
+        docids: &[u32],
+    ) -> Result<Vec<Option<Explanation>>, ReadError> {
+        explain_all(&self.root, view, docids)
     }
 }
 

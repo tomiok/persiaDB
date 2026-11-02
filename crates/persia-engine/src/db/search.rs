@@ -13,8 +13,9 @@ use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
-    Explanation, FacetCounter, FacetCounts, FacetRequest, MAX_FACETS, MAX_WINDOW, Projection,
-    Pruning, RequestError, SearchPlan, Sort, SortValue, Ties, Watch, collect_where, top_sorted,
+    Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
+    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Steps, Ties, Watch,
+    collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
 
@@ -38,7 +39,7 @@ pub struct SearchRequest {
     /// The fields each hit returns.
     pub projection: Projection,
     /// Whether each hit returns how its score adds up ([`SearchHit::explanation`], SPEC §7.7). It costs about one
-    /// unpruned search of the hit's view per hit.
+    /// unpruned search of each view holding hits of the page ([`SearchPlan::explain_all`]).
     pub explain: bool,
 }
 
@@ -229,14 +230,15 @@ impl CollectionViews<'_> {
         let search = Search {
             plan,
             request,
-            pruning: exec.pruning,
+            exec,
             window,
         };
         // Read once before any view: a search with no view to run stops too.
         exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
-        let thresholds = Thresholds::new(segments.len().saturating_add(1));
-        let found = exec.run(&self.with_documents(&segments), |index| {
+        let run = self.with_documents(&segments);
+        let thresholds = Thresholds::new(segments.len().saturating_add(1), &run, window);
+        let found = exec.run(&run, |index| {
             let mut watch = thresholds.watch(exec, index);
             match segments.get(index) {
                 Some(view) => search.view(view, index, &mut watch, |docid| Located::Segment {
@@ -263,29 +265,21 @@ impl CollectionViews<'_> {
         // Reading the page's documents is the last stage a deadline stops.
         exec.interrupt()?;
 
+        let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
+        let mut explanations = if request.explain {
+            self.explain_page(plan, &segments, &page, exec)?
+        } else {
+            Vec::new()
+        }
+        .into_iter();
         let origin = self.cursor_origin();
-        let mut hits = Vec::new();
-        for hit in ranked.into_iter().skip(request.offset) {
+        let mut hits = Vec::with_capacity(page.len());
+        for hit in page {
             let mut document = match hit.location {
                 Located::Segment { index, docid } => {
                     segment_view(&segments, index)?.document(docid)?
                 }
                 Located::Memtable(docid) => self.memtable().document(docid)?,
-            };
-            let explanation = if request.explain {
-                // An explanation costs about an unpruned search of its view: each one is stoppable (SPEC §7.3).
-                exec.interrupt()?;
-                let explained = match hit.location {
-                    Located::Segment { index, docid } => {
-                        plan.explain(segment_view(&segments, index)?, docid)?
-                    }
-                    Located::Memtable(docid) => plan.explain(self.memtable(), docid)?,
-                };
-                // Every hit matched the plan in its view, so it has one.
-                debug_assert!(explained.is_some(), "a hit the plan does not explain");
-                explained
-            } else {
-                None
             };
             request.projection.apply(&mut document);
             hits.push(SearchHit {
@@ -293,7 +287,7 @@ impl CollectionViews<'_> {
                 score: hit.score,
                 sort: hit.values,
                 document,
-                explanation,
+                explanation: explanations.next().flatten(),
                 origin: origin.clone(),
             });
         }
@@ -301,6 +295,51 @@ impl CollectionViews<'_> {
             hits,
             facets: facets.into_iter().map(FacetCounter::finish).collect(),
         })
+    }
+
+    /// The explanation of each hit of `page`, in page order (SPEC §7.7): one pass per view holding hits, in view
+    /// order, each stoppable before it starts and while it reads (SPEC §7.3).
+    fn explain_page(
+        &self,
+        plan: &SearchPlan,
+        segments: &[SegmentView<'_>],
+        page: &[Ranked],
+        exec: &Execution,
+    ) -> Result<Vec<Option<Explanation>>, RequestError> {
+        // (view order, docid, page index), so each view's hits are together and in docid order.
+        let mut by_view: Vec<(usize, u32, usize)> = page
+            .iter()
+            .enumerate()
+            .map(|(i, hit)| {
+                let (view, docid) = order(hit.location);
+                (view, docid, i)
+            })
+            .collect();
+        by_view.sort_unstable();
+        let mut out = vec![None; page.len()];
+        for group in by_view.chunk_by(|a, b| a.0 == b.0) {
+            exec.interrupt()?;
+            let docids: Vec<u32> = group.iter().map(|&(_, docid, _)| docid).collect();
+            let explained = match group.first().map(|&(view, ..)| view) {
+                Some(usize::MAX) => plan.explain_all(
+                    &Interruptible::new(self.memtable(), &Steps::new(exec)),
+                    &docids,
+                )?,
+                Some(index) => plan.explain_all(
+                    &Interruptible::new(segment_view(segments, index)?, &Steps::new(exec)),
+                    &docids,
+                )?,
+                None => continue,
+            };
+            for (&(.., i), explanation) in group.iter().zip(explained) {
+                // Every hit matched the plan in its view, so it has one.
+                debug_assert!(explanation.is_some(), "a hit the plan does not explain");
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = explanation;
+                }
+            }
+        }
+        Ok(out)
     }
 
     fn cursor_origin(&self) -> CursorOrigin {
@@ -316,7 +355,7 @@ impl CollectionViews<'_> {
 struct Search<'r> {
     plan: &'r SearchPlan,
     request: &'r SearchRequest,
-    pruning: Pruning,
+    exec: &'r Execution,
     window: usize,
 }
 
@@ -331,13 +370,15 @@ impl Search<'_> {
         location: impl Fn(u32) -> Located,
     ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
         let sort = &self.request.sort;
+        let steps = Steps::new(self.exec);
+        let view = &Interruptible::new(view, &steps);
         let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;
         let mut matcher = self.plan.matcher_with(
             view,
             if prune {
-                self.pruning
+                self.exec.pruning
             } else {
                 Pruning::Exhaustive
             },

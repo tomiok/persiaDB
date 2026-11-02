@@ -2,6 +2,7 @@
 
 use crate::document::DecodeError;
 use crate::schema::{FieldId, FieldType};
+use crate::search::Interrupt;
 
 use super::super::SectionKind;
 
@@ -110,6 +111,10 @@ pub enum ReadError {
         /// The field.
         field: FieldId,
     },
+    /// A search stopped the read: its token was cancelled or its deadline passed (ROADMAP 7.6.3). Not about the
+    /// bytes at all; a search returns it as its own interrupt error.
+    #[error(transparent)]
+    Interrupted(Interrupt),
 }
 
 impl ReadError {
@@ -126,7 +131,8 @@ impl ReadError {
             | Self::UnknownField { .. }
             | Self::OrdinalOutOfRange { .. }
             | Self::ForeignTermInfo
-            | Self::Tombstone { .. } => false,
+            | Self::Tombstone { .. }
+            | Self::Interrupted(_) => false,
         }
     }
 }

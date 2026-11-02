@@ -2,8 +2,11 @@
 //! word with its BM25F parts per field (SPEC §7.2).
 //!
 //! An explanation reads the same postings and norms a matcher does and sums in the same order, so its score is the
-//! hit's, bit for bit. It builds a fresh exhaustive matcher per leaf and evaluates a `bool`'s filters over the whole
-//! view, so it costs about one unpruned search per document: it is for the hits of a page, not every match.
+//! hit's, bit for bit. The tree is built once per view, its leaves exhaustive matchers, and the documents asked are
+//! walked in docid order, each `bool` selecting its filters once (ROADMAP 7.7.2): the hits of a page in a view cost
+//! about one unpruned search of it.
+
+use roaring::RoaringBitmap;
 
 use crate::query::Filter;
 use crate::schema::FieldId;
@@ -13,7 +16,9 @@ use crate::view::SearchView;
 
 use super::boolean::Scale;
 use super::filter::select;
+use super::phrase::PhraseMatcher;
 use super::plan::{Node, phrase_matcher, word_matcher};
+use super::word::WordMatcher;
 use super::{Matcher, Pruning, sum_in_order};
 
 /// How a document's score adds up (SPEC §7.7): a tree like the query's, with only the clauses that match it.
@@ -131,56 +136,151 @@ pub struct PhraseExplanation {
     pub tf: f64,
 }
 
-/// The explanation of `docid` in `view` under `node`; `None` when `node` does not match it.
-pub(super) fn explain<V: SearchView>(
+/// The explanations of `docids` in `view` under `node`, in the order given; `None` for a document `node` does not
+/// match. The tree is built once and walked in docid order (ROADMAP 7.7.2).
+pub(super) fn explain_all<V: SearchView>(
     node: &Node,
     view: &V,
-    docid: u32,
-) -> Result<Option<Explanation>, ReadError> {
-    Ok(match node {
-        Node::Word { terms, scorer } => word(terms, scorer, view, docid)?,
-        Node::Phrase {
-            field,
-            terms,
-            scorer,
-        } => phrase(*field, terms, scorer, view, docid)?,
-        Node::Bool {
-            must,
-            should,
-            must_not,
-            filter,
-        } => boolean(must, should, must_not, filter, view, docid)?,
-        Node::Scaled(inner, scale) => {
-            let Some(query) = explain(inner, view, docid)? else {
-                return Ok(None);
-            };
-            Some(match *scale {
-                Scale::Boost(boost) => Explanation::Boost {
-                    score: query.score() * boost,
-                    boost,
-                    query: Box::new(query),
-                },
-                Scale::Constant(score) => Explanation::Constant {
-                    score,
-                    query: Box::new(query),
-                },
-            })
+    docids: &[u32],
+) -> Result<Vec<Option<Explanation>>, ReadError> {
+    let mut order: Vec<usize> = (0..docids.len()).collect();
+    order.sort_by_key(|&i| docids.get(i).copied());
+    let mut tree = Explainer::new(node, view)?;
+    let mut out = vec![None; docids.len()];
+    for i in order {
+        if let (Some(&docid), Some(slot)) = (docids.get(i), out.get_mut(i)) {
+            *slot = tree.explain(view, docid)?;
         }
-        Node::All => view.is_live(docid).then_some(Explanation::All),
-        Node::Nothing => None,
-    })
+    }
+    Ok(out)
+}
+
+/// A plan's tree over one view, for documents asked in ascending docid order: each leaf's matcher only advances,
+/// and a `bool` selects its filters once, the first time it needs them.
+enum Explainer<'a, V: SearchView> {
+    Word {
+        terms: &'a [(FieldId, Vec<u8>, bool)],
+        scorer: &'a TermScorer,
+        matcher: Option<WordMatcher<'a, V>>,
+    },
+    Phrase {
+        field: FieldId,
+        terms: &'a [(Vec<u8>, u32)],
+        scorer: &'a TermScorer,
+        matcher: Option<PhraseMatcher<'a, V>>,
+    },
+    Bool {
+        must: Vec<Explainer<'a, V>>,
+        should: Vec<Explainer<'a, V>>,
+        must_not: Vec<Explainer<'a, V>>,
+        filter: &'a [Filter],
+        selected: Option<RoaringBitmap>,
+    },
+    Scaled(Box<Explainer<'a, V>>, Scale),
+    All,
+    Nothing,
+}
+
+impl<'a, V: SearchView> Explainer<'a, V> {
+    fn new(node: &'a Node, view: &'a V) -> Result<Self, ReadError> {
+        let all = |nodes: &'a [Node]| -> Result<Vec<Self>, ReadError> {
+            nodes.iter().map(|n| Self::new(n, view)).collect()
+        };
+        Ok(match node {
+            Node::Word { terms, scorer } => Self::Word {
+                terms,
+                scorer,
+                matcher: word_matcher(terms, scorer, view, Pruning::Exhaustive)?,
+            },
+            Node::Phrase {
+                field,
+                terms,
+                scorer,
+            } => Self::Phrase {
+                field: *field,
+                terms,
+                scorer,
+                matcher: phrase_matcher(*field, terms, scorer, view)?,
+            },
+            Node::Bool {
+                must,
+                should,
+                must_not,
+                filter,
+            } => Self::Bool {
+                must: all(must)?,
+                should: all(should)?,
+                must_not: all(must_not)?,
+                filter,
+                selected: None,
+            },
+            Node::Scaled(inner, scale) => Self::Scaled(Box::new(Self::new(inner, view)?), *scale),
+            Node::All => Self::All,
+            Node::Nothing => Self::Nothing,
+        })
+    }
+
+    /// The explanation of `docid`, at or after every document asked before; `None` when the tree does not match it.
+    fn explain(&mut self, view: &V, docid: u32) -> Result<Option<Explanation>, ReadError> {
+        Ok(match self {
+            Self::Word {
+                terms,
+                scorer,
+                matcher,
+            } => match matcher {
+                Some(m) => word(terms, scorer, m, docid)?,
+                None => None,
+            },
+            Self::Phrase {
+                field,
+                terms,
+                scorer,
+                matcher,
+            } => match matcher {
+                Some(m) => phrase(*field, terms, scorer, m, docid)?,
+                None => None,
+            },
+            Self::Bool {
+                must,
+                should,
+                must_not,
+                filter,
+                selected,
+            } => boolean(must, should, must_not, filter, selected, view, docid)?,
+            Self::Scaled(inner, scale) => {
+                let Some(query) = inner.explain(view, docid)? else {
+                    return Ok(None);
+                };
+                Some(match *scale {
+                    Scale::Boost(boost) => Explanation::Boost {
+                        score: query.score() * boost,
+                        boost,
+                        query: Box::new(query),
+                    },
+                    Scale::Constant(score) => Explanation::Constant {
+                        score,
+                        query: Box::new(query),
+                    },
+                })
+            }
+            Self::All => view.is_live(docid).then_some(Explanation::All),
+            Self::Nothing => None,
+        })
+    }
+}
+
+/// Whether `m` matches `docid`: moved onto it, or left after it (no match) for the next, larger docid.
+fn reaches(m: &mut impl Matcher, docid: u32) -> Result<bool, ReadError> {
+    Ok(m.advance(docid)? == Some(docid))
 }
 
 fn word<V: SearchView>(
     terms: &[(FieldId, Vec<u8>, bool)],
     scorer: &TermScorer,
-    view: &V,
+    m: &mut WordMatcher<'_, V>,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
-    let Some(mut m) = word_matcher(terms, scorer, view, Pruning::Exhaustive)? else {
-        return Ok(None);
-    };
-    if m.advance(docid)? != Some(docid) {
+    if !reaches(m, docid)? {
         return Ok(None);
     }
     let hits = m.field_hits()?;
@@ -213,13 +313,10 @@ fn phrase<V: SearchView>(
     field: FieldId,
     terms: &[(Vec<u8>, u32)],
     scorer: &TermScorer,
-    view: &V,
+    m: &mut PhraseMatcher<'_, V>,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
-    let Some(mut m) = phrase_matcher(field, terms, scorer, view)? else {
-        return Ok(None);
-    };
-    if m.advance(docid)? != Some(docid) {
+    if !reaches(m, docid)? {
         return Ok(None);
     }
     let Some(hit) = m.field_hit()? else {
@@ -241,31 +338,38 @@ fn phrase<V: SearchView>(
 }
 
 fn boolean<V: SearchView>(
-    must: &[Node],
-    should: &[Node],
-    must_not: &[Node],
+    must: &mut [Explainer<'_, V>],
+    should: &mut [Explainer<'_, V>],
+    must_not: &mut [Explainer<'_, V>],
     filter: &[Filter],
+    selected: &mut Option<RoaringBitmap>,
     view: &V,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
-    for clause in must_not {
-        if explain(clause, view, docid)?.is_some() {
+    for clause in must_not.iter_mut() {
+        if clause.explain(view, docid)?.is_some() {
             return Ok(None);
         }
     }
     let mut musts = Vec::with_capacity(must.len());
-    for clause in must {
-        let Some(e) = explain(clause, view, docid)? else {
+    for clause in must.iter_mut() {
+        let Some(e) = clause.explain(view, docid)? else {
             return Ok(None);
         };
         musts.push(e);
     }
-    if !filter.is_empty() && !select(filter, view)?.contains(docid) {
-        return Ok(None);
+    if !filter.is_empty() {
+        let docs = match selected {
+            Some(docs) => docs,
+            None => selected.insert(select(filter, view)?),
+        };
+        if !docs.contains(docid) {
+            return Ok(None);
+        }
     }
     let mut shoulds = Vec::new();
-    for clause in should {
-        if let Some(e) = explain(clause, view, docid)? {
+    for clause in should.iter_mut() {
+        if let Some(e) = clause.explain(view, docid)? {
             shoulds.push(e);
         }
     }

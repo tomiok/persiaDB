@@ -435,7 +435,11 @@ impl SearchView for MemtableView {
         })
     }
 
-    fn column_keys(&self, field: FieldId, mut f: impl FnMut(u32, u64)) -> Result<(), ReadError> {
+    fn try_column_keys(
+        &self,
+        field: FieldId,
+        mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
         // Copied out: `f` runs without the lock.
         let keys: Vec<(u32, u64)> = {
             let inner = read(&self.shared);
@@ -455,7 +459,7 @@ impl SearchView for MemtableView {
             }
         };
         for (docid, key) in keys {
-            f(docid, key);
+            f(docid, key)?;
         }
         Ok(())
     }

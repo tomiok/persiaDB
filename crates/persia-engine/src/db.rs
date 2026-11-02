@@ -71,7 +71,7 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
-pub use exec::{CancelToken, Execution, PoolError, SearchPool, Threads};
+pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
 pub use merging::MergeOutcome;
 pub use objects::ContainerObjects;
 use obsolete::Pin;
