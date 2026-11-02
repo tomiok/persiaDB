@@ -31,9 +31,10 @@ That percentage is M0–M15 only. Milestones after v1.0 are at the end of this p
 
 ## M0 — Project bootstrap
 
-Done. The Cargo workspace and its crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo deny`,
-Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo tooling in Rust (`cargo xtask`, ADR-0003), issue
-templates, and the documentation scaffolding: this repository's rules, the ADR process, ADR-0001 and
+Done. The Cargo workspace and its crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo
+deny`, Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo
+tooling in Rust (`cargo xtask`, ADR-0003), issue templates, and the documentation scaffolding:
+this repository's rules, the ADR process, ADR-0001 and
 ADR-0002, and [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md). No dependencies.
 
 ## M1 — Format primitives

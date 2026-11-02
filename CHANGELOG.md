@@ -57,9 +57,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-format`: `widen::usize_from_u32` and `widen::u64_from_usize`, the lossless widenings `From` lacks, with
   a compile-time check that pointers are 32 or 64 bits. `persia-format`, `persia-storage` and `persia-engine` deny
   `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, or an
-  annotated bit reinterpretation (ROADMAP 0.6.5). `BitWidth::packed_len` is no longer a `const fn`.
+  annotated bit reinterpretation (ROADMAP 0.6.5).
 - `persia-engine`: `segment::scored_length(len)`, the length a field of `len` tokens is scored with (its norm,
-  decoded; SPEC §5.3.4). The reference model uses it instead of a copy of the codec (ROADMAP 7.8.5).
+  decoded; SPEC §5.3.4), as an explanation reports it. The differential suite checks it against the reference
+  model's own statement of the rounding (ROADMAP 7.8.5).
 - `persia-storage`: `Container::is_mapped` and `Container::mapping_failures` report a fallback from mapped reads to
   `pread` (ROADMAP 0.6.7).
 - `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed

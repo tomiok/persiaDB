@@ -36,7 +36,7 @@ repo-checks:
 
 # Miri covers persia-format and the pure parsers of persia-engine (ROADMAP 0.6.6): documents (CBOR, datetimes),
 # tombstone sidecars, segment section kinds, norms, the FST check, the manifest codec, WAL chunks and the document
-# encoding. Left out: property tests and golden-fixture readers (Miri's isolation has no filesystem: proptest's
+# encoding. Left out: property tests and fixture readers that open files (Miri's isolation has no filesystem: proptest's
 # failure persistence calls `getcwd`), and exhaustive sweeps that take minutes interpreted (each over 90 s). Native
 # runs cover all of those. CI runs this recipe.
 

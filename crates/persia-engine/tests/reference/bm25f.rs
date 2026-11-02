@@ -1,7 +1,7 @@
 //! Reference BM25F (SPEC §7.2) over plain documents: each document is its tokens per field, as the analyzer would
-//! give them. Statistics are counted from the documents, field lengths quantized by the engine's norm codec (checked
-//! here against the properties SPEC §5.3.4 gives it, not copied), and the score evaluated as the SPEC writes the
-//! formula.
+//! give them. Statistics are counted from the documents, field lengths quantized as SPEC §5.3.4 states the rounding
+//! (independently of the engine's codec, and checked against it in `tests/differential.rs`), and the score evaluated
+//! as the SPEC writes the formula.
 
 #![allow(dead_code, clippy::cast_precision_loss, clippy::many_single_char_names)]
 
@@ -93,60 +93,16 @@ impl Corpus {
     }
 }
 
-/// The length a field of `n` tokens is scored with. The engine's norm codec decides it (SPEC §5.3.4,
-/// `persia_engine::segment::scored_length`); the reference does not copy the codec, it checks the properties the SPEC
-/// gives it (the tests below), so the scores here and in the engine use the same lengths without the reference
-/// repeating a bug of the codec.
+/// The length a field of `n` tokens is scored with, from SPEC §5.3.4's statement of the rounding rather than the
+/// engine's bit layout: lengths below 24 are their own; above, `n − 24` keeps its 4 most significant bits (lengths
+/// past `2^31 − 1` share the last code). `tests/differential.rs` checks it against the SPEC's properties and against
+/// the engine's codec (`persia_engine::segment::scored_length`).
 pub fn quantized(n: u64) -> u64 {
-    u64::from(persia_engine::segment::scored_length(
-        u32::try_from(n).unwrap_or(u32::MAX),
-    ))
-}
-
-/// SPEC §5.3.4 by hand: lengths below 40 are exact; 41 − 24 = 17 = `0b1_0001` keeps `0b1000 << 1` = 16, so 40;
-/// 100 − 24 = 76 = `0b100_1100` keeps `0b1001 << 3` = 72, so 96.
-#[test]
-fn quantization_by_hand() {
-    assert_eq!(quantized(23), 23);
-    assert_eq!(quantized(39), 39);
-    assert_eq!(quantized(41), 40);
-    assert_eq!(quantized(100), 96);
-}
-
-/// The properties below, for every length up to 2^17, where real fields are: random lengths up to 2^31 would rarely
-/// land on one.
-#[test]
-fn quantization_keeps_the_spec_properties_for_every_short_length() {
-    let mut previous = 0;
-    for n in 0..1u64 << 17 {
-        let q = quantized(n);
-        assert!(q <= n, "{n} scores as {q}");
-        if n < 40 {
-            assert_eq!(q, n);
-        }
-        assert!(
-            (n - q) * 8 < n.max(1),
-            "{n} scores as {q}: 12.5 % or more low"
-        );
-        assert!(q >= previous, "{n} scores shorter than {}", n - 1);
-        previous = q;
+    if n < 24 {
+        return n;
     }
-}
-
-proptest::proptest! {
-    /// SPEC §5.3.4: the scored length never exceeds the field's, is exact below 40, is less than 12.5 % low, and
-    /// keeps the order of lengths.
-    #[test]
-    fn quantization_keeps_the_spec_properties(a in 0u64..1 << 31, b in 0u64..1 << 31) {
-        for n in [a, b] {
-            let q = quantized(n);
-            proptest::prop_assert!(q <= n, "{n} scores as {q}");
-            if n < 40 {
-                proptest::prop_assert_eq!(q, n);
-            }
-            proptest::prop_assert!((n - q) * 8 < n.max(1), "{n} scores as {q}: 12.5 % or more low");
-        }
-        let (lo, hi) = (a.min(b), a.max(b));
-        proptest::prop_assert!(quantized(lo) <= quantized(hi), "{lo} scores longer than {hi}");
-    }
+    let x = n.min((1 << 31) - 1) - 24;
+    let bits = 64 - x.leading_zeros();
+    let dropped = bits.saturating_sub(4);
+    24 + (x & !((1u64 << dropped) - 1))
 }

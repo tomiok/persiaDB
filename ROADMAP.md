@@ -73,10 +73,11 @@ Deps: none.
 - [x] 0.6.2 README claims only what the code does: the engine's write path and search are described as they are, and the relaxation tagline is design intent (M8), not a feature
 - [x] 0.6.3 Website status from `website/src/status.mjs`: `features.mdx` and `guide/getting-started.md` take their status sentences from it, and it sees the collection search (`CollectionViews::search`, `db/search.rs`)
 - [x] 0.6.4 Placeholder crates say so: `persia`, `persia-blob`, `persia-proto` docs read "Placeholder for M9/M10/M11", and `persia-server` prints "not implemented (M11)" and exits non-zero
-- [~] 0.6.5 No unchecked `as` in `persia-format`, `persia-storage` and `persia-engine`: the pedantic cast lints were already on, so deny `clippy::as_conversions` outside tests; each `as` becomes `From`, a `widen` helper, `try_from`, or carries a justified `#[allow]` (CLAUDE.md "checked ops")
-- [~] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`: documents, tombstones, section kinds, norms, the FST check, the manifest, WAL and document codecs; property tests, fixture readers and sweeps over 90 s are left to native runs
+- [x] 0.6.5 No unchecked `as` in `persia-format`, `persia-storage` and `persia-engine`: the pedantic cast lints were already on, so deny `clippy::as_conversions` outside tests; each `as` becomes `From`, a `widen` helper, `try_from`, or carries a justified `#[allow]` (CLAUDE.md "checked ops")
+- [x] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`: documents, tombstones, section kinds, norms, the FST check, the manifest, WAL and document codecs; property tests, fixture readers and sweeps over 90 s are left to native runs
 - [x] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`) and how many remaps failed (`mapping_failures()`)
 - [x] 0.6.8 `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017)
+- [ ] 0.6.9 Guard `just miri`'s filters: a repository check that each test filter of the recipe selects at least one test and each `--skip` matches only the tests it names, so a rename cannot silently drop Miri coverage (found in the 0.6.6 review)
 
 ---
 
@@ -514,8 +515,8 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
 - [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
 - [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
-- [~] 7.8.5 The reference model's norm oracle is independent of the implementation: properties `decode(encode(n)) <= n`, exact below 40, within 12.5 %, monotonic, instead of a copy of the codec (found in the 2026-11-02 audit)
-- [~] 7.8.6 The differential suite compares ranked order to the reference directly (every pair of hits, within the score tolerance), not only through each score within tolerance plus the engine's own order, which together implied it (found in the 2026-11-02 audit)
+- [x] 7.8.5 The reference model's norm oracle is independent of the implementation: it states SPEC §5.3.4's rounding (keep the top 4 bits of `n − 24`) instead of copying the codec, checks it against the SPEC's properties (`q <= n`, exact below 40, less than `(n − 24) / 8` low, monotonic), and checks the engine's codec against it for every length up to 2^17 and by proptest to 2^31 (found in the 2026-11-02 audit)
+- [x] 7.8.6 The differential suite compares ranked order to the reference directly (every pair of hits, within the score tolerance). Made explicit only: each score within tolerance of the reference plus the engine's own order already implied it, so it adds no detection power today (found in the 2026-11-02 audit)
 
 ---
 
