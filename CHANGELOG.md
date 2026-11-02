@@ -26,7 +26,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (ROADMAP 7.6.6).
 - `persia-engine`: `TermSource::each_term` calls back with the memtable view's own count of a term
   (`stats::MemtableDf`, `search::EachTerm`), and `StatisticsProvider` has provided `expansion_df` and
-  `expansion_kept`. A `prefix` or `fuzzy` reads each distinct term's `df` once, does not count the memtable's again,
+  `expansion_kept`. A `prefix` or `fuzzy` memoizes each distinct term's `df` while its bounded per-expansion cache has room, and avoids recounting a matching memtable view while cached,
   and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
 
 ### Fixed
