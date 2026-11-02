@@ -1339,7 +1339,7 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   dictionary), set operations on bitmaps, one chunk of the memtable's copies for a view (a fixed number of items under one read lock, 1024 today, a tuning
   value: its terms, column keys, deletions, a `bool` column's trues, which documents have a value, a field's keys or
   keyword values, and norms; ROADMAP 7.6.5, 7.6.6), and reading the page's documents run to their end first. Those
-  copies step between their chunks, never under the lock: one step per term tried, column key, kill version, length,
+  copies step between their chunks, never under the lock: one step per term tried and one additional step per matched term after its `df` is counted, column key, kill version, length,
   keyword posting and keyword value, so an expansion that matches nothing in a large memtable or a filter, sort or
   facet over one stops too; norms one step per chunk, since copying a norm costs less than a step.
   Returning the best so far is relaxation's budget (§7.6), not this.
