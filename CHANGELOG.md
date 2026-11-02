@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-server` is a placeholder until M11: it prints `persia-server: not implemented (M11)` and exits with status
+  1, instead of exiting 0 without doing anything (ROADMAP 0.6.4).
+- README and docs site: status comes from `PROGRESS.md` and the tree (`cargo xtask progress` rewrites the README's
+  progress blocks; the site's status sentences come from `website/src/status.mjs`), the quickstart creates a database
+  and searches it, and relaxation is described as design intent (M8), not a feature (ROADMAP 0.6.1–0.6.3).
+- Documented: a database file only grows until the engine compacts its container (ROADMAP 6.5.8, SPEC §4.6).
 - `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
 - `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
