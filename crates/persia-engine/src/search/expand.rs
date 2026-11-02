@@ -7,22 +7,28 @@
 
 use core::cmp::Reverse;
 use core::ops::Bound;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use fst::Automaton;
 
 use crate::schema::FieldId;
 use crate::segment::ReadError;
-use crate::stats::StatisticsProvider;
+use crate::stats::{MemtableDf, StatisticsProvider};
 use crate::view::{SearchView, TermEnum};
+
+/// What [`TermSource::each_term`] calls with each term: its bytes, and the memtable view's count of it when that view
+/// listed it.
+pub type EachTerm<'e> = dyn FnMut(&[u8], Option<MemtableDf<'_>>) -> Result<(), ReadError> + 'e;
 
 /// The views a plan runs on, as a `prefix` or `fuzzy` expands over their terms (SPEC §7.1): a single view, or a
 /// collection's segments and memtable ([`crate::db::CollectionViews`]).
 pub trait TermSource {
     /// Calls `each` with every term of the `text` or `keyword` field `field` between `lower` and `upper` (byte
     /// order) that `expansion` accepts, view by view: a term comes once per view that lists it
-    /// ([`SearchView::terms`]).
+    /// ([`SearchView::terms`]). A term the memtable view lists comes with that view's count of it
+    /// ([`MemtableDf`], ROADMAP 7.4.14), so the statistics need not count it again; a collection walks its memtable
+    /// first, so the terms it shares with a segment are counted once.
     ///
     /// # Errors
     /// As [`SearchView::terms`]; what `each` returns.
@@ -32,7 +38,7 @@ pub trait TermSource {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
         expansion: &Expansion,
-        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+        each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError>;
 }
 
@@ -43,11 +49,13 @@ impl<V: SearchView> TermSource for V {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
         expansion: &Expansion,
-        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+        each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
+        // A memtable's walk counted each term's live documents: pass that on, so the statistics do not count again.
+        let memtable = self.as_memtable();
         let mut terms = self.terms(field, lower, upper, expansion.clone())?;
-        while let Some((term, _)) = terms.next()? {
-            each(term)?;
+        while let Some((term, df)) = terms.next()? {
+            each(term, memtable.map(|m| MemtableDf::new(m, df)))?;
         }
         Ok(())
     }
@@ -255,8 +263,18 @@ impl Automaton for Expansion {
     }
 }
 
+/// Approximate bytes the `df`s one expansion remembers hold at most: past them, a term a later view lists again is
+/// counted again.
+const MEMO_BYTES: usize = 4 << 20;
+/// What a remembered `df` costs besides its term's bytes: the key's header, the `df`, and hash-table slack.
+const MEMO_ENTRY_OVERHEAD: usize = 64;
+
 /// The terms of `field` in range that `expansion` takes from `terms`, at most `cap`: the highest collection `df`
 /// (`stats`) first, ties by bytes; returned in byte order with their `df`s (SPEC §7.1).
+///
+/// Each distinct term's `df` is read once ([`StatisticsProvider::expansion_df`], remembered for this expansion only),
+/// with the memtable's own count when its walk listed the term, and only the kept terms reach the statistics' cache
+/// ([`StatisticsProvider::expansion_kept`], ROADMAP 7.4.14).
 ///
 /// # Errors
 /// As [`TermSource::each_term`]; a `df` that cannot be read.
@@ -272,8 +290,22 @@ pub(super) fn expand(
     if cap == 0 {
         return Ok(Vec::new());
     }
-    terms.each_term(field, range.0, range.1, expansion, &mut |term| {
-        let df = stats.df(field, term)?;
+    let mut seen = HashMap::<Vec<u8>, u64>::new();
+    let mut seen_bytes = 0_usize;
+    terms.each_term(field, range.0, range.1, expansion, &mut |term, memtable| {
+        let df = if let Some(&df) = seen.get(term) {
+            df
+        } else {
+            let df = stats.expansion_df(field, term, memtable)?;
+            let bytes = seen_bytes
+                .saturating_add(term.len())
+                .saturating_add(MEMO_ENTRY_OVERHEAD);
+            if bytes <= MEMO_BYTES {
+                seen.insert(term.to_vec(), df);
+                seen_bytes = bytes;
+            }
+            df
+        };
         // Full: a term ranking after the last kept one (or that one again) changes nothing. One evicted before
         // ranks after it too, since the last kept only moves up.
         if kept.len() >= cap
@@ -290,6 +322,9 @@ pub(super) fn expand(
     })?;
     let mut out: Vec<(Vec<u8>, u64)> = kept.into_iter().map(|(Reverse(df), t)| (t, df)).collect();
     out.sort_unstable();
+    for (term, _) in &out {
+        stats.expansion_kept(field, term)?;
+    }
     Ok(out)
 }
 
@@ -450,5 +485,200 @@ mod tests {
                 assert_eq!(accepts(&a, &term), want, "{query:?} ~{distance} {term:?}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod df_tests {
+    use core::cell::RefCell;
+    use core::ops::Bound;
+    use std::sync::Arc;
+
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::{EachTerm, Expansion, TermSource, expand};
+    use crate::memtable::{Memtable, MemtableView};
+    use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
+    use crate::segment::ReadError;
+    use crate::stats::{FieldTotals, MemtableDf, StatisticsProvider};
+
+    /// Views listing terms: the memtable's (with its counts) first, then each segment's.
+    struct Lists<'a> {
+        memtable: &'a MemtableView,
+        memtable_terms: Vec<(&'static str, u32)>,
+        segments: Vec<Vec<&'static str>>,
+    }
+
+    impl TermSource for Lists<'_> {
+        fn each_term(
+            &self,
+            _field: FieldId,
+            _lower: Bound<&[u8]>,
+            _upper: Bound<&[u8]>,
+            _expansion: &Expansion,
+            each: &mut EachTerm<'_>,
+        ) -> Result<(), ReadError> {
+            for &(term, df) in &self.memtable_terms {
+                let memtable = Some(MemtableDf::new(self.memtable, df));
+                each(term.as_bytes(), memtable)?;
+            }
+            for segment in &self.segments {
+                for term in segment {
+                    each(term.as_bytes(), None)?;
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// `df` = the term's length times 10, plus the memtable's count when given; records what it was asked.
+    #[derive(Default)]
+    struct Counting {
+        asked: RefCell<Vec<(String, Option<u32>)>>,
+        kept: RefCell<Vec<String>>,
+    }
+
+    impl StatisticsProvider for Counting {
+        fn doc_count(&self) -> u64 {
+            100
+        }
+
+        fn field(&self, _: FieldId) -> FieldTotals {
+            FieldTotals::default()
+        }
+
+        fn df(&self, _: FieldId, _: &[u8]) -> Result<u64, ReadError> {
+            panic!("an expansion asks expansion_df")
+        }
+
+        fn expansion_df(
+            &self,
+            _: FieldId,
+            term: &[u8],
+            memtable: Option<MemtableDf<'_>>,
+        ) -> Result<u64, ReadError> {
+            let term = String::from_utf8(term.to_vec()).unwrap();
+            let df = term.len() as u64 * 10 + memtable.map_or(0, |m| u64::from(m.df()));
+            self.asked
+                .borrow_mut()
+                .push((term, memtable.map(|m| m.df())));
+            Ok(df)
+        }
+
+        fn expansion_kept(&self, _: FieldId, term: &[u8]) -> Result<(), ReadError> {
+            self.kept
+                .borrow_mut()
+                .push(String::from_utf8(term.to_vec()).unwrap());
+            Ok(())
+        }
+    }
+
+    fn view() -> (Arc<CollectionSchema>, MemtableView) {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap();
+        let mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        (Arc::new(schema), mem.view())
+    }
+
+    /// ROADMAP 7.4.14: each distinct term's `df` is asked once, however many views list it, with the memtable's own
+    /// count when it listed the term; only the kept terms are reported kept.
+    #[test]
+    fn each_term_is_asked_once_and_only_winners_are_kept() {
+        let (schema, memtable) = view();
+        let field = schema.field("body").unwrap().id();
+        let lists = Lists {
+            memtable: &memtable,
+            memtable_terms: vec![("ab", 5), ("abcd", 1)],
+            segments: vec![vec!["a", "ab", "abc"], vec!["ab", "abc", "abcd", "abcde"]],
+        };
+        let stats = Counting::default();
+        let unbounded = (Bound::Unbounded, Bound::Unbounded);
+        let kept = expand(field, unbounded, &Expansion::all(), 2, &lists, &stats).unwrap();
+        // df: a 10, ab 25, abc 30, abcd 41, abcde 50: the top two.
+        assert_eq!(kept, [(b"abcd".to_vec(), 41), (b"abcde".to_vec(), 50)]);
+        let asked = stats.asked.into_inner();
+        let expected: Vec<(String, Option<u32>)> = [
+            ("ab", Some(5)),
+            ("abcd", Some(1)),
+            ("a", None),
+            ("abc", None),
+            ("abcde", None),
+        ]
+        .into_iter()
+        .map(|(t, m)| (t.to_owned(), m))
+        .collect();
+        assert_eq!(asked, expected);
+        assert_eq!(stats.kept.into_inner(), ["abcd", "abcde"]);
+        // A cap of 0 asks nothing.
+        let none = Counting::default();
+        let capped = expand(field, unbounded, &Expansion::all(), 0, &lists, &none).unwrap();
+        assert_eq!(capped, []);
+        assert_eq!(none.asked.into_inner(), []);
+    }
+}
+
+#[cfg(test)]
+mod memtable_source_tests {
+    use core::ops::Bound;
+
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::{Expansion, TermSource};
+    use crate::document::{Document, Value};
+    use crate::memtable::Memtable;
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+    use crate::search::{Interrupt, Interruptible, Interrupts, Steps};
+
+    struct Never;
+
+    impl Interrupts for Never {
+        fn check(&self) -> Result<(), Interrupt> {
+            Ok(())
+        }
+    }
+
+    /// A memtable view used directly as a term source, bare or under a search's interrupts, hands each term's count
+    /// from its own walk to the statistics (ROADMAP 7.4.14).
+    #[test]
+    fn a_memtable_source_passes_its_walk_counts() {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (id, text) in [("a", "run runs"), ("b", "run"), ("c", "red")] {
+            mem.put(&Document::new(id).with(body, Value::String(text.into())))
+                .unwrap();
+        }
+        let view = mem.view();
+        let walk = |source: &dyn TermSource| {
+            let mut listed = Vec::new();
+            source
+                .each_term(
+                    body,
+                    Bound::Included(b"r".as_slice()),
+                    Bound::Excluded(b"s".as_slice()),
+                    &Expansion::all(),
+                    &mut |term, memtable| {
+                        let memtable = memtable.expect("a memtable count");
+                        assert!(memtable.view().is_same_view(&view));
+                        listed.push((String::from_utf8(term.to_vec()).unwrap(), memtable.df()));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            listed
+        };
+        let expected = [
+            ("red".to_owned(), 1),
+            ("run".to_owned(), 2),
+            ("runs".to_owned(), 1),
+        ];
+        assert_eq!(walk(&view), expected);
+        let steps = Steps::new(&Never);
+        assert_eq!(walk(&Interruptible::new(&view, &steps)), expected);
     }
 }

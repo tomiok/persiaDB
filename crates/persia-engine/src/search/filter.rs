@@ -56,7 +56,7 @@ pub(super) fn select<V: SearchView>(
     view: &V,
 ) -> Result<RoaringBitmap, ReadError> {
     let mut docs = all(filters, view)?;
-    docs -= view.deleted();
+    docs -= view.deleted()?;
     Ok(docs)
 }
 

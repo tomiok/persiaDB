@@ -54,7 +54,7 @@ mod sort;
 mod top_k;
 mod word;
 
-pub use expand::{Expansion, TermSource};
+pub use expand::{EachTerm, Expansion, TermSource};
 pub use explain::{Explanation, FieldExplanation, PhraseExplanation, WordExplanation};
 pub(crate) use facet::FacetCounter;
 pub use facet::{

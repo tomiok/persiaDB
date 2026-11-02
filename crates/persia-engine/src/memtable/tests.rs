@@ -1,10 +1,11 @@
 use persia_analysis::{Analyzer, WhitespaceTokenizer};
 use proptest::prelude::*;
+use roaring::RoaringBitmap;
 
 use super::*;
 use crate::schema::{FieldId, SchemaBuilder, TextOptions};
-use crate::segment::MAX_TERM_LEN;
-use crate::view::{PostingsIterator, SearchView};
+use crate::segment::{MAX_TERM_LEN, ReadError};
+use crate::view::{KeyReader, KeywordReader, NormReader, PostingsIterator, SearchView};
 
 /// A memtable whose two `text` fields split on whitespace only, so a token can pass [`MAX_TERM_LEN`].
 fn unguarded() -> (Memtable, FieldId, FieldId) {
@@ -248,4 +249,191 @@ fn for_each_id_yields_the_ids_of_applied_operations() {
     .unwrap();
     ids.sort();
     assert_eq!(ids, ["deleted", "put"]);
+}
+
+/// The fields of [`chunked`]: `body` text, `tag` keyword, `n` i64, `flag` bool.
+struct Chunked {
+    schema: CollectionSchema,
+    body: FieldId,
+    tag: FieldId,
+    n: FieldId,
+    flag: FieldId,
+}
+
+fn chunked() -> Chunked {
+    let schema = SchemaBuilder::new("c")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field(
+            "tag",
+            FieldKind::Keyword(crate::schema::KeywordOptions::default()),
+        )
+        .field("n", FieldKind::I64 { stored: false })
+        .field("flag", FieldKind::Bool { stored: false })
+        .build()
+        .unwrap();
+    let id = |name| schema.field(name).unwrap().id();
+    Chunked {
+        body: id("body"),
+        tag: id("tag"),
+        n: id("n"),
+        flag: id("flag"),
+        schema,
+    }
+}
+
+/// Document `i` of [`chunked`]: `i % 50` words in `body` (none for 0), tag `t{1499 - i % 1500}` (interned in reverse byte order), `n = i`, `flag` for even `i`.
+fn chunked_doc(f: &Chunked, id: &str, i: u32) -> Document {
+    Document::new(id)
+        .with(f.body, Value::String("w ".repeat((i % 50) as usize)))
+        .with(f.tag, Value::String(format!("t{:05}", 1_499 - i % 1_500)))
+        .with(f.n, Value::I64(i64::from(i)))
+        .with(f.flag, Value::Bool(i.is_multiple_of(2)))
+}
+
+/// ROADMAP 7.6.6: the memtable's whole-field copies for a view (`deleted`, `present`, `trues`, `keys`, `keywords`,
+/// `norms`) are taken in chunks, with a step per item (per chunk for norms) outside the lock: writers that land
+/// between chunks (new documents, a failed put, a replace, a delete) change nothing the view sees.
+#[test]
+fn chunked_copies_are_the_view_while_writers_interleave() {
+    let f = chunked();
+    let mem =
+        std::sync::Mutex::new(Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap());
+    // 2 500 documents, the view's cutoff inside the third chunk. Before the view: `d3` deleted and `d5` replaced
+    // (by docid 2 500, as document 5).
+    for i in 0..2_500 {
+        mem.lock()
+            .unwrap()
+            .put(&chunked_doc(&f, &format!("d{i}"), i))
+            .unwrap();
+    }
+    mem.lock().unwrap().delete("d3").unwrap();
+    mem.lock().unwrap().put(&chunked_doc(&f, "d5", 5)).unwrap();
+    let view = mem.lock().unwrap().view();
+    let docs = 2_501_u32;
+    let i_of = |docid: u32| if docid == 2_500 { 5 } else { docid };
+    // Writes land in every phase of every copy: at its first step (norms take two), in its first chunks, and in the
+    // keyword values after their 2 501 postings. A failed put interns new terms that are truncated, and the next put
+    // interns other new terms under the same ids; then new documents, a replace and a delete, all after the view.
+    let writes = std::cell::Cell::new(0_u32);
+    let steps = std::cell::Cell::new(0_u32);
+    let step = || {
+        steps.set(steps.get() + 1);
+        if matches!(steps.get(), 1 | 1_000 | 3_000) {
+            let w = writes.get();
+            writes.set(w + 1);
+            let mut mem = mem.lock().unwrap();
+            let fresh = |id: &str, word: &str| {
+                Document::new(id)
+                    .with(f.body, Value::String(format!("{word}{w}")))
+                    .with(f.tag, Value::String(format!("{word}{w}")))
+            };
+            let failed = mem.put_logged(&fresh("x", "lost"), |_| Err("disk"));
+            assert!(failed.is_err());
+            mem.put(&fresh(&format!("y{w}"), "kept")).unwrap();
+            for i in 0..300 {
+                mem.put(&chunked_doc(&f, &format!("n{w}-{i}"), 4_000 + i))
+                    .unwrap();
+            }
+            mem.put(&chunked_doc(&f, "d7", 8)).unwrap();
+            mem.delete(&format!("d{}", 9 + w)).unwrap();
+        }
+        Ok(())
+    };
+    let counted = |expected: u32| {
+        assert_eq!(steps.replace(0), expected);
+    };
+
+    assert_eq!(
+        view.deleted_stepped(&step).unwrap(),
+        RoaringBitmap::from_iter([3, 5])
+    );
+    counted(docs);
+    // A document whose `i` is a multiple of 50 has no `body` token.
+    let all: RoaringBitmap = (0..docs).collect();
+    let worded: RoaringBitmap = (0..docs).filter(|&d| !i_of(d).is_multiple_of(50)).collect();
+    assert_eq!(view.present_stepped(f.body, &step).unwrap(), worded);
+    counted(u32::try_from(worded.len()).unwrap());
+    for field in [f.tag, f.n, f.flag] {
+        assert_eq!(view.present_stepped(field, &step).unwrap(), all);
+        counted(docs);
+    }
+    let even: RoaringBitmap = (0..docs).filter(|&d| i_of(d).is_multiple_of(2)).collect();
+    assert_eq!(view.trues_stepped(f.flag, &step).unwrap(), even);
+    counted(docs);
+
+    let mut keys = view.keys_stepped(f.n, &step).unwrap();
+    counted(docs);
+    for docid in 0..docs {
+        let key = persia_format::for_codec::i64_to_key(i64::from(i_of(docid)));
+        assert_eq!(keys.key(docid).unwrap(), Some(key), "{docid}");
+    }
+    assert_eq!(keys.key(docs).unwrap(), None);
+
+    let mut words = view.keywords_stepped(f.tag, &step).unwrap();
+    // A step per posting, then per distinct tag.
+    counted(docs + 1_500);
+    assert_eq!(words.len(), 1_500);
+    for docid in 0..docs {
+        let ords = words.ords(docid).unwrap().to_vec();
+        assert_eq!(ords.len(), 1);
+        let value = words.value(ords[0]).unwrap();
+        assert_eq!(
+            value,
+            format!("t{:05}", 1_499 - i_of(docid) % 1_500).as_bytes()
+        );
+    }
+    assert!(words.ords(docs).is_err());
+    // Byte order: ord `o` is `t{o}`.
+    assert_eq!(words.value(7), Some(&b"t00007"[..]));
+
+    let mut norms = view.norms_stepped(f.body, &step).unwrap();
+    // One step per full chunk: 1 024 and 2 048 of 2 501.
+    counted(2);
+    for docid in 0..docs {
+        let expected = norms::encode(i_of(docid) % 50);
+        assert_eq!(norms.get(docid).unwrap(), expected, "{docid}");
+    }
+    // Copied once per view and field: no step the second time.
+    view.norms_stepped(f.body, &step).unwrap();
+    counted(0);
+    // Two writes per copy, three in the keywords copy (one in its values), one in the norms copy.
+    assert_eq!(writes.get(), 18);
+    // The plain calls are the stepped ones.
+    assert_eq!(view.deleted().unwrap(), RoaringBitmap::from_iter([3, 5]));
+    assert_eq!(view.trues(f.flag).unwrap(), even);
+}
+
+/// A step's error stops each copy, outside the lock: a writer can still write after it.
+#[test]
+fn a_step_error_stops_each_chunked_copy() {
+    let f = chunked();
+    let mut mem = Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap();
+    for i in 0..3_000 {
+        mem.put(&chunked_doc(&f, &format!("d{i}"), i % 7)).unwrap();
+    }
+    let view = mem.view();
+    let stop = |after: u32| {
+        let steps = std::cell::Cell::new(0_u32);
+        move || {
+            steps.set(steps.get() + 1);
+            if steps.get() >= after {
+                Err(ReadError::Interrupted(crate::search::Interrupt::Cancelled))
+            } else {
+                Ok(())
+            }
+        }
+    };
+    let stopped = |r: Result<(), ReadError>| {
+        assert!(matches!(r, Err(ReadError::Interrupted(_))), "{r:?}");
+    };
+    stopped(view.deleted_stepped(&stop(2_000)).map(drop));
+    stopped(view.present_stepped(f.body, &stop(2_000)).map(drop));
+    stopped(view.trues_stepped(f.flag, &stop(2_000)).map(drop));
+    stopped(view.keys_stepped(f.n, &stop(2_000)).map(drop));
+    // Past the postings, in the values.
+    stopped(view.keywords_stepped(f.tag, &stop(3_001)).map(drop));
+    stopped(view.norms_stepped(f.body, &stop(2)).map(drop));
+    // A stopped norms copy is not kept: the next one copies again.
+    assert!(view.norms_stepped(f.body, &|| Ok(())).is_ok());
+    mem.put(&chunked_doc(&f, "after", 1)).unwrap();
 }

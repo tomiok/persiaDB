@@ -16,6 +16,7 @@ use fst::automaton::AlwaysMatch;
 use roaring::RoaringBitmap;
 
 use crate::document::Document;
+use crate::memtable::MemtableView;
 use crate::schema::{FieldId, FieldType};
 use crate::score::FieldHit;
 use crate::segment::{
@@ -284,8 +285,33 @@ pub trait SearchView {
         self.terms(field, lower, upper, automaton)
     }
 
+    /// The memtable view this is, or reads through (a search's interruptible view of it); `None` for a segment. Its
+    /// [`Self::terms`] count each term's live documents, which a `prefix` or `fuzzy` hands to the statistics instead of
+    /// counting again (ROADMAP 7.4.14).
+    fn as_memtable(&self) -> Option<&MemtableView> {
+        None
+    }
+
     /// The documents below [`Self::doc_count`] a search may not return: deleted, or replaced in the memtable.
-    fn deleted(&self) -> RoaringBitmap;
+    ///
+    /// # Errors
+    /// What [`Self::deleted_stepped`]'s `step` returns, for a view that reads a search's interrupts.
+    fn deleted(&self) -> Result<RoaringBitmap, ReadError>;
+
+    /// As [`Self::deleted`], calling `step` for each document the view reads. The memtable copies its whole kill
+    /// record, [`Self::present`] and [`Self::trues`] a whole field, and [`Self::norms`], [`Self::keys`] and
+    /// [`Self::keywords`] a field's values as of the view; each `_stepped` method copies in chunks and calls `step`
+    /// between them, never under its lock, so a search's interrupts stop a copy of a large memtable (ROADMAP 7.6.6).
+    /// A segment reads what it needs from its bytes, and ignores `step`.
+    ///
+    /// # Errors
+    /// As [`Self::deleted`]; what `step` returns.
+    fn deleted_stepped(
+        &self,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.deleted()
+    }
 
     /// The documents that have a value in `field`, deleted ones included (see [`Self::deleted`]): a `text` field's
     /// with at least one token, a `keyword` field's with at least one value, a column's with a value.
@@ -294,6 +320,18 @@ pub trait SearchView {
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a `stored` field; a corruption of the source.
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError>;
 
+    /// As [`Self::present`], calling `step` for each document the view reads ([`Self::deleted_stepped`]).
+    ///
+    /// # Errors
+    /// As [`Self::present`]; what `step` returns.
+    fn present_stepped(
+        &self,
+        field: FieldId,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.present(field)
+    }
+
     /// The documents whose `bool` field is `true`, deleted ones included: with [`Self::present`], a `bool` filter's
     /// answer without a key per document.
     ///
@@ -301,6 +339,18 @@ pub trait SearchView {
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
     /// source.
     fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError>;
+
+    /// As [`Self::trues`], calling `step` for each key the view reads ([`Self::deleted_stepped`]).
+    ///
+    /// # Errors
+    /// As [`Self::trues`]; what `step` returns.
+    fn trues_stepped(
+        &self,
+        field: FieldId,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.trues(field)
+    }
 
     /// Calls `f` with each document that has a value in an `i64`, `f64`, `datetime` or `bool` field, deleted ones
     /// included, and its key, in docid order: the order-preserving key of the value (SPEC §5.2.1; for `f64`,
@@ -333,6 +383,19 @@ pub trait SearchView {
     /// As [`Self::postings`], for a field that is not `text`; a corruption of the source.
     fn norms(&self, field: FieldId) -> Result<Self::Norms<'_>, ReadError>;
 
+    /// As [`Self::norms`], calling `step` for each chunk of norms the memtable copies ([`Self::deleted_stepped`]):
+    /// a norm is one byte, so one step stands for a chunk of them, not each.
+    ///
+    /// # Errors
+    /// As [`Self::norms`]; what `step` returns.
+    fn norms_stepped(
+        &self,
+        field: FieldId,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Norms<'_>, ReadError> {
+        self.norms(field)
+    }
+
     /// The keys of an `i64`, `f64`, `datetime` or `bool` field by docid, for sorting (ROADMAP 7.5.1); deleted
     /// documents keep theirs.
     ///
@@ -341,6 +404,18 @@ pub trait SearchView {
     /// source.
     fn keys(&self, field: FieldId) -> Result<Self::Keys<'_>, ReadError>;
 
+    /// As [`Self::keys`], calling `step` for each key the view copies ([`Self::deleted_stepped`]).
+    ///
+    /// # Errors
+    /// As [`Self::keys`]; what `step` returns.
+    fn keys_stepped(
+        &self,
+        field: FieldId,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Keys<'_>, ReadError> {
+        self.keys(field)
+    }
+
     /// The values of a `keyword` field by docid, for sorting and facets (ROADMAP 7.5.1, 7.5.3); deleted documents
     /// keep theirs. The memtable copies the field's values as of the view once per call.
     ///
@@ -348,6 +423,19 @@ pub trait SearchView {
     /// [`ReadError::UnknownField`], or [`ReadError::FieldType`] for a field of another type; a corruption of the
     /// source.
     fn keywords(&self, field: FieldId) -> Result<Self::Keywords<'_>, ReadError>;
+
+    /// As [`Self::keywords`], calling `step` for each posting and each value the view copies
+    /// ([`Self::deleted_stepped`]).
+    ///
+    /// # Errors
+    /// As [`Self::keywords`]; what `step` returns.
+    fn keywords_stepped(
+        &self,
+        field: FieldId,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Keywords<'_>, ReadError> {
+        self.keywords(field)
+    }
 
     /// Document `docid` as stored: its id, blob reference and stored fields (SPEC §6.4.2).
     ///
@@ -511,10 +599,11 @@ impl SearchView for SegmentView<'_> {
             .search_range(automaton, lower, upper))
     }
 
-    fn deleted(&self) -> RoaringBitmap {
-        self.tombstones
+    fn deleted(&self) -> Result<RoaringBitmap, ReadError> {
+        Ok(self
+            .tombstones
             .map(|t| t.docids().clone())
-            .unwrap_or_default()
+            .unwrap_or_default())
     }
 
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {

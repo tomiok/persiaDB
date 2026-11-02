@@ -529,5 +529,63 @@ fn suite(c: &mut Criterion) {
     }
     group.finish();
 }
-criterion_group!(benches, bench, requests, parallel, suite);
+
+/// `prefix` and `fuzzy` planned over a collection's views (ROADMAP 7.4.14): 4 committed segments of the benchmark
+/// documents and a memtable of 10 000 more, so every term is listed by five views, and `w1`'s 111 terms lose the cap
+/// of 50 to the memtable's counts too. Planning only: the expansion walk and its `df` lookups.
+fn collection_expansions(c: &mut Criterion) {
+    let (mut db, [body, price, tag]) = collection(4, false);
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    for i in 0..10_000 {
+        let len = 5 + rng.next() % 30;
+        let text: Vec<String> = (0..len).map(|_| format!("w{}", rng.word())).collect();
+        let doc = Document::new(format!("m{i}"))
+            .with(body, Value::String(text.join(" ")))
+            .with(price, Value::I64(i64::try_from(rng.next() % 1000).unwrap()))
+            .with(tag, Value::String(format!("t{}", rng.next() % 10)));
+        db.put("bench", &doc, Durability::Buffered).unwrap();
+    }
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    assert_eq!(coll.segments().len(), 4);
+    let memtable = coll.memtable();
+    assert_eq!(memtable.live_count(), 10_000);
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let stats = coll.search_statistics(&memtable);
+    let expansions = [
+        (
+            "prefix",
+            Query::Prefix(PrefixQuery {
+                field: body,
+                prefix: "w1".into(),
+                max_expansions: 50,
+            }),
+        ),
+        (
+            "fuzzy",
+            Query::Fuzzy(FuzzyQuery {
+                field: body,
+                term: "w15".into(),
+                distance: 1,
+                max_expansions: 50,
+            }),
+        ),
+    ];
+    let mut group = c.benchmark_group("search_expansion_collection");
+    for (name, query) in &expansions {
+        group.bench_function(format!("{name}/plan"), |b| {
+            b.iter(|| black_box(SearchPlan::with_terms(query, schema, &stats, &views).unwrap()));
+        });
+    }
+    group.finish();
+}
+criterion_group!(
+    benches,
+    bench,
+    requests,
+    parallel,
+    suite,
+    collection_expansions
+);
 criterion_main!(benches);

@@ -90,6 +90,56 @@ pub trait StatisticsProvider {
     /// [`ReadError::UnknownField`] or [`ReadError::FieldType`] for a field that is not a `text` or `keyword` field;
     /// a corruption of a source.
     fn df(&self, field: FieldId, term: &[u8]) -> Result<u64, ReadError>;
+
+    /// As [`Self::df`], for a term a `prefix` or `fuzzy` ranks while it expands (SPEC §7.1, ROADMAP 7.4.14): most of
+    /// them lose the `max_expansions` cap, so a cache does not keep the answer ([`Self::expansion_kept`] keeps the
+    /// winners). `memtable` is the memtable view's own count of the term when its term walk listed it; a provider
+    /// that adds that view adds this count instead of counting again.
+    ///
+    /// # Errors
+    /// As [`Self::df`].
+    fn expansion_df(
+        &self,
+        field: FieldId,
+        term: &[u8],
+        _memtable: Option<MemtableDf<'_>>,
+    ) -> Result<u64, ReadError> {
+        self.df(field, term)
+    }
+
+    /// An expansion kept `term`: a provider with a cache may keep its `df` now, as [`Self::df`] would.
+    ///
+    /// # Errors
+    /// As [`Self::df`].
+    fn expansion_kept(&self, _field: FieldId, _term: &[u8]) -> Result<(), ReadError> {
+        Ok(())
+    }
+}
+
+/// A memtable view's live `df` of a term, as its [`SearchView::terms`] counted it while an expansion walked it
+/// ([`StatisticsProvider::expansion_df`]). Only the engine's own walk makes one, so a provider can trust the count it
+/// carries for its view.
+#[derive(Debug, Clone, Copy)]
+pub struct MemtableDf<'a> {
+    view: &'a MemtableView,
+    df: u32,
+}
+
+impl<'a> MemtableDf<'a> {
+    /// `df`, as `view`'s term walk counted it.
+    pub(crate) fn new(view: &'a MemtableView, df: u32) -> Self {
+        Self { view, df }
+    }
+
+    /// The view that counted it.
+    pub fn view(&self) -> &'a MemtableView {
+        self.view
+    }
+
+    /// Its live documents holding the term.
+    pub fn df(&self) -> u32 {
+        self.df
+    }
 }
 
 /// The statistics of a snapshot's segments: `N` and the field totals summed once, `df` summed on demand and cached
@@ -167,6 +217,17 @@ impl SegmentStatistics {
         }
     }
 
+    /// The cached `df` of `term` in `field`, if any.
+    fn cached(&self, field: FieldId, term: &[u8]) -> Option<u64> {
+        // A poisoned lock only means another reader panicked mid-insert; the map itself is consistent.
+        self.df
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .terms
+            .get(&field)
+            .and_then(|terms| terms.get(term).copied())
+    }
+
     fn sum_df(&self, field: FieldId, term: &[u8]) -> Result<u64, ReadError> {
         let mut df = 0_u64;
         for segment in &self.segments {
@@ -189,15 +250,7 @@ impl StatisticsProvider for SegmentStatistics {
 
     fn df(&self, field: FieldId, term: &[u8]) -> Result<u64, ReadError> {
         self.check_field(field)?;
-        // A poisoned lock only means another reader panicked mid-insert; the map itself is consistent.
-        let cached = self
-            .df
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .terms
-            .get(&field)
-            .and_then(|terms| terms.get(term).copied());
-        if let Some(df) = cached {
+        if let Some(df) = self.cached(field, term) {
             return Ok(df);
         }
         let df = self.sum_df(field, term)?;
@@ -217,6 +270,25 @@ impl StatisticsProvider for SegmentStatistics {
             cache.bytes = bytes;
         }
         Ok(df)
+    }
+
+    fn expansion_df(
+        &self,
+        field: FieldId,
+        term: &[u8],
+        _memtable: Option<MemtableDf<'_>>,
+    ) -> Result<u64, ReadError> {
+        // Read from the cache, never added to it: a term that loses the cap would take the place of one a later
+        // search asks again.
+        self.check_field(field)?;
+        match self.cached(field, term) {
+            Some(df) => Ok(df),
+            None => self.sum_df(field, term),
+        }
+    }
+
+    fn expansion_kept(&self, field: FieldId, term: &[u8]) -> Result<(), ReadError> {
+        self.df(field, term).map(drop)
     }
 }
 
@@ -255,6 +327,25 @@ impl StatisticsProvider for SearchStatistics<'_> {
         // Its live documents only, as its postings.
         let memtable = u64::from(self.memtable.df(field, term)?);
         Ok(segments.saturating_add(memtable))
+    }
+
+    fn expansion_df(
+        &self,
+        field: FieldId,
+        term: &[u8],
+        memtable: Option<MemtableDf<'_>>,
+    ) -> Result<u64, ReadError> {
+        let segments = self.segments.expansion_df(field, term, None)?;
+        // The walk's count, when it is this view's: the same live documents `MemtableView::df` would walk again.
+        let memtable = match memtable {
+            Some(m) if m.view.is_same_view(self.memtable) => m.df,
+            _ => self.memtable.df(field, term)?,
+        };
+        Ok(segments.saturating_add(u64::from(memtable)))
+    }
+
+    fn expansion_kept(&self, field: FieldId, term: &[u8]) -> Result<(), ReadError> {
+        self.segments.expansion_kept(field, term)
     }
 }
 
@@ -309,6 +400,72 @@ mod tests {
         assert_eq!((entries, cache.bytes), (2, cap));
     }
 
+    fn cached_terms(stats: &SegmentStatistics) -> Vec<Vec<u8>> {
+        let cache = stats.df.read().unwrap();
+        let mut terms: Vec<Vec<u8>> = cache
+            .terms
+            .values()
+            .flat_map(|t| t.keys().map(|k| k.to_vec()))
+            .collect();
+        terms.sort();
+        terms
+    }
+
+    /// ROADMAP 7.4.14: an expansion's `df` reads the cache but does not fill it; a kept term does.
+    #[test]
+    fn an_expansion_fills_the_cache_with_kept_terms_only() {
+        let (schema, segment) = collection();
+        let body = schema.field("body").unwrap().id();
+        let stats = SegmentStatistics::new(&schema, &[segment]);
+        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 2);
+        assert_eq!(stats.expansion_df(body, b"aa", None).unwrap(), 1);
+        assert_eq!(cached_terms(&stats), Vec::<Vec<u8>>::new());
+        stats.expansion_kept(body, b"bb").unwrap();
+        assert_eq!(cached_terms(&stats), [b"bb".to_vec()]);
+        // Read from the cache once there.
+        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 2);
+        // The field is checked as `df` checks it.
+        let n = schema.field("n").unwrap().id();
+        assert!(matches!(
+            stats.expansion_df(n, b"x", None),
+            Err(ReadError::FieldType { .. })
+        ));
+        assert!(matches!(
+            stats.expansion_kept(n, b"x"),
+            Err(ReadError::FieldType { .. })
+        ));
+    }
+
+    /// The memtable's count from its own walk is added, not counted again, but only for this statistics' view.
+    #[test]
+    fn an_expansion_adds_the_memtable_count_of_the_same_view_only() {
+        let (schema, segment) = collection();
+        let body = schema.field("body").unwrap().id();
+        let segments = SegmentStatistics::new(&schema, &[segment]);
+        let mut mem =
+            crate::memtable::Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        mem.put(&Document::new("m").with(body, Value::String("bb".into())))
+            .unwrap();
+        let view = mem.view();
+        let stats = SearchStatistics::new(&segments, &view);
+        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 3);
+        let cloned = view.clone();
+        // A count the walk gave this view is taken as it is (here a made-up 7, to see it used).
+        let given = |view| Some(MemtableDf::new(view, 7));
+        assert_eq!(stats.expansion_df(body, b"bb", given(&view)).unwrap(), 9);
+        assert_eq!(stats.expansion_df(body, b"bb", given(&cloned)).unwrap(), 9);
+        // Another view (a later cutoff, or another memtable) is counted here.
+        mem.put(&Document::new("m2").with(body, Value::String("bb".into())))
+            .unwrap();
+        let later = mem.view();
+        assert_eq!(stats.expansion_df(body, b"bb", given(&later)).unwrap(), 3);
+        let other = crate::memtable::Memtable::new(&schema, &AnalyzerRegistry::builtin())
+            .unwrap()
+            .view();
+        assert_eq!(stats.expansion_df(body, b"bb", given(&other)).unwrap(), 3);
+        stats.expansion_kept(body, b"bb").unwrap();
+        assert_eq!(cached_terms(&segments), [b"bb".to_vec()]);
+    }
     #[test]
     fn df_checks_the_field_with_or_without_segments() {
         let (schema, segment) = collection();

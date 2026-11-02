@@ -19,7 +19,8 @@ use super::clock::Clock;
 use super::views::CollectionViews;
 use crate::schema::FieldId;
 use crate::search::{
-    Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource, Watch,
+    EachTerm, Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource,
+    Watch,
 };
 use crate::segment::ReadError;
 
@@ -271,17 +272,19 @@ impl TermSource for ExecTerms<'_> {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
         expansion: &Expansion,
-        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+        each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
         // Read once first: a walk shorter than one look stops too.
         self.exec.interrupt().map_err(ReadError::Interrupted)?;
-        // One count over every view: many views of few terms each still look.
+        // One count over every view: many views of few terms each still look. The memtable first, as
+        // `CollectionViews` walks it.
         let steps = Steps::new(self.exec);
+        Interruptible::new(self.views.memtable(), &steps)
+            .each_term(field, lower, upper, expansion, each)?;
         for segment in self.views.segments() {
             Interruptible::new(&segment, &steps).each_term(field, lower, upper, expansion, each)?;
         }
-        Interruptible::new(self.views.memtable(), &steps)
-            .each_term(field, lower, upper, expansion, each)
+        Ok(())
     }
 }
 

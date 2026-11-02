@@ -892,7 +892,7 @@ fn older_memtable_views_filter_as_when_taken() {
             search(c, &old, &q, 100)
         })
         .collect();
-    let deleted = old.deleted();
+    let deleted = old.deleted().unwrap();
     let present = old.present(f.tag).unwrap();
     // Writes after the view: an upsert that flips `flag`, a delete, a new document.
     db.put("c", &v(5, true).document("b"), Durability::Buffered)
@@ -905,7 +905,7 @@ fn older_memtable_views_filter_as_when_taken() {
         let q = with_filter(BoolQuery::default(), filter);
         assert_eq!(&search(c, &old, &q, 100), hits, "{filter:?}");
     }
-    assert_eq!(old.deleted(), deleted);
+    assert_eq!(old.deleted().unwrap(), deleted);
     assert_eq!(old.present(f.tag).unwrap(), present);
     let mut keys = Vec::new();
     old.column_keys(f.flag, |d, k| keys.push((d, k))).unwrap();
