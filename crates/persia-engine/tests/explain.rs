@@ -67,8 +67,7 @@ struct Fixture {
     tag: FieldId,
 }
 
-/// `a`, `b` and `gone` in a segment (`gone` then deleted), `c` in the memtable, and `b` replaced in the memtable by
-/// a version whose title holds `blue`.
+/// `a`, `b` and `gone` in a segment (`gone` then deleted), and `c` in the memtable.
 fn fixture() -> Fixture {
     let options = DatabaseOptions {
         clock: Arc::new(ManualClock::new(1_700_000_000_000_000)) as _,
@@ -517,7 +516,7 @@ fn one_pass_explains_repeats_deleted_and_excluded_documents_as_each_alone() {
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
     let stats = c.search_statistics(&memtable);
-    // a, b, gone at docids 0, 1, 2; `gone` deleted, and b hidden by the memtable's copy.
+    // a, b, gone at docids 0, 1, 2; `gone` deleted.
     let segment = views.segments().next().unwrap();
     // A nested `bool` whose `must_not` short-circuits on some documents, beside a filter and a `should`.
     let query = Query::Bool(BoolQuery {

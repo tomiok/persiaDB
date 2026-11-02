@@ -487,6 +487,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.6.2 Query deadline/cancellation token
 - [x] 7.6.3 Interrupts beyond the collector: a deadline or a cancellation is read only between the matches a collector is yielded (every 256) and before each view, so a matcher that walks long without a match (a phrase over common terms, a pruning disjunction skipping blocks) planning (`SearchPlan::with_terms` expansion, SPEC §7.1), building a view's matcher, and counting a facet over a large bitmap (`FacetCounter::add`) run past it; read it there too, and bench the cost on `search_top10` (found in 7.6.2)
 - [x] 7.6.4 A merged threshold across views: a view shares only its own `k`-th score, so on the calling thread a later view starts from the best single earlier view instead of the `k`-th of all earlier hits merged (what sequential search used before 7.6.1); publish a merged threshold where the views finished are a prefix, and bench `search_top10` over several segments (found in 7.6.1)
+- [ ] 7.6.5 Interruptible memtable copies: `MemtableView::terms` tries every term of a field's hash arena under its read lock (then runs the automaton), and `try_column_keys` copies the whole column, before any interruptible reader step; copy in chunks that read the search's interrupts, so an expansion that matches nothing in a large memtable, or a filter scan over it, stops too (SPEC §7.3, found in the 7.6.3 PR review)
 
 ## 7.7 Explain
 - [x] 7.7.1 Per-hit score breakdown (per term/field) when `explain: true`
