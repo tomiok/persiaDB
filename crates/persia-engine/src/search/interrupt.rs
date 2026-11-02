@@ -591,6 +591,68 @@ mod tests {
     }
 
     #[test]
+    fn a_memtable_expansion_lists_its_view_while_writers_interleave() {
+        let f = fixture();
+        let mem = std::sync::Mutex::new(
+            crate::memtable::Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap(),
+        );
+        let doc = |id: String, tag: String| {
+            Document::new(id)
+                .with(f.body, Value::String("alpha".into()))
+                .with(f.tag, Value::String(tag))
+        };
+        for i in 0..2_500 {
+            mem.lock()
+                .unwrap()
+                .put(&doc(format!("d{i}"), format!("t{i:05}")))
+                .unwrap();
+        }
+        let view = mem.lock().unwrap().view();
+        // Between the first chunks: a put whose log fails (its new tag is truncated from the arena), new tags, a
+        // replaced document with an old tag, a delete, all after the view.
+        let steps = Cell::new(0_u32);
+        let step = || {
+            steps.set(steps.get() + 1);
+            if steps.get() == 1_024 {
+                let mut mem = mem.lock().unwrap();
+                let failed = mem.put_logged(&doc("x".into(), "t99999".into()), |_| Err("disk"));
+                assert!(failed.is_err());
+                for i in 0..3_000 {
+                    mem.put(&doc(format!("n{i}"), format!("t{:05}", 50_000 + i)))
+                        .unwrap();
+                }
+                mem.put(&doc("d7".into(), "t00008".into())).unwrap();
+                mem.delete("d9").unwrap();
+            }
+            Ok(())
+        };
+        let mut terms = view
+            .terms_stepped(
+                f.tag,
+                Bound::Unbounded,
+                Bound::Unbounded,
+                fst::automaton::Str::new("t").starts_with(),
+                &step,
+            )
+            .unwrap();
+        let mut listed = Vec::new();
+        while let Some((term, df)) = terms.next().unwrap() {
+            listed.push((String::from_utf8(term.to_vec()).unwrap(), df));
+        }
+        let expected: Vec<(String, u32)> = (0..2_500).map(|i| (format!("t{i:05}"), 1)).collect();
+        assert_eq!(listed, expected);
+        // The 3 000 tags interned after the view were not tried: one step per term of the view, then per match.
+        assert_eq!(steps.get(), 2 * 2_500);
+    }
+
+    #[test]
+    fn a_memtable_column_copy_ends_on_a_chunk_boundary() {
+        let (view, f) = memtable(2_048);
+        let mut keys = Vec::new();
+        view.column_keys(f.n, |docid, _| keys.push(docid)).unwrap();
+        assert_eq!(keys, (0..2_048).collect::<Vec<_>>());
+    }
+    #[test]
     fn a_memtable_expansion_that_matches_nothing_stops() {
         let (view, f) = memtable(DOCS);
         let stats = SegmentStatistics::new(&f.schema, &[]);

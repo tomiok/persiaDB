@@ -15,12 +15,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use core::ops::Bound;
+
 use persia_engine::db::{
     CancelToken, Clock, CollectionHit, Database, DatabaseOptions, Execution, ManualClock,
     SearchPool, SearchRequest, Threads,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::query::{PhraseQuery, PhraseTerm, PrefixQuery, Query, TermQuery};
+
+use persia_engine::query::{
+    BoolQuery, Filter, FilterValue, PhraseQuery, PhraseTerm, PrefixQuery, Query, TermQuery,
+};
 use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 use persia_engine::search::{
     ExecError, FacetRequest, Interrupt, Order, Pruning, RequestError, SearchError, SearchPlan,
@@ -380,6 +385,55 @@ fn a_deadline_stops_explaining_a_page() {
         stopped,
         Err(RequestError::Interrupted(Interrupt::DeadlineExceeded))
     ));
+}
+
+#[test]
+fn an_explained_filtered_page_does_not_select_its_filters_again() {
+    // 3 000 documents per segment: selecting `n >= 0` reads 1 024 keys several times over in each.
+    let (db, query) = database(3_000);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let n = c.schema().field("n").unwrap().id();
+    let query = Query::Bool(BoolQuery {
+        must: vec![query],
+        filter: vec![Filter::Range {
+            field: n,
+            lower: Bound::Included(FilterValue::I64(0)),
+            upper: Bound::Unbounded,
+        }],
+        ..BoolQuery::default()
+    });
+    let memtable = c.memtable();
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let views = c.views(&memtable).unwrap();
+    let run = |explain: bool| {
+        let clock = Arc::new(TickingClock::new());
+        let at = clock.start + Duration::from_secs(3_600);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), at);
+        let request = SearchRequest {
+            explain,
+            ..SearchRequest::default()
+        };
+        (
+            views.search_with(&plan, &request, &exec).unwrap(),
+            clock.reads(),
+        )
+    };
+    let (_, reads) = run(false);
+    let (explained, with) = run(true);
+    assert!(explained.hits.iter().all(|h| h.explanation.is_some()));
+    let views: std::collections::BTreeSet<_> = explained
+        .hits
+        .iter()
+        .map(|h| match h.location {
+            persia_engine::db::Located::Segment { index, .. } => index,
+            persia_engine::db::Located::Memtable(_) => usize::MAX,
+        })
+        .collect();
+    // One read before each view explained; the filter's selection is the search's, not read again (ROADMAP 7.7.3).
+    assert_eq!(with, reads + u64::try_from(views.len()).unwrap());
 }
 
 /// One segment of 3 000 documents "alpha x beta" and distinct tags: the phrase "alpha beta" never lines up.

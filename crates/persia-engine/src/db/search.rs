@@ -274,7 +274,7 @@ impl CollectionViews<'_> {
 
         let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
         let mut explanations = if request.explain {
-            self.explain_page(plan, &segments, &page, &kept, exec)?
+            self.explain_page(plan, &segments, &page, kept, exec)?
         } else {
             Vec::new()
         }
@@ -311,7 +311,7 @@ impl CollectionViews<'_> {
         plan: &SearchPlan,
         segments: &[SegmentView<'_>],
         page: &[Ranked],
-        kept: &[(usize, Selections)],
+        mut kept: Vec<(usize, Selections)>,
         exec: &Execution,
     ) -> Result<Vec<Option<Explanation>>, RequestError> {
         // (view order, docid, page index), so each view's hits are together and in docid order.
@@ -324,6 +324,8 @@ impl CollectionViews<'_> {
             })
             .collect();
         by_view.sort_unstable();
+        // Only the views holding the page's hits are explained.
+        kept.retain(|(rank, _)| by_view.iter().any(|&(view, ..)| view == *rank));
         let mut out = vec![None; page.len()];
         for group in by_view.chunk_by(|a, b| a.0 == b.0) {
             exec.interrupt()?;
@@ -453,6 +455,12 @@ impl Search<'_> {
                     values: h.values,
                 })
                 .collect()
+        };
+        // A view without a hit has none on the page to explain.
+        let kept = if hits.is_empty() {
+            Selections::default()
+        } else {
+            kept
         };
         let mut facets = Vec::with_capacity(self.request.facets.len());
         if counting {

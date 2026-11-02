@@ -338,11 +338,13 @@ impl SearchView for MemtableView {
         step: &dyn Fn() -> Result<(), ReadError>,
     ) -> Result<MemtableTerms, ReadError> {
         // Copy the terms in range [`COPY_CHUNK`] at a time, each chunk under its own read lock, and run `automaton`
-        // without the lock. `df` is counted afterward, still at this view's `(docs, version)` cutoff, so a write
-        // between two locks cannot add or hide a document the view should see. A term with a document in the view
-        // was interned before it and keeps its id (a failed `put` truncates only the ids it interned); one interned
-        // after it has no document in it.
+        // and `step` without the lock. `df` is counted afterward, still at this view's `(docs, version)` cutoff, so
+        // a write between two locks cannot add or hide a document the view should see. A term with a document in
+        // the view was interned before it and keeps its id (a failed `put` truncates only the ids it interned), so
+        // the ids below the arena's length at the first lock hold every such term; the ones interned later are not
+        // read, however many writers add.
         let mut matched: Vec<Vec<u8>> = Vec::new();
+        let mut limit = None;
         let mut from = 0_usize;
         loop {
             let mut in_range = Vec::new();
@@ -353,9 +355,9 @@ impl SearchView for MemtableView {
                 };
                 // The term arena is a hash table: every term is tried, then the matches are sorted.
                 let arena = &index.inverted.terms;
-                let end = arena.len().min(from.saturating_add(COPY_CHUNK));
+                let limit = *limit.get_or_insert(arena.len());
+                let end = arena.len().min(limit).min(from.saturating_add(COPY_CHUNK));
                 for id in (0..=u32::MAX).skip(from).take(end.saturating_sub(from)) {
-                    step()?;
                     let term = arena.key(id);
                     if RangeBounds::<[u8]>::contains(&(lower, upper), term) {
                         in_range.push(term.to_vec());
@@ -363,6 +365,9 @@ impl SearchView for MemtableView {
                 }
                 end
             };
+            for _ in from..end {
+                step()?;
+            }
             matched.extend(
                 in_range
                     .into_iter()
@@ -378,19 +383,23 @@ impl SearchView for MemtableView {
         matched.dedup();
         let mut terms = Vec::new();
         for chunk in matched.chunks(COPY_CHUNK) {
-            let inner = read(&self.shared);
-            let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
-                break;
-            };
-            for term in chunk {
-                step()?;
-                let Some(id) = index.inverted.terms.get(term) else {
-                    continue;
+            {
+                let inner = read(&self.shared);
+                let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
+                    break;
                 };
-                let df = self.live_df(&inner, index, id);
-                if df > 0 {
-                    terms.push((term.clone(), df));
+                for term in chunk {
+                    let Some(id) = index.inverted.terms.get(term) else {
+                        continue;
+                    };
+                    let df = self.live_df(&inner, index, id);
+                    if df > 0 {
+                        terms.push((term.clone(), df));
+                    }
                 }
+            }
+            for _ in chunk {
+                step()?;
             }
         }
         Ok(MemtableTerms { terms, next: 0 })

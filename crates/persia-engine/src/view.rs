@@ -269,6 +269,7 @@ pub trait SearchView {
     /// As [`Self::terms`], calling `step` for each term a view tries before it returns: the memtable tries every
     /// term of the field (its terms are a hash table), so a search's interrupts stop an expansion that matches
     /// nothing in a large memtable (ROADMAP 7.6.5). A segment streams its terms as they are read, and ignores it.
+    /// The memtable calls `step` between its chunks, never under its lock, so `step` may write to it.
     ///
     /// # Errors
     /// As [`Self::terms`]; what `step` returns.

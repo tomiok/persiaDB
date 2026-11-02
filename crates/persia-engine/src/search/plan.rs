@@ -51,7 +51,8 @@ pub(super) enum Node {
         should: Vec<Node>,
         must_not: Vec<Node>,
         filter: Vec<Filter>,
-        /// Unique in the plan: where a search keeps what its filters select ([`Selections`]).
+        /// Unique in the plan: where a search keeps what its filters select ([`Selections`]); unused by a `bool`
+        /// without filters (an expansion's).
         slot: usize,
     },
     Scaled(Box<Node>, Scale),
@@ -414,6 +415,7 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
         filter: q.filter.clone(),
+        // After the clauses: a `bool`'s slot follows its nested ones' (post-order).
         slot: p.slot(),
     })
 }

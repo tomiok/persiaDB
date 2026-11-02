@@ -1336,9 +1336,11 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the clock at or past the deadline, the search stops with an error (cancelled, or deadline exceeded; a cancellation
   wins) and returns no hits: a page cut short would rank hits a full search does not return. Between two reads
   nothing is interrupted: a step of a reader (one block decoded, one term of an automaton's walk over the
-  dictionary), set operations on bitmaps, one chunk of the memtable's copies (1024 terms or column keys under one
-  read lock: a field's terms are tried one step each, so an expansion that matches nothing in a large memtable stops
-  too, and a column is scanned a chunk at a time), and reading the page's documents run to their end first.
+  dictionary), set operations on bitmaps, one chunk of the memtable's term and column copies (a fixed number of terms or
+  column keys under one read lock, 1024 today, a tuning value: a field's terms are tried one step each, so an
+  expansion that matches nothing in a large memtable stops too, and a column is scanned a chunk at a time), the
+  memtable's other copies for a view (its deletions, a `bool` column's trues, which documents have a value, a
+  field's norms, keys or keyword values; ROADMAP 7.6.6), and reading the page's documents run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a

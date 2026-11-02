@@ -542,7 +542,8 @@ mod tests {
             .unwrap();
         assert_eq!(kept_explained, explained);
         assert_eq!(looks.0.load(Ordering::Relaxed), 0);
-        // And it is that selection it reads: one without the document explains nothing.
+        // And it is that selection it reads: one without the document explains nothing. The root is planned after
+        // the nested `bool`, so its slot is 1.
         let kept = Selections::default();
         kept.keep(1, &RoaringBitmap::new());
         assert_eq!(plan.explain_kept(&view, &[1_000], &kept).unwrap(), [None]);
