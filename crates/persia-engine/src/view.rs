@@ -266,6 +266,23 @@ pub trait SearchView {
         automaton: A,
     ) -> Result<Self::Terms<'a, A>, ReadError>;
 
+    /// As [`Self::terms`], calling `step` for each term a view tries before it returns: the memtable tries every
+    /// term of the field (its terms are a hash table), so a search's interrupts stop an expansion that matches
+    /// nothing in a large memtable (ROADMAP 7.6.5). A segment streams its terms as they are read, and ignores it.
+    ///
+    /// # Errors
+    /// As [`Self::terms`]; what `step` returns.
+    fn terms_stepped<'a, A: Automaton + 'a>(
+        &'a self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        automaton: A,
+        _step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Terms<'a, A>, ReadError> {
+        self.terms(field, lower, upper, automaton)
+    }
+
     /// The documents below [`Self::doc_count`] a search may not return: deleted, or replaced in the memtable.
     fn deleted(&self) -> RoaringBitmap;
 

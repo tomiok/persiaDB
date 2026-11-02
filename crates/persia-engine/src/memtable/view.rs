@@ -15,6 +15,10 @@ use crate::score::FieldHit;
 use crate::segment::{BlockMax, FieldStats, ReadError};
 use crate::view::{NormReader, PostingsIterator, SearchView, TermEnum};
 
+/// How many terms or column keys a view copies under one read lock: a copy of a large memtable is taken in chunks,
+/// so a writer waits for one chunk, not the whole copy (ROADMAP 7.6.5).
+const COPY_CHUNK: usize = 1024;
+
 /// What the memtable knew of an id when a view was taken.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdState {
@@ -322,44 +326,73 @@ impl SearchView for MemtableView {
         upper: Bound<&[u8]>,
         automaton: A,
     ) -> Result<MemtableTerms, ReadError> {
-        // Copy the terms in range, then run `automaton` without the lock. `df` is counted afterward, still at
-        // this view's `(docs, version)` cutoff, so a write between the two locks cannot add or hide a document
-        // the view should see.
-        let in_range = {
-            let inner = read(&self.shared);
-            let mut terms = Vec::new();
-            // The term arena is a hash table: every term is tried, then the matches are sorted.
-            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
+        self.terms_stepped(field, lower, upper, automaton, &|| Ok(()))
+    }
+
+    fn terms_stepped<'a, A: Automaton + 'a>(
+        &'a self,
+        field: FieldId,
+        lower: Bound<&[u8]>,
+        upper: Bound<&[u8]>,
+        automaton: A,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<MemtableTerms, ReadError> {
+        // Copy the terms in range [`COPY_CHUNK`] at a time, each chunk under its own read lock, and run `automaton`
+        // without the lock. `df` is counted afterward, still at this view's `(docs, version)` cutoff, so a write
+        // between two locks cannot add or hide a document the view should see. A term with a document in the view
+        // was interned before it and keeps its id (a failed `put` truncates only the ids it interned); one interned
+        // after it has no document in it.
+        let mut matched: Vec<Vec<u8>> = Vec::new();
+        let mut from = 0_usize;
+        loop {
+            let mut in_range = Vec::new();
+            let end = {
+                let inner = read(&self.shared);
+                let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
+                    break;
+                };
+                // The term arena is a hash table: every term is tried, then the matches are sorted.
                 let arena = &index.inverted.terms;
-                for id in (0..=u32::MAX).take(arena.len()) {
+                let end = arena.len().min(from.saturating_add(COPY_CHUNK));
+                for id in (0..=u32::MAX).skip(from).take(end.saturating_sub(from)) {
+                    step()?;
                     let term = arena.key(id);
                     if RangeBounds::<[u8]>::contains(&(lower, upper), term) {
-                        terms.push(term.to_vec());
+                        in_range.push(term.to_vec());
                     }
                 }
+                end
+            };
+            matched.extend(
+                in_range
+                    .into_iter()
+                    .filter(|term| accepts(&automaton, term)),
+            );
+            if end <= from {
+                break;
             }
-            terms
-        };
-        let matched: Vec<Vec<u8>> = in_range
-            .into_iter()
-            .filter(|term| accepts(&automaton, term))
-            .collect();
+            from = end;
+        }
+        // A truncated id interned again may list a term twice.
+        matched.sort_unstable();
+        matched.dedup();
         let mut terms = Vec::new();
-        if !matched.is_empty() {
+        for chunk in matched.chunks(COPY_CHUNK) {
             let inner = read(&self.shared);
-            if let Some(index) = indexed(&inner, field, false, "terms")?.index() {
-                for term in matched {
-                    let Some(id) = index.inverted.terms.get(&term) else {
-                        continue;
-                    };
-                    let df = self.live_df(&inner, index, id);
-                    if df > 0 {
-                        terms.push((term, df));
-                    }
+            let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
+                break;
+            };
+            for term in chunk {
+                step()?;
+                let Some(id) = index.inverted.terms.get(term) else {
+                    continue;
+                };
+                let df = self.live_df(&inner, index, id);
+                if df > 0 {
+                    terms.push((term.clone(), df));
                 }
             }
         }
-        terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
         Ok(MemtableTerms { terms, next: 0 })
     }
 
@@ -440,28 +473,39 @@ impl SearchView for MemtableView {
         field: FieldId,
         mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
-        // Copied out: `f` runs without the lock.
-        let keys: Vec<(u32, u64)> = {
-            let inner = read(&self.shared);
-            match field_of(&inner, field)? {
-                (_, MemField::Column { keys }) => keys
-                    .iter()
-                    .take_while(|&&(docid, _)| docid < self.docs)
-                    .copied()
-                    .collect(),
-                (field_type, _) => {
-                    return Err(ReadError::FieldType {
-                        field,
-                        field_type,
-                        what: "column",
-                    });
+        // Copied out [`COPY_CHUNK`] keys at a time, so `f` runs without the lock and a search's interrupts, which
+        // `f` reads, stop a scan of a large column (ROADMAP 7.6.5). Keys are only appended, in docid order.
+        let mut from = 0_usize;
+        loop {
+            let chunk: Vec<(u32, u64)> = {
+                let inner = read(&self.shared);
+                match field_of(&inner, field)? {
+                    (_, MemField::Column { keys }) => keys
+                        .get(from..)
+                        .unwrap_or_default()
+                        .iter()
+                        .take(COPY_CHUNK)
+                        .take_while(|&&(docid, _)| docid < self.docs)
+                        .copied()
+                        .collect(),
+                    (field_type, _) => {
+                        return Err(ReadError::FieldType {
+                            field,
+                            field_type,
+                            what: "column",
+                        });
+                    }
                 }
+            };
+            let done = chunk.len() < COPY_CHUNK;
+            from = from.saturating_add(chunk.len());
+            for (docid, key) in chunk {
+                f(docid, key)?;
             }
-        };
-        for (docid, key) in keys {
-            f(docid, key)?;
+            if done {
+                return Ok(());
+            }
         }
-        Ok(())
     }
 
     fn keys(&self, field: FieldId) -> Result<MemtableKeys, ReadError> {
