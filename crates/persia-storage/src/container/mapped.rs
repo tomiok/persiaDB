@@ -25,12 +25,16 @@ pub(super) fn map_committed(file: &File, sb: &Superblock) -> io::Result<ByteSour
     // but the slice handed out starts at 12288, so no reference ever covers them. Frames are append-only (§4.4), and
     // no Persia writer truncates, hole-punches or rewrites the file below a `log_end` it opened with or committed:
     // recovery truncates only after `log_end` (§8.6), compaction writes a new file and renames it over this one
-    // (§4.6), and create never truncates (§4.5.1). The writer lock keeps a second writer out (§4.5.1). Every other
-    // writer is the caller's to exclude: this runs only after `Container::enable_mapped_reads`, an `unsafe fn` whose
-    // `# Safety` contract rules out other programs and other handles in this process writing, truncating or
-    // hole-punching the file below the mapped `log_end` while a mapping lives (ADR-0010 decision 3). A slot damaged
-    // after this handle read it stays outside any contract, as for any mmap-based database: a truncation then faults
-    // and ends the process (decision 5).
+    // (§4.6), and create never truncates (§4.5.1). The writer lock keeps a second writer out (§4.5.1), except where
+    // the lock is per process (`flock` emulated with POSIX locks, e.g. Linux NFS): two read-write containers of one
+    // process are then not excluded, and a second one appends at its own end over frames this handle mapped. Every
+    // other writer, and that second container, is the caller's to exclude: this runs only after
+    // `Container::enable_mapped_reads`, an `unsafe fn` whose `# Safety` contract rules out other programs, other
+    // handles in this process writing, truncating or hole-punching the file below the mapped `log_end` while a
+    // mapping lives, and a second read-write container where locks are per process (ADR-0010 decision 3). A slot
+    // damaged after this handle read it stays outside any contract, as for any mmap-based database: recovery may then
+    // fall back to the older slot and truncate below the mapped `log_end`, which faults and ends the process
+    // (decision 5), and a writer's later appends rewrite bytes this handle still maps.
     let map = unsafe { MmapFile::map(file, range)? };
     Ok(ByteSource::from_mmap(map))
 }
@@ -59,10 +63,20 @@ impl Container<File> {
     /// nothing but Persia containers writes, truncates or hole-punches the file below the `log_end` it was mapped at:
     /// not other programs, and not other handles to the file in this process (a `try_clone` of the `File` given to
     /// [`Container::open_on`], a second `File::open`, a [`ContainerFile`](super::ContainerFile) call on either).
-    /// Persia's own containers keep to this (SPEC §4.7): frames are append-only, recovery truncates only after
-    /// `log_end`, and compaction renames a new file over the old one. Appending after `log_end` lies outside the
-    /// mapping and is allowed. Breaking the contract is undefined behavior (bytes changing behind a live `&[u8]`) or,
-    /// for a truncation, ends the process with `SIGBUS` / `EXCEPTION_IN_PAGE_ERROR`.
+    /// Persia's own containers keep to this (SPEC §4.7), with two exceptions the caller must also rule out:
+    /// - where the writer lock belongs to the process rather than the handle (`flock` emulated with POSIX locks:
+    ///   Linux NFS, some FUSE and CIFS mounts; SPEC §4.5.1), a second read-write container on the file in this
+    ///   process is not locked out, and it appends over frames this one mapped. Open at most one read-write
+    ///   container per file per process there, or map only on a local disk
+    ///   ([`enable_mapped_reads_if_local`](Container::enable_mapped_reads_if_local));
+    /// - a superblock slot damaged after this container read it may make recovery fall back to the older slot and
+    ///   truncate below the mapped `log_end`; a writer's later appends then rewrite mapped bytes. As for any
+    ///   mmap-based database, this is outside what Persia can rule out (ADR-0010 decision 3).
+    ///
+    /// Otherwise frames are append-only, recovery truncates only after `log_end`, and compaction renames a new file
+    /// over the old one. Appending after `log_end` lies outside the mapping and is allowed. Breaking the contract is
+    /// undefined behavior (bytes changing behind a live `&[u8]`) or, for a truncation, ends the process with
+    /// `SIGBUS` / `EXCEPTION_IN_PAGE_ERROR`.
     ///
     /// # Errors
     /// [`Error::Io`] if the mapping fails (e.g. no address space for a large container on a 32-bit target); reads
@@ -128,16 +142,17 @@ impl Container<File> {
 }
 
 impl<F> Container<F> {
-    /// Whether some committed frames are read from a live mapping ([`Container::enable_mapped_reads`]). `false`
-    /// without mapped reads, and after mapping the file a compaction moved to failed: every frame is then read with
-    /// `pread`.
+    /// Whether a mapping is live ([`Container::enable_mapped_reads`]): committed frames it covers are read from it
+    /// (a new container's mapping covers none yet). `false` without mapped reads, and after mapping the file a
+    /// compaction moved to failed: every frame is then read with `pread`.
     pub fn is_mapped(&self) -> bool {
         self.mapped.as_ref().is_some_and(|m| m.window.is_some())
     }
 
     /// How many times remapping failed since mapped reads were enabled: after a commit (the frames it added are then
     /// read with `pread`) or after a compaction (every frame is). Each failure also logs a `tracing` warning, since
-    /// the fallback is otherwise invisible: reads stay correct, only slower.
+    /// the fallback is otherwise invisible: reads stay correct, only slower. Enabling mapped reads again starts the
+    /// count from 0.
     pub fn mapping_failures(&self) -> u64 {
         self.mapped.as_ref().map_or(0, |m| m.failures)
     }

@@ -13,15 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Their soundness rests on a precondition the container cannot check (nothing outside Persia writes, truncates or
   hole-punches the file below the mapped `log_end` while a mapping lives), now stated in a `# Safety` section
   (ROADMAP 0.6.8, ADR-0017).
-- `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning; `Container::is_mapped` and
-  `Container::mapping_failures` report the fallback to `pread` (ROADMAP 0.6.7).
-- `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
-  and cancelled since open (`db::MergeStats`, ROADMAP 6.5.11).
-- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
-  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
-- `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
-  documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
-  might not have (ROADMAP 6.3.12, SPEC §8.2.1).
+- `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning (ROADMAP 0.6.7).
 - `persia-server` is a placeholder until M11: it prints `persia-server: not implemented (M11)` and exits with status
   1, instead of exiting 0 without doing anything (ROADMAP 0.6.4).
 - README and docs site: status comes from `PROGRESS.md` and the tree (`cargo xtask progress` rewrites the README's
@@ -50,6 +42,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
 
 ### Fixed
+- `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
+  documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
+  might not have (ROADMAP 6.3.12, SPEC §8.2.1).
 - A search no longer drops a hit whose segment index is missing from the views
   (`RequestError::HitSegment`). A memtable keyword whose term has no ordinal is
   `ReadError::Section`, not ordinal 0. A keyword ordinal with no bytes is the same error, not an
@@ -59,6 +54,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-storage`: `Container::is_mapped` and `Container::mapping_failures` report a fallback from mapped reads to
+  `pread` (ROADMAP 0.6.7).
+- `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
+  and cancelled since open (`db::MergeStats`, ROADMAP 6.5.11).
+- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
+  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
 - `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
   are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
   best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.

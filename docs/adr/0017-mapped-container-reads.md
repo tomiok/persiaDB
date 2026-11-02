@@ -13,8 +13,11 @@ site lives, how much to map at once (one mapping per frame, or one window over `
 
 ## Decision
 
-1. **Call site.** `persia_storage::container::mapped` is the only module outside `persia-format` with `unsafe`. The
-   crate root is `#![deny(unsafe_code)]` instead of `forbid` so that module can `allow` it; a repository check
+1. **Call site.** `persia_storage::container::mapped` is the only library module outside `persia-format` that maps
+   (`persia_storage::sys` holds the OS calls of ADR-0021); the tests and the bench that enable mapped reads hold
+   `unsafe` blocks for the `unsafe fn` (decision 3: `container_mapped.rs`, `container_process.rs`,
+   `benches/container_read.rs`). The crate root is `#![deny(unsafe_code)]` instead of `forbid` so that module can
+   `allow` it; a repository check
    (`xtask/src/repo_checks.rs`, `UNSAFE_ALLOWED`) fails if any other file relaxes the lint. The mapping function is
    private to the container and only ever gets the container's own file and a superblock the container read or
    committed on it, so the API offers no way to map an arbitrary range. That does not make the file exclusively the
@@ -32,7 +35,10 @@ site lives, how much to map at once (one mapping per frame, or one window over `
    It is an `unsafe fn` (ROADMAP 0.6.8): soundness rests on a precondition the container cannot check (nothing but
    Persia containers writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives,
    ADR-0010 decision 3), so the caller states it with an `unsafe` block, as for `memmap2::Mmap::map`.
-   `enable_mapped_reads_if_local` is `unsafe` for the same reason.
+   `enable_mapped_reads_if_local` is `unsafe` for the same reason. The `# Safety` section also names the two cases
+   where Persia itself would break the precondition: a second read-write container in the same process where the
+   writer lock is per process (NFS, SPEC §4.5.1), and recovery truncating below a mapped `log_end` after a slot was
+   damaged.
    Choosing automatically needs the file system type (`statfs`/`f_type` on Linux, `MNT_LOCAL` on the BSDs and macOS,
    `GetDriveTypeW` on Windows), which the standard library does not expose and which would need FFI (`unsafe`) or a
    new dependency. ROADMAP 2.3.10 tracks it; until then the embedder decides.

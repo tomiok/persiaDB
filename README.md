@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **300 of 514** MVP leaves done (58%), 5 in progress (last snapshot 2026-11-02). Post-MVP work is 0 of 177 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **305 of 514** MVP leaves done (59%), 0 in progress (last snapshot 2026-11-02). Post-MVP work is 0 of 177 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -241,13 +241,13 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 <!-- BEGIN GENERATED progress:milestones by `cargo xtask progress`. Do not edit by hand. -->
 | Milestone | State | Leaves done |
 |---|---|---|
-| **M0** Project bootstrap | 🔨 in progress | 30/34 |
+| **M0** Project bootstrap | 🔨 in progress | 32/34 |
 | **M1** Format primitives | ✅ done | 53/53 |
 | **M2** Storage abstraction & local backends | ✅ done | 46/46 |
 | **M3** Schema, documents, collections | ✅ done | 15/15 |
 | **M4** Text analysis | ✅ done | 29/29 |
 | **M5** Segment writer & reader | ✅ done | 48/48 |
-| **M6** Write path, durability, merging | 🔨 in progress | 40/55 |
+| **M6** Write path, durability, merging | 🔨 in progress | 43/55 |
 | **M7** Query engine & ranking | 🔨 in progress | 39/49 |
 | **M8** Zero-results avoidance | ⏳ blocked | 0/29 |
 | **M9** Blob store | ▶️ ready | 0/20 |

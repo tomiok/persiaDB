@@ -44,7 +44,7 @@ use persia_engine::wal::Durability;
 use persia_format::ByteSource;
 use persia_format::block::Compression;
 use persia_format::frame::FrameKind;
-use persia_storage::container::sim::SimFile;
+use persia_storage::container::sim::{CrashLoss, SimFile};
 use persia_storage::container::{Commit, Container};
 use proptest::prelude::*;
 
@@ -355,7 +355,7 @@ fn fully_deleted_segments_are_removed_by_their_commit() {
 
 #[test]
 fn obsolete_objects_wait_for_their_last_reader() {
-    let (_, mut db) = database(0);
+    let (file, mut db) = database(0);
     commit_segments(&mut db, &[&["a0", "a1", "a2"], &["b0", "b1"]]);
     // A held snapshot keeps sidecar version 1 of the first segment once version 2 supersedes it.
     db.delete("a", "a0", Durability::Fsync).unwrap();
@@ -418,6 +418,8 @@ fn obsolete_objects_wait_for_their_last_reader() {
     assert_eq!(reader.snapshot().seq(), db.seq());
     // While held they are live space (ROADMAP 6.5.10); once no reader can read them, exactly their frames are dead.
     let pinned = db.space_usage().unwrap();
+    // The file as it is now, while a snapshot still pins the obsolete frames.
+    let disk = file.crash(CrashLoss::Nothing);
     drop(held);
     let freed = db.space_usage().unwrap();
     let frames: u64 = expected
@@ -445,6 +447,9 @@ fn obsolete_objects_wait_for_their_last_reader() {
     assert_eq!(db.take_unreferenced().len(), 3);
     // Taking them changes nothing on disk: they stay dead until a compaction (ROADMAP 6.5.8).
     assert_eq!(db.space_usage().unwrap(), freed);
+    // A reopen knows no reader of the old frames: what a snapshot pinned before it is dead after it.
+    let reopened = Database::open_on(disk, options(0)).unwrap();
+    assert_eq!(reopened.space_usage().unwrap(), freed);
 }
 
 /// A database's dead bytes only grow while it writes: nothing compacts the container yet (ROADMAP 6.5.8, 6.5.10).
@@ -925,7 +930,7 @@ fn live_ids_by_segment(db: &Database<SimFile>) -> Vec<Vec<String>> {
 /// The gap ROADMAP 6.5.9 closes, pinned so it stays visible (6.5.11): merges run on a worker and are committed by
 /// the next [`Database::merge_step`], so a commit that deletes from every segment between two steps discards every
 /// merge in flight. Each discard is counted ([`Database::merge_stats`]), and while the deletes go on nothing merges:
-/// the segment count grows by one per round, unbounded. The outcome does not depend on thread timing: a merge is
+/// the segment count grows by one per round, unbounded. What every settled merge does is not up to thread timing: a merge is
 /// only ever committed by a later step, after that round's deletes. Once the deletes pause, merging catches up.
 #[test]
 fn deletes_into_every_segment_discard_every_merge_until_they_pause() {
@@ -953,12 +958,14 @@ fn deletes_into_every_segment_discard_every_merge_until_they_pause() {
     }
     let stats = db.merge_stats();
     assert_eq!(stats.committed, 0, "{stats:?}");
-    assert!(stats.conflicts >= 1, "{stats:?}");
+    // How many were settled by now depends on the worker's speed; that every settled one conflicted does not.
     assert_eq!((stats.failed, stats.cancelled), (0, 0));
 
     let outcomes = db.finish_merges().unwrap();
     let after = db.merge_stats();
     assert!(after.committed > 0, "{after:?}");
+    // The merge in flight met a delete before any step settled it, whatever the timing.
+    assert!(after.conflicts >= 1, "{after:?}");
     // Every outcome of the step is counted, the discarded one still in flight included.
     let conflicts = outcomes
         .iter()
