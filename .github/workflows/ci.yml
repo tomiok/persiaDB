@@ -112,10 +112,11 @@ jobs:
           done
 
   miri:
-    # ROADMAP 0.2.5: UB detection for persia-format, the only crate allowed to contain `unsafe`.
+    # ROADMAP 0.2.5, 0.6.6: UB detection for persia-format and the pure parsers of persia-engine (`just miri` lists
+    # them and why the rest is left out).
     # The dated nightly lives in .github/nightly-toolchain (CLAUDE.md "Toolchain").
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -126,10 +127,10 @@ jobs:
           echo "NIGHTLY=$nightly" >> "$GITHUB_ENV"
           rustup toolchain install "$nightly" --profile minimal --component miri,rust-src
       - run: cargo "+$NIGHTLY" miri setup
-      # Unit tests + doctests only: property tests need the filesystem (proptest's failure persistence),
-      # which Miri isolates, and they test pure logic that native runs already cover.
-      - run: cargo "+$NIGHTLY" miri test -p persia-format --lib
-      - run: cargo "+$NIGHTLY" miri test -p persia-format --doc
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: just
+      - run: just miri
 
   deny:
     runs-on: ubuntu-latest

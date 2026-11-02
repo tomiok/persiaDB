@@ -610,7 +610,7 @@ Text analysis (M4) may proceed alongside them. The generated ready-next list is 
 ### M0 — Project bootstrap
 
 Done. The Cargo workspace and stub crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo deny`,
-Miri on `persia-format`), the `justfile`, repo tooling in Rust (`cargo xtask`, ADR-0003), issue
+Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo tooling in Rust (`cargo xtask`, ADR-0003), issue
 templates, and the documentation scaffolding: this repository's rules, the ADR process, ADR-0001 and
 ADR-0002, and [`docs/architecture.md`](./architecture.md). No dependencies.
 
