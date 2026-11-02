@@ -116,7 +116,7 @@ _Nothing ready._
 - `0.6.7` A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`) and how many remaps failed (`mapping_failures()`) (M0)
 - `0.6.8` `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017) (M0)
 - `6.3.12` `put_batch` makes a document visible only once it is durable (today the ones before the last are visible once buffered, SPEC §8.2.1); test with a forced sync failure that no reader sees an unsynced document (found in the 2026-11-02 audit) (M6)
-- `6.5.10` Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database` space usage) (found in the 2026-11-02 audit) (M6)
+- `6.5.10` Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database::space_usage`) (found in the 2026-11-02 audit) (M6)
 
 ## Ready next (first 15 MVP todo leaves whose milestone deps are done)
 

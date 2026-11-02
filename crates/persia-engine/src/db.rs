@@ -566,6 +566,61 @@ impl<F: ContainerFile + Sync> Database<F> {
         ContainerObjects::new(self.wal.log(), &self.manifest)
     }
 
+    /// How much of the container file is live and how much a compaction would reclaim (SPEC §4.6). Live are the
+    /// segment and sidecar frames the committed manifest lists, the obsolete ones a reader may still read
+    /// ([`Database::obsolete`]), and everything from `wal_start` on; the rest (replaced segments, superseded
+    /// sidecars, old manifests, consumed WAL chunks) is dead. The engine does not compact yet (ROADMAP 6.5.8), so
+    /// the dead bytes only grow: this is how to watch them.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions};
+    /// use persia_engine::document::Document;
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder};
+    /// use persia_engine::wal::Durability;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let schema = SchemaBuilder::new("items").field("n", FieldKind::I64 { stored: true }).build()?;
+    /// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// db.create_collection(schema)?;
+    /// db.put("items", &Document::new("a"), Durability::Fsync)?;
+    /// db.commit()?;
+    /// let before = db.space_usage()?;
+    /// db.put("items", &Document::new("a"), Durability::Fsync)?; // replaces "a"
+    /// db.commit()?;
+    /// // The consumed WAL chunks and the old manifest are dead now.
+    /// assert!(db.space_usage()?.dead() > before.dead());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`DatabaseError::Container`] if a listed frame lies outside the file's frames or overlaps another (a manifest
+    /// the open checks would have refused).
+    pub fn space_usage(&self) -> Result<container::SpaceUsage, DatabaseError> {
+        let container = self.wal.log();
+        let wal_start = container.superblock().wal_start;
+        let listed = self
+            .manifest
+            .collections()
+            .flat_map(|c| c.segments().iter())
+            .flat_map(|s| std::iter::once(s.location).chain(s.tombstones.map(|t| t.location)));
+        let pinned = self
+            .merges
+            .obsolete
+            .all()
+            .filter(|(_, referenced)| *referenced)
+            .map(|(o, _)| o.location);
+        let live: Vec<_> = listed
+            .chain(pinned)
+            .filter_map(|location| match location {
+                Location::Frame { offset, len } => Some(offset..offset.saturating_add(len)),
+                Location::Object => None,
+            })
+            // Frames from `wal_start` on count as live anyway.
+            .filter(|r| r.end <= wal_start)
+            .collect();
+        Ok(container.space_usage(&live)?)
+    }
+
     fn usable(&self) -> Result<(), DatabaseError> {
         if self.poisoned {
             Err(DatabaseError::Poisoned)

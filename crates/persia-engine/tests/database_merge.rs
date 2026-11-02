@@ -416,8 +416,66 @@ fn obsolete_objects_wait_for_their_last_reader() {
     assert!(db.take_unreferenced().is_empty());
     // The reader's current snapshot is the merged one: it holds none of them.
     assert_eq!(reader.snapshot().seq(), db.seq());
+    // While held they are live space (ROADMAP 6.5.10); once no reader can read them, exactly their frames are dead.
+    let pinned = db.space_usage().unwrap();
     drop(held);
+    let freed = db.space_usage().unwrap();
+    let frames: u64 = expected
+        .iter()
+        .map(|(_, location)| match location {
+            Location::Frame { len, .. } => *len,
+            Location::Object => panic!("a local database stores frames"),
+        })
+        .sum();
+    assert_eq!(freed.total, pinned.total);
+    assert_eq!(freed.dead() - pinned.dead(), frames);
+    // The merged segment is live: everything listed counts.
+    let listed: u64 = db
+        .manifest()
+        .collection("a")
+        .unwrap()
+        .segments()
+        .iter()
+        .map(|s| match s.location {
+            Location::Frame { len, .. } => len,
+            Location::Object => 0,
+        })
+        .sum();
+    assert!(freed.live >= 12288 + listed);
     assert_eq!(db.take_unreferenced().len(), 3);
+    // Taking them changes nothing on disk: they stay dead until a compaction (ROADMAP 6.5.8).
+    assert_eq!(db.space_usage().unwrap(), freed);
+}
+
+/// A database's dead bytes only grow while it writes: nothing compacts the container yet (ROADMAP 6.5.8, 6.5.10).
+#[test]
+fn dead_space_grows_with_replaced_data_until_compaction_exists() {
+    let (_, mut db) = database(0);
+    let empty = db.space_usage().unwrap();
+    assert_eq!(empty.live + empty.dead(), empty.total);
+    let mut last = empty;
+    for round in 0..6 {
+        for id in ["x", "y", "z"] {
+            db.put(
+                "a",
+                &doc(id, &format!("{id} round {round}")),
+                Durability::Fsync,
+            )
+            .unwrap();
+        }
+        db.commit().unwrap();
+        db.finish_merges().unwrap();
+        let now = db.space_usage().unwrap();
+        assert!(
+            now.total > last.total,
+            "round {round}: {now:?} after {last:?}"
+        );
+        assert!(
+            now.dead() > last.dead(),
+            "round {round}: {now:?} after {last:?}"
+        );
+        last = now;
+    }
 }
 
 /// A reader may keep an `Arc<Segment>` after dropping the snapshot that handed it out. The obsolete frame stays

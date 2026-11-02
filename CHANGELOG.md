@@ -15,6 +15,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (ROADMAP 0.6.8, ADR-0017).
 - `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning; `Container::is_mapped` and
   `Container::mapping_failures` report the fallback to `pread` (ROADMAP 0.6.7).
+- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
+  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
 - `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
   documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
   might not have (ROADMAP 6.3.12, SPEC §8.2.1). `Memtable::hold`, `release` and `is_held` are new.
