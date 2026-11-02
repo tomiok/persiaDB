@@ -21,17 +21,20 @@
 )] // Tests: inputs are fixed.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use persia_analysis::AnalyzerRegistry;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, Located, ManualClock, ObsoleteKind, SegmentIds,
+    CommitPolicy, Database, DatabaseError, DatabaseOptions, Located, ManualClock, ObsoleteKind,
+    SegmentIds,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
     CollectionChange, CollectionDiff, Location, Manifest, ManifestDiff, SegmentEntry, SegmentId,
     Tombstones,
 };
+use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::segment::{SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::tombstone::{MAX_SIDECAR_LEN, SidecarError, TombstoneSidecar};
@@ -676,4 +679,87 @@ fn one_commit_removes_a_segment_before_one_it_writes_a_sidecar_for() {
     check(&db);
     drop(db);
     check(&Database::open_on(file.crash(CrashLoss::All), options()).unwrap());
+}
+
+/// A flush commit inside a `put_batch` that fails while it is planned (ROADMAP 6.3.12, SPEC §8.2.1): it does not
+/// poison, so the batch makes the documents before it durable and visible, to a snapshot loaded before the batch
+/// too (the memtable is not left held), and returns the planning error; the rest of the batch never appears. The
+/// memtable stays full, so the next write retries the flush and fails the same way, still unpoisoned.
+#[test]
+fn a_flush_that_cannot_be_planned_ends_a_batch_with_the_documents_before_it_seen_and_durable() {
+    let (file, id) = one_segment();
+    let sidecar = TombstoneSidecar::new(id, u64::MAX, 5, deleted(&[1, 3])).unwrap();
+    commit_sidecar_patched(&file, &sidecar.encode().unwrap(), 1, 2, |m| {
+        let mut entry = vec![1];
+        entry.extend(1_u64.to_le_bytes());
+        entry.extend(2_u32.to_le_bytes());
+        let at = m.windows(entry.len()).position(|w| w == entry).unwrap();
+        m[at + 1..at + 9].copy_from_slice(&u64::MAX.to_le_bytes());
+    });
+    let flushing = || DatabaseOptions {
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: 4 << 10,
+                idle: Duration::from_secs(10),
+            },
+            interval: Duration::from_secs(3600),
+        },
+        ..options()
+    };
+    let mut db = Database::open_on(file.clone(), flushing()).unwrap();
+    let seq = db.seq();
+    let old = db.snapshot();
+    let filler = "lorem ipsum dolor sit amet ".repeat(20);
+    // The upsert of `x0` makes every flush plan a sidecar for the segment, which has no version after u64::MAX.
+    let batch: Vec<Document> = std::iter::once(doc("x0", "batch"))
+        .chain((0..12).map(|i| doc(&format!("f{i:02}"), &filler)))
+        .collect();
+    let e = db.put_batch("a", &batch, Durability::Fsync).unwrap_err();
+    assert!(matches!(e, DatabaseError::Sidecar { .. }), "{e}");
+    assert_eq!(db.seq(), seq, "nothing committed");
+    let shown = ids(&db);
+    let fillers = shown.iter().filter(|i| i.starts_with('f')).count();
+    assert!(
+        (1..12).contains(&fillers),
+        "{fillers} documents before the flush"
+    );
+    let want: Vec<String> = batch[..=fillers]
+        .iter()
+        .map(|d| d.id().to_owned())
+        // The sidecar deletes x1 and x3.
+        .chain(["x2".to_owned(), "x4".to_owned()])
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    assert_eq!(shown, want);
+    let x0 = |s: &persia_engine::db::Snapshot| {
+        text(&s.collection("a").unwrap().get("x0").unwrap().unwrap()).to_owned()
+    };
+    assert_eq!(x0(&db.snapshot()), "batch");
+    // A snapshot loaded before the batch reads the same memtable: released, so it shows them too.
+    assert_eq!(x0(&old), "batch");
+    assert!(
+        old.collection("a")
+            .unwrap()
+            .get(&format!("f{:02}", fillers - 1))
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        old.collection("a")
+            .unwrap()
+            .get(&format!("f{fillers:02}"))
+            .unwrap()
+            .is_none()
+    );
+    // Not poisoned: the next write retries the flush and fails while planning again.
+    let e = db
+        .put("a", &doc("late", "x"), Durability::Fsync)
+        .unwrap_err();
+    assert!(matches!(e, DatabaseError::Sidecar { .. }), "{e}");
+    drop((db, old));
+    // Durable: a crash losing every unsynced write keeps them (reopened without a size flush, which would fail).
+    let db = Database::open_on(file.crash(CrashLoss::All), options()).unwrap();
+    assert_eq!(ids(&db), want);
+    assert_eq!(x0(&db.snapshot()), "batch");
 }

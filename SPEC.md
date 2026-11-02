@@ -1511,12 +1511,15 @@ The write path does it in three steps (ADR-0029): the memtable *stages* the oper
 interns the id, but publishes nothing: no view sees it), the record is logged, and only then the memtable *publishes*
 it. A rejected operation is never logged, and no reader sees an operation that was not logged. A single `put` or
 `delete` is logged with its durability before it is published, so it is visible only once durable at that level. A
-`put_batch` logs the documents before the last `Buffered` and the last one with the batch's durability (one sync for
-all), and *holds* the memtable while it runs (ROADMAP 6.3.12): a view taken meanwhile sees the collection as it was
-before the batch, and the batch becomes visible only once it is durable at its level. A batch whose document is
-rejected keeps the ones before it, made durable at the batch's level and then visible. A flush commit inside a batch
-(the size threshold) syncs the WAL first and publishes the prefix it flushed, durable; nothing is visible before it
-is durable. A sync that fails poisons the database before any reader saw the batch; a reopen decides what survived.
+`put_batch` logs the documents before the last `Buffered` and the last one with the batch's durability (one sync
+for all), and a batch of two or more *holds* the memtable while it runs (ROADMAP 6.3.12): a view taken meanwhile
+sees the collection as it was before the batch, and the batch becomes visible only once it is durable at its level
+(at `Buffered` and `Async`, the level a single `put` reaches before it is visible). A batch whose document is
+rejected keeps the ones before it, made durable at the batch's level and then visible. A flush commit inside
+a batch (the size threshold) syncs the WAL first and publishes the prefix it flushed, durable. A sync that
+fails poisons the database before any reader saw the part of the batch that is not durable; a reopen decides
+what survived. A memtable a batch left held (a panic unwound it) poisons the database at the next write to it,
+rather than take writes no reader would see.
 
 Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
 put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).

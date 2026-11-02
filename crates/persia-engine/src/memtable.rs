@@ -167,13 +167,13 @@ pub(crate) struct Inner {
     pub(crate) stats: Vec<Option<FieldStats>>,
     pub(crate) live: u32,
     /// While set, what every new view sees instead of the latest writes ([`Memtable::hold`]).
-    pub(crate) held: Option<Held>,
+    pub(crate) held: Option<HeldView>,
 }
 
 /// The state a held memtable shows its new views: the documents, operations and live statistics when
 /// [`Memtable::hold`] was called.
 #[derive(Debug, Clone)]
-pub(crate) struct Held {
+pub(crate) struct HeldView {
     pub(crate) docs: u32,
     pub(crate) version: u64,
     pub(crate) stats: Vec<Option<FieldStats>>,
@@ -560,10 +560,10 @@ impl Memtable {
     /// Holds what new views see at the writes applied so far, until [`Self::release`]: writes keep applying, but
     /// a view taken meanwhile sees none of them. A `put_batch` holds while its documents are not durable yet
     /// (SPEC §8.2.1, ROADMAP 6.3.12). Holding a held memtable keeps the first hold.
-    pub fn hold(&self) {
+    pub(crate) fn hold(&self) {
         let mut inner = self.shared.write().unwrap_or_else(PoisonError::into_inner);
         if inner.held.is_none() {
-            inner.held = Some(Held {
+            inner.held = Some(HeldView {
                 docs: inner.doc_count(),
                 version: inner.version(),
                 stats: inner.stats.clone(),
@@ -573,7 +573,7 @@ impl Memtable {
     }
 
     /// Ends a [`Self::hold`]: new views see every write applied so far again. A memtable not held is unchanged.
-    pub fn release(&self) {
+    pub(crate) fn release(&self) {
         self.shared
             .write()
             .unwrap_or_else(PoisonError::into_inner)
@@ -581,7 +581,7 @@ impl Memtable {
     }
 
     /// Whether new views are held ([`Self::hold`]).
-    pub fn is_held(&self) -> bool {
+    pub(crate) fn is_held(&self) -> bool {
         read(&self.shared).held.is_some()
     }
 
