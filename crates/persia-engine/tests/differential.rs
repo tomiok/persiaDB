@@ -7,7 +7,8 @@
 //! 1. A search returns exactly the live documents the reference matches and the filter selects, each once, with
 //!    the reference's score within [`EPSILON`] of the query's scale. Statistics count every document of every
 //!    segment, deleted or replaced ones too, plus the memtable's live documents (SPEC §7.2).
-//! 2. Hits rank by score descending, then segment order with the memtable last, then docid (SPEC §7.3).
+//! 2. Hits rank in the reference's order: no hit above one the reference scores higher beyond the tolerance, every
+//!    pair compared. Ties rank by segment order with the memtable last, then docid (SPEC §7.3).
 //! 3. Every pruning strategy, on the calling thread and on a pool, returns the same page, scores bit for bit; a page
 //!    of `k` is the first `k` of the full ranking, and the page after its last cursor is the next `k`.
 //! 4. Each hit's explanation scores the hit, bit for bit; each field of a word lists the frequency the reference
@@ -609,7 +610,34 @@ fn check(
             );
         }
 
-        // Invariant 2: the order.
+        // Invariant 2: the order is the reference's: no hit ranks above one the reference scores higher beyond the
+        // scores' tolerance (every pair, since a tolerance is not transitive), so a page of `k` is the reference's top
+        // `k` up to near-ties.
+        let reference: Vec<(f64, f64)> = full
+            .iter()
+            .map(|h| {
+                want.iter()
+                    .find(|(id, _)| id.as_str() == h.document.id())
+                    .map(|(_, s)| *s)
+                    .unwrap()
+            })
+            .collect();
+        for (i, (above, above_scale)) in reference.iter().enumerate() {
+            for (j, (below, below_scale)) in reference.iter().enumerate().skip(i + 1) {
+                let tolerance = 2.0 * EPSILON * above_scale.max(*below_scale).max(1.0);
+                prop_assert!(
+                    *above >= below - tolerance,
+                    "rank {} ({}, reference {}) above rank {} ({}, reference {}) for {:?}",
+                    i,
+                    full[i].document.id(),
+                    above,
+                    j,
+                    full[j].document.id(),
+                    below,
+                    query
+                );
+            }
+        }
         for pair in full.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
             prop_assert!(

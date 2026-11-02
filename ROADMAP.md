@@ -515,7 +515,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
 - [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
 - [~] 7.8.5 The reference model's norm oracle is independent of the implementation: properties `decode(encode(n)) <= n`, exact below 40, within 12.5 %, monotonic, instead of a copy of the codec (found in the 2026-11-02 audit)
-- [ ] 7.8.6 The differential suite compares ranked order (ties by docid), not only scores within a tolerance (found in the 2026-11-02 audit)
+- [~] 7.8.6 The differential suite compares ranked order to the reference directly (every pair of hits, within the score tolerance), not only through each score within tolerance plus the engine's own order, which together implied it (found in the 2026-11-02 audit)
 
 ---
 
