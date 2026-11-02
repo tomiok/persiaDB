@@ -23,7 +23,7 @@ head:
             "name": "What is Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a search you can call. %%LIBRARY_NOW%% Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
+              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a database handle you can open. %%LIBRARY_NOW%% Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
             }
           },
           {
@@ -31,7 +31,7 @@ head:
             "name": "Is Persia DB production ready?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%\n\nPROGRESS.md is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
+              "text": "No. Persia DB is pre-alpha, and its public API (Db) does not exist yet. The crates are unpublished (publish = false, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%\n\nPROGRESS.md is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The comparison page says which one fits which job, and it is not a benchmark."
             }
           },
           {
@@ -39,7 +39,7 @@ head:
             "name": "How is Persia DB different from SQLite FTS5, Tantivy, and Meilisearch?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is an empty main function.\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A search call and the relaxation cascade are not. That split is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/."
+              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is a placeholder binary that exits with not implemented (M11).\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle and the relaxation cascade are not. That split is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/."
             }
           },
           {
@@ -112,13 +112,13 @@ Planned work is marked as planned. Nothing here is a benchmark.
 
 Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md). When this site and the SPEC disagree, the SPEC wins.
 
-What the repository contains today is library code, not a search you can call. %%LIBRARY_NOW%% Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+What the repository contains today is library code, not a database handle you can open. %%LIBRARY_NOW%% Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
 What an embedded search database is, and how embedded full-text search in Rust fits this design, is [What is an embedded search database?](/guide/embedded-search/).
 
 ## Is Persia DB production ready?
 
-No. Persia DB is pre-alpha, and it does not answer a query. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%
+No. Persia DB is pre-alpha, and its public API (Db) does not exist yet. The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release and no compatibility promise. The on-disk format stays unstable until v1.0 (roadmap M15, SPEC §15). %%M10_BLOCKED%%
 
 [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md) is the live counter: %%PROGRESS_SUMMARY%%. A number on this page is that snapshot. For a search feature in production today, use an existing engine. The [comparison page](/guide/comparison/) says which one fits which job, and it is not a benchmark.
 
@@ -130,9 +130,9 @@ SQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQ
 
 Tantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. [ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md) forbids depending on another search engine.
 
-Meilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: `persia-server` is an empty main function.
+Meilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: `persia-server` is a placeholder binary that exits with "not implemented (M11)".
 
-The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A search call and the relaxation cascade are not. That split is [Typo-tolerant search](/guide/typo-tolerant-search/).
+The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle and the relaxation cascade are not. That split is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Is Persia DB embedded or a server?
 

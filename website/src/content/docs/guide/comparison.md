@@ -40,10 +40,10 @@ The [getting started](/guide/getting-started/) page separates that library code 
 The first release a caller can use is `v0.1` (roadmap M10). The format stays unstable until `v1.0` (M15).
 Counts on the [roadmap](/roadmap/) are read from PROGRESS.md when the site is built.
 
-Specified, and not something you can search with yet:
+Specified, and searchable only as engine library code today:
 
 - The query compiler, the filter DSL, and a BM25F scorer are library code (ROADMAP 7.1–7.3).
-  They do not return hits by themselves. Matching and score top-k over one view are library code (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, and a `search` call are not implemented.
+  %%MATCHING_CELL%% There is no `search` call on a database handle (M10).
   Analysis libraries are in the tree. The project does not wrap Tantivy, Lucene, or SQLite
   ([ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md)).
 - A query with too few hits is relaxed step by step, and the response says what changed (SPEC §7.6).

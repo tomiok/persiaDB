@@ -19,7 +19,7 @@ import ArchitectureDiagram from '../../../components/ArchitectureDiagram.astro';
 The picture below is the intended layering in [SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview).
 `persia-format`, `persia-storage`, `persia-engine`, and `persia-analysis` contain library code.
 %%ENGINE_SHORT%%
-`persia` exports no `Db`. `persia-server` is an empty `main`. `persia-blob` and `persia-proto` are module docs only.
+`persia` exports no `Db`. `persia-server` is a placeholder binary that exits with "not implemented (M11)". `persia-blob` and `persia-proto` are placeholders, module docs only.
 [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
 
@@ -45,8 +45,8 @@ Three rules shape the rest of the design:
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | No API yet (M9) |
 | `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10). The crate exports no types. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
-| `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Empty `main` (M11, M13) |
-| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `compact`, `bench`, import, and search are later. | Sweep, inspect, and dump exist. The rest is M10. |
+| `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Placeholder: exits with "not implemented" (M11, M13) |
+| `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `compact`, `bench`, import, and search are later. | Sweep, inspect, dump, and `verify` exist. The rest is M10. |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. The public facade orders blob writes before the document commit so the engine never has

@@ -38,7 +38,7 @@ An embedded search database fits when search belongs in the same program as the 
 
 A search server fits when many applications share one index, when callers should use HTTP without linking a library, or when a team already runs that service.
 
-The Persia DB design is the library, with a server only as a later option. The planned gRPC and HTTP server embeds the same engine as the library ([SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview), [§12](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-server-and-api)). That server is milestone M11. `persia-server` is an empty `main` function. See [Server, cloud, and Kubernetes](/guide/server/).
+The Persia DB design is the library, with a server only as a later option. The planned gRPC and HTTP server embeds the same engine as the library ([SPEC §3](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#3-architecture-overview), [§12](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-server-and-api)). That server is milestone M11. `persia-server` is a placeholder binary that exits with "not implemented (M11)". See [Server, cloud, and Kubernetes](/guide/server/).
 
 For a search feature in production today, use an engine that already answers queries. The [comparison](/guide/comparison/) says which established tool fits which job. Persia DB cannot answer a query.
 

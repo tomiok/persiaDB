@@ -18,29 +18,28 @@ import RelaxationFlow from '../../components/RelaxationFlow.astro';
 import WinButton from '../../components/WinButton.astro';
 
 The product is a search database: ranked full-text search, filters, facets, and a default that
-avoids an empty page. The query compiler, the filter DSL, and BM25F scoring exist as library code.
-Matching, facets, a search call, and relaxation do not. The write path is
-partly in the tree. The table says which milestone builds each row. The long form, including the
+avoids an empty page. %%FEATURES_LEAD%%
+The table says which milestone builds each row. The long form, including the
 schema sketch and the relaxation JSON, is the [feature reference](/guide/features/).
 How a typo is supposed to avoid an empty page is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 | Capability | Status |
 |---|---|
-| Open a file and search | Planned (M10) |
-| Query text, filters, and BM25F | Compiler, filter DSL, and scorer are library code (M7). They do not return hits. |
-| Matching, facets, and sort | Not started (M7) |
-| Zero-results relaxation | Not started (M8), on by default in the design |
+| Open a file and search | %%OPEN_CELL%% |
+| Query text, filters, and BM25F | %%QUERY_CELL%% |
+| Matching, facets, and sort | %%MATCHING_CELL%% |
+| Zero-results relaxation | %%RELAXATION_CELL%% |
 | Schema and documents | Done as library code (M3). Not reachable through `Db`. |
-| Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. The query compiler runs them. They do not run a search. |
+| Analyzers | Done as library code (M4): `standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`. The query compiler runs them. |
 | Segment writer and reader | %%M5_CELL%% |
 | Crash-safe commit and recovery | %%DURABILITY_CELL%% |
-| Blob storage | Planned (M9) |
-| gRPC and HTTP server | Planned (M11) |
-| S3, GCS, Azure, replication | Planned (M12) |
-| Kubernetes and sharding | Planned (M13) |
+| Blob storage | %%STATE_M9%% |
+| gRPC and HTTP server | %%STATE_M11%% |
+| S3, GCS, Azure, replication | %%STATE_M12%% |
+| Kubernetes and sharding | %%STATE_M13%% |
 | Embedded Go and TypeScript bindings | Planned (after M10). Design only. |
-| Rust and Go network SDKs | Planned (M14) |
-| Integer codecs and `None` / `Zstd` block codecs | Done, as library code in `persia-format` (M1) |
+| Rust and Go network SDKs | %%STATE_M14%% |
+| Integer codecs and `None` / `Zstd` block codecs | %%STATE_M1%% Library code in `persia-format`. |
 
 ## Zero-results relaxation
 
