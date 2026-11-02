@@ -9,6 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
+  documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
+  might not have (ROADMAP 6.3.12, SPEC §8.2.1). `Memtable::hold`, `release` and `is_held` are new.
 - `persia-server` is a placeholder until M11: it prints `persia-server: not implemented (M11)` and exits with status
   1, instead of exiting 0 without doing anything (ROADMAP 0.6.4).
 - README and docs site: status comes from `PROGRESS.md` and the tree (`cargo xtask progress` rewrites the README's

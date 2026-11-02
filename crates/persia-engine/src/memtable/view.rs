@@ -54,11 +54,20 @@ pub struct MemtableView {
 
 impl MemtableView {
     pub(super) fn new(shared: Arc<RwLock<Inner>>, inner: &Inner) -> Self {
+        let (docs, version, stats, live) = match &inner.held {
+            Some(held) => (held.docs, held.version, held.stats.clone(), held.live),
+            None => (
+                inner.doc_count(),
+                inner.version(),
+                inner.stats.clone(),
+                inner.live,
+            ),
+        };
         Self {
-            docs: inner.doc_count(),
-            version: inner.version(),
-            stats: inner.stats.clone(),
-            live: inner.live,
+            docs,
+            version,
+            stats,
+            live,
             norms: inner.fields.iter().map(|_| OnceLock::new()).collect(),
             schema: Arc::clone(&inner.schema),
             shared,

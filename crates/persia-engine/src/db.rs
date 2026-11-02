@@ -625,14 +625,15 @@ impl<F: ContainerFile + Sync> Database<F> {
     }
 
     /// [`Database::put`] of every document of `docs` in order, reaching `durability` once for all of them (one
-    /// sync for `Fsync`, SPEC §8.2.1). The last document is logged with `durability` and becomes visible once it is
-    /// durable, like a single `put`; the ones before it are visible once buffered, so a reader may see them before
-    /// the batch is durable (a failed sync then poisons the database, and a reopen decides what survived). The size
-    /// threshold is checked before each document, so a batch may commit part of itself.
+    /// sync for `Fsync`, SPEC §8.2.1). The documents before the last are logged `Buffered` and the last one with
+    /// `durability`; the collection's memtable is held meanwhile ([`crate::memtable::Memtable::hold`]), so a reader sees none of the
+    /// batch until it is durable at `durability` (ROADMAP 6.3.12). The size threshold is checked before each
+    /// document, so a batch may commit part of itself; that commit syncs the WAL first, so it publishes only durable
+    /// documents. A failed sync poisons the database with the batch still unseen, and a reopen decides what survived.
     ///
     /// # Errors
     /// As [`Database::put`]; a rejected document is [`DatabaseError::BatchRejected`], after the documents before it
-    /// are made durable.
+    /// are made durable (and then visible).
     pub fn put_batch(
         &mut self,
         collection: &str,
@@ -643,6 +644,28 @@ impl<F: ContainerFile + Sync> Database<F> {
         if !self.collections.contains_key(collection) {
             return Err(no_such(collection));
         }
+        // A single put is logged at `durability` before it is published: nothing to hold.
+        let hold = docs.len() > 1;
+        let result = self.put_each(collection, docs, durability, hold);
+        // Released only once the batch reached `durability`: a poisoned database keeps it unseen.
+        if hold
+            && !self.poisoned
+            && let Some(c) = self.collections.get(collection)
+        {
+            c.memtable.release();
+        }
+        result
+    }
+
+    /// The loop of [`Database::put_batch`]. On an error it reaches `durability` for the documents before (unless the
+    /// WAL failed), so the caller may release the hold.
+    fn put_each(
+        &mut self,
+        collection: &str,
+        docs: &[Document],
+        durability: Durability,
+        hold: bool,
+    ) -> Result<(), DatabaseError> {
         let last = docs.len().saturating_sub(1);
         for (index, doc) in docs.iter().enumerate() {
             let level = if index == last {
@@ -650,13 +673,30 @@ impl<F: ContainerFile + Sync> Database<F> {
             } else {
                 Durability::Buffered
             };
-            self.flush_if_full(collection)?;
+            let before = self
+                .collections
+                .get(collection)
+                .map(|c| c.memtable.reader());
+            if let Err(e) = self.flush_if_full(collection) {
+                if !self.poisoned {
+                    self.reach(durability)?;
+                }
+                return Err(e);
+            }
             let Self {
                 wal, collections, ..
             } = &mut *self;
             let state = collections
                 .get_mut(collection)
                 .ok_or_else(|| no_such(collection))?;
+            if hold {
+                // A flush commit synced the WAL and published the flushed memtable's documents in a segment: its
+                // hold is over. The new memtable holds the rest of the batch.
+                if let Some(old) = before.filter(|old| !old.reads(&state.memtable)) {
+                    old.release();
+                }
+                state.memtable.hold();
+            }
             let logged = state.memtable.put_logged(doc, |encoded| {
                 let record = WalRecord::put(collection, encoded)?;
                 wal.append(&record, level).map_err(DatabaseError::from)

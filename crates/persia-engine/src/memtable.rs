@@ -115,9 +115,23 @@ impl MemtableReader {
         &self.shared
     }
 
-    /// A view of every write applied so far.
+    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
+    }
+
+    /// [`Memtable::release`] through a reader, for a memtable its writer replaced (a flush inside a held batch).
+    pub(crate) fn release(&self) {
+        self.shared
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held = None;
+    }
+
+    /// Whether this reads `memtable`.
+    pub(crate) fn reads(&self, memtable: &Memtable) -> bool {
+        Arc::ptr_eq(&self.shared, &memtable.shared)
     }
 }
 
@@ -150,6 +164,18 @@ pub(crate) struct Inner {
     /// Operation `v` (versions start at 1) is `ops[v - 1]`.
     pub(crate) ops: Vec<Op>,
     /// Statistics of the live documents, by field id; `None` for a field that is not `text` or `keyword`.
+    pub(crate) stats: Vec<Option<FieldStats>>,
+    pub(crate) live: u32,
+    /// While set, what every new view sees instead of the latest writes ([`Memtable::hold`]).
+    pub(crate) held: Option<Held>,
+}
+
+/// The state a held memtable shows its new views: the documents, operations and live statistics when
+/// [`Memtable::hold`] was called.
+#[derive(Debug, Clone)]
+pub(crate) struct Held {
+    pub(crate) docs: u32,
+    pub(crate) version: u64,
     pub(crate) stats: Vec<Option<FieldStats>>,
     pub(crate) live: u32,
 }
@@ -327,6 +353,7 @@ impl Memtable {
             ops: Vec::new(),
             stats,
             live: 0,
+            held: None,
         };
         Ok(Self {
             schema,
@@ -524,9 +551,38 @@ impl Memtable {
         Ok(inner.record(id, NONE, version))
     }
 
-    /// A view of every write applied so far.
+    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
+    }
+
+    /// Holds what new views see at the writes applied so far, until [`Self::release`]: writes keep applying, but
+    /// a view taken meanwhile sees none of them. A `put_batch` holds while its documents are not durable yet
+    /// (SPEC §8.2.1, ROADMAP 6.3.12). Holding a held memtable keeps the first hold.
+    pub fn hold(&self) {
+        let mut inner = self.shared.write().unwrap_or_else(PoisonError::into_inner);
+        if inner.held.is_none() {
+            inner.held = Some(Held {
+                docs: inner.doc_count(),
+                version: inner.version(),
+                stats: inner.stats.clone(),
+                live: inner.live,
+            });
+        }
+    }
+
+    /// Ends a [`Self::hold`]: new views see every write applied so far again. A memtable not held is unchanged.
+    pub fn release(&self) {
+        self.shared
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held = None;
+    }
+
+    /// Whether new views are held ([`Self::hold`]).
+    pub fn is_held(&self) -> bool {
+        read(&self.shared).held.is_some()
     }
 
     /// Live documents: added and not replaced or deleted since.
