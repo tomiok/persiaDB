@@ -343,6 +343,10 @@ not interpret payloads, so the writer (the engine, from its manifest) names the 
 every frame from `wal_start` on is kept, since the WAL range and the frames after `log_end` (acknowledged WAL
 frames, §8.2) are needed by recovery.
 
+**Status (pre-alpha).** The container implements compaction, but the engine does not call it yet (ROADMAP 6.5.8).
+Until it does, a database file only grows: every replaced segment, superseded tombstone sidecar, old Manifest and
+consumed WAL chunk stays in the file, and nothing reclaims it, however many documents are deleted or merged away.
+
 **Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
 from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as

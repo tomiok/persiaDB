@@ -68,6 +68,16 @@ Deps: none.
 - [x] 0.5.2 `cargo xtask progress` (port of `scripts/progress.py`; byte-identical `PROGRESS.md`)
 - [x] 0.5.3 `cargo xtask github-setup`; repo-file and toolchain checks as Rust tests; delete Python, update CI/justfile/docs
 
+## 0.6 Status honesty and hardening (found in the 2026-11-02 audit)
+- [~] 0.6.1 `cargo xtask progress` rewrites marked progress blocks in `README.md` (headline count, milestone table), `--check` fails when they are stale, and a `repo_checks` test fails when README and `PROGRESS.md` disagree
+- [~] 0.6.2 README claims only what the code does: the engine's write path and search are described as they are, and the relaxation tagline is design intent (M8), not a feature
+- [~] 0.6.3 Website status from `website/src/status.mjs`: `features.mdx` and `guide/getting-started.md` take their status sentences from it, and it sees the collection search (`CollectionViews::search`, `db/search.rs`)
+- [~] 0.6.4 Placeholder crates say so: `persia`, `persia-blob`, `persia-proto` docs read "Placeholder for M9/M10/M11", and `persia-server` prints "not implemented (M11)" and exits non-zero
+- [ ] 0.6.5 Clippy cast lints (`cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_lossless`) on `persia-format`, `persia-storage` and `persia-engine`; each `as` becomes `try_from`/`from` or carries a justified `#[allow]` (CLAUDE.md "checked ops")
+- [ ] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`
+- [ ] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`)
+- [ ] 0.6.8 `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017)
+
 ---
 
 # M1 — Format primitives (`persia-format`)
@@ -395,6 +405,7 @@ Deps: M2, M5.
 - [x] 6.3.9 Log only what replay can apply (SPEC §8.2.1 "What may be logged"): a record of a collection whose create is committed, for an operation its memtable accepts (validation, term length, a docid left), checked before the record is acknowledged; decide whether the memtable applies first (an unlogged write is then briefly visible) or a dry-run check runs before the WAL. Includes whether a changed `strict` (§6.2.4) can make an old put fail replay. Test: a put the memtable rejects is never logged (built-in analyzers truncate tokens at 255 bytes, so `SegmentError::Full` is the reachable case) (found in the 6.2 review)
 - [x] 6.3.10 Schema change and drop through commit (SPEC §8.2.1, §8.7.2): both flush every memtable first, so `wal_start` reaches the end of the log and no record of an earlier schema (or of the dropped collection) is replayed; reopen the collection's segments with the evolved schema. Test: a non-`strict` put with extra fields, then `strict`, then a crash and reopen (found in 6.3.9)
 - [ ] 6.3.11 Flush without re-indexing: build the segment from the memtable's postings instead of analyzing every document again (ADR-0029, found in 6.3.1); bench the flush before and after
+- [ ] 6.3.12 `put_batch` makes a document visible only once it is durable (today the ones before the last are visible once buffered, SPEC §8.2.1); test with a forced sync failure that no reader sees an unsynced document (found in the 2026-11-02 audit)
 
 ## 6.4 Upserts & deletes across segments
 - [x] 6.4.1 Lookup docid by external id newest→oldest segment (IdMap FST)
@@ -418,6 +429,8 @@ Deps: M2, M5.
 - [ ] 6.5.7 Merge throughput: a merge-only postings reader that decodes whole lists (no per-term `Postings` cursor), and regrouping without a sort; goal: `segment_merge/copy_8` faster than `segment/add` on the same run (internal bench, `docs/benchmarks.md`; not a claim, BENCHMARKS.md)
 - [ ] 6.5.8 Engine-driven container compaction (SPEC §4.6): `Database` names the live frames (the manifest's, plus the obsolete frames still referenced, 6.5.4) and the WAL range, compacts when dead space reaches the ratio, and publishes the relocated manifest (`Manifest::relocate`) (found in 6.5.4)
 - [ ] 6.5.9 Merges that survive concurrent deletes: re-apply the deletions committed to its inputs since the plan to the merged segment (a docid map kept with the result) instead of discarding it (ADR-0032 item 4, found in 6.5.3)
+- [~] 6.5.10 Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database` space usage) (found in the 2026-11-02 audit)
+- [ ] 6.5.11 Count the merges discarded because their inputs had deletes committed meanwhile, and test that the segment count stays bounded under steady deletes (or document the bound 6.5.9 lifts) (found in the 2026-11-02 audit)
 
 ## 6.6 Open/recovery orchestration
 - [x] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)
@@ -501,6 +514,8 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
 - [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
 - [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
+- [ ] 7.8.5 The reference model's norm oracle is independent of the implementation: properties `decode(encode(n)) <= n`, exact below 40, within 12.5 %, monotonic, instead of a copy of the codec (found in the 2026-11-02 audit)
+- [ ] 7.8.6 The differential suite compares ranked order (ties by docid), not only scores within a tolerance (found in the 2026-11-02 audit)
 
 ---
 

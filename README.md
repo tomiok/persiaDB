@@ -6,7 +6,8 @@
 
 <p align="center">
   <strong>An embedded, single-file search database, written in Rust.</strong><br>
-  Open a file. Index documents. Ranked results, with relaxation on by default.
+  Open a file. Index documents. Get ranked results.<br>
+  The design goal: a search that would come back empty relaxes instead (M8, not built yet).
 </p>
 
 <p align="center">
@@ -28,11 +29,15 @@
   <a href="./PROGRESS.md">Progress</a>
 </p>
 
-> **Pre-alpha.** The 2026-10-27 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **210 of 451** MVP leaves (47%). Post-MVP work is 0 of 164 and sits outside that percentage. Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). When this file and `PROGRESS.md` disagree, `PROGRESS.md` wins.
->
-> The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
+<!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
+**Pre-alpha.** The 2026-11-02 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **296 of 514** MVP leaves done (58%), 5 in progress. Post-MVP work is 0 of 177 and sits outside that percentage.
+<!-- END GENERATED progress:summary -->
 
-`persia` does not export `Db` yet. What you can call today is the segment library, the text analyzers, the single-file container, and a small CLI. Query, ranking, and relaxation are specified and not implemented.
+Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
+
+`persia` does not export `Db` yet (M10). Under it, [`persia-engine`](./crates/persia-engine/src/lib.rs) creates and opens a database file, puts, deletes and commits documents through a WAL, merges segments, and runs a ranked search over a collection snapshot: user text compiled to a query, BM25F scoring, filters, sorts, facets, and pages. Relaxation (M8) is not built, so a search that matches nothing returns no hits. A small CLI inspects and verifies files.
+
+**Known limitation:** a database file only grows. The container can compact itself, but the engine does not call it yet (ROADMAP 6.5.8, [SPEC §4.6](./SPEC.md#46-compaction-of-the-container)), so replaced segments, old manifests, and consumed WAL chunks stay in the file.
 
 ## Why Persia DB
 
@@ -40,10 +45,10 @@ The product is a search database you link, the way you link SQLite. The design i
 
 | | Benefit | Where it stands |
 |---|---|---|
-| **Embedded** | The calling process is the database. `Db::open("app.persia")` is the whole setup: no daemon, no config file, no cluster. | The facade is [M10](./ROADMAP.md). The container, analyzers, and segment read/write are libraries now. |
-| **Rust, short dependency list** | The index format, analysis, and segment codec are written in this repository. BM25F and query execution are specified for the same crate ([ADR-0001](./docs/adr/0001-own-engine-and-allowed-dependencies.md), M7). | `cargo deny` rejects Tantivy, SQLite, and RocksDB. `cargo xtask check-deps` rejects any direct dependency outside the workspace allow-list. There is no `build.rs`. |
+| **Embedded** | The calling process is the database. `Db::open("app.persia")` is the whole setup: no daemon, no config file, no cluster. | The facade is [M10](./ROADMAP.md). Under it, `persia_engine::db::Database` opens a file, writes, and searches as library code. |
+| **Rust, short dependency list** | The index format, analysis, segment codec, BM25F scoring, and query execution are written in this repository ([ADR-0001](./docs/adr/0001-own-engine-and-allowed-dependencies.md)). | `cargo deny` rejects Tantivy, SQLite, and RocksDB. `cargo xtask check-deps` rejects any direct dependency outside the workspace allow-list. There is no `build.rs`. |
 | **One file, then object storage** | A local database is `<name>.persia`, plus an optional `<name>.persia.blobs` pack. Segments are immutable. The same segment bytes are specified for S3, GCS, and Azure Blob, in front of stateless query nodes. | The container and the segment format exist. Cloud backends, the server, and Kubernetes are M11–M13. |
-| **A page of results** | Relaxation is the default ([SPEC §7](./SPEC.md#7-search)). Too few hits, and the engine walks synonyms, dropped terms, prefix, a fuzzy step, and a fallback, then names the step that matched. | Specified. Milestone M8. |
+| **A page of results** | By design, relaxation is the default ([SPEC §7.6](./SPEC.md#76-zero-results-avoidance-default-on)). Too few hits, and the engine walks synonyms, dropped terms, prefix, a fuzzy step, and a fallback, then names the step that matched. | Specified, not built (M8). Today a search that matches nothing returns no hits. |
 
 Out of scope for v1, in the SPEC: SQL, joins, vector search, more than one writer on a shard, and encryption inside the file. Encryption at rest is v1.2. Geo and the enterprise work are v3.0. See [Status](#status).
 
@@ -57,63 +62,79 @@ Product shape, from [SPEC §1](./SPEC.md#1-goals-and-non-goals), the [comparison
 | How you run it | Planned: in-process, `Db::open` on a file. | A cluster. Clients use HTTP. | A separate process. Clients use HTTP. | In-process. You own the index directory and the serving code. | In-process. SQL `MATCH` on the SQLite file. |
 | What you store | Planned: one `<name>.persia` file and an optional blob pack. Segment bytes are specified to be identical in object storage. | The cluster's data path. | The server's data directory. | A directory of segment files. | The FTS5 index lives in the SQLite database file. |
 | A mistyped query | Planned default: a named relaxation cascade (SPEC §7). | Analyzers, fuzziness, and suggesters, configured on the query. | Typo tolerance is part of both products. | You compose the query. | `MATCH` returns the rows that match. `bm25()` ranks them. |
-| Today | Pre-alpha. Codecs, local storage, schema, analysis, segment read/write, and a small CLI. | A released server. | Released servers. | A released library. | Part of SQLite. |
+| Today | Pre-alpha. Codecs, local storage, analysis, a WAL-backed write path with merges, and a ranked search as library code in `persia-engine`. No `Db` facade and no relaxation yet. | A released server. | Released servers. | A released library. | Part of SQLite. |
 
-For a search feature in production today, use one of the released tools. Persia DB is the design in the SPEC — an embedded Rust API, one local file, the same segment bytes in object storage, relaxation on by default — and the implementation of the layers under that API.
+For a search feature in production today, use one of the released tools. Persia DB is the design in the SPEC — an embedded Rust API, one local file, the same segment bytes in object storage, relaxation as the default once M8 lands — and the implementation of the layers under that API.
 
 ## Quickstart
 
 The crates are unpublished (`publish = false`, version `0.0.0`). There is no crates.io release and no `cargo add persia`.
 
-### Build a segment and look up a term
+### Index documents and search them
 
-This is the highest API the engine exports. It writes one immutable segment in memory and reads it back. Opening `app.persia`, ranking, and relaxation are the [planned API](#planned-embedded-api) below. The calls are the doctest on [`Segment`](./crates/persia-engine/src/segment/read.rs), wrapped in `main`.
+This is the highest API the engine exports today. It is not the [planned `Db` API](#planned-embedded-api): it creates `app.persia`, puts three documents, commits, and runs a ranked search. The same calls run as the test [`readme_quickstart.rs`](./crates/persia-engine/tests/readme_quickstart.rs).
 
 ```toml
 [dependencies]
 persia-engine = { git = "https://github.com/tomiok/persiaDB" }
 persia-analysis = { git = "https://github.com/tomiok/persiaDB" }
-persia-format = { git = "https://github.com/tomiok/persiaDB" }
 ```
 
 ```rust
 use persia_analysis::AnalyzerRegistry;
+use persia_engine::db::{Database, DatabaseOptions, SearchRequest};
 use persia_engine::document::{Document, Value};
+use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
 use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
-use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
-use persia_format::ByteSource;
+use persia_engine::search::{Pruning, SearchPlan};
+use persia_engine::wal::Durability;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let schema = SchemaBuilder::new("notes")
         .field("body", FieldKind::Text(TextOptions::default()))
         .build()?;
     let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
-    let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
-    builder.add(&Document::new("n1").with(body, Value::String("Hello, world".into())))?;
 
-    let meta = SegmentMeta {
-        segment_id: 7,
-        created_at: 0,
-        merge_generation: 0,
-    };
-    let bytes = SegmentWriter::new(&builder, meta).finish()?;
+    let mut db = Database::create("app.persia", DatabaseOptions::default())?;
+    db.create_collection(schema)?;
+    for (id, text) in [
+        ("n1", "Hello, world"),
+        ("n2", "hello, hello again"),
+        ("n3", "goodbye"),
+    ] {
+        let doc = Document::new(id).with(body, Value::String(text.into()));
+        db.put("notes", &doc, Durability::Fsync)?;
+    }
+    db.commit()?;
 
-    // The default text analyzer is `standard`: "Hello" is indexed as "hello".
-    let segment = Segment::open(ByteSource::new(bytes.into()), &schema)?;
-    assert_eq!((segment.segment_id(), segment.doc_count()), (7, 1));
-    let info = segment.terms(body)?.get(b"hello")?.ok_or("no term")?;
-    assert_eq!(info.df(), 1);
-    assert_eq!(
-        segment.document(0)?.get(body),
-        Some(&Value::String("Hello, world".into()))
-    );
+    // Compile user text, plan it against the collection's statistics, run it (BM25F, SPEC §7).
+    let snapshot = db.snapshot();
+    let notes = snapshot.collection("notes").ok_or("no collection")?;
+    let compiler = QueryCompiler::new(notes.schema(), &AnalyzerRegistry::builtin())?;
+    let query = compiler
+        .compile(
+            "hello",
+            &DefaultFields::all(notes.schema()),
+            &QueryLimits::default(),
+        )
+        .query;
+    let memtable = notes.memtable();
+    let plan = SearchPlan::new(&query, notes.schema(), &notes.search_statistics(&memtable))?;
+    let page = notes
+        .views(&memtable)?
+        .search(&plan, &SearchRequest::default(), Pruning::default())?;
+
+    // "n2" says hello twice, so it ranks first. "goodbye" does not match, and with no
+    // relaxation yet (M8), "helo" would return no hits at all.
+    let ids: Vec<_> = page.hits.iter().map(|h| h.document.id()).collect();
+    assert_eq!(ids, ["n2", "n1"]);
     Ok(())
 }
 ```
 
 Field types on a [`CollectionSchema`](./crates/persia-engine/src/schema.rs) are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored`. A schema is valid only after `SchemaBuilder::build` or `CollectionSchema::from_json`.
 
-`Container::create("app.persia")` and `Container::open` in [`persia-storage`](./crates/persia-storage/src/container/path.rs) create and recover the single-file container (header, two superblock slots, checksummed frames). That file is the container. It is not yet an index of documents.
+`Container::create("app.persia")` and `Container::open` in [`persia-storage`](./crates/persia-storage/src/container/path.rs) create and recover the single-file container (header, two superblock slots, checksummed frames) that `Database` stores everything in.
 
 ### CLI
 
@@ -136,6 +157,7 @@ The binary is `persia`. These subcommands exist:
 | `persia container sweep <file> [--quarantine]` | Removes stale temporary files. `--quarantine` also removes quarantine copies that existed before the command. |
 | `persia store files <dir>` | Temporary files under a local object store. |
 | `persia store sweep <dir> [--force]` | Removes temporary files a live writer does not hold. |
+| `persia verify <file>` | Checks a whole database read-only: every check an open makes, every segment's bytes, one live copy per document id. Exit status 3 on corruption, 4 when the file is not a Persia container. |
 
 The golden segment above is format 1.0 and holds 300 documents (`doc_count` in the inspect output; see [`crates/persia-cli/tests/segment.rs`](./crates/persia-cli/tests/segment.rs)).
 
@@ -204,29 +226,42 @@ flowchart TD
 | `persia-format` | Encodings, frames, header, superblock, checksums, compression, mmap. No I/O policy. | Implemented. |
 | `persia-storage` | `Storage`, memory, local files, the single-file container, crash-test faults. | Implemented. S3, GCS, and Azure Blob are M12. |
 | `persia-analysis` | Tokenizers, normalizers, stemmers, the analyzer registry. No internal dependencies. | Implemented. |
-| `persia-engine` | Schema, documents, the manifest codec, segment build / write / read. Synchronous. I/O only through `Storage`. | Those pieces. Memtable, WAL, commit, merge, query, BM25F, and relaxation are M6–M8. |
+| `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 and M7 still in progress. Relaxation is M8. |
 | `persia-cli` | The `persia` binary. | Inspect, dump, and file sweep. See [CLI](#cli). |
-| `persia` | The embedded facade: `Db`, `Collection`. | The dependency edges. No types yet. M10. |
-| `persia-blob` | Content-addressed chunks, dedup, GC. | The dependency edges. M9, which can start. |
-| `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Stubs. M11. |
+| `persia` | The embedded facade: `Db`, `Collection`. | Placeholder for M10: the dependency edges, no types. |
+| `persia-blob` | Content-addressed chunks, dedup, GC. | Placeholder for M9: the dependency edges, no types. |
+| `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Placeholders for M11. The server binary exits with "not implemented". |
 
-`persia-server` is drawn in [`docs/architecture.md`](./docs/architecture.md) above `persia`. It is an empty `main` today, so it stays out of the figure.
+`persia-server` is drawn in [`docs/architecture.md`](./docs/architecture.md) above `persia`. Today it is a placeholder binary that prints "not implemented (M11)" and exits with status 1, so it stays out of the figure.
 
 ## Status
 
 MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-next list are [`PROGRESS.md`](./PROGRESS.md). The checklist is [`ROADMAP.md`](./ROADMAP.md). The same snapshot is on the [roadmap page](https://tomiok.github.io/persiaDB/roadmap/).
 
-| Milestone | State in the 2026-10-27 snapshot |
-|---|---|
-| M0 Repository, M1 Format, M2 Storage, M3 Schema, M4 Analysis | Done. |
-| M5 Segment writer and reader | 41 of 47 leaves. No leaf is marked in progress. |
-| M9 Blob store | Ready to start. 0 of 20. |
-| M6 Durability, M7 Query, M8 Relaxation, M10 Embedded API | Not started. M10 is the `Db` facade. |
-| M11 Server, M12 Cloud storage, M13 Kubernetes, M14 Network SDKs, M15 v1.0 | Not started. Blocked on earlier milestones. |
+<!-- BEGIN GENERATED progress:milestones by `cargo xtask progress`. Do not edit by hand. -->
+| Milestone | State | Leaves done |
+|---|---|---|
+| **M0** Project bootstrap | 🔨 in progress | 26/34 |
+| **M1** Format primitives | ✅ done | 53/53 |
+| **M2** Storage abstraction & local backends | ✅ done | 46/46 |
+| **M3** Schema, documents, collections | ✅ done | 15/15 |
+| **M4** Text analysis | ✅ done | 29/29 |
+| **M5** Segment writer & reader | ✅ done | 48/48 |
+| **M6** Write path, durability, merging | 🔨 in progress | 40/55 |
+| **M7** Query engine & ranking | 🔨 in progress | 39/49 |
+| **M8** Zero-results avoidance | ⏳ blocked | 0/29 |
+| **M9** Blob store | ▶️ ready | 0/20 |
+| **M10** Embedded API | ⏳ blocked | 0/19 |
+| **M11** Server | ⏳ blocked | 0/23 |
+| **M12** Cloud storage backends | ⏳ blocked | 0/29 |
+| **M13** Distribution & Kubernetes | ⏳ blocked | 0/24 |
+| **M14** SDKs | ⏳ blocked | 0/19 |
+| **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | 0/22 |
+<!-- END GENERATED progress:milestones -->
 
 ### After v1.0
 
-From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves are started (0 of 164).
+From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves are started; the counts are in [`PROGRESS.md`](./PROGRESS.md).
 
 | Target | Milestones |
 |---|---|
@@ -243,7 +278,7 @@ v2.1, v2.2, and v2.3 are separate targets: UI components, AI search, and on-devi
 
 ## SDKs
 
-Rust is the native API. The facade crate is [`persia`](./crates/persia/src/lib.rs). The libraries under it are what a Rust caller can use today, as in the [quickstart](#build-a-segment-and-look-up-a-term).
+Rust is the native API. The facade crate is [`persia`](./crates/persia/src/lib.rs), a placeholder until M10. The libraries under it are what a Rust caller can use today, as in the [quickstart](#index-documents-and-search-them).
 
 Go and TypeScript embedded bindings are planned for **v1.1** (M16). The design is [ADR-0018](./docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](./docs/sdk/README.md), and it is not implemented. One C ABI (`persia-ffi`) wraps `persia`. Go calls it through cgo (`sdk/persia`). TypeScript calls it through N-API (`@persiadb/node`) for Node.js, Bun, and Deno. Ranking, relaxation, and crash recovery stay in the Rust core.
 

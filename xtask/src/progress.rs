@@ -5,7 +5,8 @@
 //! one snapshot per day for the burn-up chart.
 //!
 //! `--record` upserts today's snapshot (UTC date, or `--date YYYY-MM-DD`); `--check` fails if `PROGRESS.md`
-//! or the latest snapshot is stale (CI).
+//! or the latest snapshot is stale (CI). The same run rewrites the progress blocks in `README.md` (`readme`),
+//! and `--check` fails when they are stale too.
 //!
 //! The headline percentage, the burn-up, and `docs/progress-history.csv` count milestones M0–M15 only.
 //! Those are the MVP and ship as v1.0. Later milestones render in their own section, so adding them does
@@ -17,6 +18,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+
+pub(crate) mod readme;
 
 const READY_NEXT_LIMIT: usize = 15;
 const COMMAND: &str = "cargo xtask progress";
@@ -441,7 +444,7 @@ pub(crate) struct Snapshot {
 const HISTORY_HEADER: &str = "date,done,in_progress,total";
 const MAX_COUNT: usize = 1_000_000;
 
-fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
+pub(crate) fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
     let mut lines = text.lines();
     match lines.next() {
         None => return Ok(Vec::new()),
@@ -866,6 +869,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     }
 
     let rendered = render(&milestones, &history);
+    let readme_path = root.join("README.md");
+    let readme_text = std::fs::read_to_string(&readme_path).context("reading README.md")?;
+    let readme_rendered = readme::apply(&readme_text, &milestones, &history)?;
     if check {
         let mut stale = Vec::new();
         let current = history
@@ -876,6 +882,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         }
         if std::fs::read_to_string(&progress_path).ok().as_deref() != Some(rendered.as_str()) {
             stale.push("PROGRESS.md is out of date");
+        }
+        if readme_rendered != readme_text {
+            stale.push("README.md's progress blocks are out of date");
         }
         if !stale.is_empty() {
             eprintln!("{}\nRun: {COMMAND} --record", stale.join("\n"));
@@ -888,6 +897,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     }
 
     std::fs::write(&progress_path, rendered).context("writing PROGRESS.md")?;
+    if readme_rendered != readme_text {
+        std::fs::write(&readme_path, readme_rendered).context("writing README.md")?;
+    }
     println!(
         "PROGRESS.md: {done}/{total} MVP done ({}), {doing} in progress; post-MVP {post_done}/{post_total}",
         pct(done, total)

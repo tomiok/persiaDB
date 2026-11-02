@@ -411,4 +411,22 @@ mod tests {
         assert_eq!(attr("crates/persia/src/lib.rs", "eol"), "lf");
         assert_eq!(attr("crates/persia/src/lib.rs", "text"), "auto");
     }
+
+    // --- README status (CLAUDE.md "Progress") ---
+
+    /// The README's progress blocks match what `cargo xtask progress` renders from ROADMAP.md and the history,
+    /// so the README cannot claim a count PROGRESS.md does not.
+    #[test]
+    fn readme_progress_matches_progress_md() {
+        use crate::progress::{parse_history, parse_roadmap, readme};
+        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
+        let milestones = parse_roadmap(&read("ROADMAP.md")).unwrap();
+        let history = parse_history(&read("docs/progress-history.csv")).unwrap();
+        let current = read("README.md");
+        let expected = readme::apply(&current, &milestones, &history).unwrap();
+        assert!(
+            current == expected,
+            "README.md's progress blocks are stale. Run: cargo xtask progress --record"
+        );
+    }
 }
