@@ -1336,9 +1336,11 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the clock at or past the deadline, the search stops with an error (cancelled, or deadline exceeded; a cancellation
   wins) and returns no hits: a page cut short would rank hits a full search does not return. Between two reads
   nothing is interrupted: a step of a reader (one block decoded, one term of an automaton's walk over the
-  dictionary), set operations on bitmaps, the memtable's copy of a field's terms in range (before the automaton runs)
-  or of its column keys (a bulk copy under its lock, bounded by the memtable's size), and reading the page's documents
-  run to their end first.
+  dictionary), set operations on bitmaps, one chunk of the memtable's term and column copies (a fixed number of terms or
+  column keys under one read lock, 1024 today, a tuning value: a field's terms are tried one step each, so an
+  expansion that matches nothing in a large memtable stops too, and a column is scanned a chunk at a time), the
+  memtable's other copies for a view (its deletions, a `bool` column's trues, which documents have a value, a
+  field's norms, keys or keyword values; ROADMAP 7.6.6), and reading the page's documents run to their end first.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1420,10 +1422,10 @@ A `bool` lists every `must` clause and the `should` clauses that match, in query
 nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
-time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters selected the
-first time they are needed) and advanced over its hits in docid order, so a page costs about one unpruned search of
-each view holding its hits, plus one more selection of each `bool`'s filters per view: the explanation selects them
-again rather than reuse the search's selection (ROADMAP 7.7.3). It is done for the page's hits only, and a deadline or a cancellation is read before
+time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents
+the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher
+did not read them) and advanced over its hits in docid order, so a page costs about one unpruned search of each view
+holding its hits. It is done for the page's hits only, and a deadline or a cancellation is read before
 each view and while its readers walk (§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
 
 ---

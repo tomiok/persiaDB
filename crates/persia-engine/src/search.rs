@@ -60,6 +60,7 @@ pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,
 };
+pub(crate) use filter::Selections;
 pub(crate) use interrupt::{Interruptible, Interrupts, Steps};
 pub use plan::SearchPlan;
 pub use request::{MAX_WINDOW, Projection, RequestError};
