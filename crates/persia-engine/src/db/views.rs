@@ -20,7 +20,7 @@ use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, ExecError, Expansion, Interruptible, Pruning, SearchPlan, Steps, TermSource,
-    collect_where, each_memtable_term,
+    collect_where,
 };
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
@@ -218,8 +218,8 @@ impl TermSource for CollectionViews<'_> {
         expansion: &Expansion,
         each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
-        let memtable = self.memtable();
-        each_memtable_term(memtable, memtable, field, (lower, upper), expansion, each)?;
+        self.memtable()
+            .each_term(field, lower, upper, expansion, each)?;
         for segment in self.segments() {
             segment.each_term(field, lower, upper, expansion, each)?;
         }

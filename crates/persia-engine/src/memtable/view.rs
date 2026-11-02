@@ -320,6 +320,10 @@ impl SearchView for MemtableView {
         self.docs
     }
 
+    fn as_memtable(&self) -> Option<&MemtableView> {
+        Some(self)
+    }
+
     fn is_live(&self, docid: u32) -> bool {
         self.visible(&read(&self.shared), docid)
     }

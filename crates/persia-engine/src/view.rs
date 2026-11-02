@@ -16,6 +16,7 @@ use fst::automaton::AlwaysMatch;
 use roaring::RoaringBitmap;
 
 use crate::document::Document;
+use crate::memtable::MemtableView;
 use crate::schema::{FieldId, FieldType};
 use crate::score::FieldHit;
 use crate::segment::{
@@ -282,6 +283,13 @@ pub trait SearchView {
         _step: &dyn Fn() -> Result<(), ReadError>,
     ) -> Result<Self::Terms<'a, A>, ReadError> {
         self.terms(field, lower, upper, automaton)
+    }
+
+    /// The memtable view this is, or reads through (a search's interruptible view of it); `None` for a segment. Its
+    /// [`Self::terms`] count each term's live documents, which a `prefix` or `fuzzy` hands to the statistics instead of
+    /// counting again (ROADMAP 7.4.14).
+    fn as_memtable(&self) -> Option<&MemtableView> {
+        None
     }
 
     /// The documents below [`Self::doc_count`] a search may not return: deleted, or replaced in the memtable.

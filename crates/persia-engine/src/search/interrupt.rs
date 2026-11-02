@@ -14,6 +14,7 @@ use roaring::RoaringBitmap;
 
 use super::Interrupt;
 use crate::document::Document;
+use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::score::FieldHit;
 use crate::segment::{BlockMax, FieldStats, ReadError};
@@ -185,6 +186,10 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
 
     fn doc_count(&self) -> u32 {
         self.view.doc_count()
+    }
+
+    fn as_memtable(&self) -> Option<&MemtableView> {
+        self.view.as_memtable()
     }
 
     fn is_live(&self, docid: u32) -> bool {
@@ -603,7 +608,7 @@ mod tests {
     }
 
     /// A memtable of `DOCS` documents shaped as [`fixture`]'s, and a view of its first `seen`.
-    fn memtable(seen: u32) -> (crate::memtable::MemtableView, Fixture) {
+    fn memtable(seen: u32) -> (MemtableView, Fixture) {
         let f = fixture();
         let mut mem =
             crate::memtable::Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap();

@@ -20,7 +20,7 @@ use super::views::CollectionViews;
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource,
-    Watch, each_memtable_term,
+    Watch,
 };
 use crate::segment::ReadError;
 
@@ -279,9 +279,8 @@ impl TermSource for ExecTerms<'_> {
         // One count over every view: many views of few terms each still look. The memtable first, as
         // `CollectionViews` walks it.
         let steps = Steps::new(self.exec);
-        let memtable = self.views.memtable();
-        let walk = Interruptible::new(memtable, &steps);
-        each_memtable_term(&walk, memtable, field, (lower, upper), expansion, each)?;
+        Interruptible::new(self.views.memtable(), &steps)
+            .each_term(field, lower, upper, expansion, each)?;
         for segment in self.views.segments() {
             Interruptible::new(&segment, &steps).each_term(field, lower, upper, expansion, each)?;
         }

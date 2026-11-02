@@ -12,7 +12,6 @@ use std::sync::Arc;
 
 use fst::Automaton;
 
-use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::segment::ReadError;
 use crate::stats::{MemtableDf, StatisticsProvider};
@@ -52,32 +51,14 @@ impl<V: SearchView> TermSource for V {
         expansion: &Expansion,
         each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
+        // A memtable's walk counted each term's live documents: pass that on, so the statistics do not count again.
+        let memtable = self.as_memtable();
         let mut terms = self.terms(field, lower, upper, expansion.clone())?;
-        while let Some((term, _)) = terms.next()? {
-            each(term, None)?;
+        while let Some((term, df)) = terms.next()? {
+            each(term, memtable.map(|m| MemtableDf::new(m, df)))?;
         }
         Ok(())
     }
-}
-
-/// As [`TermSource::each_term`] over `walk`, which is `memtable` (or it under a search's interrupts): each term with
-/// the count `memtable` gave it.
-///
-/// # Errors
-/// As [`TermSource::each_term`].
-pub(crate) fn each_memtable_term<V: SearchView>(
-    walk: &V,
-    memtable: &MemtableView,
-    field: FieldId,
-    (lower, upper): (Bound<&[u8]>, Bound<&[u8]>),
-    expansion: &Expansion,
-    each: &mut EachTerm<'_>,
-) -> Result<(), ReadError> {
-    let mut terms = walk.terms(field, lower, upper, expansion.clone())?;
-    while let Some((term, df)) = terms.next()? {
-        each(term, Some(MemtableDf::new(memtable, df)))?;
-    }
-    Ok(())
 }
 
 /// Which terms in range an expansion takes: every one (a `prefix`, whose range is the prefix's), or those within
@@ -635,5 +616,69 @@ mod df_tests {
         let capped = expand(field, unbounded, &Expansion::all(), 0, &lists, &none).unwrap();
         assert_eq!(capped, []);
         assert_eq!(none.asked.into_inner(), []);
+    }
+}
+
+#[cfg(test)]
+mod memtable_source_tests {
+    use core::ops::Bound;
+
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::{Expansion, TermSource};
+    use crate::document::{Document, Value};
+    use crate::memtable::Memtable;
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+    use crate::search::{Interrupt, Interruptible, Interrupts, Steps};
+
+    struct Never;
+
+    impl Interrupts for Never {
+        fn check(&self) -> Result<(), Interrupt> {
+            Ok(())
+        }
+    }
+
+    /// A memtable view used directly as a term source, bare or under a search's interrupts, hands each term's count
+    /// from its own walk to the statistics (ROADMAP 7.4.14).
+    #[test]
+    fn a_memtable_source_passes_its_walk_counts() {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (id, text) in [("a", "run runs"), ("b", "run"), ("c", "red")] {
+            mem.put(&Document::new(id).with(body, Value::String(text.into())))
+                .unwrap();
+        }
+        let view = mem.view();
+        let walk = |source: &dyn TermSource| {
+            let mut listed = Vec::new();
+            source
+                .each_term(
+                    body,
+                    Bound::Included(b"r".as_slice()),
+                    Bound::Excluded(b"s".as_slice()),
+                    &Expansion::all(),
+                    &mut |term, memtable| {
+                        let memtable = memtable.expect("a memtable count");
+                        assert!(memtable.view().is_same_view(&view));
+                        listed.push((String::from_utf8(term.to_vec()).unwrap(), memtable.df()));
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            listed
+        };
+        let expected = [
+            ("red".to_owned(), 1),
+            ("run".to_owned(), 2),
+            ("runs".to_owned(), 1),
+        ];
+        assert_eq!(walk(&view), expected);
+        let steps = Steps::new(&Never);
+        assert_eq!(walk(&Interruptible::new(&view, &steps)), expected);
     }
 }
