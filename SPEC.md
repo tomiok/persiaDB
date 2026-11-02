@@ -1519,8 +1519,8 @@ rejected keeps the ones before it, made durable at the batch's level and then vi
 a batch (the size threshold) syncs the WAL first and publishes the prefix it flushed, durable. A sync that
 fails poisons the database before any reader saw the part of the batch that is not durable; a reopen decides
 what survived. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
-`put_batch` or `delete` to it, rather than take writes no reader would see; a commit before that flushes it like
-any memtable, syncing first, so what it publishes is durable.
+`put_batch` or `delete` to it, rather than take writes no reader would see, and at the next commit, tick, schema
+change or drop, before it flushes anything, since the held documents may not be durable.
 
 Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
 put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).

@@ -23,7 +23,7 @@ head:
             "name": "What is Persia DB?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not a database handle you can open. %%LIBRARY_NOW%% Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
+              "text": "Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is “SQLite for search”: open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is SPEC.md. When this site and the SPEC disagree, the SPEC wins.\n\nWhat the repository contains today is library code, not the public persia::Db handle you can open. %%LIBRARY_NOW%% Live status is PROGRESS.md.\n\nWhat an embedded search database is, and how embedded full-text search in Rust fits this design, is explained at https://tomiok.github.io/persiaDB/guide/embedded-search/."
             }
           },
           {
@@ -112,7 +112,7 @@ Planned work is marked as planned. Nothing here is a benchmark.
 
 Persia DB is an embedded, single-file, cloud-native search database written in Rust. The design is "SQLite for search": open a file, index documents, and get ranked results that, by default, never come back empty. The same segment bytes are specified to live in a local file or in object storage (S3, GCS, or Azure Blob), and to be served by stateless query nodes. It is pre-alpha. The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md). When this site and the SPEC disagree, the SPEC wins.
 
-What the repository contains today is library code, not a database handle you can open. %%LIBRARY_NOW%% Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
+What the repository contains today is library code, not the public persia::Db handle you can open. %%LIBRARY_NOW%% Live status is [PROGRESS.md](https://github.com/tomiok/persiaDB/blob/main/PROGRESS.md).
 
 What an embedded search database is, and how embedded full-text search in Rust fits this design, is [What is an embedded search database?](/guide/embedded-search/).
 

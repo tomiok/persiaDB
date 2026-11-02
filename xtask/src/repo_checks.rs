@@ -433,10 +433,11 @@ mod tests {
         );
     }
 
-    /// Every statement of the README quickstart appears, in order, in `readme_quickstart.rs`, so the README cannot
-    /// show calls the test does not run. The test may add statements (a temporary path, the typo check). Comments
-    /// and whitespace are ignored (rustfmt lays the two out differently), and the README's `"app.persia"` is the
-    /// test's `&path`. A test statement may carry an attribute the README lacks (`#![allow(..)]` before the first `use`).
+    /// The README quickstart is exactly the code `readme_quickstart.rs` runs, so the README cannot show calls, or a
+    /// control flow, the test does not run. The test's own code (the attributes, a temporary path, the typo check)
+    /// sits between `// readme: hidden` and `// readme: shown` and is left out; comments and whitespace are ignored
+    /// (rustfmt lays the two out differently); the README's `"app.persia"` is the test's `&path` and its `main` the
+    /// test function. Everything else, braces and semicolons included, must be equal.
     #[test]
     fn readme_quickstart_is_the_tested_one() {
         let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
@@ -450,36 +451,52 @@ mod tests {
             .and_then(|(_, rest)| rest.split_once("\n```"))
             .expect("README.md: quickstart rust block")
             .0;
-        let statements = |text: &str| -> Vec<String> {
-            let code: String = text
-                .lines()
-                .filter(|l| !l.trim_start().starts_with("//"))
-                .flat_map(|l| l.split_once("// ").map_or(l, |(code, _)| code).chars())
-                .filter(|c| !c.is_whitespace())
-                .collect();
-            code.split([';', '{', '}'])
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect()
+        // The code without comments, whitespace, or the test's hidden regions.
+        let code = |text: &str| -> String {
+            let mut shown = true;
+            let mut out = String::new();
+            for line in text.lines() {
+                match line.trim() {
+                    "// readme: hidden" => shown = false,
+                    "// readme: shown" => shown = true,
+                    t if !shown || t.starts_with("//") => {}
+                    _ => out.extend(
+                        line.split_once("// ")
+                            .map_or(line, |(code, _)| code)
+                            .chars()
+                            .filter(|c| !c.is_whitespace()),
+                    ),
+                }
+            }
+            out
         };
-        let want = statements(
+        let want = code(
             &block
                 .replace("\"app.persia\"", "&path")
                 .replace("fn main()", "fn readme_quickstart()"),
         );
-        let test = statements(&read("crates/persia-engine/tests/readme_quickstart.rs"));
+        let have = code(&read("crates/persia-engine/tests/readme_quickstart.rs"));
         assert!(
-            want.len() > 10,
-            "README quickstart: too few statements parsed"
+            want.len() > 500,
+            "README quickstart: too little code parsed"
         );
-        let mut have = test.iter();
-        for statement in &want {
-            assert!(
-                have.any(|t| t == statement
-                    || t.strip_suffix(statement.as_str())
-                        .is_some_and(|p| p.ends_with(']'))),
-                "README quickstart statement not in readme_quickstart.rs (in order): {statement}"
-            );
-        }
+        let at = want
+            .chars()
+            .zip(have.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            want == have,
+            "README quickstart and readme_quickstart.rs differ after {} equal characters:\nREADME: {}\ntest:   {}",
+            at,
+            want.chars()
+                .skip(at.saturating_sub(40))
+                .take(100)
+                .collect::<String>(),
+            have.chars()
+                .skip(at.saturating_sub(40))
+                .take(100)
+                .collect::<String>()
+        );
     }
 }

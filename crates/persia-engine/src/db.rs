@@ -637,6 +637,17 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(())
     }
 
+    /// [`Self::check_unheld`] for every collection, before an operation that flushes or publishes them all
+    /// ([`Database::commit`], [`Database::tick`], a schema change or a drop): a stale hold may cover documents
+    /// that are not durable, and a flush would publish them.
+    fn check_none_held(&mut self) -> Result<(), DatabaseError> {
+        if self.collections.values().any(|c| c.memtable.is_held()) {
+            self.poisoned = true;
+            return Err(DatabaseError::Poisoned);
+        }
+        Ok(())
+    }
+
     fn usable(&self) -> Result<(), DatabaseError> {
         if self.poisoned {
             Err(DatabaseError::Poisoned)
@@ -863,7 +874,8 @@ impl<F: ContainerFile + Sync> Database<F> {
             c.memtable.size_in_bytes() >= self.options.policy.flush.memtable_bytes
         });
         if full {
-            self.commit()?;
+            // The batch calling this holds its memtable legitimately: no stale-hold check.
+            self.commit_unchecked()?;
         }
         Ok(())
     }
@@ -885,6 +897,12 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// other error poisons the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
+        self.commit_unchecked()
+    }
+
+    /// [`Database::commit`] without the stale-hold check, for a flush inside a running batch.
+    fn commit_unchecked(&mut self) -> Result<u64, DatabaseError> {
         let planned = self.plan_flushes(None)?;
         if planned.is_empty() {
             return Ok(self.manifest.seq());
@@ -909,6 +927,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`Database::commit`].
     pub fn evolve_collection(&mut self, proposed: &CollectionSchema) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         let name = proposed.name();
         let c = self.collections.get(name).ok_or_else(|| no_such(name))?;
         let schema = c
@@ -957,6 +976,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`DatabaseError::NoSuchCollection`]; otherwise as [`Database::commit`].
     pub fn drop_collection(&mut self, name: &str) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         if !self.collections.contains_key(name) {
             return Err(no_such(name));
         }
@@ -1011,6 +1031,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// As [`Database::commit`].
     pub fn tick(&mut self) -> Result<Option<u64>, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         let now = self.options.clock.now();
         let memtables = self.collections.values().map(|c| MemtableState {
             size_in_bytes: c.memtable.size_in_bytes(),
@@ -1527,5 +1548,46 @@ mod tests {
         )
         .unwrap();
         assert!(!db.collections.get("a").unwrap().memtable.is_held());
+    }
+
+    /// The operations that flush every memtable refuse a stale hold too, before publishing anything: a commit, a
+    /// tick, a schema change and a drop each poison the database and leave the held documents unpublished.
+    #[test]
+    fn a_stale_hold_poisons_every_flush_before_it_publishes() {
+        type Op = fn(&mut Database<SimFile>, &CollectionSchema) -> Result<(), DatabaseError>;
+        let schema = || {
+            SchemaBuilder::new("a")
+                .field("t", FieldKind::Text(TextOptions::default()))
+                .build()
+                .unwrap()
+        };
+        let t = schema().field("t").unwrap().id();
+        let ops: [(&str, Op); 4] = [
+            ("commit", |db, _| db.commit().map(drop)),
+            ("tick", |db, _| db.tick().map(drop)),
+            ("evolve", |db, s| db.evolve_collection(s).map(drop)),
+            ("drop", |db, _| db.drop_collection("a").map(drop)),
+        ];
+        for (name, op) in ops {
+            let mut db =
+                Database::create_on(SimFile::new(), [5; 16], DatabaseOptions::default()).unwrap();
+            db.create_collection(schema()).unwrap();
+            let seq = db.seq();
+            db.put(
+                "a",
+                &Document::new("held").with(t, Value::String("x".into())),
+                Durability::Fsync,
+            )
+            .unwrap();
+            db.collections.get("a").unwrap().memtable.hold();
+            assert!(
+                matches!(op(&mut db, &schema()), Err(DatabaseError::Poisoned)),
+                "{name}"
+            );
+            assert_eq!(db.seq(), seq, "{name}: nothing committed");
+            let snapshot = db.snapshot();
+            let a = snapshot.collection("a").unwrap();
+            assert!(a.segments().is_empty(), "{name}: nothing flushed");
+        }
     }
 }

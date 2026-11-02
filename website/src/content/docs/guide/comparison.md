@@ -1,6 +1,6 @@
 ---
 title: "Persia DB vs SQLite FTS5, Tantivy, and Meilisearch"
-description: "Persia DB versus SQLite FTS5, Tantivy, and Meilisearch: embedded or server, single file or segments, language, and maturity. Pre-alpha; no public search API yet."
+description: "Persia DB versus SQLite FTS5, Tantivy, and Meilisearch: embedded or server, single file or segments, language, and maturity. Pre-alpha; no persia::Db search API yet."
 ---
 
 > **Status: pre-alpha.** %%PRE_ALPHA%%
@@ -111,7 +111,7 @@ would stay the same in object storage. That server is not written.
 
 ## When to pick which today
 
-For a search feature in production today, use one of the established tools. Persia DB has no public search API yet (M10).
+For a search feature in production today, use one of the established tools. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
 
 - **SQLite FTS5**, when the data is already in SQLite, or you want SQL and full-text in one database file and one process.
 - **Tantivy**, when you are writing Rust, you want a library, and you will own the schema, the index directory, and how results are served.

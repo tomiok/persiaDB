@@ -31,8 +31,10 @@ reads I/O through the `Storage` trait, while a container stores frames without n
 4. **Stage, log, publish** (ROADMAP 6.3.9). The memtable splits an operation into a stage (every check, the
    indexing, the id), the caller's log call, and a publish that cannot fail. Rejected operations are never logged,
    and no view sees an unlogged one. A single operation is logged with its durability before it is published; in a
-   batch, all but the last are logged `Buffered`, and the memtable is held (views see it as before the batch) until
-   the batch reaches its durability (ROADMAP 6.3.12), so no reader sees a document not durable at the batch's level.
+   batch, all but the last are logged `Buffered`, and the memtable is held until the batch reaches its durability
+   (ROADMAP 6.3.12): views see none of the batch's unflushed tail. A size-triggered flush inside the batch syncs
+   first and publishes the prefix it flushed, which is durable; so no reader sees a document not durable at the
+   batch's level.
    The record's payload is the memtable's own `FieldSet::All` encoding, so a put is encoded once.
 5. **Schema changes flush every memtable first** (ROADMAP 6.3.10). A logged put of a non-`strict` collection may hold
    extra fields that fail validation once the collection becomes `strict`, and replay decodes with the committed

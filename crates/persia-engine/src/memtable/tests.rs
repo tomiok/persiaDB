@@ -476,3 +476,17 @@ fn a_hold_keeps_new_views_at_the_writes_before_it() {
     reader.release();
     assert!(!mem.is_held());
 }
+
+/// A hold's copy of the statistics counts toward the flush threshold (`size_in_bytes`) while it lives.
+#[test]
+fn a_hold_counts_its_copy_of_the_statistics() {
+    let (mut mem, t, _) = unguarded();
+    mem.put(&Document::new("a").with(t, Value::String("x".into())))
+        .unwrap();
+    let before = mem.size_in_bytes();
+    mem.hold();
+    let held = mem.size_in_bytes();
+    assert!(held > before, "{held} <= {before}");
+    mem.release();
+    assert_eq!(mem.size_in_bytes(), before);
+}

@@ -48,7 +48,9 @@ use crate::document::DocumentError;
 use crate::schema::FieldId;
 
 /// The length a field of `len` tokens is scored with: its one-byte norm (SPEC §5.3.4), decoded. Exactly `len` below
-/// 40; above, rounded down by less than an eighth, and never above `len`. Longer fields never score as shorter ones.
+/// 40; up to `2^31 − 1`, rounded down by less than an eighth. Longer lengths all share the last code, the score of
+/// `2^31 − 1` rounded down (no document gets near them, SPEC §6.4.1). Never above `len`, and longer fields never
+/// score as shorter ones.
 ///
 /// ```
 /// use persia_engine::segment::scored_length;

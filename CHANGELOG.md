@@ -10,9 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 - `persia-storage` (breaking): `Container::enable_mapped_reads` and `enable_mapped_reads_if_local` are `unsafe fn`.
-  Their soundness rests on a precondition the container cannot check (nothing outside Persia writes, truncates or
-  hole-punches the file below the mapped `log_end` while a mapping lives), now stated in a `# Safety` section
-  (ROADMAP 0.6.8, ADR-0017).
+  Their soundness rests on a precondition the container cannot check, now stated in a `# Safety` section: nothing
+  outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives, and the
+  caller also rules out the two cases where Persia itself would: a second read-write container on the file in the
+  same process where the writer lock is per process (NFS), and recovery truncating below the mapped `log_end` after
+  a superblock slot was damaged (ROADMAP 0.6.8, ADR-0017).
 - `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning (ROADMAP 0.6.7).
 - `persia-server` is a placeholder until M11: it prints `persia-server: not implemented (M11)` and exits with status
   1, instead of exiting 0 without doing anything (ROADMAP 0.6.4).
@@ -56,8 +58,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Added
 - `persia-format`: `widen::usize_from_u32` and `widen::u64_from_usize`, the lossless widenings `From` lacks, with
   a compile-time check that pointers are 32 or 64 bits. `persia-format`, `persia-storage` and `persia-engine` deny
-  `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, or an
-  annotated bit reinterpretation (ROADMAP 0.6.5).
+  `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, a
+  same-width `cast_signed`/`cast_unsigned`, or an `as` with an annotated reason (intended truncation to low bits,
+  int-to-float, a `repr(u8)` discriminant) (ROADMAP 0.6.5).
 - `persia-engine`: `segment::scored_length(len)`, the length a field of `len` tokens is scored with (its norm,
   decoded; SPEC §5.3.4), as an explanation reports it. The differential suite checks it against the reference
   model's own statement of the rounding (ROADMAP 7.8.5).

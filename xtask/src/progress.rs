@@ -820,6 +820,31 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
+/// Writes every output to a temporary file beside it, then renames them into place, so a failed write leaves the
+/// generated files as they were (and in step with each other) instead of updating some of them. Each rename is
+/// atomic; between two renames another process could see a mix, which a rerun repairs.
+fn write_all(outputs: &[(std::path::PathBuf, String)]) -> Result<()> {
+    let staged: Vec<(std::path::PathBuf, &std::path::PathBuf)> = outputs
+        .iter()
+        .map(|(path, text)| {
+            let tmp = path.with_extension("xtask-tmp");
+            std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+            Ok((tmp, path))
+        })
+        .collect::<Result<_>>()
+        .inspect_err(|_| {
+            for (path, _) in outputs {
+                // Best effort: a staged file that cannot be removed is only clutter, and the error above is the
+                // one to report.
+                drop(std::fs::remove_file(path.with_extension("xtask-tmp")));
+            }
+        })?;
+    for (tmp, path) in staged {
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// Entry point. Returns whether the command passed.
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     let (mut record, mut check, mut date) = (false, false, None);
@@ -895,14 +920,14 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         return Ok(true);
     }
 
+    let mut outputs = vec![(progress_path, rendered)];
     if record {
-        std::fs::write(&history_path, format_history(&history))
-            .context("writing docs/progress-history.csv")?;
+        outputs.push((history_path, format_history(&history)));
     }
-    std::fs::write(&progress_path, rendered).context("writing PROGRESS.md")?;
     if readme_rendered != readme_text {
-        std::fs::write(&readme_path, readme_rendered).context("writing README.md")?;
+        outputs.push((readme_path, readme_rendered));
     }
+    write_all(&outputs)?;
     println!(
         "PROGRESS.md: {done}/{total} MVP done ({}), {doing} in progress; post-MVP {post_done}/{post_total}",
         pct(done, total)
@@ -1166,5 +1191,23 @@ Deps: M0.
         let post = post.split("### Ready (post-MVP)").next().unwrap();
         assert!(post.contains("`16.1`"), "{post}");
         assert!(!post.contains("`0.1`"), "{post}");
+    }
+
+    /// A failed write leaves every output as it was: none is replaced, and no staged file stays behind.
+    #[test]
+    fn a_failed_write_replaces_no_output() {
+        let dir = std::env::temp_dir().join(format!("xtask-write-all-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("PROGRESS.md");
+        std::fs::write(&first, "old").unwrap();
+        // A file inside a directory that does not exist cannot be staged.
+        let missing = dir.join("no-such-dir").join("README.md");
+        let err = write_all(&[(first.clone(), "new".into()), (missing, "new".into())]);
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old");
+        assert!(!first.with_extension("xtask-tmp").exists());
+        write_all(&[(first.clone(), "new".into())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

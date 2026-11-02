@@ -364,15 +364,20 @@ fn a_reader_thread_sees_each_batch_as_a_prefix() {
     let returned = Arc::new(AtomicUsize::new(0));
     let started = Arc::new(AtomicUsize::new(0));
     let stop = Arc::new(AtomicBool::new(false));
+    // Loads the checker finished: the writer waits for the first, so the run never ends unchecked.
+    let loaded = Arc::new(AtomicUsize::new(0));
     let checker = {
-        let (returned, started, stop) = (
+        let (returned, started, stop, loaded) = (
             Arc::clone(&returned),
             Arc::clone(&started),
             Arc::clone(&stop),
+            Arc::clone(&loaded),
         );
         std::thread::spawn(move || {
             let mut loads = 0usize;
-            while !stop.load(Ordering::SeqCst) {
+            // At least one load, and one more after the writer is done.
+            loop {
+                let last = stop.load(Ordering::SeqCst);
                 let low = returned.load(Ordering::SeqCst);
                 let snapshot = reader.snapshot();
                 let shown = docs(&snapshot);
@@ -398,10 +403,17 @@ fn a_reader_thread_sees_each_batch_as_a_prefix() {
                     }
                 }
                 loads += 1;
+                loaded.store(loads, Ordering::SeqCst);
+                if last {
+                    break;
+                }
             }
             loads
         })
     };
+    while loaded.load(Ordering::SeqCst) == 0 {
+        std::thread::yield_now();
+    }
     let text = filler();
     for round in 0..ROUNDS {
         let batch: Vec<Document> = (0..SIZE).map(|i| doc(&id(round, i), &text)).collect();

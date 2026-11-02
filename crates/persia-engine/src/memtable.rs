@@ -853,7 +853,16 @@ impl Inner {
             .saturating_add(self.ids.size_in_bytes())
             .saturating_add(self.latest.capacity().saturating_mul(size_of::<u64>()))
             .saturating_add(self.ops.capacity().saturating_mul(size_of::<Op>()))
+            // The live statistics, and their copy while a batch holds the memtable.
+            .saturating_add(stats_bytes(&self.stats))
+            .saturating_add(self.held.as_ref().map_or(0, |h| stats_bytes(&h.stats)))
     }
+}
+
+fn stats_bytes(stats: &Vec<Option<FieldStats>>) -> usize {
+    stats
+        .capacity()
+        .saturating_mul(size_of::<Option<FieldStats>>())
 }
 
 #[cfg(test)]
