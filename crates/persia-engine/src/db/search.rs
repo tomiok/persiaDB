@@ -14,7 +14,7 @@ use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
-    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Steps, Ties, Watch,
+    Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortValue, Steps, Ties, Watch,
     collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
@@ -256,18 +256,25 @@ impl CollectionViews<'_> {
             .copied()
             .map(FacetCounter::new)
             .collect();
-        for (hits, counted) in found? {
+        let mut kept = Vec::new();
+        for Searched {
+            hits,
+            facets: counted,
+            kept: selections,
+        } in found?
+        {
             ranked = merge(&request.sort, ranked, hits, window)?;
             for (facet, counted) in facets.iter_mut().zip(counted) {
                 facet.merge(counted);
             }
+            kept.push(selections);
         }
         // Reading the page's documents is the last stage a deadline stops.
         exec.interrupt()?;
 
         let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
         let mut explanations = if request.explain {
-            self.explain_page(plan, &segments, &page, exec)?
+            self.explain_page(plan, &segments, &page, &kept, exec)?
         } else {
             Vec::new()
         }
@@ -304,6 +311,7 @@ impl CollectionViews<'_> {
         plan: &SearchPlan,
         segments: &[SegmentView<'_>],
         page: &[Ranked],
+        kept: &[(usize, Selections)],
         exec: &Execution,
     ) -> Result<Vec<Option<Explanation>>, RequestError> {
         // (view order, docid, page index), so each view's hits are together and in docid order.
@@ -320,16 +328,22 @@ impl CollectionViews<'_> {
         for group in by_view.chunk_by(|a, b| a.0 == b.0) {
             exec.interrupt()?;
             let docids: Vec<u32> = group.iter().map(|&(_, docid, _)| docid).collect();
-            let explained = match group.first().map(|&(view, ..)| view) {
-                Some(usize::MAX) => plan.explain_all(
-                    &Interruptible::new(self.memtable(), &Steps::new(exec)),
-                    &docids,
-                )?,
-                Some(index) => plan.explain_all(
-                    &Interruptible::new(segment_view(segments, index)?, &Steps::new(exec)),
-                    &docids,
-                )?,
-                None => continue,
+            let Some(rank) = group.first().map(|&(view, ..)| view) else {
+                continue;
+            };
+            // What the view's matcher selected; every view holding a hit ran one.
+            let empty = Selections::default();
+            let selections = kept
+                .iter()
+                .find(|(r, _)| *r == rank)
+                .map_or(&empty, |(_, s)| s);
+            let steps = Steps::new(exec);
+            let explained = if rank == usize::MAX {
+                let view = Interruptible::new(self.memtable(), &steps);
+                plan.explain_kept(&view, &docids, selections)?
+            } else {
+                let view = Interruptible::new(segment_view(segments, rank)?, &steps);
+                plan.explain_kept(&view, &docids, selections)?
             };
             for (&(.., i), explanation) in group.iter().zip(explained) {
                 // Every hit matched the plan in its view, so it has one.
@@ -351,6 +365,16 @@ impl CollectionViews<'_> {
     }
 }
 
+/// What a search found in one view.
+struct Searched {
+    /// Its best hits.
+    hits: Vec<Ranked>,
+    /// Its matches counted, per facet asked.
+    facets: Vec<FacetCounter>,
+    /// Its rank in collection order ([`order`]), and what its `bool`s selected when the page is explained.
+    kept: (usize, Selections),
+}
+
 /// A search's request, run over one view at a time.
 struct Search<'r> {
     plan: &'r SearchPlan,
@@ -361,28 +385,32 @@ struct Search<'r> {
 
 impl Search<'_> {
     /// The best `window` hits of `view`, at `rank` in collection order ([`order`]), and its matches counted for each
-    /// facet.
+    /// facet, and what its `bool`s selected when the page is explained.
     fn view<V: SearchView>(
         &self,
         view: &V,
         rank: usize,
         watch: &mut ViewWatch<'_>,
         location: impl Fn(u32) -> Located,
-    ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
+    ) -> Result<Searched, RequestError> {
         let sort = &self.request.sort;
         let steps = Steps::new(self.exec);
         let view = &Interruptible::new(view, &steps);
         let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;
-        let mut matcher = self.plan.matcher_with(
-            view,
-            if prune {
-                self.exec.pruning
-            } else {
-                Pruning::Exhaustive
-            },
-        )?;
+        let pruning = if prune {
+            self.exec.pruning
+        } else {
+            Pruning::Exhaustive
+        };
+        // An explained page takes its filters' selections from these rather than selecting again (SPEC §7.7).
+        let kept = Selections::default();
+        let mut matcher = if self.request.explain {
+            self.plan.matcher_keeping(view, pruning, &kept)?
+        } else {
+            self.plan.matcher_with(view, pruning)?
+        };
         let after = self
             .request
             .search_after
@@ -436,7 +464,11 @@ impl Search<'_> {
                 facets.push(facet);
             }
         }
-        Ok((hits, facets))
+        Ok(Searched {
+            hits,
+            facets,
+            kept: (rank, kept),
+        })
     }
 }
 

@@ -426,8 +426,8 @@ fn parallel(c: &mut Criterion) {
 /// merge, and the page's 10 documents read (planned once, outside the loop). `term` is `w3`, `and` is `w3 w40` as
 /// user text (SPEC §7.1.1), `or` is `w3 OR w40 OR w120`, `phrase` is `"w0 w1"`, `filtered` is `w3` with
 /// `price < 100`, `sorted` is `w3` by price, `facets` is `w3` with a `tag` facet, `explain` is `term` with every hit
-/// explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, one pass per view selecting the filter once
-/// (ROADMAP 7.7.2).
+/// explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, one pass per view reusing the
+/// search's filter selection (ROADMAP 7.7.2, 7.7.3).
 fn suite(c: &mut Criterion) {
     let (db, [body, price, tag]) = collection(4, true);
     let snapshot = db.snapshot();

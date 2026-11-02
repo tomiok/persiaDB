@@ -1,7 +1,10 @@
 //! A query planned against the collection statistics (SPEC §7.3): its scorers built once, then a matcher tree per
 //! view.
 
+use core::cell::Cell;
 use core::ops::Bound;
+
+use roaring::RoaringBitmap;
 
 use crate::query::{
     BoolQuery, Filter, FuzzyQuery, PhraseQuery, PrefixQuery, Query, QueryError, QueryLimits,
@@ -18,7 +21,7 @@ use super::boolean::{
 };
 use super::expand::{Expansion, TermSource, expand};
 use super::explain::{Explanation, explain_all};
-use super::filter::{FilterDocs, Filtered, select};
+use super::filter::{FilterDocs, Filtered, Selections, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
 use super::word::{WordField, WordMatcher};
@@ -48,6 +51,8 @@ pub(super) enum Node {
         should: Vec<Node>,
         must_not: Vec<Node>,
         filter: Vec<Filter>,
+        /// Unique in the plan: where a search keeps what its filters select ([`Selections`]).
+        slot: usize,
     },
     Scaled(Box<Node>, Scale),
     All,
@@ -73,7 +78,15 @@ impl SearchPlan {
         stats: &(impl StatisticsProvider + ?Sized),
     ) -> Result<Self, SearchError> {
         Ok(Self {
-            root: plan(query, schema, &Planner { stats, terms: None })?,
+            root: plan(
+                query,
+                schema,
+                &Planner {
+                    stats,
+                    terms: None,
+                    slots: Cell::new(0),
+                },
+            )?,
         })
     }
 
@@ -133,6 +146,7 @@ impl SearchPlan {
                 &Planner {
                     stats,
                     terms: Some(terms),
+                    slots: Cell::new(0),
                 },
             )?,
         })
@@ -160,7 +174,18 @@ impl SearchPlan {
         view: &'a V,
         pruning: Pruning,
     ) -> Result<BoxedMatcher<'a>, ReadError> {
-        build(&self.root, view, pruning)
+        build(&self.root, view, pruning, None)
+    }
+
+    /// As [`Self::matcher_with`], keeping in `kept` what each `bool` selects with its filters, for
+    /// [`Self::explain_kept`] over the same view (ROADMAP 7.7.3).
+    pub(crate) fn matcher_keeping<'a, V: SearchView>(
+        &'a self,
+        view: &'a V,
+        pruning: Pruning,
+        kept: &Selections,
+    ) -> Result<BoxedMatcher<'a>, ReadError> {
+        build(&self.root, view, pruning, Some(kept))
     }
 
     /// The best `k` hits of the plan in `view`: score descending, then docid ascending (ROADMAP 7.4.3), with the
@@ -230,7 +255,9 @@ impl SearchPlan {
         view: &V,
         docid: u32,
     ) -> Result<Option<Explanation>, ReadError> {
-        Ok(explain_all(&self.root, view, &[docid])?.pop().flatten())
+        Ok(explain_all(&self.root, view, &[docid], None)?
+            .pop()
+            .flatten())
     }
 
     /// As [`Self::explain`] for each of `docids`, in that order, in one pass over `view` (ROADMAP 7.7.2): the tree is
@@ -276,7 +303,18 @@ impl SearchPlan {
         view: &V,
         docids: &[u32],
     ) -> Result<Vec<Option<Explanation>>, ReadError> {
-        explain_all(&self.root, view, docids)
+        explain_all(&self.root, view, docids, None)
+    }
+
+    /// As [`Self::explain_all`], each `bool` starting from what [`Self::matcher_keeping`] kept over the same view
+    /// rather than selecting its filters again (ROADMAP 7.7.3). The selections are taken out of `kept`.
+    pub(crate) fn explain_kept<V: SearchView>(
+        &self,
+        view: &V,
+        docids: &[u32],
+        kept: &Selections,
+    ) -> Result<Vec<Option<Explanation>>, ReadError> {
+        explain_all(&self.root, view, docids, Some(kept))
     }
 }
 
@@ -284,6 +322,17 @@ impl SearchPlan {
 struct Planner<'a, S: ?Sized> {
     stats: &'a S,
     terms: Option<&'a dyn TermSource>,
+    /// The `bool`s planned so far: the next one's slot.
+    slots: Cell<usize>,
+}
+
+impl<S: ?Sized> Planner<'_, S> {
+    /// A slot no other `bool` of the plan has.
+    fn slot(&self) -> usize {
+        let slot = self.slots.get();
+        self.slots.set(slot.saturating_add(1));
+        slot
+    }
 }
 
 fn plan<S: StatisticsProvider + ?Sized>(
@@ -365,6 +414,7 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
         filter: q.filter.clone(),
+        slot: p.slot(),
     })
 }
 
@@ -515,6 +565,7 @@ fn plan_expansion<S: StatisticsProvider + ?Sized>(
             should: words,
             must_not: Vec::new(),
             filter: Vec::new(),
+            slot: p.slot(),
         },
     })
 }
@@ -529,11 +580,12 @@ const UNLIMITED: QueryLimits = QueryLimits {
 
 /// The matcher of `node`. `pruning` is what a threshold on its score may skip with; the clauses a threshold on the
 /// whole score says nothing about (a conjunction's, optional ones, exclusions, under a constant score) are built
-/// [`Pruning::Exhaustive`].
+/// [`Pruning::Exhaustive`]. Each `bool`'s selection is kept in `kept`, if given.
 fn build<'a, V: SearchView>(
     node: &'a Node,
     view: &'a V,
     pruning: Pruning,
+    kept: Option<&Selections>,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     Ok(match node {
         Node::Word { terms, scorer } => match word_matcher(terms, scorer, view, pruning)? {
@@ -553,22 +605,28 @@ fn build<'a, V: SearchView>(
             should,
             must_not,
             filter,
+            slot,
         } => build_bool(
             Clauses {
                 must,
                 should,
                 must_not,
                 filter,
+                slot: *slot,
             },
             view,
             pruning,
+            kept,
         )?,
         Node::Scaled(inner, scale) => {
             let inner_pruning = match scale {
                 Scale::Boost(_) => pruning,
                 Scale::Constant(_) => Pruning::Exhaustive,
             };
-            Box::new(Scaled::new(build(inner, view, inner_pruning)?, *scale))
+            Box::new(Scaled::new(
+                build(inner, view, inner_pruning, kept)?,
+                *scale,
+            ))
         }
         Node::All => Box::new(AllDocs::new(view)),
         Node::Nothing => Box::new(Empty),
@@ -634,6 +692,7 @@ struct Clauses<'a> {
     should: &'a [Node],
     must_not: &'a [Node],
     filter: &'a [Filter],
+    slot: usize,
 }
 
 /// A `bool` (SPEC §7.1): every `must` and `filter`, at least one `should` when there is neither, no `must_not`; an
@@ -644,15 +703,21 @@ fn build_bool<'a, V: SearchView>(
     clauses: Clauses<'a>,
     view: &'a V,
     pruning: Pruning,
+    kept: Option<&Selections>,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     let Clauses {
         must,
         should,
         must_not,
         filter,
+        slot,
     } = clauses;
+    let select = || select_kept(filter, view, slot, kept);
     let all = |nodes: &'a [Node], pruning| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
-        nodes.iter().map(|n| build(n, view, pruning)).collect()
+        nodes
+            .iter()
+            .map(|n| build(n, view, pruning, kept))
+            .collect()
     };
     // The score is the `should` clauses' when they are required, or the one `must` clause's without `should`.
     // No `must`: a filter adds 0, so the threshold reaches `should` whether or not a filter is present.
@@ -666,9 +731,9 @@ fn build_bool<'a, V: SearchView>(
     let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
         let required = conjunction(all(must, must_pruning)?);
-        (filtered(required, filter, view)?, optional)
+        (filtered(required, filter, select)?, optional)
     } else if !filter.is_empty() {
-        let docs = select(filter, view)?;
+        let docs = select()?;
         let required: BoxedMatcher<'a> = if docs.is_empty() {
             Box::new(Empty)
         } else {
@@ -692,22 +757,36 @@ fn build_bool<'a, V: SearchView>(
     })
 }
 
-/// The documents of `required` that every filter selects; the filters are not read when there are none, or when
-/// `required` matches nothing in the view.
-fn filtered<'a, V: SearchView>(
+/// The documents of `required` that every filter selects (`select`); the filters are not read when there are none,
+/// or when `required` matches nothing in the view.
+fn filtered<'a>(
     required: BoxedMatcher<'a>,
     filter: &[Filter],
-    view: &V,
+    select: impl FnOnce() -> Result<RoaringBitmap, ReadError>,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     if filter.is_empty() || required.cost() == 0 {
         return Ok(required);
     }
-    let docs = select(filter, view)?;
+    let docs = select()?;
     Ok(if docs.is_empty() {
         Box::new(Empty)
     } else {
         Box::new(Filtered::new(required, docs))
     })
+}
+
+/// What `filter` selects in `view`, kept at `slot` of `kept` if given.
+fn select_kept<V: SearchView>(
+    filter: &[Filter],
+    view: &V,
+    slot: usize,
+    kept: Option<&Selections>,
+) -> Result<RoaringBitmap, ReadError> {
+    let docs = select(filter, view)?;
+    if let Some(kept) = kept {
+        kept.keep(slot, &docs);
+    }
+    Ok(docs)
 }
 
 /// AND of at least one clause; no document if a clause has none in the view.

@@ -18,6 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `SearchView::terms_stepped` is a new provided method, `terms` with a callback a view calls for
   each term it tries; the memtable copies its terms and column keys 1024 at a time, so a deadline or a
   cancellation stops an expansion or a column scan over a large memtable (ROADMAP 7.6.5).
+- `persia-engine`: an explained page takes each `bool`'s filter selections from the search's own matchers rather than
+  selecting them again (`search_suite/explain_filtered` 1.42 ms → 566 µs; ROADMAP 7.7.3).
 
 ### Fixed
 - A search no longer drops a hit whose segment index is missing from the views

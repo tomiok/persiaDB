@@ -15,7 +15,7 @@ use crate::segment::{ReadError, norms};
 use crate::view::SearchView;
 
 use super::boolean::Scale;
-use super::filter::select;
+use super::filter::{Selections, select};
 use super::phrase::PhraseMatcher;
 use super::plan::{Node, phrase_matcher, word_matcher};
 use super::word::WordMatcher;
@@ -142,10 +142,11 @@ pub(super) fn explain_all<V: SearchView>(
     node: &Node,
     view: &V,
     docids: &[u32],
+    kept: Option<&Selections>,
 ) -> Result<Vec<Option<Explanation>>, ReadError> {
     let mut order: Vec<usize> = (0..docids.len()).collect();
     order.sort_by_key(|&i| docids.get(i).copied());
-    let mut tree = Explainer::new(node, view)?;
+    let mut tree = Explainer::new(node, view, kept)?;
     let mut out = vec![None; docids.len()];
     for i in order {
         if let (Some(&docid), Some(slot)) = (docids.get(i), out.get_mut(i)) {
@@ -182,9 +183,9 @@ enum Explainer<'a, V: SearchView> {
 }
 
 impl<'a, V: SearchView> Explainer<'a, V> {
-    fn new(node: &'a Node, view: &'a V) -> Result<Self, ReadError> {
+    fn new(node: &'a Node, view: &'a V, kept: Option<&Selections>) -> Result<Self, ReadError> {
         let all = |nodes: &'a [Node]| -> Result<Vec<Self>, ReadError> {
-            nodes.iter().map(|n| Self::new(n, view)).collect()
+            nodes.iter().map(|n| Self::new(n, view, kept)).collect()
         };
         Ok(match node {
             Node::Word { terms, scorer } => Self::Word {
@@ -207,14 +208,17 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 should,
                 must_not,
                 filter,
+                slot,
             } => Self::Bool {
                 must: all(must)?,
                 should: all(should)?,
                 must_not: all(must_not)?,
                 filter,
-                selected: None,
+                selected: kept.and_then(|k| k.take(*slot)),
             },
-            Node::Scaled(inner, scale) => Self::Scaled(Box::new(Self::new(inner, view)?), *scale),
+            Node::Scaled(inner, scale) => {
+                Self::Scaled(Box::new(Self::new(inner, view, kept)?), *scale)
+            }
             Node::All => Self::All,
             Node::Nothing => Self::Nothing,
         })
@@ -401,4 +405,146 @@ fn boolean<V: SearchView>(
 /// one of the scorer's; were it not, the scorer would not have scored that field either (0).
 fn field_factor(scorer: &TermScorer, slot: usize, norm: u8) -> f64 {
     scorer.factor(slot, norm).unwrap_or(0.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use core::ops::Bound;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use persia_analysis::AnalyzerRegistry;
+    use persia_format::ByteSource;
+
+    use super::*;
+    use crate::document::{Document, Value};
+    use crate::query::{BoolQuery, FilterValue, Query, TermQuery};
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+    use crate::search::{Interrupt, Interruptible, Interrupts, SearchPlan, Steps};
+    use crate::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    use crate::stats::SegmentStatistics;
+    use crate::view::SegmentView;
+
+    const DOCS: u32 = 3_000;
+
+    /// Never stops; counts its looks.
+    #[derive(Default)]
+    struct Looks(AtomicU32);
+
+    impl Interrupts for Looks {
+        fn check(&self) -> Result<(), Interrupt> {
+            self.0.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+    }
+
+    /// `DOCS` documents with `n` = their docid; every 100th holds "red". The query: "red" with `n >= 1000`, and an
+    /// optional nested `bool` "blue" with `n >= 0` that no document matches.
+    fn fixture() -> (Arc<Segment>, SearchPlan) {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .field("n", FieldKind::I64 { stored: false })
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let n = schema.field("n").unwrap().id();
+        let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for i in 0..DOCS {
+            let text = if i % 100 == 0 { "red hat" } else { "green hat" };
+            let doc = Document::new(format!("d{i}"))
+                .with(body, Value::String(text.into()))
+                .with(n, Value::I64(i64::from(i)));
+            b.add(&doc).unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&b, meta).finish().unwrap();
+        let segment = Arc::new(Segment::open(ByteSource::new(bytes.into()), &schema).unwrap());
+        let at_least = |v| Filter::Range {
+            field: n,
+            lower: Bound::Included(FilterValue::I64(v)),
+            upper: Bound::Unbounded,
+        };
+        let term = |t: &str| {
+            Query::Term(TermQuery {
+                field: body,
+                term: t.into(),
+            })
+        };
+        let query = Query::Bool(BoolQuery {
+            must: vec![term("red")],
+            should: vec![Query::Bool(BoolQuery {
+                must: vec![term("blue")],
+                filter: vec![at_least(0)],
+                ..BoolQuery::default()
+            })],
+            filter: vec![at_least(1_000)],
+            ..BoolQuery::default()
+        });
+        let schema = Arc::new(schema);
+        let stats = SegmentStatistics::new(&schema, &[Arc::clone(&segment)]);
+        let plan = SearchPlan::new(&query, &schema, &stats).unwrap();
+        (segment, plan)
+    }
+
+    #[test]
+    fn kept_selections_explain_as_selecting_again() {
+        let (segment, plan) = fixture();
+        let view = SegmentView::new(&segment, None);
+        let kept = Selections::default();
+        let hits = crate::search::collect(
+            &mut plan
+                .matcher_keeping(&view, Pruning::Exhaustive, &kept)
+                .unwrap(),
+            100,
+        )
+        .unwrap();
+        assert_eq!(hits.len(), 20);
+        let docids: Vec<u32> = hits.iter().map(|h| h.docid).collect();
+        let again = plan.explain_all(&view, &docids).unwrap();
+        let explained = plan.explain_kept(&view, &docids, &kept).unwrap();
+        assert_eq!(explained, again);
+        for (hit, e) in hits.iter().zip(&explained) {
+            assert_eq!(e.as_ref().unwrap().score().to_bits(), hit.score.to_bits());
+        }
+        // The nested `bool`'s `must` matches nothing, so its filters were never selected: nothing kept to take.
+        assert_eq!(kept.take(0), None);
+        assert_eq!(kept.take(1), None);
+    }
+
+    #[test]
+    fn an_explanation_reads_the_kept_selection_and_not_the_columns() {
+        let (segment, plan) = fixture();
+        let view = SegmentView::new(&segment, None);
+        let kept = Selections::default();
+        drop(
+            plan.matcher_keeping(&view, Pruning::Exhaustive, &kept)
+                .unwrap(),
+        );
+        // Selecting `n >= 1000` scans 3 000 keys: the readers look at their interrupts.
+        let looks = Looks::default();
+        let explained = plan
+            .explain_all(&Interruptible::new(&view, &Steps::new(&looks)), &[1_000])
+            .unwrap();
+        assert!(explained[0].is_some());
+        assert!(looks.0.load(Ordering::Relaxed) >= 2);
+        // From the kept selection, a hit reads a few postings and no column.
+        let looks = Looks::default();
+        let kept_explained = plan
+            .explain_kept(
+                &Interruptible::new(&view, &Steps::new(&looks)),
+                &[1_000],
+                &kept,
+            )
+            .unwrap();
+        assert_eq!(kept_explained, explained);
+        assert_eq!(looks.0.load(Ordering::Relaxed), 0);
+        // And it is that selection it reads: one without the document explains nothing.
+        let kept = Selections::default();
+        kept.keep(1, &RoaringBitmap::new());
+        assert_eq!(plan.explain_kept(&view, &[1_000], &kept).unwrap(), [None]);
+    }
 }
