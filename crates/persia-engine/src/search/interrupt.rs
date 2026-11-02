@@ -241,6 +241,32 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         self.view.trues_stepped(field, &|| self.steps.step())
     }
 
+    fn deleted_stepped(
+        &self,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.view
+            .deleted_stepped(&|| self.steps.step().and_then(|()| step()))
+    }
+
+    fn present_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.view
+            .present_stepped(field, &|| self.steps.step().and_then(|()| step()))
+    }
+
+    fn trues_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.view
+            .trues_stepped(field, &|| self.steps.step().and_then(|()| step()))
+    }
+
     fn try_column_keys(
         &self,
         field: FieldId,
@@ -268,6 +294,37 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
             self.view.keywords_stepped(field, &|| self.steps.step())?,
             self.steps,
         ))
+    }
+
+    fn norms_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Norms<'_>, ReadError> {
+        self.view
+            .norms_stepped(field, &|| self.steps.step().and_then(|()| step()))
+    }
+
+    fn keys_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Keys<'_>, ReadError> {
+        let keys = self
+            .view
+            .keys_stepped(field, &|| self.steps.step().and_then(|()| step()))?;
+        Ok(Watched::new(keys, self.steps))
+    }
+
+    fn keywords_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<Self::Keywords<'_>, ReadError> {
+        let words = self
+            .view
+            .keywords_stepped(field, &|| self.steps.step().and_then(|()| step()))?;
+        Ok(Watched::new(words, self.steps))
     }
 
     fn document(&self, docid: u32) -> Result<Document, ReadError> {
@@ -695,6 +752,14 @@ mod tests {
         interrupted(&watched.present(f.n));
         interrupted(&watched.keys(f.n).map(drop));
         interrupted(&watched.keywords(f.tag).map(drop));
+        // A caller's own step is called too, beside the search's.
+        let calls = Cell::new(0_u32);
+        let counting = || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        };
+        interrupted(&watched.keys_stepped(f.n, &counting).map(drop));
+        assert!(calls.get() > 0);
         // Unwatched, the same copies succeed.
         assert_eq!(view.deleted().unwrap(), RoaringBitmap::new());
         assert_eq!(view.present(f.tag).unwrap().len(), u64::from(DOCS));

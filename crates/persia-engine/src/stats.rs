@@ -117,13 +117,29 @@ pub trait StatisticsProvider {
 }
 
 /// A memtable view's live `df` of a term, as its [`SearchView::terms`] counted it while an expansion walked it
-/// ([`StatisticsProvider::expansion_df`]).
+/// ([`StatisticsProvider::expansion_df`]). Only the engine's own walk makes one, so a provider can trust the count it
+/// carries for its view.
 #[derive(Debug, Clone, Copy)]
 pub struct MemtableDf<'a> {
+    view: &'a MemtableView,
+    df: u32,
+}
+
+impl<'a> MemtableDf<'a> {
+    /// `df`, as `view`'s term walk counted it.
+    pub(crate) fn new(view: &'a MemtableView, df: u32) -> Self {
+        Self { view, df }
+    }
+
     /// The view that counted it.
-    pub view: &'a MemtableView,
+    pub fn view(&self) -> &'a MemtableView {
+        self.view
+    }
+
     /// Its live documents holding the term.
-    pub df: u32,
+    pub fn df(&self) -> u32 {
+        self.df
+    }
 }
 
 /// The statistics of a snapshot's segments: `N` and the field totals summed once, `df` summed on demand and cached
@@ -435,7 +451,7 @@ mod tests {
         assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 3);
         let cloned = view.clone();
         // A count the walk gave this view is taken as it is (here a made-up 7, to see it used).
-        let given = |view| Some(MemtableDf { view, df: 7 });
+        let given = |view| Some(MemtableDf::new(view, 7));
         assert_eq!(stats.expansion_df(body, b"bb", given(&view)).unwrap(), 9);
         assert_eq!(stats.expansion_df(body, b"bb", given(&cloned)).unwrap(), 9);
         // Another view (a later cutoff, or another memtable) is counted here.

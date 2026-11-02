@@ -311,19 +311,31 @@ fn chunked_copies_are_the_view_while_writers_interleave() {
     let view = mem.lock().unwrap().view();
     let docs = 2_501_u32;
     let i_of = |docid: u32| if docid == 2_500 { 5 } else { docid };
+    // Writes land in every phase of every copy: at its first step (norms take two), in its first chunks, and in the
+    // keyword values after their 2 501 postings. A failed put interns new terms that are truncated, and the next put
+    // interns other new terms under the same ids; then new documents, a replace and a delete, all after the view.
+    let writes = std::cell::Cell::new(0_u32);
     let steps = std::cell::Cell::new(0_u32);
     let step = || {
         steps.set(steps.get() + 1);
-        if steps.get() == 1_000 {
+        if matches!(steps.get(), 1 | 1_000 | 3_000) {
+            let w = writes.get();
+            writes.set(w + 1);
             let mut mem = mem.lock().unwrap();
-            let failed = mem.put_logged(&chunked_doc(&f, "x", 99_999), |_| Err("disk"));
+            let fresh = |id: &str, word: &str| {
+                Document::new(id)
+                    .with(f.body, Value::String(format!("{word}{w}")))
+                    .with(f.tag, Value::String(format!("{word}{w}")))
+            };
+            let failed = mem.put_logged(&fresh("x", "lost"), |_| Err("disk"));
             assert!(failed.is_err());
-            for i in 0..3_000 {
-                mem.put(&chunked_doc(&f, &format!("n{i}"), 4_000 + i))
+            mem.put(&fresh(&format!("y{w}"), "kept")).unwrap();
+            for i in 0..300 {
+                mem.put(&chunked_doc(&f, &format!("n{w}-{i}"), 4_000 + i))
                     .unwrap();
             }
             mem.put(&chunked_doc(&f, "d7", 8)).unwrap();
-            mem.delete("d9").unwrap();
+            mem.delete(&format!("d{}", 9 + w)).unwrap();
         }
         Ok(())
     };
@@ -384,6 +396,8 @@ fn chunked_copies_are_the_view_while_writers_interleave() {
     // Copied once per view and field: no step the second time.
     view.norms_stepped(f.body, &step).unwrap();
     counted(0);
+    // Two writes per copy, three in the keywords copy (one in its values), one in the norms copy.
+    assert_eq!(writes.get(), 18);
     // The plain calls are the stepped ones.
     assert_eq!(view.deleted().unwrap(), RoaringBitmap::from_iter([3, 5]));
     assert_eq!(view.trues(f.flag).unwrap(), even);

@@ -75,7 +75,7 @@ pub(crate) fn each_memtable_term<V: SearchView>(
 ) -> Result<(), ReadError> {
     let mut terms = walk.terms(field, lower, upper, expansion.clone())?;
     while let Some((term, df)) = terms.next()? {
-        each(term, Some(MemtableDf { view: memtable, df }))?;
+        each(term, Some(MemtableDf::new(memtable, df)))?;
     }
     Ok(())
 }
@@ -538,10 +538,7 @@ mod df_tests {
             each: &mut EachTerm<'_>,
         ) -> Result<(), ReadError> {
             for &(term, df) in &self.memtable_terms {
-                let memtable = Some(MemtableDf {
-                    view: self.memtable,
-                    df,
-                });
+                let memtable = Some(MemtableDf::new(self.memtable, df));
                 each(term.as_bytes(), memtable)?;
             }
             for segment in &self.segments {
@@ -580,8 +577,10 @@ mod df_tests {
             memtable: Option<MemtableDf<'_>>,
         ) -> Result<u64, ReadError> {
             let term = String::from_utf8(term.to_vec()).unwrap();
-            let df = term.len() as u64 * 10 + memtable.map_or(0, |m| u64::from(m.df));
-            self.asked.borrow_mut().push((term, memtable.map(|m| m.df)));
+            let df = term.len() as u64 * 10 + memtable.map_or(0, |m| u64::from(m.df()));
+            self.asked
+                .borrow_mut()
+                .push((term, memtable.map(|m| m.df())));
             Ok(df)
         }
 
