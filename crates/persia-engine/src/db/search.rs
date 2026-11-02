@@ -311,7 +311,7 @@ impl CollectionViews<'_> {
         plan: &SearchPlan,
         segments: &[SegmentView<'_>],
         page: &[Ranked],
-        mut kept: Vec<(usize, Selections)>,
+        kept: Vec<(usize, Selections)>,
         exec: &Execution,
     ) -> Result<Vec<Option<Explanation>>, RequestError> {
         // (view order, docid, page index), so each view's hits are together and in docid order.
@@ -324,8 +324,32 @@ impl CollectionViews<'_> {
             })
             .collect();
         by_view.sort_unstable();
-        // Only the views holding the page's hits are explained.
-        kept.retain(|(rank, _)| by_view.iter().any(|&(view, ..)| view == *rank));
+        // Index selections by view rank once. A linear search of `kept` per group is quadratic in the
+        // views a page spans. The memtable's rank is `usize::MAX` ([`order`]); it sits after the segments.
+        // A view with no hit on the page has nothing to explain, so its bitmaps are dropped here.
+        let segments_len = segments.len();
+        let slots = segments_len.saturating_add(1);
+        let mut on_page = vec![false; slots];
+        for &(view, ..) in &by_view {
+            if let Some(slot) = selection_slot(view, segments_len)
+                && let Some(flag) = on_page.get_mut(slot)
+            {
+                *flag = true;
+            }
+        }
+        let mut by_rank = Vec::with_capacity(slots);
+        by_rank.resize_with(slots, || None);
+        for (rank, selections) in kept {
+            let Some(slot) = selection_slot(rank, segments_len) else {
+                continue;
+            };
+            if on_page.get(slot).copied() != Some(true) {
+                continue;
+            }
+            if let Some(entry @ None) = by_rank.get_mut(slot) {
+                *entry = Some(selections);
+            }
+        }
         let mut out = vec![None; page.len()];
         for group in by_view.chunk_by(|a, b| a.0 == b.0) {
             exec.interrupt()?;
@@ -335,10 +359,9 @@ impl CollectionViews<'_> {
             };
             // What the view's matcher selected; every view holding a hit ran one.
             let empty = Selections::default();
-            let selections = kept
-                .iter()
-                .find(|(r, _)| *r == rank)
-                .map_or(&empty, |(_, s)| s);
+            let selections = selection_slot(rank, segments_len)
+                .and_then(|slot| by_rank.get(slot).and_then(Option::as_ref))
+                .unwrap_or(&empty);
             let steps = Steps::new(exec);
             let explained = if rank == usize::MAX {
                 let view = Interruptible::new(self.memtable(), &steps);
@@ -490,6 +513,18 @@ fn segment_view<'a>(
         index,
         segments: segments.len(),
     })
+}
+
+/// Where the selections of the view at `rank` sit: its segment index, or `segments` for the memtable
+/// (`usize::MAX` in [`order`]). A rank that is neither is not a view of this search.
+fn selection_slot(rank: usize, segments: usize) -> Option<usize> {
+    if rank == usize::MAX {
+        Some(segments)
+    } else if rank < segments {
+        Some(rank)
+    } else {
+        None
+    }
 }
 
 /// Collection order of a location (SPEC §7.3): segment order with the memtable last, then docid.

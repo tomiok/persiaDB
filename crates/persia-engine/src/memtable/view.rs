@@ -381,24 +381,29 @@ impl SearchView for MemtableView {
         // A truncated id interned again may list a term twice.
         matched.sort_unstable();
         matched.dedup();
+        // Consume each chunk by value and move a matched term into `terms`. Cloning it would allocate again
+        // per term. A step still runs once per term of the chunk, outside the lock; a missing index stops
+        // before that step, as a borrowed chunk did.
         let mut terms = Vec::new();
-        for chunk in matched.chunks(COPY_CHUNK) {
+        while !matched.is_empty() {
+            let n = COPY_CHUNK.min(matched.len());
+            let chunk: Vec<Vec<u8>> = matched.drain(..n).collect();
             {
                 let inner = read(&self.shared);
                 let Some(index) = indexed(&inner, field, false, "terms")?.index() else {
                     break;
                 };
                 for term in chunk {
-                    let Some(id) = index.inverted.terms.get(term) else {
+                    let Some(id) = index.inverted.terms.get(&term) else {
                         continue;
                     };
                     let df = self.live_df(&inner, index, id);
                     if df > 0 {
-                        terms.push((term.clone(), df));
+                        terms.push((term, df));
                     }
                 }
             }
-            for _ in chunk {
+            for _ in 0..n {
                 step()?;
             }
         }
