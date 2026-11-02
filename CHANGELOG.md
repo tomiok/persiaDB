@@ -54,6 +54,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: `segment::scored_length(len)`, the length a field of `len` tokens is scored with (its norm,
+  decoded; SPEC §5.3.4). The reference model uses it instead of a copy of the codec (ROADMAP 7.8.5).
 - `persia-storage`: `Container::is_mapped` and `Container::mapping_failures` report a fallback from mapped reads to
   `pread` (ROADMAP 0.6.7).
 - `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
