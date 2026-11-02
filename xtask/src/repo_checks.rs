@@ -429,4 +429,54 @@ mod tests {
             "README.md's progress blocks are stale. Run: cargo xtask progress --record"
         );
     }
+
+    /// Every statement of the README quickstart appears, in order, in `readme_quickstart.rs`, so the README cannot
+    /// show calls the test does not run. The test may add statements (a temporary path, the typo check). Comments
+    /// and whitespace are ignored (rustfmt lays the two out differently), and the README's `"app.persia"` is the
+    /// test's `&path`. A test statement may carry an attribute the README lacks (`#![allow(..)]` before the first `use`).
+    #[test]
+    fn readme_quickstart_is_the_tested_one() {
+        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
+        let readme = read("README.md");
+        let section = readme
+            .split_once("### Index documents and search them")
+            .expect("README.md: quickstart heading")
+            .1;
+        let block = section
+            .split_once("```rust\n")
+            .and_then(|(_, rest)| rest.split_once("\n```"))
+            .expect("README.md: quickstart rust block")
+            .0;
+        let statements = |text: &str| -> Vec<String> {
+            let code: String = text
+                .lines()
+                .filter(|l| !l.trim_start().starts_with("//"))
+                .flat_map(|l| l.split_once("// ").map_or(l, |(code, _)| code).chars())
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            code.split([';', '{', '}'])
+                .filter(|s| !s.is_empty())
+                .map(str::to_owned)
+                .collect()
+        };
+        let want = statements(
+            &block
+                .replace("\"app.persia\"", "&path")
+                .replace("fn main()", "fn readme_quickstart()"),
+        );
+        let test = statements(&read("crates/persia-engine/tests/readme_quickstart.rs"));
+        assert!(
+            want.len() > 10,
+            "README quickstart: too few statements parsed"
+        );
+        let mut have = test.iter();
+        for statement in &want {
+            assert!(
+                have.any(|t| t == statement
+                    || t.strip_suffix(statement.as_str())
+                        .is_some_and(|p| p.ends_with(']'))),
+                "README quickstart statement not in readme_quickstart.rs (in order): {statement}"
+            );
+        }
+    }
 }

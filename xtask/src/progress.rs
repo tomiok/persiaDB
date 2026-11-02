@@ -864,10 +864,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
             total,
         });
         history.sort_by(|a, b| a.date.cmp(&b.date));
-        std::fs::write(&history_path, format_history(&history))
-            .context("writing docs/progress-history.csv")?;
     }
 
+    // Render everything before writing anything, so a README without its markers fails with no file changed.
     let rendered = render(&milestones, &history);
     let readme_path = root.join("README.md");
     let readme_text = std::fs::read_to_string(&readme_path).context("reading README.md")?;
@@ -896,6 +895,10 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         return Ok(true);
     }
 
+    if record {
+        std::fs::write(&history_path, format_history(&history))
+            .context("writing docs/progress-history.csv")?;
+    }
     std::fs::write(&progress_path, rendered).context("writing PROGRESS.md")?;
     if readme_rendered != readme_text {
         std::fs::write(&readme_path, readme_rendered).context("writing README.md")?;

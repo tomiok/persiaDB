@@ -54,5 +54,5 @@ to know about blob bytes (SPEC §9.5).
 
 On a query, the design is: analyze the text, search each segment and the memtable, merge
 the per-segment top-k, and if there are too few hits run the relaxation cascade. The response
-includes which level matched. The compiler and the BM25F scorer exist. Matching, the top-k merge,
-and the cascade do not. See [Typo-tolerant search](/guide/typo-tolerant-search/).
+includes which level matched. The compiler, the BM25F scorer, matching, and the top-k merge exist as library code.
+The cascade does not. See [Typo-tolerant search](/guide/typo-tolerant-search/).

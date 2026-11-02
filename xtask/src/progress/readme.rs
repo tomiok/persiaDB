@@ -25,11 +25,11 @@ fn summary(milestones: &[Milestone], history: &[Snapshot]) -> String {
     let (done, doing, total) = totals(milestones.iter().filter(|ms| is_mvp(ms)));
     let (post_done, _, post_total) = totals(milestones.iter().filter(|ms| !is_mvp(ms)));
     let snapshot = history.last().map_or_else(
-        || "No snapshot is recorded yet".to_owned(),
-        |r| format!("The {} snapshot", r.date),
+        || "no snapshot recorded yet".to_owned(),
+        |r| format!("last snapshot {}", r.date),
     );
     format!(
-        "**Pre-alpha.** {snapshot} in [`PROGRESS.md`](./PROGRESS.md) is **{done} of {total}** MVP leaves done ({}), {doing} in progress. Post-MVP work is {post_done} of {post_total} and sits outside that percentage.",
+        "**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **{done} of {total}** MVP leaves done ({}), {doing} in progress ({snapshot}). Post-MVP work is {post_done} of {post_total} and sits outside that percentage.",
         pct(done, total)
     )
 }
@@ -46,7 +46,7 @@ fn table(milestones: &[Milestone]) -> String {
         out.push(format!(
             "| **{}** {} | {} | {}/{} |",
             ms.key,
-            ms.short_title(),
+            ms.short_title().replace('|', "\\|"),
             state.label(),
             ms.count(Status::Done),
             ms.leaves.len()
@@ -123,7 +123,7 @@ Deps: M1.
         assert!(out.ends_with("\n\ntail\n"));
         assert!(!out.contains("stale"));
         assert!(out.contains(
-            "The 2026-11-02 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **1 of 3** MVP leaves done (33%), 1 in progress. Post-MVP work is 0 of 1"
+            "[`PROGRESS.md`](./PROGRESS.md) counts **1 of 3** MVP leaves done (33%), 1 in progress (last snapshot 2026-11-02). Post-MVP work is 0 of 1"
         ));
         assert!(out.contains("| **M0** Bootstrap | 🔨 in progress | 1/2 |"));
         assert!(out.contains("| **M1** Format | ⏳ blocked | 0/1 |"));

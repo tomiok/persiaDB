@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** The 2026-11-02 snapshot in [`PROGRESS.md`](./PROGRESS.md) is **296 of 514** MVP leaves done (58%), 5 in progress. Post-MVP work is 0 of 177 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **300 of 514** MVP leaves done (58%), 1 in progress (last snapshot 2026-11-02). Post-MVP work is 0 of 177 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -72,7 +72,7 @@ The crates are unpublished (`publish = false`, version `0.0.0`). There is no cra
 
 ### Index documents and search them
 
-This is the highest API the engine exports today. It is not the [planned `Db` API](#planned-embedded-api): it creates `app.persia`, puts three documents, commits, and runs a ranked search. The same calls run as the test [`readme_quickstart.rs`](./crates/persia-engine/tests/readme_quickstart.rs).
+This is the highest API the engine exports today. It is not the [planned `Db` API](#planned-embedded-api): it creates `app.persia`, puts three documents, commits, and runs a ranked search. `Database::create` refuses a file that exists, so delete `app.persia` before running it again. The same calls run as the test [`readme_quickstart.rs`](./crates/persia-engine/tests/readme_quickstart.rs).
 
 ```toml
 [dependencies]
@@ -227,7 +227,7 @@ flowchart TD
 | `persia-storage` | `Storage`, memory, local files, the single-file container, crash-test faults. | Implemented. S3, GCS, and Azure Blob are M12. |
 | `persia-analysis` | Tokenizers, normalizers, stemmers, the analyzer registry. No internal dependencies. | Implemented. |
 | `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 and M7 still in progress. Relaxation is M8. |
-| `persia-cli` | The `persia` binary. | Inspect, dump, and file sweep. See [CLI](#cli). |
+| `persia-cli` | The `persia` binary. | Inspect, dump, file sweep, and `verify`. See [CLI](#cli). |
 | `persia` | The embedded facade: `Db`, `Collection`. | Placeholder for M10: the dependency edges, no types. |
 | `persia-blob` | Content-addressed chunks, dedup, GC. | Placeholder for M9: the dependency edges, no types. |
 | `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Placeholders for M11. The server binary exits with "not implemented". |
@@ -241,7 +241,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 <!-- BEGIN GENERATED progress:milestones by `cargo xtask progress`. Do not edit by hand. -->
 | Milestone | State | Leaves done |
 |---|---|---|
-| **M0** Project bootstrap | 🔨 in progress | 26/34 |
+| **M0** Project bootstrap | 🔨 in progress | 30/34 |
 | **M1** Format primitives | ✅ done | 53/53 |
 | **M2** Storage abstraction & local backends | ✅ done | 46/46 |
 | **M3** Schema, documents, collections | ✅ done | 15/15 |

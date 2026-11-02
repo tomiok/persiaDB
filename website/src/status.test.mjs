@@ -8,6 +8,7 @@ import { loadProgress, parseProgress } from './progress.mjs';
 import {
 	buildStatus,
 	exportedFns,
+	implHasMethod,
 	loadStatus,
 	parseRoadmapLeaves,
 	publicModules,
@@ -123,7 +124,8 @@ test('the collection search is claimed only with its leaves checked and its code
 	live.set('7.5.2', false);
 	const partial = buildStatus(input);
 	assert.match(partial.engineShort, /part of the collection search \(not every leaf is done\)/);
-	assert.match(partial.engineShort, /Nothing searches/);
+	assert.match(partial.engineShort, /A collection search call is in the tree, but not every leaf of it is done/);
+	assert.equal(partial.engineShort.includes('Nothing searches'), false);
 	assert.equal(partial.engineCalls.includes('CollectionViews::search'), false);
 	assert.match(partial.tokens['%%QUERY_CELL%%'], /They do not return hits/);
 });
@@ -244,6 +246,21 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 		'is an empty main function',
 		'Empty `main`',
 		'do not return hits.',
+		'does not search yet',
+		'cannot answer a query',
+		'There is no search call.',
+		'It has no `search`',
+		'They do not search.',
+		'Not started (ROADMAP 7.4.5',
+		'Not a search call',
+		'A score is not a hit list',
+		'They do not run a search',
+		'Facets are not implemented',
+		'A search that returns hits is still not there',
+		'Not started: filter bitmaps',
+		'and the cascade do not',
+		'no code lists the terms within that distance',
+		'rejects `prefix`, `fuzzy`',
 	];
 	for (const file of walk(docsDir)) {
 		const raw = readFileSync(file, 'utf8');
@@ -305,3 +322,14 @@ function currentInput(leaves) {
 		version: '0.0.0',
 	};
 }
+
+test('implHasMethod looks inside the impl block only', () => {
+	const plain = "impl CollectionViews<'_> {\n    /// { braces in docs }\n    pub fn search(&self) {}\n}\n";
+	assert.equal(implHasMethod(plain, 'CollectionViews', 'search'), true);
+	const generic = "impl<'a> CollectionViews<'a> {\n    pub fn search<V>(&self) {}\n}\n";
+	assert.equal(implHasMethod(generic, 'CollectionViews', 'search'), true);
+	const elsewhere = "impl CollectionViews<'_> {\n    pub fn other(&self) { if x { y } }\n}\n\nimpl Other {\n    pub fn search(&self) {}\n}\n";
+	assert.equal(implHasMethod(elsewhere, 'CollectionViews', 'search'), false);
+	assert.equal(implHasMethod("impl CollectionViews<'_> {\n    fn search(&self) {}\n}\n", 'CollectionViews', 'search'), false);
+	assert.equal(implHasMethod("impl CollectionViewsX {\n    pub fn search(&self) {}\n}\n", 'CollectionViews', 'search'), false);
+});

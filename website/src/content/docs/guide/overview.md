@@ -31,7 +31,7 @@ never come back empty. The same segment bytes can live in a local file or in obj
 A longer definition of the embedded library — in your process, one file, no search server — is
 [What is an embedded search database?](/guide/embedded-search/).
 Where the design sits next to SQLite FTS5, Tantivy, and Meilisearch is
-[Comparison](/guide/comparison/). That page is not a benchmark. Persia DB does not search yet.
+[Comparison](/guide/comparison/). That page is not a benchmark. Persia DB has no public search API yet (M10).
 How a typo is supposed to avoid an empty page is [Typo-tolerant search](/guide/typo-tolerant-search/).
 Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 

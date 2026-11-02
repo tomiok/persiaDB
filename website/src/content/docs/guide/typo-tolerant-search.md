@@ -27,7 +27,7 @@ head:
             "name": "Does Persia DB do typo-tolerant search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. The relaxation cascade has not been started (milestone M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, but no code lists the terms within that distance. Exact term, phrase, and boolean top-k over one view is library code. There is no search call."
+              "text": "No. The relaxation cascade has not been started (milestone M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (CollectionViews::search). There is no search call on the database handle."
             }
           },
           {
@@ -163,7 +163,7 @@ let filter = Filter::from_json(
 )?;
 ```
 
-The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required. Fuzzy matching is L4 of the cascade, which is not written. `SearchPlan` rejects `prefix`, `fuzzy`, and `bool` filters. Term iterators, phrases, boolean combination, and top-k over one segment or memtable view are library code (ROADMAP 7.4.1–7.4.4). There is no search call.
+The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required. Fuzzy matching is L4 of the cascade, which is not written. An explicit `prefix` or `fuzzy` clause plans with `SearchPlan::with_terms`, which expands it over the collection terms (ROADMAP 7.4.12). Matching, sorts, pages, and facets over a collection snapshot are library code (`CollectionViews::search`). There is no search call on the database handle.
 
 ## BM25F scoring and filters
 
@@ -193,12 +193,12 @@ What scoring does not do: walk postings, apply tombstones, collect a top-k, face
 | Collection statistics | Library code (ROADMAP 7.2). |
 | BM25F scorer, static rank, score upper bounds | Library code (ROADMAP 7.3), checked against the reference scorer. |
 | `RelaxationConfig` and `SynonymMap` | Stored and looked up. Not called from a search. |
-| Term, phrase, and boolean matching; score top-k over one view | Library code (ROADMAP 7.4.1–7.4.4). Not a search call. |
-| Filter evaluation, facets, sort, explain | Not started (ROADMAP 7.4.5, 7.5, 7.7). |
-| Relaxation cascade | Not started (M8). |
+| Term, phrase, boolean, prefix, and fuzzy matching | %%MATCHING_CELL%% |
+| Filter evaluation, facets, sort, explain | %%MATCHING_CELL%% Explain is library code (ROADMAP 7.7). |
+| Relaxation cascade | %%RELAXATION_CELL%% |
 | `persia::Db::open` and `search` | Not in the crate (M10). |
 
-`persia_engine::db::Database` has `open`, `put`, and `commit`. It has no `search`. The public `persia` crate exports no `Db`. %%ENGINE_CALLS%%
+`persia_engine::db::Database` has `open`, `put`, and `commit`; searching goes through `CollectionViews::search` on a snapshot, not through `Database`. The public `persia` crate exports no `Db`. %%ENGINE_CALLS%%
 
 The call below is the intended API from SPEC §7.1 and §7.6. It is illustrative: these methods are not in the `persia` crate.
 
@@ -220,7 +220,7 @@ let relaxation = &results.relaxation;
 
 ### Does Persia DB do typo-tolerant search today?
 
-No. The relaxation cascade has not been started (M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, but no code lists the terms within that distance. Exact term, phrase, and boolean top-k over one view is library code. There is no search call.
+No. The relaxation cascade has not been started (M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (CollectionViews::search). There is no search call on the database handle.
 
 ### What is query relaxation?
 

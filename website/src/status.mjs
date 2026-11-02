@@ -182,6 +182,31 @@ export function exportedFns(source) {
 }
 
 /**
+ * Whether an `impl <type>` block of `source` declares `pub fn <method>` (generic or not). Each impl body is cut at
+ * its matching brace, so a method of another impl later in the file does not count. Braces inside comments and
+ * strings are counted too; Rust sources keep those balanced in practice, and a miss fails loudly in groupPhrase.
+ * @param {string} source
+ * @param {string} type
+ * @param {string} method
+ * @returns {boolean}
+ */
+export function implHasMethod(source, type, method) {
+	const head = new RegExp(`^impl(?:<[^>]*>)?\\s+${type}\\b[^{]*\\{`, 'gm');
+	const fn = new RegExp(`^\\s*pub fn ${method}\\s*[<(]`, 'm');
+	for (const match of source.matchAll(head)) {
+		let depth = 1;
+		let i = (match.index ?? 0) + match[0].length;
+		const start = i;
+		for (; i < source.length && depth > 0; i++) {
+			if (source[i] === '{') depth++;
+			else if (source[i] === '}') depth--;
+		}
+		if (fn.test(source.slice(start, i))) return true;
+	}
+	return false;
+}
+
+/**
  * @param {string} registryRs
  * @returns {string[]}
  */
@@ -383,7 +408,9 @@ export function buildStatus(ctx) {
 		? ''
 		: collectionSearch
 			? 'A collection snapshot can be searched as library code. There is no search call on the database handle.'
-			: 'Nothing searches.';
+			: request && ctx.hasCollectionSearch
+				? 'A collection search call is in the tree, but not every leaf of it is done.'
+				: 'Nothing searches.';
 	let querySentence = '';
 	if (m7.state !== 'done') {
 		if (queryPieces.length > 0) {
@@ -686,8 +713,8 @@ function readInput() {
 		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib),
 		hasQuery: modules.includes('query'),
 		hasSearch: dbFns.has('search') || /pub fn search\b/.test(persiaLib),
-		hasCollectionSearch: /impl CollectionViews\b[\s\S]*?\n\s*pub fn search\(/.test(
-			read('crates/persia-engine/src/db/search.rs'),
+		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>
+			implHasMethod(read(rel), 'CollectionViews', 'search'),
 		),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),
 		published: pkg.published,

@@ -69,10 +69,10 @@ Deps: none.
 - [x] 0.5.3 `cargo xtask github-setup`; repo-file and toolchain checks as Rust tests; delete Python, update CI/justfile/docs
 
 ## 0.6 Status honesty and hardening (found in the 2026-11-02 audit)
-- [~] 0.6.1 `cargo xtask progress` rewrites marked progress blocks in `README.md` (headline count, milestone table), `--check` fails when they are stale, and a `repo_checks` test fails when README and `PROGRESS.md` disagree
-- [~] 0.6.2 README claims only what the code does: the engine's write path and search are described as they are, and the relaxation tagline is design intent (M8), not a feature
-- [~] 0.6.3 Website status from `website/src/status.mjs`: `features.mdx` and `guide/getting-started.md` take their status sentences from it, and it sees the collection search (`CollectionViews::search`, `db/search.rs`)
-- [~] 0.6.4 Placeholder crates say so: `persia`, `persia-blob`, `persia-proto` docs read "Placeholder for M9/M10/M11", and `persia-server` prints "not implemented (M11)" and exits non-zero
+- [x] 0.6.1 `cargo xtask progress` rewrites marked progress blocks in `README.md` (headline count, milestone table), `--check` fails when they are stale, and `repo_checks` tests fail when the README blocks differ from what ROADMAP.md and the history render, or when the README quickstart is not the one `readme_quickstart.rs` runs
+- [x] 0.6.2 README claims only what the code does: the engine's write path and search are described as they are, and the relaxation tagline is design intent (M8), not a feature
+- [x] 0.6.3 Website status from `website/src/status.mjs`: `features.mdx` and `guide/getting-started.md` take their status sentences from it, and it sees the collection search (`CollectionViews::search`, `db/search.rs`)
+- [x] 0.6.4 Placeholder crates say so: `persia`, `persia-blob`, `persia-proto` docs read "Placeholder for M9/M10/M11", and `persia-server` prints "not implemented (M11)" and exits non-zero
 - [ ] 0.6.5 Clippy cast lints (`cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_lossless`) on `persia-format`, `persia-storage` and `persia-engine`; each `as` becomes `try_from`/`from` or carries a justified `#[allow]` (CLAUDE.md "checked ops")
 - [ ] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`
 - [ ] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`)
