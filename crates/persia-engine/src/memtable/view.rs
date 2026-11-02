@@ -121,6 +121,14 @@ impl MemtableView {
             .collect()
     }
 
+    /// Whether `other` sees what this view sees: a view of the same memtable at the same cutoff, so its counts are
+    /// this view's.
+    pub(crate) fn is_same_view(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
+            && self.version == other.version
+            && self.docs == other.docs
+    }
+
     /// Whether this is a view of the memtable `reader` reads.
     pub(crate) fn is_of(&self, reader: &super::MemtableReader) -> bool {
         Arc::ptr_eq(&self.shared, reader.shared())

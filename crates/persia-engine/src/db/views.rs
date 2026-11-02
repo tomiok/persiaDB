@@ -19,7 +19,8 @@ use super::snapshot::{CollectionSnapshot, Located};
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::search::{
-    ExecError, Expansion, Interruptible, Pruning, SearchPlan, Steps, TermSource, collect_where,
+    EachTerm, ExecError, Expansion, Interruptible, Pruning, SearchPlan, Steps, TermSource,
+    collect_where, each_memtable_term,
 };
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
@@ -206,8 +207,8 @@ impl CollectionSnapshot {
     }
 }
 
-/// The terms of every segment, then of the memtable: what a `prefix` or `fuzzy` planned for these views expands
-/// over ([`SearchPlan::with_terms`], SPEC §7.1).
+/// The terms of the memtable, then of every segment: what a `prefix` or `fuzzy` planned for these views expands over
+/// ([`SearchPlan::with_terms`], SPEC §7.1). The memtable comes first with its own counts ([`TermSource::each_term`]).
 impl TermSource for CollectionViews<'_> {
     fn each_term(
         &self,
@@ -215,13 +216,14 @@ impl TermSource for CollectionViews<'_> {
         lower: Bound<&[u8]>,
         upper: Bound<&[u8]>,
         expansion: &Expansion,
-        each: &mut dyn FnMut(&[u8]) -> Result<(), ReadError>,
+        each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
+        let memtable = self.memtable();
+        each_memtable_term(memtable, memtable, field, (lower, upper), expansion, each)?;
         for segment in self.segments() {
             segment.each_term(field, lower, upper, expansion, each)?;
         }
-        self.memtable()
-            .each_term(field, lower, upper, expansion, each)
+        Ok(())
     }
 }
 

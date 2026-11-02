@@ -245,6 +245,20 @@ reusing the search's filter selections (ROADMAP 7.7.3). Command: `cargo bench -p
 | 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.7.3; only `explain_filtered`) | — | — | — | — | — | — | — | — | 566 µs |
 | 2026-11-02, same machine and session as the row above, main before this change (only `explain_filtered`) | — | — | — | — | — | — | — | — | 1.42 ms |
 
+`search_expansion_collection` (ROADMAP 7.4.14): `prefix` `w1` (111 terms, capped at 50) and `fuzzy` `w15` at distance
+1, planned (`SearchPlan::with_terms`) over the same documents in 4 segments plus a memtable of 10 000 more, so every
+term is listed by five views. Planning only. `search_top10_expansion` is the same queries planned and searched over
+the single segment. Command: `cargo bench -p persia-engine --bench search -- "search_expansion_collection|search_top10_expansion"`.
+Time per query.
+
+| Recorded | collection `prefix` plan | collection `fuzzy` plan | one segment `prefix` | one segment `fuzzy` |
+|---|--:|--:|--:|--:|
+| 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.14) | 826 µs | 618 µs | 25.8 ms | 21.7 ms |
+| 2026-11-02, same machine and session, the commit before 7.4.14 | 3.59 ms | 2.31 ms | 25.1 ms | 21.0 ms |
+
+The one-segment queries are about 3 % slower: a term that loses the cap is no longer cached, so each run reads its
+`df` from the segment again (ROADMAP 7.4.15 reuses the segments' own counts).
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54
