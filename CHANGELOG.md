@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-storage` (breaking): `Container::enable_mapped_reads` and `enable_mapped_reads_if_local` are `unsafe fn`.
+  Their soundness rests on a precondition the container cannot check (nothing outside Persia writes, truncates or
+  hole-punches the file below the mapped `log_end` while a mapping lives), now stated in a `# Safety` section
+  (ROADMAP 0.6.8, ADR-0017).
+- `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning; `Container::is_mapped` and
+  `Container::mapping_failures` report the fallback to `pread` (ROADMAP 0.6.7).
 - `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
   documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
   might not have (ROADMAP 6.3.12, SPEC §8.2.1). `Memtable::hold`, `release` and `is_held` are new.

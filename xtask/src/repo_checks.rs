@@ -234,13 +234,16 @@ mod tests {
     /// Files that may `allow(unsafe_code)`, each justified by an ADR. Adding one means amending ADR-0010 (or writing
     /// a new ADR) first.
     const UNSAFE_ALLOWED: &[&str] = &[
-        "crates/persia-format/src/mmap.rs",              // ADR-0010
-        "crates/persia-format/tests/mmap_rename.rs",     // ADR-0010: maps its own temporary files
-        "crates/persia-format/tests/source_props.rs",    // ADR-0010: maps its own temporary files
+        "crates/persia-format/src/mmap.rs",                 // ADR-0010
+        "crates/persia-format/tests/mmap_rename.rs", // ADR-0010: maps its own temporary files
+        "crates/persia-format/tests/source_props.rs", // ADR-0010: maps its own temporary files
         "crates/persia-storage/src/container/mapped.rs", // ADR-0017
-        "crates/persia-storage/src/sys.rs",              // ADR-0021
-        "crates/persia-analysis/tests/allocations.rs",   // ADR-0026: counting allocator
-        "crates/persia-engine/tests/flush_memory.rs",    // ADR-0026: counting allocator
+        "crates/persia-storage/tests/container_mapped.rs", // ADR-0017: maps containers it owns (unsafe enable_mapped_reads)
+        "crates/persia-storage/tests/container_process.rs", // ADR-0017: maps containers it owns
+        "crates/persia-storage/benches/container_read.rs", // ADR-0017: maps a container it owns
+        "crates/persia-storage/src/sys.rs",                // ADR-0021
+        "crates/persia-analysis/tests/allocations.rs",     // ADR-0026: counting allocator
+        "crates/persia-engine/tests/flush_memory.rs",      // ADR-0026: counting allocator
     ];
 
     #[test]

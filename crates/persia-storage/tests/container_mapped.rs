@@ -9,7 +9,8 @@
     clippy::unwrap_used,
     clippy::indexing_slicing,
     clippy::cast_possible_truncation,
-    clippy::single_range_in_vec_init // a list of one live frame is the point
+    clippy::single_range_in_vec_init, // a list of one live frame is the point
+    unsafe_code // maps containers this test owns (ADR-0017)
 )]
 
 use std::fs::OpenOptions;
@@ -51,6 +52,14 @@ fn commit_batch(c: &mut Container, wal: &[&[u8]], manifest: &[u8]) -> Vec<FrameR
 }
 
 /// Whether the frame at `offset` comes from the mapping: two reads share their bytes. Needs a non-empty payload.
+/// [`Container::enable_mapped_reads`] on a container this test owns.
+fn map_reads(c: &mut Container) -> persia_storage::container::Result<()> {
+    // SAFETY: each test's file lives in its own temporary directory. Nothing but Persia containers writes it while
+    // a mapping lives, except appends after the mapped `log_end` (a torn tail), which the contract allows, and
+    // writes made before the container is opened and mapped.
+    unsafe { c.enable_mapped_reads() }
+}
+
 fn is_mapped(c: &Container, offset: u64) -> bool {
     let a = c.read_frame_source(offset, MAX).unwrap().payload;
     let b = c.read_frame_source(offset, MAX).unwrap().payload;
@@ -81,6 +90,8 @@ fn off_by_default() {
     let dir = tempfile::tempdir().unwrap();
     let (c, frames) = committed(&path(&dir));
     assert_eq!(c.mapped_range(), None);
+    assert!(!c.is_mapped());
+    assert_eq!(c.mapping_failures(), 0);
     for f in &frames {
         assert!(!is_mapped(&c, f.offset));
     }
@@ -90,8 +101,10 @@ fn off_by_default() {
 fn committed_frames_come_from_the_mapping() {
     let dir = tempfile::tempdir().unwrap();
     let (mut c, frames) = committed(&path(&dir));
-    c.enable_mapped_reads().unwrap();
+    map_reads(&mut c).unwrap();
     assert_eq!(c.mapped_range(), Some(F..c.superblock().log_end));
+    assert!(c.is_mapped());
+    assert_eq!(c.mapping_failures(), 0);
     for (f, want) in frames
         .iter()
         .zip([&b"wal one"[..], b"wal two", b"manifest 1"])
@@ -111,7 +124,7 @@ fn committed_frames_come_from_the_mapping() {
 fn a_mapped_read_still_validates_the_frame() {
     let dir = tempfile::tempdir().unwrap();
     let (mut c, frames) = committed(&path(&dir));
-    c.enable_mapped_reads().unwrap();
+    map_reads(&mut c).unwrap();
     // The bomb limit applies to mapped payloads too.
     assert!(matches!(
         c.read_frame_source(frames[0].offset, 3),
@@ -131,7 +144,7 @@ fn frames_after_log_end_are_read() {
     let path = path(&dir);
     let mut w = Container::create(&path).unwrap();
     commit_batch(&mut w, &[b"committed"], b"manifest 1");
-    w.enable_mapped_reads().unwrap();
+    map_reads(&mut w).unwrap();
     let log_end = w.superblock().log_end;
     // Synced WAL frames after the last commit (SPEC §8.2): never mapped, since recovery may truncate there.
     let wal = w
@@ -144,7 +157,7 @@ fn frames_after_log_end_are_read() {
 
     // A read-only open sees it after `log_end` too.
     let mut r = Container::open(&path, Mode::ReadOnly).unwrap();
-    r.enable_mapped_reads().unwrap();
+    map_reads(&mut r).unwrap();
     assert_eq!(r.uncommitted_frames(), &[wal]);
     assert!(!is_mapped(&r, wal.offset));
     assert_eq!(payload(&r, wal.offset), b"not yet committed");
@@ -154,7 +167,7 @@ fn frames_after_log_end_are_read() {
 fn a_commit_remaps() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = Container::create(path(&dir)).unwrap();
-    w.enable_mapped_reads().unwrap();
+    map_reads(&mut w).unwrap();
     // A new container has no frames: an empty mapping.
     assert_eq!(w.mapped_range(), Some(F..F));
     let first = commit_batch(&mut w, &[b"a"], b"manifest 1");
@@ -176,7 +189,7 @@ fn a_commit_remaps() {
 fn compressed_payloads_are_decompressed_at_offset_zero() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = Container::create(path(&dir)).unwrap();
-    w.enable_mapped_reads().unwrap();
+    map_reads(&mut w).unwrap();
     let data = vec![42_u8; 10_000];
     let wal = w.append(FrameKind::WalChunk, &data, ZSTD).unwrap();
     w.sync().unwrap();
@@ -212,11 +225,11 @@ fn an_in_place_compaction_maps_the_new_file() {
         fence_token: 0,
     })
     .unwrap();
-    w.enable_mapped_reads().unwrap();
+    map_reads(&mut w).unwrap();
 
     // A reader of the old file, mapped too: compaction must not change what it reads (SPEC §4.6).
     let mut old = Container::open(&path, Mode::ReadOnly).unwrap();
-    old.enable_mapped_reads().unwrap();
+    map_reads(&mut old).unwrap();
     let old_range = old.mapped_range();
 
     let relocation = w
@@ -242,7 +255,7 @@ fn a_mapping_survives_appends_and_commits_of_another_handle() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let (mut r, frames) = committed(&path);
-    r.enable_mapped_reads().unwrap();
+    map_reads(&mut r).unwrap();
     let mut w = Container::open(&path, Mode::ReadWrite).unwrap();
     for i in 0..20 {
         let wal = format!("wal {i}");
@@ -258,7 +271,7 @@ fn a_mapping_and_a_writer_truncating_a_torn_tail() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let (mut r, frames) = committed(&path);
-    r.enable_mapped_reads().unwrap();
+    map_reads(&mut r).unwrap();
     // Half of the next frame: a writer that died mid-append (SPEC §4.4).
     let mut torn = Writer::new();
     encode_frame(&mut torn, FrameKind::WalChunk, 4, &[1; 300], NONE).unwrap();
@@ -308,7 +321,7 @@ proptest! {
         let dir = tempfile::tempdir().unwrap();
         let path = path(&dir);
         let mut w = Container::create(&path).unwrap();
-        w.enable_mapped_reads().unwrap();
+        map_reads(&mut w).unwrap();
         let compression = if compress { ZSTD } else { NONE };
         let mut all = Vec::new();
         for batch in &batches {
@@ -322,7 +335,7 @@ proptest! {
 
         let plain = Container::open(&path, Mode::ReadOnly).unwrap();
         let mut mapped = Container::open(&path, Mode::ReadOnly).unwrap();
-        mapped.enable_mapped_reads().unwrap();
+        map_reads(&mut mapped).unwrap();
         let log_end = w.superblock().log_end;
         for f in &all {
             let want = plain.read_frame(f.offset, MAX).unwrap();
@@ -359,7 +372,7 @@ fn a_corrupt_segment_below_wal_start_is_an_error_not_a_panic() {
     persia_storage::container::ContainerFile::write_all_at(&f, &[6], seg.offset + 1000).unwrap();
     drop(f);
     let mut c = Container::open(&path, Mode::ReadOnly).unwrap();
-    c.enable_mapped_reads().unwrap();
+    map_reads(&mut c).unwrap();
     assert_eq!(c.mapped_range(), Some(F..m.end()));
     assert!(matches!(
         c.read_frame_source(seg.offset, MAX),
@@ -377,7 +390,7 @@ fn a_compaction_that_fails_keeps_the_window() {
     let dir = tempfile::tempdir().unwrap();
     let mut w = Container::create(path(&dir)).unwrap();
     let frames = commit_batch(&mut w, &[b"wal"], b"manifest 1");
-    w.enable_mapped_reads().unwrap();
+    map_reads(&mut w).unwrap();
     let range = w.mapped_range();
     // Not a frame below `wal_start`: refused before anything is written.
     let err = w
@@ -394,9 +407,9 @@ fn enabling_twice_maps_anew() {
     let dir = tempfile::tempdir().unwrap();
     let path = path(&dir);
     let (mut r, frames) = committed(&path);
-    r.enable_mapped_reads().unwrap();
+    map_reads(&mut r).unwrap();
     let first = r.read_frame_source(frames[0].offset, MAX).unwrap().payload;
-    r.enable_mapped_reads().unwrap();
+    map_reads(&mut r).unwrap();
     assert_eq!(r.mapped_range(), Some(F..r.superblock().log_end));
     let second = r.read_frame_source(frames[0].offset, MAX).unwrap().payload;
     // A payload from the old mapping stays valid after it was replaced.
@@ -434,7 +447,8 @@ fn a_container_on_a_local_disk_is_mapped_automatically() {
         let mut c = Container::open(&path, Mode::ReadOnly).unwrap();
         assert!(c.is_on_local_disk().unwrap(), "{}", dir.display());
         assert!(
-            c.enable_mapped_reads_if_local().unwrap(),
+            // SAFETY: as `map_reads`.
+            unsafe { c.enable_mapped_reads_if_local() }.unwrap(),
             "{}",
             dir.display()
         );

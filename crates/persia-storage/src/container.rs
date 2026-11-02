@@ -259,23 +259,52 @@ struct Mapped<F> {
     map: fn(&F, &Superblock) -> io::Result<ByteSource>,
     /// The latest mapping of the current file, if mapping it succeeded. Frames it does not cover are read.
     window: Option<ByteSource>,
+    /// Remaps that failed since mapped reads were enabled, each logged ([`Container::mapping_failures`]).
+    failures: u64,
 }
 
 impl<F> Mapped<F> {
+    fn new(map: fn(&F, &Superblock) -> io::Result<ByteSource>, window: ByteSource) -> Self {
+        Self {
+            map,
+            window: Some(window),
+            failures: 0,
+        }
+    }
+
     /// Remaps after a commit moved `log_end`. If that fails, the previous window stays: it is still valid for the
     /// frames it covers, and the newer ones are read.
     fn remap(&mut self, file: &F, sb: &Superblock) {
-        if self.window.as_ref().map(ByteSource::end_offset) != Some(sb.log_end)
-            && let Ok(window) = (self.map)(file, sb)
-        {
-            self.window = Some(window);
+        if self.window.as_ref().map(ByteSource::end_offset) == Some(sb.log_end) {
+            return;
+        }
+        match (self.map)(file, sb) {
+            Ok(window) => self.window = Some(window),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    log_end = sb.log_end,
+                    "container remap failed; frames past the previous mapping are read with pread"
+                );
+            }
         }
     }
 
     /// Maps the file a compaction moved the container to. The old window is dropped even if this fails: its
     /// offsets are those of the old file.
     fn moved_to(&mut self, file: &F, sb: &Superblock) {
-        self.window = (self.map)(file, sb).ok();
+        self.window = match (self.map)(file, sb) {
+            Ok(window) => Some(window),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    "mapping the compacted container failed; every frame is read with pread"
+                );
+                None
+            }
+        };
     }
 }
 
@@ -828,7 +857,8 @@ impl<F: ContainerFile> Container<F> {
     /// # c.commit(Commit { manifest, wal_start: c.end(), fence_token: 0 })?;
     /// # drop(c);
     /// let mut c = Container::open(&path, Mode::ReadOnly)?;
-    /// c.enable_mapped_reads()?;
+    /// // SAFETY: nothing but Persia containers writes this file while it is mapped.
+    /// unsafe { c.enable_mapped_reads()? };
     /// let m = c.read_frame_source(c.superblock().manifest_off, 1 << 20)?;
     /// assert_eq!(&*m.payload, b"manifest 1");
     /// assert_eq!(m.payload.base_offset(), m.frame.offset + 24); // just after the frame header

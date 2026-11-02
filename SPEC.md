@@ -396,9 +396,11 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
-disk file system (`enable_mapped_reads_if_local`): on Linux, those in an allow-list of `f_type`s (ext2-4, XFS, Btrfs
-and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
+Mapping is opt-in; ordinary reads are the default (ADR-0017). Turning it on is an `unsafe` call: the embedder states
+that nothing outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping
+lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
+choice maps only a container on a local disk file system (`enable_mapped_reads_if_local`): on Linux, those in an
+allow-list of `f_type`s (ext2-4, XFS, Btrfs and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
 and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
 there can end the process (ADR-0021, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the

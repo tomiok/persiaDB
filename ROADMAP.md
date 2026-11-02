@@ -75,8 +75,8 @@ Deps: none.
 - [x] 0.6.4 Placeholder crates say so: `persia`, `persia-blob`, `persia-proto` docs read "Placeholder for M9/M10/M11", and `persia-server` prints "not implemented (M11)" and exits non-zero
 - [ ] 0.6.5 Clippy cast lints (`cast_possible_truncation`, `cast_sign_loss`, `cast_possible_wrap`, `cast_lossless`) on `persia-format`, `persia-storage` and `persia-engine`; each `as` becomes `try_from`/`from` or carries a justified `#[allow]` (CLAUDE.md "checked ops")
 - [ ] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`
-- [ ] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`)
-- [ ] 0.6.8 `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017)
+- [~] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`) and how many remaps failed (`mapping_failures()`)
+- [~] 0.6.8 `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017)
 
 ---
 

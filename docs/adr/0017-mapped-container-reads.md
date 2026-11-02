@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-10-17
-- Related: SPEC §4.4, §4.6, §4.7; amends ADR-0010 (decisions 2 and 6); ADR-0016; ROADMAP 2.3.6, 2.3.10
+- Related: SPEC §4.4, §4.6, §4.7; amends ADR-0010 (decisions 2 and 6); ADR-0016; ROADMAP 2.3.6, 2.3.10, 0.6.7, 0.6.8
 
 ## Context
 
@@ -29,6 +29,10 @@ site lives, how much to map at once (one mapping per frame, or one window over `
    new file. A failed remap after a commit keeps the old window, which stays valid for the frames it
    covers; after a compaction the old window is dropped, since its offsets belong to the old file.
 3. **Opt-in only, for now.** `Container::<File>::enable_mapped_reads` turns it on; the default stays `pread`.
+   It is an `unsafe fn` (ROADMAP 0.6.8): soundness rests on a precondition the container cannot check (nothing but
+   Persia containers writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives,
+   ADR-0010 decision 3), so the caller states it with an `unsafe` block, as for `memmap2::Mmap::map`.
+   `enable_mapped_reads_if_local` is `unsafe` for the same reason.
    Choosing automatically needs the file system type (`statfs`/`f_type` on Linux, `MNT_LOCAL` on the BSDs and macOS,
    `GetDriveTypeW` on Windows), which the standard library does not expose and which would need FFI (`unsafe`) or a
    new dependency. ROADMAP 2.3.10 tracks it; until then the embedder decides.
@@ -49,8 +53,9 @@ site lives, how much to map at once (one mapping per frame, or one window over `
   commit or compaction has already succeeded, and returning an error from it would read as if it had not. The
   remap is an optimization with a complete fallback (`pread`, which reports its own I/O errors on every read), so
   no I/O error that affects data is dropped (CLAUDE.md forbids swallowing those). The fallback is observable:
-  `mapped_range()` then still ends at the old `log_end`, or is `None` after a compaction. `persia-storage` has no
-  `tracing` dependency; the layers above that log (the engine, the server) can check `mapped_range()`.
+  `mapped_range()` then still ends at the old `log_end`, or is `None` after a compaction (`is_mapped()` is then
+  `false`). Each failed remap also logs a `tracing` warning and counts in `mapping_failures()` (ROADMAP 0.6.7), so a
+  container that silently fell back to `pread` shows up in logs and metrics.
 - On Windows the file mapping object behind a window covers the whole file as it was when mapped (memmap2 creates
   it with maximum size 0; the view itself is only `12288..log_end`, rounded to the 64 KiB allocation granularity),
   and Windows refuses to shrink a file below a live mapping object. While a reader holds a window, a read-write

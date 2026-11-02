@@ -2,7 +2,7 @@
 //! a small (WAL-sized) and a large (segment-sized) frame, page cache warm.
 //! Run: `cargo bench -p persia-storage --bench container_read`.
 
-#![allow(missing_docs, clippy::unwrap_used)]
+#![allow(missing_docs, clippy::unwrap_used, unsafe_code)] // maps a container the bench owns (ADR-0017)
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use persia_format::block::Compression;
@@ -34,7 +34,8 @@ fn read_frame(c: &mut Criterion) {
 
         let plain = Container::open(&path, Mode::ReadOnly).unwrap();
         let mut mapped = Container::open(&path, Mode::ReadOnly).unwrap();
-        mapped.enable_mapped_reads().unwrap();
+        // SAFETY: nothing writes the temporary file after it is written and closed above.
+        unsafe { mapped.enable_mapped_reads() }.unwrap();
         group.throughput(Throughput::Bytes(size as u64));
         for (name, c) in [("pread", &plain), ("mapped", &mapped)] {
             group.bench_with_input(BenchmarkId::new(name, size), &frame.offset, |b, &offset| {
