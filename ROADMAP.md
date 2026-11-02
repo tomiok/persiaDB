@@ -430,7 +430,7 @@ Deps: M2, M5.
 - [ ] 6.5.8 Engine-driven container compaction (SPEC §4.6): `Database` names the live frames (the manifest's, plus the obsolete frames still referenced, 6.5.4) and the WAL range, compacts when dead space reaches the ratio, and publishes the relocated manifest (`Manifest::relocate`) (found in 6.5.4)
 - [ ] 6.5.9 Merges that survive concurrent deletes: re-apply the deletions committed to its inputs since the plan to the merged segment (a docid map kept with the result) instead of discarding it (ADR-0032 item 4, found in 6.5.3)
 - [~] 6.5.10 Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database::space_usage`) (found in the 2026-11-02 audit)
-- [ ] 6.5.11 Count the merges discarded because their inputs had deletes committed meanwhile, and test that the segment count stays bounded under steady deletes (or document the bound 6.5.9 lifts) (found in the 2026-11-02 audit)
+- [~] 6.5.11 Count the merges discarded because their inputs had deletes committed meanwhile (`Database::merge_stats`), and pin with a test what steady deletes do to the segment count: deletes into the inputs of every merge in flight keep any merge from committing, so the count grows until they pause (SPEC §8.7.2); 6.5.9 lifts that, and its test must then bound the count (found in the 2026-11-02 audit)
 
 ## 6.6 Open/recovery orchestration
 - [x] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)

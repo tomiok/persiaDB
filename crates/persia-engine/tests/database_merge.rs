@@ -906,3 +906,69 @@ fn a_database_is_send_and_sync() {
     check::<Database<SimFile>>();
     check::<Database<std::fs::File>>();
 }
+
+/// The live ids of each committed segment, oldest first.
+fn live_ids_by_segment(db: &Database<SimFile>) -> Vec<Vec<String>> {
+    db.snapshot()
+        .collection("a")
+        .unwrap()
+        .segment_views()
+        .map(|view| {
+            (0..view.doc_count())
+                .filter(|&d| view.is_live(d))
+                .map(|d| view.document(d).unwrap().id().to_owned())
+                .collect()
+        })
+        .collect()
+}
+
+/// The gap ROADMAP 6.5.9 closes, pinned so it stays visible (6.5.11): merges run on a worker and are committed by
+/// the next [`Database::merge_step`], so a commit that deletes from every segment between two steps discards every
+/// merge in flight. Each discard is counted ([`Database::merge_stats`]), and while the deletes go on nothing merges:
+/// the segment count grows by one per round, unbounded. The outcome does not depend on thread timing: a merge is
+/// only ever committed by a later step, after that round's deletes. Once the deletes pause, merging catches up.
+#[test]
+fn deletes_into_every_segment_discard_every_merge_until_they_pause() {
+    const ROUNDS: usize = 12;
+    let (_, mut db) = database(1);
+    let mut next = 0;
+    for round in 0..ROUNDS {
+        // Enough documents that a delete per round never empties a segment (an emptied one is dropped, 6.4.6).
+        for _ in 0..2 * ROUNDS {
+            db.put(
+                "a",
+                &doc(&format!("d{next}"), "alpha beta"),
+                Durability::Buffered,
+            )
+            .unwrap();
+            next += 1;
+        }
+        db.commit().unwrap();
+        db.merge_step().unwrap();
+        for ids in live_ids_by_segment(&db) {
+            db.delete("a", &ids[0], Durability::Buffered).unwrap();
+        }
+        db.commit().unwrap();
+        assert_eq!(segment_count(&db), round + 1, "round {round}");
+    }
+    let stats = db.merge_stats();
+    assert_eq!(stats.committed, 0, "{stats:?}");
+    assert!(stats.conflicts >= 1, "{stats:?}");
+    assert_eq!((stats.failed, stats.cancelled), (0, 0));
+
+    let outcomes = db.finish_merges().unwrap();
+    let after = db.merge_stats();
+    assert!(after.committed > 0, "{after:?}");
+    // Every outcome of the step is counted, the discarded one still in flight included.
+    let conflicts = outcomes
+        .iter()
+        .filter(|o| matches!(o, MergeOutcome::Conflict { .. }))
+        .count() as u64;
+    assert_eq!(after.conflicts, stats.conflicts + conflicts);
+    assert_eq!(after.committed, committed(&outcomes) as u64);
+    assert!(
+        segment_count(&db) <= ROUNDS / 2,
+        "{} segments",
+        segment_count(&db)
+    );
+}

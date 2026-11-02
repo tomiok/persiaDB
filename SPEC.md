@@ -1651,7 +1651,9 @@ and joins its workers. A **merge commit** appends the merged segment's frame and
 inputs at the sidecar versions the plan read and adds the merged segment (none for a drop plan), following the commit
 protocol (§4.5); `wal_start` stays where the WAL puts it. It is made only if every input is still live at that
 version and the schema is unchanged, which the writer checks before writing anything: otherwise (a commit deleted
-from an input meanwhile) the result is discarded and the segments are planned again. A merge that fails, the
+from an input meanwhile) the result is discarded, counted (`merge_stats`), and the segments are planned again. Until
+ROADMAP 6.5.9 re-applies such deletions to the result, a workload that deletes from the inputs of every merge in
+flight keeps every merge from committing, and the segment count grows while it lasts. A merge that fails, the
 merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
 reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
 **Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, the segments and sidecars of

@@ -66,6 +66,33 @@ pub enum MergeOutcome {
     },
 }
 
+/// What became of the merges a database ran since it was opened ([`Database::merge_stats`]): one count per
+/// [`MergeOutcome`] kind. The outcomes are also returned by each step, but a caller that drops them would not see a
+/// merge discarded because a commit deleted from its inputs meanwhile (ROADMAP 6.5.9, 6.5.11).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MergeStats {
+    /// Merges committed.
+    pub committed: u64,
+    /// Merges discarded because an input changed after the plan read it ([`MergeOutcome::Conflict`]).
+    pub conflicts: u64,
+    /// Merges that failed ([`MergeOutcome::Failed`]).
+    pub failed: u64,
+    /// Merges cancelled ([`MergeOutcome::Cancelled`]).
+    pub cancelled: u64,
+}
+
+impl MergeStats {
+    fn count(&mut self, outcome: &MergeOutcome) {
+        let n = match outcome {
+            MergeOutcome::Committed { .. } => &mut self.committed,
+            MergeOutcome::Conflict { .. } => &mut self.conflicts,
+            MergeOutcome::Failed { .. } => &mut self.failed,
+            MergeOutcome::Cancelled { .. } => &mut self.cancelled,
+        };
+        *n = n.saturating_add(1);
+    }
+}
+
 /// The writer's merge state.
 #[derive(Debug)]
 pub(super) struct Merges {
@@ -75,6 +102,7 @@ pub(super) struct Merges {
     /// Inputs of failed merges, left out of planning.
     failed: HashSet<SegmentId>,
     pub obsolete: Obsolete,
+    stats: MergeStats,
 }
 
 impl Merges {
@@ -84,6 +112,7 @@ impl Merges {
             running: Vec::new(),
             failed: HashSet::new(),
             obsolete: Obsolete::default(),
+            stats: MergeStats::default(),
         }
     }
 
@@ -162,10 +191,12 @@ impl<F: ContainerFile + Sync> Database<F> {
         let mut outcomes = Vec::new();
         while let Some(Finished { job, .. }) = self.merges.workers.next() {
             self.merges.done(&job);
-            outcomes.push(MergeOutcome::Cancelled {
+            let outcome = MergeOutcome::Cancelled {
                 inputs: input_ids(&job.plan),
                 collection: job.collection,
-            });
+            };
+            self.merges.stats.count(&outcome);
+            outcomes.push(outcome);
         }
         outcomes
     }
@@ -173,6 +204,11 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// Merges submitted and not yet committed or discarded: running, or finished and waiting for the next step.
     pub fn merges_running(&self) -> usize {
         self.merges.workers.in_flight()
+    }
+
+    /// How many merges committed, conflicted, failed or were cancelled since the database was opened.
+    pub fn merge_stats(&self) -> MergeStats {
+        self.merges.stats
     }
 
     /// Every segment and tombstone sidecar that no commit lists any more and that has not been taken by
@@ -265,6 +301,13 @@ impl<F: ContainerFile + Sync> Database<F> {
 
     /// Commits a finished merge if its inputs are still what the plan read; a failed commit poisons the database.
     fn commit_merge(&mut self, finished: Finished) -> Result<MergeOutcome, DatabaseError> {
+        let outcome = self.settle_merge(finished)?;
+        self.merges.stats.count(&outcome);
+        Ok(outcome)
+    }
+
+    /// [`Self::commit_merge`] before the outcome is counted.
+    fn settle_merge(&mut self, finished: Finished) -> Result<MergeOutcome, DatabaseError> {
         let Finished { job, result } = finished;
         self.merges.done(&job);
         let inputs = input_ids(&job.plan);

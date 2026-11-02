@@ -72,7 +72,7 @@ use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
-pub use merging::MergeOutcome;
+pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
