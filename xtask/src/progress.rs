@@ -820,14 +820,20 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
+/// Where [`write_all`] stages `path` for this process: beside it, so the rename stays on one file system, and
+/// named after the process, so two runs never write or rename each other's staged file.
+fn staging(path: &Path) -> std::path::PathBuf {
+    path.with_extension(format!("xtask-tmp.{}", std::process::id()))
+}
+
 /// Writes every output to a temporary file beside it, then renames them into place, so a failed write leaves the
 /// generated files as they were (and in step with each other) instead of updating some of them. Each rename is
-/// atomic; between two renames another process could see a mix, which a rerun repairs.
+/// atomic; [`run`] holds the progress lock throughout, so another run never sees a mix of the two.
 fn write_all(outputs: &[(std::path::PathBuf, String)]) -> Result<()> {
     let staged: Vec<(std::path::PathBuf, &std::path::PathBuf)> = outputs
         .iter()
         .map(|(path, text)| {
-            let tmp = path.with_extension("xtask-tmp");
+            let tmp = staging(path);
             std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
             Ok((tmp, path))
         })
@@ -836,13 +842,30 @@ fn write_all(outputs: &[(std::path::PathBuf, String)]) -> Result<()> {
             for (path, _) in outputs {
                 // Best effort: a staged file that cannot be removed is only clutter, and the error above is the
                 // one to report.
-                drop(std::fs::remove_file(path.with_extension("xtask-tmp")));
+                drop(std::fs::remove_file(staging(path)));
             }
         })?;
     for (tmp, path) in staged {
         std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
     }
     Ok(())
+}
+
+/// Takes the exclusive lock that serializes progress runs on one checkout: a second run waits, then reads the
+/// ROADMAP, history and README the first one wrote. The operating system releases it when the file closes, also if
+/// the process dies.
+fn lock(root: &Path) -> Result<std::fs::File> {
+    let path = root.join("target").join("xtask-progress.lock");
+    std::fs::create_dir_all(root.join("target")).context("creating target/")?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
 }
 
 /// Entry point. Returns whether the command passed.
@@ -863,6 +886,8 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         bail!("--record and --check are mutually exclusive");
     }
 
+    // Held until this run returns: reads, renders and writes happen with no other progress run in between.
+    let _lock = lock(root)?;
     let roadmap = std::fs::read_to_string(root.join("ROADMAP.md")).context("reading ROADMAP.md")?;
     let milestones = parse_roadmap(&roadmap)?;
     let history_path = root.join("docs/progress-history.csv");
@@ -1205,9 +1230,38 @@ Deps: M0.
         let err = write_all(&[(first.clone(), "new".into()), (missing, "new".into())]);
         assert!(err.is_err());
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "old");
-        assert!(!first.with_extension("xtask-tmp").exists());
+        assert!(!staging(&first).exists());
         write_all(&[(first.clone(), "new".into())]).unwrap();
         assert_eq!(std::fs::read_to_string(&first).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A progress run holds an exclusive lock: another run's lock on the same checkout waits until it is released;
+    /// and each process stages under its own name.
+    #[test]
+    fn runs_are_serialized_and_stage_under_their_own_names() {
+        let dir = std::env::temp_dir().join(format!("xtask-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = lock(&dir).unwrap();
+        let other = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("target").join("xtask-progress.lock"))
+            .unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        other.try_lock().unwrap();
+        let staged = staging(&dir.join("PROGRESS.md"));
+        assert!(
+            staged
+                .to_string_lossy()
+                .ends_with(&format!(".xtask-tmp.{}", std::process::id())),
+            "{}",
+            staged.display()
+        );
+        drop(other);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
