@@ -229,16 +229,16 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         Ok(Watched::new(terms, self.steps))
     }
 
-    fn deleted(&self) -> RoaringBitmap {
-        self.view.deleted()
+    fn deleted(&self) -> Result<RoaringBitmap, ReadError> {
+        self.view.deleted_stepped(&|| self.steps.step())
     }
 
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
-        self.view.present(field)
+        self.view.present_stepped(field, &|| self.steps.step())
     }
 
     fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
-        self.view.trues(field)
+        self.view.trues_stepped(field, &|| self.steps.step())
     }
 
     fn try_column_keys(
@@ -253,15 +253,21 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
     }
 
     fn norms(&self, field: FieldId) -> Result<Self::Norms<'_>, ReadError> {
-        self.view.norms(field)
+        self.view.norms_stepped(field, &|| self.steps.step())
     }
 
     fn keys(&self, field: FieldId) -> Result<Self::Keys<'_>, ReadError> {
-        Ok(Watched::new(self.view.keys(field)?, self.steps))
+        Ok(Watched::new(
+            self.view.keys_stepped(field, &|| self.steps.step())?,
+            self.steps,
+        ))
     }
 
     fn keywords(&self, field: FieldId) -> Result<Self::Keywords<'_>, ReadError> {
-        Ok(Watched::new(self.view.keywords(field)?, self.steps))
+        Ok(Watched::new(
+            self.view.keywords_stepped(field, &|| self.steps.step())?,
+            self.steps,
+        ))
     }
 
     fn document(&self, docid: u32) -> Result<Document, ReadError> {
@@ -677,6 +683,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_memtable_copy_for_a_view_stops() {
+        // ROADMAP 7.6.6: each whole-field copy reads the interrupts between its chunks.
+        let (view, f) = memtable(DOCS);
+        let stop = StopAfter::new(1);
+        let steps = Steps::new(&stop);
+        let watched = Interruptible::new(&view, &steps);
+        interrupted(&watched.deleted());
+        interrupted(&watched.present(f.tag));
+        interrupted(&watched.present(f.n));
+        interrupted(&watched.keys(f.n).map(drop));
+        interrupted(&watched.keywords(f.tag).map(drop));
+        // Unwatched, the same copies succeed.
+        assert_eq!(view.deleted().unwrap(), RoaringBitmap::new());
+        assert_eq!(view.present(f.tag).unwrap().len(), u64::from(DOCS));
+    }
     #[test]
     fn a_memtable_range_filter_stops() {
         let (view, f) = memtable(DOCS);

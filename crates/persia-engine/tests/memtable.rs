@@ -300,7 +300,7 @@ fn assert_matches(schema: &CollectionSchema, f: &Fields, view: &MemtableView, mo
     }
     assert_enumerations_match(f, view, seg_view.as_ref());
     assert_eq!(
-        view.deleted(),
+        view.deleted().unwrap(),
         (0..view.doc_count())
             .filter(|&d| !view.is_live(d))
             .collect()
@@ -540,7 +540,7 @@ fn segment_views_list_deleted_documents_terms() {
     let seg = segment(&schema, &docs).unwrap();
     let tombstones = seg.tombstones(RoaringBitmap::from_iter([0])).unwrap();
     let view = SegmentView::new(&seg, Some(&tombstones));
-    assert_eq!(view.deleted(), RoaringBitmap::from_iter([0]));
+    assert_eq!(view.deleted().unwrap(), RoaringBitmap::from_iter([0]));
     // `alpha` only holds a deleted document: still listed, with the df its postings report.
     let listed = enumerate(
         &view,
@@ -557,7 +557,10 @@ fn segment_views_list_deleted_documents_terms() {
         view.present(f.body).unwrap(),
         RoaringBitmap::from_iter([0, 1])
     );
-    assert_eq!(SegmentView::new(&seg, None).deleted(), RoaringBitmap::new());
+    assert_eq!(
+        SegmentView::new(&seg, None).deleted().unwrap(),
+        RoaringBitmap::new()
+    );
 }
 
 #[test]
@@ -684,7 +687,7 @@ fn check_consistent(view: &MemtableView, f: &Fields) {
     assert_eq!(stats.docs_with_field, live);
     assert_eq!(stats.sum_field_len, 2 * u64::from(live));
     // The enumeration and column methods agree with the same cutoff, whatever the writer does meanwhile.
-    let deleted = view.deleted();
+    let deleted = view.deleted().unwrap();
     assert_eq!(u64::from(view.doc_count()) - deleted.len(), u64::from(live));
     let present = view.present(f.body).unwrap();
     assert!(present.max().is_none_or(|d| d < view.doc_count()));

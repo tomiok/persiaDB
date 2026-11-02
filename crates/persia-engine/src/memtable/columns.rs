@@ -1,11 +1,10 @@
 //! The memtable's column values for sorting and facets (ROADMAP 7.5.1, 7.5.3): a column field's keys, and a
 //! `keyword` field's values as a dictionary in byte order with each document's ords, as a segment's `Columns` section
-//! holds them (SPEC §5.3.5). Each is copied out of the memtable as of a view, under its read lock, once per call.
+//! holds them (SPEC §5.3.5). Each is copied out of the memtable as of a view once per call, in chunks under its read
+//! lock ([`super::view`], ROADMAP 7.6.6), and built here without it.
 
 use std::sync::Arc;
 
-use super::view::field_of;
-use super::{Inner, MemField};
 use crate::schema::FieldId;
 use crate::segment::builder::inverted::Inverted;
 use crate::segment::{ReadError, SectionKind, SegmentCorruption};
@@ -21,21 +20,12 @@ pub struct MemtableKeys {
 }
 
 impl MemtableKeys {
-    /// The keys of the documents below `docs` in column field `field`.
-    pub(super) fn new(inner: &Inner, field: FieldId, docs: u32) -> Result<Self, ReadError> {
-        let (field_type, memfield) = field_of(inner, field)?;
-        let MemField::Column { keys } = memfield else {
-            return Err(ReadError::FieldType {
-                field,
-                field_type,
-                what: "column",
-            });
-        };
-        let end = keys.partition_point(|&(docid, _)| docid < docs);
-        Ok(Self {
-            keys: keys.get(..end).unwrap_or_default().into(),
+    /// The keys copied out of a column field, `(docid, key)` in docid order.
+    pub(super) fn new(keys: Vec<(u32, u64)>) -> Self {
+        Self {
+            keys: keys.into(),
             at: 0,
-        })
+        }
     }
 }
 
@@ -68,86 +58,113 @@ pub struct MemtableKeywords {
     field: FieldId,
 }
 
-impl MemtableKeywords {
-    /// The values of the documents below `docs` in `keyword` field `field`, deleted ones included (as a segment's
-    /// column holds them).
-    pub(super) fn new(inner: &Inner, field: FieldId, docs: u32) -> Result<Self, ReadError> {
-        let (field_type, memfield) = field_of(inner, field)?;
-        let MemField::Keyword { index } = memfield else {
-            return Err(ReadError::FieldType {
-                field,
-                field_type,
-                what: "keyword column",
-            });
-        };
-        from_inverted(&index.inverted, field, docs)
-    }
+/// Postings `[from, from + n)` of a `keyword` field's `inverted` that are in a view of `docs` documents, as
+/// `(docid, term id)`: postings are in docid order, so the view's are a prefix, which later writes do not change.
+pub(super) fn posting_chunk(
+    inverted: &Inverted,
+    docs: u32,
+    from: usize,
+    n: usize,
+) -> Vec<(u32, u32)> {
+    inverted
+        .postings
+        .get(from..)
+        .unwrap_or_default()
+        .iter()
+        .take(n)
+        .take_while(|p| p.doc < docs)
+        .map(|p| (p.doc, p.term))
+        .collect()
 }
 
-/// The keyword column of `inverted` for documents `0..docs`.
-fn from_inverted(
+/// The bytes of term ids `ids` of `inverted`. A term id outside the arena has no bytes, and is
+/// [`missing_term`], so it cannot sort as the empty key. A term with a document in a view keeps its id
+/// (a failed `put` truncates only the ids it interned), so ids read in several chunks name the same terms.
+pub(super) fn term_bytes(
     inverted: &Inverted,
     field: FieldId,
-    docs: u32,
-) -> Result<MemtableKeywords, ReadError> {
-    // Postings are in docid order: the view's are a prefix.
-    let end = inverted.postings.partition_point(|p| p.doc < docs);
-    let postings = inverted.postings.get(..end).unwrap_or_default();
-    let mut used: Vec<u32> = postings.iter().map(|p| p.term).collect();
+    ids: &[u32],
+) -> Result<Vec<Box<[u8]>>, ReadError> {
+    ids.iter()
+        .map(|&term| {
+            let in_range = usize::try_from(term).is_ok_and(|i| i < inverted.terms.len());
+            if !in_range {
+                return Err(missing_term(field, term));
+            }
+            Ok(inverted.terms.key(term).into())
+        })
+        .collect()
+}
+
+/// The distinct term ids of `postings`, ascending: the ids whose bytes [`term_bytes`] copies.
+pub(super) fn used_terms(postings: &[(u32, u32)]) -> Vec<u32> {
+    let mut used: Vec<u32> = postings.iter().map(|&(_, term)| term).collect();
     used.sort_unstable();
     used.dedup();
-    // A term id outside the arena has no bytes. Reject it before ordering, so it cannot sort as the empty key.
-    for &term in &used {
-        let in_range = usize::try_from(term).is_ok_and(|i| i < inverted.terms.len());
-        if !in_range {
-            return Err(missing_term(field, term));
+    used
+}
+
+/// The keyword column of documents `0..docs` of `field`: their `postings` (`(docid, term id)`, in docid order),
+/// the [`used_terms`] of them and each one's bytes, in that order.
+pub(super) fn keywords(
+    field: FieldId,
+    docs: u32,
+    postings: &[(u32, u32)],
+    used: &[u32],
+    bytes: Vec<Box<[u8]>>,
+) -> Result<MemtableKeywords, ReadError> {
+    if bytes.len() != used.len() {
+        return Err(missing_term(
+            field,
+            used.get(bytes.len()).copied().unwrap_or(0),
+        ));
+    }
+    // Ordinal `o` is the `o`-th used term in byte order; `ords[i]` is the ordinal of `used[i]`.
+    let mut by_bytes: Vec<usize> = (0..used.len()).collect();
+    by_bytes.sort_unstable_by(|&a, &b| bytes.get(a).cmp(&bytes.get(b)));
+    let mut ords = vec![0_u64; used.len()];
+    for (ord, &i) in (0_u64..).zip(&by_bytes) {
+        if let Some(slot) = ords.get_mut(i) {
+            *slot = ord;
         }
     }
-    used.sort_unstable_by(|&a, &b| inverted.terms.key(a).cmp(inverted.terms.key(b)));
-    // `None` is not ordinal 0: a term the dictionary does not hold must not sort or facet as the first value.
-    // Ordinal `i` is `used[i]`, which is byte order.
-    let mut ord_of = vec![None; inverted.terms.len()];
-    for (ord, &term) in (0_u64..).zip(&used) {
-        let Some(slot) = ord_of.get_mut(term as usize) else {
-            return Err(missing_term(field, term));
-        };
-        *slot = Some(ord);
-    }
-    let values: Arc<[Box<[u8]>]> = used.iter().map(|&t| inverted.terms.key(t).into()).collect();
+    let mut bytes: Vec<Option<Box<[u8]>>> = bytes.into_iter().map(Some).collect();
+    let values: Arc<[Box<[u8]>]> = by_bytes
+        .iter()
+        .map(|&i| bytes.get_mut(i).and_then(Option::take).unwrap_or_default())
+        .collect();
     let doc_count = docs as usize;
     let mut starts = Vec::with_capacity(doc_count.saturating_add(1));
-    let mut ords = Vec::with_capacity(postings.len());
+    let mut doc_ords = Vec::with_capacity(postings.len());
     let mut rest = postings;
     for d in 0..docs {
-        starts.push(ords.len());
-        let n = rest.partition_point(|p| p.doc == d);
+        starts.push(doc_ords.len());
+        let n = rest.partition_point(|&(doc, _)| doc == d);
         let (mine, after) = rest.split_at(n);
         let mut mapped = Vec::with_capacity(mine.len());
-        for posting in mine {
-            mapped.push(ord_at(&ord_of, posting.term, field)?);
+        for &(_, term) in mine {
+            mapped.push(ord_at(used, &ords, term, field)?);
         }
         mapped.sort_unstable();
-        ords.extend(mapped);
+        doc_ords.extend(mapped);
         rest = after;
     }
-    starts.push(ords.len());
+    starts.push(doc_ords.len());
     Ok(MemtableKeywords {
         values,
         starts: starts.into(),
-        ords: ords.into(),
+        ords: doc_ords.into(),
         docs,
         field,
     })
 }
 
-/// The ordinal of term id `term`, or [`missing_term`] when `ord_of` has no entry for it (including a missing slot,
-/// which is not ordinal 0).
-fn ord_at(ord_of: &[Option<u64>], term: u32, field: FieldId) -> Result<u64, ReadError> {
-    let index = usize::try_from(term).unwrap_or(usize::MAX);
-    ord_of
-        .get(index)
-        .copied()
-        .flatten()
+/// The ordinal of term id `term`, `ords[i]` for `used[i] == term`, or [`missing_term`] when `used` does not hold it:
+/// a term with no ordinal is not ordinal 0.
+fn ord_at(used: &[u32], ords: &[u64], term: u32, field: FieldId) -> Result<u64, ReadError> {
+    used.binary_search(&term)
+        .ok()
+        .and_then(|i| ords.get(i).copied())
         .ok_or_else(|| missing_term(field, term))
 }
 
@@ -213,6 +230,18 @@ mod tests {
     use super::*;
     use crate::segment::builder::inverted::Posting;
 
+    /// The keyword column of `inverted` for documents `0..docs`, copied in one piece.
+    fn from_inverted(
+        inverted: &Inverted,
+        field: FieldId,
+        docs: u32,
+    ) -> Result<MemtableKeywords, ReadError> {
+        let postings = posting_chunk(inverted, docs, 0, usize::MAX);
+        let used = used_terms(&postings);
+        let bytes = term_bytes(inverted, field, &used)?;
+        keywords(field, docs, &postings, &used, bytes)
+    }
+
     fn section_what(err: &ReadError) -> &'static str {
         match err {
             ReadError::Section {
@@ -226,13 +255,16 @@ mod tests {
     #[test]
     fn a_missing_term_ordinal_is_not_ordinal_zero() {
         let field = FieldId::new(3);
-        // A slot that was never filled is not the first dictionary term.
-        let missing = ord_at(&[None], 0, field).unwrap_err();
+        // A term `used` does not hold is not the first dictionary term.
+        let missing = ord_at(&[1], &[0], 0, field).unwrap_err();
         assert_eq!(section_what(&missing), "a keyword term with no ordinal");
-        let past = ord_at(&[], 0, field).unwrap_err();
+        let past = ord_at(&[], &[], 0, field).unwrap_err();
         assert_eq!(section_what(&past), "a keyword term with no ordinal");
-        // Ordinal 0 is a real ordinal when the slot says so.
-        assert_eq!(ord_at(&[Some(0)], 0, field).unwrap(), 0);
+        // Ordinal 0 is a real ordinal when `used` holds the term.
+        assert_eq!(ord_at(&[0], &[0], 0, field).unwrap(), 0);
+        // Bytes missing for a used term: no ordinal either.
+        let short = keywords(field, 1, &[(0, 0)], &[0], Vec::new()).unwrap_err();
+        assert_eq!(section_what(&short), "a keyword term with no ordinal");
 
         let mut inverted = Inverted::new(false);
         inverted.postings.push(Posting {

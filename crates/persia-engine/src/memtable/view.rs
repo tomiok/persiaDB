@@ -7,16 +7,19 @@ use core::ops::{Bound, RangeBounds};
 use fst::Automaton;
 use roaring::RoaringBitmap;
 
+use super::columns::{keywords, posting_chunk, term_bytes, used_terms};
 use super::{FieldIndex, Inner, MemField, MemtableKeys, MemtableKeywords, NONE, read};
 use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::score::FieldHit;
+use crate::segment::builder::inverted::Inverted;
 use crate::segment::{BlockMax, FieldStats, ReadError};
 use crate::view::{NormReader, PostingsIterator, SearchView, TermEnum};
 
-/// How many terms or column keys a view copies under one read lock: a copy of a large memtable is taken in chunks,
-/// so a writer waits for one chunk, not the whole copy (ROADMAP 7.6.5).
+/// How many items (terms, column keys, kill versions, lengths, postings, norms) a view copies under one read lock: a
+/// copy of a large memtable is taken in chunks, so a writer waits for one chunk, not the whole copy, and a search's
+/// interrupts are read between them (ROADMAP 7.6.5, 7.6.6).
 const COPY_CHUNK: usize = 1024;
 
 /// What the memtable knew of an id when a view was taken.
@@ -170,6 +173,67 @@ impl MemtableView {
                 .get(docid as usize)
                 .is_some_and(|&k| k > self.version)
     }
+
+    /// Copies items out of the memtable [`COPY_CHUNK`] at a time, each chunk under its own read lock:
+    /// `copy(inner, from)` returns the items from index `from` on, at most [`COPY_CHUNK`] and fewer only at the end
+    /// of what the view sees. `each`, and `step` once per item, run without the lock, so a writer waits for one
+    /// chunk and a search's interrupts stop a copy of a large memtable (ROADMAP 7.6.5, 7.6.6). What a view sees of a
+    /// field is a prefix that later writes do not change, so the chunks hold what one copy under one lock would.
+    fn copy_chunked<T>(
+        &self,
+        step: &dyn Fn() -> Result<(), ReadError>,
+        mut copy: impl FnMut(&Inner, usize) -> Result<Vec<T>, ReadError>,
+        mut each: impl FnMut(T) -> Result<(), ReadError>,
+    ) -> Result<(), ReadError> {
+        let mut from = 0_usize;
+        loop {
+            let chunk = copy(&read(&self.shared), from)?;
+            let n = chunk.len();
+            for item in chunk {
+                step()?;
+                each(item)?;
+            }
+            if n < COPY_CHUNK {
+                return Ok(());
+            }
+            from = from.saturating_add(n);
+        }
+    }
+
+    /// The keys of column `field` from index `from` in the view, at most [`COPY_CHUNK`] ([`Self::copy_chunked`]).
+    fn column_chunk(
+        &self,
+        inner: &Inner,
+        field: FieldId,
+        from: usize,
+    ) -> Result<Vec<(u32, u64)>, ReadError> {
+        match field_of(inner, field)? {
+            (_, MemField::Column { keys }) => Ok(key_chunk(keys, from, self.docs)),
+            (field_type, _) => Err(ReadError::FieldType {
+                field,
+                field_type,
+                what: "column",
+            }),
+        }
+    }
+}
+
+/// `items[from..]`, at most [`COPY_CHUNK`] of them, up to the first `in_view` rejects: a view's part of an
+/// append-only, docid-ordered list.
+fn prefix_chunk<T: Copy>(items: &[T], from: usize, in_view: impl Fn(&T) -> bool) -> Vec<T> {
+    items
+        .get(from..)
+        .unwrap_or_default()
+        .iter()
+        .take(COPY_CHUNK)
+        .take_while(|item| in_view(item))
+        .copied()
+        .collect()
+}
+
+/// The keys of a column from index `from` whose documents are below `docs` (keys are appended in docid order).
+fn key_chunk(keys: &[(u32, u64)], from: usize, docs: u32) -> Vec<(u32, u64)> {
+    prefix_chunk(keys, from, |&(docid, _)| docid < docs)
 }
 
 /// The field `field` of `inner`'s schema, and its type.
@@ -410,76 +474,118 @@ impl SearchView for MemtableView {
         Ok(MemtableTerms { terms, next: 0 })
     }
 
-    fn deleted(&self) -> RoaringBitmap {
-        // Copy the kill versions, then build the bitmap without the read lock. Same rule as `visible`: a document
-        // is live when its killing operation is after the view.
-        let killed = {
-            let inner = read(&self.shared);
-            let n = usize::try_from(self.docs).unwrap_or(0);
-            inner
-                .killed_at
-                .get(..n)
-                .map(<[u64]>::to_vec)
-                .unwrap_or_default()
-        };
+    fn deleted(&self) -> Result<RoaringBitmap, ReadError> {
+        self.deleted_stepped(&|| Ok(()))
+    }
+
+    fn deleted_stepped(
+        &self,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        // Same rule as `visible`: a document is live when its killing operation is after the view. A kill version
+        // only changes from `ALIVE` to an operation's, which is after the view too, so chunks agree.
+        let n = usize::try_from(self.docs).unwrap_or(0);
         let mut deleted = Ascending::default();
-        for docid in 0..self.docs {
-            // `docid` is below `docs`, which fits in `usize` (at most [`crate::segment::MAX_DOCS`]).
-            let i = usize::try_from(docid).unwrap_or(usize::MAX);
-            let live = killed.get(i).is_some_and(|&k| k > self.version);
-            if !live {
-                deleted.push(docid);
-            }
+        let mut docid = 0_u32;
+        self.copy_chunked(
+            step,
+            |inner, from| {
+                let end = n.min(from.saturating_add(COPY_CHUNK));
+                Ok(inner
+                    .killed_at
+                    .get(from..end)
+                    .map(<[u64]>::to_vec)
+                    .unwrap_or_default())
+            },
+            |killed| {
+                if killed <= self.version {
+                    deleted.push(docid);
+                }
+                docid = docid.saturating_add(1);
+                Ok(())
+            },
+        )?;
+        // A document with no kill version is not live (as `visible`).
+        for missing in docid..self.docs {
+            deleted.push(missing);
         }
-        deleted.finish()
+        Ok(deleted.finish())
     }
 
     fn trues(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
-        let inner = read(&self.shared);
-        match field_of(&inner, field)? {
-            (FieldType::Bool, MemField::Column { keys }) => {
-                let mut trues = Ascending::default();
-                for &(docid, _) in keys
-                    .iter()
-                    .take_while(|&&(docid, _)| docid < self.docs)
-                    .filter(|&&(_, key)| key == 1)
-                {
+        self.trues_stepped(field, &|| Ok(()))
+    }
+
+    fn trues_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        let mut trues = Ascending::default();
+        self.copy_chunked(
+            step,
+            |inner, from| match field_of(inner, field)? {
+                (FieldType::Bool, MemField::Column { keys }) => {
+                    Ok(key_chunk(keys, from, self.docs))
+                }
+                (field_type, _) => Err(ReadError::FieldType {
+                    field,
+                    field_type,
+                    what: "bool column",
+                }),
+            },
+            |(docid, key)| {
+                if key == 1 {
                     trues.push(docid);
                 }
-                Ok(trues.finish())
-            }
-            (field_type, _) => Err(ReadError::FieldType {
-                field,
-                field_type,
-                what: "bool column",
-            }),
-        }
+                Ok(())
+            },
+        )?;
+        Ok(trues.finish())
     }
 
     fn present(&self, field: FieldId) -> Result<RoaringBitmap, ReadError> {
-        let inner = read(&self.shared);
-        Ok(match field_of(&inner, field)? {
-            // Lengths are recorded only for documents with a token or value, in docid order.
-            (_, MemField::Text { index, .. } | MemField::Keyword { index }) => index
-                .inverted
-                .lengths
-                .iter()
-                .map(|&(docid, _)| docid)
-                .take_while(|&docid| docid < self.docs)
-                .collect(),
-            (_, MemField::Column { keys }) => keys
-                .iter()
-                .map(|&(docid, _)| docid)
-                .take_while(|&docid| docid < self.docs)
-                .collect(),
-            (field_type, MemField::Other) => {
-                return Err(ReadError::FieldType {
-                    field,
-                    field_type,
-                    what: "values",
-                });
-            }
-        })
+        self.present_stepped(field, &|| Ok(()))
+    }
+
+    fn present_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        let mut present = Ascending::default();
+        self.copy_chunked(
+            step,
+            |inner, from| {
+                Ok(match field_of(inner, field)? {
+                    // Lengths are recorded only for documents with a token or value, in docid order.
+                    (_, MemField::Text { index, .. } | MemField::Keyword { index }) => {
+                        prefix_chunk(&index.inverted.lengths, from, |&(docid, _)| {
+                            docid < self.docs
+                        })
+                        .into_iter()
+                        .map(|(docid, _)| docid)
+                        .collect()
+                    }
+                    (_, MemField::Column { keys }) => key_chunk(keys, from, self.docs)
+                        .into_iter()
+                        .map(|(docid, _)| docid)
+                        .collect(),
+                    (field_type, MemField::Other) => {
+                        return Err(ReadError::FieldType {
+                            field,
+                            field_type,
+                            what: "values",
+                        });
+                    }
+                })
+            },
+            |docid| {
+                present.push(docid);
+                Ok(())
+            },
+        )?;
+        Ok(present.finish())
     }
 
     fn try_column_keys(
@@ -487,62 +593,120 @@ impl SearchView for MemtableView {
         field: FieldId,
         mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
-        // Copied out [`COPY_CHUNK`] keys at a time, so `f` runs without the lock and a search's interrupts, which
-        // `f` reads, stop a scan of a large column (ROADMAP 7.6.5). Keys are only appended, in docid order.
-        let mut from = 0_usize;
-        loop {
-            let chunk: Vec<(u32, u64)> = {
-                let inner = read(&self.shared);
-                match field_of(&inner, field)? {
-                    (_, MemField::Column { keys }) => keys
-                        .get(from..)
-                        .unwrap_or_default()
-                        .iter()
-                        .take(COPY_CHUNK)
-                        .take_while(|&&(docid, _)| docid < self.docs)
-                        .copied()
-                        .collect(),
-                    (field_type, _) => {
-                        return Err(ReadError::FieldType {
-                            field,
-                            field_type,
-                            what: "column",
-                        });
-                    }
-                }
-            };
-            let done = chunk.len() < COPY_CHUNK;
-            from = from.saturating_add(chunk.len());
-            for (docid, key) in chunk {
-                f(docid, key)?;
-            }
-            if done {
-                return Ok(());
-            }
-        }
+        // `f` runs without the lock, and a search's interrupts, which `f` reads, stop a scan of a large column
+        // (ROADMAP 7.6.5).
+        self.copy_chunked(
+            &|| Ok(()),
+            |inner, from| self.column_chunk(inner, field, from),
+            |(docid, key)| f(docid, key),
+        )
     }
 
     fn keys(&self, field: FieldId) -> Result<MemtableKeys, ReadError> {
-        MemtableKeys::new(&read(&self.shared), field, self.docs)
+        self.keys_stepped(field, &|| Ok(()))
+    }
+
+    fn keys_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<MemtableKeys, ReadError> {
+        let mut keys = Vec::new();
+        self.copy_chunked(
+            step,
+            |inner, from| self.column_chunk(inner, field, from),
+            |key| {
+                keys.push(key);
+                Ok(())
+            },
+        )?;
+        Ok(MemtableKeys::new(keys))
     }
 
     fn keywords(&self, field: FieldId) -> Result<MemtableKeywords, ReadError> {
-        MemtableKeywords::new(&read(&self.shared), field, self.docs)
+        self.keywords_stepped(field, &|| Ok(()))
+    }
+
+    fn keywords_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<MemtableKeywords, ReadError> {
+        // The view's postings, then the bytes of the terms they use, each copied in chunks; the dictionary and the
+        // ords are built without the lock.
+        let mut postings = Vec::new();
+        self.copy_chunked(
+            step,
+            |inner, from| {
+                Ok(posting_chunk(
+                    keyword_column(inner, field)?,
+                    self.docs,
+                    from,
+                    COPY_CHUNK,
+                ))
+            },
+            |posting| {
+                postings.push(posting);
+                Ok(())
+            },
+        )?;
+        let used = used_terms(&postings);
+        let mut bytes = Vec::with_capacity(used.len());
+        self.copy_chunked(
+            step,
+            |inner, from| {
+                let rest = used.get(from..).unwrap_or_default();
+                let ids = rest.get(..COPY_CHUNK.min(rest.len())).unwrap_or_default();
+                term_bytes(keyword_column(inner, field)?, field, ids)
+            },
+            |term| {
+                bytes.push(term);
+                Ok(())
+            },
+        )?;
+        keywords(field, self.docs, &postings, &used, bytes)
     }
 
     fn norms(&self, field: FieldId) -> Result<MemtableNorms, ReadError> {
+        self.norms_stepped(field, &|| Ok(()))
+    }
+
+    fn norms_stepped(
+        &self,
+        field: FieldId,
+        step: &dyn Fn() -> Result<(), ReadError>,
+    ) -> Result<MemtableNorms, ReadError> {
         let slot = usize::try_from(field.get())
             .ok()
             .and_then(|i| self.norms.get(i));
         if let Some(norms) = slot.and_then(OnceLock::get) {
             return Ok(MemtableNorms(Arc::clone(norms)));
         }
-        let inner = read(&self.shared);
-        let copied: Arc<[u8]> = match indexed(&inner, field, true, "norms")? {
-            MemField::Text { norms, .. } => norms.get(..self.docs as usize).unwrap_or(norms).into(),
-            _ => Arc::from([]),
-        };
-        drop(inner);
+        // A norm is pushed once its document is linked, so the view's are a prefix. Copied [`COPY_CHUNK`] at a time,
+        // one step per chunk: a step costs more than copying a byte.
+        let docs = self.docs as usize;
+        let mut copied = Vec::new();
+        let mut from = 0_usize;
+        loop {
+            let chunk = {
+                let inner = read(&self.shared);
+                match indexed(&inner, field, true, "norms")? {
+                    MemField::Text { norms, .. } => {
+                        let end = docs.min(norms.len()).min(from.saturating_add(COPY_CHUNK));
+                        norms.get(from..end).unwrap_or_default().to_vec()
+                    }
+                    _ => Vec::new(),
+                }
+            };
+            let n = chunk.len();
+            copied.extend(chunk);
+            if n < COPY_CHUNK {
+                break;
+            }
+            step()?;
+            from = from.saturating_add(n);
+        }
+        let copied: Arc<[u8]> = copied.into();
         Ok(MemtableNorms(match slot {
             Some(cell) => Arc::clone(cell.get_or_init(|| copied)),
             None => copied,
@@ -718,5 +882,17 @@ impl TermEnum for MemtableTerms {
         };
         self.next = self.next.saturating_add(1);
         Ok(Some((term, *df)))
+    }
+}
+
+/// The inverted index of `keyword` field `field`, which holds its column (SPEC §5.3.5).
+fn keyword_column(inner: &Inner, field: FieldId) -> Result<&Inverted, ReadError> {
+    match field_of(inner, field)? {
+        (_, MemField::Keyword { index }) => Ok(&index.inverted),
+        (field_type, _) => Err(ReadError::FieldType {
+            field,
+            field_type,
+            what: "keyword column",
+        }),
     }
 }
