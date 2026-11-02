@@ -375,7 +375,7 @@ impl TermScorer {
 }
 
 /// `idf(t) = ln(1 + (N − df + 0.5)/(df + 0.5))` (SPEC §7.2), with `df` at most `N`: always positive.
-#[allow(clippy::cast_precision_loss)] // counts far below 2^52
+#[allow(clippy::cast_precision_loss, clippy::as_conversions)] // int to float on purpose: counts far below 2^52
 pub fn idf(doc_count: u64, df: u64) -> f64 {
     let df = df.min(doc_count);
     let rest = doc_count.saturating_sub(df) as f64;

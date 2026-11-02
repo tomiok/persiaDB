@@ -2,6 +2,9 @@
 //!
 //! Synchronous and storage-agnostic: all I/O goes through `persia_storage::Storage`.
 #![forbid(unsafe_code)]
+// Sizes and offsets convert with `From`, `persia_format::widen` or `try_from`, never a silent `as` (CLAUDE.md checked
+// ops, ROADMAP 0.6.5).
+#![cfg_attr(not(test), deny(clippy::as_conversions))]
 
 mod bitmap;
 pub mod db;

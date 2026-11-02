@@ -75,7 +75,7 @@ impl BlockHeader {
         let stored_len = u32::try_from(payload.len()).map_err(|_| EncodeError::InvalidLen {
             len: payload.len(),
             min: 0,
-            max: u32::MAX as usize,
+            max: crate::widen::usize_from_u32(u32::MAX),
         })?;
         let mut header = Self {
             crc32c: 0,
@@ -98,7 +98,7 @@ impl BlockHeader {
         let len = u32::try_from(payload.len()).map_err(|_| EncodeError::InvalidLen {
             len: payload.len(),
             min: 0,
-            max: u32::MAX as usize,
+            max: crate::widen::usize_from_u32(u32::MAX),
         })?;
         Self::with_uncompressed_len(codec, len, payload)
     }
@@ -321,7 +321,7 @@ impl BlockWriter {
 
     /// Appends one block holding `src` (at most `block_size` bytes).
     fn emit(&mut self, src: &[u8]) -> Result<(), EncodeError> {
-        if self.ends.len() >= u32::MAX as usize {
+        if self.ends.len() >= crate::widen::usize_from_u32(u32::MAX) {
             return Err(EncodeError::TooManyBlocks);
         }
         let uncompressed_len = u32::try_from(src.len()).map_err(|_| EncodeError::InvalidLen {

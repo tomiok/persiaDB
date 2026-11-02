@@ -49,6 +49,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
+use persia_format::widen::usize_from_u32;
 
 pub use columns::{MemtableKeys, MemtableKeywords};
 pub use flush::{FlushPolicy, FlushReason};
@@ -243,11 +244,11 @@ impl FieldIndex {
         let start = u32::try_from(from).unwrap_or(NONE);
         let new = self.inverted.postings.get(from..).unwrap_or_default();
         for (i, posting) in (start..).zip(new) {
-            let term = posting.term as usize;
+            let term = usize_from_u32(posting.term);
             self.next.push(NONE);
             let slot = match self.tails.get(term) {
                 Some(&NONE) => self.heads.get_mut(term),
-                Some(&tail) => self.next.get_mut(tail as usize),
+                Some(&tail) => self.next.get_mut(usize_from_u32(tail)),
                 None => None,
             };
             if let Some(slot) = slot {
@@ -660,7 +661,7 @@ impl Inner {
     /// Records operation `version` on id `id`, which added `docid` ([`NONE`] for a delete), replacing the id's
     /// previous document; returns whether there was a live one. Last, so a view never sees half an operation.
     fn record(&mut self, id: u32, docid: u32, version: u64) -> bool {
-        let prev = self.latest.get(id as usize).copied().unwrap_or(0);
+        let prev = self.latest.get(usize_from_u32(id)).copied().unwrap_or(0);
         let previous = prev
             .checked_sub(1)
             .and_then(|i| usize::try_from(i).ok())
@@ -669,7 +670,7 @@ impl Inner {
             .filter(|&d| d != NONE);
         let replaced = previous.is_some_and(|d| self.kill(d, version));
         self.ops.push(Op { docid, prev, id });
-        if let Some(l) = self.latest.get_mut(id as usize) {
+        if let Some(l) = self.latest.get_mut(usize_from_u32(id)) {
             *l = version;
         }
         replaced
@@ -679,7 +680,7 @@ impl Inner {
     fn kill(&mut self, docid: u32, version: u64) -> bool {
         let Some(k) = self
             .killed_at
-            .get_mut(docid as usize)
+            .get_mut(usize_from_u32(docid))
             .filter(|k| **k == ALIVE)
         else {
             return false;

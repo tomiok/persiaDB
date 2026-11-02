@@ -1,6 +1,7 @@
 //! The WAL chunk encoding (SPEC §8.2.1, ADR-0028): a header, then length-prefixed records, each with a CRC32C.
 
 use persia_format::checksum::crc32c;
+use persia_format::widen::{u64_from_usize, usize_from_u32};
 
 use crate::document::{MAX_DOCUMENT_LEN, MAX_ID_LEN};
 use crate::schema::{NameProblem, collection_name_problem};
@@ -138,22 +139,25 @@ impl<'a> WalRecord<'a> {
         RECORD_OVERHEAD + 2 + self.collection.len() + self.payload.len()
     }
 
-    /// Appends the record to `out`.
-    #[allow(clippy::cast_possible_truncation)]
-    pub(super) fn encode_into(&self, out: &mut Vec<u8>) {
+    /// Appends the record to `out`, or changes nothing if a length does not fit its field.
+    pub(super) fn encode_into(&self, out: &mut Vec<u8>) -> Result<(), ChunkFull> {
+        // The constructors bound both (a 64-byte name, a 16 MiB payload), so neither conversion fails; were one
+        // to, the record is refused rather than written with a truncated length.
+        let body_len =
+            u32::try_from(2 + self.collection.len() + self.payload.len()).map_err(|_| ChunkFull)?;
+        let name_len = u8::try_from(self.collection.len()).map_err(|_| ChunkFull)?;
         let start = out.len();
-        // Fits: `encoded_len` is far below `u32::MAX`, and a name below 256 bytes (constructors).
-        let body_len = (2 + self.collection.len() + self.payload.len()) as u32;
         out.extend_from_slice(&body_len.to_le_bytes());
         out.push(match self.op {
             WalOp::Put => OP_PUT,
             WalOp::Delete => OP_DELETE,
         });
-        out.push(self.collection.len() as u8);
+        out.push(name_len);
         out.extend_from_slice(self.collection.as_bytes());
         out.extend_from_slice(self.payload);
         let crc = crc32c(out.get(start..).unwrap_or_default());
         out.extend_from_slice(&crc.to_le_bytes());
+        Ok(())
     }
 }
 
@@ -233,7 +237,7 @@ impl ChunkBuilder {
         if !self.fits(record) {
             return Err(ChunkFull);
         }
-        record.encode_into(&mut self.buf);
+        record.encode_into(&mut self.buf)?;
         self.count += 1;
         Ok(())
     }
@@ -343,7 +347,7 @@ pub enum WalCorruption {
 
 fn corrupt(offset: usize, reason: WalCorruption) -> WalError {
     WalError::Corrupt {
-        offset: offset as u64,
+        offset: u64_from_usize(offset),
         reason,
     }
 }
@@ -400,14 +404,14 @@ pub struct ChunkRecords<'a> {
 impl<'a> ChunkRecords<'a> {
     /// Offset of the next record from the start of the chunk (after the last, the end of the records).
     pub fn offset(&self) -> u64 {
-        self.pos as u64
+        u64_from_usize(self.pos)
     }
 
     fn record(&mut self) -> Result<WalRecord<'a>, WalError> {
         let start = self.pos;
         let eof = |at| corrupt(at, WalCorruption::UnexpectedEof);
         let body_len = u32_at(self.bytes, start).ok_or_else(|| eof(self.bytes.len()))?;
-        let len = body_len as usize;
+        let len = usize_from_u32(body_len);
         if len < MIN_BODY_LEN {
             return Err(corrupt(start, WalCorruption::BodyLen { len: body_len }));
         }

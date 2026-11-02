@@ -36,6 +36,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::{
     ActiveSuperblock, FIRST_FRAME_OFFSET, SLOTS_LEN, Slot, Superblock,
 };
+use persia_format::widen::u64_from_usize;
 use persia_format::{Corruption, Reader, Writer};
 
 use crate::vfs::Vfs;
@@ -722,7 +723,7 @@ impl<F: ContainerFile> Container<F> {
             .ok_or_else(|| Error::InvalidInput("frame_seq exhausted (ADR-0013)".into()))?;
         let mut w = Writer::with_base_offset(self.end);
         encode_frame(&mut w, kind, frame_seq, payload, compression)?;
-        let len = w.len() as u64;
+        let len = u64_from_usize(w.len());
         let end = self
             .end
             .checked_add(len)
@@ -874,8 +875,9 @@ impl<F: ContainerFile> Container<F> {
             Cow::Borrowed(stored) => {
                 // The stored payload follows the frame header (SPEC §4.4) and lies inside `bytes`, so this slice
                 // cannot fail; the assertion catches a layout change that would make it the wrong bytes.
-                let start = offset.saturating_add(FRAME_HEADER_LEN as u64);
-                let payload = bytes.slice(start..start.saturating_add(stored.len() as u64))?;
+                let start = offset.saturating_add(u64_from_usize(FRAME_HEADER_LEN));
+                let payload =
+                    bytes.slice(start..start.saturating_add(u64_from_usize(stored.len())))?;
                 debug_assert!(stored.is_empty() || payload.as_ptr() == stored.as_ptr());
                 payload
             }
@@ -890,7 +892,7 @@ impl<F: ContainerFile> Container<F> {
     /// The bytes of the frame at `offset`, sized from its header and bounded by [`Container::end`]: a slice of the
     /// mapping if it covers the frame, else read.
     fn frame_bytes(&self, offset: u64) -> Result<ByteSource> {
-        let header_len = FRAME_HEADER_LEN as u64;
+        let header_len = u64_from_usize(FRAME_HEADER_LEN);
         if offset < FIRST_FRAME_OFFSET
             || offset.checked_add(header_len).is_none_or(|e| e > self.end)
         {
@@ -1337,7 +1339,7 @@ impl<G: ContainerFile> Rewriter<'_, G> {
     }
 
     fn write(&mut self, w: &Writer, kind: FrameKind, frame_seq: u64) -> Result<FrameRef> {
-        let len = w.len() as u64;
+        let len = u64_from_usize(w.len());
         let offset = self.end;
         self.end = offset
             .checked_add(len)
@@ -1370,7 +1372,7 @@ impl<G: ContainerFile> Rewriter<'_, G> {
                 .write_all_at(bytes, at)
                 .map_err(Error::io("write compacted frame"))?;
             // Bounded by the frame's total length, checked below to fit after `start`.
-            at = at.saturating_add(bytes.len() as u64);
+            at = at.saturating_add(u64_from_usize(bytes.len()));
             Ok(())
         };
         // Frames are read up to `end`, so a range running past a frame is caught by the length check below.

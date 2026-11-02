@@ -251,7 +251,7 @@ impl<M: Matcher> Matcher for BlockMaxWand<M> {
 /// summed in any other order. Each order is within `γ = (n − 1)·u / (1 − (n − 1)·u)` of the exact sum (`u` the unit
 /// roundoff, `ε / 2`), so the ratio of two is at most `(1 + γ) / (1 − γ)`, about `1 + n·ε`; `1 + 4·n·ε` covers that
 /// and the rounding of the product, for any `n` below 2⁴⁰.
-#[allow(clippy::cast_precision_loss)] // a clause count, far below 2^53
+#[allow(clippy::cast_precision_loss, clippy::as_conversions)] // int to float: a clause count, far below 2^53
 fn order_slack(n: usize) -> f64 {
     1.0 + 4.0 * (n as f64) * f64::EPSILON
 }

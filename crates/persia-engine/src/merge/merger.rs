@@ -10,6 +10,7 @@ use std::ops::Bound;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_format::Writer;
+use persia_format::widen::usize_from_u32;
 
 use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::segment::builder::FieldBuilder;
@@ -264,7 +265,7 @@ fn copy_documents(
     };
     // Merged docids below this came from earlier inputs.
     let first = builder.doc_count();
-    let mut docids = Vec::with_capacity(segment.doc_count() as usize);
+    let mut docids = Vec::with_capacity(usize_from_u32(segment.doc_count()));
     for old in 0..segment.doc_count() {
         if source.tombstones.is_some_and(|t| t.contains(old)) {
             docids.push(GONE);
@@ -361,7 +362,7 @@ fn copy_postings(
             // `docids` has one entry per document: a docid past it is damage, never a deletion (the reader rejects it
             // today; dropping it silently would hide it from the output's `verify`).
             let new = docids
-                .get(old as usize)
+                .get(usize_from_u32(old))
                 .copied()
                 .ok_or_else(|| corrupt("a posting past the segment's documents"))?;
             if new == GONE {
@@ -374,7 +375,7 @@ fn copy_postings(
             let start = scratch.positions.len();
             if keep_positions {
                 let positions = postings.positions().map_err(read)?;
-                if positions.len() != tf as usize {
+                if positions.len() != usize_from_u32(tf) {
                     return Err(corrupt("positions that do not match the frequency"));
                 }
                 scratch.positions.extend_from_slice(positions);
@@ -400,7 +401,7 @@ fn copy_postings(
         for e in group {
             let positions = if keep_positions {
                 // Pushed with exactly `tf` positions above, so the range is there; never default to none.
-                let end = e.positions.saturating_add(e.tf as usize);
+                let end = e.positions.saturating_add(usize_from_u32(e.tf));
                 scratch
                     .positions
                     .get(e.positions..end)

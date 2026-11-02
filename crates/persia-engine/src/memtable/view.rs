@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock, RwLock};
 use core::ops::{Bound, RangeBounds};
 
 use fst::Automaton;
+use persia_format::widen::usize_from_u32;
 use roaring::RoaringBitmap;
 
 use super::columns::{keywords, posting_chunk, term_bytes, used_terms};
@@ -88,7 +89,7 @@ impl MemtableView {
     pub fn lookup(&self, id: &str) -> Option<IdState> {
         let inner = read(&self.shared);
         let index = inner.ids.get(id.as_bytes())?;
-        let mut version = inner.latest.get(index as usize).copied()?;
+        let mut version = inner.latest.get(usize_from_u32(index)).copied()?;
         // Walk back past the operations after the view.
         loop {
             let op = version
@@ -168,9 +169,13 @@ impl MemtableView {
     /// The live documents of the view on the chain of term `term` (its id in `index`).
     fn live_df(&self, inner: &Inner, index: &FieldIndex, term: u32) -> u32 {
         // A term interned by a document not linked yet has no chain.
-        let mut at = index.heads.get(term as usize).copied().unwrap_or(NONE);
+        let mut at = index
+            .heads
+            .get(usize_from_u32(term))
+            .copied()
+            .unwrap_or(NONE);
         let mut df = 0_u32;
-        while let Some(p) = index.inverted.postings.get(at as usize) {
+        while let Some(p) = index.inverted.postings.get(usize_from_u32(at)) {
             // A chain is in docid order: the rest came after the view.
             if p.doc >= self.docs {
                 break;
@@ -178,7 +183,7 @@ impl MemtableView {
             if self.visible(inner, p.doc) {
                 df = df.saturating_add(1);
             }
-            at = index.next.get(at as usize).copied().unwrap_or(NONE);
+            at = index.next.get(usize_from_u32(at)).copied().unwrap_or(NONE);
         }
         df
     }
@@ -187,7 +192,7 @@ impl MemtableView {
         docid < self.docs
             && inner
                 .killed_at
-                .get(docid as usize)
+                .get(usize_from_u32(docid))
                 .is_some_and(|&k| k > self.version)
     }
 
@@ -359,14 +364,14 @@ impl SearchView for MemtableView {
             .inverted
             .terms
             .get(term)
-            .and_then(|t| index.heads.get(t as usize).copied())
+            .and_then(|t| index.heads.get(usize_from_u32(t)).copied())
         else {
             return Ok(None);
         };
         // Copy this term's chain under the read lock. The caller iterates the copy; the guard ends with this call.
         let mut entries = Vec::new();
         let (mut max_tf, mut min_norm) = (0_u32, u8::MAX);
-        while let Some(p) = index.inverted.postings.get(at as usize) {
+        while let Some(p) = index.inverted.postings.get(usize_from_u32(at)) {
             // A chain is in docid order: the rest came after the view.
             if p.doc >= self.docs {
                 break;
@@ -378,10 +383,10 @@ impl SearchView for MemtableView {
                     pos_start: p.pos_start,
                 });
                 max_tf = max_tf.max(p.tf);
-                let norm = norms.and_then(|n| n.get(p.doc as usize).copied());
+                let norm = norms.and_then(|n| n.get(usize_from_u32(p.doc)).copied());
                 min_norm = min_norm.min(norm.unwrap_or(0));
             }
-            at = index.next.get(at as usize).copied().unwrap_or(NONE);
+            at = index.next.get(usize_from_u32(at)).copied().unwrap_or(NONE);
         }
         let Some(last) = entries.last() else {
             return Ok(None);
@@ -705,7 +710,7 @@ impl SearchView for MemtableView {
         }
         // A norm is pushed once its document is linked, so the view's are a prefix. Copied [`COPY_CHUNK`] at a time,
         // one step per chunk: a step costs more than copying a byte.
-        let docs = self.docs as usize;
+        let docs = usize_from_u32(self.docs);
         let mut copied = Vec::new();
         let mut from = 0_usize;
         loop {
@@ -744,7 +749,7 @@ impl SearchView for MemtableView {
         // Copy the encoding out; decode without the lock.
         let bytes = {
             let inner = read(&self.shared);
-            let i = docid as usize;
+            let i = usize_from_u32(docid);
             let start = i
                 .checked_sub(1)
                 .and_then(|p| inner.doc_ends.get(p))
@@ -856,9 +861,9 @@ impl PostingsIterator for MemtablePostings<'_> {
                 .and_then(|i| inner.fields.get(i))
                 .and_then(MemField::index)
                 .and_then(|index| index.inverted.positions.as_ref());
-            let start = entry.pos_start as usize;
+            let start = usize_from_u32(entry.pos_start);
             let run = positions
-                .and_then(|p| p.get(start..start.saturating_add(entry.tf as usize)))
+                .and_then(|p| p.get(start..start.saturating_add(usize_from_u32(entry.tf))))
                 .unwrap_or_default();
             self.positions.extend_from_slice(run);
         }
@@ -884,7 +889,7 @@ pub struct MemtableNorms(Arc<[u8]>);
 
 impl NormReader for MemtableNorms {
     fn get(&mut self, docid: u32) -> Result<u8, ReadError> {
-        Ok(self.0.get(docid as usize).copied().unwrap_or(0))
+        Ok(self.0.get(usize_from_u32(docid)).copied().unwrap_or(0))
     }
 }
 

@@ -49,9 +49,9 @@ impl BitWidth {
     }
 
     /// Bytes of a packed block at this width: `16 · width` (128 values × width bits / 8).
-    pub const fn packed_len(self) -> usize {
+    pub fn packed_len(self) -> usize {
         // At most 512: cannot overflow.
-        (self.0 as usize).wrapping_mul(BLOCK_LEN / 8)
+        usize::from(self.0).wrapping_mul(BLOCK_LEN / 8)
     }
 
     /// The largest value that fits.
@@ -166,8 +166,8 @@ impl Reader<'_> {
 
 /// The low 32 bits of `x`.
 fn low_u32(x: u64) -> u32 {
-    // Truncation is the point.
-    #[allow(clippy::cast_possible_truncation)]
+    // Truncation is the point: callers split a u64 accumulator into its low and high words.
+    #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
     let low = x as u32;
     low
 }

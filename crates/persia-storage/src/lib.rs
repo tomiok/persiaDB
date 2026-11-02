@@ -6,6 +6,9 @@
 // Offsets and lengths come from disk and the network: arithmetic must be checked (ROADMAP 1.1.5).
 #![deny(clippy::arithmetic_side_effects)]
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+// Sizes and offsets convert with `From`, `persia_format::widen` or `try_from`, never a silent `as` (CLAUDE.md checked
+// ops, ROADMAP 0.6.5).
+#![cfg_attr(not(test), deny(clippy::as_conversions))]
 
 pub mod container;
 pub mod error;

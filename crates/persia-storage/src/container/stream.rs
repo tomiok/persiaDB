@@ -1,6 +1,7 @@
 //! Appending a frame whose payload is written in pieces (ROADMAP 2.4.13; SPEC §4.4 "Streaming and ranged access").
 
 use persia_format::frame::{FrameEncoder, FrameKind};
+use persia_format::widen::u64_from_usize;
 
 use super::{Container, ContainerFile, Error, FrameRef, Result};
 
@@ -138,7 +139,7 @@ impl<F: ContainerFile> FrameWriter<'_, F> {
         let at = self.at;
         self.container.write_op(op, |f| f.write_all_at(bytes, at))?;
         // Within the total length `append_stream` checked.
-        self.at = at.saturating_add(bytes.len() as u64);
+        self.at = at.saturating_add(u64_from_usize(bytes.len()));
         Ok(())
     }
 }

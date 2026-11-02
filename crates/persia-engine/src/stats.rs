@@ -56,7 +56,8 @@ pub struct FieldTotals {
 impl FieldTotals {
     /// `avglen_f` of SPEC §7.2: the mean length of the field over the documents that have it; 1 when none has it
     /// (no document then holds one of its terms, so it only shapes score bounds).
-    #[allow(clippy::cast_precision_loss)] // counts far below 2^52; a rounded mean is still a mean
+    // Int to float on purpose: counts far below 2^52; a rounded mean is still a mean.
+    #[allow(clippy::cast_precision_loss, clippy::as_conversions)]
     pub fn avglen(&self) -> f64 {
         let avg = self.sum_field_len as f64 / self.docs_with_field as f64;
         if avg.is_finite() && avg > 0.0 {
