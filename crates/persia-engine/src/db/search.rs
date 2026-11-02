@@ -14,7 +14,7 @@ use crate::bitmap::Ascending;
 use crate::document::Document;
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
-    Projection, Pruning, RequestError, SearchPlan, Sort, SortValue, Steps, Ties, Watch,
+    Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortValue, Steps, Ties, Watch,
     collect_where, top_sorted,
 };
 use crate::view::{SearchView, SegmentView};
@@ -256,18 +256,25 @@ impl CollectionViews<'_> {
             .copied()
             .map(FacetCounter::new)
             .collect();
-        for (hits, counted) in found? {
+        let mut kept = Vec::new();
+        for Searched {
+            hits,
+            facets: counted,
+            kept: selections,
+        } in found?
+        {
             ranked = merge(&request.sort, ranked, hits, window)?;
             for (facet, counted) in facets.iter_mut().zip(counted) {
                 facet.merge(counted);
             }
+            kept.push(selections);
         }
         // Reading the page's documents is the last stage a deadline stops.
         exec.interrupt()?;
 
         let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
         let mut explanations = if request.explain {
-            self.explain_page(plan, &segments, &page, exec)?
+            self.explain_page(plan, &segments, &page, kept, exec)?
         } else {
             Vec::new()
         }
@@ -304,6 +311,7 @@ impl CollectionViews<'_> {
         plan: &SearchPlan,
         segments: &[SegmentView<'_>],
         page: &[Ranked],
+        kept: Vec<(usize, Selections)>,
         exec: &Execution,
     ) -> Result<Vec<Option<Explanation>>, RequestError> {
         // (view order, docid, page index), so each view's hits are together and in docid order.
@@ -316,20 +324,51 @@ impl CollectionViews<'_> {
             })
             .collect();
         by_view.sort_unstable();
+        // Index selections by view rank once. A linear search of `kept` per group is quadratic in the
+        // views a page spans. The memtable's rank is `usize::MAX` ([`order`]); it sits after the segments.
+        // A view with no hit on the page has nothing to explain, so its bitmaps are dropped here.
+        let segments_len = segments.len();
+        let slots = segments_len.saturating_add(1);
+        let mut on_page = vec![false; slots];
+        for &(view, ..) in &by_view {
+            if let Some(slot) = selection_slot(view, segments_len)
+                && let Some(flag) = on_page.get_mut(slot)
+            {
+                *flag = true;
+            }
+        }
+        let mut by_rank = Vec::with_capacity(slots);
+        by_rank.resize_with(slots, || None);
+        for (rank, selections) in kept {
+            let Some(slot) = selection_slot(rank, segments_len) else {
+                continue;
+            };
+            if on_page.get(slot).copied() != Some(true) {
+                continue;
+            }
+            if let Some(entry @ None) = by_rank.get_mut(slot) {
+                *entry = Some(selections);
+            }
+        }
         let mut out = vec![None; page.len()];
         for group in by_view.chunk_by(|a, b| a.0 == b.0) {
             exec.interrupt()?;
             let docids: Vec<u32> = group.iter().map(|&(_, docid, _)| docid).collect();
-            let explained = match group.first().map(|&(view, ..)| view) {
-                Some(usize::MAX) => plan.explain_all(
-                    &Interruptible::new(self.memtable(), &Steps::new(exec)),
-                    &docids,
-                )?,
-                Some(index) => plan.explain_all(
-                    &Interruptible::new(segment_view(segments, index)?, &Steps::new(exec)),
-                    &docids,
-                )?,
-                None => continue,
+            let Some(rank) = group.first().map(|&(view, ..)| view) else {
+                continue;
+            };
+            // What the view's matcher selected; every view holding a hit ran one.
+            let empty = Selections::default();
+            let selections = selection_slot(rank, segments_len)
+                .and_then(|slot| by_rank.get(slot).and_then(Option::as_ref))
+                .unwrap_or(&empty);
+            let steps = Steps::new(exec);
+            let explained = if rank == usize::MAX {
+                let view = Interruptible::new(self.memtable(), &steps);
+                plan.explain_kept(&view, &docids, selections)?
+            } else {
+                let view = Interruptible::new(segment_view(segments, rank)?, &steps);
+                plan.explain_kept(&view, &docids, selections)?
             };
             for (&(.., i), explanation) in group.iter().zip(explained) {
                 // Every hit matched the plan in its view, so it has one.
@@ -351,6 +390,16 @@ impl CollectionViews<'_> {
     }
 }
 
+/// What a search found in one view.
+struct Searched {
+    /// Its best hits.
+    hits: Vec<Ranked>,
+    /// Its matches counted, per facet asked.
+    facets: Vec<FacetCounter>,
+    /// Its rank in collection order ([`order`]), and what its `bool`s selected when the page is explained.
+    kept: (usize, Selections),
+}
+
 /// A search's request, run over one view at a time.
 struct Search<'r> {
     plan: &'r SearchPlan,
@@ -361,28 +410,32 @@ struct Search<'r> {
 
 impl Search<'_> {
     /// The best `window` hits of `view`, at `rank` in collection order ([`order`]), and its matches counted for each
-    /// facet.
+    /// facet, and what its `bool`s selected when the page is explained.
     fn view<V: SearchView>(
         &self,
         view: &V,
         rank: usize,
         watch: &mut ViewWatch<'_>,
         location: impl Fn(u32) -> Located,
-    ) -> Result<(Vec<Ranked>, Vec<FacetCounter>), RequestError> {
+    ) -> Result<Searched, RequestError> {
         let sort = &self.request.sort;
         let steps = Steps::new(self.exec);
         let view = &Interruptible::new(view, &steps);
         let counting = !self.request.facets.is_empty();
         // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
         let prune = sort.is_score() && !counting;
-        let mut matcher = self.plan.matcher_with(
-            view,
-            if prune {
-                self.exec.pruning
-            } else {
-                Pruning::Exhaustive
-            },
-        )?;
+        let pruning = if prune {
+            self.exec.pruning
+        } else {
+            Pruning::Exhaustive
+        };
+        // An explained page takes its filters' selections from these rather than selecting again (SPEC §7.7).
+        let kept = Selections::default();
+        let mut matcher = if self.request.explain {
+            self.plan.matcher_keeping(view, pruning, &kept)?
+        } else {
+            self.plan.matcher_with(view, pruning)?
+        };
         let after = self
             .request
             .search_after
@@ -426,6 +479,12 @@ impl Search<'_> {
                 })
                 .collect()
         };
+        // A view without a hit has none on the page to explain.
+        let kept = if hits.is_empty() {
+            Selections::default()
+        } else {
+            kept
+        };
         let mut facets = Vec::with_capacity(self.request.facets.len());
         if counting {
             let docs: RoaringBitmap = docs.finish();
@@ -436,7 +495,11 @@ impl Search<'_> {
                 facets.push(facet);
             }
         }
-        Ok((hits, facets))
+        Ok(Searched {
+            hits,
+            facets,
+            kept: (rank, kept),
+        })
     }
 }
 
@@ -450,6 +513,18 @@ fn segment_view<'a>(
         index,
         segments: segments.len(),
     })
+}
+
+/// Where the selections of the view at `rank` sit: its segment index, or `segments` for the memtable
+/// (`usize::MAX` in [`order`]). A rank that is neither is not a view of this search.
+fn selection_slot(rank: usize, segments: usize) -> Option<usize> {
+    if rank == usize::MAX {
+        Some(segments)
+    } else if rank < segments {
+        Some(rank)
+    } else {
+        None
+    }
 }
 
 /// Collection order of a location (SPEC §7.3): segment order with the memtable last, then docid.

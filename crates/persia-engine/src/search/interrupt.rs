@@ -223,7 +223,9 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         upper: Bound<&[u8]>,
         automaton: A,
     ) -> Result<Self::Terms<'a, A>, ReadError> {
-        let terms = self.view.terms(field, lower, upper, automaton)?;
+        let terms = self
+            .view
+            .terms_stepped(field, lower, upper, automaton, &|| self.steps.step())?;
         Ok(Watched::new(terms, self.steps))
     }
 
@@ -537,6 +539,164 @@ mod tests {
         assert!(never.looks() >= 2, "{}", never.looks());
     }
 
+    /// A memtable of `DOCS` documents shaped as [`fixture`]'s, and a view of its first `seen`.
+    fn memtable(seen: u32) -> (crate::memtable::MemtableView, Fixture) {
+        let f = fixture();
+        let mut mem =
+            crate::memtable::Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap();
+        let doc = |i: u32| {
+            Document::new(format!("d{i}"))
+                .with(f.body, Value::String("alpha x beta".into()))
+                .with(f.tag, Value::String(format!("t{i:05}")))
+                .with(f.n, Value::I64(i64::from(i)))
+        };
+        for i in 0..seen {
+            mem.put(&doc(i)).unwrap();
+        }
+        let view = mem.view();
+        // Written after the view: none of it is in it.
+        for i in seen..DOCS {
+            mem.put(&doc(i)).unwrap();
+        }
+        (view, f)
+    }
+
+    #[test]
+    fn a_memtable_copies_its_terms_and_keys_in_chunks_up_to_its_view() {
+        // 2 500 seen: chunks end at 1 024 and 2 048, and the view's cutoff falls inside the third.
+        let (view, f) = memtable(2_500);
+        let mut terms = view
+            .terms(
+                f.tag,
+                Bound::Unbounded,
+                Bound::Unbounded,
+                fst::automaton::Str::new("t").starts_with(),
+            )
+            .unwrap();
+        let mut listed = Vec::new();
+        while let Some((term, df)) = terms.next().unwrap() {
+            assert_eq!(df, 1);
+            listed.push(String::from_utf8(term.to_vec()).unwrap());
+        }
+        let expected: Vec<String> = (0..2_500).map(|i| format!("t{i:05}")).collect();
+        assert_eq!(listed, expected);
+        let mut keys = Vec::new();
+        view.column_keys(f.n, |docid, key| keys.push((docid, key)))
+            .unwrap();
+        assert_eq!(keys.len(), 2_500);
+        for (i, &(docid, key)) in (0_u32..).zip(&keys) {
+            assert_eq!(docid, i);
+            assert_eq!(key, persia_format::for_codec::i64_to_key(i64::from(i)));
+        }
+    }
+
+    #[test]
+    fn a_memtable_expansion_lists_its_view_while_writers_interleave() {
+        let f = fixture();
+        let mem = std::sync::Mutex::new(
+            crate::memtable::Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap(),
+        );
+        let doc = |id: String, tag: String| {
+            Document::new(id)
+                .with(f.body, Value::String("alpha".into()))
+                .with(f.tag, Value::String(tag))
+        };
+        for i in 0..2_500 {
+            mem.lock()
+                .unwrap()
+                .put(&doc(format!("d{i}"), format!("t{i:05}")))
+                .unwrap();
+        }
+        let view = mem.lock().unwrap().view();
+        // Between the first chunks: a put whose log fails (its new tag is truncated from the arena), new tags, a
+        // replaced document with an old tag, a delete, all after the view.
+        let steps = Cell::new(0_u32);
+        let step = || {
+            steps.set(steps.get() + 1);
+            if steps.get() == 1_024 {
+                let mut mem = mem.lock().unwrap();
+                let failed = mem.put_logged(&doc("x".into(), "t99999".into()), |_| Err("disk"));
+                assert!(failed.is_err());
+                for i in 0..3_000 {
+                    mem.put(&doc(format!("n{i}"), format!("t{:05}", 50_000 + i)))
+                        .unwrap();
+                }
+                mem.put(&doc("d7".into(), "t00008".into())).unwrap();
+                mem.delete("d9").unwrap();
+            }
+            Ok(())
+        };
+        let mut terms = view
+            .terms_stepped(
+                f.tag,
+                Bound::Unbounded,
+                Bound::Unbounded,
+                fst::automaton::Str::new("t").starts_with(),
+                &step,
+            )
+            .unwrap();
+        let mut listed = Vec::new();
+        while let Some((term, df)) = terms.next().unwrap() {
+            listed.push((String::from_utf8(term.to_vec()).unwrap(), df));
+        }
+        let expected: Vec<(String, u32)> = (0..2_500).map(|i| (format!("t{i:05}"), 1)).collect();
+        assert_eq!(listed, expected);
+        // The 3 000 tags interned after the view were not tried: one step per term of the view, then per match.
+        assert_eq!(steps.get(), 2 * 2_500);
+    }
+
+    #[test]
+    fn a_memtable_column_copy_ends_on_a_chunk_boundary() {
+        let (view, f) = memtable(2_048);
+        let mut keys = Vec::new();
+        view.column_keys(f.n, |docid, _| keys.push(docid)).unwrap();
+        assert_eq!(keys, (0..2_048).collect::<Vec<_>>());
+    }
+    #[test]
+    fn a_memtable_expansion_that_matches_nothing_stops() {
+        let (view, f) = memtable(DOCS);
+        let stats = SegmentStatistics::new(&f.schema, &[]);
+        let prefix = Query::Prefix(PrefixQuery {
+            field: f.tag,
+            prefix: "zz".into(),
+            max_expansions: 50,
+        });
+        assert!(SearchPlan::with_terms(&prefix, &f.schema, &stats, &view).is_ok());
+        let planned = SearchPlan::with_terms(
+            &prefix,
+            &f.schema,
+            &stats,
+            &Interruptible::new(&view, &Steps::new(&StopAfter::new(1))),
+        );
+        assert!(
+            matches!(
+                planned,
+                Err(SearchError::Interrupted(Interrupt::DeadlineExceeded))
+            ),
+            "{planned:?}"
+        );
+    }
+
+    #[test]
+    fn a_memtable_range_filter_stops() {
+        let (view, f) = memtable(DOCS);
+        let stats = SegmentStatistics::new(&f.schema, &[]);
+        let query = Query::Bool(BoolQuery {
+            filter: vec![crate::query::Filter::Range {
+                field: f.n,
+                lower: Bound::Included(FilterValue::I64(i64::MAX)),
+                upper: Bound::Unbounded,
+            }],
+            ..BoolQuery::default()
+        });
+        let plan = SearchPlan::new(&query, &f.schema, &stats).unwrap();
+        assert_eq!(plan.top_k(&view, 10).unwrap(), []);
+        interrupted(
+            &plan
+                .matcher(&Interruptible::new(&view, &Steps::new(&StopAfter::new(1))))
+                .map(|_| ()),
+        );
+    }
     #[test]
     fn match_all_over_deleted_documents_stops() {
         let f = fixture();

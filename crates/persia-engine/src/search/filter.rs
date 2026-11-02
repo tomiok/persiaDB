@@ -8,6 +8,7 @@
 //! [`crate::segment::MAX_DOCS`] is corruption returned before that range is built. Deleted documents are taken out
 //! once, at the end.
 
+use core::cell::RefCell;
 use core::ops::Bound;
 
 use persia_format::for_codec::{f64_to_key, i64_to_key};
@@ -20,6 +21,31 @@ use crate::query::{Filter, FilterValue};
 use crate::schema::FieldId;
 use crate::segment::ReadError;
 use crate::view::{PostingsIterator, SearchView};
+
+/// The documents each `bool` of a plan selected with its filters in one view, by the `bool`'s slot in the plan:
+/// what a search's matcher selected, handed to the explanation of the view's hits, which then does not select them
+/// again (SPEC §7.7, ROADMAP 7.7.3). A `bool` whose filters a matcher did not read (its `must` clauses match
+/// nothing in the view) has none; the explanation never reaches its filters either.
+#[derive(Debug, Default)]
+pub(crate) struct Selections(RefCell<Vec<Option<RoaringBitmap>>>);
+
+impl Selections {
+    /// Keeps `docs`, the selection of the `bool` at `slot`.
+    pub(super) fn keep(&self, slot: usize, docs: &RoaringBitmap) {
+        let mut kept = self.0.borrow_mut();
+        if kept.len() <= slot {
+            kept.resize(slot.saturating_add(1), None);
+        }
+        if let Some(s) = kept.get_mut(slot) {
+            *s = Some(docs.clone());
+        }
+    }
+
+    /// The selection kept for the `bool` at `slot`, taken out.
+    pub(super) fn take(&self, slot: usize) -> Option<RoaringBitmap> {
+        self.0.borrow_mut().get_mut(slot).and_then(Option::take)
+    }
+}
 
 /// The live documents of `view` that every filter of `filters` selects (none: every live document).
 ///
