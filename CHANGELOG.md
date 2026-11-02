@@ -37,7 +37,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   §7.3). The readers a collection search opens on a view (postings lists, term streams, column scans, column
   readers, live-document scans) share one count and read them every 1024 steps. So a phrase whose terms never line
   up, a conjunction or a pruning disjunction that skips, a filter scan, a facet count, a column sort and explaining
-  a hit stop too. Not interrupted: one block decode, set operations on bitmaps, the memtable's copy of a field's
++  a hit stop too. Explain still selects a `bool`'s filters once more per view (ROADMAP 7.7.3). Not interrupted: one block decode, set operations on bitmaps, the memtable's copy of a field's
   terms or column keys, and reading the page's documents. `Execution::terms(&views)` gives the terms for
   `SearchPlan::with_terms` under the same deadline and token, so planning a `prefix` or `fuzzy` returns
   `SearchError::Interrupted`.
