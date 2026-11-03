@@ -121,6 +121,23 @@ impl Obsolete {
         self.objects.iter().map(|(o, pin)| (o, pin.referenced()))
     }
 
+    /// After a container compaction (SPEC §4.6): moves each object's frame to `moved(offset)`, and stops tracking the
+    /// ones it did not copy, which are reclaimed. A compaction copies every object still referenced when it started
+    /// (an unreferenced one cannot be read again), so only unreferenced ones are dropped.
+    pub fn relocate(&mut self, moved: impl Fn(u64) -> Option<u64>) {
+        self.objects
+            .retain_mut(|(object, _)| match object.location {
+                Location::Frame { offset, len } => match moved(offset) {
+                    Some(to) => {
+                        object.location = Location::Frame { offset: to, len };
+                        true
+                    }
+                    None => false,
+                },
+                Location::Object => true,
+            });
+    }
+
     /// Removes and returns the objects no reader can read any more.
     pub fn take_unreferenced(&mut self) -> Vec<ObsoleteObject> {
         let (free, kept): (Vec<_>, Vec<_>) = std::mem::take(&mut self.objects)

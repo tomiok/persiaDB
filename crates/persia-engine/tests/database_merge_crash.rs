@@ -302,7 +302,11 @@ fn found<F: ContainerFile + Sync>(db: &Database<F>, ctx: &str) -> Found {
 }
 
 /// Commits what the reopen replayed and finishes the merges: the documents stay.
-fn resume<F: ContainerFile + Sync>(mut db: Database<F>, ctx: &str, docs: &Docs) -> Database<F> {
+fn resume<F: ContainerFile + Sync + 'static>(
+    mut db: Database<F>,
+    ctx: &str,
+    docs: &Docs,
+) -> Database<F> {
     db.commit()
         .unwrap_or_else(|e| panic!("{ctx}: commit after reopen: {e}"));
     assert_eq!(&observed(&db.snapshot()), docs, "{ctx}: after the commit");

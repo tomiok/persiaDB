@@ -967,7 +967,8 @@ impl<F: ContainerFile> Container<F> {
     /// Writes the compacted container into `target`, an empty file, and returns it open read-write together with
     /// where every frame moved (SPEC §4.6). `live` names the live frames below `wal_start` (byte ranges, as the
     /// manifest records them); every frame from `wal_start` on is copied too. `manifest` builds the new Manifest
-    /// payload from the [`Relocation`]; it is stored with `compression`.
+    /// payload from the [`Relocation`]; it is stored with `compression`. An error it returns fails the compaction
+    /// before anything is committed in `target` (the writer may find, only then, that it cannot build its manifest).
     ///
     /// Unsynced appends are synced first; a failure there poisons this handle like any failed sync. Otherwise this
     /// container's file is only read, so on error it is unchanged and still writable, and `target` is garbage.
@@ -985,7 +986,7 @@ impl<F: ContainerFile> Container<F> {
         &mut self,
         target: G,
         live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        manifest: impl FnOnce(&Relocation) -> Result<Vec<u8>>,
         compression: Compression,
     ) -> Result<(Container<G>, Relocation)> {
         self.compact_locked_by(target, live, manifest, compression, LockedBy::File)
@@ -996,7 +997,7 @@ impl<F: ContainerFile> Container<F> {
         &mut self,
         target: G,
         live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        manifest: impl FnOnce(&Relocation) -> Result<Vec<u8>>,
         compression: Compression,
         lock: LockedBy,
     ) -> Result<(Container<G>, Relocation)> {
@@ -1037,7 +1038,7 @@ impl<F: ContainerFile> Container<F> {
         let relocation = Relocation {
             moved: out.moved.clone(),
         };
-        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation), compression)?;
+        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation)?, compression)?;
         let wal_start = out
             .moved
             .get(wal_first)

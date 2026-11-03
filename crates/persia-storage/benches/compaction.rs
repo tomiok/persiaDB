@@ -76,7 +76,7 @@ fn compact(c: &mut Criterion) {
                     |target| {
                         black_box(
                             source
-                                .compact_into(target, &[], |_| b"m".to_vec(), NONE)
+                                .compact_into(target, &[], |_| Ok(b"m".to_vec()), NONE)
                                 .unwrap(),
                         )
                     },
@@ -92,7 +92,7 @@ fn compact(c: &mut Criterion) {
                     |target| {
                         black_box(
                             source
-                                .compact_into(target, &[], |_| b"m".to_vec(), NONE)
+                                .compact_into(target, &[], |_| Ok(b"m".to_vec()), NONE)
                                 .unwrap(),
                         )
                     },

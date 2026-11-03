@@ -111,8 +111,10 @@ fn sim() -> Built<SimFile> {
 }
 
 /// Builds the new manifest the way an engine would: from where the live segment moved.
-fn new_manifest(live: FrameRef) -> impl FnOnce(&Relocation) -> Vec<u8> {
-    move |r: &Relocation| manifest_for(r.get(live.offset).unwrap().offset)
+fn new_manifest(
+    live: FrameRef,
+) -> impl FnOnce(&Relocation) -> persia_storage::container::Result<Vec<u8>> {
+    move |r: &Relocation| Ok(manifest_for(r.get(live.offset).unwrap().offset))
 }
 
 fn payload<F: ContainerFile>(c: &Container<F>, offset: u64) -> Vec<u8> {
@@ -300,7 +302,7 @@ fn empty_wal_range_puts_wal_start_after_the_manifest() {
     })
     .unwrap();
     let (new, _) = c
-        .compact_into(SimFile::new(), &[range(seg)], |_| b"m2".to_vec(), NONE)
+        .compact_into(SimFile::new(), &[range(seg)], |_| Ok(b"m2".to_vec()), NONE)
         .unwrap();
     let sb = *new.superblock();
     assert_eq!(
@@ -316,7 +318,7 @@ fn empty_wal_range_puts_wal_start_after_the_manifest() {
 fn a_new_container_compacts_to_a_committed_one() {
     let mut c = Container::create_on(SimFile::new(), [5; 16]).unwrap();
     let (new, relocation) = c
-        .compact_into(SimFile::new(), &[], |_| b"first".to_vec(), NONE)
+        .compact_into(SimFile::new(), &[], |_| Ok(b"first".to_vec()), NONE)
         .unwrap();
     assert!(relocation.is_empty());
     let sb = *new.superblock();
@@ -350,21 +352,21 @@ fn bad_compaction_requests_change_nothing() {
     ];
     for live in bad_requests {
         let err =
-            b.c.compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
+            b.c.compact_into(SimFile::new(), &live, |_| Ok(Vec::new()), NONE)
                 .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "{live:?}: {err}");
     }
     // Not a frame start: the bytes there do not decode as a frame, which may be either.
     let live = vec![b.live.offset + 8..b.live.end()];
     let err =
-        b.c.compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
+        b.c.compact_into(SimFile::new(), &live, |_| Ok(Vec::new()), NONE)
             .unwrap_err();
     assert!(
         matches!(err, Error::InvalidInput(_)) || err.is_corruption(),
         "{live:?}: {err}"
     );
     let err =
-        b.c.compact_into(SimFile::from_bytes(vec![0]), &[], |_| Vec::new(), NONE)
+        b.c.compact_into(SimFile::from_bytes(vec![0]), &[], |_| Ok(Vec::new()), NONE)
             .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert_eq!(b.c.file().bytes(), old_bytes);
@@ -381,7 +383,7 @@ fn a_corrupt_live_frame_stops_compaction() {
     bytes[b.live.offset as usize + 40] ^= 1; // below wal_start: recovery does not read it
     let mut c = Container::open_on(SimFile::from_bytes(bytes), Mode::ReadWrite).unwrap();
     let err = c
-        .compact_into(SimFile::new(), &[range(b.live)], |_| Vec::new(), NONE)
+        .compact_into(SimFile::new(), &[range(b.live)], |_| Ok(Vec::new()), NONE)
         .unwrap_err();
     assert!(err.is_corruption(), "{err}");
 }
@@ -392,7 +394,7 @@ fn read_only_and_poisoned_handles_do_not_compact() {
     let mut ro =
         Container::open_on(SimFile::from_bytes(b.c.file().bytes()), Mode::ReadOnly).unwrap();
     let err = ro
-        .compact_into(SimFile::new(), &[], |_| Vec::new(), NONE)
+        .compact_into(SimFile::new(), &[], |_| Ok(Vec::new()), NONE)
         .unwrap_err();
     assert!(matches!(err, Error::ReadOnly { .. }), "{err}");
 
@@ -401,7 +403,7 @@ fn read_only_and_poisoned_handles_do_not_compact() {
     file.set_fault(Some(SimFault::FailAt(file.mutations())));
     assert!(c.append(FrameKind::WalChunk, b"x", NONE).is_err());
     let err = c
-        .compact_into(SimFile::new(), &[], |_| Vec::new(), NONE)
+        .compact_into(SimFile::new(), &[], |_| Ok(Vec::new()), NONE)
         .unwrap_err();
     assert!(matches!(err, Error::Poisoned), "{err}");
 }
@@ -534,7 +536,7 @@ fn failed_compact_leaves_the_old_file_and_no_temporary() {
     let mut c = b.c;
     let before = std::fs::read(&path).unwrap();
     let err = c
-        .compact(&[b.live.offset..b.live.end() - 8], |_| Vec::new(), NONE)
+        .compact(&[b.live.offset..b.live.end() - 8], |_| Ok(Vec::new()), NONE)
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert_eq!(std::fs::read(&path).unwrap(), before);
@@ -563,9 +565,40 @@ fn compact_needs_a_path() {
     let file = SimFile::new();
     let mut c = Container::create_on(file.clone(), [5; 16]).unwrap();
     let before = file.bytes();
-    let err = c.compact(&[], |_| Vec::new(), NONE).unwrap_err();
+    let err = c.compact(&[], |_| Ok(Vec::new()), NONE).unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert_eq!(file.bytes(), before);
+}
+
+/// A writer that cannot build its manifest fails the compaction: nothing is committed or renamed, the temporary
+/// file is removed, and the container is unchanged and still writable.
+#[test]
+fn a_failing_manifest_builder_leaves_the_container() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let b = build(Container::create(&path).unwrap());
+    let mut c = b.c;
+    let before = std::fs::read(&path).unwrap();
+    let err = c
+        .compact(
+            &[range(b.live)],
+            |_| Err(Error::InvalidInput("no manifest".into())),
+            NONE,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(&err, Error::InvalidInput(m) if m == "no manifest"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("app.persia")]);
+    c.append(FrameKind::WalChunk, b"still writable", NONE)
+        .unwrap();
+    c.sync().unwrap();
 }
 
 /// After a compaction, the path names the new file; a writer opening it later gets the new file, never the old
@@ -671,7 +704,7 @@ fn a_failed_pre_sync_poisons_and_writes_no_target() {
     file.set_fault(Some(SimFault::FailAt(file.mutations())));
     let target = SimFile::new();
     let err =
-        b.c.compact_into(target.clone(), &[], |_| Vec::new(), NONE)
+        b.c.compact_into(target.clone(), &[], |_| Ok(Vec::new()), NONE)
             .unwrap_err();
     assert!(matches!(err, Error::Io { .. }), "{err}");
     assert_eq!(target.mutations(), 0);
@@ -872,7 +905,7 @@ fn check_large_compaction(mib: usize) {
         .compact_into(
             target.clone(),
             &live_ranges,
-            |r| manifest_for(r.get(live[0].offset).unwrap().offset),
+            |r| Ok(manifest_for(r.get(live[0].offset).unwrap().offset)),
             NONE,
         )
         .unwrap();
@@ -961,7 +994,7 @@ fn a_corrupt_byte_inside_a_large_live_frame_fails_compaction_cleanly() {
             .compact_into(
                 SimFile::new(),
                 &[range(live[0]), range(live[1])],
-                |_| Vec::new(),
+                |_| Ok(Vec::new()),
                 NONE,
             )
             .unwrap_err();
@@ -1002,7 +1035,7 @@ fn a_live_range_not_matching_a_large_frame_is_invalid_input() {
     ];
     for live in bad {
         let err = c
-            .compact_into(SimFile::new(), &live, |_| Vec::new(), NONE)
+            .compact_into(SimFile::new(), &live, |_| Ok(Vec::new()), NONE)
             .unwrap_err();
         assert!(matches!(err, Error::InvalidInput(_)), "{live:?}: {err:?}");
         assert_eq!(file.file.bytes(), old_bytes);
@@ -1022,7 +1055,7 @@ fn a_failed_write_inside_a_large_frame_copy_leaves_the_source() {
         c.compact_into(
             target.clone(),
             &[range(live[0]), range(live[1])],
-            |_| Vec::new(),
+            |_| Ok(Vec::new()),
             NONE,
         )
         .unwrap();
@@ -1042,7 +1075,7 @@ fn a_failed_write_inside_a_large_frame_copy_leaves_the_source() {
                 .compact_into(
                     target,
                     &[range(live[0]), range(live[1])],
-                    |_| Vec::new(),
+                    |_| Ok(Vec::new()),
                     NONE,
                 )
                 .unwrap_err();

@@ -234,7 +234,7 @@ impl<F: ContainerFile + 'static> Container<F> {
     pub fn compact(
         &mut self,
         live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        manifest: impl FnOnce(&Relocation) -> Result<Vec<u8>>,
         compression: Compression,
     ) -> Result<Relocation> {
         let (vfs, path) = match &self.location {

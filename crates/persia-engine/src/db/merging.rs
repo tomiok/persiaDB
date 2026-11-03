@@ -139,7 +139,7 @@ fn input_ids(plan: &MergePlan) -> Vec<SegmentId> {
     plan.inputs.iter().map(|i| i.id).collect()
 }
 
-impl<F: ContainerFile + Sync> Database<F> {
+impl<F: ContainerFile + Sync + 'static> Database<F> {
     /// Commits the merges that finished, then plans merges for every collection and starts as many as there is room
     /// for (one per merge thread, [`crate::merge::MergeOptions::threads`]); returns what became of the finished ones.
     /// Never waits for a merge, except with no threads, where it runs one merge to the end and commits it. Call it
@@ -161,6 +161,10 @@ impl<F: ContainerFile + Sync> Database<F> {
             while let Some(finished) = self.merges.workers.try_next() {
                 outcomes.push(self.commit_merge(finished)?);
             }
+        }
+        if self.options.compaction.automatic {
+            // Merges are what leaves most frames dead; the inputs a merge in flight holds are kept (SPEC §4.6).
+            self.compact_if_due()?;
         }
         Ok(outcomes)
     }
