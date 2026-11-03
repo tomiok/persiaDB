@@ -26,11 +26,11 @@ until green, add `#[ignore]`, or loosen its assertion (CLAUDE.md "Things Claude 
 
 ## 3. Read the file state
 - `cargo run -p persia-cli -- verify <copy>` gives `seq`, segments, replayed WAL records, uncommitted frames, tail.
-- List the frames, `wal_start` and `log_end`, and find the lost record. `grep -boa "<doc body>" <copy>` finds its
-  bytes. For frame-level detail use `persia inspect container` once it exists (ROADMAP 6.6.10); until then write a
-  throwaway test (`tests/zz_debug.rs`, deleted before committing) that opens
-  the copy with `Container::open(path, Mode::ReadOnly)`, prints the superblock and `frames()`, and decodes each
-  `WalChunk` with `persia_engine::wal::decode_chunk`.
+- List the frames, `wal_start` and `log_end`, and find the lost record:
+  `cargo run -p persia-cli -- inspect container <copy> --id <doc id>` prints the superblock, every frame from
+  `wal_start` (kind, offset, length, `frame_seq`, whether after `log_end`), the `seq` of each Manifest frame, and the
+  WAL records that put or delete that id. `grep -boa "<doc body>" <copy>` finds bytes it does not reach (below
+  `wal_start`).
 - Compare what the open replays (`verify`'s count) with the chunks from `wal_start`. Note anything after `log_end`
   that is not WAL (segments, sidecars, a Manifest of a cut commit), and which child wrote what (frame order).
 - Write the sequence of events as numbered steps (child k cut here, child k+1 did this, the open did that). It must

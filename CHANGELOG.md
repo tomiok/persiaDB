@@ -67,6 +67,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia inspect container <file> [--id <id>]` (ROADMAP 6.6.10): read-only, without the writer lock, prints the
+  active superblock (`seq`, `wal_start`, `log_end`), every frame from `wal_start` (offset, length, `frame_seq`, kind,
+  whether after `log_end`) with the `seq` of each Manifest frame, and with `--id` the WAL records that put or delete
+  that document id.
+- `persia-engine`: `Document::encoded_id` reads a document encoding's id without its schema (SPEC §6.4.2).
 - `persia-engine`: the database compacts its container (ROADMAP 6.5.8, SPEC §4.6). `Database::compact` rewrites
   the file without its dead frames, keeping the obsolete ones a reader still holds; `Database::compact_if_due` and
   every `merge_step` compact when dead bytes reach `CompactionOptions::dead_space_percent` (40) of the file and

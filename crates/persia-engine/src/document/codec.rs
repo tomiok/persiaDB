@@ -212,6 +212,26 @@ fn encode_json(e: &mut Encoder, value: &serde_json::Value) {
 
 pub(super) fn decode(bytes: &[u8], schema: &CollectionSchema) -> Result<Document, DecodeError> {
     let corrupt = |(offset, reason): Failure| DecodeError::Corrupt { offset, reason };
+    let mut d = decode_header(bytes)?;
+    let mut doc = Document::new(decode_id(&mut d).map_err(corrupt)?);
+    doc.blob_ref = decode_blob_ref(&mut d)?;
+    decode_fields(&mut d, schema, &mut doc).map_err(corrupt)?;
+    decode_extra(&mut d, schema, &mut doc).map_err(corrupt)?;
+    if !d.is_at_end() {
+        return Err(corrupt((d.offset(), DocumentCorruption::TrailingBytes)));
+    }
+    Ok(doc)
+}
+
+/// The id of an encoding, read without a schema: the checks of [`decode`] up to the id; the rest is not read.
+pub(super) fn encoded_id(bytes: &[u8]) -> Result<String, DecodeError> {
+    let mut d = decode_header(bytes)?;
+    decode_id(&mut d).map_err(|(offset, reason)| DecodeError::Corrupt { offset, reason })
+}
+
+/// Checks the length, the array and the version (SPEC §6.4.2); returns the decoder at the id.
+fn decode_header(bytes: &[u8]) -> Result<Decoder<'_>, DecodeError> {
+    let corrupt = |(offset, reason): Failure| DecodeError::Corrupt { offset, reason };
     if bytes.len() > MAX_DOCUMENT_LEN {
         return Err(corrupt((
             0,
@@ -250,14 +270,7 @@ pub(super) fn decode(bytes: &[u8], schema: &CollectionSchema) -> Result<Document
             "an array of another length",
         )));
     }
-    let mut doc = Document::new(decode_id(&mut d).map_err(corrupt)?);
-    doc.blob_ref = decode_blob_ref(&mut d)?;
-    decode_fields(&mut d, schema, &mut doc).map_err(corrupt)?;
-    decode_extra(&mut d, schema, &mut doc).map_err(corrupt)?;
-    if !d.is_at_end() {
-        return Err(corrupt((d.offset(), DocumentCorruption::TrailingBytes)));
-    }
-    Ok(doc)
+    Ok(d)
 }
 
 fn unexpected(offset: u64, expected: &'static str, found: &'static str) -> Failure {

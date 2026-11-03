@@ -10,7 +10,9 @@
 //! segment` prints its footer, sections and per-field statistics, and `dump segment` a field's terms or one term's
 //! postings (module `segment`).
 //!
-//! `persia verify` checks a whole database read-only (ROADMAP 6.6.3, module `database`).
+//! `persia inspect container` prints a container's superblock, the frames recovery reads and, by document id, the WAL
+//! records replay applies (ROADMAP 6.6.10, module `container`). `persia verify` checks a whole database read-only
+//! (ROADMAP 6.6.3, module `database`).
 //!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
 //! container or segment that breaks its format), 4 when the file is not a Persia container (its header magic differs,
@@ -20,6 +22,7 @@
 //! run (1).
 #![forbid(unsafe_code)]
 
+mod container;
 mod database;
 mod segment;
 
@@ -94,6 +97,16 @@ enum ContainerCommand {
 
 #[derive(Debug, Subcommand)]
 enum InspectCommand {
+    /// A container file (SPEC §4): the active superblock, every frame from `wal_start` (offset, length, `frame_seq`,
+    /// kind, whether after `log_end`) with the `seq` of each Manifest frame, and with `--id` the WAL records that
+    /// put or delete that document id. Read-only, without the writer lock.
+    Container {
+        /// The container file.
+        path: PathBuf,
+        /// Also list the WAL records of this document id.
+        #[arg(long)]
+        id: Option<String>,
+    },
     /// A segment file (SPEC §5): footer, sections with their sizes, and per-field statistics.
     Segment {
         /// The segment file.
@@ -244,6 +257,9 @@ fn run(cli: Cli) -> Result<()> {
             schema,
             verify,
         }) => to_stdout(|out| segment::inspect(out, &path, &schema, verify))?,
+        Command::Inspect(InspectCommand::Container { path, id }) => {
+            to_stdout(|out| container::inspect(out, &path, id.as_deref()))?;
+        }
         Command::Dump(DumpCommand::Segment {
             path,
             schema,

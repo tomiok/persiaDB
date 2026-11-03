@@ -356,6 +356,9 @@ compaction runs on request, and on its own at each merge step when it is due: de
 frames (`compaction.automatic` turns that off). One that fails before its rename leaves the database usable (unless
 syncing the old file failed, §4.5): it is counted, and does not fail the merge step, whose merges are committed. A
 container opened without a path (on a bare file) cannot be renamed over, and is not compacted.
+A compaction is not a WAL write-out (§8.2 "Writing"): its commit holds the snapshot already committed, so it copies
+only the frames in the file, and the in-memory WAL chunk stays buffered, to be written after the new `log_end`. A
+`Buffered` record stays as durable as it was; a frame written and not yet synced (`Async`) is synced with the new file.
 
 **Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
 from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
@@ -1508,8 +1511,8 @@ next to the buffered ones closes the chunk first. Durability is chosen per call 
 - `Fsync`: the chunk is written and synced before the call returns. One sync covers every record written since the
   last one, `Buffered` and `Async` ones included, and a batch of records (`put_batch`) takes one sync; chunks may
   still rotate inside it, so a crash may keep a prefix of a batch.
-A commit writes and syncs the in-memory chunk before its Manifest (§4.5 step 1), and only then takes its
-`wal_start`, so no record written before the commit lands after it. A failed write or sync stops the
+A commit (every one but a compaction's, §4.6) writes and syncs the in-memory chunk before its Manifest (§4.5 step 1),
+and only then takes its `wal_start`, so no record written before the commit lands after it. A failed write or sync stops the
 writer, like the container it writes to (§4.5): the records it held are lost or not, and only a reopen tells.
 
 **What may be logged.** Replay must be able to apply every record, or every later open fails. A record is
@@ -1669,7 +1672,9 @@ bytes waiting for their commit are bounded too (backpressure); plans that find n
 `merge_threads` 0 a merge runs on the writer's thread, one per step. The embedding drives the writer: a merge step
 commits the jobs that finished, then plans and submits; finishing waits for every merge until the policy plans none;
 cancelling stops every job in flight at its next field or stage and commits nothing; closing the database cancels
-and joins its workers. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
+and joins its workers. Tests may hold finished jobs (a hidden `hold_merges` hook, ROADMAP 6.5.14): a step then
+commits none, and each waits for an explicit release, a finish, a cancel or the close, so which writes a merge in flight spans
+depends on the calls alone, not on a worker's speed. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
 inputs and adds the merged segment (none for a drop plan), following the commit protocol (§4.5); `wal_start` stays
 where the WAL puts it. Commits may delete from the inputs while a merge runs (ROADMAP 6.5.9): the merge then
 **catches up**. The merge kept, with its result, the merged docid of each input document it copied; the documents
@@ -1760,6 +1765,13 @@ with status 3 when it fails on corruption, status 4 when the file is not a Persi
 the file is too short to hold the magic; §4.2 still calls that corruption), and 1 on any other failure (ROADMAP 6.6.7),
 so a script separates a wrong file, a damaged database, and any other failed run. It
 analyzes replayed records with the built-in analyzers, the only ones a schema can name (§6.2.2).
+
+**Inspection** (ROADMAP 6.6.10, `persia inspect container`) is a read-only container open (§4.4) that prints what
+recovery reads: the active slot's superblock, every frame from `wal_start` (offset, length, `frame_seq`, kind, and
+whether it lies after `log_end`), the `seq` each Manifest frame holds, and, for a document id, the WAL records that
+put or delete it (a put names its document by the id of its encoding, read without the schema, §6.4.2). A frame whose
+payload does not decode is reported on its row; inspection is a debugging aid and does not fail on it, `persia verify`
+does.
 
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's

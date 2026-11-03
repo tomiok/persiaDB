@@ -14,10 +14,13 @@
 //!    buffered write too.
 //! 3. A merge whose input gained deletions meanwhile commits with them deleted from the merged segment, and a crash at
 //!    any write of that commit keeps them deleted (ROADMAP 6.5.9).
-//! 4. Random interleavings of writes, commits, merge steps, cancels, finishes and reopens (inline and threaded)
-//!    always read the documents of a `BTreeMap` model, also after a reopen that loses every unsynced write; a
-//!    committed merge never revives a deleted id; segment ids in the manifest stay unique; merges in flight never
-//!    exceed the merge threads.
+//! 4. Random interleavings of writes, commits, merge steps, releases, cancels, finishes and reopens (inline and
+//!    threaded) always read the documents of a `BTreeMap` model, also after a reopen that loses every unsynced write;
+//!    a committed merge never revives a deleted id; segment ids in the manifest stay unique; merges in flight never
+//!    exceed the merge threads. Finished merges are held until an op commits them (`Database::hold_merges`), so the
+//!    schedules explored do not depend on how fast a worker runs (ROADMAP 6.5.14).
+//! 5. The same on a path (`SimFs`), with compactions interleaved: a compaction leaves merges in flight alone, keeps
+//!    every acknowledged document, and is not a sync point (ROADMAP 6.5.12).
 
 #![allow(
     clippy::unwrap_used,
@@ -33,10 +36,11 @@ use std::path::Path;
 use std::sync::Arc;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome, SegmentIds, Snapshot,
+    CompactionOptions, Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome,
+    SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::manifest::{Manifest, SegmentEntry};
+use persia_engine::manifest::{Location, Manifest, SegmentEntry};
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
@@ -45,7 +49,7 @@ use persia_format::frame::FrameKind;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, ContainerFile, Error as ContainerError, Mode, Repair};
 use persia_storage::vfs::Vfs;
-use persia_storage::vfs::sim::SimFs;
+use persia_storage::vfs::sim::{SimFs, SimFsFile};
 use proptest::prelude::*;
 use proptest::test_runner::RngSeed;
 
@@ -615,8 +619,12 @@ enum Op {
     Delete(usize, u8, bool),
     Commit,
     MergeStep,
+    /// Commits the next merge in flight, waiting for it (merges are held, ROADMAP 6.5.14).
+    Release,
     Cancel,
     Finish,
+    /// Compacts the container (SPEC §4.6): on a path, while merges are in flight too; else an error.
+    Compact,
     /// Drops the database and reopens it after a crash that loses every unsynced write.
     Reopen,
 }
@@ -629,10 +637,114 @@ fn arb_op() -> impl Strategy<Value = Op> {
         4 => (c, 0..8_u8, any::<bool>()).prop_map(|(c, id, f)| Op::Delete(c, id, f)),
         4 => Just(Op::Commit),
         5 => Just(Op::MergeStep),
+        3 => Just(Op::Release),
         1 => Just(Op::Cancel),
         1 => Just(Op::Finish),
+        2 => Just(Op::Compact),
         1 => Just(Op::Reopen),
     ]
+}
+
+/// How merges run. Finished merges are held until a `Release` (or a finish, a cancel, a reopen), so which writes a
+/// merge in flight spans depends on the ops alone, not on how fast its worker is (ROADMAP 6.5.14).
+/// A threaded merge committed by a step as soon as its worker is done (unheld) is timing-dependent, so it is left to
+/// the deterministic tests (`a_merge_held_then_unheld_commits_at_the_next_step`, `database_merge.rs`).
+#[derive(Debug, Clone, Copy)]
+enum Schedule {
+    /// No threads: each merge runs inside the step that starts it and commits there.
+    Inline,
+    /// No threads, held: the step runs the merge, a later op commits it.
+    InlineHeld,
+    /// One worker thread, held.
+    ThreadedHeld,
+}
+
+impl Schedule {
+    fn threads(self) -> usize {
+        match self {
+            Self::Inline | Self::InlineHeld => 0,
+            Self::ThreadedHeld => 1,
+        }
+    }
+
+    fn held(self) -> bool {
+        !matches!(self, Self::Inline)
+    }
+}
+
+fn arb_schedule() -> impl Strategy<Value = Schedule> {
+    prop_oneof![
+        Just(Schedule::Inline),
+        Just(Schedule::InlineHeld),
+        Just(Schedule::ThreadedHeld),
+    ]
+}
+
+/// Where the container lives: a `SimFile` (no path, so no compaction), or a path on a `SimFs` (ROADMAP 6.5.12).
+trait Store: Sized {
+    type File: ContainerFile + Sync + 'static;
+    /// Whether [`Database::compact`] can rewrite the container.
+    const COMPACTS: bool;
+    fn create(options: DatabaseOptions) -> (Self, Database<Self::File>);
+    /// The database a restart opens after a crash that loses every unsynced write.
+    fn crash_and_open(&mut self, options: DatabaseOptions) -> Database<Self::File>;
+}
+
+struct OnFile(SimFile);
+
+impl Store for OnFile {
+    type File = SimFile;
+    const COMPACTS: bool = false;
+
+    fn create(options: DatabaseOptions) -> (Self, Database<SimFile>) {
+        let file = SimFile::new();
+        let db = Database::create_on(file.clone(), [11; 16], options).unwrap();
+        (Self(file), db)
+    }
+
+    fn crash_and_open(&mut self, options: DatabaseOptions) -> Database<SimFile> {
+        self.0 = self.0.crash(CrashLoss::All);
+        Database::open_on(self.0.clone(), options).unwrap()
+    }
+}
+
+struct OnPath(SimFs);
+
+/// On a path, `merge_step` also compacts on its own once 40% of the file is dead, with no floor: so a compaction may
+/// run right after the merges a step committed, before the ones it starts (SPEC §4.6).
+fn compacting(options: DatabaseOptions) -> DatabaseOptions {
+    DatabaseOptions {
+        compaction: CompactionOptions {
+            automatic: true,
+            dead_space_percent: 40,
+            min_dead_bytes: 0,
+        },
+        ..options
+    }
+}
+
+const MODEL_PATH: &str = "/model.persia";
+
+impl Store for OnPath {
+    type File = SimFsFile;
+    const COMPACTS: bool = true;
+
+    fn create(options: DatabaseOptions) -> (Self, Database<SimFsFile>) {
+        let options = compacting(options);
+        let fs = SimFs::new();
+        let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
+        let container = Container::create_in(vfs, MODEL_PATH).unwrap();
+        let db = Database::create_container(container, options).unwrap();
+        (Self(fs), db)
+    }
+
+    fn crash_and_open(&mut self, options: DatabaseOptions) -> Database<SimFsFile> {
+        let options = compacting(options);
+        self.0 = self.0.crash(CrashLoss::All);
+        let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(self.0.clone());
+        let container = Container::open_in(vfs, MODEL_PATH, Mode::ReadWrite).unwrap();
+        Database::open_container(container, options).unwrap()
+    }
 }
 
 /// The model: what the database shows (`acked`), and what survives losing every unsynced write (`durable`). A sync
@@ -685,10 +797,18 @@ fn check_outcome(
     }
 }
 
-fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
-    let mut file = SimFile::new();
+/// Opens with `schedule`'s threads and its hold.
+fn held<S: Store>(store: &mut S, schedule: Schedule, opens: u64) -> Database<S::File> {
+    let mut db = store.crash_and_open(options(schedule.threads(), opens));
+    db.hold_merges(schedule.held());
+    db
+}
+
+fn run_case<S: Store>(schedule: Schedule, ops: &[Op]) -> Result<(), TestCaseError> {
+    let threads = schedule.threads();
     let mut opens = 10_u64;
-    let mut db = Database::create_on(file.clone(), [11; 16], options(threads, opens)).unwrap();
+    let (mut store, mut db) = S::create(options(threads, opens));
+    db.hold_merges(schedule.held());
     for c in COLLECTIONS {
         db.create_collection(schema(c)).unwrap();
     }
@@ -698,7 +818,7 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
     };
     let mut last_seq = db.seq();
     for (step, op) in ops.iter().enumerate() {
-        let ctx = format!("step {step} {op:?}, threads {threads}");
+        let ctx = format!("step {step} {op:?}, {schedule:?}");
         match *op {
             Op::Put(c, id, w, fsync) => {
                 let (name, id) = (COLLECTIONS[c], format!("d{id}"));
@@ -735,12 +855,21 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
                     model.synced();
                 }
             }
-            Op::MergeStep | Op::Finish => {
-                let outcomes = if matches!(op, Op::Finish) {
-                    db.finish_merges().unwrap()
-                } else {
-                    db.merge_step().unwrap()
+            Op::MergeStep | Op::Finish | Op::Release => {
+                let in_flight = db.merges_running();
+                let outcomes = match op {
+                    Op::Finish => db.finish_merges().unwrap(),
+                    Op::Release => db.release_merge().unwrap().into_iter().collect(),
+                    _ => db.merge_step().unwrap(),
                 };
+                if schedule.held() && matches!(op, Op::MergeStep) {
+                    // Held: a step starts merges and commits none.
+                    prop_assert!(outcomes.is_empty(), "{}: {:?}", ctx, outcomes);
+                }
+                if matches!(op, Op::Release) {
+                    prop_assert_eq!(outcomes.len(), usize::from(in_flight > 0), "{}", ctx);
+                    prop_assert_eq!(db.merges_running(), in_flight.saturating_sub(1), "{}", ctx);
+                }
                 let mut any = false;
                 for o in &outcomes {
                     any |= check_outcome(o, db.manifest(), &mut last_seq)?;
@@ -752,6 +881,7 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
                     prop_assert_eq!(db.merges_running(), 0, "{}", ctx);
                     // Finished: the policy plans nothing more.
                     prop_assert!(db.merge_step().unwrap().is_empty(), "{}", ctx);
+                    // Held, that step may have started nothing either: nothing was left to plan.
                     prop_assert_eq!(db.merges_running(), 0, "{}", ctx);
                 }
             }
@@ -768,11 +898,63 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
                 prop_assert_eq!(db.merges_running(), 0, "{}", ctx);
                 prop_assert_eq!(db.seq(), seq, "{}", ctx);
             }
+            Op::Compact => {
+                let (seq, in_flight) = (db.seq(), db.merges_running());
+                if S::COMPACTS {
+                    let pinned = |db: &Database<S::File>| -> Vec<_> {
+                        db.obsolete()
+                            .filter(|(_, held)| *held)
+                            .map(|(o, _)| (o.collection.clone(), o.kind, o.obsolete_since))
+                            .collect()
+                    };
+                    let before = pinned(&db);
+                    let done = db.compact().unwrap();
+                    prop_assert_eq!(
+                        pinned(&db),
+                        before,
+                        "{}: a pinned obsolete object was reclaimed",
+                        ctx
+                    );
+                    prop_assert_eq!(done.seq, seq + 1, "{}", ctx);
+                    prop_assert_eq!(done.after.dead(), 0, "{}", ctx);
+                    last_seq = done.seq;
+                    // What a reader or a merge in flight still holds was moved, not reclaimed: each obsolete
+                    // object it pins is still a whole frame of its kind at its new location (SPEC §4.6, §8.5).
+                    for (o, _) in db.obsolete().filter(|(_, held)| *held) {
+                        let Location::Frame { offset, len } = o.location else {
+                            continue;
+                        };
+                        let read = db.container().read_frame(offset, usize::MAX);
+                        prop_assert!(
+                            read.as_ref().is_ok_and(|r| r.frame.len == len),
+                            "{}: {:?} at {}: {:?}",
+                            ctx,
+                            o,
+                            offset,
+                            read.map(|r| r.frame)
+                        );
+                    }
+                    // Not a sync point (SPEC §4.6): it copies the frames in the file, and a `Buffered` record stays
+                    // in the WAL's in-memory chunk until the next write-out (SPEC §8.2), which a crash loses.
+                    // Every frame in the file is synced here (ops are `Buffered` or `Fsync`, far below a chunk's
+                    // rotation), so copying them makes nothing more durable; an `Async` op would change that.
+                } else {
+                    let result = db.compact();
+                    prop_assert!(
+                        matches!(result, Err(DatabaseError::Container(_))),
+                        "{}: {:?}",
+                        ctx,
+                        result
+                    );
+                    prop_assert_eq!(db.seq(), seq, "{}", ctx);
+                }
+                // A compaction leaves the merges in flight alone; they commit afterwards.
+                prop_assert_eq!(db.merges_running(), in_flight, "{}", ctx);
+            }
             Op::Reopen => {
                 drop(db);
-                file = file.crash(CrashLoss::All);
                 opens += 1;
-                db = Database::open_on(file.clone(), options(threads, opens)).unwrap();
+                db = held(&mut store, schedule, opens);
                 model.acked = model.durable.clone();
                 last_seq = db.seq();
             }
@@ -791,7 +973,7 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
     }
     prop_assert_eq!(&observed(&db.snapshot()), &model.acked);
     drop(db);
-    let db = Database::open_on(file.crash(CrashLoss::All), options(threads, opens + 1)).unwrap();
+    let db = held(&mut store, schedule, opens + 1);
     assert_unique_ids(db.manifest(), "final reopen");
     prop_assert_eq!(&observed(&db.snapshot()), &model.durable);
     Ok(())
@@ -800,14 +982,161 @@ fn run_case(threads: usize, ops: &[Op]) -> Result<(), TestCaseError> {
 proptest! {
     #![proptest_config(config())]
 
-    /// Invariant 4. Threaded runs depend on when the worker finishes, but every timing must satisfy the model.
+    /// Invariant 4. Merges are held until an op commits them, so every schedule is the same on every machine.
     #[test]
     fn merge_interleavings_match_the_model(
-        threads in 0..=1_usize,
-        ops in prop::collection::vec(arb_op(), 1..64),
+        schedule in arb_schedule(),
+        ops in prop::collection::vec(arb_op(), 1..200),
     ) {
-        run_case(threads, &ops)?;
+        run_case::<OnFile>(schedule, &ops)?;
     }
+
+    /// Invariant 5. The same on a path, where compactions interleave with the rest (ROADMAP 6.5.12).
+    #[test]
+    fn merge_and_compaction_interleavings_match_the_model(
+        schedule in arb_schedule(),
+        ops in prop::collection::vec(arb_op(), 1..200),
+    ) {
+        run_case::<OnPath>(schedule, &ops)?;
+    }
+}
+
+/// The cases proptest once shrank to (their seeds stopped replaying them when the strategy changed), spelled out.
+/// The third is the threaded upsert during a merge behind ROADMAP 6.5.13, now held so it is the same everywhere; the
+/// last a model bug found while writing 6.5.12 (it took a compaction for a sync point).
+#[test]
+fn shrunk_interleavings_still_match_the_model() {
+    use Op::{Commit, Compact, MergeStep, Put, Release};
+    let cases: [(Schedule, Vec<Op>); 4] = [
+        (
+            Schedule::Inline,
+            vec![
+                Put(1, 0, 0, false),
+                Commit,
+                Put(1, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+            ],
+        ),
+        (
+            Schedule::Inline,
+            vec![
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                MergeStep,
+                MergeStep,
+            ],
+        ),
+        (
+            Schedule::ThreadedHeld,
+            vec![
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 2, 0, false),
+                Commit,
+                MergeStep,
+                Put(0, 2, 0, false),
+                Commit,
+                Release,
+            ],
+        ),
+        (
+            Schedule::InlineHeld,
+            vec![
+                Put(0, 5, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 5, 0, false),
+                MergeStep,
+                Commit,
+                Compact,
+            ],
+        ),
+    ];
+    for (schedule, ops) in &cases {
+        run_case::<OnFile>(*schedule, ops).unwrap();
+        run_case::<OnPath>(*schedule, ops).unwrap();
+    }
+}
+
+/// Unholding hands a held merge back to the step: the next `merge_step` commits it, as an unheld database does.
+#[test]
+fn a_merge_held_then_unheld_commits_at_the_next_step() {
+    for threads in [0, 1] {
+        let (_store, mut db) = OnFile::create(options(threads, 10));
+        db.hold_merges(true);
+        db.create_collection(schema("a")).unwrap();
+        for id in ["d0", "d1"] {
+            db.put("a", &doc(id, "alpha"), Durability::Fsync).unwrap();
+            db.commit().unwrap();
+        }
+        assert!(db.merge_step().unwrap().is_empty(), "threads {threads}");
+        assert_eq!(db.merges_running(), 1);
+        db.hold_merges(false);
+        // Threaded, the worker may not be done at the first step.
+        let mut outcomes = db.merge_step().unwrap();
+        while outcomes.is_empty() && db.merges_running() > 0 {
+            outcomes = db.merge_step().unwrap();
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(outcomes.as_slice(), [MergeOutcome::Committed { .. }]),
+            "threads {threads}: {outcomes:?}"
+        );
+        assert_eq!(db.merges_running(), 0);
+    }
+}
+
+/// Invariants 4 and 5, one schedule spelled out: a threaded merge held across an upsert of one of its documents and a
+/// compaction commits after both, catching up with the upsert's delete (ROADMAP 6.5.9), and the id reads the new
+/// copy, also after a crash (ROADMAP 6.5.13). Held, this schedule is the same on every machine (ROADMAP 6.5.14).
+#[test]
+fn a_held_threaded_merge_spans_an_upsert_and_a_compaction() {
+    let (mut store, mut db) = OnPath::create(options(1, 10));
+    db.hold_merges(true);
+    db.create_collection(schema("a")).unwrap();
+    db.create_collection(schema("b")).unwrap();
+    for pair in [
+        [("d0", "alpha"), ("d1", "beta")],
+        [("d2", "delta"), ("d3", "alpha")],
+    ] {
+        for (id, text) in pair {
+            db.put("a", &doc(id, text), Durability::Fsync).unwrap();
+        }
+        db.commit().unwrap();
+    }
+    assert!(db.merge_step().unwrap().is_empty(), "held");
+    assert_eq!(db.merges_running(), 1);
+    db.put("a", &doc("d0", "gamma"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.compact().unwrap();
+    // Held: the worker finished long ago, or not; either way the step commits nothing.
+    assert!(db.merge_step().unwrap().is_empty());
+    assert_eq!(db.merges_running(), 1);
+    let outcome = db.release_merge().unwrap();
+    let Some(MergeOutcome::Committed { reapplied, .. }) = outcome else {
+        panic!("the held merge did not commit: {outcome:?}");
+    };
+    assert_eq!(reapplied, 1, "the upsert deleted d0 from an input");
+    assert!(
+        db.release_merge().unwrap().is_none(),
+        "nothing left in flight"
+    );
+    let mut want = empty_docs();
+    want.get_mut("a").unwrap().extend([
+        ("d0".to_owned(), "gamma".to_owned()),
+        ("d1".to_owned(), "beta".to_owned()),
+        ("d2".to_owned(), "delta".to_owned()),
+        ("d3".to_owned(), "alpha".to_owned()),
+    ]);
+    assert_eq!(observed(&db.snapshot()), want);
+    drop(db);
+    let db = store.crash_and_open(options(1, 11));
+    assert_eq!(observed(&db.snapshot()), want, "reopened");
 }
 
 /// Whether `file` holds a valid Manifest frame after the committed `log_end` (a cut commit's, ROADMAP 6.6.9); `None`
