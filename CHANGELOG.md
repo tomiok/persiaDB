@@ -53,7 +53,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed
   (`CollectionSnapshot::get`, `lookup`, and a read-only open beside the writer): the merge, catching up with the
   upsert (ROADMAP 6.5.9), keeps the old copy deleted in the merged segment, which goes last, and the lookup stopped
-  at the newest segment holding the id. It now passes deleted copies (ROADMAP 6.5.13, SPEC §8.5). The data was never
+  at the newest segment holding the id. It now passes deleted copies (ROADMAP 6.5.13, SPEC §8.3). The data was never
   lost: searches saw the document, and the fixed build reads it.
 - `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
   documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
