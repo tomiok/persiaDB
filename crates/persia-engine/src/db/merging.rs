@@ -117,6 +117,8 @@ pub(super) struct Merges {
     failed: HashSet<SegmentId>,
     pub obsolete: Obsolete,
     stats: MergeStats,
+    /// Whether finished merges wait for [`Database::release_merge`] (tests, ROADMAP 6.5.14).
+    held: bool,
 }
 
 impl Merges {
@@ -127,6 +129,7 @@ impl Merges {
             failed: HashSet::new(),
             obsolete: Obsolete::default(),
             stats: MergeStats::default(),
+            held: false,
         }
     }
 
@@ -167,11 +170,11 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     pub fn merge_step(&mut self) -> Result<Vec<MergeOutcome>, DatabaseError> {
         self.usable()?;
         let mut outcomes = Vec::new();
-        while let Some(finished) = self.merges.workers.try_next() {
+        while let Some(finished) = self.next_released() {
             outcomes.push(self.commit_merge(finished)?);
         }
         self.start_merges()?;
-        if self.options.merge.threads == 0 {
+        if self.options.merge.threads == 0 && !self.merges.held {
             // The merge just ran inline. A worker's result waits for the next step, so a step never commits a
             // merge it started.
             while let Some(finished) = self.merges.workers.try_next() {
@@ -225,6 +228,38 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             outcomes.push(outcome);
         }
         outcomes
+    }
+
+    /// Test hook (ROADMAP 6.5.14): while `hold` is set, [`Database::merge_step`] commits no finished merge, inline
+    /// ones included; each waits, in flight, for [`Database::release_merge`], [`Database::finish_merges`] or
+    /// [`Database::cancel_merges`]. Whether a merge is in flight across a write then depends on the calls made, not
+    /// on how fast a worker runs, so a randomized test explores the same schedules on every machine.
+    #[doc(hidden)]
+    pub fn hold_merges(&mut self, hold: bool) {
+        self.merges.held = hold;
+    }
+
+    /// Test hook (ROADMAP 6.5.14): waits for the next merge in flight to finish and commits it, as
+    /// [`Database::merge_step`] would have; `None` when none is in flight. Nothing else is planned or started.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Poisoned`]; a failed merge commit, which poisons the database.
+    #[doc(hidden)]
+    pub fn release_merge(&mut self) -> Result<Option<MergeOutcome>, DatabaseError> {
+        self.usable()?;
+        match self.merges.workers.next() {
+            Some(finished) => self.commit_merge(finished).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// A finished merge to commit now: none while merges are held ([`Database::hold_merges`]).
+    fn next_released(&mut self) -> Option<Finished> {
+        if self.merges.held {
+            None
+        } else {
+            self.merges.workers.try_next()
+        }
     }
 
     /// Merges submitted and not yet committed or discarded: running, or finished and waiting for the next step.

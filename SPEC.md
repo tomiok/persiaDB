@@ -1669,7 +1669,9 @@ bytes waiting for their commit are bounded too (backpressure); plans that find n
 `merge_threads` 0 a merge runs on the writer's thread, one per step. The embedding drives the writer: a merge step
 commits the jobs that finished, then plans and submits; finishing waits for every merge until the policy plans none;
 cancelling stops every job in flight at its next field or stage and commits nothing; closing the database cancels
-and joins its workers. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
+and joins its workers. Tests may hold finished jobs (a hidden `hold_merges` hook, ROADMAP 6.5.14): a step then
+commits none, and each waits for an explicit release, a finish or a cancel, so which writes a merge in flight spans
+depends on the calls alone, not on a worker's speed. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
 inputs and adds the merged segment (none for a drop plan), following the commit protocol (§4.5); `wal_start` stays
 where the WAL puts it. Commits may delete from the inputs while a merge runs (ROADMAP 6.5.9): the merge then
 **catches up**. The merge kept, with its result, the merged docid of each input document it copied; the documents
