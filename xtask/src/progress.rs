@@ -1252,7 +1252,10 @@ Deps: M0.
             Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(held);
-        other.try_lock().unwrap();
+        // Blocking, as a second run takes it: a process another test spawns in parallel shares the locked file for a
+        // moment (between its fork and its exec, which closes the descriptor), so a `try_lock` right after the drop
+        // can still see it held.
+        other.lock().unwrap();
         let staged = staging(&dir.join("PROGRESS.md"));
         assert!(
             staged
