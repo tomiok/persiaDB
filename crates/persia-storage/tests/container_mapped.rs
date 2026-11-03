@@ -233,7 +233,11 @@ fn an_in_place_compaction_maps_the_new_file() {
     let old_range = old.mapped_range();
 
     let relocation = w
-        .compact(&[seg.offset..seg.end()], |_| b"manifest 3".to_vec(), NONE)
+        .compact(
+            &[seg.offset..seg.end()],
+            |_| Ok(b"manifest 3".to_vec()),
+            NONE,
+        )
         .unwrap();
     let new_seg = relocation.get(seg.offset).unwrap();
     let new_wal = relocation.get(wal.offset).unwrap();
@@ -394,7 +398,7 @@ fn a_compaction_that_fails_keeps_the_window() {
     let range = w.mapped_range();
     // Not a frame below `wal_start`: refused before anything is written.
     let err = w
-        .compact(&[F + 1..F + 2], |_| b"manifest 2".to_vec(), NONE)
+        .compact(&[F + 1..F + 2], |_| Ok(b"manifest 2".to_vec()), NONE)
         .unwrap_err();
     assert!(matches!(err, Error::InvalidInput(_)), "{err}");
     assert_eq!(w.mapped_range(), range);

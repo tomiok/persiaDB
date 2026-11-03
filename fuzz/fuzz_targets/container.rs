@@ -222,7 +222,7 @@ fuzz_target!(|input: &[u8]| {
                 let tail = c.uncommitted_frames().len();
                 assert_eq!(tail, 1);
                 let (new, relocation) = c
-                    .compact_into(target.clone(), &live, |_| b"compacted".to_vec(), NONE)
+                    .compact_into(target.clone(), &live, |_| Ok(b"compacted".to_vec()), NONE)
                     .unwrap();
                 assert_eq!(
                     rw_file.bytes(),

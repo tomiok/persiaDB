@@ -1008,7 +1008,7 @@ fn the_header_page_is_never_written_in_place() {
     assert_eq!(file.bytes()[..4096], bytes[..4096]);
     // A rewrite keeps the newer minor: it never decreases (ADR-0008).
     let (new, _) = c
-        .compact_into(SimFile::new(), &[], |_| b"m".to_vec(), NONE)
+        .compact_into(SimFile::new(), &[], |_| Ok(b"m".to_vec()), NONE)
         .unwrap();
     assert_eq!(new.header().format_minor, FORMAT_MINOR + 1);
 }

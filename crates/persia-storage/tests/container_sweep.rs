@@ -62,7 +62,7 @@ fn with_stale_files() -> SimFs {
             let mut c = Container::open_in(vfs(&copy), DB, Mode::ReadWrite).unwrap();
             copy.set_fault(Some(SimFault::FailAt(copy.mutations() + k)));
             let failed = c
-                .compact(&[], |_| b"c".to_vec(), Compression::None)
+                .compact(&[], |_| Ok(b"c".to_vec()), Compression::None)
                 .is_err();
             drop(c);
             let after = copy.crash(CrashLoss::Nothing);

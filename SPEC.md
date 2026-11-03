@@ -343,9 +343,19 @@ not interpret payloads, so the writer (the engine, from its manifest) names the 
 every frame from `wal_start` on is kept, since the WAL range and the frames after `log_end` (acknowledged WAL
 frames, §8.2) are needed by recovery.
 
-**Status (pre-alpha).** The container implements compaction, but the engine does not call it yet (ROADMAP 6.5.8).
-Until it does, a database file only grows: every replaced segment, superseded tombstone sidecar, old Manifest and
-consumed WAL chunk stays in the file, and nothing reclaims it, however many documents are deleted or merged away.
+**Driven by the writer** (ROADMAP 6.5.8). The engine names the live frames below `wal_start`: the segment and
+sidecar frames its manifest lists, and the obsolete ones a snapshot, job or reader still holds (§8.5); the rest are
+reclaimed, and the obsolete objects among them are no longer tracked. It builds the new Manifest from where the
+frames moved (§8.7.2 "Relocation"), with the new `wal_start` the container decided (step 3) and passes to it, so
+the Manifest and the slot cannot disagree. If the writer cannot build that Manifest, the compaction fails before
+anything is committed. Once the new file is in place, everything the writer holds that names an offset
+follows it: the manifest, the positions of the WAL chunks that hold `wal_start` back, and the obsolete objects. Open
+segments hold their bytes (read, or mapped from the old file, §4.7), so snapshots and merges in flight read on. A
+compaction runs on request, and on its own at each merge step when it is due: dead bytes reach the dead-space ratio
+**and** a floor (`compaction.min_dead_bytes`, default 1 MiB), so a small file is not rewritten for a few dead
+frames (`compaction.automatic` turns that off). One that fails before its rename leaves the database usable (unless
+syncing the old file failed, §4.5): it is counted, and does not fail the merge step, whose merges are committed. A
+container opened without a path (on a bare file) cannot be renamed over, and is not compacted.
 
 **Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
 from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
@@ -360,8 +370,9 @@ live; they are few and small.
    does not grow with the size of a frame, compressed or not (ROADMAP 2.4.17).
 2. A new Manifest frame, which the writer builds from where the frames moved (the offsets it references change).
 3. Both slots hold the same commit: `seq` one above the old one, `log_end` the end of the new Manifest, `wal_start`
-   the new offset of the old `wal_start` frame (the end of the Manifest if the old WAL range was empty), the old
-   `fence_token`, and `next_frame_seq` one above the Manifest's.
+   the new offset of the old `wal_start` frame (the new Manifest frame itself if the old WAL range was empty, as after
+   any commit, §4.5), the old `fence_token`, and `next_frame_seq` one above the Manifest's. It is decided before
+   step 2, which must record it.
 4. The old frames after `log_end`, copied the same way after the new `log_end`, so they stay uncommitted.
 5. The header is the old one with `format_minor = max(old, own)` (§4.2).
 
@@ -1652,12 +1663,16 @@ bytes waiting for their commit are bounded too (backpressure); plans that find n
 commits the jobs that finished, then plans and submits; finishing waits for every merge until the policy plans none;
 cancelling stops every job in flight at its next field or stage and commits nothing; closing the database cancels
 and joins its workers. A **merge commit** appends the merged segment's frame and a manifest whose diff removes the
-inputs at the sidecar versions the plan read and adds the merged segment (none for a drop plan), following the commit
-protocol (§4.5); `wal_start` stays where the WAL puts it. It is made only if every input is still live at that
-version and the schema is unchanged, which the writer checks before writing anything: otherwise (a commit deleted
-from an input meanwhile) the result is discarded, counted (`merge_stats`), and the segments are planned again. Until
-ROADMAP 6.5.9 re-applies such deletions to the result, a workload that deletes from the inputs of every merge in
-flight keeps every merge from committing, and the segment count grows while it lasts. A merge that fails, the
+inputs and adds the merged segment (none for a drop plan), following the commit protocol (§4.5); `wal_start` stays
+where the WAL puts it. Commits may delete from the inputs while a merge runs (ROADMAP 6.5.9): the merge then
+**catches up**. The merge kept, with its result, the merged docid of each input document it copied; the documents
+deleted from each input since the plan's sidecar version (the current deletions less the ones the plan read, which
+they include, §8.3) are mapped through it, and the merge commit writes them as the merged segment's first sidecar
+(`version = 1`), a `TombstoneSidecar` frame after its `Segment` frame, and removes each input at its *current*
+sidecar version. If they cover every merged document, it adds no segment. So a deleted document never comes back,
+and steady deletes do not keep merges from committing. The writer checks before writing anything that the schema is
+unchanged and every input is still live; otherwise (a flush deleted an input's last documents and removed it, or its
+collection was dropped) the result is discarded, counted (`merge_stats`), and the segments are planned again. A merge that fails, the
 merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
 reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
 **Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, the segments and sidecars of
@@ -1812,7 +1827,8 @@ gives the next manifest, `seq + 1`, and fails unless:
 - removed and updated segments are live in that collection; each id appears once in the diff; an added segment's
   id is in no collection of the base;
 - a removed segment's sidecar version is the one the diff names: a merge drops the documents deleted at that
-  version, so deletions committed since would come back in the merged segment;
+  version, so deletions committed since would come back in the merged segment (a merge that caught up with them
+  names the current version, §8.5);
 - an updated entry keeps `doc_count`, `size` and location; its sidecar is the next version (`version + 1`,
   `deleted` not lower) or the first (`version = 1`) of a segment that had none, never the current one (two deletes
   planned on one manifest would both write the next version); deletions are never removed. The manifest sees only
@@ -2160,10 +2176,12 @@ They are blocked on the embedded API (M10). They do not replace the `persia` cra
 
 Embedded: builder options (`OpenOptions`), sensible defaults, no files.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
-Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `search_threads`,
+Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `compaction.*`
+(§4.6), `search_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`, `query.*` (limits, §7.1.3).
 Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge_threads` 1
-(0 merges on the writer's thread); `merge.*` as in §8.5.
+(0 merges on the writer's thread); `merge.*` as in §8.5; `compaction.dead_space_percent` 40 and
+`compaction.min_dead_bytes` 1 MiB, `compaction.automatic` on (§4.6).
 
 ---
 

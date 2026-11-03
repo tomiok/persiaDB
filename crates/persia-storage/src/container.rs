@@ -677,6 +677,11 @@ impl<F: ContainerFile> Container<F> {
         &self.recovery
     }
 
+    /// Whether a failed write, truncation or sync stopped this handle from writing (SPEC §4.5): reopen to recover.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Whether appends since the last [`Container::sync`] are waiting for it.
     pub fn has_unsynced(&self) -> bool {
         self.dirty
@@ -967,7 +972,8 @@ impl<F: ContainerFile> Container<F> {
     /// Writes the compacted container into `target`, an empty file, and returns it open read-write together with
     /// where every frame moved (SPEC §4.6). `live` names the live frames below `wal_start` (byte ranges, as the
     /// manifest records them); every frame from `wal_start` on is copied too. `manifest` builds the new Manifest
-    /// payload from the [`Relocation`]; it is stored with `compression`.
+    /// payload from the [`Relocation`]; it is stored with `compression`. An error it returns fails the compaction
+    /// before anything is committed in `target` (the writer may find, only then, that it cannot build its manifest).
     ///
     /// Unsynced appends are synced first; a failure there poisons this handle like any failed sync. Otherwise this
     /// container's file is only read, so on error it is unchanged and still writable, and `target` is garbage.
@@ -985,7 +991,7 @@ impl<F: ContainerFile> Container<F> {
         &mut self,
         target: G,
         live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        manifest: impl FnOnce(&Relocation) -> Result<Vec<u8>>,
         compression: Compression,
     ) -> Result<(Container<G>, Relocation)> {
         self.compact_locked_by(target, live, manifest, compression, LockedBy::File)
@@ -996,7 +1002,7 @@ impl<F: ContainerFile> Container<F> {
         &mut self,
         target: G,
         live: &[Range<u64>],
-        manifest: impl FnOnce(&Relocation) -> Vec<u8>,
+        manifest: impl FnOnce(&Relocation) -> Result<Vec<u8>>,
         compression: Compression,
         lock: LockedBy,
     ) -> Result<(Container<G>, Relocation)> {
@@ -1034,15 +1040,18 @@ impl<F: ContainerFile> Container<F> {
         for f in &committed {
             out.copy(self, f.offset, f.len)?;
         }
-        let relocation = Relocation {
-            moved: out.moved.clone(),
-        };
-        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation), compression)?;
+        // Decided before the Manifest is built, which must hold it: where the old `wal_start` frame moved, or, with
+        // an empty WAL range, the new Manifest frame itself, as after any commit (SPEC §4.6 step 3).
         let wal_start = out
             .moved
             .get(wal_first)
             .filter(|_| !committed.is_empty())
-            .map_or(manifest.end(), |(_, new)| new.offset);
+            .map_or(out.end, |(_, new)| new.offset);
+        let relocation = Relocation {
+            moved: out.moved.clone(),
+            wal_start,
+        };
+        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation)?, compression)?;
         let superblock = Superblock {
             seq: old
                 .seq
@@ -1149,7 +1158,7 @@ fn assemble_compacted<G: ContainerFile>(
         file_locked,
         unlock_file: release_writer_lock,
     };
-    (container, Relocation { moved })
+    (container, Relocation { moved, wal_start })
 }
 
 /// Reads `len` bytes at `offset`, which the caller has bounded by the file length.
@@ -1290,12 +1299,18 @@ impl SpaceUsage {
 }
 
 /// Where compaction moved each frame: old frame to new frame, in old-offset order (SPEC §4.6).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
     moved: Vec<(FrameRef, FrameRef)>,
+    wal_start: u64,
 }
 
 impl Relocation {
+    /// The `wal_start` of the compacted container (SPEC §4.6 step 3), which the new Manifest must hold.
+    pub fn wal_start(&self) -> u64 {
+        self.wal_start
+    }
+
     /// The new frame of the old frame at `old_offset`, if it was copied.
     pub fn get(&self, old_offset: u64) -> Option<FrameRef> {
         let i = self

@@ -1090,7 +1090,9 @@ fn a_mapped_reader_process_keeps_its_bytes_across_commits_and_compaction() {
         .collect();
     assert!(!live.is_empty() && live.len() < segments.len());
     let len_before = std::fs::metadata(&path).unwrap().len();
-    let relocation = w.compact(&live, |_| compaction_manifest(0), NONE).unwrap();
+    let relocation = w
+        .compact(&live, |_| Ok(compaction_manifest(0)), NONE)
+        .unwrap();
     assert!(std::fs::metadata(&path).unwrap().len() < len_before);
     old.check("after compaction");
     let mut new_segments = Vec::new();
@@ -1264,7 +1266,7 @@ fn kill_9_writers_never_disturb_a_mapped_reader_process() {
             .unwrap_or_else(|e| panic!("{ctx}: recovery failed: {e}"));
         torn += usize::from(matches!(c.recovery().scan_end, ScanEnd::TornTail { .. }));
         if iter % 3 == 2 {
-            c.compact(&[], |_| compaction_manifest(iter), NONE)
+            c.compact(&[], |_| Ok(compaction_manifest(iter)), NONE)
                 .unwrap_or_else(|e| panic!("{ctx}: compaction failed: {e}"));
             compactions += 1;
         }

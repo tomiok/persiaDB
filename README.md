@@ -30,14 +30,14 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **309 of 515** MVP leaves done (60%), 0 in progress (last snapshot 2026-11-02). Post-MVP work is 0 of 177 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **311 of 516** MVP leaves done (60%), 0 in progress (last snapshot 2026-11-03). Post-MVP work is 0 of 177 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
 
 `persia` does not export `Db` yet (M10). Under it, [`persia-engine`](./crates/persia-engine/src/lib.rs) creates and opens a database file, puts, deletes and commits documents through a WAL, merges segments, and runs a ranked search over a collection snapshot: user text compiled to a query, BM25F scoring, filters, sorts, facets, and pages. Relaxation (M8) is not built, so a search that matches nothing returns no hits. A small CLI inspects and verifies files.
 
-**Known limitation:** a database file only grows. The container can compact itself, but the engine does not call it yet (ROADMAP 6.5.8, [SPEC §4.6](./SPEC.md#46-compaction-of-the-container)), so replaced segments, old manifests, and consumed WAL chunks stay in the file. `Database::space_usage` reports the live and dead bytes.
+**Space:** dead frames (replaced segments, old manifests, consumed WAL chunks) are reclaimed by compacting the container ([SPEC §4.6](./SPEC.md#46-compaction-of-the-container)). Call `Database::compact` to compact now; besides, every `merge_step` compacts when dead bytes reach 40% of the file and at least 1 MiB, unless `CompactionOptions::automatic` is turned off (`DatabaseOptions::compaction`). `Database::space_usage` reports the live and dead bytes.
 
 ## Why Persia DB
 
@@ -247,7 +247,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M3** Schema, documents, collections | ✅ done | 15/15 |
 | **M4** Text analysis | ✅ done | 29/29 |
 | **M5** Segment writer & reader | ✅ done | 48/48 |
-| **M6** Write path, durability, merging | 🔨 in progress | 43/55 |
+| **M6** Write path, durability, merging | 🔨 in progress | 45/56 |
 | **M7** Query engine & ranking | 🔨 in progress | 41/49 |
 | **M8** Zero-results avoidance | ⏳ blocked | 0/29 |
 | **M9** Blob store | ▶️ ready | 0/20 |

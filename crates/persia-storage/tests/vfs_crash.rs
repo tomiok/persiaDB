@@ -261,7 +261,8 @@ fn container_compaction_leaves_the_old_or_the_new_container() {
         db_with_commits,
         |fs| {
             let mut c = Container::open_in(vfs(fs), DB, Mode::ReadWrite)?;
-            c.compact(&[], |_| b"compacted".to_vec(), NONE).map(drop)
+            c.compact(&[], |_| Ok(b"compacted".to_vec()), NONE)
+                .map(drop)
         },
         |crashed, result, ctx| {
             let got = db_state(crashed, ctx);

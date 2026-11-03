@@ -43,6 +43,7 @@
 //! ```
 
 mod clock;
+mod compaction;
 mod exec;
 mod flush;
 mod merging;
@@ -71,6 +72,7 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
+pub use compaction::{Compacted, CompactionOptions, CompactionStats};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
 pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
@@ -301,6 +303,8 @@ pub struct DatabaseOptions {
     pub wal_chunk_target: usize,
     /// How segments are merged in the background (SPEC §8.5).
     pub merge: MergeOptions,
+    /// When the container is compacted on its own (SPEC §4.6).
+    pub compaction: CompactionOptions,
     /// Caps each memtable's docids, so tests reach the limit.
     #[cfg(test)]
     pub(crate) memtable_max_docs: Option<u32>,
@@ -316,6 +320,7 @@ impl Default for DatabaseOptions {
             write_options: WriteOptions::default(),
             wal_chunk_target: DEFAULT_CHUNK_TARGET,
             merge: MergeOptions::default(),
+            compaction: CompactionOptions::default(),
             #[cfg(test)]
             memtable_max_docs: None,
         }
@@ -441,6 +446,8 @@ pub struct Database<F = File> {
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
     /// the records from there on may not be in a memtable yet (ROADMAP 6.6.5).
     replaying: Option<u64>,
+    /// What became of the compactions since the open.
+    compactions: CompactionStats,
 }
 
 impl Database<File> {
@@ -506,6 +513,31 @@ impl<F: ContainerFile + Sync> Database<F> {
         Self::recover(container, options)
     }
 
+    /// [`Database::create_on`] for a container the caller just created, e.g. at a path of its own
+    /// [`Vfs`](persia_storage::vfs::Vfs) ([`Container::create_in`]), which [`Database::compact`] needs.
+    ///
+    /// # Errors
+    /// [`DatabaseError::Container`] with [`container::Error::InvalidInput`] for a container that holds a commit or a
+    /// frame, or with [`container::Error::ReadOnly`] for one opened read-only; a failed first commit.
+    pub fn create_container(
+        container: Container<F>,
+        options: DatabaseOptions,
+    ) -> Result<Self, DatabaseError> {
+        if container.mode() != Mode::ReadWrite {
+            return Err(container::Error::ReadOnly {
+                reason: container::ReadOnlyReason::OpenedReadOnly,
+            }
+            .into());
+        }
+        if container.superblock().seq != 0 || !container.frames().is_empty() {
+            return Err(container::Error::InvalidInput(
+                "a database is created in a new container".into(),
+            )
+            .into());
+        }
+        Self::created(container, options)
+    }
+
     fn created(container: Container<F>, options: DatabaseOptions) -> Result<Self, DatabaseError> {
         let wal = WalWriter::resume(container, BTreeMap::new())
             .with_chunk_target(options.wal_chunk_target);
@@ -531,6 +563,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             options,
             poisoned: false,
             replaying: None,
+            compactions: CompactionStats::default(),
         }
     }
 
@@ -569,8 +602,8 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// How much of the container file is live and how much a compaction would reclaim (SPEC §4.6). Live are the
     /// segment and sidecar frames the committed manifest lists, the obsolete ones a reader may still read
     /// ([`Database::obsolete`]), and everything from `wal_start` on; the rest (replaced segments, superseded
-    /// sidecars, old manifests, consumed WAL chunks) is dead. The engine does not compact yet (ROADMAP 6.5.8), so
-    /// the dead bytes only grow: this is how to watch them.
+    /// sidecars, old manifests, consumed WAL chunks) is dead, until [`Database::compact`] reclaims it (on its own
+    /// when due, [`CompactionOptions`]).
     ///
     /// ```
     /// use persia_engine::db::{Database, DatabaseOptions};
@@ -596,29 +629,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`DatabaseError::Container`] if a listed frame lies outside the file's frames or overlaps another (a manifest
     /// the open checks would have refused).
     pub fn space_usage(&self) -> Result<container::SpaceUsage, DatabaseError> {
-        let container = self.wal.log();
-        let wal_start = container.superblock().wal_start;
-        let listed = self
-            .manifest
-            .collections()
-            .flat_map(|c| c.segments().iter())
-            .flat_map(|s| std::iter::once(s.location).chain(s.tombstones.map(|t| t.location)));
-        let pinned = self
-            .merges
-            .obsolete
-            .all()
-            .filter(|(_, referenced)| *referenced)
-            .map(|(o, _)| o.location);
-        let live: Vec<_> = listed
-            .chain(pinned)
-            .filter_map(|location| match location {
-                Location::Frame { offset, len } => Some(offset..offset.saturating_add(len)),
-                Location::Object => None,
-            })
-            // Frames from `wal_start` on count as live anyway.
-            .filter(|r| r.end <= wal_start)
-            .collect();
-        Ok(container.space_usage(&live)?)
+        Ok(self.wal.log().space_usage(&self.live_below_wal())?)
     }
 
     /// A memtable is held only while a [`Database::put_batch`] runs, and `&mut self` keeps every other write out

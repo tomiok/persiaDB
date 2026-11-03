@@ -4,7 +4,9 @@
 //! which a job holds as `Arc`s (they are immutable, SPEC §5), and writes the merged bytes into memory. So workers
 //! need no lock on the database, and a merge never blocks a read or a write. The pool bounds what is in flight to
 //! one job per thread: a finished job's bytes wait for the writer to collect them, so a merge in memory is the most
-//! there is per thread (backpressure), and plans that do not fit are made again later.
+//! there is per thread (backpressure), and plans that do not fit are made again later. With its bytes, a result
+//! keeps its [`DocidMap`] until the commit catches up with deletes (ROADMAP 6.5.9): per input, a first docid, a count
+//! and a copy of the deletions it was merged at, so small beside the merged segment.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -16,7 +18,7 @@ use bytes::Bytes;
 use persia_analysis::AnalyzerRegistry;
 use persia_format::ByteSource;
 
-use super::merger::{MergeError, MergeSource, merge_until};
+use super::merger::{DocidMap, MergeError, MergeSource, merge_until};
 use super::policy::{MergePlan, MergePolicy, MergeReason};
 use crate::manifest::SegmentId;
 use crate::schema::CollectionSchema;
@@ -73,6 +75,8 @@ pub(crate) struct MergeJob {
 pub(crate) struct Merged {
     pub bytes: Bytes,
     pub doc_count: u32,
+    /// Where each input document went, to re-apply deletions committed while the merge ran (ROADMAP 6.5.9).
+    pub docids: DocidMap,
 }
 
 /// A job and what it came to: the merged segment, `None` when nothing is live (a drop, SPEC §8.5 step 1).
@@ -124,6 +128,7 @@ impl MergeJob {
         Ok(Some(Merged {
             bytes,
             doc_count: merged.doc_count(),
+            docids: merged.into_docid_map(),
         }))
     }
 

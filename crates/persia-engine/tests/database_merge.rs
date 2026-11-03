@@ -3,8 +3,8 @@
 //! Invariants:
 //! 1. A merge commit removes its inputs and adds one segment of their live documents: every id reads the same before
 //!    and after, a reopen sees the merge, and the merged segment holds no deleted document (6.5.3).
-//! 2. A merge whose input lost documents after the plan read it is discarded, never committed: deletions committed
-//!    meanwhile stay (SPEC §8.7.2). The segments are planned again.
+//! 2. A merge whose inputs lost documents after the plan read them deletes those from the merged segment: deletions
+//!    committed meanwhile stay (SPEC §8.5, ROADMAP 6.5.9). A merge whose input is gone is discarded and replanned.
 //! 3. In-flight merges never exceed the merge threads (one when inline); cancelled ones commit nothing; dropping a
 //!    database joins its workers.
 //! 4. A merged segment that fails `Segment::verify` is not committed, and its inputs are not planned again.
@@ -28,15 +28,14 @@ use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    Database, DatabaseOptions, ManualClock, MergeOutcome, ObsoleteKind, SegmentIds, Snapshot,
+    Database, DatabaseOptions, ManualClock, MergeOutcome, MergeStats, ObsoleteKind, SegmentIds,
+    Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
     CollectionDiff, Location, Manifest, ManifestDiff, SegmentEntry, SegmentId,
 };
-use persia_engine::merge::{
-    MergeError, MergeOptions, MergePolicy, MergeReason, MergeSource, merge,
-};
+use persia_engine::merge::{MergeError, MergeOptions, MergePolicy, MergeSource, merge};
 use persia_engine::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter, WriteOptions};
 use persia_engine::view::SearchView;
@@ -241,32 +240,90 @@ fn merges_in_flight_are_bounded_by_the_threads() {
     }
 }
 
+/// Invariant 2: the deletions committed to a merge's inputs while it ran are deleted from the merged segment (its
+/// first sidecar), not brought back, and the merge commits instead of being discarded (ROADMAP 6.5.9).
 #[test]
-fn a_merge_whose_input_lost_documents_meanwhile_is_discarded() {
-    let (_, mut db) = database(1);
+fn a_merge_whose_input_lost_documents_meanwhile_deletes_them_from_its_output() {
+    let (file, mut db) = database(1);
     commit_segments(&mut db, &[&["a0", "a1"], &["b0", "b1"]]);
     db.merge_step().unwrap();
     assert_eq!(db.merges_running(), 1);
-    // The plan read `a`'s first segment without deletions; this commit gives it a sidecar.
+    // The plan read both segments without deletions; these commits give each a sidecar, the first one twice.
+    db.delete("a", "b1", Durability::Fsync).unwrap();
+    db.commit().unwrap();
     db.delete("a", "a0", Durability::Fsync).unwrap();
     db.commit().unwrap();
     let seq = db.seq();
-    let outcomes = db.finish_merges().unwrap();
-    assert!(
-        matches!(&outcomes[0], MergeOutcome::Conflict { inputs, .. } if inputs.len() == 2),
-        "{outcomes:?}"
-    );
-    // Planned again, from the segments as they are now.
-    assert!(
-        matches!(&outcomes[1..], [MergeOutcome::Committed { reason: MergeReason::Tier(0), seq: s, .. }] if *s == seq + 1),
-        "{outcomes:?}"
-    );
-    let docs = documents(&db.snapshot());
+    let outcome = loop {
+        // Only the merge in flight: no step plans another while it runs (one thread).
+        let mut step = db.merge_step().unwrap();
+        if let Some(outcome) = step.pop() {
+            break outcome;
+        }
+        std::thread::yield_now();
+    };
+    let MergeOutcome::Committed {
+        output: Some(output),
+        seq: s,
+        reapplied,
+        ..
+    } = outcome
+    else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!((s, reapplied), (seq + 1, 2));
+    let entries = db.manifest().collection("a").unwrap().segments().to_vec();
+    assert_eq!(entries.len(), 1);
+    let t = entries[0].tombstones.unwrap();
+    // The sidecar frame follows the segment frame it deletes from (SPEC §8.3).
+    let (
+        Location::Frame {
+            offset: segment_at,
+            len,
+        },
+        Location::Frame {
+            offset: sidecar_at, ..
+        },
+    ) = (entries[0].location, t.location)
+    else {
+        panic!("{entries:?}");
+    };
+    assert!(sidecar_at >= segment_at + len, "{entries:?}");
     assert_eq!(
-        docs.keys().map(String::as_str).collect::<Vec<_>>(),
-        ["a1", "b0", "b1"]
+        (entries[0].id, entries[0].doc_count, t.version, t.deleted),
+        (output, 4, 1, 2)
     );
-    assert_eq!(segment_count(&db), 1);
+    let stats = db.merge_stats();
+    assert_eq!(
+        (stats.committed, stats.caught_up, stats.conflicts),
+        (1, 1, 0)
+    );
+    let expected = ["a1", "b0"];
+    assert_eq!(
+        documents(&db.snapshot())
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    // The policy rewrites it next (half its documents are deleted), and a reopen sees the same documents.
+    db.finish_merges().unwrap();
+    assert_eq!(
+        documents(&db.snapshot())
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected
+    );
+    drop(db);
+    let db = Database::open_on(file.crash(CrashLoss::All), options(1)).unwrap();
+    assert_eq!(
+        documents(&db.snapshot())
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        expected
+    );
 }
 
 #[test]
@@ -445,16 +502,17 @@ fn obsolete_objects_wait_for_their_last_reader() {
         .sum();
     assert!(freed.live >= 12288 + listed);
     assert_eq!(db.take_unreferenced().len(), 3);
-    // Taking them changes nothing on disk: they stay dead until a compaction (ROADMAP 6.5.8).
+    // Taking them changes nothing on disk: they stay dead until a compaction (SPEC §4.6).
     assert_eq!(db.space_usage().unwrap(), freed);
     // A reopen knows no reader of the old frames: what a snapshot pinned before it is dead after it.
     let reopened = Database::open_on(disk, options(0)).unwrap();
     assert_eq!(reopened.space_usage().unwrap(), freed);
 }
 
-/// A database's dead bytes only grow while it writes: nothing compacts the container yet (ROADMAP 6.5.8, 6.5.10).
+/// Without compaction a database's dead bytes only grow: a container on a bare file has no path to rename over, so
+/// nothing compacts it (SPEC §4.6; `database_compaction.rs` covers the ones that do).
 #[test]
-fn dead_space_grows_with_replaced_data_until_compaction_exists() {
+fn dead_space_grows_on_a_container_that_cannot_be_compacted() {
     let (_, mut db) = database(0);
     let empty = db.space_usage().unwrap();
     assert_eq!(empty.live + empty.dead(), empty.total);
@@ -927,16 +985,18 @@ fn live_ids_by_segment(db: &Database<SimFile>) -> Vec<Vec<String>> {
         .collect()
 }
 
-/// The gap ROADMAP 6.5.9 closes, pinned so it stays visible (6.5.11): merges run on a worker and are committed by
-/// the next [`Database::merge_step`], so a commit that deletes from every segment between two steps discards every
-/// merge in flight. Each discard is counted ([`Database::merge_stats`]), and while the deletes go on nothing merges:
-/// the segment count grows by one per round, unbounded. What every settled merge does is not up to thread timing: a merge is
-/// only ever committed by a later step, after that round's deletes. Once the deletes pause, merging catches up.
+/// ROADMAP 6.5.9 (replacing 6.5.11's pin of the unbounded growth): merges run on a worker and are committed by a
+/// later [`Database::merge_step`], so each round's deletes, into every segment, land on the inputs of the merge in
+/// flight. Each such merge catches up with them and commits, so the segment count stays bounded while the deletes go
+/// on, and no deleted document comes back. The test waits for each merge in flight by stepping (no sleep), so which
+/// merge commits in which round does not depend on thread timing.
 #[test]
-fn deletes_into_every_segment_discard_every_merge_until_they_pause() {
+fn steady_deletes_into_every_segment_keep_the_segment_count_bounded() {
     const ROUNDS: usize = 12;
-    let (_, mut db) = database(1);
+    let (file, mut db) = database(1);
     let mut next = 0;
+    let mut deleted = Vec::new();
+    let mut max_segments = 0;
     for round in 0..ROUNDS {
         // Enough documents that a delete per round never empties a segment (an emptied one is dropped, 6.4.6).
         for _ in 0..2 * ROUNDS {
@@ -949,33 +1009,43 @@ fn deletes_into_every_segment_discard_every_merge_until_they_pause() {
             next += 1;
         }
         db.commit().unwrap();
-        db.merge_step().unwrap();
+        // Settle the merge in flight (last round's deletes hit it); the step that commits it also plans the next.
+        let settled = |s: MergeStats| s.committed + s.conflicts + s.failed + s.cancelled;
+        let before = settled(db.merge_stats());
+        while db.merges_running() > 0 && settled(db.merge_stats()) == before {
+            db.merge_step().unwrap();
+            std::thread::yield_now();
+        }
+        if db.merges_running() == 0 {
+            db.merge_step().unwrap();
+        }
         for ids in live_ids_by_segment(&db) {
             db.delete("a", &ids[0], Durability::Buffered).unwrap();
+            deleted.push(ids[0].clone());
         }
         db.commit().unwrap();
-        assert_eq!(segment_count(&db), round + 1, "round {round}");
+        max_segments = max_segments.max(segment_count(&db));
+        assert!(
+            segment_count(&db) <= 3,
+            "round {round}: {} segments",
+            segment_count(&db)
+        );
     }
     let stats = db.merge_stats();
-    assert_eq!(stats.committed, 0, "{stats:?}");
-    // How many were settled by now depends on the worker's speed; that every settled one conflicted does not.
-    assert_eq!((stats.failed, stats.cancelled), (0, 0));
-
-    let outcomes = db.finish_merges().unwrap();
-    let after = db.merge_stats();
-    assert!(after.committed > 0, "{after:?}");
-    // The merge in flight met a delete before any step settled it, whatever the timing.
-    assert!(after.conflicts >= 1, "{after:?}");
-    // Every outcome of the step is counted, the discarded one still in flight included.
-    let conflicts = outcomes
-        .iter()
-        .filter(|o| matches!(o, MergeOutcome::Conflict { .. }))
-        .count() as u64;
-    assert_eq!(after.conflicts, stats.conflicts + conflicts);
-    assert_eq!(after.committed, committed(&outcomes) as u64);
-    assert!(
-        segment_count(&db) <= ROUNDS / 2,
-        "{} segments",
-        segment_count(&db)
+    assert_eq!(
+        (stats.conflicts, stats.failed, stats.cancelled),
+        (0, 0, 0),
+        "{stats:?}"
     );
+    // From the second round on, one merge per round committed, each after deletes into its inputs.
+    assert_eq!(stats.committed, ROUNDS as u64 - 2, "{stats:?}");
+    assert_eq!(stats.caught_up, stats.committed, "{stats:?}");
+    db.finish_merges().unwrap();
+    let live = documents(&db.snapshot());
+    assert_eq!(live.len(), next - deleted.len());
+    assert!(deleted.iter().all(|id| !live.contains_key(id)));
+    drop(db);
+    let db = Database::open_on(file.crash(CrashLoss::All), options(1)).unwrap();
+    assert_eq!(documents(&db.snapshot()), live);
+    assert!(max_segments >= 2);
 }

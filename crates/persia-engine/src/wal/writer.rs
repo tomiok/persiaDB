@@ -353,6 +353,20 @@ impl<L: WalLog> WalWriter<L> {
         Ok(self.wal_start())
     }
 
+    /// Moves every written chunk position to `moved(position)`, after a container compaction copied the chunks
+    /// (SPEC §4.6). Positions hold `wal_start` back, so they are all from `wal_start` on, and a compaction copies
+    /// every frame there. Returns the first position `moved` has no new place for; nothing is changed then.
+    pub(crate) fn relocate(&mut self, moved: impl Fn(u64) -> Option<u64>) -> Result<(), u64> {
+        let mut new = self.held.clone();
+        for held in new.values_mut().flat_map(VecDeque::iter_mut) {
+            if let At::Written(at) = held.at {
+                held.at = At::Written(moved(at).ok_or(at)?);
+            }
+        }
+        self.held = new;
+        Ok(())
+    }
+
     fn usable(&self) -> Result<(), WalWriteError<L::Error>> {
         if self.poisoned {
             Err(WalWriteError::Poisoned)

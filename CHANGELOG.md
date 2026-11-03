@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-storage` (breaking): the manifest builder of `Container::compact` and `compact_into` returns
+  `Result<Vec<u8>>`; an error fails the compaction before anything is committed.
+- `persia-engine` (breaking): `Database::merge_step`, `finish_merges` and the other merge methods need
+  `F: 'static` (they may compact, which renames through the container's `Vfs`). `MergeOutcome::Conflict` now means
+  an input is gone or the schema changed, not that an input gained deletions.
+- `persia-storage`: a compaction of a container whose WAL range is empty sets `wal_start` to the new Manifest frame's
+  offset, as any commit does, instead of its end (SPEC §4.6 step 3); both are valid, so files written either way open.
 - `persia-storage` (breaking): `Container::enable_mapped_reads` and `enable_mapped_reads_if_local` are `unsafe fn`.
   Their soundness rests on a precondition the container cannot check, now stated in a `# Safety` section: nothing
   outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives, and the
@@ -21,7 +28,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - README and docs site: status comes from `PROGRESS.md` and the tree (`cargo xtask progress` rewrites the README's
   progress blocks; the site's status sentences come from `website/src/status.mjs`), the quickstart creates a database
   and searches it, and relaxation is described as design intent (M8), not a feature (ROADMAP 0.6.1–0.6.3).
-- Documented: a database file only grows until the engine compacts its container (ROADMAP 6.5.8, SPEC §4.6).
 - `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
 - `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
@@ -56,6 +62,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: the database compacts its container (ROADMAP 6.5.8, SPEC §4.6). `Database::compact` rewrites
+  the file without its dead frames, keeping the obsolete ones a reader still holds; `Database::compact_if_due` and
+  every `merge_step` compact when dead bytes reach `CompactionOptions::dead_space_percent` (40) of the file and
+  `min_dead_bytes` (1 MiB); `DatabaseOptions::compaction` configures it (`automatic: false` turns it off).
+  `Database::create_container` creates a database in a container created on a `Vfs` path.
+- `persia-engine`: merges catch up with deletes (ROADMAP 6.5.9, SPEC §8.5). Documents deleted from a merge's inputs
+  while it ran are deleted from the merged segment (its first sidecar) instead of the merge being discarded, so
+  steady deletes no longer make the segment count grow. `MergeOutcome::Committed` has a `reapplied` count,
+  `MergeStats` a `caught_up` count, and `merge::MergedSegment::docid_map` returns where each input document went
+  (`merge::DocidMap`).
+- `persia-engine`: `Database::compaction_stats` (`CompactionStats`) counts compactions and failures. A compaction
+  `merge_step` starts on its own and that fails before its rename (without poisoning) is counted there and does not
+  fail the step. `persia-storage`: `Relocation::wal_start` gives a compaction's manifest builder the `wal_start` the
+  container decided, and `Container::is_poisoned` tells whether a failed write stopped the handle.
 - `persia-format`: `widen::usize_from_u32` and `widen::u64_from_usize`, the lossless widenings `From` lacks, with
   a compile-time check that pointers are 32 or 64 bits. `persia-format`, `persia-storage` and `persia-engine` deny
   `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, a
@@ -68,8 +88,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `pread` (ROADMAP 0.6.7).
 - `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
   and cancelled since open (`db::MergeStats`, ROADMAP 6.5.11).
-- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
-  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
+- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6, ROADMAP
+  6.5.10); compaction reclaims the dead ones (`Database::compact`, ROADMAP 6.5.8).
 - `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
   are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
   best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.

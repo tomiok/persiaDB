@@ -8,6 +8,8 @@
 
 use std::ops::Bound;
 
+use roaring::RoaringBitmap;
+
 use persia_analysis::AnalyzerRegistry;
 use persia_format::Writer;
 use persia_format::widen::usize_from_u32;
@@ -113,6 +115,49 @@ pub enum MergeError {
 pub struct MergedSegment {
     builder: SegmentBuilder,
     merge_generation: u32,
+    docids: DocidMap,
+}
+
+/// Where a merge put each input document (SPEC §8.5): per input, in plan order, the merged docid of each of its
+/// docids, or none for one the merge left out (deleted at the version it read). A merge commit uses it to delete
+/// from the merged segment the documents deleted from its inputs while it ran (ROADMAP 6.5.9).
+///
+/// A merge copies each input's live documents in docid order, after the earlier inputs' (SPEC §5.5), so a document's
+/// merged docid is where its input starts plus its rank among that input's live documents. The map keeps only
+/// that: per input, its first merged docid, its document count and the deletions it was merged at (a compressed
+/// bitmap, shared in size with the input's sidecar), not an entry per document.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct DocidMap {
+    inputs: Vec<MappedInput>,
+}
+
+/// One input of a [`DocidMap`].
+#[derive(Debug, Clone, PartialEq)]
+struct MappedInput {
+    /// The merged docid of its first live document.
+    first: u32,
+    doc_count: u32,
+    /// The docids the merge left out.
+    left_out: RoaringBitmap,
+}
+
+impl DocidMap {
+    /// The merged docid of input `input`'s document `docid`; `None` if the merge left it out, or there is no such
+    /// input or document.
+    pub fn get(&self, input: usize, docid: u32) -> Option<u32> {
+        let m = self.inputs.get(input)?;
+        if docid >= m.doc_count || m.left_out.contains(docid) {
+            return None;
+        }
+        // `docid` is not left out, so every one counted here is below it.
+        let left_out_below = u32::try_from(m.left_out.rank(docid)).ok()?;
+        m.first.checked_add(docid.checked_sub(left_out_below)?)
+    }
+
+    /// How many inputs it maps.
+    pub fn inputs(&self) -> usize {
+        self.inputs.len()
+    }
 }
 
 impl MergedSegment {
@@ -124,6 +169,16 @@ impl MergedSegment {
     /// One more than the highest of the inputs' (SPEC §5.1).
     pub fn merge_generation(&self) -> u32 {
         self.merge_generation
+    }
+
+    /// Where each input document went.
+    pub fn docid_map(&self) -> &DocidMap {
+        &self.docids
+    }
+
+    /// [`Self::docid_map`], taken: the builder is not needed once the segment is written.
+    pub fn into_docid_map(self) -> DocidMap {
+        self.docids
     }
 
     /// The merged segment's bytes, with id `segment_id`, written at `created_at` (microseconds since the Unix epoch).
@@ -214,6 +269,7 @@ pub fn merge_until(
     let mut builder = SegmentBuilder::new(schema, registry)?;
     let mut generation = 0_u32;
     let mut scratch = Scratch::default();
+    let mut docid_map = Vec::with_capacity(sources.len());
     for source in sources {
         stop()?;
         let segment = source.segment;
@@ -226,6 +282,7 @@ pub fn merge_until(
             return Err(MergeError::SchemaMismatch { segment: id });
         }
         generation = generation.max(segment.merge_generation());
+        let first = builder.doc_count();
         let docids = copy_documents(&mut builder, source)?;
         for (field, target) in schema.fields().iter().zip(builder.fields.iter_mut()) {
             stop()?;
@@ -239,6 +296,14 @@ pub fn merge_until(
                 FieldBuilder::Stored => {}
             }
         }
+        docid_map.push(MappedInput {
+            first,
+            doc_count: segment.doc_count(),
+            left_out: source
+                .tombstones
+                .map(|t| t.docids().clone())
+                .unwrap_or_default(),
+        });
     }
     if builder.doc_count() == 0 {
         return Ok(None);
@@ -249,6 +314,7 @@ pub fn merge_until(
     Ok(Some(MergedSegment {
         builder,
         merge_generation,
+        docids: DocidMap { inputs: docid_map },
     }))
 }
 
