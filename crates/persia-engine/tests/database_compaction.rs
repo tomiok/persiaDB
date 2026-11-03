@@ -370,7 +370,11 @@ fn compaction_is_due_at_the_ratio_and_floor_and_runs_from_merge_step() {
         db.commit().unwrap();
     }
     // Due by the ratio alone: only the floor holds it back.
-    assert!(db.space_usage().unwrap().is_due(40), "{:?}", db.space_usage());
+    assert!(
+        db.space_usage().unwrap().is_due(40),
+        "{:?}",
+        db.space_usage()
+    );
     assert!(db.compact_if_due().unwrap().is_none());
 }
 
@@ -634,20 +638,28 @@ fn unflushed_records_survive_a_merge_commit_after_a_compaction() {
         docs.insert("old".into(), format!("{round}"));
         db.commit().unwrap();
     }
-    db.put("a", &doc("second", "s"), Durability::Buffered).unwrap();
+    db.put("a", &doc("second", "s"), Durability::Buffered)
+        .unwrap();
     docs.insert("second".into(), "s".into());
     db.commit().unwrap();
     // Unflushed and durable.
     for i in 0..3 {
         let id = format!("u{i}");
-        db.put("a", &doc(&id, "unflushed"), Durability::Fsync).unwrap();
+        db.put("a", &doc(&id, "unflushed"), Durability::Fsync)
+            .unwrap();
         docs.insert(id, "unflushed".into());
     }
     let before = db.container().superblock().wal_start;
     db.compact().unwrap();
-    assert!(db.container().superblock().wal_start < before, "the WAL range moved down");
+    assert!(
+        db.container().superblock().wal_start < before,
+        "the WAL range moved down"
+    );
     let outcomes = db.merge_step().unwrap();
-    assert!(matches!(&outcomes[..], [MergeOutcome::Committed { .. }]), "{outcomes:?}");
+    assert!(
+        matches!(&outcomes[..], [MergeOutcome::Committed { .. }]),
+        "{outcomes:?}"
+    );
     drop(db);
     let db = open(&fs.crash(CrashLoss::All)).unwrap();
     assert_docs(&db, &docs, &[], "reopened after the merge commit");
