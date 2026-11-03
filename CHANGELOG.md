@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-engine`: faster numeric and `datetime` filters and sorts (ROADMAP 7.4.13, 7.5.6; SPEC §7.3, §7.4). A filter scan
+  skips the FOR blocks whose bounds (minimum, and minimum plus `2^width − 1`) rule it out and takes whole those they
+  rule in; a `bool` whose `must` clauses match at most a quarter of a view checks its column filters per candidate;
+  a sort led by a numeric or `datetime` field (`missing: "last"`, no facet) skips blocks that cannot beat its worst
+  kept hit and scores only the hits it keeps. Results are unchanged. New in `persia_engine::segment`: `KeyBlock`,
+  `Overlap`, `NumericKeys::block`, `NumericColumn::select`, `Segment::select_keys`; in `persia_engine::view`:
+  `KeyReader::block` and `SearchView::select_keys` (default methods).
 - `persia-storage` (breaking): the manifest builder of `Container::compact` and `compact_into` returns
   `Result<Vec<u8>>`; an error fails the compaction before anything is committed.
 - `persia-engine` (breaking): `Database::merge_step`, `finish_merges` and the other merge methods need

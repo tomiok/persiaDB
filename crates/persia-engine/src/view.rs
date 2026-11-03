@@ -20,8 +20,8 @@ use crate::memtable::MemtableView;
 use crate::schema::{FieldId, FieldType};
 use crate::score::FieldHit;
 use crate::segment::{
-    BlockMax, BoolColumn, FieldStats, KeywordOrds, NormsCursor, NumericKeys, Postings, ReadError,
-    Segment, TermStream, Tombstones,
+    BlockMax, BoolColumn, FieldStats, KeyBlock, KeywordOrds, NormsCursor, NumericKeys, Overlap,
+    Postings, ReadError, Segment, TermStream, Tombstones,
 };
 
 /// The documents of one term, in docid order, with their frequencies and positions; the interface of
@@ -120,6 +120,16 @@ pub trait KeyReader {
     /// # Errors
     /// A corruption of the source.
     fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError>;
+
+    /// Bounds on the keys of a run of documents that holds `docid` ([`KeyBlock`]: a segment's FOR block), so a sort
+    /// can skip a run whose keys cannot beat the hits it keeps (ROADMAP 7.5.6). `None`: the reader knows no bounds
+    /// (the memtable, a `bool` column), or `docid` is past the view.
+    ///
+    /// # Errors
+    /// A corruption of the source.
+    fn block(&mut self, _docid: u32) -> Result<Option<KeyBlock>, ReadError> {
+        Ok(None)
+    }
 }
 
 /// A `keyword` field's values by docid, as ordinals of a dictionary in byte order (SPEC §5.3.5), from
@@ -180,6 +190,13 @@ impl KeyReader for SegmentKeys<'_> {
         match self {
             Self::Numeric(keys) => keys.key(docid),
             Self::Bool(column) => Ok(column.get(docid).map(u64::from)),
+        }
+    }
+
+    fn block(&mut self, docid: u32) -> Result<Option<KeyBlock>, ReadError> {
+        match self {
+            Self::Numeric(keys) => keys.block(docid),
+            Self::Bool(_) => Ok(None),
         }
     }
 }
@@ -375,6 +392,46 @@ pub trait SearchView {
         field: FieldId,
         f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError>;
+
+    /// The documents with a value in an `i64`, `f64`, `datetime` or `bool` field whose key `keep` accepts, deleted
+    /// ones included: what [`Self::try_column_keys`] calling `keep` on every key selects (ROADMAP 7.4.13). `cover`
+    /// says how the keys a run of documents can hold (between its two arguments, both included) meet what `keep`
+    /// accepts; a segment then skips a FOR block whose bounds are [`Overlap::Disjoint`] unread and selects one
+    /// [`Overlap::Within`] without reading its keys. `cover` must not claim more: a run it calls `Within` holding a key
+    /// `keep` rejects is selected all the same. The memtable reads every key.
+    ///
+    /// # Errors
+    /// As [`Self::column_keys`].
+    fn select_keys(
+        &self,
+        field: FieldId,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.select_keys_stepped(field, cover, keep, || Ok(()))
+    }
+
+    /// As [`Self::select_keys`], calling `step` for each run and each key the view reads ([`Self::deleted_stepped`]).
+    ///
+    /// # Errors
+    /// As [`Self::select_keys`]; what `step` returns.
+    fn select_keys_stepped(
+        &self,
+        field: FieldId,
+        _cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+        step: impl Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        let mut docs = crate::bitmap::Ascending::default();
+        self.try_column_keys(field, |docid, key| {
+            step()?;
+            if keep(key) {
+                docs.push(docid);
+            }
+            Ok(())
+        })?;
+        Ok(docs.finish())
+    }
 
     /// The norms of a `text` field (SPEC §5.3.4), for scoring each candidate document: a reader that keeps what it
     /// read (a segment's [`NormsCursor`]; the memtable's norms as of the view, copied once per view and field).
@@ -620,6 +677,16 @@ impl SearchView for SegmentView<'_> {
         f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
         self.segment.try_column_keys(field, f)
+    }
+
+    fn select_keys_stepped(
+        &self,
+        field: FieldId,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+        step: impl Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.segment.select_keys(field, cover, keep, step)
     }
 
     fn keys(&self, field: FieldId) -> Result<SegmentKeys<'_>, ReadError> {

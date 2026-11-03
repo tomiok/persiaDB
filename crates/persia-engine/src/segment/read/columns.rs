@@ -14,6 +14,7 @@ use super::super::norms;
 use super::super::write::columns::{TAG_BOOL, TAG_KEYWORD, TAG_NUMERIC};
 use super::error::{ReadError, SegmentCorruption};
 use super::stream::Stream;
+use crate::bitmap::Ascending;
 use crate::document::Value;
 use crate::schema::FieldType;
 
@@ -360,6 +361,22 @@ impl<'s> ForColumn<'s> {
         Ok(())
     }
 
+    /// Bounds on block `b`'s keys, from its header alone (SPEC §5.2.1): each is its minimum plus at most
+    /// `2^width − 1`. The upper bound saturates at `u64::MAX`; reading the block checked that no value it holds goes
+    /// past it.
+    fn bound(&self, b: u64) -> Result<(u64, u64), ReadError> {
+        self.with_block(b, |block, _| {
+            // Width 0: every value is the minimum. Otherwise a shift of 0..=63.
+            let span = match block.width() {
+                0 => 0,
+                w => u64::MAX
+                    .checked_shr(64_u32.saturating_sub(u32::from(w)))
+                    .unwrap_or(u64::MAX),
+            };
+            Ok((block.min(), block.min().saturating_add(span)))
+        })
+    }
+
     /// Block `b`'s values: the last block read stays decoded, so a scan decodes each block once.
     fn decoded(&self, b: u64) -> Result<Arc<Vec<u64>>, ReadError> {
         if let Some((last, values)) = &*self.last.lock()
@@ -567,6 +584,33 @@ impl<'c, 's> ForCursor<'c, 's> {
     }
 }
 
+/// Bounds on the keys of a run of documents (ROADMAP 7.4.13, 7.5.6): each document of `start..end` with a value has a
+/// key in `min..=max`. A segment's runs are its FOR blocks (SPEC §5.2.1), bounded by their headers: a block's minimum,
+/// plus at most `2^width − 1`. Writers store the block's minimum for a document without a value and use the minimal
+/// width, so the bounds are those of the keys present.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBlock {
+    /// The run's first docid.
+    pub start: u32,
+    /// The docid after its last.
+    pub end: u32,
+    /// No key of the run is below it.
+    pub min: u64,
+    /// No key of the run is above it.
+    pub max: u64,
+}
+
+/// How a run of keys bounded by `min..=max` meets what a scan selects ([`NumericColumn::select`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlap {
+    /// No key in the bounds is selected: the run is not read.
+    Disjoint,
+    /// Every key in the bounds is: each document of the run with a value is selected, its key unread.
+    Within,
+    /// Some may be: each key is read.
+    Partial,
+}
+
 /// The values of an `i64`, `f64` or `datetime` field (SPEC §5.3.5), read from their FOR blocks on demand.
 #[derive(Debug, Clone)]
 pub struct NumericColumn<'s> {
@@ -646,12 +690,96 @@ impl<'s> NumericColumn<'s> {
         Ok(self.key(docid)?.map(|key| self.value(key)))
     }
 
+    /// The documents with a value whose key `keep` accepts (ROADMAP 7.4.13). A FOR block is read only where
+    /// `cover` of its bounds ([`KeyBlock`]) is [`Overlap::Partial`]; `step` runs once per block with a value and
+    /// once per key read, so a search's interrupts stop a scan of a large column.
+    ///
+    /// # Errors
+    /// A corruption of a block read (one whose header says it is [`Overlap::Disjoint`] or [`Overlap::Within`] is
+    /// checked only as far as reading its header); what `step` returns.
+    ///
+    /// ```
+    /// # use persia_analysis::AnalyzerRegistry;
+    /// # use persia_engine::document::{Document, Value};
+    /// # use persia_engine::schema::{FieldKind, SchemaBuilder};
+    /// # use persia_engine::segment::{Overlap, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    /// # use persia_format::ByteSource;
+    /// # use persia_format::for_codec::i64_to_key;
+    /// # let schema = SchemaBuilder::new("c").field("n", FieldKind::I64 { stored: false }).build()?;
+    /// # let n = schema.field("n").map(|f| f.id()).ok_or("no field")?;
+    /// # let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// for (id, v) in [("a", 5), ("b", 50), ("c", 7)] {
+    ///     builder.add(&Document::new(id).with(n, Value::I64(v)))?;
+    /// }
+    /// # let meta = SegmentMeta { segment_id: 1, created_at: 0, merge_generation: 0 };
+    /// # let segment = Segment::open(ByteSource::new(SegmentWriter::new(&builder, meta).finish()?.into()), &schema)?;
+    /// let (low, high) = (i64_to_key(0), i64_to_key(9));
+    /// let docs = segment.numeric_column(n)?.select(
+    ///     // One block, keys 5..=50: some may match.
+    ///     |min, max| if max < low || min > high { Overlap::Disjoint } else { Overlap::Partial },
+    ///     |key| (low..=high).contains(&key),
+    ///     || Ok(()),
+    /// )?;
+    /// assert_eq!(docs.iter().collect::<Vec<_>>(), [0, 2]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn select(
+        &self,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+        step: impl Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        let Some(keys) = &self.keys else {
+            return Ok(RoaringBitmap::new());
+        };
+        let present = self.present()?;
+        let mut whole = RoaringBitmap::new();
+        let mut some = Ascending::default();
+        let mut buf = ForBuf::default();
+        let mut docs = present.iter();
+        while let Some(first) = docs.next() {
+            step()?;
+            let b = u64::from(first) / PER_BLOCK;
+            // Within the column: the block holds `first`, below `doc_count`.
+            let start = u32::try_from(b.saturating_mul(PER_BLOCK)).unwrap_or(u32::MAX);
+            let end = start
+                .saturating_add(u32::try_from(PER_BLOCK).unwrap_or(u32::MAX))
+                .min(self.doc_count);
+            let (min, max) = keys.bound(b)?;
+            match cover(min, max) {
+                Overlap::Disjoint => {}
+                Overlap::Within => {
+                    whole.insert_range(start..end);
+                }
+                Overlap::Partial => {
+                    let values = buf.load(keys, b)?;
+                    for docid in present.range(first..end) {
+                        step()?;
+                        // `with_block` checked the block holds what its place in the column says.
+                        let at = usize::try_from(docid.saturating_sub(start)).unwrap_or(usize::MAX);
+                        let key = values
+                            .get(at)
+                            .copied()
+                            .ok_or_else(|| keys.bad(keys.at, "a FOR block count"))?;
+                        if keep(key) {
+                            some.push(docid);
+                        }
+                    }
+                }
+            }
+            docs.advance_to(end);
+        }
+        whole &= &present;
+        Ok(whole | some.finish())
+    }
+
     /// A reader of the keys that owns the column (ROADMAP 7.5.1): as [`Self::cursor`], for a caller with nowhere to
     /// keep the column.
     pub fn into_keys(self) -> NumericKeys<'s> {
         NumericKeys {
             column: self,
             buf: ForBuf::default(),
+            block: None,
         }
     }
 
@@ -729,6 +857,8 @@ impl NumericCursor<'_, '_> {
 pub struct NumericKeys<'s> {
     column: NumericColumn<'s>,
     buf: ForBuf,
+    /// The bounds [`Self::block`] read last.
+    block: Option<KeyBlock>,
 }
 
 impl NumericKeys<'_> {
@@ -744,6 +874,38 @@ impl NumericKeys<'_> {
             }
             _ => Ok(None),
         }
+    }
+
+    /// Bounds on the keys of the FOR block that holds `docid` (ROADMAP 7.5.6), from its header; `None` past the
+    /// column or when no document has a value. The last bounds read are kept, so asking along a block reads it once.
+    ///
+    /// # Errors
+    /// A corruption of the block's header or position.
+    pub fn block(&mut self, docid: u32) -> Result<Option<KeyBlock>, ReadError> {
+        if let Some(block) = self.block
+            && (block.start..block.end).contains(&docid)
+        {
+            return Ok(Some(block));
+        }
+        let Some(keys) = &self.column.keys else {
+            return Ok(None);
+        };
+        if docid >= self.column.doc_count {
+            return Ok(None);
+        }
+        let b = u64::from(docid) / PER_BLOCK;
+        let (min, max) = keys.bound(b)?;
+        let start = u32::try_from(b.saturating_mul(PER_BLOCK)).unwrap_or(u32::MAX);
+        let block = KeyBlock {
+            start,
+            end: start
+                .saturating_add(u32::try_from(PER_BLOCK).unwrap_or(u32::MAX))
+                .min(self.column.doc_count),
+            min,
+            max,
+        };
+        self.block = Some(block);
+        Ok(Some(block))
     }
 }
 
@@ -1317,5 +1479,159 @@ mod tests {
                 .collect();
             assert_eq!(got, want, "doc {d}");
         }
+    }
+
+    /// `n` by FOR block (ROADMAP 7.4.13, 7.5.6): a narrow band, a band with absent values, the two ends of the key
+    /// space (width 64), one constant (width 0), and a short last block of a band again.
+    fn banded(i: u32, state: &mut u64) -> Option<i64> {
+        let r = i64::try_from(lcg(state) % 100).unwrap();
+        match i / 1024 {
+            0 => Some(r),
+            1 => (!i.is_multiple_of(3)).then_some(1_000 + r),
+            2 => Some(if i.is_multiple_of(2) {
+                i64::MIN
+            } else {
+                i64::MAX
+            }),
+            3 => Some(7),
+            _ => Some(-5_000 + r),
+        }
+    }
+
+    const BANDED: u32 = 4 * 1024 + 300;
+
+    fn banded_segment() -> (Segment, crate::schema::FieldId, Vec<Option<u64>>) {
+        let schema = SchemaBuilder::new("c")
+            .field("n", FieldKind::I64 { stored: false })
+            .build()
+            .unwrap();
+        let n = schema.field("n").unwrap().id();
+        let mut state = 0x7413;
+        let keys: Vec<Option<i64>> = (0..BANDED).map(|i| banded(i, &mut state)).collect();
+        let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (i, v) in keys.iter().enumerate() {
+            let mut d = Document::new(format!("d{i:05}"));
+            if let Some(v) = v {
+                d = d.with(n, Value::I64(*v));
+            }
+            builder.add(&d).unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&builder, meta).finish().unwrap();
+        let seg = Segment::open(ByteSource::new(bytes.into()), &schema).unwrap();
+        (
+            seg,
+            n,
+            keys.into_iter().map(|v| v.map(i64_to_key)).collect(),
+        )
+    }
+
+    #[test]
+    fn block_bounds_hold_every_key_of_their_block() {
+        let (seg, n, keys) = banded_segment();
+        let mut reader = seg.numeric_column(n).unwrap().into_keys();
+        for d in order() {
+            let block = reader.block(d).unwrap();
+            if d >= BANDED {
+                assert_eq!(block, None, "doc {d}");
+                continue;
+            }
+            let block = block.unwrap();
+            let start = d / 1024 * 1024;
+            assert_eq!(
+                (block.start, block.end),
+                (start, (start + 1024).min(BANDED))
+            );
+            let present: Vec<u64> = keys[start as usize..block.end as usize]
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            // Writers use the true minimum and the minimal width (SPEC §5.2.1).
+            assert_eq!(block.min, *present.iter().min().unwrap(), "doc {d}");
+            let max = *present.iter().max().unwrap();
+            assert!(block.max >= max, "doc {d}");
+            // The minimal width: the span is below twice the true one, plus one.
+            assert!(
+                block.max - block.min <= (max - block.min).saturating_mul(2).saturating_add(1),
+                "doc {d}"
+            );
+            // The key itself, read after the bounds, is the document's.
+            assert_eq!(reader.key(d).unwrap(), keys[d as usize]);
+        }
+        let mut reader = seg.numeric_column(n).unwrap().into_keys();
+        let constant = reader.block(3 * 1024).unwrap().unwrap();
+        assert_eq!((constant.min, constant.max), (i64_to_key(7), i64_to_key(7)));
+        let ends = reader.block(2 * 1024).unwrap().unwrap();
+        assert_eq!((ends.min, ends.max), (0, u64::MAX));
+    }
+
+    #[test]
+    fn a_select_skipping_blocks_equals_a_scan_of_every_key() {
+        let (seg, n, keys) = banded_segment();
+        let column = seg.numeric_column(n).unwrap();
+        let ok = || Ok(());
+        let between = |low: u64, high: u64| {
+            move |min: u64, max: u64| {
+                if max < low || min > high {
+                    Overlap::Disjoint
+                } else if low <= min && max <= high {
+                    Overlap::Within
+                } else {
+                    Overlap::Partial
+                }
+            }
+        };
+        let k = i64_to_key;
+        for (low, high) in [
+            (0, u64::MAX),
+            (k(0), k(99)),
+            (k(10), k(1_050)),
+            (k(1_000), k(1_099)),
+            (k(7), k(7)),
+            (k(8), k(999)),
+            (u64::MAX, u64::MAX),
+            (0, 0),
+            (k(-5_000), k(-4_950)),
+            (k(-4_990), k(5)),
+        ] {
+            let want: RoaringBitmap = keys
+                .iter()
+                .enumerate()
+                .filter(|(_, key)| key.is_some_and(|key| (low..=high).contains(&key)))
+                .map(|(d, _)| u32::try_from(d).unwrap())
+                .collect();
+            let got = column
+                .select(between(low, high), |key| (low..=high).contains(&key), ok)
+                .unwrap();
+            assert_eq!(got, want, "{low}..={high}");
+        }
+        // `Within` selects what has a value, keys unread; `Disjoint` nothing, whatever `keep` says.
+        let present = column.present().unwrap();
+        assert_eq!(present.len(), keys.iter().flatten().count() as u64);
+        let within = column
+            .select(|_, _| Overlap::Within, |_| false, ok)
+            .unwrap();
+        assert_eq!(within, present);
+        let disjoint = column
+            .select(|_, _| Overlap::Disjoint, |_| true, ok)
+            .unwrap();
+        assert!(disjoint.is_empty());
+        // A step's error stops the scan.
+        let stopped = column.select(
+            |_, _| Overlap::Partial,
+            |_| true,
+            || {
+                Err(ReadError::DocOutOfRange {
+                    docid: 0,
+                    doc_count: 0,
+                })
+            },
+        );
+        assert!(stopped.is_err());
     }
 }

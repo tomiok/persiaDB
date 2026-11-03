@@ -491,6 +491,7 @@ Deps: M5 (M6 for end-to-end).
 - [~] 7.4.13 Faster filters: a `range` scans every key of the column (~12 ns per document on `search_top10_filtered`); skip FOR blocks whose keys cannot match by their minimum and bit width (every key is at most `min + 2^width − 1`, no format change), and for a selective `must` check the column per candidate instead of building the whole bitmap (SPEC §7.3's "column predicates"), picked by cost (found in 7.4.5)
 - [x] 7.4.14 Expansion `df` lookups: planning reads the collection `df` of every term each view lists, before the cap rejects it, so the memtable walks the term's postings again (its `TermEnum` just counted them) and the snapshot's capped `df` cache fills with terms that lose the cap; reuse the view's count for the memtable and bypass the cache for losing terms. Bench with a memtable and several segments (found in the 7.4.12 review)
 - [ ] 7.4.15 Expansion `df` from the segments' own counts: a term that loses the cap is no longer cached (7.4.14), so each plan sums its `df` over every segment again (`search_top10_expansion` +3 %) although each segment's `TermEnum` already gave its count; when the statistics are the views' segments, add those counts instead of looking each term up in every segment (found in 7.4.14)
+- [ ] 7.4.16 Check column filters per candidate beside other filters: a `bool` with a `keyword` filter (postings) and a `range` builds the bitmap of both today (7.4.13 checks only when every filter reads column keys); select the postings filters as a bitmap and check the column ones per candidate, and fit the per-candidate threshold (a quarter of the view, `CHECK_SHARE`) from a sweep of `must` costs on `search_top10_filtered` (found in 7.4.13)
 
 ## 7.5 Sorting, pagination, facets
 - [x] 7.5.1 Sort by column (asc/desc, missing handling) with top-k
@@ -498,7 +499,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.5.3 Facet counting over keyword columns with bitmap input; top-N merge across segments
 - [x] 7.5.4 Result assembly: fetch stored fields, projection, blob_ref in hit
 - [ ] 7.5.5 Keep column dictionaries across requests: a segment's `keyword_column` decodes its whole dictionary on every sort or facet request (`SearchView::keywords`), and the memtable copies its keyword values and column keys per call; cache them per segment (beside the block cache) and per memtable view (as its norms), and bench `search_request/sort_price` and `score_facet` before and after (found in 7.5)
-- [~] 7.5.6 Prune column sorts: `search_request/sort_price` visits every match (+21 % over a pruned score top-10 on 50 000 documents); skip FOR blocks whose keys cannot beat the worst kept hit (a block's minimum and bit width bound its keys, as 7.4.13) and stop a view early when its index sort matches (SPEC §5.4 `index_sort`, post-v1) (found in 7.5)
+- [~] 7.5.6 Prune column sorts: `search_request/sort_price` visits every match (+21 % over a pruned score top-10 on 50 000 documents); skip FOR blocks whose keys cannot beat the worst kept hit (a block's minimum and bit width bound its keys, as 7.4.13) (stopping a view early when its index sort matches waits on `index_sort`, 33.6.1) (found in 7.5)
 
 ## 7.6 Parallel execution
 - [x] 7.6.1 Per-segment search tasks on a thread pool; deterministic merge. A threshold shared across views (`CollectionViews::top_k`, 7.4.6) skips "at most t" only from views that win the tie (earlier ones); one from a later view must skip strictly below t (found in the 7.4.6 review)
@@ -1301,6 +1302,9 @@ v1.0 ships per-character CJK (4.1.1.2), keyword facets (7.5.3), and delete-by-id
 
 ## 33.5 Grouping
 - [ ] 33.5.1 (v1.1) Distinct / group-by: at most one hit per distinct value of a column, with a documented rule for which document represents the group. [T] Three documents sharing a value return one hit, and the representative is the one the rule names
+
+## 33.6 Index sort
+- [ ] 33.6.1 (v1.1) `index_sort`: a collection declares a column its segments are written in order of (SPEC §5.4, post-v1), and a column sort that matches it stops a view once it keeps `k` hits: the part of 7.5.6 that waits on it. It also serves newest first on an insertion-ordered column (`search_request/sort_newest`), where no FOR block can lose in docid order. A new segment layout follows the format discipline (SPEC §15). [T] A sorted page from an index-sorted segment equals the one from an unsorted segment of the same documents, and visits at most `k` matches per view
 
 ---
 

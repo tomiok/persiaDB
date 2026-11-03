@@ -3,10 +3,11 @@
 //! matches a matcher's documents in it with the matcher's scores and bounds, so a threshold reaches what it wraps.
 //!
 //! A `term` or `terms` filter on a `keyword` field reads the field's postings; on another field, and a `range`, it
-//! scans the column's order-preserving keys (SPEC §5.2.1); `exists` reads which documents have a value. `not` takes
-//! the complement among the view's documents (`0..doc_count`, one roaring run per 2^16 ids). A count above
-//! [`crate::segment::MAX_DOCS`] is corruption returned before that range is built. Deleted documents are taken out
-//! once, at the end.
+//! scans the column's order-preserving keys (SPEC §5.2.1), skipping the FOR blocks its bounds rule out and taking
+//! whole those they rule in ([`SearchView::select_keys`], ROADMAP 7.4.13); `exists` reads which documents have a value.
+//! `not` takes the complement among the view's documents (`0..doc_count`, one roaring run per 2^16 ids). A count
+//! above [`crate::segment::MAX_DOCS`] is corruption returned before that range is built. Deleted documents are taken
+//! out once, at the end. A `bool` with few candidates may check its filters per candidate instead ([`super::check`]).
 
 use core::cell::RefCell;
 use core::ops::Bound;
@@ -19,7 +20,7 @@ use super::{Matcher, Pos, ScoreBound};
 use crate::bitmap::Ascending;
 use crate::query::{Filter, FilterValue};
 use crate::schema::FieldId;
-use crate::segment::ReadError;
+use crate::segment::{Overlap, ReadError};
 use crate::view::{PostingsIterator, SearchView};
 
 /// The documents each `bool` of a plan selected with its filters in one view, by the `bool`'s slot in the plan:
@@ -135,7 +136,11 @@ fn holding<V: SearchView>(
     if !keys.is_empty() {
         keys.sort_unstable();
         keys.dedup();
-        docs |= scan(view, field, |k| keys.binary_search(&k).is_ok())?;
+        docs |= view.select_keys(
+            field,
+            |min, max| among(&keys, min, max),
+            |k| keys.binary_search(&k).is_ok(),
+        )?;
     }
     Ok(docs)
 }
@@ -147,6 +152,21 @@ fn within<V: SearchView>(
     lower: &Bound<FilterValue>,
     upper: &Bound<FilterValue>,
 ) -> Result<RoaringBitmap, ReadError> {
+    match key_range(lower, upper) {
+        Some((low, high)) => view.select_keys(
+            field,
+            |min, max| between(low, high, min, max),
+            |k| (low..=high).contains(&k),
+        ),
+        None => Ok(RoaringBitmap::new()),
+    }
+}
+
+/// The keys within the bounds, `low..=high`; `None` when no key is.
+pub(super) fn key_range(
+    lower: &Bound<FilterValue>,
+    upper: &Bound<FilterValue>,
+) -> Option<(u64, u64)> {
     // An exclusive bound is the inclusive one next to it; none past the end of the key space means no document.
     let low = match lower {
         Bound::Included(v) => key(v),
@@ -159,29 +179,40 @@ fn within<V: SearchView>(
         Bound::Unbounded => Some(u64::MAX),
     };
     match (low, high) {
-        (Some(low), Some(high)) if low <= high => scan(view, field, |k| (low..=high).contains(&k)),
-        _ => Ok(RoaringBitmap::new()),
+        (Some(low), Some(high)) if low <= high => Some((low, high)),
+        _ => None,
     }
 }
 
-/// The documents whose key in `field` satisfies `keep`.
-fn scan<V: SearchView>(
-    view: &V,
-    field: FieldId,
-    keep: impl Fn(u64) -> bool,
-) -> Result<RoaringBitmap, ReadError> {
-    let mut docs = Ascending::default();
-    view.column_keys(field, |docid, k| {
-        if keep(k) {
-            docs.push(docid);
+/// How keys in `min..=max` meet `low..=high`.
+pub(super) fn between(low: u64, high: u64, min: u64, max: u64) -> Overlap {
+    if max < low || min > high {
+        Overlap::Disjoint
+    } else if low <= min && max <= high {
+        Overlap::Within
+    } else {
+        Overlap::Partial
+    }
+}
+
+/// How keys in `min..=max` meet `keys` (sorted, distinct).
+pub(super) fn among(keys: &[u64], min: u64, max: u64) -> Overlap {
+    let from = keys.partition_point(|&k| k < min);
+    match keys.get(from) {
+        Some(&k) if k <= max => {
+            if min == max {
+                Overlap::Within
+            } else {
+                Overlap::Partial
+            }
         }
-    })?;
-    Ok(docs.finish())
+        _ => Overlap::Disjoint,
+    }
 }
 
 /// The column key of `value` (SPEC §5.2.1), as the builder stores it: `-0.0` is `0.0` (SPEC §6.4.1); `None` for a
 /// `keyword`, which has postings instead.
-fn key(value: &FilterValue) -> Option<u64> {
+pub(super) fn key(value: &FilterValue) -> Option<u64> {
     Some(match *value {
         FilterValue::I64(v) | FilterValue::Datetime(v) => i64_to_key(v),
         FilterValue::F64(v) => f64_to_key(if v == 0.0 { 0.0 } else { v }),
