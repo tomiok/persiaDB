@@ -1252,10 +1252,19 @@ Deps: M0.
             Err(std::fs::TryLockError::WouldBlock)
         ));
         drop(held);
-        // Blocking, as a second run takes it: a process another test spawns in parallel shares the locked file for a
-        // moment (between its fork and its exec, which closes the descriptor), so a `try_lock` right after the drop
-        // can still see it held.
-        other.lock().unwrap();
+        // A process another test spawns in parallel shares the locked file for a moment (between its fork and its exec,
+        // which closes the descriptor), so a `try_lock` right after the drop may still see it held. Retry, yielding,
+        // for a bounded time: a lock that is never released fails here instead of hanging the test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match other.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
+                    std::thread::yield_now();
+                }
+                Err(e) => panic!("the lock was not released after the drop: {e:?}"),
+            }
+        }
         let staged = staging(&dir.join("PROGRESS.md"));
         assert!(
             staged
