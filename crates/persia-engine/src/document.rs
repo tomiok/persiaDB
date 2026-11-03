@@ -225,6 +225,25 @@ impl Document {
         codec::decode(bytes, schema)
     }
 
+    /// The id of an encoding (SPEC §6.4.2), read without its schema: a WAL put names its document by it. Only the
+    /// version and the id are checked; [`Self::decode`] checks the rest.
+    ///
+    /// ```
+    /// use persia_engine::document::{Document, FieldSet};
+    /// use persia_engine::schema::SchemaBuilder;
+    ///
+    /// let schema = SchemaBuilder::new("items").build()?;
+    /// let bytes = Document::new("a1").encode(&schema, FieldSet::All)?;
+    /// assert_eq!(Document::encoded_id(&bytes)?, "a1");
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`Self::decode`], for the bytes it reads.
+    pub fn encoded_id(bytes: &[u8]) -> Result<String, DecodeError> {
+        codec::encoded_id(bytes)
+    }
+
     /// Parses a JSON document for `schema` and validates it (SPEC §6.4.1).
     ///
     /// # Errors

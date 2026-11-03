@@ -2,7 +2,7 @@
 //! what is removed and kept, `verify` on sound and corrupt databases, and the errors for a missing path or a
 //! container a writer holds.
 
-#![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+#![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::too_many_lines)]
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -461,4 +461,169 @@ fn verify_usage_errors_exit_with_2() {
     let _serial = serial();
     let out = persia(&["verify"]);
     assert_eq!(out.status.code(), Some(2));
+}
+
+/// One frame row of `persia inspect container`: `(offset, len, frame_seq, kind, state, note)`.
+type FrameRow = (u64, u64, u64, String, String, String);
+
+/// What [`inspected`] splits the output into.
+type Inspected = (Vec<(String, String)>, Vec<FrameRow>, Vec<Vec<String>>);
+
+/// The output of `persia inspect container`, which must have succeeded: its `key value` lines, its frame rows, and
+/// the record rows after `records of id` (`frame record state op collection`, each split on whitespace).
+fn inspected(out: &Output) -> Inspected {
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let text = String::from_utf8(out.stdout.clone()).unwrap();
+    let mut sections = text.split("\n\n");
+    let keys = sections
+        .next()
+        .unwrap()
+        .lines()
+        .map(|l| {
+            let (key, value) = l.split_once(' ').unwrap();
+            (key.to_owned(), value.trim_start().to_owned())
+        })
+        .collect();
+    let frames = sections
+        .next()
+        .unwrap()
+        .lines()
+        .skip(1)
+        .map(|l| {
+            let f: Vec<&str> = l.split_whitespace().collect();
+            let n = |i: usize| f[i].parse::<u64>().unwrap();
+            (n(0), n(1), n(2), f[3].into(), f[4].into(), f[5..].join(" "))
+        })
+        .collect();
+    let records = sections
+        .next()
+        .map(|s| {
+            s.lines()
+                .skip(2)
+                .map(|l| l.split_whitespace().map(str::to_owned).collect())
+                .collect()
+        })
+        .unwrap_or_default();
+    (keys, frames, records)
+}
+
+/// ROADMAP 6.6.10: the superblock, every frame from `wal_start` with its state (a stray Manifest after `log_end`, as
+/// a commit cut before its slot write leaves, with its `seq`), and by id the WAL records not yet flushed, beside a
+/// live writer and without changing the file.
+#[test]
+fn inspect_container_lists_frames_and_the_records_of_an_id() {
+    use persia_engine::wal::Durability;
+    use persia_format::block::Compression;
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut writer = database(&path);
+    // n1 is in a segment (its put was flushed); its delete, synced, is not.
+    writer.delete("notes", "n1", Durability::Fsync).unwrap();
+    drop(writer);
+    // A copy of the committed manifest after `log_end`: a cut commit's frame.
+    let committed_seq = {
+        let mut c = Container::open(&path, Mode::ReadWrite).unwrap();
+        let sb = *c.superblock();
+        let manifest = c.read_frame(sb.manifest_off, 1 << 20).unwrap().payload;
+        c.append(FrameKind::Manifest, &manifest, Compression::None)
+            .unwrap();
+        c.sync().unwrap();
+        sb.seq
+    };
+
+    let c = Container::open(&path, Mode::ReadOnly).unwrap();
+    let sb = *c.superblock();
+    let before = std::fs::read(&path).unwrap();
+    let (keys, frames, records) = inspected(&persia(&[
+        "inspect",
+        "container",
+        path_arg(&path),
+        "--id",
+        "n1",
+    ]));
+    assert_eq!(std::fs::read(&path).unwrap(), before, "read-only");
+    for (key, value) in [
+        ("seq", sb.seq.to_string()),
+        ("wal_start", sb.wal_start.to_string()),
+        ("log_end", sb.log_end.to_string()),
+        ("tail", format!("clean at {}", c.end())),
+    ] {
+        assert!(keys.contains(&pair(key, &value)), "{key}: {keys:?}");
+    }
+    let want: Vec<(u64, u64, u64, String)> = c
+        .frames()
+        .iter()
+        .map(|f| (f.offset, f.len, f.frame_seq, format!("{:?}", f.kind)))
+        .collect();
+    let kind = |k: &str| match k {
+        "wal" => "WalChunk",
+        "manifest" => "Manifest",
+        "segment" => "Segment",
+        "tombstones" => "TombstoneSidecar",
+        other => panic!("{other}"),
+    };
+    let got: Vec<(u64, u64, u64, String)> = frames
+        .iter()
+        .map(|(o, l, s, k, ..)| (*o, *l, *s, kind(k).to_owned()))
+        .collect();
+    assert_eq!(got, want);
+    for (offset, _, _, kind, state, _) in &frames {
+        let after = if *offset >= sb.log_end {
+            "uncommitted"
+        } else {
+            "committed"
+        };
+        assert_eq!(state, after, "{offset} {kind}");
+    }
+    let manifests: Vec<(&str, &str)> = frames
+        .iter()
+        .filter(|f| f.3 == "manifest")
+        .map(|f| (f.4.as_str(), f.5.as_str()))
+        .collect();
+    let seq = committed_seq.to_string();
+    assert_eq!(
+        manifests,
+        [
+            ("committed", format!("seq {seq}, the slot's").as_str()),
+            ("uncommitted", format!("seq {seq}").as_str()),
+        ]
+    );
+    // The delete of n1, logged after the commit: one record, after `log_end`.
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0][2..], ["uncommitted", "delete", "\"notes\""]);
+    // n2's put, by its encoded id.
+    let (_, _, n2) = inspected(&persia(&[
+        "inspect",
+        "container",
+        path_arg(&path),
+        "--id",
+        "n2",
+    ]));
+    assert_eq!(n2.len(), 1, "{n2:?}");
+    assert_eq!(n2[0][2..], ["uncommitted", "put", "\"notes\""]);
+    let (_, _, none) = inspected(&persia(&[
+        "inspect",
+        "container",
+        path_arg(&path),
+        "--id",
+        "zz",
+    ]));
+    assert!(none.is_empty(), "{none:?}");
+
+    // Not a container: exit 4, like verify.
+    let other = dir.path().join("other");
+    std::fs::write(&other, b"not a persia file at all").unwrap();
+    assert_eq!(
+        persia(&["inspect", "container", path_arg(&other)])
+            .status
+            .code(),
+        Some(4)
+    );
 }

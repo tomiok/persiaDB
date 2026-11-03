@@ -10,6 +10,7 @@
 //! 3. Every strict prefix of an encoding is `Corrupt { UnexpectedEof }`; every damaged encoding is an error or a
 //!    canonical document, never a panic.
 //! 4. Nesting is bounded on decode and validate, so hostile depth cannot exhaust the stack.
+//! 5. `encoded_id` reads the id `decode` would, without the schema, and fails as `decode` does up to it.
 
 // Helpers outside #[test] functions are test code too; long table-driven tests and small casts on test data.
 #![allow(
@@ -1117,6 +1118,21 @@ proptest! {
                     prop_assert!(offset <= cut as u64, "cut {}: offset {}", cut, offset);
                 }
                 other => prop_assert!(false, "cut {}: {:?}", cut, other),
+            }
+        }
+    }
+
+    /// Invariant 5: the id read without a schema is the document's, for both field sets; a prefix that cuts the
+    /// header or the id is the same error `decode` reports, and one past the id still yields it.
+    #[test]
+    fn the_id_reads_without_the_schema((schema, doc) in schema_and_doc(), stored in any::<bool>()) {
+        let set = if stored { FieldSet::Stored } else { FieldSet::All };
+        let bytes = doc.encode(&schema, set).unwrap();
+        prop_assert_eq!(Document::encoded_id(&bytes), Ok(doc.id().to_owned()));
+        for cut in 0..bytes.len() {
+            match Document::encoded_id(&bytes[..cut]) {
+                Ok(id) => prop_assert_eq!(id.as_str(), doc.id(), "cut {}", cut),
+                Err(e) => prop_assert_eq!(Err(e), Document::decode(&bytes[..cut], &schema).map(|_| ()), "cut {}", cut),
             }
         }
     }

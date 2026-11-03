@@ -1763,6 +1763,13 @@ the file is too short to hold the magic; §4.2 still calls that corruption), and
 so a script separates a wrong file, a damaged database, and any other failed run. It
 analyzes replayed records with the built-in analyzers, the only ones a schema can name (§6.2.2).
 
+**Inspection** (ROADMAP 6.6.10, `persia inspect container`) is a read-only container open (§4.4) that prints what
+recovery reads: the active slot's superblock, every frame from `wal_start` (offset, length, `frame_seq`, kind, and
+whether it lies after `log_end`), the `seq` each Manifest frame holds, and, for a document id, the WAL records that
+put or delete it (a put names its document by the id of its encoding, read without the schema, §6.4.2). A frame whose
+payload does not decode is reported on its row; inspection is a debugging aid and does not fail on it, `persia verify`
+does.
+
 ### 8.7 Manifest
 A manifest is the snapshot one commit publishes (ADR-0024): the commit's `seq`, the committing writer's
 `fence_token` (§11.3), `wal_start`, and per collection its current schema and live segments, each with its current

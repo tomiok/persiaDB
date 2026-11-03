@@ -1,5 +1,6 @@
 //! Fuzz the binary document encoding (ROADMAP 3.2.3; SPEC §6.4.2, ADR-0023): arbitrary bytes never panic, and an
-//! accepted encoding is the canonical one (re-encoding gives the same bytes) and survives a JSON round trip.
+//! accepted encoding is the canonical one (re-encoding gives the same bytes), survives a JSON round trip, and has the
+//! id `Document::encoded_id` reads.
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
@@ -24,9 +25,12 @@ fn schema() -> CollectionSchema {
 
 fuzz_target!(|data: &[u8]| {
     let schema = schema();
+    // Reading the id alone never panics either, and agrees with a full decode (ROADMAP 6.6.10).
+    let id = Document::encoded_id(data);
     let Ok(doc) = Document::decode(data, &schema) else {
         return;
     };
+    assert_eq!(id.as_deref().ok(), Some(doc.id()), "the id read alone differs");
     let json = doc
         .to_json(&schema)
         .expect("a decoded document converts to JSON");
