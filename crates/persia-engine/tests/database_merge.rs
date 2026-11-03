@@ -28,7 +28,7 @@ use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    Database, DatabaseOptions, ManualClock, MergeOutcome, MergeStats, ObsoleteKind,
+    Database, DatabaseOptions, Located, ManualClock, MergeOutcome, MergeStats, ObsoleteKind,
     ReadOnlyDatabase, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
@@ -1064,11 +1064,17 @@ fn an_upsert_during_a_merge_stays_visible_after_the_merge_catches_up() {
     db.put("a", &doc("x", "x replaced"), Durability::Fsync)
         .unwrap();
     db.commit().unwrap();
+    // Bounded, so a merge that never settles fails the test instead of hanging it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let outcome = loop {
         let mut step = db.merge_step().unwrap();
         if let Some(outcome) = step.pop() {
             break outcome;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge did not settle"
+        );
         std::thread::yield_now();
     };
     assert!(
@@ -1084,6 +1090,23 @@ fn an_upsert_during_a_merge_stays_visible_after_the_merge_catches_up() {
         !last.is_live(in_last),
         "the merged segment's copy of x is deleted"
     );
+    // The lookup finds the live copy in the flush segment (first: the merge removed both older ones), and exactly
+    // one live copy exists, which is what a search walks.
+    let c = snapshot.collection("a").unwrap();
+    assert_eq!(
+        c.lookup(&c.memtable(), "x").unwrap(),
+        Some(Located::Segment { index: 0, docid: 0 })
+    );
+    let live_x = views
+        .iter()
+        .flat_map(|v| {
+            (0..v.doc_count())
+                .filter(|&d| v.is_live(d))
+                .map(move |d| (v, d))
+        })
+        .filter(|(v, d)| v.document(*d).unwrap().id() == "x")
+        .count();
+    assert_eq!(live_x, 1);
 
     let check = |snapshot: &Snapshot, ctx: &str| {
         let c = snapshot.collection("a").unwrap();

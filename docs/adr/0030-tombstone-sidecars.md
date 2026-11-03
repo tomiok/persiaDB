@@ -92,14 +92,21 @@ merge that catches up with an upsert committed while it ran keeps the old copy, 
 the merged segment goes after the segment holding the new copy. A lookup stopped at that deleted copy and reported
 the document absent; the kill-9 loop found it in CI. Two fixes were weighed:
 
-- **Keep the rule, change the merge**: place the merged segment where its inputs were (a change to the diff
-  semantics of SPEC §8.7.2, and wrong for inputs that are not adjacent), or discard merges whose inputs were
-  upserted (steady upserts would again keep the segment count growing, which 6.5.9 fixed).
+- **Keep the rule, change the merge**: place the merged segment at the position of its newest input, or discard
+  merges whose inputs were upserted. The first would keep the rule correct (every live copy a commit wrote after the
+  plan lands after that position), but it changes what manifest order means (SPEC §8.7.2: added segments follow the
+  kept ones), so it falls under the format discipline; it moves segment indexes, which order search ties and
+  cursors; and it rests on an invariant every later change to merge order would have to keep (a deleted copy always
+  precedes the live one). The second would bring back the growth of the segment count under steady upserts that
+  6.5.9 fixed.
 - **Change the rule** (chosen): the lookup returns the live copy, newest first, passing deleted ones. Every commit
   leaves at most one live copy (item 5, SPEC §8.3), so the result is exact for every file the engine writes. What is
   given up is item 6's defense against a stale live copy: an older copy left live by a bug, behind a deleted newer
   one, used to stay hidden and is now visible. That layout is no longer a sign of damage (a caught-up merge leaves a
   deleted newer copy and a live older one), so nothing can tell the two apart; `verify` still reports two live
-  copies of an id (`LiveTwice`).
+  copies of an id (`LiveTwice`). Such a stale copy is undetectable by design: only one copy is live, and segments
+  record no operation order that would show which copy is older. The defense only ever covered lookups, too: search
+  walks every live docid and showed a stale copy all along, and the next write of the id deletes every live copy
+  (item 5). No released build could have left one (item 9).
 
 A lookup of a deleted id now reads every segment's `IdMap`, as a lookup of an id never written always did.

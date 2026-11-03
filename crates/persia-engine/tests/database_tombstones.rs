@@ -10,7 +10,7 @@
 //!    most one live copy. Writes are visible before the commit (read-your-writes); older snapshots keep their state;
 //!    a reopen after losing every unsynced write shows the same documents (6.4.3).
 //!    A commit that deletes a segment's last live document removes the segment instead, with no sidecar (6.4.6).
-//! 4. The newest segment whose `IdMap` holds an id decides a lookup: a deleted copy there ends it (6.4.1). A newer
+//! 4. A lookup returns the live copy of an id, passing deleted copies in newer segments (6.4.1, 6.5.13). A newer
 //!    sidecar encoding is unsupported, not corrupt; one longer than `MAX_SIDECAR_LEN` is corrupt (6.4.2).
 
 #![allow(
