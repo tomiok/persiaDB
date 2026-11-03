@@ -109,4 +109,4 @@ the document absent; the kill-9 loop found it in CI. Two fixes were weighed:
   walks every live docid and showed a stale copy all along, and the next write of the id deletes every live copy
   (item 5). No released build could have left one (item 9).
 
-A lookup of a deleted id now reads every segment's `IdMap`, as a lookup of an id never written always did.
+A lookup with no memtable operation whose committed copies are deleted now reads every segment's `IdMap`, as a lookup of an id never written always did.
