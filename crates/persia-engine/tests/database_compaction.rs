@@ -364,11 +364,13 @@ fn compaction_is_due_at_the_ratio_and_floor_and_runs_from_merge_step() {
     drop(db);
     let container = Container::open_in(vfs(&fs), PATH, Mode::ReadWrite).unwrap();
     let mut db = Database::open_container(container, opts).unwrap();
-    db.put("a", &doc("d0", "x"), Durability::Buffered).unwrap();
-    db.commit().unwrap();
-    db.put("a", &doc("d0", "y"), Durability::Buffered).unwrap();
-    db.commit().unwrap();
-    assert!(db.space_usage().unwrap().dead() > 0);
+    for round in 0..8 {
+        db.put("a", &doc("d0", &format!("{round}")), Durability::Buffered)
+            .unwrap();
+        db.commit().unwrap();
+    }
+    // Due by the ratio alone: only the floor holds it back.
+    assert!(db.space_usage().unwrap().is_due(40), "{:?}", db.space_usage());
     assert!(db.compact_if_due().unwrap().is_none());
 }
 
@@ -615,4 +617,38 @@ fn compaction_works_on_the_real_file_system() {
     );
     let db = Database::open(&moved, options(false)).unwrap();
     assert_docs(&db, &docs, &[], "moved");
+}
+
+/// The WAL positions follow the new file (invariant 3): records still unflushed at a compaction hold `wal_start` back
+/// at their relocated chunks, so a later commit that flushes nothing (a merge commit) keeps them, and a crash after
+/// it loses none.
+#[test]
+fn unflushed_records_survive_a_merge_commit_after_a_compaction() {
+    let fs = SimFs::new();
+    let mut db = create(&fs, false);
+    let mut docs = Docs::new();
+    // Dead bytes first, so the compaction moves the WAL chunks down.
+    for round in 0..4 {
+        db.put("a", &doc("old", &format!("{round}")), Durability::Buffered)
+            .unwrap();
+        docs.insert("old".into(), format!("{round}"));
+        db.commit().unwrap();
+    }
+    db.put("a", &doc("second", "s"), Durability::Buffered).unwrap();
+    docs.insert("second".into(), "s".into());
+    db.commit().unwrap();
+    // Unflushed and durable.
+    for i in 0..3 {
+        let id = format!("u{i}");
+        db.put("a", &doc(&id, "unflushed"), Durability::Fsync).unwrap();
+        docs.insert(id, "unflushed".into());
+    }
+    let before = db.container().superblock().wal_start;
+    db.compact().unwrap();
+    assert!(db.container().superblock().wal_start < before, "the WAL range moved down");
+    let outcomes = db.merge_step().unwrap();
+    assert!(matches!(&outcomes[..], [MergeOutcome::Committed { .. }]), "{outcomes:?}");
+    drop(db);
+    let db = open(&fs.crash(CrashLoss::All)).unwrap();
+    assert_docs(&db, &docs, &[], "reopened after the merge commit");
 }
