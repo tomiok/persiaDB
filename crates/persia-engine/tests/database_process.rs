@@ -356,7 +356,7 @@ impl ChildConfig {
 }
 
 /// The document with key `(collection, id)` as `snapshot` shows it: the memtable's version or delete hides the
-/// segments', then the newest segment that holds the id decides (SPEC §8.3).
+/// segments', then the live copy in any segment, newest first (SPEC §8.3).
 fn get(snapshot: &Snapshot, collection: &str, id: &str) -> Option<Document> {
     let c = snapshot.collection(collection)?;
     c.get(id).unwrap()

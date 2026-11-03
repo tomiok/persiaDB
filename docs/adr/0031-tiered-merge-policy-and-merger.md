@@ -1,6 +1,6 @@
 # ADR-0031: Tiered merge policy, and a merger that fills a segment builder
 
-- Status: proposed
+- Status: proposed; item 7 amended 2026-11-03 (ROADMAP 6.5.9, 6.5.13)
 - Date: 2026-10-28
 - Related: SPEC §5.5, §8.3, §8.5, §8.7.2, §14; ROADMAP 6.4.6, 6.5.1, 6.5.2; ADR-0024, ADR-0027, ADR-0030
 
@@ -34,8 +34,9 @@ happens to a segment whose documents are all deleted (ADR-0030 item 8 keeps it l
    background path; the commit itself still keeps them listed).
 7. **Order of documents and segments**: a merged segment holds its inputs' live documents in plan order and is added
    after the kept segments. Merges may take segments that are not adjacent: a commit leaves at most one live copy of
-   each id (SPEC §8.3) and a merged segment holds only live documents, so the newest-segment-decides lookup gives
-   the same answer.
+   each id (SPEC §8.3), and a lookup returns that copy wherever it is. (As first decided, a merged segment held only
+   live documents and the newest segment holding an id decided a lookup. Since ROADMAP 6.5.9 a merged segment may
+   hold copies deleted while it merged, and since 6.5.13 a lookup passes deleted copies: ADR-0030's amendment.)
 8. **The merger fills a `SegmentBuilder`** from the input readers: each input's term dictionary, read in byte order,
    is added to the builder's one dictionary per field (the writer sorts the union, as for a flush, so no k-way merge
    of the streams is needed); postings and positions are copied with docids remapped; columns, `DocStore` rows, ids

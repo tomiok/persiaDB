@@ -28,8 +28,8 @@ use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    Database, DatabaseOptions, ManualClock, MergeOutcome, MergeStats, ObsoleteKind, SegmentIds,
-    Snapshot,
+    Database, DatabaseOptions, Located, ManualClock, MergeOutcome, MergeStats, ObsoleteKind,
+    ReadOnlyDatabase, SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{
@@ -1048,4 +1048,93 @@ fn steady_deletes_into_every_segment_keep_the_segment_count_bounded() {
     let db = Database::open_on(file.crash(CrashLoss::All), options(1)).unwrap();
     assert_eq!(documents(&db.snapshot()), live);
     assert!(max_segments >= 2);
+}
+
+/// Found by `kill_9_loop_through_replay_flushes_merges_and_open` (CI, seed 104372101176064): a merge that catches up
+/// with an upsert committed while it ran keeps the old copy, deleted, in the merged segment, which goes after the
+/// segment holding the new copy (SPEC §8.5). A lookup by id must still find the live copy, wherever it is: it used to
+/// stop at the newest segment holding the id and report it absent because that copy was deleted.
+#[test]
+fn an_upsert_during_a_merge_stays_visible_after_the_merge_catches_up() {
+    let (file, mut db) = database(1);
+    commit_segments(&mut db, &[&["x", "y"], &["z", "w"]]);
+    db.merge_step().unwrap();
+    assert_eq!(db.merges_running(), 1);
+    // Upsert `x` while the merge runs: a new segment holds the new copy, a sidecar deletes the old one.
+    db.put("a", &doc("x", "x replaced"), Durability::Fsync)
+        .unwrap();
+    db.commit().unwrap();
+    // Bounded, so a merge that never settles fails the test instead of hanging it.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let outcome = loop {
+        let mut step = db.merge_step().unwrap();
+        if let Some(outcome) = step.pop() {
+            break outcome;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the merge did not settle"
+        );
+        std::thread::yield_now();
+    };
+    assert!(
+        matches!(outcome, MergeOutcome::Committed { reapplied: 1, .. }),
+        "{outcome:?}"
+    );
+    // The scenario: the merged segment, last, holds a deleted copy of `x`; the live one is in an earlier segment.
+    let snapshot = db.snapshot();
+    let views: Vec<_> = snapshot.collection("a").unwrap().segment_views().collect();
+    let last = views.last().unwrap();
+    let in_last = last.segment().docid_of("x").unwrap().unwrap();
+    assert!(
+        !last.is_live(in_last),
+        "the merged segment's copy of x is deleted"
+    );
+    // The lookup finds the live copy in the flush segment (first: the merge removed both older ones), and exactly
+    // one live copy exists, which is what a search walks.
+    let c = snapshot.collection("a").unwrap();
+    assert_eq!(
+        c.lookup(&c.memtable(), "x").unwrap(),
+        Some(Located::Segment { index: 0, docid: 0 })
+    );
+    let live_x = views
+        .iter()
+        .flat_map(|v| {
+            (0..v.doc_count())
+                .filter(|&d| v.is_live(d))
+                .map(move |d| (v, d))
+        })
+        .filter(|(v, d)| v.document(*d).unwrap().id() == "x")
+        .count();
+    assert_eq!(live_x, 1);
+
+    let check = |snapshot: &Snapshot, ctx: &str| {
+        let c = snapshot.collection("a").unwrap();
+        for (id, body) in [
+            ("x", "x replaced"),
+            ("y", "y alpha"),
+            ("z", "z alpha"),
+            ("w", "w alpha"),
+        ] {
+            let got = c
+                .get(id)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{ctx}: {id} is absent"));
+            assert_eq!(
+                got.get(field("body")),
+                Some(&Value::String(body.into())),
+                "{ctx}: {id}"
+            );
+        }
+    };
+    check(&snapshot, "after the merge");
+    drop(snapshot);
+    drop(db);
+    let crashed = file.crash(CrashLoss::All);
+    let db = Database::open_on(crashed.clone(), options(0)).unwrap();
+    check(&db.snapshot(), "reopened");
+    drop(db);
+    let ro = ReadOnlyDatabase::open_on(crashed, &AnalyzerRegistry::builtin()).unwrap();
+    ro.verify().unwrap();
+    check(&ro.snapshot(), "read-only");
 }

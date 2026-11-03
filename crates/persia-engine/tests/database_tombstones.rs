@@ -10,7 +10,7 @@
 //!    most one live copy. Writes are visible before the commit (read-your-writes); older snapshots keep their state;
 //!    a reopen after losing every unsynced write shows the same documents (6.4.3).
 //!    A commit that deletes a segment's last live document removes the segment instead, with no sidecar (6.4.6).
-//! 4. The newest segment whose `IdMap` holds an id decides a lookup: a deleted copy there ends it (6.4.1). A newer
+//! 4. A lookup returns the live copy of an id, passing deleted copies in newer segments (6.4.1, 6.5.13). A newer
 //!    sidecar encoding is unsupported, not corrupt; one longer than `MAX_SIDECAR_LEN` is corrupt (6.4.2).
 
 #![allow(
@@ -536,10 +536,11 @@ fn an_oversized_sidecar_is_corrupt() {
     );
 }
 
-/// The newest segment holding an id decides a lookup: a deleted copy there ends it, even if an older segment still
-/// holds the id live (which a commit never leaves, ADR-0030).
+/// A lookup passes a deleted copy and returns the live one, here in an older segment (SPEC §8.3, ROADMAP 6.5.13):
+/// the layout a merge that caught up with an upsert leaves (its merged segment, last, holds the old copy deleted).
+/// Until 6.5.13 the deleted newest copy ended the lookup (ADR-0030 item 6, amended).
 #[test]
-fn a_deleted_newest_copy_ends_the_lookup() {
+fn a_lookup_passes_a_deleted_newest_copy() {
     let file = SimFile::new();
     {
         let mut c = Container::create_on(file.clone(), [8; 16]).unwrap();
@@ -603,8 +604,14 @@ fn a_deleted_newest_copy_ends_the_lookup() {
     let db = Database::open_on(file, options()).unwrap();
     let snapshot = db.snapshot();
     let a = snapshot.collection("a").unwrap();
-    assert_eq!(a.lookup(&a.memtable(), "x").unwrap(), None);
-    assert_eq!(a.get("x").unwrap(), None);
+    assert_eq!(
+        a.lookup(&a.memtable(), "x").unwrap(),
+        Some(Located::Segment { index: 0, docid: 0 })
+    );
+    assert_eq!(
+        a.get("x").unwrap().map(|d| d.id().to_owned()),
+        Some("x".to_owned())
+    );
 }
 
 /// A commit that fails while it is planned (here: no sidecar version after `u64::MAX`) writes nothing and does not

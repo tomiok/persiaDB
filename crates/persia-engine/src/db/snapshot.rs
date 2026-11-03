@@ -130,9 +130,9 @@ impl CollectionSnapshot {
 
     /// Where the live version of `id` is, as of `memtable` (a view of [`Self::memtable`]) and this snapshot's
     /// segments (SPEC §8.3, ROADMAP 6.4.1): the memtable's version or delete of the id, if it has one, hides every
-    /// segment's; otherwise the newest segment whose `IdMap` holds the id decides: its copy if live, `None` if its
-    /// tombstones delete it (older copies are never consulted, so a deleted id stays deleted even if an older
-    /// segment still held it live). `None` if no segment holds the id.
+    /// segment's; otherwise the live copy in the segments, searched newest first, passing deleted copies (ROADMAP
+    /// 6.5.13: the newest segment holding the id may hold it deleted after a merge caught up with an upsert). `None`
+    /// if no segment holds the id live.
     ///
     /// # Errors
     /// A corruption of a segment's `IdMap`.
@@ -166,14 +166,19 @@ impl CollectionSnapshot {
     }
 }
 
-/// The newest of `views` (oldest first) whose `IdMap` holds `id`, by index, and its docid there, if that copy is live.
+/// The live copy of `id` in `views` (oldest first), by index, and its docid there, searched newest first. A commit
+/// leaves at most one live copy (SPEC §8.3), but not always in the newest segment holding the id: a merge that caught
+/// up with an upsert keeps the old copy, deleted, in the merged segment, which goes after the segment of the new copy
+/// (SPEC §8.5, ROADMAP 6.5.13). So a deleted copy does not end the search.
 fn newest<'s>(
     views: impl DoubleEndedIterator<Item = SegmentView<'s>> + ExactSizeIterator,
     id: &str,
 ) -> Result<Option<(usize, u32)>, ReadError> {
     for (index, view) in views.enumerate().rev() {
-        if let Some(docid) = view.segment().docid_of(id)? {
-            return Ok(view.is_live(docid).then_some((index, docid)));
+        if let Some(docid) = view.segment().docid_of(id)?
+            && view.is_live(docid)
+        {
+            return Ok(Some((index, docid)));
         }
     }
     Ok(None)

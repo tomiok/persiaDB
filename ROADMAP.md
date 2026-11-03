@@ -433,6 +433,8 @@ Deps: M2, M5.
 - [x] 6.5.10 Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database::space_usage`) (found in the 2026-11-02 audit)
 - [x] 6.5.11 Count the merges discarded because their inputs had deletes committed meanwhile (`Database::merge_stats`), and pin with a test what steady deletes do to the segment count: deletes into the inputs of every merge in flight keep any merge from committing, so the count grows until they pause (SPEC §8.7.2); 6.5.9 lifts that, and its test must then bound the count (found in the 2026-11-02 audit)
 - [ ] 6.5.12 Compaction in the randomized merge model: a SimFs (path) variant of `merge_interleavings_match_the_model` with a `Compact` op, so compactions interleave with threaded merges in flight, deletes, cancels and crash-reopens (found in the 6.5.8 review)
+- [x] 6.5.13 A lookup by id finds the live copy wherever it is: after a merge caught up with an upsert (6.5.9), the merged segment, last, holds the old copy deleted, and the lookup stopped there and reported the document absent (SPEC §8.5; found by the kill-9 loop in CI, seed 104372101176064)
+- [ ] 6.5.14 Deterministic threaded interleavings in the merge model: a test-only gate that holds each finished merge until a `Release` op (or settles only on request), so `merge_interleavings_match_the_model` explores the same schedules on every machine; today whether a merge is in flight across an upsert depends on the worker's speed, and the model caught 6.5.13 only on a loaded machine (found in the 6.5.13 review)
 
 ## 6.6 Open/recovery orchestration
 - [x] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)
