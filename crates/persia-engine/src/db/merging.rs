@@ -448,51 +448,9 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             else {
                 return Err(internal("a merge diff has no collection change"));
             };
-            let sidecar = if deleted.is_empty() {
-                None
-            } else {
-                let invalid = |source| DatabaseError::Sidecar {
-                    collection: job.collection.clone(),
-                    id: job.segment_id,
-                    source,
-                };
-                let sidecar = TombstoneSidecar::new(job.segment_id, 1, doc_count, deleted.clone())
-                    .map_err(invalid)?;
-                let encoded = sidecar.encode().map_err(invalid)?;
-                Some((sidecar.deleted_count(), encoded))
-            };
-            let container = self.wal.log_mut();
-            let frame = container.append(FrameKind::Segment, &bytes, Compression::None)?;
-            let tombstones = match sidecar {
-                Some((count, encoded)) => {
-                    // After the segment it deletes from (SPEC §8.3).
-                    let frame = container.append(
-                        FrameKind::TombstoneSidecar,
-                        &encoded,
-                        Compression::None,
-                    )?;
-                    Some(Tombstones {
-                        version: 1,
-                        deleted: count,
-                        location: Location::Frame {
-                            offset: frame.offset,
-                            len: frame.len,
-                        },
-                    })
-                }
-                None => None,
-            };
-            let entry = SegmentEntry {
-                id: job.segment_id,
-                doc_count,
-                size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
-                location: Location::Frame {
-                    offset: frame.offset,
-                    len: frame.len,
-                },
-                tombstones,
-            };
-            change.added.push(entry);
+            change
+                .added
+                .push(self.append_merged(job, &bytes, doc_count, &deleted)?);
             added = Some(bytes);
         }
         let next = self.commit_diff(diff)?;
@@ -549,6 +507,58 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
         self.published
             .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
         Ok((output, seq))
+    }
+
+    /// Appends the merged segment's frame and, when deletions were committed to the inputs while it ran, its first
+    /// sidecar after it (SPEC §8.3, §8.5); returns the manifest entry that adds them.
+    fn append_merged(
+        &mut self,
+        job: &MergeJob,
+        bytes: &[u8],
+        doc_count: u32,
+        deleted: &RoaringBitmap,
+    ) -> Result<SegmentEntry, DatabaseError> {
+        let sidecar = if deleted.is_empty() {
+            None
+        } else {
+            let invalid = |source| DatabaseError::Sidecar {
+                collection: job.collection.clone(),
+                id: job.segment_id,
+                source,
+            };
+            let sidecar = TombstoneSidecar::new(job.segment_id, 1, doc_count, deleted.clone())
+                .map_err(invalid)?;
+            let encoded = sidecar.encode().map_err(invalid)?;
+            Some((sidecar.deleted_count(), encoded))
+        };
+        let container = self.wal.log_mut();
+        let frame = container.append(FrameKind::Segment, bytes, Compression::None)?;
+        let tombstones = match sidecar {
+            Some((count, encoded)) => {
+                // After the segment it deletes from (SPEC §8.3).
+                let frame =
+                    container.append(FrameKind::TombstoneSidecar, &encoded, Compression::None)?;
+                Some(Tombstones {
+                    version: 1,
+                    deleted: count,
+                    location: Location::Frame {
+                        offset: frame.offset,
+                        len: frame.len,
+                    },
+                })
+            }
+            None => None,
+        };
+        Ok(SegmentEntry {
+            id: job.segment_id,
+            doc_count,
+            size: u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+            location: Location::Frame {
+                offset: frame.offset,
+                len: frame.len,
+            },
+            tombstones,
+        })
     }
 }
 

@@ -137,7 +137,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             }
         };
         // From here the container is on the new file: everything that names an offset must follow it.
-        let applied = self.follow(relocation, built);
+        let applied = self.follow(&relocation, built);
         if applied.is_err() || failure.is_some() {
             self.poisoned = true;
         }
@@ -174,7 +174,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     /// and the obsolete objects; then publishes the snapshot of the new manifest.
     fn follow(
         &mut self,
-        relocation: Relocation,
+        relocation: &Relocation,
         built: Option<Result<Manifest, DatabaseError>>,
     ) -> Result<(), DatabaseError> {
         let Some(Ok(next)) = built else {

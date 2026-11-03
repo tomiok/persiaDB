@@ -11,7 +11,13 @@
 //! 6. It is due at the configured ratio and floor, runs on its own from `merge_step`, and is skipped for a
 //!    container without a path.
 
-#![allow(clippy::unwrap_used, clippy::panic, missing_docs)] // Tests: inputs are fixed.
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::result_large_err,
+    clippy::assert_is_empty,
+    missing_docs
+)] // Tests: inputs are fixed.
 
 use std::collections::BTreeMap;
 use std::path::Path;
