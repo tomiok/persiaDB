@@ -945,7 +945,7 @@ fn banded(i: usize) -> Values {
 }
 
 /// Two segments of 2 100 documents each (three FOR blocks), banded values, and a memtable that deletes and replaces
-/// some of them.
+/// some of them, some twice.
 static MANY_BLOCKS: LazyLock<(Database<SimFile>, BTreeMap<String, Values>)> = LazyLock::new(|| {
     let mut db = database();
     let mut model = BTreeMap::new();
@@ -968,6 +968,13 @@ static MANY_BLOCKS: LazyLock<(Database<SimFile>, BTreeMap<String, Values>)> = La
             db.put("c", &v.document(&id), Durability::Buffered).unwrap();
             model.insert(id, v);
         }
+    }
+    // Some ids put twice in the memtable: the first copy is superseded there, as the segments' are.
+    for i in (0..2_100).step_by(74) {
+        let id = format!("s{}-{i}", i % 2);
+        let v = banded(i * 11);
+        db.put("c", &v.document(&id), Durability::Buffered).unwrap();
+        model.insert(id, v);
     }
     (db, model)
 });
@@ -1076,4 +1083,86 @@ fn filters_over_banded_blocks_select_what_the_reference_selects() {
             rare(c, &memtable, model, &filter)
         },
     );
+}
+
+/// Each read of [`persia_engine::db::Clock::now`] moves the clock 1 µs forward and is counted: a search reads it once
+/// per so many steps of its readers, so the reads measure its work.
+#[derive(Debug)]
+struct CountingClock {
+    start: std::time::Instant,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl persia_engine::db::Clock for CountingClock {
+    fn now(&self) -> std::time::Instant {
+        let n = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.start + std::time::Duration::from_micros(n)
+    }
+
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+/// The per-candidate path runs (ROADMAP 7.4.13): a rare `must` under column filters reads about what the `must` alone
+/// reads, where selecting the filters' bitmap reads the keys of every FOR block they cut.
+#[test]
+fn a_rare_must_checks_its_filters_per_candidate_without_a_scan() {
+    use persia_engine::db::{Execution, Threads};
+    let (db, _) = &*MANY_BLOCKS;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = &*FIELDS;
+    let reads = |query: &Query| {
+        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+        let clock = Arc::new(CountingClock {
+            start: std::time::Instant::now(),
+            reads: std::sync::atomic::AtomicU64::new(0),
+        });
+        let far = clock.start + std::time::Duration::from_secs(3_600);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), far);
+        views.top_k_with(&plan, 10, &exec).unwrap();
+        clock.reads.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let filters = vec![
+        Filter::Terms {
+            field: f.n,
+            values: vec![FilterValue::I64(0), FilterValue::I64(1)],
+        },
+        Filter::Not(Box::new(Filter::Term {
+            field: f.x,
+            value: FilterValue::F64(0.5),
+        })),
+        Filter::Exists { field: f.at },
+    ];
+    let must = BoolQuery {
+        must: vec![term("alpha")],
+        ..BoolQuery::default()
+    };
+    let alone = reads(&Query::Bool(must.clone()));
+    let checked = reads(&Query::Bool(BoolQuery {
+        filter: filters.clone(),
+        ..must
+    }));
+    assert!(
+        checked <= alone + 1,
+        "{checked} reads filtered, {alone} alone"
+    );
+    // The same filters under a frequent `must` select their bitmaps: the keys of the FOR blocks they cut are read.
+    let common = BoolQuery {
+        must: vec![term("common")],
+        ..BoolQuery::default()
+    };
+    let alone = reads(&Query::Bool(common.clone()));
+    let scanned = reads(&Query::Bool(BoolQuery {
+        filter: filters,
+        ..common
+    }));
+    assert!(scanned > alone, "{scanned} reads filtered, {alone} alone");
 }

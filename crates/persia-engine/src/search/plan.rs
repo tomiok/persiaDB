@@ -743,7 +743,7 @@ fn build_bool<'a, V: SearchView>(
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
         let required = conjunction(all(must, must_pruning)?);
         let check = (checks && per_candidate(required.cost(), view.doc_count()))
-            .then(|| Check::new(filter, view));
+            .then_some(|| Check::new(filter, view));
         (filtered(required, filter, select, check)?, optional)
     } else if !filter.is_empty() {
         let docs = select()?;
@@ -777,13 +777,13 @@ fn filtered<'a, K: KeyReader + 'a>(
     required: BoxedMatcher<'a>,
     filter: &[Filter],
     select: impl FnOnce() -> Result<RoaringBitmap, ReadError>,
-    check: Option<Result<Check<K>, ReadError>>,
+    check: Option<impl FnOnce() -> Result<Check<K>, ReadError>>,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     if filter.is_empty() || required.cost() == 0 {
         return Ok(required);
     }
     if let Some(check) = check {
-        return Ok(Box::new(Checked::new(required, check?)));
+        return Ok(Box::new(Checked::new(required, check()?)));
     }
     let docs = select()?;
     Ok(if docs.is_empty() {

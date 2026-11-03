@@ -13,10 +13,11 @@
 //!   with its CRC and length recomputed: the footer rules of SPEC §5.1 alone stand between them and the reader.
 //!
 //! In every mode an opened segment is read completely: every term with its postings, frequencies and positions,
-//! `advance` and `shallow_advance` to a few targets, norms, columns (directly and through cursors), every document,
-//! id and blob reference, then `Segment::verify`; then it is merged (ROADMAP 6.5.2) alone and with every other
-//! document deleted, and each merged segment written; then it is searched (ROADMAP 7.4.10) with a few queries (some
-//! with filters over every column kind, ROADMAP 7.4.5) under each pruning strategy, alone and with every other
+//! `advance` and `shallow_advance` to a few targets, norms, columns (directly, through cursors, and by FOR block
+//! bounds, ROADMAP 7.4.13, 7.5.6), every document, id and blob reference, then `Segment::verify`; then it is merged
+//! (ROADMAP 6.5.2) alone and with every other document deleted, and each merged segment written; then it is searched
+//! (ROADMAP 7.4.10) with a few queries (some with filters over every column kind, ROADMAP 7.4.5, one with a rare
+//! `must` that checks its filters per candidate, 7.4.13) under each pruning strategy, alone and with every other
 //! document deleted. Half the inputs are read through a 4 KiB block cache, and positions are also read for every 7th
 //! document only. Errors are ignored, except that a segment that verifies must merge into one that opens and
 //! verifies, and give the same hits under every pruning strategy; otherwise the only failure is a panic (or a hang).
@@ -39,8 +40,8 @@ use persia_engine::schema::{
 };
 use persia_engine::search::{Pruning, SearchPlan};
 use persia_engine::segment::{
-    BlockCache, ReadError, SectionKind, Segment, SegmentBuilder, SegmentMeta, SegmentWriter,
-    TermIndex, WriteOptions,
+    BlockCache, Overlap, ReadError, SectionKind, Segment, SegmentBuilder, SegmentMeta,
+    SegmentWriter, TermIndex, WriteOptions,
 };
 use persia_engine::stats::SegmentStatistics;
 use persia_engine::view::SegmentView;
@@ -514,10 +515,27 @@ fn read_all(seg: &Segment, schema: &CollectionSchema) {
             for d in 0..=n {
                 let _ = (col.has_value(d), col.key(d), col.get(d), cursor.get(n - d));
             }
-            // The owning reader a sort gets (ROADMAP 7.5.1), alternating ends so it jumps between blocks.
+            // Scans that skip FOR blocks by their bounds, or take them whole (ROADMAP 7.4.13): around the middle of the
+            // key space, everything, nothing.
+            let mid = 1_u64 << 63;
+            for (low, high) in [(mid - 1_000, mid + 1_000), (0, u64::MAX), (u64::MAX, 0)] {
+                let cover = |min: u64, max: u64| {
+                    if max < low || min > high {
+                        Overlap::Disjoint
+                    } else if low <= min && max <= high {
+                        Overlap::Within
+                    } else {
+                        Overlap::Partial
+                    }
+                };
+                let _ = col.select(cover, |k| (low..=high).contains(&k), || Ok(()));
+            }
+            // The owning reader a sort gets (ROADMAP 7.5.1), alternating ends so it jumps between blocks, and its
+            // block bounds (7.5.6).
             let mut keys = col.into_keys();
             for d in 0..=n {
-                let _ = keys.key(if d % 2 == 0 { d } else { n - d });
+                let at = if d % 2 == 0 { d } else { n - d };
+                let _ = (keys.block(at), keys.key(at));
             }
         }
         if let Ok(col) = seg.bool_column(fid) {
@@ -659,6 +677,19 @@ fn queries(schema: &CollectionSchema) -> Vec<Query> {
         field: id(schema, field),
     };
     vec![
+        // A rare `must` checks column filters per candidate (ROADMAP 7.4.13).
+        filtered(
+            vec![term("title", "alpha")],
+            vec![],
+            vec![
+                Filter::Range {
+                    field: id(schema, "qty"),
+                    lower: Bound::Included(FilterValue::I64(-120)),
+                    upper: Bound::Unbounded,
+                },
+                Filter::Not(Box::new(exists("at"))),
+            ],
+        ),
         filtered(
             vec![term("title", "the")],
             vec![],

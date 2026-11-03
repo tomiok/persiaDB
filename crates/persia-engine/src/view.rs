@@ -160,6 +160,10 @@ impl KeyReader for NumericKeys<'_> {
     fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
         NumericKeys::key(self, docid)
     }
+
+    fn block(&mut self, docid: u32) -> Result<Option<KeyBlock>, ReadError> {
+        NumericKeys::block(self, docid)
+    }
 }
 
 impl KeywordReader for KeywordOrds<'_> {

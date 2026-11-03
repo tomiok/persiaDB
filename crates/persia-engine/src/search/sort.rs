@@ -403,6 +403,7 @@ pub(crate) fn top_sorted<V: SearchView>(
     let lead = lead_column(sort).filter(|_| seen.is_none());
     let only = sort.keys.len() == 1;
     let mut bound: Option<KeyBlock> = None;
+    let mut unbounded = false;
     let mut next = matcher.next()?;
     while let Some(docid) = next {
         if ticks.due() {
@@ -420,8 +421,10 @@ pub(crate) fn top_sorted<V: SearchView>(
             && let Some(&Local::Num(worst)) = heap.worst().and_then(|w| w.locals().first())
             && let Some(Reader::Keys(keys)) = readers.first_mut()
         {
-            if bound.is_none_or(|b| !(b.start..b.end).contains(&docid)) {
+            if !unbounded && bound.is_none_or(|b| !(b.start..b.end).contains(&docid)) {
                 bound = keys.block(docid)?;
+                // A reader without bounds (the memtable, a `bool` column) has none for any document.
+                unbounded = bound.is_none();
             }
             if let Some(block) = bound.filter(|b| (b.start..b.end).contains(&docid))
                 && block_loses(order, only, block, worst)
@@ -803,6 +806,38 @@ fn locals_agree(entries: &[Entry]) -> bool {
 mod tests {
     use super::*;
     use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+
+    /// A block loses when every key in it ranks after the worst kept one; with one key, a tie loses too (ROADMAP 7.5.6).
+    #[test]
+    fn a_block_loses_only_when_no_key_in_it_can_rank_before_the_worst() {
+        let block = |min, max| KeyBlock {
+            start: 0,
+            end: 1024,
+            min,
+            max,
+        };
+        for (order, only, b, worst, loses) in [
+            (Order::Asc, true, block(10, 20), 9, true),
+            (Order::Asc, true, block(10, 20), 10, true),
+            (Order::Asc, false, block(10, 20), 10, false),
+            (Order::Asc, true, block(10, 20), 11, false),
+            (Order::Asc, true, block(0, u64::MAX), 0, true),
+            (Order::Asc, false, block(0, u64::MAX), 0, false),
+            (Order::Desc, true, block(10, 20), 21, true),
+            (Order::Desc, true, block(10, 20), 20, true),
+            (Order::Desc, false, block(10, 20), 20, false),
+            (Order::Desc, true, block(10, 20), 19, false),
+            (Order::Desc, true, block(0, u64::MAX), u64::MAX, true),
+            (Order::Desc, false, block(0, u64::MAX), u64::MAX, false),
+            (Order::Desc, true, block(0, u64::MAX), 5, false),
+        ] {
+            assert_eq!(
+                block_loses(order, only, b, worst),
+                loses,
+                "{order:?}, only {only}, {b:?}, worst {worst}"
+            );
+        }
+    }
 
     fn keyword_sort() -> (Sort, SortKey) {
         let schema = SchemaBuilder::new("c")

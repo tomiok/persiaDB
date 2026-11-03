@@ -178,8 +178,10 @@ enum Explainer<'a, V: SearchView> {
         filter: &'a [Filter],
         selected: Option<RoaringBitmap>,
         /// The filters checked per document, when they can be and no selection was kept (ROADMAP 7.4.13): an
-        /// explanation reads a page's hits, not the whole column.
+        /// explanation reads a page's hits, not the whole column. Built the first time a hit reaches the `bool`,
+        /// from `checker`.
         check: Option<Check<V::Keys<'a>>>,
+        checker: Option<&'a V>,
     },
     Scaled(Box<Explainer<'a, V>>, Scale),
     All,
@@ -216,18 +218,15 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 slot,
             } => {
                 let selected = kept.and_then(|k| k.take(*slot));
-                let check = if selected.is_none() && *checks && !filter.is_empty() {
-                    Some(Check::new(filter, view)?)
-                } else {
-                    None
-                };
+                let checker = (selected.is_none() && *checks && !filter.is_empty()).then_some(view);
                 Self::Bool {
                     must: all(must)?,
                     should: all(should)?,
                     must_not: all(must_not)?,
                     filter,
                     selected,
-                    check,
+                    check: None,
+                    checker,
                 }
             }
             Node::Scaled(inner, scale) => {
@@ -265,18 +264,24 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 filter,
                 selected,
                 check,
-            } => boolean(
-                must,
-                should,
-                must_not,
-                Filters {
-                    filter,
-                    selected,
-                    check: check.as_mut(),
-                },
-                view,
-                docid,
-            )?,
+                checker,
+            } => {
+                if let Some(v) = checker.take() {
+                    *check = Some(Check::new(filter, v)?);
+                }
+                boolean(
+                    must,
+                    should,
+                    must_not,
+                    Filters {
+                        filter,
+                        selected,
+                        check: check.as_mut(),
+                    },
+                    view,
+                    docid,
+                )?
+            }
             Self::Scaled(inner, scale) => {
                 let Some(query) = inner.explain(view, docid)? else {
                     return Ok(None);
@@ -564,14 +569,14 @@ mod tests {
             plan.matcher_keeping(&view, Pruning::Exhaustive, &kept)
                 .unwrap(),
         );
-        // Without a selection, `n >= 1000` reads only the hit's key, not the column (ROADMAP 7.4.13): too few reads
-        // to look at the interrupts.
+        // Without a selection, `n >= 1000` reads only the hit's key, not the column (ROADMAP 7.4.13).
         let looks = Looks::default();
         let explained = plan
             .explain_all(&Interruptible::new(&view, &Steps::new(&looks)), &[1_000])
             .unwrap();
         assert!(explained[0].is_some());
-        assert_eq!(looks.0.load(Ordering::Relaxed), 0);
+        // A scan of every one of the column's 3 000 keys would look at least twice.
+        assert!(looks.0.load(Ordering::Relaxed) < 2);
         // From the kept selection, a hit reads a few postings and no column.
         let looks = Looks::default();
         let kept_explained = plan

@@ -17,7 +17,8 @@ use crate::view::{KeyReader, SearchView};
 
 /// A candidate is checked rather than a column scanned when the candidates are at most this share of the view's
 /// documents (`1 / CHECK_SHARE`): a check reads a key, a scan reads one per document and builds a bitmap, but a
-/// bitmap lets the matcher skip what it does not hold (benchmarked on `search_top10_filtered`, ROADMAP 7.4.13).
+/// bitmap lets the matcher skip what it does not hold. A first guess that wins on `search_top10_filtered` (ROADMAP
+/// 7.4.13); fitting it from a sweep of costs is 7.4.16.
 const CHECK_SHARE: u64 = 4;
 
 /// Whether every filter of `filters` reads only column keys, so it can be checked per candidate.

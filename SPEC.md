@@ -1328,8 +1328,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
   key inward), `exists` from which documents have a value, and `not` as the complement among the view's documents;
   the deleted ones are then left out, so no filter selects one. A segment scans a column's keys by FOR block (§5.2.1): a
-  block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter selects is not read, and
-  one whose bounds the filter selects whole selects its documents with a value without reading their keys. A `bool`
+  block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter selects is not decoded
+  (it is still read and checked as a FOR block), and one whose bounds the filter selects whole selects its documents
+  with a value without decoding their keys. A `bool`
   whose filters read only column keys (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool`
   field, and `and`, `or`, `not` of those) checks them per candidate instead, as column predicates, when its `must`
   clauses match at most a quarter of the view's documents (by their cost estimate); the documents and scores are the
@@ -1400,7 +1401,8 @@ cursor matters. A facet visits every match. A sort whose first key is a numeric 
 "last"`, without a facet, skips in each segment the FOR blocks (§5.2.1) whose keys all rank after the worst of the
 hits the view keeps: a block's keys lie between its minimum and the minimum plus `2^width − 1`, and a document
 without a value ranks after every value; with that one key, a tie ranks after the kept hit too (docids ascend). A
-skipped match is not scored, and a column sort scores only the matches it keeps. The hits are those of visiting every
+skipped match is not scored, and a column sort without a `score` key scores only the matches it keeps, so a
+corrupt norm of a match it does not keep is not found (as with pruning, §7.3). The hits are those of visiting every
 match. Any other sort visits every match.
 
 ### 7.5 Facets

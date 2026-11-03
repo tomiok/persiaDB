@@ -1487,3 +1487,79 @@ fn column_sorts_over_banded_blocks_match_the_model() {
         }
     }
 }
+
+/// Each read of [`Clock::now`] moves the clock 1 µs forward and is counted: a search reads it once per so many steps
+/// of its readers and matches, so the reads measure its work.
+#[derive(Debug)]
+struct CountingClock {
+    start: std::time::Instant,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl persia_engine::db::Clock for CountingClock {
+    fn now(&self) -> std::time::Instant {
+        let n = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.start + std::time::Duration::from_micros(n)
+    }
+
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+/// The clock reads of `request`, on the calling thread, under a deadline that never passes.
+fn reads(
+    views: &persia_engine::db::CollectionViews<'_>,
+    plan: &SearchPlan,
+    request: &SearchRequest,
+) -> u64 {
+    let clock = Arc::new(CountingClock {
+        start: std::time::Instant::now(),
+        reads: std::sync::atomic::AtomicU64::new(0),
+    });
+    let far = clock.start + std::time::Duration::from_secs(3_600);
+    let exec = Execution::default()
+        .threads(Threads::Current)
+        .deadline(clock.clone(), far);
+    views.search_with(plan, request, &exec).unwrap();
+    clock.reads.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Block skipping happens (ROADMAP 7.5.6): ascending by the banded `n`, the first block's hits beat every later block,
+/// so a sort without a facet visits a fraction of the matches; with a facet, or descending (each block beats the one
+/// before), it visits them all.
+#[test]
+fn a_column_sort_without_a_facet_skips_the_blocks_that_lose() {
+    let db = banded();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let request = |order, facets: bool| SearchRequest {
+        sort: Sort::new([SortKey::field(f.n, order)], c.schema()).unwrap(),
+        limit: 10,
+        facets: if facets {
+            vec![FacetRequest::new(f.tag, 3, c.schema()).unwrap()]
+        } else {
+            Vec::new()
+        },
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let pruned = reads(&views, &plan, &request(Order::Asc, false));
+    let faceted = reads(&views, &plan, &request(Order::Asc, true));
+    let descending = reads(&views, &plan, &request(Order::Desc, false));
+    assert!(
+        pruned * 3 < descending,
+        "{pruned} reads pruned, {descending} descending"
+    );
+    assert!(
+        pruned * 3 < faceted,
+        "{pruned} reads pruned, {faceted} with a facet"
+    );
+}

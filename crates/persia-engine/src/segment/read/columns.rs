@@ -361,7 +361,8 @@ impl<'s> ForColumn<'s> {
         Ok(())
     }
 
-    /// Bounds on block `b`'s keys, from its header alone (SPEC §5.2.1): each is its minimum plus at most
+    /// Bounds on block `b`'s keys, from its header (SPEC §5.2.1), the block read and checked but not decoded: each
+    /// key is its minimum plus at most
     /// `2^width − 1`. The upper bound saturates at `u64::MAX`; reading the block checked that no value it holds goes
     /// past it.
     fn bound(&self, b: u64) -> Result<(u64, u64), ReadError> {
@@ -587,7 +588,7 @@ impl<'c, 's> ForCursor<'c, 's> {
 /// Bounds on the keys of a run of documents (ROADMAP 7.4.13, 7.5.6): each document of `start..end` with a value has a
 /// key in `min..=max`. A segment's runs are its FOR blocks (SPEC §5.2.1), bounded by their headers: a block's minimum,
 /// plus at most `2^width − 1`. Writers store the block's minimum for a document without a value and use the minimal
-/// width, so the bounds are those of the keys present.
+/// width, so `min` is the smallest key present and `max` below twice the span of the keys present above it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct KeyBlock {
     /// The run's first docid.
@@ -603,7 +604,7 @@ pub struct KeyBlock {
 /// How a run of keys bounded by `min..=max` meets what a scan selects ([`NumericColumn::select`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlap {
-    /// No key in the bounds is selected: the run is not read.
+    /// No key in the bounds is selected: the run is not decoded.
     Disjoint,
     /// Every key in the bounds is: each document of the run with a value is selected, its key unread.
     Within,
@@ -695,8 +696,9 @@ impl<'s> NumericColumn<'s> {
     /// once per key read, so a search's interrupts stop a scan of a large column.
     ///
     /// # Errors
-    /// A corruption of a block read (one whose header says it is [`Overlap::Disjoint`] or [`Overlap::Within`] is
-    /// checked only as far as reading its header); what `step` returns.
+    /// A corruption of a block with a value: each is read and checked as a FOR block (SPEC §5.2.1), and only one
+    /// [`Overlap::Partial`] is decoded, so a key past the type's range is found only there, as by a scan; what `step`
+    /// returns.
     ///
     /// ```
     /// # use persia_analysis::AnalyzerRegistry;
@@ -877,7 +879,8 @@ impl NumericKeys<'_> {
     }
 
     /// Bounds on the keys of the FOR block that holds `docid` (ROADMAP 7.5.6), from its header; `None` past the
-    /// column or when no document has a value. The last bounds read are kept, so asking along a block reads it once.
+    /// column or when no document has a value. The block is read and checked, not decoded. The last bounds read are
+    /// kept, so asking along a block reads it once.
     ///
     /// # Errors
     /// A corruption of the block's header or position.
@@ -1621,6 +1624,26 @@ mod tests {
             .select(|_, _| Overlap::Disjoint, |_| true, ok)
             .unwrap();
         assert!(disjoint.is_empty());
+        // Steps count the work: one per block with a value, one per key of a block decoded. `n == 7` decodes only the
+        // blocks it cuts, the first (0..=99) and the third (both ends of the key space), of 1 024 values each, and takes
+        // the fourth whole (ROADMAP 7.4.13).
+        let steps = core::cell::Cell::new(0_u32);
+        let seven = k(7);
+        let got = column
+            .select(
+                between(seven, seven),
+                |key| key == seven,
+                || {
+                    steps.set(steps.get() + 1);
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            got.len(),
+            1024 + keys[..1024].iter().filter(|k| **k == Some(seven)).count() as u64
+        );
+        assert_eq!(steps.get(), 5 + 2 * 1024);
         // A step's error stops the scan.
         let stopped = column.select(
             |_, _| Overlap::Partial,
