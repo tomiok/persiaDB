@@ -72,7 +72,7 @@ use persia_storage::container::{self, Commit, Container, ContainerFile, Mode};
 use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
-pub use compaction::{Compacted, CompactionOptions};
+pub use compaction::{Compacted, CompactionOptions, CompactionStats};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
 pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
@@ -446,6 +446,8 @@ pub struct Database<F = File> {
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
     /// the records from there on may not be in a memtable yet (ROADMAP 6.6.5).
     replaying: Option<u64>,
+    /// What became of the compactions since the open.
+    compactions: CompactionStats,
 }
 
 impl Database<File> {
@@ -561,6 +563,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             options,
             poisoned: false,
             replaying: None,
+            compactions: CompactionStats::default(),
         }
     }
 

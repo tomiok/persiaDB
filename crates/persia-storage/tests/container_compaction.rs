@@ -290,7 +290,7 @@ fn compacted_file_keeps_live_frames_wal_and_tail() {
 }
 
 #[test]
-fn empty_wal_range_puts_wal_start_after_the_manifest() {
+fn empty_wal_range_puts_wal_start_at_the_new_manifest() {
     let mut c = Container::create_on(SimFile::new(), [5; 16]).unwrap();
     let seg = c.append(FrameKind::Segment, b"segment", NONE).unwrap();
     c.sync().unwrap();
@@ -301,15 +301,30 @@ fn empty_wal_range_puts_wal_start_after_the_manifest() {
         fence_token: 0,
     })
     .unwrap();
-    let (new, _) = c
-        .compact_into(SimFile::new(), &[range(seg)], |_| Ok(b"m2".to_vec()), NONE)
+    // The builder learns the new `wal_start` before it writes the Manifest that must hold it.
+    let mut told = None;
+    let (new, relocation) = c
+        .compact_into(
+            SimFile::new(),
+            &[range(seg)],
+            |r| {
+                told = Some(r.wal_start());
+                Ok(b"m2".to_vec())
+            },
+            NONE,
+        )
         .unwrap();
     let sb = *new.superblock();
+    // As after any commit, the Manifest frame is the WAL range (SPEC §4.6 step 3).
     assert_eq!(
         (sb.wal_start, sb.log_end),
-        (sb.log_end, sb.manifest_off + sb.manifest_len)
+        (sb.manifest_off, sb.manifest_off + sb.manifest_len)
     );
-    assert_eq!(new.frames().len(), 0);
+    assert_eq!(
+        (told, relocation.wal_start()),
+        (Some(sb.wal_start), sb.wal_start)
+    );
+    assert_eq!(new.frames().len(), 1);
     let r = Container::open_on(SimFile::from_bytes(new.file().bytes()), Mode::ReadOnly).unwrap();
     assert_eq!(payload(&r, sb.manifest_off), b"m2");
 }

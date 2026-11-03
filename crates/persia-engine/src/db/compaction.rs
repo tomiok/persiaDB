@@ -12,8 +12,6 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use persia_format::block::Compression;
-use persia_format::frame::frame_len;
-use persia_format::superblock::{FIRST_FRAME_OFFSET, Superblock};
 use persia_storage::container::{self, ContainerFile, Relocation, SpaceUsage};
 
 use super::{Database, DatabaseError, Location, Manifest, snapshot_of};
@@ -42,6 +40,17 @@ impl Default for CompactionOptions {
             min_dead_bytes: Self::DEFAULT_MIN_DEAD_BYTES,
         }
     }
+}
+
+/// How many compactions a database ran since it was opened, and how many failed ([`Database::compaction_stats`]). A
+/// compaction [`Database::merge_step`] starts on its own and that fails before its rename does not fail the step (its
+/// merges are committed): it is only counted here, and tried again at a later step.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompactionStats {
+    /// Compactions that replaced the file.
+    pub compacted: u64,
+    /// Compactions that failed.
+    pub failed: u64,
 }
 
 /// What a compaction did.
@@ -94,15 +103,26 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     /// ([`container::Error::CompactedNotDurable`]) leaves the database on the new file, poisoned.
     pub fn compact(&mut self) -> Result<Compacted, DatabaseError> {
         self.usable()?;
+        let result = self.compact_once();
+        let n = if result.is_ok() {
+            &mut self.compactions.compacted
+        } else {
+            &mut self.compactions.failed
+        };
+        *n = n.saturating_add(1);
+        result
+    }
+
+    /// [`Database::compact`] before it is counted.
+    fn compact_once(&mut self) -> Result<Compacted, DatabaseError> {
         let before = self.space_usage()?;
         let live = self.live_below_wal();
         let base = Arc::clone(&self.manifest);
-        let old = *self.wal.log().superblock();
         let mut built: Option<Result<Manifest, DatabaseError>> = None;
         let result = self.wal.log_mut().compact(
             &live,
             |relocation| {
-                let next = relocated(&base, &old, relocation).and_then(|m| {
+                let next = relocated(&base, relocation).and_then(|m| {
                     let bytes = m.encode()?;
                     Ok((m, bytes))
                 });
@@ -128,8 +148,12 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
                 let e = container::Error::CompactedNotDurable { relocation, source };
                 (again, Some(e))
             }
-            // The old file is in place: nothing the writer holds moved.
+            // The old file is in place: nothing the writer holds moved. A failed sync of it poisoned the container
+            // (SPEC §4.5), and so the database.
             Err(e) => {
+                if self.wal.log().is_poisoned() {
+                    self.poisoned = true;
+                }
                 return Err(match built {
                     Some(Err(why)) => why,
                     _ => e.into(),
@@ -150,6 +174,11 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             before,
             after: self.space_usage()?,
         })
+    }
+
+    /// How many compactions ran since the database was opened, and how many failed.
+    pub fn compaction_stats(&self) -> CompactionStats {
+        self.compactions
     }
 
     /// [`Database::compact`] if the container was opened from a path and its dead bytes reach both thresholds of
@@ -232,19 +261,9 @@ impl<F: ContainerFile + Sync> Database<F> {
 }
 
 /// The manifest of the compacted file (SPEC §8.7.2 "Relocation"): `base` with every frame location moved where
-/// `relocation` copied it, and the new `wal_start`. `old` is the superblock of the file compacted.
-///
-/// The new `wal_start` is where the old `wal_start` frame moved, or, with an empty WAL range, the end of the new
-/// Manifest frame (SPEC §4.6 step 3). That frame follows the last frame copied below `log_end`, and its length does
-/// not depend on the `wal_start` it holds (a fixed-width field), so it is known before the manifest is final.
-fn relocated(
-    base: &Manifest,
-    old: &Superblock,
-    relocation: &Relocation,
-) -> Result<Manifest, DatabaseError> {
-    let not_copied = DatabaseError::Internal {
-        what: "a compaction did not copy a frame the manifest lists",
-    };
+/// `relocation` copied it, and the `wal_start` the container decided before asking for it (SPEC §4.6 step 3), so the
+/// manifest and the superblock slot cannot disagree.
+fn relocated(base: &Manifest, relocation: &Relocation) -> Result<Manifest, DatabaseError> {
     let mut moves = BTreeMap::new();
     for segment in base.collections().flat_map(|c| c.segments().iter()) {
         let sidecar = segment.tombstones.map(|t| t.location);
@@ -257,21 +276,5 @@ fn relocated(
             }
         }
     }
-    let wal_start = if old.wal_start < old.log_end {
-        relocation.get(old.wal_start).ok_or(not_copied)?.offset
-    } else {
-        let manifest_at = relocation
-            .iter()
-            .last()
-            .map_or(FIRST_FRAME_OFFSET, |(_, new)| new.end());
-        let payload = base.relocate(&moves, 0)?.encode()?;
-        let len = u64::try_from(payload.len())
-            .ok()
-            .and_then(frame_len)
-            .and_then(|len| manifest_at.checked_add(len));
-        len.ok_or(DatabaseError::Internal {
-            what: "a compacted manifest's frame does not fit a u64",
-        })?
-    };
-    Ok(base.relocate(&moves, wal_start)?)
+    Ok(base.relocate(&moves, relocation.wal_start())?)
 }

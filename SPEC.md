@@ -346,14 +346,16 @@ frames, §8.2) are needed by recovery.
 **Driven by the writer** (ROADMAP 6.5.8). The engine names the live frames below `wal_start`: the segment and
 sidecar frames its manifest lists, and the obsolete ones a snapshot, job or reader still holds (§8.5); the rest are
 reclaimed, and the obsolete objects among them are no longer tracked. It builds the new Manifest from where the
-frames moved (§8.7.2 "Relocation"); the new `wal_start` is known before the Manifest is final, since a Manifest's
-length does not depend on the `wal_start` it holds. If the writer cannot build that Manifest, the compaction fails
-before anything is committed. Once the new file is in place, everything the writer holds that names an offset
+frames moved (§8.7.2 "Relocation"), with the new `wal_start` the container decided (step 3) and passes to it, so
+the Manifest and the slot cannot disagree. If the writer cannot build that Manifest, the compaction fails before
+anything is committed. Once the new file is in place, everything the writer holds that names an offset
 follows it: the manifest, the positions of the WAL chunks that hold `wal_start` back, and the obsolete objects. Open
 segments hold their bytes (read, or mapped from the old file, §4.7), so snapshots and merges in flight read on. A
 compaction runs on request, and on its own at each merge step when it is due: dead bytes reach the dead-space ratio
 **and** a floor (`compaction.min_dead_bytes`, default 1 MiB), so a small file is not rewritten for a few dead
-frames. A container opened without a path (on a bare file) cannot be renamed over, and is not compacted.
+frames (`compaction.automatic` turns that off). One that fails before its rename leaves the database usable (unless
+syncing the old file failed, §4.5): it is counted, and does not fail the merge step, whose merges are committed. A
+container opened without a path (on a bare file) cannot be renamed over, and is not compacted.
 
 **Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
 from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
@@ -368,8 +370,9 @@ live; they are few and small.
    does not grow with the size of a frame, compressed or not (ROADMAP 2.4.17).
 2. A new Manifest frame, which the writer builds from where the frames moved (the offsets it references change).
 3. Both slots hold the same commit: `seq` one above the old one, `log_end` the end of the new Manifest, `wal_start`
-   the new offset of the old `wal_start` frame (the end of the Manifest if the old WAL range was empty), the old
-   `fence_token`, and `next_frame_seq` one above the Manifest's.
+   the new offset of the old `wal_start` frame (the new Manifest frame itself if the old WAL range was empty, as after
+   any commit, §4.5), the old `fence_token`, and `next_frame_seq` one above the Manifest's. It is decided before
+   step 2, which must record it.
 4. The old frames after `log_end`, copied the same way after the new `log_end`, so they stay uncommitted.
 5. The header is the old one with `format_minor = max(old, own)` (§4.2).
 
@@ -2178,7 +2181,7 @@ Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`, `query.*` (limits, §7.1.3).
 Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60 s (§8.2 step 3); `merge_threads` 1
 (0 merges on the writer's thread); `merge.*` as in §8.5; `compaction.dead_space_percent` 40 and
-`compaction.min_dead_bytes` 1 MiB (§4.6).
+`compaction.min_dead_bytes` 1 MiB, `compaction.automatic` on (§4.6).
 
 ---
 

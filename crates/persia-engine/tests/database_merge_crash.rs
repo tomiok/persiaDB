@@ -489,8 +489,8 @@ fn a_crash_at_any_write_of_a_merge_commit_gives_the_old_or_the_new_manifest() {
 
 // --- 3: a merge that catches up with deletes ----------------------------------------------------------------------
 
-/// Opens the base with one merge thread, starts the merge, commits a delete into its input, and waits until the
-/// merge has finished (it is still to be committed). Returns the file, the database, and the documents.
+/// Opens the base with one merge thread, starts the merge, and commits a delete into its input; the merge is still
+/// to be settled ([`settle`]). Returns the file, the database, the documents and the segments before the merge.
 fn caught_up_base(base: &[u8], docs: &Docs) -> (SimFile, Database<SimFile>, Docs, Segments) {
     let mut docs = docs.clone();
     let file = SimFile::from_bytes(base.to_vec());

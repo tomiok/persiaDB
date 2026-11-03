@@ -432,6 +432,7 @@ Deps: M2, M5.
 - [~] 6.5.9 Merges that survive concurrent deletes: re-apply the deletions committed to its inputs since the plan to the merged segment (a docid map kept with the result) instead of discarding it. Test: the segment count stays bounded under steady deletes, replacing `deletes_into_every_segment_discard_every_merge_until_they_pause` (6.5.11), which pins today's unbounded growth (ADR-0032 item 4, found in 6.5.3)
 - [x] 6.5.10 Until 6.5.8, say that a database file only grows (README, SPEC §4.6), and report its dead bytes (`Database::space_usage`) (found in the 2026-11-02 audit)
 - [x] 6.5.11 Count the merges discarded because their inputs had deletes committed meanwhile (`Database::merge_stats`), and pin with a test what steady deletes do to the segment count: deletes into the inputs of every merge in flight keep any merge from committing, so the count grows until they pause (SPEC §8.7.2); 6.5.9 lifts that, and its test must then bound the count (found in the 2026-11-02 audit)
+- [ ] 6.5.12 Compaction in the randomized merge model: a SimFs (path) variant of `merge_interleavings_match_the_model` with a `Compact` op, so compactions interleave with threaded merges in flight, deletes, cancels and crash-reopens (found in the 6.5.8 review)
 
 ## 6.6 Open/recovery orchestration
 - [x] 6.6.1 Open sequence: superblock → manifest → replay WAL → memtable → ready (SPEC §8.6)

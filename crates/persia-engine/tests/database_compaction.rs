@@ -25,13 +25,15 @@ use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
-    CompactionOptions, Database, DatabaseError, DatabaseOptions, ManualClock, ReadOnlyDatabase,
-    SegmentIds,
+    CompactionOptions, Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome,
+    ReadOnlyDatabase, SegmentIds,
 };
 use persia_engine::document::{Document, Value};
+use persia_engine::manifest::Location;
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::wal::Durability;
+use persia_format::frame::FrameKind;
 use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
 use persia_storage::container::{Container, Error as ContainerError, Mode};
 use persia_storage::vfs::Vfs;
@@ -250,7 +252,7 @@ fn a_merge_in_flight_commits_after_a_compaction() {
     assert!(
         outcomes
             .iter()
-            .any(|o| matches!(o, persia_engine::db::MergeOutcome::Committed { .. })),
+            .any(|o| matches!(o, MergeOutcome::Committed { .. })),
         "{outcomes:?}"
     );
     assert_eq!(db.snapshot().collection("a").unwrap().segments().len(), 1);
@@ -286,17 +288,27 @@ fn an_obsolete_frame_a_reader_holds_is_kept_and_moved() {
         );
         assert_ne!(old.location, new.location, "the frame moved");
     }
-    let frames = db.container().frames();
-    for o in &moved {
-        let persia_engine::manifest::Location::Frame { offset, .. } = o.location else {
-            panic!("{o:?}");
-        };
-        // Below `wal_start`, kept frames are not listed by the container; reading checks they are segments there.
-        assert!(
-            offset < db.container().superblock().log_end,
-            "{o:?} {frames:?}"
-        );
-    }
+    // The new locations are the frames: each reads back as a whole Segment frame of the same length there.
+    let check_frames = |db: &Database<SimFsFile>| {
+        for o in db.obsolete().map(|(o, _)| o) {
+            let Location::Frame { offset, len } = o.location else {
+                panic!("{o:?}");
+            };
+            let read = db.container().read_frame(offset, usize::MAX).unwrap();
+            assert_eq!(
+                (read.frame.kind, read.frame.len),
+                (FrameKind::Segment, len),
+                "{o:?}"
+            );
+        }
+    };
+    check_frames(&db);
+    // Compacting again while they are still held: the container takes each named range only if it is exactly one
+    // valid frame, so this fails if a relocated offset is wrong.
+    let kept = db.compact().unwrap();
+    assert_eq!(db.obsolete().count(), 2);
+    check_frames(&db);
+    assert_eq!(kept.after.dead(), 0, "{kept:?}");
     let held_reads = held.collection("a").unwrap().get("k0").unwrap();
     assert!(held_reads.is_some());
 
@@ -386,8 +398,8 @@ fn a_container_without_a_path_is_not_compacted() {
 }
 
 /// Invariant 5: a fault at each mutating call of a compaction (a failed write, or one applied then reported failed),
-/// then a crash. The database reopens with every acknowledged document, whether the old or the new file survived;
-/// an open database whose compaction failed before the rename writes on.
+/// then a crash. The database reopens with every acknowledged document, whether the old or the new file survived.
+/// (A simulated fault kills the file system for good, so writing on after a failure is tested on the real one.)
 #[test]
 fn a_crash_or_failure_at_any_write_of_a_compaction_keeps_every_document() {
     let calls = {
@@ -402,7 +414,7 @@ fn a_crash_or_failure_at_any_write_of_a_compaction_keeps_every_document() {
         for apply_first in [false, true] {
             let ctx = format!("call {n}, apply_first {apply_first}");
             let fs = SimFs::new();
-            let (mut db, mut docs, gone) = populated(&fs);
+            let (mut db, docs, gone) = populated(&fs);
             let at = fs.mutations() + n;
             fs.set_fault(Some(if apply_first {
                 SimFault::ApplyThenFail(at)
@@ -414,12 +426,6 @@ fn a_crash_or_failure_at_any_write_of_a_compaction_keeps_every_document() {
             assert!(result.is_err(), "{ctx}: the fault fired");
             // Whatever happened, the handle still reads every document.
             assert_docs(&db, &docs, &gone, &ctx);
-            if db
-                .put("a", &doc("after", "after"), Durability::Fsync)
-                .is_ok()
-            {
-                docs.insert("after".into(), "after".into());
-            }
             drop(db);
             for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(n)] {
                 let crashed = fs.crash(loss);
@@ -428,4 +434,185 @@ fn a_crash_or_failure_at_any_write_of_a_compaction_keeps_every_document() {
             }
         }
     }
+}
+
+/// Steps until the merge in flight settles; returns its outcomes.
+fn settle(db: &mut Database<SimFsFile>) -> Vec<MergeOutcome> {
+    loop {
+        let outcomes = db.merge_step().unwrap();
+        if !outcomes.is_empty() {
+            return outcomes;
+        }
+        // No sleeps: the worker finishes when it does.
+        std::thread::yield_now();
+    }
+}
+
+/// A compaction between a merge's plan and its commit, with a delete committed into an input in between: the input's
+/// superseded sidecar is obsolete and held by the job, so it is kept and moved; the merge then catches up with the
+/// delete (ROADMAP 6.5.9) on the new file, and a later compaction reclaims what the job held.
+#[test]
+fn a_compaction_between_a_merge_plan_and_its_catch_up_keeps_the_deletes() {
+    let fs = SimFs::new();
+    let container = Container::create_in(vfs(&fs), PATH).unwrap();
+    let mut opts = options(false);
+    opts.merge.threads = 1;
+    let mut db = Database::create_container(container, opts).unwrap();
+    db.create_collection(schema()).unwrap();
+    let mut docs = Docs::new();
+    for (i, ids) in [["a0", "a1", "a2"], ["b0", "b1", "b2"]].iter().enumerate() {
+        for id in ids {
+            db.put("a", &doc(id, "x"), Durability::Buffered).unwrap();
+            docs.insert((*id).to_owned(), "x".into());
+        }
+        // A first sidecar on the first segment before the plan, so the delete below supersedes one.
+        if i == 0 {
+            db.commit().unwrap();
+            db.delete("a", "a2", Durability::Buffered).unwrap();
+            docs.remove("a2");
+        }
+        db.commit().unwrap();
+    }
+    db.merge_step().unwrap();
+    assert_eq!(db.merges_running(), 1);
+    db.delete("a", "a0", Durability::Buffered).unwrap();
+    docs.remove("a0");
+    db.commit().unwrap();
+    let held: Vec<_> = db
+        .obsolete()
+        .filter(|(_, r)| *r)
+        .map(|(o, _)| o.clone())
+        .collect();
+    assert!(!held.is_empty(), "the job holds the superseded sidecar");
+    db.compact().unwrap();
+    let moved: Vec<_> = db.obsolete().map(|(o, _)| o.clone()).collect();
+    for o in &held {
+        assert!(
+            moved
+                .iter()
+                .any(|m| m.kind == o.kind && m.location != o.location),
+            "{o:?} {moved:?}"
+        );
+    }
+
+    let outcomes = settle(&mut db);
+    assert!(
+        matches!(
+            &outcomes[..],
+            [MergeOutcome::Committed { reapplied: 1, .. }]
+        ),
+        "{outcomes:?}"
+    );
+    let gone = ["a0".to_owned(), "a2".to_owned()];
+    assert_docs(&db, &docs, &gone, "merged");
+    // The job is gone: what it held is reclaimed now.
+    db.finish_merges().unwrap();
+    db.compact().unwrap();
+    assert!(db.obsolete().all(|(_, referenced)| referenced));
+    drop(db);
+    let db = open(&fs.crash(CrashLoss::All)).unwrap();
+    assert_docs(&db, &docs, &gone, "reopened");
+}
+
+/// An automatic compaction that fails does not fail the merge step that started it: its merges are committed and
+/// returned, the failure is counted, and the database reopens with every document.
+#[test]
+fn a_failed_automatic_compaction_does_not_fail_the_merge_step() {
+    // The calls of a step that commits one merge and then compacts, without faults, on a copy.
+    let prepared = || {
+        let fs = SimFs::new();
+        let mut db = create(&fs, true);
+        // Replaced documents and old manifests: enough dead bytes for the 40% ratio. Each round empties the segment of
+        // the round before (dropped by the flush, 6.4.6), so no merge is planned until the last two.
+        for round in 0..6 {
+            db.put("a", &doc("k0", &format!("{round}")), Durability::Buffered)
+                .unwrap();
+            db.commit().unwrap();
+        }
+        db.put("a", &doc("k1", "x"), Durability::Buffered).unwrap();
+        db.commit().unwrap();
+        (fs, db)
+    };
+    let (fs, mut db) = prepared();
+    let start = fs.mutations();
+    let outcomes = db.merge_step().unwrap();
+    assert!(
+        matches!(&outcomes[..], [MergeOutcome::Committed { .. }]),
+        "{outcomes:?}"
+    );
+    assert_eq!(db.compaction_stats().compacted, 1);
+    let total = fs.mutations() - start;
+    drop(db);
+
+    // Fail the rename (the compaction's second-to-last call, before the directory sync): before it, so the old file
+    // is in place and the database not poisoned.
+    let (fs, mut db) = prepared();
+    fs.set_fault(Some(SimFault::FailAt(fs.mutations() + total - 2)));
+    let outcomes = db.merge_step().unwrap();
+    assert!(
+        matches!(&outcomes[..], [MergeOutcome::Committed { .. }]),
+        "{outcomes:?}"
+    );
+    let stats = db.compaction_stats();
+    assert_eq!((stats.compacted, stats.failed), (0, 1), "{stats:?}");
+    drop(db);
+    let db = open(&fs.crash(CrashLoss::All)).unwrap();
+    assert_eq!(
+        db.snapshot().collection("a").unwrap().segments().len(),
+        1,
+        "the merge is durable"
+    );
+    let docs: Docs = [("k0", "5"), ("k1", "x")]
+        .into_iter()
+        .map(|(id, body)| (id.to_owned(), body.to_owned()))
+        .collect();
+    assert_docs(&db, &docs, &[], "reopened");
+}
+
+/// On the real file system: compaction by path, a reopen, and a compaction that fails before its rename (the path
+/// no longer names the database) leaves the database writable.
+#[test]
+fn compaction_works_on_the_real_file_system() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut db = Database::create(&path, options(false)).unwrap();
+    db.create_collection(schema()).unwrap();
+    let mut docs = Docs::new();
+    for round in 0..4 {
+        db.put("a", &doc("r", &format!("{round}")), Durability::Fsync)
+            .unwrap();
+        docs.insert("r".into(), format!("{round}"));
+        db.commit().unwrap();
+        db.finish_merges().unwrap();
+    }
+    let done = db.compact().unwrap();
+    assert_eq!(done.after.dead(), 0);
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), done.after.total);
+    drop(db);
+    let mut db = Database::open(&path, options(false)).unwrap();
+    assert_docs(&db, &docs, &[], "reopened");
+
+    // Moved away from under the writer: the rename is refused, and the database writes on (into the moved file).
+    let moved = dir.path().join("moved.persia");
+    std::fs::rename(&path, &moved).unwrap();
+    db.put("a", &doc("r", "x"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let err = db.compact().unwrap_err();
+    assert!(matches!(err, DatabaseError::Container(_)), "{err:?}");
+    assert_eq!(db.compaction_stats().failed, 1);
+    db.put("a", &doc("r", "y"), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    docs.insert("r".into(), "y".into());
+    drop(db);
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec![std::ffi::OsString::from("moved.persia")],
+        "no temporary file is left"
+    );
+    let db = Database::open(&moved, options(false)).unwrap();
+    assert_docs(&db, &docs, &[], "moved");
 }

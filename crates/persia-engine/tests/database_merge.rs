@@ -275,6 +275,20 @@ fn a_merge_whose_input_lost_documents_meanwhile_deletes_them_from_its_output() {
     let entries = db.manifest().collection("a").unwrap().segments().to_vec();
     assert_eq!(entries.len(), 1);
     let t = entries[0].tombstones.unwrap();
+    // The sidecar frame follows the segment frame it deletes from (SPEC §8.3).
+    let (
+        Location::Frame {
+            offset: segment_at,
+            len,
+        },
+        Location::Frame {
+            offset: sidecar_at, ..
+        },
+    ) = (entries[0].location, t.location)
+    else {
+        panic!("{entries:?}");
+    };
+    assert!(sidecar_at >= segment_at + len, "{entries:?}");
     assert_eq!(
         (entries[0].id, entries[0].doc_count, t.version, t.deleted),
         (output, 4, 1, 2)

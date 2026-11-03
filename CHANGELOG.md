@@ -14,6 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine` (breaking): `Database::merge_step`, `finish_merges` and the other merge methods need
   `F: 'static` (they may compact, which renames through the container's `Vfs`). `MergeOutcome::Conflict` now means
   an input is gone or the schema changed, not that an input gained deletions.
+- `persia-storage`: a compaction of a container whose WAL range is empty sets `wal_start` to the new Manifest frame's
+  offset, as any commit does, instead of its end (SPEC §4.6 step 3); both are valid, so files written either way open.
 - `persia-storage` (breaking): `Container::enable_mapped_reads` and `enable_mapped_reads_if_local` are `unsafe fn`.
   Their soundness rests on a precondition the container cannot check, now stated in a `# Safety` section: nothing
   outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives, and the
@@ -70,6 +72,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   steady deletes no longer make the segment count grow. `MergeOutcome::Committed` has a `reapplied` count,
   `MergeStats` a `caught_up` count, and `merge::MergedSegment::docid_map` returns where each input document went
   (`merge::DocidMap`).
+- `persia-engine`: `Database::compaction_stats` (`CompactionStats`) counts compactions and failures. A compaction
+  `merge_step` starts on its own and that fails before its rename (without poisoning) is counted there and does not
+  fail the step. `persia-storage`: `Relocation::wal_start` gives a compaction's manifest builder the `wal_start` the
+  container decided, and `Container::is_poisoned` tells whether a failed write stopped the handle.
 - `persia-format`: `widen::usize_from_u32` and `widen::u64_from_usize`, the lossless widenings `From` lacks, with
   a compile-time check that pointers are 32 or 64 bits. `persia-format`, `persia-storage` and `persia-engine` deny
   `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, a

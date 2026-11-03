@@ -161,7 +161,9 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     ///
     /// # Errors
     /// [`DatabaseError::Poisoned`]; [`DatabaseError::MergeThread`] if no worker can be started; a failed merge
-    /// commit, which poisons the database. A merge that fails is an outcome, not an error.
+    /// commit, which poisons the database; a compaction it starts ([`crate::db::CompactionOptions::automatic`]) that
+    /// poisons the database. A merge that fails is an outcome, not an error; so is a compaction that fails without
+    /// poisoning ([`Database::compaction_stats`]).
     pub fn merge_step(&mut self) -> Result<Vec<MergeOutcome>, DatabaseError> {
         self.usable()?;
         let mut outcomes = Vec::new();
@@ -177,8 +179,14 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             }
         }
         if self.options.compaction.automatic {
-            // Merges are what leaves most frames dead; the inputs a merge in flight holds are kept (SPEC §4.6).
-            self.compact_if_due()?;
+            // Merges are what leaves most frames dead; the inputs a merge in flight holds are kept (SPEC §4.6). The
+            // merges above are committed: a compaction that fails and leaves the database usable (before its rename,
+            // e.g. no room for the copy) is counted in `compaction_stats` and tried again later, not reported here.
+            if let Err(e) = self.compact_if_due()
+                && self.poisoned
+            {
+                return Err(e);
+            }
         }
         Ok(outcomes)
     }
@@ -346,11 +354,24 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
                 });
             }
         };
-        let Some(catch_up) = self.catch_up(&job, merged.as_ref())? else {
-            return Ok(MergeOutcome::Conflict {
-                collection: job.collection,
-                inputs,
-            });
+        let catch_up = match self.catch_up(&job, merged.as_ref()) {
+            Ok(Some(catch_up)) => catch_up,
+            Ok(None) => {
+                return Ok(MergeOutcome::Conflict {
+                    collection: job.collection,
+                    inputs,
+                });
+            }
+            // Nothing was written; replanning would meet the same broken invariant at every step.
+            Err(DatabaseError::Internal { what }) => {
+                self.merges.failed.extend(inputs.iter().copied());
+                return Ok(MergeOutcome::Failed {
+                    collection: job.collection,
+                    inputs,
+                    error: MergeError::Internal { what },
+                });
+            }
+            Err(e) => return Err(e),
         };
         let reapplied = catch_up.deleted.len();
         let result = self.commit_merged(&job, merged, catch_up);
@@ -375,8 +396,9 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
     /// written, so such a merge is discarded instead of poisoning the database after its frame is appended.
     ///
     /// # Errors
-    /// [`DatabaseError::Internal`] if an input's deletions lost one the plan read (each sidecar version keeps the
-    /// previous one's, SPEC §8.3), or a document deleted since is not in the merged segment: nothing is written.
+    /// [`DatabaseError::Internal`] (the merge then fails, and its inputs are not planned again) if an input's
+    /// deletions lost one the plan read (each sidecar version keeps the previous one's, SPEC §8.3), or a document
+    /// deleted since is not in the merged segment: nothing is written.
     fn catch_up(
         &self,
         job: &MergeJob,
@@ -390,8 +412,11 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
         }
         let mut versions = Vec::with_capacity(job.plan.inputs.len());
         let mut deleted = RoaringBitmap::new();
-        for (i, (input, (_, read))) in job.plan.inputs.iter().zip(&job.inputs).enumerate() {
-            let Some(live) = find(&c.segments, input.id) else {
+        for (i, (input, (segment, read))) in job.plan.inputs.iter().zip(&job.inputs).enumerate() {
+            // The same open segment, not only the same id.
+            let Some(live) =
+                find(&c.segments, input.id).filter(|l| Arc::ptr_eq(&l.segment, segment))
+            else {
                 return Ok(None);
             };
             let version = live.deleted.as_ref().map_or(0, |(v, _)| *v);

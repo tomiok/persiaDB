@@ -677,6 +677,11 @@ impl<F: ContainerFile> Container<F> {
         &self.recovery
     }
 
+    /// Whether a failed write, truncation or sync stopped this handle from writing (SPEC §4.5): reopen to recover.
+    pub fn is_poisoned(&self) -> bool {
+        self.poisoned
+    }
+
     /// Whether appends since the last [`Container::sync`] are waiting for it.
     pub fn has_unsynced(&self) -> bool {
         self.dirty
@@ -1035,15 +1040,18 @@ impl<F: ContainerFile> Container<F> {
         for f in &committed {
             out.copy(self, f.offset, f.len)?;
         }
-        let relocation = Relocation {
-            moved: out.moved.clone(),
-        };
-        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation)?, compression)?;
+        // Decided before the Manifest is built, which must hold it: where the old `wal_start` frame moved, or, with
+        // an empty WAL range, the new Manifest frame itself, as after any commit (SPEC §4.6 step 3).
         let wal_start = out
             .moved
             .get(wal_first)
             .filter(|_| !committed.is_empty())
-            .map_or(manifest.end(), |(_, new)| new.offset);
+            .map_or(out.end, |(_, new)| new.offset);
+        let relocation = Relocation {
+            moved: out.moved.clone(),
+            wal_start,
+        };
+        let manifest = out.append(FrameKind::Manifest, &manifest(&relocation)?, compression)?;
         let superblock = Superblock {
             seq: old
                 .seq
@@ -1150,7 +1158,7 @@ fn assemble_compacted<G: ContainerFile>(
         file_locked,
         unlock_file: release_writer_lock,
     };
-    (container, Relocation { moved })
+    (container, Relocation { moved, wal_start })
 }
 
 /// Reads `len` bytes at `offset`, which the caller has bounded by the file length.
@@ -1294,9 +1302,15 @@ impl SpaceUsage {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Relocation {
     moved: Vec<(FrameRef, FrameRef)>,
+    wal_start: u64,
 }
 
 impl Relocation {
+    /// The `wal_start` of the compacted container (SPEC §4.6 step 3), which the new Manifest must hold.
+    pub fn wal_start(&self) -> u64 {
+        self.wal_start
+    }
+
     /// The new frame of the old frame at `old_offset`, if it was copied.
     pub fn get(&self, old_offset: u64) -> Option<FrameRef> {
         let i = self
