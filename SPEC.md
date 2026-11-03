@@ -1651,8 +1651,10 @@ Plans come in that order, tier merges by tier then by size, rewrites in manifest
 and a `max_merged_docs` above 2^31 as 2^31.
 Live sizes are estimates, so a merged segment may come out somewhat above `max_merged_bytes`.
 A merged segment lists its inputs' documents in plan order (§5.5) and is added after the kept segments (§8.7.2).
-Order does not matter for lookups: a commit leaves at most one live copy of each id (§8.3), and a merged segment
-holds only live documents.
+Order does not matter for lookups: a commit leaves at most one live copy of each id (§8.3), and a lookup by id
+returns that copy wherever it is, passing deleted ones. The newest segment holding an id may hold it deleted: a
+merge that caught up with an upsert (below) keeps the old copy, deleted, in the merged segment, which goes after
+the segment of the new copy (ROADMAP 6.5.13).
 Merges run in background threads, are crash-safe (new segment + new manifest commit), and never block reads or writes.
 **Scheduling** (ADR-0032, ROADMAP 6.5.3). The writer plans, a pool of `merge_threads` worker threads (§14, default 1)
 merges, and the writer commits. Each plan becomes a job holding its inputs as the writer's open segments and their
