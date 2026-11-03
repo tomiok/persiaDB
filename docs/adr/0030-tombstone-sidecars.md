@@ -1,6 +1,6 @@
 # ADR-0030: Tombstone sidecars, and upserts and deletes through the commit
 
-- Status: proposed
+- Status: proposed; amended 2026-11-03 (item 6: a lookup passes deleted copies, ROADMAP 6.5.13)
 - Date: 2026-10-28
 - Related: SPEC §5.3.6, §8.2, §8.3, §8.7, §8.7.2, §10.4, §15, §18.3; ROADMAP 6.4.1–6.4.4; ADR-0024, ADR-0029
 
@@ -41,9 +41,10 @@ copy live.
    sidecars are appended after the new segments and before the WAL's commit point and the manifest (SPEC §4.5
    step 1). Looking in every segment, not only the newest holding the id, also removes duplicates left by builds
    before this change (ADR-0029 Consequences).
-6. **Lookups** (ROADMAP 6.4.1): the memtable's version or delete of an id hides the segments'; otherwise the newest
-   segment whose `IdMap` holds the id decides: its copy if live, none if deleted (`CollectionSnapshot::lookup`,
-   `get`). Older copies are not consulted, so a lookup never depends on every older copy having been deleted.
+6. **Lookups** (ROADMAP 6.4.1; amended by 6.5.13, below): the memtable's version or delete of an id hides the
+   segments'; otherwise the lookup returns the live copy, searching newest first and passing deleted copies
+   (`CollectionSnapshot::lookup`, `get`). As first decided, the newest segment holding the id decided, live or not,
+   so a lookup never depended on every older copy having been deleted.
 7. **Visibility.** A write is visible in the memtable once logged (ADR-0029); the commit publishes the new segment and
    the sidecars that hide the older copies in one snapshot, so every snapshot shows each id at most once.
 8. A segment whose documents are all deleted stays listed (with `deleted = doc_count`) until a merge drops it
@@ -83,3 +84,22 @@ copy live.
 - **Looking up only the newest segment holding an id**: cheaper for upserts (inserts must check every segment
   anyway), but an older live copy, from a build before this change or a future bug, would stay live: invisible to
   lookups, which the newest copy decides, but kept by a merge, which drops only tombstoned documents.
+
+## Amendment (2026-11-03): a lookup passes deleted copies (ROADMAP 6.5.13)
+
+Item 6 assumed the newest segment holding an id holds its deciding copy. ADR-0032's amended item 4 broke that. A
+merge that catches up with an upsert committed while it ran keeps the old copy, deleted, in the merged segment, and
+the merged segment goes after the segment holding the new copy. A lookup stopped at that deleted copy and reported
+the document absent; the kill-9 loop found it in CI. Two fixes were weighed:
+
+- **Keep the rule, change the merge**: place the merged segment where its inputs were (a change to the diff
+  semantics of SPEC §8.7.2, and wrong for inputs that are not adjacent), or discard merges whose inputs were
+  upserted (steady upserts would again keep the segment count growing, which 6.5.9 fixed).
+- **Change the rule** (chosen): the lookup returns the live copy, newest first, passing deleted ones. Every commit
+  leaves at most one live copy (item 5, SPEC §8.3), so the result is exact for every file the engine writes. What is
+  given up is item 6's defense against a stale live copy: an older copy left live by a bug, behind a deleted newer
+  one, used to stay hidden and is now visible. That layout is no longer a sign of damage (a caught-up merge leaves a
+  deleted newer copy and a live older one), so nothing can tell the two apart; `verify` still reports two live
+  copies of an id (`LiveTwice`).
+
+A lookup of a deleted id now reads every segment's `IdMap`, as a lookup of an id never written always did.

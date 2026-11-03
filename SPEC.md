@@ -1608,9 +1608,14 @@ the sidecar version it has (0 for none), and it is obsolete from that commit on,
 ROADMAP 6.4.6). So a commit leaves at most one live copy of each id, and every snapshot shows
 each id at most once: the memtable's version or delete before the commit, the new segment and the sidecars after.
 
-**Lookup** (ROADMAP 6.4.1): the memtable's version or delete of an id hides every segment's; otherwise the newest
-segment whose `IdMap` holds the id (§5.3.6) decides: its copy if live, none if its sidecar deletes it. Older copies
-are never consulted, so a deleted id stays deleted whatever older segments hold.
+**Lookup** (ROADMAP 6.4.1, 6.5.13): the memtable's version or delete of an id hides every segment's; otherwise the
+lookup returns the live copy, searching the segments whose `IdMap` holds the id (§5.3.6) newest first and passing
+deleted copies; none if every copy is deleted. A commit leaves at most one live copy (above), so the order only
+decides which deleted copies are passed. The newest segment holding an id is not always the one with its live copy:
+a merge that caught up with an upsert keeps the old copy, deleted, in the merged segment, which goes after the
+segment of the new copy (§8.5). (Until 6.5.13 the newest copy decided, live or not, and older copies were never
+consulted; that hid the new copy after such a merge.) A file with two live copies of an id breaks §8.3 and fails
+`verify`.
 
 ### 8.4 Concurrency
 - **Single writer** per database/shard (file lock locally; lease remotely, SPEC §11.3). Opening a second writer fails fast.
