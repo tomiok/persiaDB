@@ -470,6 +470,8 @@ impl Search<'_> {
                 })
                 .collect()
         } else {
+            // Without a facet, no match must be seen: a column sort may skip those that cannot rank (ROADMAP 7.5.6).
+            let seen = counting.then_some(seen);
             top_sorted(sort, view, &mut matcher, self.window, after, seen, watch)?
                 .into_iter()
                 .map(|h| Ranked {
