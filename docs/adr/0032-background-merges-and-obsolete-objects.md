@@ -27,12 +27,14 @@ planned against one manifest may finish after commits that deleted from its inpu
 3. **Backpressure is a bound on jobs in flight**: one per thread, counting finished jobs not yet collected, so at
    most `merge_threads` merged segments are held in memory. There is no queue of plans: a plan that finds no room is
    simply made again at a later step from the then-current manifest.
-4. **A merge commit applies only to unchanged inputs.** Before writing anything, the writer checks that every input
-   is still live at the sidecar version the plan read and that the schema is the one merged with; otherwise the
-   result is discarded (`MergeOutcome::Conflict`), and the segments are planned again. This is SPEC §8.7.2's rule,
-   checked early so a discarded merge leaves no frame behind. The commit is the usual protocol (SPEC §4.5): segment
-   frame, WAL commit point, sync, manifest, slot. Re-applying the newer deletions to the merged segment instead
-   would save the merge, but needs a docid map kept with the result; it can come later without a format change.
+4. **A merge commit catches up with deletes** (as amended, below). Before writing anything, the writer checks that
+   every input is still live (the same open segment) and that the schema is the one merged with; otherwise the
+   result is discarded (`MergeOutcome::Conflict`), and the segments are planned again. Deletions committed to an
+   input since the plan read it are mapped to merged docids (`merge::DocidMap`) and written as the merged segment's
+   first sidecar; the inputs are removed at their current sidecar versions (SPEC §8.5, §8.7.2). All of it is
+   checked before the first frame, so a discarded merge leaves no frame behind. The commit is the usual protocol
+   (SPEC §4.5): segment frame, its sidecar frame if any, WAL commit point, sync, manifest, slot. (As first decided,
+   a merge whose inputs gained deletions was discarded too.)
 5. **Cancellation** is a flag per job, checked by `merge::merge_until` before each input and each field, and between
    writing and verifying. Writing, opening and verifying the merged segment are not interrupted, so a cancel (and
    dropping the database) waits at most for those stages of the merges in flight. Cancelled and conflicting merges
@@ -46,9 +48,9 @@ planned against one manifest may finish after commits that deleted from its inpu
    object and it may be deleted (`Database::take_unreferenced`; `Database::obsolete` lists them all). A per-snapshot
    epoch would hold back every object retired after the oldest snapshot still held, even ones that snapshot never
    referenced; the counts are already there.
-8. **Locally nothing is deleted yet.** Obsolete objects are frames, which a container compaction (SPEC §4.6) reclaims;
-   it must keep the frames still referenced. Wiring compaction into the engine is ROADMAP 6.5.8. Remote layouts
-   (M12) delete objects from the same list.
+8. **Locally, compaction deletes them** (as amended, below). Obsolete objects are frames, which a container
+   compaction (SPEC §4.6, `Database::compact`, also run by `merge_step` when due) reclaims once no reader holds
+   them; it keeps, and moves, the frames still referenced. Remote layouts (M12) delete objects from the same list.
 9. **The equivalence property (6.5.5) is checked on what a search reads**, as M7 has no query engine yet: per term,
    each live document's id, frequency, positions and norm, and a BM25 score over collection-level statistics (SPEC
    §7.2) counted over live documents, before and after each merge. M7's differential tests extend it to real
@@ -57,7 +59,7 @@ planned against one manifest may finish after commits that deleted from its inpu
 ## Amendment (2026-11-03): merges catch up with deletes, compaction is wired
 
 - **Item 4** (ROADMAP 6.5.9). The alternative it named is taken: a merge keeps a docid map with its result
-  (`merge::DocidMap`, 4 bytes per input document), and a merge whose inputs gained deletions after the plan read them
+  (`merge::DocidMap`: per input, where it starts in the merged segment and the deletions it was merged at), and a merge whose inputs gained deletions after the plan read them
   commits anyway. The writer maps the new deletions to merged docids, writes them as the merged segment's first
   sidecar (version 1, after its segment frame), and removes each input at its current sidecar version. No format
   change: SPEC §8.7.2 already allows an added segment's version-1 sidecar. A merge is still discarded when an input
@@ -68,10 +70,12 @@ planned against one manifest may finish after commits that deleted from its inpu
 
 ## Consequences
 
-- A busy writer that deletes from the inputs of a long merge may discard it repeatedly; the merge is lost work, not
-  lost data. Item 4's alternative fixes that if it shows up.
+- Deletes into the inputs of a merge in flight no longer discard it (item 4, as amended); a merge is lost work only
+  when an input is emptied and removed, or the schema changes, meanwhile.
 - Merged bytes are held in memory until the writer's next step: `merge_threads` × the merged segment size, the same
-  bound as a flush per thread (ADR-0031 item 8; ROADMAP 6.5.6 streams it).
+  bound as a flush per thread (ADR-0031 item 8; ROADMAP 6.5.6 streams it). Each result also keeps its `DocidMap`:
+  per input, a first docid, a count and a copy of the deletions it was merged at (a compressed bitmap, about the
+  size of the input's sidecar), not an entry per document.
 - The engine now owns threads, but only for merges, and they never touch the container.
 - Obsolete objects of a database nobody calls `take_unreferenced` on accumulate in memory, a few dozen bytes each.
 

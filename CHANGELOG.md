@@ -88,8 +88,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `pread` (ROADMAP 0.6.7).
 - `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
   and cancelled since open (`db::MergeStats`, ROADMAP 6.5.11).
-- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
-  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
+- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6, ROADMAP
+  6.5.10); compaction reclaims the dead ones (`Database::compact`, ROADMAP 6.5.8).
 - `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
   are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
   best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.

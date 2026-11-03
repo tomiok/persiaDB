@@ -606,11 +606,7 @@ fn a_failing_manifest_builder_leaves_the_container() {
         "{err}"
     );
     assert_eq!(std::fs::read(&path).unwrap(), before);
-    let names: Vec<_> = std::fs::read_dir(dir.path())
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert_eq!(names, vec![std::ffi::OsString::from("app.persia")]);
+    assert_eq!(names(dir.path()), ["app.persia"], "no temporary file left");
     c.append(FrameKind::WalChunk, b"still writable", NONE)
         .unwrap();
     c.sync().unwrap();

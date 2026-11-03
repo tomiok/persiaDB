@@ -1299,7 +1299,7 @@ impl SpaceUsage {
 }
 
 /// Where compaction moved each frame: old frame to new frame, in old-offset order (SPEC §4.6).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Relocation {
     moved: Vec<(FrameRef, FrameRef)>,
     wal_start: u64,

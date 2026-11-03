@@ -610,15 +610,13 @@ fn compaction_works_on_the_real_file_system() {
     db.commit().unwrap();
     docs.insert("r".into(), "y".into());
     drop(db);
-    let names: Vec<_> = std::fs::read_dir(dir.path())
+    // On Windows the writer lock is a file beside the container (ADR-0021), named after it.
+    let names: Vec<String> = std::fs::read_dir(dir.path())
         .unwrap()
-        .map(|e| e.unwrap().file_name())
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .filter(|n| !(cfg!(windows) && Path::new(n).extension().is_some_and(|e| e == "lock")))
         .collect();
-    assert_eq!(
-        names,
-        vec![std::ffi::OsString::from("moved.persia")],
-        "no temporary file is left"
-    );
+    assert_eq!(names, ["moved.persia"], "no temporary file is left");
     let db = Database::open(&moved, options(false)).unwrap();
     assert_docs(&db, &docs, &[], "moved");
 }

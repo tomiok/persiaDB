@@ -449,6 +449,21 @@ fn check_merge(plan: &Plan, old: &[bool], options: WriteOptions) -> Result<(), T
     for (docid, doc) in live.iter().enumerate() {
         prop_assert_eq!(segment.docid_of(doc.id()).unwrap(), Some(docid as u32));
     }
+    // The docid map (ROADMAP 6.5.9) sends every input document where it went, and every deleted one nowhere.
+    let map = merged.docid_map();
+    prop_assert_eq!(map.inputs(), plan.len());
+    for (i, (docs, deleted, _)) in plan.iter().enumerate() {
+        for (d, doc) in docs.iter().enumerate() {
+            let want = if deleted.contains(&(d as u32)) {
+                None
+            } else {
+                segment.docid_of(doc.id()).unwrap()
+            };
+            prop_assert_eq!(map.get(i, d as u32), want, "input {}, docid {}", i, d);
+        }
+        prop_assert_eq!(map.get(i, docs.len() as u32), None);
+    }
+    prop_assert_eq!(map.get(plan.len(), 0), None);
     check_read_back(&schema, &inputs, &deleted, &segment)
 }
 

@@ -4,7 +4,9 @@
 //! which a job holds as `Arc`s (they are immutable, SPEC §5), and writes the merged bytes into memory. So workers
 //! need no lock on the database, and a merge never blocks a read or a write. The pool bounds what is in flight to
 //! one job per thread: a finished job's bytes wait for the writer to collect them, so a merge in memory is the most
-//! there is per thread (backpressure), and plans that do not fit are made again later.
+//! there is per thread (backpressure), and plans that do not fit are made again later. With its bytes, a result
+//! keeps its [`DocidMap`] until the commit catches up with deletes (ROADMAP 6.5.9): per input, a first docid, a count
+//! and a copy of the deletions it was merged at, so small beside the merged segment.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, Ordering};
