@@ -5,7 +5,7 @@
 //! then one row per frame from `wal_start` to the end of the valid frames: its offset, length, `frame_seq`, kind, and
 //! whether it lies after `log_end` (not committed: WAL frames synced since the last commit, or a commit cut before its
 //! slot write, ROADMAP 6.6.9). A Manifest frame shows the `seq` it holds, and which one the slot names. With `--id`,
-//! then every WAL record of those frames that puts or deletes that document id.
+//! then every WAL record of those frames that puts or deletes that document id, and every put whose id cannot be read.
 //!
 //! A frame the container accepted (its CRC holds) whose payload does not decode is reported on its row, and the rest
 //! is still listed: this is a debugging aid, and `persia verify` is the check that fails on such damage.
@@ -14,7 +14,7 @@ use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use persia_engine::document::Document;
+use persia_engine::document::{DecodeError, Document};
 use persia_engine::manifest::{MAX_MANIFEST_LEN, Manifest};
 use persia_engine::wal::{MAX_CHUNK_LEN, WalOp, WalRecord, decode_chunk};
 use persia_format::frame::{FrameKind, ScanEnd};
@@ -157,7 +157,20 @@ fn write_records(out: &mut dyn Write, c: &Container, id: &str) -> Result<()> {
                     break;
                 }
             };
-            if names(&record, id) {
+            let named = match names(&record, id) {
+                Ok(named) => named,
+                Err(e) => {
+                    // A put whose id cannot be read may be the one sought; replay would fail on it.
+                    writeln!(
+                        out,
+                        "{:>12} {n:>7}  {state:<11} put    {:?} unreadable id: {e}",
+                        f.offset,
+                        record.collection()
+                    )?;
+                    continue;
+                }
+            };
+            if named {
                 let op = match record.op() {
                     WalOp::Put => "put",
                     WalOp::Delete => "delete",
@@ -174,12 +187,11 @@ fn write_records(out: &mut dyn Write, c: &Container, id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether `record` puts or deletes the document `id`. A put whose document's id cannot be read names none; replay
-/// would fail on it, and `persia verify` reports it.
-fn names(record: &WalRecord<'_>, id: &str) -> bool {
+/// Whether `record` puts or deletes the document `id`; for a put whose document id cannot be read, why.
+fn names(record: &WalRecord<'_>, id: &str) -> Result<bool, DecodeError> {
     match record.op() {
-        WalOp::Delete => record.deleted_id() == Some(id),
-        WalOp::Put => Document::encoded_id(record.payload()).is_ok_and(|d| d == id),
+        WalOp::Delete => Ok(record.deleted_id() == Some(id)),
+        WalOp::Put => Document::encoded_id(record.payload()).map(|d| d == id),
     }
 }
 

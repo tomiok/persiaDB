@@ -226,7 +226,8 @@ impl Document {
     }
 
     /// The id of an encoding (SPEC §6.4.2), read without its schema: a WAL put names its document by it. Only the
-    /// version and the id are checked; [`Self::decode`] checks the rest.
+    /// length, the array head (whose 5 items must fit what is left), the version and the id are checked; [`Self::decode`]
+    /// checks the rest.
     ///
     /// ```
     /// use persia_engine::document::{Document, FieldSet};

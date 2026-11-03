@@ -30,7 +30,11 @@ fuzz_target!(|data: &[u8]| {
     let Ok(doc) = Document::decode(data, &schema) else {
         return;
     };
-    assert_eq!(id.as_deref().ok(), Some(doc.id()), "the id read alone differs");
+    assert_eq!(
+        id.as_deref().ok(),
+        Some(doc.id()),
+        "the id read alone differs"
+    );
     let json = doc
         .to_json(&schema)
         .expect("a decoded document converts to JSON");

@@ -1173,3 +1173,219 @@ fn fuzz_seeds_decode_as_intended() {
         corrupt(7 + MAX_STORED_DEPTH as u64, DocumentCorruption::TooDeep)
     );
 }
+
+/// Invariant 5 on hostile headers (SPEC §6.4.2): `encoded_id` fails exactly as `decode` does, at the same offset,
+/// for every header or id `decode` rejects.
+#[test]
+fn encoded_id_rejects_hostile_headers_as_decode_does() {
+    let schema = all_types(false);
+    let mut long_id = vec![0x85, 0x01, 0x79, 0x02, 0x01];
+    long_id.extend(std::iter::repeat_n(b'i', MAX_ID_LEN + 1));
+    long_id.extend([0xf6, 0xa0, 0xa0]);
+    let mut max_id = vec![0x85, 0x01, 0x79, 0x02, 0x00];
+    max_id.extend(std::iter::repeat_n(b'i', MAX_ID_LEN));
+    // Over the limit is rejected before anything is read, even with a valid header in front.
+    let mut too_large = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
+    too_large.resize(MAX_DOCUMENT_LEN + 1, 0);
+    let unexpected = |offset, expected, found| DecodeError::Corrupt {
+        offset,
+        reason: DocumentCorruption::Unexpected { expected, found },
+    };
+    let eof = |offset| DecodeError::Corrupt {
+        offset,
+        reason: DocumentCorruption::UnexpectedEof,
+    };
+    let cases: Vec<(&str, Vec<u8>, DecodeError)> = vec![
+        ("empty input", vec![], eof(0)),
+        ("array head only", vec![0x85], eof(1)),
+        (
+            "not an array",
+            vec![0x01],
+            unexpected(0, "a non-empty array", "an integer"),
+        ),
+        (
+            "empty array",
+            vec![0x80],
+            unexpected(0, "a non-empty array", "an array"),
+        ),
+        (
+            "version 0",
+            vec![0x85, 0x00, 0x61, b'1', 0xf6, 0xa0, 0xa0],
+            DecodeError::Corrupt {
+                offset: 1,
+                reason: DocumentCorruption::OutOfRange { what: "version" },
+            },
+        ),
+        (
+            "version 2",
+            vec![0x85, 0x02, 0x61, b'1', 0xf6, 0xa0, 0xa0],
+            DecodeError::UnsupportedVersion { version: 2 },
+        ),
+        // The version is read before the arity, so a newer version with another shape is still unsupported.
+        (
+            "version 2, arity 3",
+            vec![0x83, 0x02, 0x00, 0x00],
+            DecodeError::UnsupportedVersion { version: 2 },
+        ),
+        (
+            "version u64::MAX",
+            vec![0x85, 0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            DecodeError::UnsupportedVersion { version: u64::MAX },
+        ),
+        (
+            "version not an integer",
+            vec![0x85, 0x61, b'1', 0xf6, 0xa0, 0xa0],
+            unexpected(1, "the version", "a text string"),
+        ),
+        (
+            "arity 4",
+            vec![0x84, 0x01, 0x61, b'1', 0xf6, 0xa0],
+            unexpected(0, "an array of 5 items", "an array of another length"),
+        ),
+        (
+            "arity 6",
+            vec![0x86, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0, 0xa0],
+            unexpected(0, "an array of 5 items", "an array of another length"),
+        ),
+        (
+            "arity 1",
+            vec![0x81, 0x01],
+            unexpected(0, "an array of 5 items", "an array of another length"),
+        ),
+        // An array claims at least one byte per item, so a count past the input ends at the array head.
+        ("array count past the input", vec![0x85, 0x01], eof(1)),
+        (
+            "header and id, nothing after",
+            vec![0x85, 0x01, 0x62, b'i', b'd'],
+            eof(1),
+        ),
+        (
+            "empty id",
+            vec![0x85, 0x01, 0x60, 0xf6, 0xa0, 0xa0],
+            DecodeError::Corrupt {
+                offset: 2,
+                reason: DocumentCorruption::Invalid { what: "id length" },
+            },
+        ),
+        (
+            "id over MAX_ID_LEN",
+            long_id,
+            DecodeError::Corrupt {
+                offset: 2,
+                reason: DocumentCorruption::Invalid { what: "id length" },
+            },
+        ),
+        (
+            "id length past the input",
+            vec![0x85, 0x01, 0x65, b'a', 0xf6, 0xa0],
+            eof(3),
+        ),
+        (
+            "integer id",
+            vec![0x85, 0x01, 0x01, 0xf6, 0xa0, 0xa0],
+            unexpected(2, "the id", "an integer"),
+        ),
+        (
+            "byte-string id",
+            vec![0x85, 0x01, 0x41, b'1', 0xf6, 0xa0, 0xa0],
+            unexpected(2, "the id", "a byte string"),
+        ),
+        (
+            "null id",
+            vec![0x85, 0x01, 0xf6, 0xf6, 0xa0, 0xa0],
+            unexpected(2, "the id", "null"),
+        ),
+        (
+            "non-UTF-8 id",
+            vec![0x85, 0x01, 0x61, 0xff, 0xf6, 0xa0, 0xa0],
+            DecodeError::Corrupt {
+                offset: 3, // the decoder reports UTF-8 errors at the content, as `decode` does
+                reason: DocumentCorruption::InvalidUtf8,
+            },
+        ),
+        (
+            "non-canonical id length",
+            vec![0x85, 0x01, 0x78, 0x01, b'1', 0xf6, 0xa0, 0xa0],
+            DecodeError::Corrupt {
+                offset: 2,
+                reason: DocumentCorruption::NonCanonicalHead,
+            },
+        ),
+        (
+            "over MAX_DOCUMENT_LEN",
+            too_large,
+            DecodeError::Corrupt {
+                offset: 0,
+                reason: DocumentCorruption::TooLarge {
+                    len: MAX_DOCUMENT_LEN + 1,
+                },
+            },
+        ),
+    ];
+    for (name, bytes, want) in cases {
+        assert_eq!(
+            Document::encoded_id(&bytes),
+            Err(want.clone()),
+            "{name}: encoded_id"
+        );
+        assert_eq!(
+            Document::decode(&bytes, &schema).map(|d| d.id().to_owned()),
+            Err(want),
+            "{name}: decode"
+        );
+    }
+    // The boundary: an id of exactly MAX_ID_LEN bytes reads, with nothing after it.
+    assert_eq!(Document::encoded_id(&max_id), Ok("i".repeat(MAX_ID_LEN)));
+}
+
+/// `encoded_id` reads the header and the id and nothing more: whatever follows, even bytes `decode` rejects,
+/// does not change the result.
+#[test]
+fn encoded_id_does_not_read_past_the_id() {
+    let schema = all_types(false);
+    let header_and_id = [0x85, 0x01, 0x62, b'i', b'd'];
+    let tails: [&[u8]; 6] = [
+        &[0xff, 0xff, 0xff], // break codes, outside the subset
+        &[0x1b, 0xff],       // a head cut short
+        &[0xc0, 0x00],       // a tag
+        &[0x7b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], // a length past the input
+        &[0xf6, 0xa0, 0xa0, 0x00], // a valid body, then trailing bytes
+        &[0xf6, 0xa1, 0x63, 0xa0], // an unknown field id
+    ];
+    for tail in tails {
+        let mut bytes = header_and_id.to_vec();
+        bytes.extend_from_slice(tail);
+        assert_eq!(
+            Document::encoded_id(&bytes),
+            Ok("id".to_owned()),
+            "tail {tail:02x?}"
+        );
+        assert!(
+            Document::decode(&bytes, &schema).is_err(),
+            "tail {tail:02x?}"
+        );
+    }
+    // The only thing read past the id is the input length: five items need five bytes after the array head
+    // (SPEC §6.4.2 counts are bounded by the input), so header and id alone are cut short, as for `decode`.
+    assert_eq!(
+        Document::encoded_id(&header_and_id),
+        Err(DecodeError::Corrupt {
+            offset: 1,
+            reason: DocumentCorruption::UnexpectedEof
+        })
+    );
+    // Garbage filling the input up to the limit still reads; one byte more is TooLarge first.
+    let mut big = header_and_id.to_vec();
+    big.resize(MAX_DOCUMENT_LEN, 0xff);
+    assert_eq!(Document::encoded_id(&big), Ok("id".to_owned()));
+    big.push(0xff);
+    assert_eq!(
+        Document::encoded_id(&big),
+        Err(DecodeError::Corrupt {
+            offset: 0,
+            reason: DocumentCorruption::TooLarge {
+                len: MAX_DOCUMENT_LEN + 1
+            }
+        })
+    );
+}

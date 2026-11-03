@@ -36,7 +36,8 @@ use std::path::Path;
 use std::sync::Arc;
 
 use persia_engine::db::{
-    Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome, SegmentIds, Snapshot,
+    CompactionOptions, Database, DatabaseError, DatabaseOptions, ManualClock, MergeOutcome,
+    SegmentIds, Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::manifest::{Location, Manifest, SegmentEntry};
@@ -646,6 +647,8 @@ fn arb_op() -> impl Strategy<Value = Op> {
 
 /// How merges run. Finished merges are held until a `Release` (or a finish, a cancel, a reopen), so which writes a
 /// merge in flight spans depends on the ops alone, not on how fast its worker is (ROADMAP 6.5.14).
+/// A threaded merge committed by a step as soon as its worker is done (unheld) is timing-dependent, so it is left to
+/// the deterministic tests (`a_merge_held_then_unheld_commits_at_the_next_step`, `database_merge.rs`).
 #[derive(Debug, Clone, Copy)]
 enum Schedule {
     /// No threads: each merge runs inside the step that starts it and commits there.
@@ -707,6 +710,19 @@ impl Store for OnFile {
 
 struct OnPath(SimFs);
 
+/// On a path, `merge_step` also compacts on its own once 40% of the file is dead, with no floor: so a compaction may
+/// run right after the merges a step committed, before the ones it starts (SPEC §4.6).
+fn compacting(options: DatabaseOptions) -> DatabaseOptions {
+    DatabaseOptions {
+        compaction: CompactionOptions {
+            automatic: true,
+            dead_space_percent: 40,
+            min_dead_bytes: 0,
+        },
+        ..options
+    }
+}
+
 const MODEL_PATH: &str = "/model.persia";
 
 impl Store for OnPath {
@@ -714,6 +730,7 @@ impl Store for OnPath {
     const COMPACTS: bool = true;
 
     fn create(options: DatabaseOptions) -> (Self, Database<SimFsFile>) {
+        let options = compacting(options);
         let fs = SimFs::new();
         let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(fs.clone());
         let container = Container::create_in(vfs, MODEL_PATH).unwrap();
@@ -722,6 +739,7 @@ impl Store for OnPath {
     }
 
     fn crash_and_open(&mut self, options: DatabaseOptions) -> Database<SimFsFile> {
+        let options = compacting(options);
         self.0 = self.0.crash(CrashLoss::All);
         let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(self.0.clone());
         let container = Container::open_in(vfs, MODEL_PATH, Mode::ReadWrite).unwrap();
@@ -916,8 +934,10 @@ fn run_case<S: Store>(schedule: Schedule, ops: &[Op]) -> Result<(), TestCaseErro
                             read.map(|r| r.frame)
                         );
                     }
-                    // Not a sync point: it copies the frames in the file (SPEC §4.6), and a `Buffered` record
-                    // stays in the WAL's in-memory chunk until the next write-out (SPEC §8.2), which a crash loses.
+                    // Not a sync point (SPEC §4.6): it copies the frames in the file, and a `Buffered` record stays
+                    // in the WAL's in-memory chunk until the next write-out (SPEC §8.2), which a crash loses.
+                    // Every frame in the file is synced here (ops are `Buffered` or `Fsync`, far below a chunk's
+                    // rotation), so copying them makes nothing more durable; an `Async` op would change that.
                 } else {
                     let result = db.compact();
                     prop_assert!(
@@ -978,6 +998,96 @@ proptest! {
         ops in prop::collection::vec(arb_op(), 1..200),
     ) {
         run_case::<OnPath>(schedule, &ops)?;
+    }
+}
+
+/// The cases proptest once shrank to (their seeds stopped replaying them when the strategy changed), spelled out.
+/// The third is the threaded upsert during a merge behind ROADMAP 6.5.13, now held so it is the same everywhere; the
+/// last a model bug found while writing 6.5.12 (it took a compaction for a sync point).
+#[test]
+fn shrunk_interleavings_still_match_the_model() {
+    use Op::{Commit, Compact, MergeStep, Put, Release};
+    let cases: [(Schedule, Vec<Op>); 4] = [
+        (
+            Schedule::Inline,
+            vec![
+                Put(1, 0, 0, false),
+                Commit,
+                Put(1, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+            ],
+        ),
+        (
+            Schedule::Inline,
+            vec![
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                MergeStep,
+                MergeStep,
+            ],
+        ),
+        (
+            Schedule::ThreadedHeld,
+            vec![
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 2, 0, false),
+                Commit,
+                MergeStep,
+                Put(0, 2, 0, false),
+                Commit,
+                Release,
+            ],
+        ),
+        (
+            Schedule::InlineHeld,
+            vec![
+                Put(0, 5, 0, false),
+                Commit,
+                Put(0, 0, 0, false),
+                Commit,
+                Put(0, 5, 0, false),
+                MergeStep,
+                Commit,
+                Compact,
+            ],
+        ),
+    ];
+    for (schedule, ops) in &cases {
+        run_case::<OnFile>(*schedule, ops).unwrap();
+        run_case::<OnPath>(*schedule, ops).unwrap();
+    }
+}
+
+/// Unholding hands a held merge back to the step: the next `merge_step` commits it, as an unheld database does.
+#[test]
+fn a_merge_held_then_unheld_commits_at_the_next_step() {
+    for threads in [0, 1] {
+        let (_store, mut db) = OnFile::create(options(threads, 10));
+        db.hold_merges(true);
+        db.create_collection(schema("a")).unwrap();
+        for id in ["d0", "d1"] {
+            db.put("a", &doc(id, "alpha"), Durability::Fsync).unwrap();
+            db.commit().unwrap();
+        }
+        assert!(db.merge_step().unwrap().is_empty(), "threads {threads}");
+        assert_eq!(db.merges_running(), 1);
+        db.hold_merges(false);
+        // Threaded, the worker may not be done at the first step.
+        let mut outcomes = db.merge_step().unwrap();
+        while outcomes.is_empty() && db.merges_running() > 0 {
+            outcomes = db.merge_step().unwrap();
+            std::thread::yield_now();
+        }
+        assert!(
+            matches!(outcomes.as_slice(), [MergeOutcome::Committed { .. }]),
+            "threads {threads}: {outcomes:?}"
+        );
+        assert_eq!(db.merges_running(), 0);
     }
 }
 

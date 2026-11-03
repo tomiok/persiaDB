@@ -527,15 +527,16 @@ fn inspect_container_lists_frames_and_the_records_of_an_id() {
     // n1 is in a segment (its put was flushed); its delete, synced, is not.
     writer.delete("notes", "n1", Durability::Fsync).unwrap();
     drop(writer);
-    // A copy of the committed manifest after `log_end`: a cut commit's frame.
-    let committed_seq = {
+    // A copy of the committed manifest after `log_end`: a cut commit's frame. The writer holding the lock stays open
+    // through every inspection below.
+    let (_writer, committed_seq) = {
         let mut c = Container::open(&path, Mode::ReadWrite).unwrap();
         let sb = *c.superblock();
         let manifest = c.read_frame(sb.manifest_off, 1 << 20).unwrap().payload;
         c.append(FrameKind::Manifest, &manifest, Compression::None)
             .unwrap();
         c.sync().unwrap();
-        sb.seq
+        (c, sb.seq)
     };
 
     let c = Container::open(&path, Mode::ReadOnly).unwrap();
@@ -626,4 +627,247 @@ fn inspect_container_lists_frames_and_the_records_of_an_id() {
             .code(),
         Some(4)
     );
+}
+
+/// Runs `persia inspect container <path> [--id id]` and checks the file is unchanged by it (read-only, ROADMAP
+/// 6.6.10).
+fn inspect_container(path: &Path, id: Option<&str>) -> Output {
+    let before = std::fs::read(path).unwrap();
+    let mut args = vec!["inspect", "container", path_arg(path)];
+    if let Some(id) = id {
+        args.extend(["--id", id]);
+    }
+    let out = persia(&args);
+    assert_eq!(
+        std::fs::read(path).unwrap(),
+        before,
+        "inspection is read-only"
+    );
+    out
+}
+
+/// The frame rows' `(offset, len, frame_seq)` must be exactly the container's frames, in order.
+fn assert_rows_are_the_frames(path: &Path, frames: &[FrameRow]) {
+    let c = Container::open(path, Mode::ReadOnly).unwrap();
+    let want: Vec<(u64, u64, u64)> = c
+        .frames()
+        .iter()
+        .map(|f| (f.offset, f.len, f.frame_seq))
+        .collect();
+    let got: Vec<(u64, u64, u64)> = frames.iter().map(|f| (f.0, f.1, f.2)).collect();
+    assert_eq!(got, want);
+}
+
+/// Appends a frame of `kind` holding `payload` after `log_end` and syncs it: its frame CRC holds, so the container
+/// accepts it, whatever the payload means. Returns its offset.
+fn append_raw(path: &Path, kind: persia_format::frame::FrameKind, payload: &[u8]) -> u64 {
+    use persia_format::block::Compression;
+    let mut c = Container::open(path, Mode::ReadWrite).unwrap();
+    let offset = c.end();
+    c.append(kind, payload, Compression::None).unwrap();
+    c.sync().unwrap();
+    offset
+}
+
+/// A WAL chunk frame whose payload is not a WAL chunk is one `unreadable:` record row; the records of the other
+/// chunks are still listed, and the command succeeds (`persia verify` is the check that fails on it).
+#[test]
+fn inspect_container_reports_an_undecodable_wal_chunk_and_lists_the_rest() {
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    // n2's chunk, the last WAL frame; then the garbage chunk, then a copy of n2's chunk after it, so a listing
+    // that stopped at the garbage would miss a record.
+    let n2_chunk = {
+        let c = Container::open(&path, Mode::ReadOnly).unwrap();
+        let f = c
+            .frames()
+            .iter()
+            .rfind(|f| f.kind == FrameKind::WalChunk)
+            .copied()
+            .unwrap();
+        (f.offset, c.read_frame(f.offset, 1 << 20).unwrap().payload)
+    };
+    let bad = append_raw(&path, FrameKind::WalChunk, b"garbage");
+    let copy = append_raw(&path, FrameKind::WalChunk, &n2_chunk.1);
+
+    let out = inspect_container(&path, Some("n2"));
+    let (_, frames, records) = inspected(&out);
+    assert_rows_are_the_frames(&path, &frames);
+    let row = frames.iter().find(|f| f.0 == bad).unwrap();
+    assert_eq!((row.3.as_str(), row.4.as_str()), ("wal", "uncommitted"));
+    // In log order: n2's put, the garbage chunk as one row, n2's put again from the copy.
+    let summary: Vec<(String, String)> = records
+        .iter()
+        .map(|r| (r[0].clone(), r[3].clone()))
+        .collect();
+    assert_eq!(
+        summary,
+        [
+            (n2_chunk.0.to_string(), "put".to_owned()),
+            (bad.to_string(), "unreadable:".to_owned()),
+            (copy.to_string(), "put".to_owned()),
+        ],
+        "{records:?}"
+    );
+    assert_eq!(records[0][2..], ["uncommitted", "put", "\"notes\""]);
+    assert_eq!(records[1][1..3], ["-", "uncommitted"]);
+    assert_eq!(records[2][2..], ["uncommitted", "put", "\"notes\""]);
+    // Without --id no record is decoded, so nothing is reported unreadable.
+    let (_, frames, records) = inspected(&inspect_container(&path, None));
+    assert_rows_are_the_frames(&path, &frames);
+    assert!(records.is_empty(), "{records:?}");
+}
+
+/// A Manifest frame whose payload does not decode says so on its row; the other rows are unaffected.
+#[test]
+fn inspect_container_reports_an_undecodable_manifest() {
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let bad = append_raw(&path, FrameKind::Manifest, b"not a manifest");
+
+    let (_, frames, _) = inspected(&inspect_container(&path, Some("n1")));
+    assert_rows_are_the_frames(&path, &frames);
+    let manifests: Vec<(u64, &str, &str)> = frames
+        .iter()
+        .filter(|f| f.3 == "manifest")
+        .map(|f| (f.0, f.4.as_str(), f.5.as_str()))
+        .collect();
+    assert_eq!(manifests.len(), 2, "{manifests:?}");
+    assert!(
+        manifests[0].1 == "committed" && manifests[0].2.ends_with(", the slot's"),
+        "{manifests:?}"
+    );
+    assert!(manifests[0].2.starts_with("seq "), "{manifests:?}");
+    assert_eq!((manifests[1].0, manifests[1].1), (bad, "uncommitted"));
+    assert!(manifests[1].2.starts_with("unreadable: "), "{manifests:?}");
+}
+
+/// A torn tail (zeros after the last frame, as a crash mid-append leaves) is reported on the `tail` line, the
+/// valid frames before it are listed, and the command succeeds without truncating anything.
+#[test]
+fn inspect_container_reports_a_torn_tail() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let end = bytes.len();
+    bytes.resize(end + 4096, 0);
+    std::fs::write(&path, &bytes).unwrap();
+
+    let out = inspect_container(&path, Some("n2"));
+    assert_eq!(out.status.code(), Some(0));
+    let (keys, frames, records) = inspected(&out);
+    let tail = &keys.iter().find(|(k, _)| k == "tail").unwrap().1;
+    assert!(tail.starts_with(&format!("torn at {end}")), "{tail}");
+    assert!(keys.contains(&pair("end", &end.to_string())), "{keys:?}");
+    assert_rows_are_the_frames(&path, &frames);
+    assert!(frames.iter().all(|f| f.0 < end as u64), "{frames:?}");
+    assert_eq!(records.len(), 1, "{records:?}");
+    assert_eq!(records[0][3], "put");
+}
+
+/// A database just created, with nothing put: its frames (the first commit's) are listed and committed, the
+/// manifest is the slot's, and an id has no records.
+#[test]
+fn inspect_container_lists_a_fresh_database() {
+    use persia_engine::db::{Database, DatabaseOptions};
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(Database::create(&path, DatabaseOptions::default()).unwrap());
+
+    let (keys, frames, records) = inspected(&inspect_container(&path, Some("x")));
+    let c = Container::open(&path, Mode::ReadOnly).unwrap();
+    assert!(
+        keys.contains(&pair("tail", &format!("clean at {}", c.end()))),
+        "{keys:?}"
+    );
+    assert_ne!(frames.len(), 0);
+    assert_rows_are_the_frames(&path, &frames);
+    assert!(frames.iter().all(|f| f.4 == "committed"), "{frames:?}");
+    let manifests: Vec<&str> = frames
+        .iter()
+        .filter(|f| f.3 == "manifest")
+        .map(|f| f.5.as_str())
+        .collect();
+    assert_eq!(manifests.len(), 1, "{frames:?}");
+    assert!(manifests[0].ends_with(", the slot's"), "{manifests:?}");
+    assert!(records.is_empty(), "{records:?}");
+}
+
+/// Damage that is not a torn tail (a corrupt frame after the last commit) never makes inspection panic: it either
+/// lists the frames before it with a `corrupt at` tail, or fails with a message, and the file is left as it was.
+#[test]
+fn inspect_container_on_a_corrupt_tail_does_not_panic() {
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let mut bytes = std::fs::read(&path).unwrap();
+    let end = bytes.len();
+    bytes.resize(end + 4096, 0);
+    bytes[end + 100] = 0x5a;
+    std::fs::write(&path, &bytes).unwrap();
+
+    let out = inspect_container(&path, Some("n2"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.code(), Some(0), "{stderr}");
+    let (keys, frames, _) = inspected(&out);
+    let tail = &keys.iter().find(|(k, _)| k == "tail").unwrap().1;
+    assert!(tail.starts_with(&format!("corrupt at {end}")), "{tail}");
+    assert!(frames.iter().all(|f| f.0 < end as u64), "{frames:?}");
+}
+
+/// A put whose document id cannot be read may be the record sought: `--id` lists it, whatever the id, as an
+/// `unreadable id` row, and goes on with the next record.
+#[test]
+fn inspect_container_lists_a_put_whose_id_cannot_be_read() {
+    use persia_engine::wal::{WalRecord, encode_chunk};
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let chunk = encode_chunk(&[
+        WalRecord::put("notes", b"\xff not a document").unwrap(),
+        WalRecord::delete("notes", "n9").unwrap(),
+    ])
+    .unwrap();
+    let at = append_raw(&path, FrameKind::WalChunk, &chunk);
+    let (_, _, records) = inspected(&inspect_container(&path, Some("n9")));
+    let rows: Vec<&[String]> = records.iter().map(|r| &r[..5]).collect();
+    let at = at.to_string();
+    assert_eq!(
+        rows,
+        [
+            &[
+                at.clone(),
+                "0".into(),
+                "uncommitted".into(),
+                "put".into(),
+                "\"notes\"".into()
+            ][..],
+            &[
+                at,
+                "1".into(),
+                "uncommitted".into(),
+                "delete".into(),
+                "\"notes\"".into()
+            ][..],
+        ],
+        "{records:?}"
+    );
+    assert_eq!(records[0][5], "unreadable");
 }
