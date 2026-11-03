@@ -9,6 +9,8 @@
 use std::io;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use persia_format::widen::u64_from_usize;
+
 use super::file::ContainerFile;
 use crate::retry::Jitter;
 
@@ -245,7 +247,7 @@ fn seeded_image(inner: &Inner, rng: &Jitter) -> Vec<u8> {
                     if coin() {
                         write_into(&mut image, at, piece);
                     }
-                    at = at.saturating_add(take as u64);
+                    at = at.saturating_add(u64_from_usize(take));
                     rest = tail;
                 }
             }
@@ -275,7 +277,7 @@ fn write_into(image: &mut Vec<u8>, offset: u64, data: &[u8]) {
 
 impl ContainerFile for SimFile {
     fn file_len(&self) -> io::Result<u64> {
-        Ok(self.lock().current.len() as u64)
+        Ok(u64_from_usize(self.lock().current.len()))
     }
 
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> io::Result<()> {
@@ -293,7 +295,7 @@ impl ContainerFile for SimFile {
         let mut inner = self.lock();
         let ok = self.begin()?;
         if offset
-            .checked_add(buf.len() as u64)
+            .checked_add(u64_from_usize(buf.len()))
             .and_then(|end| usize::try_from(end).ok())
             .is_none()
         {

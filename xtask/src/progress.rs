@@ -5,7 +5,8 @@
 //! one snapshot per day for the burn-up chart.
 //!
 //! `--record` upserts today's snapshot (UTC date, or `--date YYYY-MM-DD`); `--check` fails if `PROGRESS.md`
-//! or the latest snapshot is stale (CI).
+//! or the latest snapshot is stale (CI). The same run rewrites the progress blocks in `README.md` (`readme`),
+//! and `--check` fails when they are stale too.
 //!
 //! The headline percentage, the burn-up, and `docs/progress-history.csv` count milestones M0–M15 only.
 //! Those are the MVP and ship as v1.0. Later milestones render in their own section, so adding them does
@@ -17,6 +18,8 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
+
+pub(crate) mod readme;
 
 const READY_NEXT_LIMIT: usize = 15;
 const COMMAND: &str = "cargo xtask progress";
@@ -441,7 +444,7 @@ pub(crate) struct Snapshot {
 const HISTORY_HEADER: &str = "date,done,in_progress,total";
 const MAX_COUNT: usize = 1_000_000;
 
-fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
+pub(crate) fn parse_history(text: &str) -> Result<Vec<Snapshot>> {
     let mut lines = text.lines();
     match lines.next() {
         None => return Ok(Vec::new()),
@@ -817,6 +820,54 @@ fn is_iso_date(s: &str) -> bool {
         })
 }
 
+/// Where [`write_all`] stages `path` for this process: beside it, so the rename stays on one file system, and
+/// named after the process, so two runs never write or rename each other's staged file.
+fn staging(path: &Path) -> std::path::PathBuf {
+    path.with_extension(format!("xtask-tmp.{}", std::process::id()))
+}
+
+/// Writes every output to a temporary file beside it, then renames them into place, so a failed write leaves the
+/// generated files as they were (and in step with each other) instead of updating some of them. Each rename is
+/// atomic; [`run`] holds the progress lock throughout, so another run never sees a mix of the two.
+fn write_all(outputs: &[(std::path::PathBuf, String)]) -> Result<()> {
+    let staged: Vec<(std::path::PathBuf, &std::path::PathBuf)> = outputs
+        .iter()
+        .map(|(path, text)| {
+            let tmp = staging(path);
+            std::fs::write(&tmp, text).with_context(|| format!("writing {}", tmp.display()))?;
+            Ok((tmp, path))
+        })
+        .collect::<Result<_>>()
+        .inspect_err(|_| {
+            for (path, _) in outputs {
+                // Best effort: a staged file that cannot be removed is only clutter, and the error above is the
+                // one to report.
+                drop(std::fs::remove_file(staging(path)));
+            }
+        })?;
+    for (tmp, path) in staged {
+        std::fs::rename(&tmp, path).with_context(|| format!("replacing {}", path.display()))?;
+    }
+    Ok(())
+}
+
+/// Takes the exclusive lock that serializes progress runs on one checkout: a second run waits, then reads the
+/// ROADMAP, history and README the first one wrote. The operating system releases it when the file closes, also if
+/// the process dies.
+fn lock(root: &Path) -> Result<std::fs::File> {
+    let path = root.join("target").join("xtask-progress.lock");
+    std::fs::create_dir_all(root.join("target")).context("creating target/")?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .with_context(|| format!("opening {}", path.display()))?;
+    file.lock()
+        .with_context(|| format!("locking {}", path.display()))?;
+    Ok(file)
+}
+
 /// Entry point. Returns whether the command passed.
 pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
     let (mut record, mut check, mut date) = (false, false, None);
@@ -835,6 +886,8 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         bail!("--record and --check are mutually exclusive");
     }
 
+    // Held until this run returns: reads, renders and writes happen with no other progress run in between.
+    let _lock = lock(root)?;
     let roadmap = std::fs::read_to_string(root.join("ROADMAP.md")).context("reading ROADMAP.md")?;
     let milestones = parse_roadmap(&roadmap)?;
     let history_path = root.join("docs/progress-history.csv");
@@ -861,11 +914,13 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
             total,
         });
         history.sort_by(|a, b| a.date.cmp(&b.date));
-        std::fs::write(&history_path, format_history(&history))
-            .context("writing docs/progress-history.csv")?;
     }
 
+    // Render everything before writing anything, so a README without its markers fails with no file changed.
     let rendered = render(&milestones, &history);
+    let readme_path = root.join("README.md");
+    let readme_text = std::fs::read_to_string(&readme_path).context("reading README.md")?;
+    let readme_rendered = readme::apply(&readme_text, &milestones, &history)?;
     if check {
         let mut stale = Vec::new();
         let current = history
@@ -877,6 +932,9 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         if std::fs::read_to_string(&progress_path).ok().as_deref() != Some(rendered.as_str()) {
             stale.push("PROGRESS.md is out of date");
         }
+        if readme_rendered != readme_text {
+            stale.push("README.md's progress blocks are out of date");
+        }
         if !stale.is_empty() {
             eprintln!("{}\nRun: {COMMAND} --record", stale.join("\n"));
             return Ok(false);
@@ -887,7 +945,14 @@ pub(crate) fn run(root: &Path, args: &[String]) -> Result<bool> {
         return Ok(true);
     }
 
-    std::fs::write(&progress_path, rendered).context("writing PROGRESS.md")?;
+    let mut outputs = vec![(progress_path, rendered)];
+    if record {
+        outputs.push((history_path, format_history(&history)));
+    }
+    if readme_rendered != readme_text {
+        outputs.push((readme_path, readme_rendered));
+    }
+    write_all(&outputs)?;
     println!(
         "PROGRESS.md: {done}/{total} MVP done ({}), {doing} in progress; post-MVP {post_done}/{post_total}",
         pct(done, total)
@@ -1151,5 +1216,52 @@ Deps: M0.
         let post = post.split("### Ready (post-MVP)").next().unwrap();
         assert!(post.contains("`16.1`"), "{post}");
         assert!(!post.contains("`0.1`"), "{post}");
+    }
+
+    /// A failed write leaves every output as it was: none is replaced, and no staged file stays behind.
+    #[test]
+    fn a_failed_write_replaces_no_output() {
+        let dir = std::env::temp_dir().join(format!("xtask-write-all-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("PROGRESS.md");
+        std::fs::write(&first, "old").unwrap();
+        // A file inside a directory that does not exist cannot be staged.
+        let missing = dir.join("no-such-dir").join("README.md");
+        let err = write_all(&[(first.clone(), "new".into()), (missing, "new".into())]);
+        assert!(err.is_err());
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "old");
+        assert!(!staging(&first).exists());
+        write_all(&[(first.clone(), "new".into())]).unwrap();
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "new");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A progress run holds an exclusive lock: another run's lock on the same checkout waits until it is released;
+    /// and each process stages under its own name.
+    #[test]
+    fn runs_are_serialized_and_stage_under_their_own_names() {
+        let dir = std::env::temp_dir().join(format!("xtask-lock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let held = lock(&dir).unwrap();
+        let other = std::fs::OpenOptions::new()
+            .write(true)
+            .open(dir.join("target").join("xtask-progress.lock"))
+            .unwrap();
+        assert!(matches!(
+            other.try_lock(),
+            Err(std::fs::TryLockError::WouldBlock)
+        ));
+        drop(held);
+        other.try_lock().unwrap();
+        let staged = staging(&dir.join("PROGRESS.md"));
+        assert!(
+            staged
+                .to_string_lossy()
+                .ends_with(&format!(".xtask-tmp.{}", std::process::id())),
+            "{}",
+            staged.display()
+        );
+        drop(other);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

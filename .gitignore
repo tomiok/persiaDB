@@ -38,3 +38,6 @@ waitlist-private.pem
 # Cloudflare worker local secrets and cache.
 /website/relay/waitlist/.dev.vars
 /website/relay/waitlist/.wrangler/
+
+# Staged outputs of `cargo xtask progress` a crash left behind (xtask/src/progress.rs).
+*.xtask-tmp.*

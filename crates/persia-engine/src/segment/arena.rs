@@ -6,6 +6,7 @@
 //! vectors (its bytes, end and hash) and, when the table reaches half full, doubles it.
 
 use persia_format::hash::xxh3_64;
+use persia_format::widen::usize_from_u32;
 
 /// Marks an empty slot of the table.
 const EMPTY: u32 = u32::MAX;
@@ -133,13 +134,14 @@ impl Arena {
     /// The slot holding `key`, or the empty slot where it would go.
     fn find(&self, key: &[u8], hash: u64) -> usize {
         let mask = self.slots.len().wrapping_sub(1);
-        // Truncation keeps the low bits, which the mask selects anyway.
-        #[allow(clippy::cast_possible_truncation)]
+        // Truncation keeps the low bits of the hash, which the mask selects anyway.
+        #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
         let mut slot = (hash as usize) & mask;
         loop {
             match self.slots.get(slot) {
                 Some(&id) if id != EMPTY => {
-                    let same = self.hashes.get(id as usize) == Some(&hash) && self.key(id) == key;
+                    let same =
+                        self.hashes.get(usize_from_u32(id)) == Some(&hash) && self.key(id) == key;
                     if same {
                         return slot;
                     }
@@ -159,7 +161,8 @@ impl Arena {
     fn rehash_into_slots(&mut self) {
         let mask = self.slots.len().wrapping_sub(1);
         for (id, &hash) in (0_u32..).zip(&self.hashes) {
-            #[allow(clippy::cast_possible_truncation)]
+            // As in `find`: the low bits of the hash, which the mask selects anyway.
+            #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
             let mut slot = (hash as usize) & mask;
             while let Some(s) = self.slots.get_mut(slot) {
                 if *s == EMPTY {

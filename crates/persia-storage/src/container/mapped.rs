@@ -25,11 +25,16 @@ pub(super) fn map_committed(file: &File, sb: &Superblock) -> io::Result<ByteSour
     // but the slice handed out starts at 12288, so no reference ever covers them. Frames are append-only (§4.4), and
     // no Persia writer truncates, hole-punches or rewrites the file below a `log_end` it opened with or committed:
     // recovery truncates only after `log_end` (§8.6), compaction writes a new file and renames it over this one
-    // (§4.6), and create never truncates (§4.5.1). The writer lock keeps a second writer out (§4.5.1). Outside the
-    // contract (ADR-0010 decision 3), as for any mmap-based database: other programs writing the file, other
-    // handles to it in this process (e.g. a `try_clone` of the `File` given to `open_on`) writing or truncating it
-    // outside the container API, and a slot damaged after this handle read it. A truncation then faults and ends the
-    // process (decision 5); a write changes bytes behind a live `&[u8]`, which the embedder must never do.
+    // (§4.6), and create never truncates (§4.5.1). The writer lock keeps a second writer out (§4.5.1), except where
+    // the lock is per process (`flock` emulated with POSIX locks, e.g. Linux NFS): two read-write containers of one
+    // process are then not excluded, and a second one appends at its own end over frames this handle mapped. Every
+    // other writer, and that second container, is the caller's to exclude: this runs only after
+    // `Container::enable_mapped_reads`, an `unsafe fn` whose `# Safety` contract rules out other programs, other
+    // handles in this process writing, truncating or hole-punching the file below the mapped `log_end` while a
+    // mapping lives, and a second read-write container where locks are per process (ADR-0010 decision 3). A slot
+    // damaged after this handle read it stays outside any contract, as for any mmap-based database: recovery may then
+    // fall back to the older slot and truncate below the mapped `log_end`, which faults and ends the process
+    // (decision 5), and a writer's later appends rewrite bytes this handle still maps.
     let map = unsafe { MmapFile::map(file, range)? };
     Ok(ByteSource::from_mmap(map))
 }
@@ -43,27 +48,43 @@ impl Container<File> {
     /// and read the others with `pread`: frames after `log_end`, frames committed after a failed remap (the previous
     /// mapping stays), and every frame if mapping the file a compaction moved to failed. Calling it again maps anew.
     ///
-    /// Opt in only on a local disk file system: a read error on a mapped page, or a truncation of the file by a
-    /// program other than Persia, raises `SIGBUS` (Unix) or `EXCEPTION_IN_PAGE_ERROR` (Windows) and ends the
-    /// process, where `pread` would return an error. While a mapping (or a [`FrameSource`](super::FrameSource) from
-    /// it) lives, nothing but Persia containers may write or truncate the file: not even other handles to it in this
-    /// process. On Windows a live mapping also keeps another handle's read-write open from truncating a torn or
-    /// corrupt tail: that open fails with [`Error::Io`] until the mapping is gone (possibly leaving a quarantine copy
-    /// of the tail behind each time, ADR-0017). A live mapping does not block [`compact`](Container::compact)'s
-    /// rename over the container on Windows 10 1607 and later on NTFS, where the rename has POSIX semantics (tested in
-    /// CI, ADR-0016); on other Windows file systems (FAT, exFAT) the rename may be refused, and the compaction then
-    /// fails without harm (SPEC §4.7).
+    /// Opt in only on a local disk file system: a read error on a mapped page raises `SIGBUS` (Unix) or
+    /// `EXCEPTION_IN_PAGE_ERROR` (Windows) and ends the process, where `pread` would return an error. On Windows a
+    /// live mapping also keeps another handle's read-write open from truncating a torn or corrupt tail: that open
+    /// fails with [`Error::Io`] until the mapping is gone (possibly leaving a quarantine copy of the tail behind each
+    /// time, ADR-0017). A live mapping does not block [`compact`](Container::compact)'s rename over the container on
+    /// Windows 10 1607 and later on NTFS, where the rename has POSIX semantics (tested in CI, ADR-0016); on other
+    /// Windows file systems (FAT, exFAT) the rename may be refused, and the compaction then fails without harm
+    /// (SPEC §4.7).
+    ///
+    /// # Safety
+    /// The mapping hands out `&[u8]` slices of the file (ADR-0010, ADR-0017). While a mapping this container makes,
+    /// or a [`FrameSource`](super::FrameSource) or `ByteSource` taken from one, is alive, the caller must ensure that
+    /// nothing but Persia containers writes, truncates or hole-punches the file below the `log_end` it was mapped at:
+    /// not other programs, and not other handles to the file in this process (a `try_clone` of the `File` given to
+    /// [`Container::open_on`], a second `File::open`, a [`ContainerFile`](super::ContainerFile) call on either).
+    /// Persia's own containers keep to this (SPEC §4.7), with two exceptions the caller must also rule out:
+    /// - where the writer lock belongs to the process rather than the handle (`flock` emulated with POSIX locks:
+    ///   Linux NFS, some FUSE and CIFS mounts; SPEC §4.5.1), a second read-write container on the file in this
+    ///   process is not locked out, and it appends over frames this one mapped. Open at most one read-write
+    ///   container per file per process there, or map only on a local disk
+    ///   ([`enable_mapped_reads_if_local`](Container::enable_mapped_reads_if_local));
+    /// - a superblock slot damaged after this container read it may make recovery fall back to the older slot and
+    ///   truncate below the mapped `log_end`; a writer's later appends then rewrite mapped bytes. As for any
+    ///   mmap-based database, this is outside what Persia can rule out (ADR-0010 decision 3).
+    ///
+    /// Otherwise frames are append-only, recovery truncates only after `log_end`, and compaction renames a new file
+    /// over the old one. Appending after `log_end` lies outside the mapping and is allowed. Breaking the contract is
+    /// undefined behavior (bytes changing behind a live `&[u8]`) or, for a truncation, ends the process with
+    /// `SIGBUS` / `EXCEPTION_IN_PAGE_ERROR`.
     ///
     /// # Errors
     /// [`Error::Io`] if the mapping fails (e.g. no address space for a large container on a 32-bit target); reads
     /// then go on as before the call.
-    pub fn enable_mapped_reads(&mut self) -> Result<()> {
+    pub unsafe fn enable_mapped_reads(&mut self) -> Result<()> {
         let window =
             map_committed(&self.file, &self.active.superblock).map_err(Error::io("map"))?;
-        self.mapped = Some(Mapped {
-            map: map_committed,
-            window: Some(window),
-        });
+        self.mapped = Some(Mapped::new(map_committed, window));
         Ok(())
     }
 
@@ -81,9 +102,8 @@ impl Container<File> {
     /// if the container is [on a local disk](Container::is_on_local_disk), where a read error behind a page is as rare
     /// as one behind `pread`; `pread` otherwise, where a server or a FUSE process that fails would end this process
     /// with `SIGBUS`. Returns whether this call mapped: `false` leaves an earlier `enable_mapped_reads` in place (see
-    /// [`mapped_range`](Container::mapped_range)). The same contract as `enable_mapped_reads` applies:
-    /// while a mapping lives, nothing but Persia containers may write or truncate the file, and on Windows a live
-    /// mapping keeps another handle's read-write open from truncating a torn tail, so it suits read-only handles best.
+    /// [`mapped_range`](Container::mapped_range)). On Windows a live mapping keeps another handle's read-write open
+    /// from truncating a torn tail, so it suits read-only handles best.
     ///
     /// ```
     /// use persia_storage::container::{Container, Mode};
@@ -92,20 +112,25 @@ impl Container<File> {
     /// # let path = dir.path().join("app.persia");
     /// # drop(Container::create(&path)?);
     /// let mut c = Container::open(&path, Mode::ReadOnly)?;
-    /// let mapped = c.enable_mapped_reads_if_local()?;
+    /// // SAFETY: nothing but Persia containers writes this file while it is mapped.
+    /// let mapped = unsafe { c.enable_mapped_reads_if_local()? };
     /// assert_eq!(mapped, c.mapped_range().is_some());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
+    ///
+    /// # Safety
+    /// As [`enable_mapped_reads`](Container::enable_mapped_reads), when this call maps.
     ///
     /// # Errors
     /// [`Error::Io`] if the mapping fails; reads then go on as before the call. A file system that cannot be queried
     /// (e.g. a Windows volume with no drive letter) counts as not local: `Ok(false)`, as ADR-0021 decides for every
     /// unknown answer.
-    pub fn enable_mapped_reads_if_local(&mut self) -> Result<bool> {
+    pub unsafe fn enable_mapped_reads_if_local(&mut self) -> Result<bool> {
         if !self.is_on_local_disk().unwrap_or(false) {
             return Ok(false);
         }
-        self.enable_mapped_reads()?;
+        // SAFETY: the caller keeps `enable_mapped_reads`' contract, this function's own.
+        unsafe { self.enable_mapped_reads()? };
         Ok(true)
     }
 
@@ -113,6 +138,23 @@ impl Container<File> {
     pub fn mapped_range(&self) -> Option<Range<u64>> {
         let window = self.mapped.as_ref()?.window.as_ref()?;
         Some(window.base_offset()..window.end_offset())
+    }
+}
+
+impl<F> Container<F> {
+    /// Whether a mapping is live ([`Container::enable_mapped_reads`]): committed frames it covers are read from it
+    /// (a new container's mapping covers none yet). `false` without mapped reads, and after mapping the file a
+    /// compaction moved to failed: every frame is then read with `pread`.
+    pub fn is_mapped(&self) -> bool {
+        self.mapped.as_ref().is_some_and(|m| m.window.is_some())
+    }
+
+    /// How many times remapping failed since mapped reads were enabled: after a commit (the frames it added are then
+    /// read with `pread`) or after a compaction (every frame is). Each failure also logs a `tracing` warning, since
+    /// the fallback is otherwise invisible: reads stay correct, only slower. Enabling mapped reads again starts the
+    /// count from 0.
+    pub fn mapping_failures(&self) -> u64 {
+        self.mapped.as_ref().map_or(0, |m| m.failures)
     }
 }
 
@@ -174,10 +216,10 @@ mod tests {
         FAIL.set(false);
         let mut c = Container::create_on(SimFile::new(), [1; 16]).unwrap();
         let old = commit(&mut c, b"first");
-        c.mapped = Some(Mapped {
-            map: heap_map,
-            window: Some(heap_map(&c.file, &c.active.superblock).unwrap()),
-        });
+        c.mapped = Some(Mapped::new(
+            heap_map,
+            heap_map(&c.file, &c.active.superblock).unwrap(),
+        ));
         let covered = F..c.superblock().log_end;
         FAIL.set(true);
         let new = commit(&mut c, b"second");
@@ -198,8 +240,11 @@ mod tests {
             b"second"
         );
         // The next commit that maps catches up.
+        assert!(c.is_mapped());
+        assert_eq!(c.mapping_failures(), 1);
         let newest = commit(&mut c, b"third");
         assert!(from_window(&c, new) && from_window(&c, newest));
+        assert_eq!(c.mapping_failures(), 1);
     }
 
     #[test]
@@ -207,16 +252,17 @@ mod tests {
         FAIL.set(false);
         let mut c = Container::create_on(SimFile::new(), [1; 16]).unwrap();
         commit(&mut c, b"first");
-        let mut mapped = Mapped {
-            map: heap_map,
-            window: Some(heap_map(&c.file, &c.active.superblock).unwrap()),
-        };
+        let mut mapped = Mapped::new(heap_map, heap_map(&c.file, &c.active.superblock).unwrap());
         FAIL.set(true);
         mapped.moved_to(&c.file, &c.active.superblock);
         FAIL.set(false);
         assert!(mapped.window.is_none());
+        assert_eq!(mapped.failures, 1);
         mapped.moved_to(&c.file, &c.active.superblock);
         assert!(mapped.window.is_some());
+        assert_eq!(mapped.failures, 1);
+        c.mapped = Some(mapped);
+        assert!(c.is_mapped());
     }
 
     const F: u64 = FIRST_FRAME_OFFSET;

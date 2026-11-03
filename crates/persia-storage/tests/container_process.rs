@@ -17,7 +17,8 @@
     clippy::cast_possible_truncation,
     clippy::print_stdout,
     clippy::print_stderr,
-    clippy::panic
+    clippy::panic,
+    unsafe_code // maps a container the test owns (ADR-0017)
 )]
 
 use std::io::{BufRead, BufReader, Read, Write};
@@ -399,9 +400,9 @@ impl MappedView {
     fn open(path: &Path) -> Result<Self, String> {
         let mut container =
             Container::open(path, Mode::ReadOnly).map_err(|e| format!("open: {e}"))?;
-        container
-            .enable_mapped_reads()
-            .map_err(|e| format!("map: {e}"))?;
+        // SAFETY: the test's other process writes this temporary file only through a Persia container: appends,
+        // commits and an in-place compaction, which renames a new file over it and leaves the mapped one untouched.
+        unsafe { container.enable_mapped_reads() }.map_err(|e| format!("map: {e}"))?;
         let log_end = container.superblock().log_end;
         let mut seen = Vec::new();
         let mut at = FIRST_FRAME_OFFSET;

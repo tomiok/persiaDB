@@ -67,7 +67,7 @@ cargo nextest run --workspace                # preferred runner if installed
 cargo deny check                             # licenses + advisories
 just fuzz <target> [seconds]                 # dated nightly from .github/nightly-toolchain
 cargo bench -p persia-engine
-just miri                                    # Miri on persia-format (dated nightly)
+just miri                                    # Miri on persia-format and the engine's pure parsers (dated nightly)
 just integration                             # docker-compose: MinIO, fake-gcs, azurite
 cargo xtask progress --record                # regenerate PROGRESS.md + append today's snapshot
 cargo xtask progress --check                 # CI: fail if PROGRESS.md is stale

@@ -31,16 +31,12 @@ const SIGN: u64 = 1 << 63;
 /// The key of an `i64`: unsigned key order is signed value order.
 pub const fn i64_to_key(value: i64) -> u64 {
     // Reinterpreting the bits is the point.
-    #[allow(clippy::cast_sign_loss)]
-    let bits = value as u64;
-    bits ^ SIGN
+    value.cast_unsigned() ^ SIGN
 }
 
 /// Inverse of [`i64_to_key`].
 pub const fn key_to_i64(key: u64) -> i64 {
-    #[allow(clippy::cast_possible_wrap)]
-    let value = (key ^ SIGN) as i64;
-    value
+    (key ^ SIGN).cast_signed()
 }
 
 /// The key of an `f64`: unsigned key order is [`f64::total_cmp`] order, and every bit pattern (including NaN
@@ -290,8 +286,9 @@ impl ForBlock<'_> {
             window
         };
         let bits = u128::from_le_bytes(window) >> shift;
-        // Truncation to the low 64 bits, then the width mask.
-        #[allow(clippy::cast_possible_truncation)]
+        // Truncation to the low 64 bits is the point (the bits above were shifted in only to be dropped), then
+        // the width mask.
+        #[allow(clippy::cast_possible_truncation, clippy::as_conversions)]
         let low = bits as u64;
         low & self.mask()
     }

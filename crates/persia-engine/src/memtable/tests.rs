@@ -437,3 +437,56 @@ fn a_step_error_stops_each_chunked_copy() {
     assert!(view.norms_stepped(f.body, &|| Ok(())).is_ok());
     mem.put(&chunked_doc(&f, "after", 1)).unwrap();
 }
+
+/// While held, new views (the writer's and a reader's) see the memtable as at the hold, an upserted document
+/// included; releasing shows every write, and a view taken during the hold keeps what it saw (ROADMAP 6.3.12).
+#[test]
+fn a_hold_keeps_new_views_at_the_writes_before_it() {
+    let (mut mem, t, _) = unguarded();
+    let doc = |id: &str, text: &str| Document::new(id).with(t, Value::String(text.into()));
+    mem.put(&doc("a", "old")).unwrap();
+    let reader = mem.reader();
+    mem.hold();
+    mem.hold();
+    assert!(mem.is_held());
+    mem.put(&doc("a", "new")).unwrap();
+    mem.put(&doc("b", "new")).unwrap();
+    for held in [mem.view(), reader.view()] {
+        assert_eq!((held.version(), held.live_count()), (1, 1));
+        assert_eq!(held.lookup("a"), Some(IdState::Live(0)));
+        assert_eq!(held.lookup("b"), None);
+        assert_eq!(docs(&held, t, b"old"), [0]);
+        assert_eq!(docs(&held, t, b"new"), Vec::<u32>::new());
+        let stats = held.field_stats(t).unwrap();
+        assert_eq!((stats.docs_with_field, stats.sum_field_len), (1, 1));
+    }
+    let during = reader.view();
+    mem.release();
+    assert!(!mem.is_held());
+    let after = reader.view();
+    assert_eq!((after.version(), after.live_count()), (3, 2));
+    assert_eq!(after.lookup("a"), Some(IdState::Live(1)));
+    assert_eq!(docs(&after, t, b"new"), [1, 2]);
+    assert_eq!(docs(&after, t, b"old"), Vec::<u32>::new());
+    assert_eq!((during.version(), during.live_count()), (1, 1));
+    assert_eq!(docs(&during, t, b"new"), Vec::<u32>::new());
+    // A reader of a replaced memtable can end its hold too.
+    mem.hold();
+    assert!(reader.reads(&mem));
+    reader.release();
+    assert!(!mem.is_held());
+}
+
+/// A hold's copy of the statistics counts toward the flush threshold (`size_in_bytes`) while it lives.
+#[test]
+fn a_hold_counts_its_copy_of_the_statistics() {
+    let (mut mem, t, _) = unguarded();
+    mem.put(&Document::new("a").with(t, Value::String("x".into())))
+        .unwrap();
+    let before = mem.size_in_bytes();
+    mem.hold();
+    let held = mem.size_in_bytes();
+    assert!(held > before, "{held} <= {before}");
+    mem.release();
+    assert_eq!(mem.size_in_bytes(), before);
+}

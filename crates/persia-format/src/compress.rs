@@ -29,7 +29,10 @@ pub enum Codec {
 impl Codec {
     /// The on-disk byte.
     pub const fn to_u8(self) -> u8 {
-        self as u8
+        // A fieldless `#[repr(u8)]` enum: the cast reads the declared discriminant, which is the on-disk byte.
+        #[allow(clippy::as_conversions)]
+        let byte = self as u8;
+        byte
     }
 
     /// Parses the on-disk byte read at absolute position `offset`.

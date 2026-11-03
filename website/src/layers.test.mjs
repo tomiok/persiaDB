@@ -77,7 +77,7 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(m6?.state, 'in progress');
 	assert.match(view.caption, /WAL with chunks, group commit, and replay/);
 	assert.match(view.caption, /query path is in progress/);
-	assert.match(view.caption, /Nothing searches/);
+	assert.match(view.caption, /A collection snapshot can be searched as library code/);
 	assert.equal(view.caption.includes('no query engine'), false);
 	assert.match(view.caption, /exports no Db or Collection/);
 	assert.equal(view.caption.includes('M5 in progress'), false);
@@ -96,7 +96,7 @@ test('figure captions follow the same snapshot', () => {
 	assert.match(writePathCaption(parsed), /container commit is done \(M2,/);
 	assert.match(writePathCaption(parsed), new RegExp(`in progress \\(M6, ${m6?.done}/${m6?.leaves}\\)`));
 	assert.match(writePathCaption(parsed), /WAL with chunks, group commit, and replay/);
-	assert.match(writePathCaption(parsed), /Nothing searches/);
+	assert.match(writePathCaption(parsed), /A collection snapshot can be searched as library code/);
 	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
 	assert.match(queryPathCaption(parsed), /The query milestone is in progress \(M7/);
@@ -106,7 +106,7 @@ test('figure captions follow the same snapshot', () => {
 	const llms = llmsStatusParagraph();
 	assert.match(llms, /Pre-alpha\./);
 	assert.match(llms, /WAL with chunks/);
-	assert.match(llms, /no search/);
+	assert.match(llms, /no search on the database handle/);
 	assert.equal(llms.includes('indexes a document, or runs a search'), false);
 	assert.equal(llms.includes('No WAL'), false);
 	assert.equal(m5?.state, 'done');

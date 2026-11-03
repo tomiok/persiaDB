@@ -234,13 +234,16 @@ mod tests {
     /// Files that may `allow(unsafe_code)`, each justified by an ADR. Adding one means amending ADR-0010 (or writing
     /// a new ADR) first.
     const UNSAFE_ALLOWED: &[&str] = &[
-        "crates/persia-format/src/mmap.rs",              // ADR-0010
-        "crates/persia-format/tests/mmap_rename.rs",     // ADR-0010: maps its own temporary files
-        "crates/persia-format/tests/source_props.rs",    // ADR-0010: maps its own temporary files
+        "crates/persia-format/src/mmap.rs",                 // ADR-0010
+        "crates/persia-format/tests/mmap_rename.rs", // ADR-0010: maps its own temporary files
+        "crates/persia-format/tests/source_props.rs", // ADR-0010: maps its own temporary files
         "crates/persia-storage/src/container/mapped.rs", // ADR-0017
-        "crates/persia-storage/src/sys.rs",              // ADR-0021
-        "crates/persia-analysis/tests/allocations.rs",   // ADR-0026: counting allocator
-        "crates/persia-engine/tests/flush_memory.rs",    // ADR-0026: counting allocator
+        "crates/persia-storage/tests/container_mapped.rs", // ADR-0017: maps containers it owns (unsafe enable_mapped_reads)
+        "crates/persia-storage/tests/container_process.rs", // ADR-0017: maps containers it owns
+        "crates/persia-storage/benches/container_read.rs", // ADR-0017: maps a container it owns
+        "crates/persia-storage/src/sys.rs",                // ADR-0021
+        "crates/persia-analysis/tests/allocations.rs",     // ADR-0026: counting allocator
+        "crates/persia-engine/tests/flush_memory.rs",      // ADR-0026: counting allocator
     ];
 
     #[test]
@@ -410,5 +413,90 @@ mod tests {
     fn source_is_lf_text() {
         assert_eq!(attr("crates/persia/src/lib.rs", "eol"), "lf");
         assert_eq!(attr("crates/persia/src/lib.rs", "text"), "auto");
+    }
+
+    // --- README status (CLAUDE.md "Progress") ---
+
+    /// The README's progress blocks match what `cargo xtask progress` renders from ROADMAP.md and the history,
+    /// so the README cannot claim a count PROGRESS.md does not.
+    #[test]
+    fn readme_progress_matches_progress_md() {
+        use crate::progress::{parse_history, parse_roadmap, readme};
+        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
+        let milestones = parse_roadmap(&read("ROADMAP.md")).unwrap();
+        let history = parse_history(&read("docs/progress-history.csv")).unwrap();
+        let current = read("README.md");
+        let expected = readme::apply(&current, &milestones, &history).unwrap();
+        assert!(
+            current == expected,
+            "README.md's progress blocks are stale. Run: cargo xtask progress --record"
+        );
+    }
+
+    /// The README quickstart is exactly the code `readme_quickstart.rs` runs, so the README cannot show calls, or a
+    /// control flow, the test does not run. The test's own code (the attributes, a temporary path, the typo check)
+    /// sits between `// readme: hidden` and `// readme: shown` and is left out; comments and whitespace are ignored
+    /// (rustfmt lays the two out differently); the README's `"app.persia"` is the test's `&path` and its `main` the
+    /// test function. Everything else, braces and semicolons included, must be equal.
+    #[test]
+    fn readme_quickstart_is_the_tested_one() {
+        let read = |rel: &str| std::fs::read_to_string(root().join(rel)).unwrap();
+        let readme = read("README.md");
+        let section = readme
+            .split_once("### Index documents and search them")
+            .expect("README.md: quickstart heading")
+            .1;
+        let block = section
+            .split_once("```rust\n")
+            .and_then(|(_, rest)| rest.split_once("\n```"))
+            .expect("README.md: quickstart rust block")
+            .0;
+        // The code without comments, whitespace, or the test's hidden regions.
+        let code = |text: &str| -> String {
+            let mut shown = true;
+            let mut out = String::new();
+            for line in text.lines() {
+                match line.trim() {
+                    "// readme: hidden" => shown = false,
+                    "// readme: shown" => shown = true,
+                    t if !shown || t.starts_with("//") => {}
+                    _ => out.extend(
+                        line.split_once("// ")
+                            .map_or(line, |(code, _)| code)
+                            .chars()
+                            .filter(|c| !c.is_whitespace()),
+                    ),
+                }
+            }
+            out
+        };
+        let want = code(
+            &block
+                .replace("\"app.persia\"", "&path")
+                .replace("fn main()", "fn readme_quickstart()"),
+        );
+        let have = code(&read("crates/persia-engine/tests/readme_quickstart.rs"));
+        assert!(
+            want.len() > 500,
+            "README quickstart: too little code parsed"
+        );
+        let at = want
+            .chars()
+            .zip(have.chars())
+            .take_while(|(a, b)| a == b)
+            .count();
+        assert!(
+            want == have,
+            "README quickstart and readme_quickstart.rs differ after {} equal characters:\nREADME: {}\ntest:   {}",
+            at,
+            want.chars()
+                .skip(at.saturating_sub(40))
+                .take(100)
+                .collect::<String>(),
+            have.chars()
+                .skip(at.saturating_sub(40))
+                .take(100)
+                .collect::<String>()
+        );
     }
 }

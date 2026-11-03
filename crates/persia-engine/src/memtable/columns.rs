@@ -5,6 +5,8 @@
 
 use std::sync::Arc;
 
+use persia_format::widen::{u64_from_usize, usize_from_u32};
+
 use crate::schema::FieldId;
 use crate::segment::builder::inverted::Inverted;
 use crate::segment::{ReadError, SectionKind, SegmentCorruption};
@@ -133,7 +135,7 @@ pub(super) fn keywords(
         .iter()
         .map(|&i| bytes.get_mut(i).and_then(Option::take).unwrap_or_default())
         .collect();
-    let doc_count = docs as usize;
+    let doc_count = usize_from_u32(docs);
     let mut starts = Vec::with_capacity(doc_count.saturating_add(1));
     let mut doc_ords = Vec::with_capacity(postings.len());
     let mut rest = postings;
@@ -189,7 +191,7 @@ impl KeywordReader for MemtableKeywords {
                 doc_count: self.docs,
             });
         }
-        let d = docid as usize;
+        let d = usize_from_u32(docid);
         let Some((from, to)) = self
             .starts
             .get(d)
@@ -206,7 +208,7 @@ impl KeywordReader for MemtableKeywords {
     }
 
     fn len(&self) -> u64 {
-        self.values.len() as u64
+        u64_from_usize(self.values.len())
     }
 }
 

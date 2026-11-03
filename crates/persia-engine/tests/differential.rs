@@ -7,7 +7,8 @@
 //! 1. A search returns exactly the live documents the reference matches and the filter selects, each once, with
 //!    the reference's score within [`EPSILON`] of the query's scale. Statistics count every document of every
 //!    segment, deleted or replaced ones too, plus the memtable's live documents (SPEC §7.2).
-//! 2. Hits rank by score descending, then segment order with the memtable last, then docid (SPEC §7.3).
+//! 2. Hits rank in the reference's order: no hit above one the reference scores higher beyond the tolerance, every
+//!    pair compared. Ties rank by segment order with the memtable last, then docid (SPEC §7.3).
 //! 3. Every pruning strategy, on the calling thread and on a pool, returns the same page, scores bit for bit; a page
 //!    of `k` is the first `k` of the full ranking, and the page after its last cursor is the next `k`.
 //! 4. Each hit's explanation scores the hit, bit for bit; each field of a word lists the frequency the reference
@@ -609,7 +610,34 @@ fn check(
             );
         }
 
-        // Invariant 2: the order.
+        // Invariant 2: the order is the reference's: no hit ranks above one the reference scores higher beyond the
+        // scores' tolerance (every pair, since a tolerance is not transitive), so a page of `k` is the reference's top
+        // `k` up to near-ties.
+        let reference: Vec<(f64, f64)> = full
+            .iter()
+            .map(|h| {
+                want.iter()
+                    .find(|(id, _)| id.as_str() == h.document.id())
+                    .map(|(_, s)| *s)
+                    .unwrap()
+            })
+            .collect();
+        for (i, (above, above_scale)) in reference.iter().enumerate() {
+            for (j, (below, below_scale)) in reference.iter().enumerate().skip(i + 1) {
+                let tolerance = 2.0 * EPSILON * above_scale.max(*below_scale).max(1.0);
+                prop_assert!(
+                    *above >= below - tolerance,
+                    "rank {} ({}, reference {}) above rank {} ({}, reference {}) for {:?}",
+                    i,
+                    full[i].document.id(),
+                    above,
+                    j,
+                    full[j].document.id(),
+                    below,
+                    query
+                );
+            }
+        }
         for pair in full.windows(2) {
             let (a, b) = (&pair[0], &pair[1]);
             prop_assert!(
@@ -801,4 +829,60 @@ fn the_model_tracks_segments() {
     // The first segment has no live document left: dropped.
     assert_eq!(model.segments.len(), 1);
     assert_eq!(model.live().len(), 1);
+}
+
+/// SPEC §5.3.4's properties of a scored length `q` of `n`: never above `n`, exactly `n` below 40, and otherwise
+/// below it by less than `(n − 24) / 8`; longer fields never score as shorter ones (checked by the callers).
+fn spec_quantization(n: u64, q: u64) -> Result<(), String> {
+    if q > n {
+        return Err(format!("{n} scores as {q}, above it"));
+    }
+    if n < 40 && q != n {
+        return Err(format!("{n} scores as {q}, not exactly"));
+    }
+    if n >= 40 && (n - q) * 8 >= n - 24 {
+        return Err(format!("{n} scores as {q}: (n - 24) / 8 or more below"));
+    }
+    Ok(())
+}
+
+/// SPEC §5.3.4 by hand: 41 − 24 = 17 = `0b1_0001` keeps `0b1000 << 1` = 16, so 40; 100 − 24 = 76 = `0b100_1100`
+/// keeps `0b1001 << 3` = 72, so 96.
+#[test]
+fn quantization_by_hand() {
+    use reference::bm25f::quantized;
+    assert_eq!([23, 39, 41, 100].map(quantized), [23, 39, 40, 96]);
+}
+
+/// The reference's quantization and the engine's codec agree on every length up to 2^17, where real fields are,
+/// and both keep the SPEC's properties there (ROADMAP 7.8.5): the reference states the rounding, the engine encodes
+/// a byte, and neither is derived from the other.
+#[test]
+fn quantization_matches_the_engine_and_the_spec_for_every_short_length() {
+    use reference::bm25f::quantized;
+    let mut previous = 0;
+    for n in 0..1u64 << 17 {
+        let q = quantized(n);
+        spec_quantization(n, q).unwrap();
+        assert!(q >= previous, "{n} scores shorter than {}", n - 1);
+        previous = q;
+        let engine = persia_engine::segment::scored_length(u32::try_from(n).unwrap());
+        assert_eq!(u64::from(engine), q, "length {n}");
+    }
+}
+
+proptest! {
+    /// As above, for lengths up to 2^31 (past it every length shares the last code).
+    #[test]
+    fn quantization_matches_the_engine_and_the_spec(a in 0u64..1 << 31, b in 0u64..1 << 31) {
+        use reference::bm25f::quantized;
+        for n in [a, b] {
+            let q = quantized(n);
+            prop_assert!(spec_quantization(n, q).is_ok(), "{:?}", spec_quantization(n, q));
+            let engine = persia_engine::segment::scored_length(u32::try_from(n).unwrap());
+            prop_assert_eq!(u64::from(engine), q, "length {}", n);
+        }
+        let (lo, hi) = (a.min(b), a.max(b));
+        prop_assert!(quantized(lo) <= quantized(hi), "{} scores longer than {}", lo, hi);
+    }
 }

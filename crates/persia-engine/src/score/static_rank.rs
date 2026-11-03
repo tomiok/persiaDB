@@ -44,7 +44,8 @@ pub fn static_rank(rank: &StaticRank, value: Option<&Value>) -> f64 {
 
 /// A numeric value as the static rank sees it (SPEC §6.2.3): an `i64` or `f64` as a float, a `datetime` as its
 /// microseconds since the epoch; `None` for another value.
-#[allow(clippy::cast_precision_loss)] // a rank needs magnitude, not the last bits of a 64-bit integer
+// Int to float on purpose: a rank needs magnitude, not the last bits of a 64-bit integer.
+#[allow(clippy::cast_precision_loss, clippy::as_conversions)]
 pub fn static_rank_value(value: &Value) -> Option<f64> {
     match *value {
         Value::I64(v) | Value::Datetime(v) => Some(v as f64),

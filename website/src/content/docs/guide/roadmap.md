@@ -31,9 +31,10 @@ That percentage is M0–M15 only. Milestones after v1.0 are at the end of this p
 
 ## M0 — Project bootstrap
 
-Done. The Cargo workspace and its crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo deny`,
-Miri on `persia-format`), the `justfile`, repo tooling in Rust (`cargo xtask`, ADR-0003), issue
-templates, and the documentation scaffolding: this repository's rules, the ADR process, ADR-0001 and
+Done. The Cargo workspace and its crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo
+deny`, Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo
+tooling in Rust (`cargo xtask`, ADR-0003), issue templates, and the documentation scaffolding:
+this repository's rules, the ADR process, ADR-0001 and
 ADR-0002, and [`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md). No dependencies.
 
 ## M1 — Format primitives
@@ -94,7 +95,7 @@ the v1 performance work early (M15).
 
 In the tree today: the query AST and compiler, the filter DSL, query limits, collection statistics,
 the BM25F scorer (ROADMAP 7.1–7.3), and matching with score top-k over one view, including block-max
-WAND (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, sort, parallel segment search, and explain are not.
+WAND (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, sort, parallel segment search, and explain are in the tree too (ROADMAP 7.4.5, 7.5, 7.6, 7.7), through `CollectionViews::search`.
 [Typo-tolerant search](/guide/typo-tolerant-search/) is that split. The relaxation milestone below has not been started.
 
 ## M8 — Zero-results avoidance

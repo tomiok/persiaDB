@@ -7,6 +7,9 @@
 #![deny(clippy::arithmetic_side_effects)]
 // Unit tests compute expected values with plain operators; the library build above is still checked.
 #![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+// Sizes and offsets convert with `From`, `widen` or `try_from`, never a silent `as` (CLAUDE.md checked ops,
+// ROADMAP 0.6.5).
+#![cfg_attr(not(test), deny(clippy::as_conversions))]
 
 pub mod align;
 pub mod bitpack;
@@ -28,6 +31,7 @@ pub mod reader;
 pub mod source;
 pub mod superblock;
 pub mod varint;
+pub mod widen;
 pub mod writer;
 pub mod zigzag;
 

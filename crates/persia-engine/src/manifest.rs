@@ -39,6 +39,7 @@ use std::fmt;
 use persia_format::frame::MIN_FRAME_LEN;
 use persia_format::hash::xxh3_128;
 use persia_format::superblock::FIRST_FRAME_OFFSET;
+use persia_format::widen::u64_from_usize;
 
 use crate::schema::CollectionSchema;
 
@@ -153,7 +154,11 @@ impl Location {
             Self::Frame { offset, len } => {
                 let aligned = offset % 8 == 0 && len % 8 == 0;
                 let fits = offset.checked_add(len).is_some();
-                if aligned && fits && offset >= FIRST_FRAME_OFFSET && len >= MIN_FRAME_LEN as u64 {
+                if aligned
+                    && fits
+                    && offset >= FIRST_FRAME_OFFSET
+                    && len >= u64_from_usize(MIN_FRAME_LEN)
+                {
                     Ok(())
                 } else {
                     Err(EntryProblem::FrameLocation { offset, len })

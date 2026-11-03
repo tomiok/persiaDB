@@ -56,25 +56,24 @@ impl Encoder {
         }
     }
 
-    // Each arm's range makes the narrowing exact.
-    #[allow(clippy::cast_possible_truncation)]
+    // The shortest head that holds `arg` (RFC 8949 preferred serialization): the first width it converts to.
     fn head(&mut self, major: u8, arg: u64) {
         let major = major << 5;
-        match arg {
-            0..24 => self.put(&[major | arg as u8]),
-            24..0x100 => self.put(&[major | 0x18, arg as u8]),
-            0x100..0x1_0000 => {
-                self.put(&[major | 0x19]);
-                self.put(&(arg as u16).to_be_bytes());
+        if let Ok(byte) = u8::try_from(arg) {
+            if byte < 24 {
+                self.put(&[major | byte]);
+            } else {
+                self.put(&[major | 0x18, byte]);
             }
-            0x1_0000..0x1_0000_0000 => {
-                self.put(&[major | 0x1a]);
-                self.put(&(arg as u32).to_be_bytes());
-            }
-            _ => {
-                self.put(&[major | 0x1b]);
-                self.put(&arg.to_be_bytes());
-            }
+        } else if let Ok(half) = u16::try_from(arg) {
+            self.put(&[major | 0x19]);
+            self.put(&half.to_be_bytes());
+        } else if let Ok(word) = u32::try_from(arg) {
+            self.put(&[major | 0x1a]);
+            self.put(&word.to_be_bytes());
+        } else {
+            self.put(&[major | 0x1b]);
+            self.put(&arg.to_be_bytes());
         }
     }
 

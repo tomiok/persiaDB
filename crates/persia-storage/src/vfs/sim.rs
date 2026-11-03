@@ -18,6 +18,8 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use persia_format::widen::u64_from_usize;
+
 use super::{DirEntry, EntryKind, FileType, Vfs};
 use crate::container::ContainerFile;
 use crate::container::sim::{CrashLoss, Faults, SimFault, SimFile, lock};
@@ -273,7 +275,7 @@ impl SimFs {
                 (CrashLoss::Seeded(_), Some(rng)) => {
                     let n = rng
                         .next_u64()
-                        .checked_rem((all as u64).saturating_add(1))
+                        .checked_rem(u64_from_usize(all).saturating_add(1))
                         .unwrap_or(0);
                     usize::try_from(n).unwrap_or(0)
                 }

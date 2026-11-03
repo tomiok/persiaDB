@@ -35,6 +35,7 @@ use persia_engine::db::{
     SegmentIds, Snapshot, Tail,
 };
 use persia_engine::document::{Document, Value};
+use persia_engine::manifest::Location;
 use persia_engine::memtable::FlushPolicy;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::view::SearchView;
@@ -400,6 +401,22 @@ fn a_backlog_past_the_size_threshold_is_flushed_during_replay() {
     let commits = db.seq() - base;
     assert!(commits >= 2, "{commits} commits during replay");
     assert!(db.manifest().wal_start() > 0);
+    // Replay holds `wal_start` at its chunk, so segments it flushed lie after it; they count as live there, and
+    // `space_usage` still accounts every byte (ROADMAP 6.5.10).
+    let wal_start = db.container().superblock().wal_start;
+    let after: Vec<_> = db
+        .manifest()
+        .collections()
+        .flat_map(persia_engine::manifest::CollectionEntry::segments)
+        .filter(|s| matches!(s.location, Location::Frame { offset, .. } if offset >= wal_start))
+        .collect();
+    assert!(
+        !after.is_empty(),
+        "no replay-flushed segment after wal_start {wal_start}"
+    );
+    let usage = db.space_usage().unwrap();
+    assert_eq!(usage.live + usage.dead(), usage.total);
+    assert!(usage.live >= usage.total - wal_start);
     drop(db);
 
     // Losing nothing or every unsynced write: the next open replays from the last flush and does not commit again.

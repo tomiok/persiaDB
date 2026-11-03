@@ -8,6 +8,7 @@ use persia_format::Writer;
 use persia_format::block::{BlockWriter, Compression, DEFAULT_BLOCK_SIZE};
 use persia_format::checksum::{Crc32c, crc32c};
 use persia_format::compress::DEFAULT_ZSTD_LEVEL;
+use persia_format::widen::usize_from_u32;
 
 use super::builder::inverted::Inverted;
 use super::builder::{FieldBuilder, SegmentBuilder};
@@ -200,9 +201,9 @@ fn field_stats(field: u32, inverted: &Inverted) -> FieldStats {
 
 /// The `Norms` array: one byte per document, 0 for a document without the field (SPEC §5.3.4).
 fn dense_norms(inverted: &Inverted, doc_count: u32) -> Vec<u8> {
-    let mut norms = vec![0_u8; doc_count as usize];
+    let mut norms = vec![0_u8; usize_from_u32(doc_count)];
     for &(doc, len) in &inverted.lengths {
-        if let Some(n) = norms.get_mut(doc as usize) {
+        if let Some(n) = norms.get_mut(usize_from_u32(doc)) {
             *n = norms::encode(len);
         }
     }

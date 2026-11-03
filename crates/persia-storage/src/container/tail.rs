@@ -12,6 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use persia_format::frame::{FRAME_MAGIC, StreamScanner};
+use persia_format::widen::u64_from_usize;
 
 use super::path::temp_path;
 use super::{ContainerFile, Error, Result};
@@ -67,7 +68,7 @@ pub(super) fn classify<F: ContainerFile>(
         .saturating_add(CHUNK);
     let mut read = |offset, buf: &mut [u8]| -> core::result::Result<(), Stop> {
         budget = budget
-            .checked_sub(buf.len() as u64)
+            .checked_sub(u64_from_usize(buf.len()))
             .ok_or(Stop::OverBudget)?;
         file.read_exact_at(buf, offset).map_err(Stop::Io)
     };
@@ -97,7 +98,7 @@ fn search(
     let mut buf_at = from;
     let mut at = from;
     while at < len {
-        let window_end = buf_at.saturating_add(buf.len() as u64);
+        let window_end = buf_at.saturating_add(u64_from_usize(buf.len()));
         if at < buf_at || at >= window_end {
             let n = usize::try_from(CHUNK.min(len.saturating_sub(at))).unwrap_or(0);
             buf.resize(n, 0);
@@ -179,7 +180,7 @@ fn copy_tail<F: ContainerFile>(
             .map_err(Error::io("read"))?;
         copy.write_all_at(&buf, at.saturating_sub(from))
             .map_err(Error::io("write quarantine file"))?;
-        at = at.saturating_add(n as u64);
+        at = at.saturating_add(u64_from_usize(n));
     }
     copy.sync_data()
         .map_err(Error::io("sync quarantine file"))?;

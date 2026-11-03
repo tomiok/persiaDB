@@ -931,3 +931,147 @@ fn a_crash_after_a_size_flush_writes_no_document_twice() {
     assert_eq!(documents(&db.snapshot(), "a").len(), i + 1);
     assert_eq!(documents(&db.snapshot(), "b").len(), 1);
 }
+
+/// The ids `snapshot` shows in `collection`.
+fn visible_ids(snapshot: &Snapshot, collection: &str) -> BTreeSet<String> {
+    documents(snapshot, collection)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// A database with collection `a` holding the durable document `seen`, and the batch of four this test logs.
+fn batch_setup(file: &SimFile, opts: DatabaseOptions) -> (Database<SimFile>, Vec<Document>) {
+    let mut db = Database::create_on(file.clone(), [14; 16], opts).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.put("a", &doc("seen", "before the batch"), Durability::Fsync)
+        .unwrap();
+    let batch = (0..4)
+        .map(|i| doc(&format!("b{i}"), "in the batch"))
+        .collect();
+    (db, batch)
+}
+
+/// A `put_batch` holds the memtable until the batch is durable (SPEC §8.2.1, ROADMAP 6.3.12): whichever write or
+/// sync of its WAL frames fails, with or without effect, no snapshot after the failure shows a document of the batch.
+#[test]
+fn a_batch_whose_sync_fails_is_never_seen() {
+    use persia_storage::container::sim::SimFault;
+    let clock = clock();
+    // How many file calls a successful batch makes, on a twin of the database.
+    let twin = SimFile::new();
+    let (mut db, batch) = batch_setup(&twin, options(&clock));
+    let start = twin.mutations();
+    db.put_batch("a", &batch, Durability::Fsync).unwrap();
+    let calls = twin.mutations() - start;
+    assert!(calls > 0);
+    assert_eq!(visible_ids(&db.snapshot(), "a").len(), 5);
+
+    for k in 0..calls {
+        for fault in [
+            SimFault::FailAt(start + k),
+            SimFault::ApplyThenFail(start + k),
+        ] {
+            let file = SimFile::new();
+            let (mut db, batch) = batch_setup(&file, options(&clock));
+            assert_eq!(file.mutations(), start);
+            let reader = db.reader();
+            file.set_fault(Some(fault));
+            let result = db.put_batch("a", &batch, Durability::Fsync);
+            assert!(
+                matches!(result, Err(DatabaseError::Wal(_))),
+                "{fault:?}: {result:?}"
+            );
+            file.set_fault(None);
+            let want = BTreeSet::from(["seen".to_owned()]);
+            assert_eq!(visible_ids(&db.snapshot(), "a"), want, "{fault:?}");
+            assert_eq!(visible_ids(&reader.snapshot(), "a"), want, "{fault:?}");
+        }
+    }
+}
+
+/// A batch is visible once `put_batch` returns, at every durability; a single put is not held at all.
+#[test]
+fn a_batch_is_visible_once_it_returns() {
+    let clock = clock();
+    for durability in [Durability::Buffered, Durability::Async, Durability::Fsync] {
+        let file = SimFile::new();
+        let (mut db, batch) = batch_setup(&file, options(&clock));
+        db.put_batch("a", &batch, durability).unwrap();
+        assert_eq!(visible_ids(&db.snapshot(), "a").len(), 5, "{durability:?}");
+        db.put_batch("a", &[doc("one", "alone")], durability)
+            .unwrap();
+        assert_eq!(visible_ids(&db.snapshot(), "a").len(), 6, "{durability:?}");
+    }
+}
+
+/// A flush commit inside a batch syncs the WAL and publishes the prefix it flushed; the rest of the batch stays
+/// unseen until it is durable. Whichever file call of the batch fails, with or without effect, what a snapshot then
+/// shows is a prefix of the batch, and all of it survives a crash that loses every unsynced write.
+#[test]
+fn a_batch_shows_only_durable_documents_when_any_call_fails() {
+    use persia_storage::container::sim::SimFault;
+    let clock = clock();
+    let opts = || DatabaseOptions {
+        policy: CommitPolicy {
+            flush: FlushPolicy {
+                memtable_bytes: 4 << 10,
+                idle: Duration::from_secs(10),
+            },
+            interval: Duration::from_secs(3600),
+        },
+        ..options(&clock)
+    };
+    let text = "lorem ipsum dolor sit amet ".repeat(20);
+    let batch: Vec<Document> = (0..12).map(|i| doc(&format!("b{i:02}"), &text)).collect();
+    let prefix = |n: usize| -> BTreeSet<String> {
+        std::iter::once("seen".to_owned())
+            .chain(batch.iter().take(n).map(|d| d.id().to_owned()))
+            .collect()
+    };
+    let twin = SimFile::new();
+    let (mut db, _) = batch_setup(&twin, opts());
+    let start = twin.mutations();
+    db.put_batch("a", &batch, Durability::Fsync).unwrap();
+    let calls = twin.mutations() - start;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("a").unwrap();
+    assert!(!c.segments().is_empty(), "the batch must flush");
+    assert!(
+        c.memtable().live_count() > 0,
+        "the batch must end in the memtable"
+    );
+
+    // Whether some fault left a flushed prefix visible and a tail unseen.
+    let mut partial = false;
+    for k in 0..calls {
+        for fault in [
+            SimFault::FailAt(start + k),
+            SimFault::ApplyThenFail(start + k),
+        ] {
+            let file = SimFile::new();
+            let (mut db, _) = batch_setup(&file, opts());
+            file.set_fault(Some(fault));
+            assert!(
+                db.put_batch("a", &batch, Durability::Fsync).is_err(),
+                "{fault:?}"
+            );
+            file.set_fault(None);
+            let visible = visible_ids(&db.snapshot(), "a");
+            assert_eq!(visible, prefix(visible.len() - 1), "{fault:?}");
+            partial |= visible.len() > 1 && visible.len() <= batch.len();
+            drop(db);
+            let reopened = Database::open_on(file.crash(CrashLoss::All), opts()).unwrap();
+            let durable = visible_ids(&reopened.snapshot(), "a");
+            assert!(
+                visible.is_subset(&durable),
+                "{fault:?}: seen but lost by a crash: {:?}",
+                visible.difference(&durable).collect::<Vec<_>>()
+            );
+        }
+    }
+    assert!(
+        partial,
+        "no fault left a flushed prefix with an unseen tail"
+    );
+}

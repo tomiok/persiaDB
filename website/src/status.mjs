@@ -81,6 +81,12 @@ const GROUPS = {
 		done: 'matching and score top-k over one view',
 		partial: 'part of matching (not every leaf is done)',
 	},
+	request: {
+		leaves: ['7.5.1', '7.5.2', '7.5.3', '7.5.4'],
+		code: (ctx) => ctx.hasCollectionSearch,
+		done: 'a collection search with sorts, pages, facets, and stored fields (CollectionViews::search)',
+		partial: 'part of the collection search (not every leaf is done)',
+	},
 };
 
 /** Section 6.6. Not part of the write-path claim until every leaf is checked. */
@@ -102,7 +108,8 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasPutBlob
  * @property {boolean} hasGetBlob
  * @property {boolean} hasQuery
- * @property {boolean} hasSearch
+ * @property {boolean} hasSearch A search on the database handle (persia::Db or Database), the SPEC call.
+ * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
  * @property {string[]} analyzers
  * @property {boolean} published
  * @property {string} version
@@ -175,6 +182,31 @@ export function exportedFns(source) {
 }
 
 /**
+ * Whether an `impl <type>` block of `source` declares `pub fn <method>` (generic or not). Each impl body is cut at
+ * its matching brace, so a method of another impl later in the file does not count. Braces inside comments and
+ * strings are counted too; Rust sources keep those balanced in practice, and a miss fails loudly in groupPhrase.
+ * @param {string} source
+ * @param {string} type
+ * @param {string} method
+ * @returns {boolean}
+ */
+export function implHasMethod(source, type, method) {
+	const head = new RegExp(`^impl(?:<[^>]*>)?\\s+${type}\\b[^{]*\\{`, 'gm');
+	const fn = new RegExp(`^\\s*pub fn ${method}\\s*[<(]`, 'm');
+	for (const match of source.matchAll(head)) {
+		let depth = 1;
+		let i = (match.index ?? 0) + match[0].length;
+		const start = i;
+		for (; i < source.length && depth > 0; i++) {
+			if (source[i] === '{') depth++;
+			else if (source[i] === '}') depth--;
+		}
+		if (fn.test(source.slice(start, i))) return true;
+	}
+	return false;
+}
+
+/**
  * @param {string} registryRs
  * @returns {string[]}
  */
@@ -209,6 +241,13 @@ function englishList(items) {
 	if (items.length === 1) return items[0] ?? '';
 	if (items.length === 2) return `${items[0]} and ${items[1]}`;
 	return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`;
+}
+
+/**
+ * @param {string} text
+ */
+function capitalize(text) {
+	return `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
 }
 
 /**
@@ -358,7 +397,20 @@ export function buildStatus(ctx) {
 	const stats = groupPhrase(ctx, 'stats');
 	const bm25 = groupPhrase(ctx, 'bm25');
 	const matching = groupPhrase(ctx, 'matching');
-	const queryPieces = [queryModel, stats, bm25, matching].filter((item) => item !== null);
+	const request = groupPhrase(ctx, 'request');
+	const queryPieces = [queryModel, stats, bm25, matching, request].filter((item) => item !== null);
+	// A ranked search exists as library code once the request leaves are done and the call is in the tree. It is
+	// not the SPEC's search on the database handle (hasSearch), which is the embedded API (M10).
+	const collectionSearch =
+		ctx.hasCollectionSearch && groupState(ctx.leaves, GROUPS.request.leaves) === 'done';
+	const searches = m7.state === 'done' || ctx.hasSearch || collectionSearch;
+	const searchGap = ctx.hasSearch || m7.state === 'done'
+		? ''
+		: collectionSearch
+			? 'A collection snapshot can be searched as library code. There is no search call on the database handle.'
+			: request && ctx.hasCollectionSearch
+				? 'A collection search call is in the tree, but not every leaf of it is done.'
+				: 'Nothing searches.';
 	let querySentence = '';
 	if (m7.state !== 'done') {
 		if (queryPieces.length > 0) {
@@ -378,7 +430,7 @@ export function buildStatus(ctx) {
 				: `Relaxation is ${isState(m8)}.`,
 		);
 	}
-	if (m7.state !== 'done' && !ctx.hasSearch) gaps.push('Nothing searches.');
+	if (searchGap) gaps.push(searchGap);
 
 	const engineShort = seal(
 		`persia-engine implements ${englishList(engineBits)}. ${writeSentence} ${querySentence} ${gaps.join(' ')}`,
@@ -417,7 +469,6 @@ export function buildStatus(ctx) {
 		: openState === 'done'
 			? 'Open and recovery orchestration is done (single-writer enforcement, persia verify, and the crash-loop harness).'
 			: 'Open and recovery orchestration (single-writer enforcement, persia verify, and the crash-loop harness) is not done.';
-	const searchGap = m7.state === 'done' || ctx.hasSearch ? '' : 'Nothing searches.';
 	const writePathNow = seal(
 		`The container commit is ${isState(m2)} and is crash-tested. ${writeSentence.replace(/^Its /, 'The engine ')} ${openSentence} ${openGap} ${searchGap}`,
 	);
@@ -439,13 +490,13 @@ export function buildStatus(ctx) {
 		present.length > 0
 			? `persia_engine::db::Database has ${englishList(present)}.`
 			: 'persia_engine::db::Database does not export open, put, or commit.';
-	const getSentence = ctx.snapshotFns.has('get')
-		? ' CollectionSnapshot::get fetches one document by id.'
-		: '';
+	const getSentence =
+		(ctx.snapshotFns.has('get') ? ' CollectionSnapshot::get fetches one document by id.' : '') +
+		(collectionSearch ? ' CollectionViews::search runs a ranked search over a collection snapshot.' : '');
 	/** @type {string[]} */
 	const absent = [];
 	if (!ctx.persiaExports) absent.push('persia::Db');
-	if (!ctx.hasSearch) absent.push('search');
+	if (!ctx.hasSearch) absent.push(collectionSearch ? 'search on the database handle' : 'search');
 	if (!ctx.hasPutStruct) absent.push('put_struct');
 	if (!ctx.hasPutBlob) absent.push('put_blob');
 	if (!ctx.hasGetBlob) absent.push('get_blob');
@@ -459,14 +510,16 @@ export function buildStatus(ctx) {
 	const noPublicApi = seal(
 		ctx.persiaExports
 			? 'The persia crate exports a public API.'
-			: `The public persia crate exports no Db and no Collection.${m7.state === 'done' || ctx.hasSearch ? '' : ' Nothing runs a search.'}${unpublished}`,
+			: `The public persia crate exports no Db and no Collection.${m7.state === 'done' || ctx.hasSearch ? '' : collectionSearch ? ' A search runs only through persia-engine (CollectionViews::search).' : ' Nothing runs a search.'}${unpublished}`,
 	);
 
 	const canWrite = ctx.dbFns.has('put') && ctx.dbFns.has('delete') && ctx.dbFns.has('commit');
 	const queryClause =
 		m7.state === 'done' || ctx.hasSearch
 			? 'A search call is in the tree.'
-			: bm25 && queryModel
+			: collectionSearch
+				? 'persia-engine runs a ranked search over a collection snapshot: BM25F, filters, sorts, facets, and pages.'
+				: bm25 && queryModel
 				? `A query compiler and a BM25F scorer are in the tree.${matching ? ' Score top-k over one view is library code.' : ''} Nothing runs a search.`
 				: ctx.hasQuery || bm25
 					? 'Query code is in the tree. Nothing runs a search.'
@@ -486,9 +539,11 @@ export function buildStatus(ctx) {
 				: `The first release a caller is supposed to use is v0.1 (M10). That milestone is blocked on ${englishList(blocking.map((ms) => `${ms.id} (${ms.state === 'in progress' ? 'in progress' : 'not started'})`))}.`,
 	);
 
-	const segmentSearch = matching
-		? 'A segment view can be matched. There is no search call.'
-		: 'Nothing searches the segment.';
+	const segmentSearch = collectionSearch
+		? 'Segments are searched through CollectionViews::search.'
+		: matching
+			? 'A segment view can be matched. There is no search call.'
+			: 'Nothing searches the segment.';
 	const m5Cell = seal(
 		m5.state === 'done'
 			? `Done (${m5.id}, ${m5.done}/${m5.leaves}). ${segmentSearch}`
@@ -512,7 +567,9 @@ export function buildStatus(ctx) {
 	const scoring =
 		m7.state === 'done'
 			? 'Scoring and query execution are done.'
-			: bm25 && matching
+			: bm25 && collectionSearch
+				? 'BM25F scoring and a collection search are in the tree (CollectionViews::search). There is no search call on the database handle.'
+				: bm25 && matching
 				? 'BM25F scoring is in the tree. Score top-k over one view returns hits. There is no search call.'
 				: bm25
 					? 'BM25F scoring is in the tree. Query execution does not return hits.'
@@ -536,8 +593,61 @@ export function buildStatus(ctx) {
 				? 'Local write path, partly in the tree'
 				: 'Planned local write path';
 
+	const relaxationState =
+		m8.state === 'done'
+			? `Done (${m8.id}, ${m8.done}/${m8.leaves}).`
+			: m8.done === 0 && m8.state !== 'in progress'
+				? `Not started (${m8.id}).`
+				: `In progress (${m8.id}, ${m8.done}/${m8.leaves}).`;
+	const relaxationBuilt = m8.state === 'done';
+	const featuresLead = seal(
+		`${
+			searches
+				? collectionSearch && !ctx.hasSearch
+					? 'Ranked full-text search, filters, sorts, and facets run as library code in persia-engine, over a collection snapshot.'
+					: 'A search call is in the tree.'
+				: bm25 && queryModel
+					? 'The query compiler, the filter DSL, and BM25F scoring exist as library code. Nothing runs a search.'
+					: 'Nothing runs a search.'
+		} ${ctx.persiaExports ? '' : 'There is no Db to open yet (M10).'} ${relaxationBuilt ? '' : `Relaxation is ${isState(m8)}, so a search that matches nothing returns no hits.`} The write path is ${isState(m6)}.`,
+	);
+	const queryCell = seal(
+		collectionSearch
+			? `Library code (${countState(m7)}): the compiler, the filter DSL, and the scorer return ranked hits through CollectionViews::search.`
+			: bm25 && queryModel
+				? `Compiler, filter DSL, and scorer are library code (${countState(m7)}). They do not return hits.`
+				: `${capitalize(isState(m7))}.`,
+	);
+	const matchingCell = seal(
+		collectionSearch
+			? `Library code (${countState(m7)}): matching, sorts, pages, and facets.`
+			: matching
+				? `Matching over one view is library code (${countState(m7)}). Sorts and facets are not done.`
+				: `${capitalize(isState(m7))}.`,
+	);
+	const relaxationCell = seal(
+		relaxationBuilt ? relaxationState : `${relaxationState} On by default in the design.`,
+	);
+	const openCell = seal(
+		ctx.persiaExports
+			? 'The persia crate exports a public API.'
+			: `${capitalize(isState(m10))}. ${collectionSearch && ctx.dbFns.has('open') ? 'Below it, persia_engine::db::Database opens a file and CollectionViews::search searches it.' : ''}`,
+	);
+
+	/** @type {Record<string, string>} */
+	const milestoneTokens = {};
+	for (const ms of ctx.progress.milestones) {
+		milestoneTokens[`%%STATE_${ms.id}%%`] = seal(`${capitalize(isState(ms))}.`);
+	}
+
 	/** @type {Record<string, string>} */
 	const tokens = {
+		...milestoneTokens,
+		'%%FEATURES_LEAD%%': featuresLead,
+		'%%QUERY_CELL%%': queryCell,
+		'%%MATCHING_CELL%%': matchingCell,
+		'%%RELAXATION_CELL%%': relaxationCell,
+		'%%OPEN_CELL%%': openCell,
 		'%%ENGINE_SHORT%%': engineShort,
 		'%%ENGINE_NOW%%': engineNow,
 		'%%ENGINE_MODULES%%': engineModules,
@@ -603,6 +713,9 @@ function readInput() {
 		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib),
 		hasQuery: modules.includes('query'),
 		hasSearch: dbFns.has('search') || /pub fn search\b/.test(persiaLib),
+		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>
+			implHasMethod(read(rel), 'CollectionViews', 'search'),
+		),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),
 		published: pkg.published,
 		version: pkg.version,

@@ -5,6 +5,8 @@
 //! table slot) until the writer groups the log by term with one counting sort (`by_term`). Field lengths (the norms
 //! input) are kept per document that has any (ROADMAP 5.1.1.2).
 
+use persia_format::widen::usize_from_u32;
+
 use super::super::SegmentError;
 use super::super::arena::Arena;
 
@@ -178,8 +180,8 @@ impl Inverted {
         let Some(positions) = &self.positions else {
             return &[];
         };
-        let start = posting.pos_start as usize;
-        let end = start.saturating_add(posting.tf as usize);
+        let start = usize_from_u32(posting.pos_start);
+        let end = start.saturating_add(usize_from_u32(posting.tf));
         positions.get(start..end).unwrap_or_default()
     }
 
@@ -192,7 +194,7 @@ impl Inverted {
         // Term ids are u32, so ranks are: 12 bytes per term in all, with `order` and `starts`.
         let mut rank = vec![0_u32; order.len()];
         for (r, &id) in (0_u32..).zip(&order) {
-            if let Some(slot) = rank.get_mut(id as usize) {
+            if let Some(slot) = rank.get_mut(usize_from_u32(id)) {
                 *slot = r;
             }
         }
@@ -200,8 +202,8 @@ impl Inverted {
         let mut starts = vec![0_u32; order.len().saturating_add(1)];
         for p in &self.postings {
             if let Some(c) = rank
-                .get(p.term as usize)
-                .and_then(|&r| starts.get_mut((r as usize).saturating_add(1)))
+                .get(usize_from_u32(p.term))
+                .and_then(|&r| starts.get_mut(usize_from_u32(r).saturating_add(1)))
             {
                 *c = c.saturating_add(1);
             }
@@ -217,12 +219,12 @@ impl Inverted {
         let mut index = vec![0_u32; self.postings.len()];
         for (i, p) in (0_u32..).zip(&self.postings) {
             let Some(n) = rank
-                .get(p.term as usize)
-                .and_then(|&r| starts.get_mut(r as usize))
+                .get(usize_from_u32(p.term))
+                .and_then(|&r| starts.get_mut(usize_from_u32(r)))
             else {
                 continue;
             };
-            if let Some(slot) = index.get_mut(*n as usize) {
+            if let Some(slot) = index.get_mut(usize_from_u32(*n)) {
                 *slot = i;
             }
             *n = n.saturating_add(1);
@@ -277,17 +279,17 @@ pub(crate) struct Grouped<'a> {
 impl<'a> Grouped<'a> {
     /// The indices of the postings of the term of rank `rank`.
     fn indices(&self, rank: usize) -> &[u32] {
-        let start = self.starts.get(rank).map_or(0, |&s| s as usize);
+        let start = self.starts.get(rank).map_or(0, |&s| usize_from_u32(s));
         let end = self
             .starts
             .get(rank.saturating_add(1))
-            .map_or(start, |&e| e as usize);
+            .map_or(start, |&e| usize_from_u32(e));
         self.index.get(start..end).unwrap_or_default()
     }
 
     /// The rank of term id `term`.
     pub(crate) fn rank_of(&self, term: u32) -> Option<u32> {
-        self.rank.get(term as usize).copied()
+        self.rank.get(usize_from_u32(term)).copied()
     }
 
     /// Number of postings (the df) of the term of rank `rank`.
@@ -300,7 +302,7 @@ impl<'a> Grouped<'a> {
         let postings = self.postings;
         self.indices(rank)
             .iter()
-            .filter_map(move |&i| postings.get(i as usize))
+            .filter_map(move |&i| postings.get(usize_from_u32(i)))
     }
 }
 

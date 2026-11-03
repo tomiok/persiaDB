@@ -53,6 +53,8 @@
 
 use std::cmp::max;
 
+use persia_format::widen::usize_from_u32;
+
 /// The only FST version the writer produces (`fst` 0.4's `VERSION`).
 const VERSION: u64 = 3;
 /// Version and type, two `u64`s; the first node starts right after.
@@ -193,7 +195,7 @@ impl NodeSet {
             rank_base.push(sums.len());
             let mut rest = word;
             while rest != 0 {
-                let addr = add(mul(w, 64, 0)?, rest.trailing_zeros() as usize, 0)?;
+                let addr = add(mul(w, 64, 0)?, usize_from_u32(rest.trailing_zeros()), 0)?;
                 rest &= rest.wrapping_sub(1);
                 let node = Node::parse(data, addr)?;
                 sums.push(self.node_sums(&node, addr, &sums, &rank_base, max_path)?);
@@ -257,7 +259,7 @@ impl NodeSet {
         if word & b == 0 {
             return None;
         }
-        let below = (word & b.wrapping_sub(1)).count_ones() as usize;
+        let below = usize_from_u32((word & b.wrapping_sub(1)).count_ones());
         rank_base.get(addr / 64)?.checked_add(below)
     }
 }

@@ -1,6 +1,7 @@
 //! Reference BM25F (SPEC §7.2) over plain documents: each document is its tokens per field, as the analyzer would
-//! give them. Statistics are counted from the documents, field lengths quantized as SPEC §5.3.4 describes, and the
-//! score evaluated as the SPEC writes the formula.
+//! give them. Statistics are counted from the documents, field lengths quantized as SPEC §5.3.4 states the rounding
+//! (independently of the engine's codec, and checked against it in `tests/differential.rs`), and the score evaluated
+//! as the SPEC writes the formula.
 
 #![allow(dead_code, clippy::cast_precision_loss, clippy::many_single_char_names)]
 
@@ -92,30 +93,16 @@ impl Corpus {
     }
 }
 
-/// The length a field of `n` tokens is scored with: SPEC §5.3.4's encoding of `n`, decoded.
+/// The length a field of `n` tokens is scored with, from SPEC §5.3.4's statement of the rounding rather than the
+/// engine's bit layout: lengths below 24 are their own; above, `n − 24` keeps its 4 most significant bits (lengths
+/// past `2^31 − 1` share the last code). `tests/differential.rs` checks it against the SPEC's properties and against
+/// the engine's codec (`persia_engine::segment::scored_length`).
 pub fn quantized(n: u64) -> u64 {
     if n < 24 {
         return n;
     }
     let x = n.min((1 << 31) - 1) - 24;
-    let k = 64 - u64::from(x.leading_zeros());
-    let c = if k < 4 {
-        x
-    } else {
-        ((x >> (k - 4)) & 7) | ((k - 3) << 3)
-    };
-    let v = if c < 8 {
-        c
-    } else {
-        ((c & 7) | 8) << ((c >> 3) - 1)
-    };
-    24 + v
-}
-
-#[test]
-fn quantization_by_hand() {
-    assert_eq!(quantized(23), 23);
-    assert_eq!(quantized(39), 39);
-    assert_eq!(quantized(41), 40);
-    assert_eq!(quantized(100), 96);
+    let bits = 64 - x.leading_zeros();
+    let dropped = bits.saturating_sub(4);
+    24 + (x & !((1u64 << dropped) - 1))
 }

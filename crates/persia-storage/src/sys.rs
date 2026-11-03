@@ -70,7 +70,11 @@ mod imp {
         // SAFETY: `fstatfs` returned 0, so it filled the whole struct.
         let st = unsafe { st.assume_init() };
         // `f_type`'s integer type depends on the architecture; the magic numbers are its low 32 bits.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[allow(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            clippy::as_conversions
+        )]
         let magic = st.f_type as u32;
         Ok(is_local_type(magic))
     }

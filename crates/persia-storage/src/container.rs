@@ -36,6 +36,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::{
     ActiveSuperblock, FIRST_FRAME_OFFSET, SLOTS_LEN, Slot, Superblock,
 };
+use persia_format::widen::u64_from_usize;
 use persia_format::{Corruption, Reader, Writer};
 
 use crate::vfs::Vfs;
@@ -259,23 +260,52 @@ struct Mapped<F> {
     map: fn(&F, &Superblock) -> io::Result<ByteSource>,
     /// The latest mapping of the current file, if mapping it succeeded. Frames it does not cover are read.
     window: Option<ByteSource>,
+    /// Remaps that failed since mapped reads were enabled, each logged ([`Container::mapping_failures`]).
+    failures: u64,
 }
 
 impl<F> Mapped<F> {
+    fn new(map: fn(&F, &Superblock) -> io::Result<ByteSource>, window: ByteSource) -> Self {
+        Self {
+            map,
+            window: Some(window),
+            failures: 0,
+        }
+    }
+
     /// Remaps after a commit moved `log_end`. If that fails, the previous window stays: it is still valid for the
     /// frames it covers, and the newer ones are read.
     fn remap(&mut self, file: &F, sb: &Superblock) {
-        if self.window.as_ref().map(ByteSource::end_offset) != Some(sb.log_end)
-            && let Ok(window) = (self.map)(file, sb)
-        {
-            self.window = Some(window);
+        if self.window.as_ref().map(ByteSource::end_offset) == Some(sb.log_end) {
+            return;
+        }
+        match (self.map)(file, sb) {
+            Ok(window) => self.window = Some(window),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    log_end = sb.log_end,
+                    "container remap failed; frames past the previous mapping are read with pread"
+                );
+            }
         }
     }
 
     /// Maps the file a compaction moved the container to. The old window is dropped even if this fails: its
     /// offsets are those of the old file.
     fn moved_to(&mut self, file: &F, sb: &Superblock) {
-        self.window = (self.map)(file, sb).ok();
+        self.window = match (self.map)(file, sb) {
+            Ok(window) => Some(window),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                tracing::warn!(
+                    error = %e,
+                    "mapping the compacted container failed; every frame is read with pread"
+                );
+                None
+            }
+        };
     }
 }
 
@@ -693,7 +723,7 @@ impl<F: ContainerFile> Container<F> {
             .ok_or_else(|| Error::InvalidInput("frame_seq exhausted (ADR-0013)".into()))?;
         let mut w = Writer::with_base_offset(self.end);
         encode_frame(&mut w, kind, frame_seq, payload, compression)?;
-        let len = w.len() as u64;
+        let len = u64_from_usize(w.len());
         let end = self
             .end
             .checked_add(len)
@@ -828,7 +858,8 @@ impl<F: ContainerFile> Container<F> {
     /// # c.commit(Commit { manifest, wal_start: c.end(), fence_token: 0 })?;
     /// # drop(c);
     /// let mut c = Container::open(&path, Mode::ReadOnly)?;
-    /// c.enable_mapped_reads()?;
+    /// // SAFETY: nothing but Persia containers writes this file while it is mapped.
+    /// unsafe { c.enable_mapped_reads()? };
     /// let m = c.read_frame_source(c.superblock().manifest_off, 1 << 20)?;
     /// assert_eq!(&*m.payload, b"manifest 1");
     /// assert_eq!(m.payload.base_offset(), m.frame.offset + 24); // just after the frame header
@@ -844,8 +875,9 @@ impl<F: ContainerFile> Container<F> {
             Cow::Borrowed(stored) => {
                 // The stored payload follows the frame header (SPEC §4.4) and lies inside `bytes`, so this slice
                 // cannot fail; the assertion catches a layout change that would make it the wrong bytes.
-                let start = offset.saturating_add(FRAME_HEADER_LEN as u64);
-                let payload = bytes.slice(start..start.saturating_add(stored.len() as u64))?;
+                let start = offset.saturating_add(u64_from_usize(FRAME_HEADER_LEN));
+                let payload =
+                    bytes.slice(start..start.saturating_add(u64_from_usize(stored.len())))?;
                 debug_assert!(stored.is_empty() || payload.as_ptr() == stored.as_ptr());
                 payload
             }
@@ -860,7 +892,7 @@ impl<F: ContainerFile> Container<F> {
     /// The bytes of the frame at `offset`, sized from its header and bounded by [`Container::end`]: a slice of the
     /// mapping if it covers the frame, else read.
     fn frame_bytes(&self, offset: u64) -> Result<ByteSource> {
-        let header_len = FRAME_HEADER_LEN as u64;
+        let header_len = u64_from_usize(FRAME_HEADER_LEN);
         if offset < FIRST_FRAME_OFFSET
             || offset.checked_add(header_len).is_none_or(|e| e > self.end)
         {
@@ -1307,7 +1339,7 @@ impl<G: ContainerFile> Rewriter<'_, G> {
     }
 
     fn write(&mut self, w: &Writer, kind: FrameKind, frame_seq: u64) -> Result<FrameRef> {
-        let len = w.len() as u64;
+        let len = u64_from_usize(w.len());
         let offset = self.end;
         self.end = offset
             .checked_add(len)
@@ -1340,7 +1372,7 @@ impl<G: ContainerFile> Rewriter<'_, G> {
                 .write_all_at(bytes, at)
                 .map_err(Error::io("write compacted frame"))?;
             // Bounded by the frame's total length, checked below to fit after `start`.
-            at = at.saturating_add(bytes.len() as u64);
+            at = at.saturating_add(u64_from_usize(bytes.len()));
             Ok(())
         };
         // Frames are read up to `end`, so a range running past a frame is caught by the length check below.

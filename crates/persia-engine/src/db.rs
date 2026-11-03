@@ -72,7 +72,7 @@ use roaring::RoaringBitmap;
 
 pub use clock::{Clock, ManualClock, SegmentIds, SystemClock};
 pub use exec::{CancelToken, ExecTerms, Execution, PoolError, SearchPool, Threads};
-pub use merging::MergeOutcome;
+pub use merging::{MergeOutcome, MergeStats};
 pub use objects::ContainerObjects;
 use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
@@ -566,6 +566,88 @@ impl<F: ContainerFile + Sync> Database<F> {
         ContainerObjects::new(self.wal.log(), &self.manifest)
     }
 
+    /// How much of the container file is live and how much a compaction would reclaim (SPEC §4.6). Live are the
+    /// segment and sidecar frames the committed manifest lists, the obsolete ones a reader may still read
+    /// ([`Database::obsolete`]), and everything from `wal_start` on; the rest (replaced segments, superseded
+    /// sidecars, old manifests, consumed WAL chunks) is dead. The engine does not compact yet (ROADMAP 6.5.8), so
+    /// the dead bytes only grow: this is how to watch them.
+    ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions};
+    /// use persia_engine::document::Document;
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder};
+    /// use persia_engine::wal::Durability;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let schema = SchemaBuilder::new("items").field("n", FieldKind::I64 { stored: true }).build()?;
+    /// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// db.create_collection(schema)?;
+    /// db.put("items", &Document::new("a"), Durability::Fsync)?;
+    /// db.commit()?;
+    /// let before = db.space_usage()?;
+    /// db.put("items", &Document::new("a"), Durability::Fsync)?; // replaces "a"
+    /// db.commit()?;
+    /// // The consumed WAL chunks and the old manifest are dead now.
+    /// assert!(db.space_usage()?.dead() > before.dead());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`DatabaseError::Container`] if a listed frame lies outside the file's frames or overlaps another (a manifest
+    /// the open checks would have refused).
+    pub fn space_usage(&self) -> Result<container::SpaceUsage, DatabaseError> {
+        let container = self.wal.log();
+        let wal_start = container.superblock().wal_start;
+        let listed = self
+            .manifest
+            .collections()
+            .flat_map(|c| c.segments().iter())
+            .flat_map(|s| std::iter::once(s.location).chain(s.tombstones.map(|t| t.location)));
+        let pinned = self
+            .merges
+            .obsolete
+            .all()
+            .filter(|(_, referenced)| *referenced)
+            .map(|(o, _)| o.location);
+        let live: Vec<_> = listed
+            .chain(pinned)
+            .filter_map(|location| match location {
+                Location::Frame { offset, len } => Some(offset..offset.saturating_add(len)),
+                Location::Object => None,
+            })
+            // Frames from `wal_start` on count as live anyway.
+            .filter(|r| r.end <= wal_start)
+            .collect();
+        Ok(container.space_usage(&live)?)
+    }
+
+    /// A memtable is held only while a [`Database::put_batch`] runs, and `&mut self` keeps every other write out
+    /// meanwhile; one still held here was left by a batch that unwound (a panic). Its documents may not be durable,
+    /// so they are never released: the database is poisoned instead, and a reopen decides what survived. Otherwise a
+    /// later write would apply, durable but unseen, behind the stale hold.
+    fn check_unheld(&mut self, collection: &str) -> Result<(), DatabaseError> {
+        if self
+            .collections
+            .get(collection)
+            .is_some_and(|c| c.memtable.is_held())
+        {
+            self.poisoned = true;
+            return Err(DatabaseError::Poisoned);
+        }
+        Ok(())
+    }
+
+    /// [`Self::check_unheld`] for every collection, before an operation that flushes or publishes them all
+    /// ([`Database::commit`], [`Database::tick`], a schema change or a drop): a stale hold may cover documents
+    /// that are not durable, and a flush would publish them.
+    fn check_none_held(&mut self) -> Result<(), DatabaseError> {
+        if self.collections.values().any(|c| c.memtable.is_held()) {
+            self.poisoned = true;
+            return Err(DatabaseError::Poisoned);
+        }
+        Ok(())
+    }
+
     fn usable(&self) -> Result<(), DatabaseError> {
         if self.poisoned {
             Err(DatabaseError::Poisoned)
@@ -625,14 +707,15 @@ impl<F: ContainerFile + Sync> Database<F> {
     }
 
     /// [`Database::put`] of every document of `docs` in order, reaching `durability` once for all of them (one
-    /// sync for `Fsync`, SPEC §8.2.1). The last document is logged with `durability` and becomes visible once it is
-    /// durable, like a single `put`; the ones before it are visible once buffered, so a reader may see them before
-    /// the batch is durable (a failed sync then poisons the database, and a reopen decides what survived). The size
-    /// threshold is checked before each document, so a batch may commit part of itself.
+    /// sync for `Fsync`, SPEC §8.2.1). The documents before the last are logged `Buffered` and the last one with
+    /// `durability`; a batch of two or more holds the collection's memtable meanwhile, so a reader sees none of the
+    /// batch until it is durable at `durability` (ROADMAP 6.3.12). The size threshold is checked before each
+    /// document, so a batch may commit part of itself; that commit syncs the WAL first, so it publishes only durable
+    /// documents. A failed sync poisons the database with the batch still unseen, and a reopen decides what survived.
     ///
     /// # Errors
     /// As [`Database::put`]; a rejected document is [`DatabaseError::BatchRejected`], after the documents before it
-    /// are made durable.
+    /// are made durable (and then visible).
     pub fn put_batch(
         &mut self,
         collection: &str,
@@ -643,6 +726,29 @@ impl<F: ContainerFile + Sync> Database<F> {
         if !self.collections.contains_key(collection) {
             return Err(no_such(collection));
         }
+        self.check_unheld(collection)?;
+        // A single put is logged at `durability` before it is published: nothing to hold.
+        let hold = docs.len() > 1;
+        let result = self.put_each(collection, docs, durability, hold);
+        // Released only once the batch reached `durability`: a poisoned database keeps it unseen.
+        if hold
+            && !self.poisoned
+            && let Some(c) = self.collections.get(collection)
+        {
+            c.memtable.release();
+        }
+        result
+    }
+
+    /// The loop of [`Database::put_batch`]. On an error it reaches `durability` for the documents before (unless the
+    /// WAL failed), so the caller may release the hold.
+    fn put_each(
+        &mut self,
+        collection: &str,
+        docs: &[Document],
+        durability: Durability,
+        hold: bool,
+    ) -> Result<(), DatabaseError> {
         let last = docs.len().saturating_sub(1);
         for (index, doc) in docs.iter().enumerate() {
             let level = if index == last {
@@ -650,13 +756,33 @@ impl<F: ContainerFile + Sync> Database<F> {
             } else {
                 Durability::Buffered
             };
-            self.flush_if_full(collection)?;
+            let before = self
+                .collections
+                .get(collection)
+                .map(|c| c.memtable.reader());
+            if let Err(e) = self.flush_if_full(collection) {
+                if !self.poisoned {
+                    self.reach(durability)?;
+                }
+                return Err(e);
+            }
             let Self {
                 wal, collections, ..
             } = &mut *self;
             let state = collections
                 .get_mut(collection)
                 .ok_or_else(|| no_such(collection))?;
+            if hold {
+                // A flush commit synced the WAL and published the flushed memtable's documents in a segment: its
+                // hold is over. The new memtable holds the rest of the batch.
+                let flushed = before.filter(|old| !old.reads(&state.memtable));
+                if let Some(old) = &flushed {
+                    old.release();
+                }
+                if index == 0 || flushed.is_some() {
+                    state.memtable.hold();
+                }
+            }
             let logged = state.memtable.put_logged(doc, |encoded| {
                 let record = WalRecord::put(collection, encoded)?;
                 wal.append(&record, level).map_err(DatabaseError::from)
@@ -691,6 +817,7 @@ impl<F: ContainerFile + Sync> Database<F> {
         durability: Durability,
     ) -> Result<(), DatabaseError> {
         self.usable()?;
+        self.check_unheld(collection)?;
         self.flush_if_full(collection)?;
         let Self {
             wal, collections, ..
@@ -747,7 +874,8 @@ impl<F: ContainerFile + Sync> Database<F> {
             c.memtable.size_in_bytes() >= self.options.policy.flush.memtable_bytes
         });
         if full {
-            self.commit()?;
+            // The batch calling this holds its memtable legitimately: no stale-hold check.
+            self.commit_unchecked()?;
         }
         Ok(())
     }
@@ -769,6 +897,12 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// other error poisons the database: the commit may or may not have happened, and a reopen tells.
     pub fn commit(&mut self) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
+        self.commit_unchecked()
+    }
+
+    /// [`Database::commit`] without the stale-hold check, for a flush inside a running batch.
+    fn commit_unchecked(&mut self) -> Result<u64, DatabaseError> {
         let planned = self.plan_flushes(None)?;
         if planned.is_empty() {
             return Ok(self.manifest.seq());
@@ -793,6 +927,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`Database::commit`].
     pub fn evolve_collection(&mut self, proposed: &CollectionSchema) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         let name = proposed.name();
         let c = self.collections.get(name).ok_or_else(|| no_such(name))?;
         let schema = c
@@ -841,6 +976,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// [`DatabaseError::NoSuchCollection`]; otherwise as [`Database::commit`].
     pub fn drop_collection(&mut self, name: &str) -> Result<u64, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         if !self.collections.contains_key(name) {
             return Err(no_such(name));
         }
@@ -895,6 +1031,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// As [`Database::commit`].
     pub fn tick(&mut self) -> Result<Option<u64>, DatabaseError> {
         self.usable()?;
+        self.check_none_held()?;
         let now = self.options.clock.now();
         let memtables = self.collections.values().map(|c| MemtableState {
             size_in_bytes: c.memtable.size_in_bytes(),
@@ -1361,5 +1498,96 @@ fn snapshot_of(manifest: &Arc<Manifest>, collections: &BTreeMap<String, Collecti
                 (name.clone(), snapshot)
             })
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use persia_storage::container::sim::SimFile;
+
+    use super::*;
+    use crate::document::Value;
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+
+    /// A memtable left held by a batch that unwound poisons the database at the next write to it, instead of taking
+    /// writes no reader sees (ROADMAP 6.3.12).
+    #[test]
+    fn a_stale_hold_poisons_instead_of_hiding_writes() {
+        let schema = SchemaBuilder::new("a")
+            .field("t", FieldKind::Text(TextOptions::default()))
+            .build()
+            .unwrap();
+        let t = schema.field("t").unwrap().id();
+        let doc = |id: &str| Document::new(id).with(t, Value::String("x".into()));
+        let mut db =
+            Database::create_on(SimFile::new(), [3; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(schema).unwrap();
+        db.put("a", &doc("seen"), Durability::Fsync).unwrap();
+        // What an unwinding `put_batch` leaves behind.
+        db.collections.get("a").unwrap().memtable.hold();
+        assert!(matches!(
+            db.put("a", &doc("hidden"), Durability::Fsync),
+            Err(DatabaseError::Poisoned)
+        ));
+        assert!(matches!(
+            db.delete("a", "seen", Durability::Fsync),
+            Err(DatabaseError::Poisoned)
+        ));
+        assert!(matches!(db.commit(), Err(DatabaseError::Poisoned)));
+        let memtable = db.snapshot().collection("a").unwrap().memtable();
+        assert_eq!(memtable.live_count(), 1);
+        // A batch that returns leaves nothing held.
+        let mut db =
+            Database::create_on(SimFile::new(), [4; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(SchemaBuilder::new("a").build().unwrap())
+            .unwrap();
+        db.put_batch(
+            "a",
+            &[Document::new("x"), Document::new("y")],
+            Durability::Fsync,
+        )
+        .unwrap();
+        assert!(!db.collections.get("a").unwrap().memtable.is_held());
+    }
+
+    /// The operations that flush every memtable refuse a stale hold too, before publishing anything: a commit, a
+    /// tick, a schema change and a drop each poison the database and leave the held documents unpublished.
+    #[test]
+    fn a_stale_hold_poisons_every_flush_before_it_publishes() {
+        type Op = fn(&mut Database<SimFile>, &CollectionSchema) -> Result<(), DatabaseError>;
+        let schema = || {
+            SchemaBuilder::new("a")
+                .field("t", FieldKind::Text(TextOptions::default()))
+                .build()
+                .unwrap()
+        };
+        let t = schema().field("t").unwrap().id();
+        let ops: [(&str, Op); 4] = [
+            ("commit", |db, _| db.commit().map(drop)),
+            ("tick", |db, _| db.tick().map(drop)),
+            ("evolve", |db, s| db.evolve_collection(s).map(drop)),
+            ("drop", |db, _| db.drop_collection("a").map(drop)),
+        ];
+        for (name, op) in ops {
+            let mut db =
+                Database::create_on(SimFile::new(), [5; 16], DatabaseOptions::default()).unwrap();
+            db.create_collection(schema()).unwrap();
+            let seq = db.seq();
+            db.put(
+                "a",
+                &Document::new("held").with(t, Value::String("x".into())),
+                Durability::Fsync,
+            )
+            .unwrap();
+            db.collections.get("a").unwrap().memtable.hold();
+            assert!(
+                matches!(op(&mut db, &schema()), Err(DatabaseError::Poisoned)),
+                "{name}"
+            );
+            assert_eq!(db.seq(), seq, "{name}: nothing committed");
+            let snapshot = db.snapshot();
+            let a = snapshot.collection("a").unwrap();
+            assert!(a.segments().is_empty(), "{name}: nothing flushed");
+        }
     }
 }

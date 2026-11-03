@@ -17,7 +17,7 @@ pub const SLOT_LEN: usize = 4096;
 /// Size of both slots together, as read by [`Superblock::read_active`].
 pub const SLOTS_LEN: usize = 2 * SLOT_LEN;
 /// Where the first frame starts: right after slot B (SPEC §4.2).
-pub const FIRST_FRAME_OFFSET: u64 = (HEADER_LEN + SLOTS_LEN) as u64;
+pub const FIRST_FRAME_OFFSET: u64 = crate::widen::u64_from_usize(HEADER_LEN + SLOTS_LEN);
 
 /// Bytes 56..4092.
 const RESERVED_LEN: usize = SLOT_LEN - 56 - 4;
@@ -35,8 +35,8 @@ impl Slot {
     /// Absolute offset of the slot in the container.
     pub const fn offset(self) -> u64 {
         match self {
-            Self::A => HEADER_LEN as u64,
-            Self::B => (HEADER_LEN + SLOT_LEN) as u64,
+            Self::A => crate::widen::u64_from_usize(HEADER_LEN),
+            Self::B => crate::widen::u64_from_usize(HEADER_LEN + SLOT_LEN),
         }
     }
 
@@ -233,7 +233,7 @@ impl ActiveSuperblock {
                 sb.manifest_len,
                 if committed {
                     aligned(sb.manifest_len)
-                        && sb.manifest_len >= MIN_FRAME_LEN as u64
+                        && sb.manifest_len >= crate::widen::u64_from_usize(MIN_FRAME_LEN)
                         && manifest_end.is_some_and(|end| end <= sb.log_end)
                 } else {
                     sb.manifest_len == 0

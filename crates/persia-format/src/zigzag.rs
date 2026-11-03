@@ -11,29 +11,31 @@ use crate::writer::Writer;
 /// Maps `value` to `(value << 1) ^ (value >> 31)` (arithmetic shift).
 pub const fn encode_i32(value: i32) -> u32 {
     // Bit reinterpretation is the point: the sign is moved to bit 0, nothing is truncated.
-    #[allow(clippy::cast_sign_loss)]
-    let (shifted, sign) = ((value as u32).wrapping_shl(1), (value >> 31) as u32);
+    let (shifted, sign) = (
+        value.cast_unsigned().wrapping_shl(1),
+        (value >> 31).cast_unsigned(),
+    );
     shifted ^ sign
 }
 
 /// Inverse of [`encode_i32`].
 pub const fn decode_i32(value: u32) -> i32 {
-    #[allow(clippy::cast_possible_wrap)]
-    let (magnitude, sign) = ((value >> 1) as i32, (value & 1) as i32);
+    let (magnitude, sign) = ((value >> 1).cast_signed(), (value & 1).cast_signed());
     magnitude ^ sign.wrapping_neg()
 }
 
 /// Maps `value` to `(value << 1) ^ (value >> 63)` (arithmetic shift).
 pub const fn encode_i64(value: i64) -> u64 {
-    #[allow(clippy::cast_sign_loss)]
-    let (shifted, sign) = ((value as u64).wrapping_shl(1), (value >> 63) as u64);
+    let (shifted, sign) = (
+        value.cast_unsigned().wrapping_shl(1),
+        (value >> 63).cast_unsigned(),
+    );
     shifted ^ sign
 }
 
 /// Inverse of [`encode_i64`].
 pub const fn decode_i64(value: u64) -> i64 {
-    #[allow(clippy::cast_possible_wrap)]
-    let (magnitude, sign) = ((value >> 1) as i64, (value & 1) as i64);
+    let (magnitude, sign) = ((value >> 1).cast_signed(), (value & 1).cast_signed());
     magnitude ^ sign.wrapping_neg()
 }
 

@@ -1,6 +1,6 @@
 ---
 title: "Code"
-description: "What the Persia DB crates export today, with links to the source. The public Db API does not exist yet. The engine has a WAL, commit, segment merging, a query compiler, and a BM25F scorer. Nothing runs a search."
+description: "What the Persia DB crates export today, with links to the source. The public Db API does not exist yet. The engine has a WAL, commit, segment merging, and a ranked search over a collection snapshot."
 head:
   - tag: title
     content: "Source guide to the Rust crates that exist today | PersiaDB"
@@ -34,7 +34,7 @@ What each file says about itself:
 | `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` / `fr` / `de` / `it` stemmers, and built-in analyzers. |
 | `persia-blob` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-blob/src/lib.rs) | Content-addressed chunks, dedup, GC (SPEC §9). | Module docs only. |
 
-`persia-server` is an empty `main`. `persia-cli` lists and sweeps temporary and quarantine files, and it inspects and dumps one segment (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect). It does not search. `persia-proto` is a stub library.
+`persia-server` is a placeholder binary that prints "not implemented (M11)" and exits with status 1. `persia-cli` lists and sweeps temporary and quarantine files, and it inspects and dumps one segment (`persia inspect segment`, `persia dump segment`, with `--verify` on inspect), and verifies a whole database (`persia verify`). It does not search. `persia-proto` is a placeholder library for M11.
 The public modules and re-exports of `persia-format` are the list in
 [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs):
 
@@ -73,7 +73,7 @@ pub use writer::Writer;
 
 Integer codecs (`delta`, `bitpack`, `postings`, `for_codec`), varints, zigzag, and the
 bounds-checked `Reader` / `Writer` live in those modules. They are library primitives. Segment
-writers in `persia-engine` use them (M5). A search that returns hits is still not there.
+writers in `persia-engine` use them (M5). A ranked search over a collection snapshot is library code in `persia-engine` (`CollectionViews::search`).
 The query compiler, the filter DSL, and the BM25F scorer are (ROADMAP 7.1–7.3). See
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 

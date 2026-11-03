@@ -343,6 +343,10 @@ not interpret payloads, so the writer (the engine, from its manifest) names the 
 every frame from `wal_start` on is kept, since the WAL range and the frames after `log_end` (acknowledged WAL
 frames, §8.2) are needed by recovery.
 
+**Status (pre-alpha).** The container implements compaction, but the engine does not call it yet (ROADMAP 6.5.8).
+Until it does, a database file only grows: every replaced segment, superseded tombstone sidecar, old Manifest and
+consumed WAL chunk stays in the file, and nothing reclaims it, however many documents are deleted or merged away.
+
 **Space accounting.** The *live* bytes are the 12288-byte prefix, the live frames below `wal_start`, and everything
 from `wal_start` to the end of the valid frames; the rest of that end is *dead*. Compaction is due when dead bytes
 reach the dead-space ratio of the end (default 40%). Dead frames in `wal_start..log_end` (an old Manifest) count as
@@ -392,9 +396,11 @@ truncate below the `log_end` that process mapped. A fault on a mapped page (a re
 program) raises `SIGBUS` on Unix (`EXCEPTION_IN_PAGE_ERROR` on Windows) and ends the process; a reader that cannot
 accept that reads with ordinary reads instead.
 
-Mapping is opt-in; ordinary reads are the default (ADR-0017). The automatic choice maps only a container on a local
-disk file system (`enable_mapped_reads_if_local`): on Linux, those in an allow-list of `f_type`s (ext2-4, XFS, Btrfs
-and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
+Mapping is opt-in; ordinary reads are the default (ADR-0017). Turning it on is an `unsafe` call: the embedder states
+that nothing outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping
+lives. A failed remap falls back to ordinary reads, logs a warning and is counted (`mapping_failures`). The automatic
+choice maps only a container on a local disk file system (`enable_mapped_reads_if_local`): on Linux, those in an
+allow-list of `f_type`s (ext2-4, XFS, Btrfs and other allow-listed local types; ADR-0021), on macOS local volumes other than FUSE, FAT and exFAT, on Windows fixed
 and RAM disks. Network, FUSE, overlay, removable and unlisted file systems keep ordinary reads, since a failed page read
 there can end the process (ADR-0021, ROADMAP 2.3.10). A container with mapped reads holds one mapping of
 `12288..log_end`, made again after each commit and on the new file after a compaction. If making it again fails, the
@@ -1504,11 +1510,17 @@ before acknowledging (ROADMAP 6.3.9); the WAL itself checks only the record's fr
 The write path does it in three steps (ADR-0029): the memtable *stages* the operation (validates and indexes a put,
 interns the id, but publishes nothing: no view sees it), the record is logged, and only then the memtable *publishes*
 it. A rejected operation is never logged, and no reader sees an operation that was not logged. A single `put` or
-`delete` is logged with its durability before it is published, so it is visible only once durable at that level; in
-a `put_batch` the documents before the last are logged `Buffered` and visible at once, and the last one carries the
-batch's durability (one sync for all). A batch whose document is rejected keeps the ones before it, made durable at
-the batch's level. A sync that fails after a reader saw a buffered document poisons the database; a reopen decides
-what survived.
+`delete` is logged with its durability before it is published, so it is visible only once durable at that level. A
+`put_batch` logs the documents before the last `Buffered` and the last one with the batch's durability (one sync
+for all), and a batch of two or more *holds* the memtable while it runs (ROADMAP 6.3.12): a view taken meanwhile
+sees the collection as it was before the batch, and the batch becomes visible only once it is durable at its level
+(at `Buffered` and `Async`, the level a single `put` reaches before it is visible). A batch whose document is
+rejected keeps the ones before it, made durable at the batch's level and then visible. A flush commit inside
+a batch (the size threshold) syncs the WAL first and publishes the prefix it flushed, durable. A sync that
+fails poisons the database before any reader saw the part of the batch that is not durable; a reopen decides
+what survived. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
+`put_batch` or `delete` to it, rather than take writes no reader would see, and at the next commit, tick, schema
+change or drop, before it flushes anything, since the held documents may not be durable.
 
 Schema changes are the other way a logged record could stop applying: replay decodes with the committed schema, and a
 put of a non-`strict` collection that kept extra fields fails validation once the collection is `strict` (§6.2.4).
@@ -1643,7 +1655,9 @@ and joins its workers. A **merge commit** appends the merged segment's frame and
 inputs at the sidecar versions the plan read and adds the merged segment (none for a drop plan), following the commit
 protocol (§4.5); `wal_start` stays where the WAL puts it. It is made only if every input is still live at that
 version and the schema is unchanged, which the writer checks before writing anything: otherwise (a commit deleted
-from an input meanwhile) the result is discarded and the segments are planned again. A merge that fails, the
+from an input meanwhile) the result is discarded, counted (`merge_stats`), and the segments are planned again. Until
+ROADMAP 6.5.9 re-applies such deletions to the result, a workload that deletes from the inputs of every merge in
+flight keeps every merge from committing, and the segment count grows while it lasts. A merge that fails, the
 merged segment's `verify` included, commits nothing, and its inputs are left out of planning until the database is
 reopened, so damage is not merged over and over. A merge's output id is reserved while it runs: no flush draws it.
 **Obsolete objects** (ROADMAP 6.5.4): a segment a merge commit removes, and its sidecar, the segments and sidecars of

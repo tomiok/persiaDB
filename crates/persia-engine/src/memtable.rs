@@ -49,6 +49,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
+use persia_format::widen::usize_from_u32;
 
 pub use columns::{MemtableKeys, MemtableKeywords};
 pub use flush::{FlushPolicy, FlushReason};
@@ -115,9 +116,23 @@ impl MemtableReader {
         &self.shared
     }
 
-    /// A view of every write applied so far.
+    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
+    }
+
+    /// [`Memtable::release`] through a reader, for a memtable its writer replaced (a flush inside a held batch).
+    pub(crate) fn release(&self) {
+        self.shared
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held = None;
+    }
+
+    /// Whether this reads `memtable`.
+    pub(crate) fn reads(&self, memtable: &Memtable) -> bool {
+        Arc::ptr_eq(&self.shared, &memtable.shared)
     }
 }
 
@@ -150,6 +165,18 @@ pub(crate) struct Inner {
     /// Operation `v` (versions start at 1) is `ops[v - 1]`.
     pub(crate) ops: Vec<Op>,
     /// Statistics of the live documents, by field id; `None` for a field that is not `text` or `keyword`.
+    pub(crate) stats: Vec<Option<FieldStats>>,
+    pub(crate) live: u32,
+    /// While set, what every new view sees instead of the latest writes ([`Memtable::hold`]).
+    pub(crate) held: Option<HeldView>,
+}
+
+/// The state a held memtable shows its new views: the documents, operations and live statistics when
+/// [`Memtable::hold`] was called.
+#[derive(Debug, Clone)]
+pub(crate) struct HeldView {
+    pub(crate) docs: u32,
+    pub(crate) version: u64,
     pub(crate) stats: Vec<Option<FieldStats>>,
     pub(crate) live: u32,
 }
@@ -217,11 +244,11 @@ impl FieldIndex {
         let start = u32::try_from(from).unwrap_or(NONE);
         let new = self.inverted.postings.get(from..).unwrap_or_default();
         for (i, posting) in (start..).zip(new) {
-            let term = posting.term as usize;
+            let term = usize_from_u32(posting.term);
             self.next.push(NONE);
             let slot = match self.tails.get(term) {
                 Some(&NONE) => self.heads.get_mut(term),
-                Some(&tail) => self.next.get_mut(tail as usize),
+                Some(&tail) => self.next.get_mut(usize_from_u32(tail)),
                 None => None,
             };
             if let Some(slot) = slot {
@@ -327,6 +354,7 @@ impl Memtable {
             ops: Vec::new(),
             stats,
             live: 0,
+            held: None,
         };
         Ok(Self {
             schema,
@@ -524,9 +552,38 @@ impl Memtable {
         Ok(inner.record(id, NONE, version))
     }
 
-    /// A view of every write applied so far.
+    /// A view of every write applied so far; while the memtable is held ([`Memtable::hold`]), of the writes applied
+    /// before the hold.
     pub fn view(&self) -> MemtableView {
         MemtableView::new(Arc::clone(&self.shared), &read(&self.shared))
+    }
+
+    /// Holds what new views see at the writes applied so far, until [`Self::release`]: writes keep applying, but
+    /// a view taken meanwhile sees none of them. A `put_batch` holds while its documents are not durable yet
+    /// (SPEC §8.2.1, ROADMAP 6.3.12). Holding a held memtable keeps the first hold.
+    pub(crate) fn hold(&self) {
+        let mut inner = self.shared.write().unwrap_or_else(PoisonError::into_inner);
+        if inner.held.is_none() {
+            inner.held = Some(HeldView {
+                docs: inner.doc_count(),
+                version: inner.version(),
+                stats: inner.stats.clone(),
+                live: inner.live,
+            });
+        }
+    }
+
+    /// Ends a [`Self::hold`]: new views see every write applied so far again. A memtable not held is unchanged.
+    pub(crate) fn release(&self) {
+        self.shared
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .held = None;
+    }
+
+    /// Whether new views are held ([`Self::hold`]).
+    pub(crate) fn is_held(&self) -> bool {
+        read(&self.shared).held.is_some()
     }
 
     /// Live documents: added and not replaced or deleted since.
@@ -604,7 +661,7 @@ impl Inner {
     /// Records operation `version` on id `id`, which added `docid` ([`NONE`] for a delete), replacing the id's
     /// previous document; returns whether there was a live one. Last, so a view never sees half an operation.
     fn record(&mut self, id: u32, docid: u32, version: u64) -> bool {
-        let prev = self.latest.get(id as usize).copied().unwrap_or(0);
+        let prev = self.latest.get(usize_from_u32(id)).copied().unwrap_or(0);
         let previous = prev
             .checked_sub(1)
             .and_then(|i| usize::try_from(i).ok())
@@ -613,7 +670,7 @@ impl Inner {
             .filter(|&d| d != NONE);
         let replaced = previous.is_some_and(|d| self.kill(d, version));
         self.ops.push(Op { docid, prev, id });
-        if let Some(l) = self.latest.get_mut(id as usize) {
+        if let Some(l) = self.latest.get_mut(usize_from_u32(id)) {
             *l = version;
         }
         replaced
@@ -623,7 +680,7 @@ impl Inner {
     fn kill(&mut self, docid: u32, version: u64) -> bool {
         let Some(k) = self
             .killed_at
-            .get_mut(docid as usize)
+            .get_mut(usize_from_u32(docid))
             .filter(|k| **k == ALIVE)
         else {
             return false;
@@ -796,7 +853,16 @@ impl Inner {
             .saturating_add(self.ids.size_in_bytes())
             .saturating_add(self.latest.capacity().saturating_mul(size_of::<u64>()))
             .saturating_add(self.ops.capacity().saturating_mul(size_of::<Op>()))
+            // The live statistics, and their copy while a batch holds the memtable.
+            .saturating_add(stats_bytes(&self.stats))
+            .saturating_add(self.held.as_ref().map_or(0, |h| stats_bytes(&h.stats)))
     }
+}
+
+fn stats_bytes(stats: &Vec<Option<FieldStats>>) -> usize {
+    stats
+        .capacity()
+        .saturating_mul(size_of::<Option<FieldStats>>())
 }
 
 #[cfg(test)]

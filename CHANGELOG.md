@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-storage` (breaking): `Container::enable_mapped_reads` and `enable_mapped_reads_if_local` are `unsafe fn`.
+  Their soundness rests on a precondition the container cannot check, now stated in a `# Safety` section: nothing
+  outside Persia writes, truncates or hole-punches the file below the mapped `log_end` while a mapping lives, and the
+  caller also rules out the two cases where Persia itself would: a second read-write container on the file in the
+  same process where the writer lock is per process (NFS), and recovery truncating below the mapped `log_end` after
+  a superblock slot was damaged (ROADMAP 0.6.8, ADR-0017).
+- `persia-storage`: a failed remap after a commit or compaction logs a `tracing` warning (ROADMAP 0.6.7).
+- `persia-server` is a placeholder until M11: it prints `persia-server: not implemented (M11)` and exits with status
+  1, instead of exiting 0 without doing anything (ROADMAP 0.6.4).
+- README and docs site: status comes from `PROGRESS.md` and the tree (`cargo xtask progress` rewrites the README's
+  progress blocks; the site's status sentences come from `website/src/status.mjs`), the quickstart creates a database
+  and searches it, and relaxation is described as design intent (M8), not a feature (ROADMAP 0.6.1–0.6.3).
+- Documented: a database file only grows until the engine compacts its container (ROADMAP 6.5.8, SPEC §4.6).
 - `persia-engine`: `CollectionViews::top_k` returns `search::ExecError` instead of `ReadError` (ROADMAP 7.6.2);
   `ExecError::is_corruption` replaces `ReadError::is_corruption` for its callers.
 - `persia-engine`: `SearchView::column_keys` is a provided method over the new required `try_column_keys`, whose
@@ -31,6 +44,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
 
 ### Fixed
+- `persia-engine`: `Database::put_batch` makes a batch visible only once it is durable at its level; before, the
+  documents ahead of the last were visible once buffered, and a failed sync left readers seeing documents a reopen
+  might not have (ROADMAP 6.3.12, SPEC §8.2.1).
 - A search no longer drops a hit whose segment index is missing from the views
   (`RequestError::HitSegment`). A memtable keyword whose term has no ordinal is
   `ReadError::Section`, not ordinal 0. A keyword ordinal with no bytes is the same error, not an
@@ -40,6 +56,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-format`: `widen::usize_from_u32` and `widen::u64_from_usize`, the lossless widenings `From` lacks, with
+  a compile-time check that pointers are 32 or 64 bits. `persia-format`, `persia-storage` and `persia-engine` deny
+  `clippy::as_conversions` outside tests: every numeric conversion is `From`, a `widen` helper, `try_from`, a
+  same-width `cast_signed`/`cast_unsigned`, or an `as` with an annotated reason (intended truncation to low bits,
+  int-to-float, a `repr(u8)` discriminant) (ROADMAP 0.6.5).
+- `persia-engine`: `segment::scored_length(len)`, the length a field of `len` tokens is scored with (its norm,
+  decoded; SPEC §5.3.4), as an explanation reports it. The differential suite checks it against the reference
+  model's own statement of the rounding (ROADMAP 7.8.5).
+- `persia-storage`: `Container::is_mapped` and `Container::mapping_failures` report a fallback from mapped reads to
+  `pread` (ROADMAP 0.6.7).
+- `persia-engine`: `Database::merge_stats` counts merges committed, discarded (an input changed meanwhile), failed
+  and cancelled since open (`db::MergeStats`, ROADMAP 6.5.11).
+- `persia-engine`: `Database::space_usage` reports a database file's live and dead bytes (SPEC §4.6): the engine
+  does not compact its container yet (ROADMAP 6.5.8), so the dead bytes only grow (ROADMAP 6.5.10).
 - `persia-engine`: views of a collection search share a threshold merged over the views finished so far, once those
   are a prefix of the view order (ROADMAP 7.6.4, SPEC §7.3): on `Threads::Current` each view prunes from the `k`-th
   best of every earlier hit, as a single sequential search would, instead of the best single earlier view's.

@@ -5,6 +5,7 @@ use persia_format::EncodeError;
 use persia_format::Writer;
 use persia_format::bitpack::{BLOCK_LEN, BitWidth};
 use persia_format::block::Compression;
+use persia_format::widen::usize_from_u32;
 use persia_format::{postings, varint};
 
 use super::super::SegmentError;
@@ -224,16 +225,15 @@ impl<'a> Encoder<'a> {
                 }
                 for p in &enc.block {
                     entry.max_tf = entry.max_tf.max(p.tf);
-                    let norm = match norms {
-                        Some(n) => {
-                            n.get(p.doc as usize)
-                                .copied()
-                                .ok_or(SegmentError::Internal {
+                    let norm =
+                        match norms {
+                            Some(n) => n.get(usize_from_u32(p.doc)).copied().ok_or(
+                                SegmentError::Internal {
                                     what: "a docid past the norms",
-                                })?
-                        }
-                        None => 0,
-                    };
+                                },
+                            )?,
+                            None => 0,
+                        };
                     entry.min_norm = entry.min_norm.min(norm);
                     entry.last_docid = p.doc;
                 }
@@ -363,7 +363,7 @@ fn position_deltas(
     out.clear();
     for p in block {
         let positions = inverted.positions_of(p);
-        if positions.len() != p.tf as usize {
+        if positions.len() != usize_from_u32(p.tf) {
             return Err(SegmentError::Internal {
                 what: "a posting without its positions",
             });

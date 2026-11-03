@@ -8,6 +8,7 @@ import { loadProgress, parseProgress } from './progress.mjs';
 import {
 	buildStatus,
 	exportedFns,
+	implHasMethod,
 	loadStatus,
 	parseRoadmapLeaves,
 	publicModules,
@@ -50,15 +51,16 @@ test('the live tree matches the write path that is actually checked in', () => {
 		assert.match(text, /WAL with chunks, group commit, and replay/);
 		assert.match(text, /query path is in progress/);
 		assert.match(text, /BM25F scoring/);
-		assert.match(text, /Nothing searches/);
+		assert.match(text, /A collection snapshot can be searched as library code/);
+		assert.equal(text.includes('Nothing searches'), false);
 		assert.equal(text.includes('There is no query engine'), false);
 		assert.equal(text.includes('No WAL'), false);
 		assert.equal(text.includes('no memtable'), false);
 		assert.equal(text.includes('M5 in progress'), false);
 		assert.equal(text.includes('"'), false);
 	}
-	assert.match(status.preAlpha, /A query compiler and a BM25F scorer are in the tree/);
-	assert.match(status.preAlpha, /Nothing runs a search/);
+	assert.match(status.preAlpha, /runs a ranked search over a collection snapshot/);
+	assert.equal(status.preAlpha.includes('Nothing runs a search'), false);
 	assert.match(status.preAlpha, /can put, delete, and commit/);
 	assert.equal(status.preAlpha.includes('"'), false);
 	assert.match(status.engineShort, /tombstone sidecars/);
@@ -72,22 +74,29 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.equal(status.engineModules.split(', ').includes('stats'), true);
 	assert.match(status.engineCalls, /Database has open, create_collection, put, put_batch, delete, and commit/);
 	assert.match(status.engineCalls, /no persia::Db/);
-	assert.match(status.engineCalls, /no search/);
+	assert.match(status.engineCalls, /CollectionViews::search runs a ranked search over a collection snapshot/);
+	assert.match(status.engineCalls, /no search on the database handle/);
 	assert.match(status.writePathNow, /replays the WAL/);
-	assert.match(status.writePathNow, /Nothing searches/);
+	assert.match(status.writePathNow, /A collection snapshot can be searched as library code/);
 	assert.match(status.writePathNow, /Open and recovery orchestration is done/);
 	assert.match(status.noPublicApi, /exports no Db and no Collection/);
-	assert.match(status.noPublicApi, /Nothing runs a search/);
+	assert.match(status.noPublicApi, /A search runs only through persia-engine/);
 	assert.match(status.noPublicApi, /unpublished/);
 	assert.match(status.m10Blocked, /M6 \(in progress\)/);
 	assert.match(status.m10Blocked, /M7 \(in progress\)/);
 	assert.match(status.m5Cell, /Done \(M5,/);
-	assert.match(status.m5Cell, /A segment view can be matched/);
-	assert.match(status.m5Cell, /There is no search call/);
+	assert.match(status.m5Cell, /Segments are searched through CollectionViews::search/);
 	assert.match(status.pillarEngine, /WAL, commit, and segment merging/);
-	assert.match(status.pillarEngine, /BM25F scoring is in the tree/);
-	assert.match(status.pillarEngine, /Score top-k over one view returns hits/);
-	assert.match(status.pillarEngine, /There is no search call/);
+	assert.match(status.pillarEngine, /BM25F scoring and a collection search are in the tree/);
+	assert.match(status.pillarEngine, /no search call on the database handle/);
+	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
+	assert.match(status.tokens['%%FEATURES_LEAD%%'], /a search that matches nothing returns no hits/);
+	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
+	assert.match(status.tokens['%%MATCHING_CELL%%'], /matching, sorts, pages, and facets/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /^Not started \(M8\)\. On by default in the design\.$/);
+	assert.match(status.tokens['%%OPEN_CELL%%'], /Database opens a file and CollectionViews::search searches it/);
+	assert.match(status.tokens['%%STATE_M9%%'], /^Not started \(M9; its dependencies are done\)\.$/);
+	assert.match(status.tokens['%%STATE_M1%%'], /^Done \(M1, \d+\/\d+\)\.$/);
 	assert.equal(status.pillarEngine.includes('Scoring and query execution do not.'), false);
 	assert.equal(status.pillarCorrectness.includes('no document write path'), false);
 	assert.match(status.pillarCloud, /Object storage has not been started \(M12\)/);
@@ -105,9 +114,27 @@ test('an unchecked WAL leaf drops the full WAL claim', () => {
 	assert.equal(next.writePathNow.includes('replays the WAL'), false);
 });
 
-test('a query compiler does not count as a search', () => {
+test('the collection search is claimed only with its leaves checked and its code in the tree', () => {
 	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
 	const input = currentInput(live);
+	assert.match(buildStatus(input).engineShort, /A collection snapshot can be searched as library code/);
+	input.hasCollectionSearch = false;
+	assert.throws(() => buildStatus(input), /marks request done but the matching code is not in the tree/);
+	input.hasCollectionSearch = true;
+	live.set('7.5.2', false);
+	const partial = buildStatus(input);
+	assert.match(partial.engineShort, /part of the collection search \(not every leaf is done\)/);
+	assert.match(partial.engineShort, /A collection search call is in the tree, but not every leaf of it is done/);
+	assert.equal(partial.engineShort.includes('Nothing searches'), false);
+	assert.equal(partial.engineCalls.includes('CollectionViews::search'), false);
+	assert.match(partial.tokens['%%QUERY_CELL%%'], /They do not return hits/);
+});
+
+test('a query compiler does not count as a search', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	for (const id of ['7.5.1', '7.5.2', '7.5.3', '7.5.4']) live.set(id, false);
+	const input = currentInput(live);
+	input.hasCollectionSearch = false;
 	const next = buildStatus(input);
 	assert.match(next.engineShort, /query path is in progress/);
 	assert.match(next.engineShort, /BM25F scoring/);
@@ -140,6 +167,10 @@ test('an unstarted query milestone says there is no query engine', () => {
 		'7.4.4.1',
 		'7.4.4.2',
 		'7.4.4.3',
+		'7.5.1',
+		'7.5.2',
+		'7.5.3',
+		'7.5.4',
 	]) {
 		live.set(id, false);
 	}
@@ -148,6 +179,7 @@ test('an unstarted query milestone says there is no query engine', () => {
 		(name) => name !== 'query' && name !== 'score' && name !== 'stats' && name !== 'search',
 	);
 	input.hasQuery = false;
+	input.hasCollectionSearch = false;
 	input.hasSearch = false;
 	const progressCopy = structuredClone(input.progress);
 	const m7 = progressCopy.milestones.find((ms) => ms.id === 'M7');
@@ -208,6 +240,27 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 		'Search, ranking, and relaxation are still **planned**',
 		'Search, ranking, relaxation, blobs, and the server are **planned**.',
 		'Nothing runs a query',
+		'does not answer a query',
+		'not a search you can call',
+		'is an empty `main`',
+		'is an empty main function',
+		'Empty `main`',
+		'do not return hits.',
+		'does not search yet',
+		'cannot answer a query',
+		'There is no search call.',
+		'It has no `search`',
+		'They do not search.',
+		'Not started (ROADMAP 7.4.5',
+		'Not a search call',
+		'A score is not a hit list',
+		'They do not run a search',
+		'Facets are not implemented',
+		'A search that returns hits is still not there',
+		'Not started: filter bitmaps',
+		'and the cascade do not',
+		'no code lists the terms within that distance',
+		'rejects `prefix`, `fuzzy`',
 	];
 	for (const file of walk(docsDir)) {
 		const raw = readFileSync(file, 'utf8');
@@ -222,7 +275,7 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 	}
 	const faq = substituteStatusText(readFileSync(path.join(docsDir, 'guide/faq.md'), 'utf8'));
 	assert.match(faq, /WAL with chunks, group commit, and replay/);
-	assert.match(faq, /Nothing searches/);
+	assert.match(faq, /A collection snapshot can be searched as library code/);
 	assert.match(faq, /BM25F scoring/);
 	assert.equal(faq.includes('There is no query engine'), false);
 	const code = substituteStatusText(readFileSync(path.join(docsDir, 'guide/code.md'), 'utf8'));
@@ -263,8 +316,20 @@ function currentInput(leaves) {
 		hasGetBlob: false,
 		hasQuery: true,
 		hasSearch: false,
+		hasCollectionSearch: true,
 		analyzers: ['de', 'en'],
 		published: false,
 		version: '0.0.0',
 	};
 }
+
+test('implHasMethod looks inside the impl block only', () => {
+	const plain = "impl CollectionViews<'_> {\n    /// { braces in docs }\n    pub fn search(&self) {}\n}\n";
+	assert.equal(implHasMethod(plain, 'CollectionViews', 'search'), true);
+	const generic = "impl<'a> CollectionViews<'a> {\n    pub fn search<V>(&self) {}\n}\n";
+	assert.equal(implHasMethod(generic, 'CollectionViews', 'search'), true);
+	const elsewhere = "impl CollectionViews<'_> {\n    pub fn other(&self) { if x { y } }\n}\n\nimpl Other {\n    pub fn search(&self) {}\n}\n";
+	assert.equal(implHasMethod(elsewhere, 'CollectionViews', 'search'), false);
+	assert.equal(implHasMethod("impl CollectionViews<'_> {\n    fn search(&self) {}\n}\n", 'CollectionViews', 'search'), false);
+	assert.equal(implHasMethod("impl CollectionViewsX {\n    pub fn search(&self) {}\n}\n", 'CollectionViews', 'search'), false);
+});
