@@ -805,8 +805,8 @@ fn inspect_container_lists_a_fresh_database() {
     assert!(records.is_empty(), "{records:?}");
 }
 
-/// Damage that is not a torn tail (a corrupt frame after the last commit) never makes inspection panic: it either
-/// lists the frames before it with a `corrupt at` tail, or fails with a message, and the file is left as it was.
+/// Damage that is not a torn tail (a corrupt frame after the last commit) never makes inspection panic or fail: it
+/// lists the frames before it with a `corrupt at` tail, exits 0, and leaves the file as it was.
 #[test]
 fn inspect_container_on_a_corrupt_tail_does_not_panic() {
     let _serial = serial();
@@ -870,4 +870,99 @@ fn inspect_container_lists_a_put_whose_id_cannot_be_read() {
         "{records:?}"
     );
     assert_eq!(records[0][5], "unreadable");
+}
+
+/// A WAL chunk whose header decodes but whose second record is damaged (its CRC fails): the first record is listed,
+/// the damaged one is an `unreadable:` row, the rest of that chunk is not read (the records cannot be delimited past
+/// it), and the next chunk is listed again.
+#[test]
+fn inspect_container_reports_a_damaged_record_inside_a_chunk() {
+    use persia_engine::wal::{WalRecord, encode_chunk};
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let records = [
+        WalRecord::delete("notes", "n9").unwrap(),
+        WalRecord::delete("notes", "n9").unwrap(),
+        WalRecord::delete("notes", "n9").unwrap(),
+    ];
+    let mut chunk = encode_chunk(&records).unwrap();
+    let whole = encode_chunk(&records[..1]).unwrap();
+    // The first byte of the second record's id: its body changes, its CRC no longer holds.
+    let second = whole.len() + 4 + 2 + "notes".len();
+    chunk[second] ^= 0x01;
+    let damaged = append_raw(&path, FrameKind::WalChunk, &chunk);
+    let after = append_raw(
+        &path,
+        FrameKind::WalChunk,
+        &encode_chunk(&records[..1]).unwrap(),
+    );
+
+    let (_, _, rows) = inspected(&inspect_container(&path, Some("n9")));
+    let summary: Vec<(String, String, String)> = rows
+        .iter()
+        .map(|r| (r[0].clone(), r[1].clone(), r[3].clone()))
+        .collect();
+    let (damaged, after) = (damaged.to_string(), after.to_string());
+    assert_eq!(
+        summary,
+        [
+            (damaged.clone(), "0".to_owned(), "delete".to_owned()),
+            (damaged, "-".to_owned(), "unreadable:".to_owned()),
+            (after, "0".to_owned(), "delete".to_owned()),
+        ],
+        "{rows:?}"
+    );
+}
+
+/// A WAL frame the container accepts but cannot hand over (its zstd payload inflates past the largest chunk, SPEC
+/// §8.2) is one `unreadable:` row; the command goes on and succeeds. Small on disk: 64 MiB of zeros compress to a few
+/// KiB.
+#[test]
+fn inspect_container_reports_a_wal_frame_it_cannot_read() {
+    use persia_engine::wal::{MAX_CHUNK_LEN, WalRecord, encode_chunk};
+    use persia_format::block::Compression;
+    use persia_format::frame::FrameKind;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    drop(database(&path));
+    let big = {
+        let mut c = Container::open(&path, Mode::ReadWrite).unwrap();
+        let offset = c.end();
+        let zeros = vec![0_u8; MAX_CHUNK_LEN + 1];
+        c.append(FrameKind::WalChunk, &zeros, Compression::Zstd { level: 1 })
+            .unwrap();
+        c.sync().unwrap();
+        offset
+    };
+    assert!(
+        std::fs::metadata(&path).unwrap().len() < 1 << 20,
+        "stays small"
+    );
+    let after = append_raw(
+        &path,
+        FrameKind::WalChunk,
+        &encode_chunk(&[WalRecord::delete("notes", "n9").unwrap()]).unwrap(),
+    );
+
+    let (_, frames, rows) = inspected(&inspect_container(&path, Some("n9")));
+    assert!(
+        frames.iter().any(|f| f.0 == big && f.3 == "wal"),
+        "{frames:?}"
+    );
+    let summary: Vec<(String, String)> =
+        rows.iter().map(|r| (r[0].clone(), r[3].clone())).collect();
+    assert_eq!(
+        summary,
+        [
+            (big.to_string(), "unreadable:".to_owned()),
+            (after.to_string(), "delete".to_owned()),
+        ],
+        "{rows:?}"
+    );
 }

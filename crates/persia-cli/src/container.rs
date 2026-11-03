@@ -42,7 +42,10 @@ fn write_superblock(out: &mut dyn Write, c: &Container) -> Result<()> {
         ScanEnd::Clean { offset } => format!("clean at {offset}"),
         ScanEnd::TornTail { offset, error } => format!("torn at {offset}: {error}"),
         ScanEnd::Corrupt { offset, .. } => {
-            format!("corrupt at {offset} (a read-write open quarantines it)")
+            format!(
+                "corrupt at {offset} (a read-write open truncates it, quarantining other bytes than zeros and \
+                 stale frames first, or refuses to open if a frame there may hold an acknowledged write)"
+            )
         }
         ScanEnd::Unsupported { offset, error } => format!("unsupported frame at {offset}: {error}"),
     };
