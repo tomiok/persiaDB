@@ -16,7 +16,7 @@ use bytes::Bytes;
 use persia_analysis::AnalyzerRegistry;
 use persia_format::ByteSource;
 
-use super::merger::{MergeError, MergeSource, merge_until};
+use super::merger::{DocidMap, MergeError, MergeSource, merge_until};
 use super::policy::{MergePlan, MergePolicy, MergeReason};
 use crate::manifest::SegmentId;
 use crate::schema::CollectionSchema;
@@ -73,6 +73,8 @@ pub(crate) struct MergeJob {
 pub(crate) struct Merged {
     pub bytes: Bytes,
     pub doc_count: u32,
+    /// Where each input document went, to re-apply deletions committed while the merge ran (ROADMAP 6.5.9).
+    pub docids: DocidMap,
 }
 
 /// A job and what it came to: the merged segment, `None` when nothing is live (a drop, SPEC §8.5 step 1).
@@ -124,6 +126,7 @@ impl MergeJob {
         Ok(Some(Merged {
             bytes,
             doc_count: merged.doc_count(),
+            docids: merged.into_docid_map(),
         }))
     }
 

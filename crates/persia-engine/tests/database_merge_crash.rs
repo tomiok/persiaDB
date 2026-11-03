@@ -12,8 +12,8 @@
 //! 2. A merge commit syncs the WAL before its manifest (`commit_point`): a `Durability::Buffered` write made before the
 //!    merge step is durable once the merge commit is, and a reopen that finds the merged manifest finds every
 //!    buffered write too.
-//! 3. A merge result that conflicts (a commit deleted from an input meanwhile) is discarded before anything is
-//!    written (ADR-0032 item 4).
+//! 3. A merge whose input gained deletions meanwhile commits with them deleted from the merged segment, and a crash at
+//!    any write of that commit keeps them deleted (ROADMAP 6.5.9).
 //! 4. Random interleavings of writes, commits, merge steps, cancels, finishes and reopens (inline and threaded)
 //!    always read the documents of a `BTreeMap` model, also after a reopen that loses every unsynced write; a
 //!    committed merge never revives a deleted id; segment ids in the manifest stay unique; merges in flight never
@@ -487,13 +487,13 @@ fn a_crash_at_any_write_of_a_merge_commit_gives_the_old_or_the_new_manifest() {
     );
 }
 
-// --- 3: a conflicting merge writes nothing -----------------------------------------------------------------------
+// --- 3: a merge that catches up with deletes ----------------------------------------------------------------------
 
-/// ADR-0032 item 4: a merge whose input gained deletions after the plan read it is discarded before any write.
-#[test]
-fn a_conflicting_merge_result_is_discarded_without_writing() {
-    let (base, mut docs) = base();
-    let file = SimFile::from_bytes(base);
+/// Opens the base with one merge thread, starts the merge, commits a delete into its input, and waits until the
+/// merge has finished (it is still to be committed). Returns the file, the database, and the documents.
+fn caught_up_base(base: &[u8], docs: &Docs) -> (SimFile, Database<SimFile>, Docs, Segments) {
+    let mut docs = docs.clone();
+    let file = SimFile::from_bytes(base.to_vec());
     let mut db = Database::open_on(file.clone(), options(1, 2)).unwrap();
     assert!(db.merge_step().unwrap().is_empty());
     assert_eq!(db.merges_running(), 1);
@@ -501,34 +501,85 @@ fn a_conflicting_merge_result_is_discarded_without_writing() {
     db.delete("a", "a4", Durability::Buffered).unwrap();
     docs.get_mut("a").unwrap().remove("a4");
     db.commit().unwrap();
-    let seq = db.seq();
-    let committed = segments(db.manifest());
-    let mutations = file.mutations();
-    let mut outcomes = Vec::new();
-    // No sleeps: the worker finishes when it does; each step either sees it or not.
-    while outcomes.is_empty() {
-        outcomes = db.merge_step().unwrap();
+    let pre = segments(db.manifest());
+    (file, db, docs, pre)
+}
+
+/// Steps until the merge in flight settles; returns what the step that settled it returned.
+fn settle(db: &mut Database<SimFile>) -> Result<Vec<MergeOutcome>, DatabaseError> {
+    loop {
+        let outcomes = db.merge_step()?;
+        if !outcomes.is_empty() {
+            return Ok(outcomes);
+        }
+        // No sleeps: the worker finishes when it does; each step either sees it or not.
         std::thread::yield_now();
     }
+}
+
+/// ROADMAP 6.5.9: a merge whose input gained deletions after the plan read it commits with them deleted from the
+/// merged segment (a sidecar frame after its segment frame). A fault at any write of that commit gives, after any
+/// crash, the manifest before the merge or the one after it, and in both the deleted document stays deleted.
+#[test]
+fn a_crash_at_any_write_of_a_merge_that_caught_up_keeps_the_deletes() {
+    let (base, committed) = base();
+    let (file, mut db, docs, pre) = caught_up_base(&base, &committed);
+    let start = file.mutations();
+    let outcomes = settle(&mut db).unwrap();
     assert!(
-        matches!(&outcomes[..], [MergeOutcome::Conflict { inputs, .. }] if inputs.len() == 2),
+        matches!(
+            &outcomes[..],
+            [MergeOutcome::Committed { reapplied: 1, .. }]
+        ),
         "{outcomes:?}"
     );
-    assert_eq!(file.mutations(), mutations, "a discarded merge wrote");
-    assert_eq!(db.seq(), seq);
-    assert_eq!(segments(db.manifest()), committed);
-    assert_eq!(observed(&db.snapshot()), docs);
-    // Planned again from the current segments; the deletion stays.
-    let rest = db.finish_merges().unwrap();
-    assert!(
-        rest.iter()
-            .any(|o| matches!(o, MergeOutcome::Committed { .. })),
-        "{rest:?}"
+    let total = file.mutations() - start;
+    let post = segments(db.manifest());
+    let merged = &post["a"];
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].tombstones.map(|t| (t.version, t.deleted)),
+        Some((1, 1))
     );
     assert_eq!(observed(&db.snapshot()), docs);
     drop(db);
-    let db = Database::open_on(file.crash(CrashLoss::All), options(0, 3)).unwrap();
-    assert_eq!(observed(&db.snapshot()), docs);
+    // The segment and sidecar frames, the sync, the manifest frame, the slot and its sync.
+    assert!(total >= 6, "{total} mutating calls");
+
+    let (mut saw_old, mut saw_new, mut quarantined) = (0, 0, 0);
+    for point in 0..total {
+        for apply_first in [false, true] {
+            let (file, mut db, docs, _) = caught_up_base(&base, &committed);
+            let at = file.mutations() + point;
+            file.set_fault(Some(if apply_first {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            let ctx = format!("call {point}/{total}, apply first {apply_first}");
+            let error = settle(&mut db).expect_err(&ctx);
+            assert!(!matches!(error, DatabaseError::Poisoned), "{ctx}: {error}");
+            assert_eq!(
+                segments(db.manifest()),
+                pre,
+                "{ctx}: published a failed merge"
+            );
+            assert_eq!(observed(&db.snapshot()), docs, "{ctx}");
+            drop(db);
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(point)] {
+                let ctx = format!("{ctx}, {loss:?}: {error}");
+                let f = reopen(&file.crash(loss), &ctx, &mut quarantined);
+                assert_eq!(f.docs, docs, "{ctx}");
+                if f.segments == pre {
+                    saw_old += 1;
+                } else {
+                    assert_eq!(f.segments, post, "{ctx}");
+                    saw_new += 1;
+                }
+            }
+        }
+    }
+    assert!(saw_old > 0 && saw_new > 0, "old {saw_old}, new {saw_new}");
 }
 
 // --- 4: random interleavings against a model ---------------------------------------------------------------------

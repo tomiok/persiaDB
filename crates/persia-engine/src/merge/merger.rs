@@ -113,6 +113,30 @@ pub enum MergeError {
 pub struct MergedSegment {
     builder: SegmentBuilder,
     merge_generation: u32,
+    docids: DocidMap,
+}
+
+/// Where a merge put each input document (SPEC §8.5): per input, in plan order, the merged docid of each of its
+/// docids, or none for one the merge left out (deleted at the version it read). A merge commit uses it to delete
+/// from the merged segment the documents deleted from its inputs while it ran (ROADMAP 6.5.9). It holds 4 bytes
+/// per input document.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DocidMap {
+    inputs: Vec<Vec<u32>>,
+}
+
+impl DocidMap {
+    /// The merged docid of input `input`'s document `docid`; `None` if the merge left it out, or there is no such
+    /// input or document.
+    pub fn get(&self, input: usize, docid: u32) -> Option<u32> {
+        let merged = *self.inputs.get(input)?.get(usize_from_u32(docid))?;
+        (merged != GONE).then_some(merged)
+    }
+
+    /// How many inputs it maps.
+    pub fn inputs(&self) -> usize {
+        self.inputs.len()
+    }
 }
 
 impl MergedSegment {
@@ -124,6 +148,16 @@ impl MergedSegment {
     /// One more than the highest of the inputs' (SPEC §5.1).
     pub fn merge_generation(&self) -> u32 {
         self.merge_generation
+    }
+
+    /// Where each input document went.
+    pub fn docid_map(&self) -> &DocidMap {
+        &self.docids
+    }
+
+    /// [`Self::docid_map`], taken: the builder is not needed once the segment is written.
+    pub fn into_docid_map(self) -> DocidMap {
+        self.docids
     }
 
     /// The merged segment's bytes, with id `segment_id`, written at `created_at` (microseconds since the Unix epoch).
@@ -214,6 +248,7 @@ pub fn merge_until(
     let mut builder = SegmentBuilder::new(schema, registry)?;
     let mut generation = 0_u32;
     let mut scratch = Scratch::default();
+    let mut docid_map = Vec::with_capacity(sources.len());
     for source in sources {
         stop()?;
         let segment = source.segment;
@@ -239,6 +274,7 @@ pub fn merge_until(
                 FieldBuilder::Stored => {}
             }
         }
+        docid_map.push(docids);
     }
     if builder.doc_count() == 0 {
         return Ok(None);
@@ -249,6 +285,7 @@ pub fn merge_until(
     Ok(Some(MergedSegment {
         builder,
         merge_generation,
+        docids: DocidMap { inputs: docid_map },
     }))
 }
 

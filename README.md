@@ -37,7 +37,7 @@ Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioni
 
 `persia` does not export `Db` yet (M10). Under it, [`persia-engine`](./crates/persia-engine/src/lib.rs) creates and opens a database file, puts, deletes and commits documents through a WAL, merges segments, and runs a ranked search over a collection snapshot: user text compiled to a query, BM25F scoring, filters, sorts, facets, and pages. Relaxation (M8) is not built, so a search that matches nothing returns no hits. A small CLI inspects and verifies files.
 
-**Known limitation:** a database file only grows. The container can compact itself, but the engine does not call it yet (ROADMAP 6.5.8, [SPEC §4.6](./SPEC.md#46-compaction-of-the-container)), so replaced segments, old manifests, and consumed WAL chunks stay in the file. `Database::space_usage` reports the live and dead bytes.
+**Space:** dead frames (replaced segments, old manifests, consumed WAL chunks) are reclaimed by compacting the container: `Database::compact`, run on its own from `merge_step` when dead bytes reach 40% of the file and 1 MiB ([SPEC §4.6](./SPEC.md#46-compaction-of-the-container)). `Database::space_usage` reports the live and dead bytes.
 
 ## Why Persia DB
 

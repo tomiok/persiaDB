@@ -1,6 +1,6 @@
 # ADR-0032: Background merges, and obsolete objects freed by reference counting
 
-- Status: proposed
+- Status: proposed; amended 2026-11-03 (item 4: merges catch up with deletes; item 8: compaction is wired)
 - Date: 2026-10-28
 - Related: SPEC §4.5, §4.6, §5.5, §7.2, §8.3, §8.5, §8.7.2, §14; ROADMAP 6.5.3–6.5.5; ADR-0029 (amended), ADR-0031
 
@@ -53,6 +53,18 @@ planned against one manifest may finish after commits that deleted from its inpu
    each live document's id, frequency, positions and norm, and a BM25 score over collection-level statistics (SPEC
    §7.2) counted over live documents, before and after each merge. M7's differential tests extend it to real
    queries.
+
+## Amendment (2026-11-03): merges catch up with deletes, compaction is wired
+
+- **Item 4** (ROADMAP 6.5.9). The alternative it named is taken: a merge keeps a docid map with its result
+  (`merge::DocidMap`, 4 bytes per input document), and a merge whose inputs gained deletions after the plan read them
+  commits anyway. The writer maps the new deletions to merged docids, writes them as the merged segment's first
+  sidecar (version 1, after its segment frame), and removes each input at its current sidecar version. No format
+  change: SPEC §8.7.2 already allows an added segment's version-1 sidecar. A merge is still discarded when an input
+  is gone (a flush emptied and removed it, or its collection was dropped) or the schema changed. Steady deletes no
+  longer keep the segment count growing (the first consequence below no longer holds).
+- **Item 8** (ROADMAP 6.5.8). `Database::compact` reclaims the dead frames, keeping the obsolete ones a reader still
+  holds, and `merge_step` runs it when it is due (SPEC §4.6).
 
 ## Consequences
 
