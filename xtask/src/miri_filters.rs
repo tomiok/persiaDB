@@ -2,8 +2,10 @@
 //! (ROADMAP 0.6.9).
 //!
 //! Each `cargo miri test` line of the `miri` recipe in the justfile is parsed (with its `{{ var }}`s expanded), and
-//! the same targets are listed natively with `cargo test <targets> -- --list`: Miri runs the same test binaries,
-//! so the names are the same. libtest matches filters and `--skip`s as substrings of the full test name. The check
+//! the same targets are listed natively with `cargo test <targets> -- --list`: Miri builds the same test binaries,
+//! so the names are the same unless code is gated on `cfg(miri)`. A line with filters or skips must therefore target
+//! packages without `cfg(miri)` in their sources (a test under `cfg_attr(miri, ignore)` would count as selected
+//! here and not run there). libtest matches filters and `--skip`s as substrings of the full test name. The check
 //! fails when
 //! - a line selects no test at all,
 //! - a filter selects no test (a renamed module would drop it from Miri without an error), or
@@ -36,13 +38,24 @@ pub fn run(root: &Path) -> Result<bool> {
     let mut ok = true;
     for run in &runs {
         let tests = list_tests(root, &run.targets)?;
-        let problems = check(run, &tests);
+        let mut problems = check(run, &tests);
+        if !run.filters.is_empty() || !run.skips.is_empty() {
+            for package in packages(&run.targets) {
+                if let Some(file) = miri_cfg_in(&root.join("crates").join(package))? {
+                    problems.push(format!(
+                        "{} uses cfg(miri): the native test list may not be what Miri runs, so the filters \
+                         and skips of this line cannot be checked",
+                        file.display()
+                    ));
+                }
+            }
+        }
         for p in &problems {
             eprintln!("just miri: {p}\n  in: {}", run.line);
         }
         ok &= problems.is_empty();
         println!(
-            "just miri: runs {} of {} tests: {}",
+            "just miri: {} of {} tests left after filters and skips: {}",
             selected(run, &tests)
                 .iter()
                 .filter(|t| !run.skips.iter().any(|s| t.contains(s.as_str())))
@@ -72,6 +85,50 @@ fn list_tests(root: &Path, targets: &[String]) -> Result<Vec<String>> {
         );
     }
     Ok(parse_list(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// The packages `-p <name>` / `--package <name>` in `targets`.
+fn packages(targets: &[String]) -> Vec<&str> {
+    targets
+        .windows(2)
+        .filter_map(|w| match w {
+            [flag, name] if flag == "-p" || flag == "--package" => Some(name.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The first `.rs` file under `dir` whose code depends on `cfg(miri)`, if any.
+fn miri_cfg_in(dir: &Path) -> Result<Option<std::path::PathBuf>> {
+    let mut entries: Vec<_> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading {}", dir.display()))?
+        .collect::<Result<_, _>>()?;
+    entries.sort_by_key(std::fs::DirEntry::path);
+    for entry in entries {
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            if path.file_name().is_some_and(|n| n == "target") {
+                continue;
+            }
+            if let Some(found) = miri_cfg_in(&path)? {
+                return Ok(Some(found));
+            }
+        } else if path.extension().is_some_and(|e| e == "rs")
+            && uses_miri_cfg(&std::fs::read_to_string(&path)?)
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+/// Whether Rust source `text` has a `cfg(miri)` predicate (`cfg(miri)`, `cfg_attr(miri, …)`, `not(miri)`, `any(…,
+/// miri)`), ignoring whitespace.
+pub fn uses_miri_cfg(text: &str) -> bool {
+    let code: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    ["(miri)", "(miri,", ",miri)", ",miri,"]
+        .iter()
+        .any(|p| code.contains(p))
 }
 
 /// Test names from `--list --format terse` output (`<name>: test` per test; benches and other lines are not tests).
@@ -131,6 +188,10 @@ pub fn parse_recipe(justfile: &str) -> Result<Vec<MiriRun>> {
         .filter_map(|(name, value)| {
             let value = value.trim();
             let quoted = value.strip_prefix('"')?.strip_suffix('"')?;
+            // One string literal only: `"a" + "b"` is not a value this parser can expand.
+            if quoted.contains('"') {
+                return None;
+            }
             Some((name.trim(), quoted))
         })
         .collect();
@@ -139,7 +200,8 @@ pub fn parse_recipe(justfile: &str) -> Result<Vec<MiriRun>> {
         .lines()
         .skip_while(|l| l.trim_end() != header)
         .skip(1)
-        .take_while(|l| l.starts_with([' ', '\t']));
+        // A recipe body may hold blank lines; it ends at the first non-blank line that is not indented.
+        .take_while(|l| l.trim().is_empty() || l.starts_with([' ', '\t']));
     let mut runs = Vec::new();
     for raw in body {
         let line = raw.trim();
@@ -149,16 +211,24 @@ pub fn parse_recipe(justfile: &str) -> Result<Vec<MiriRun>> {
         };
         let after = words.get(test_at + 2..).unwrap_or_default().join(" ");
         let expanded = expand(&after, &vars).with_context(|| format!("in: {line}"))?;
-        let (targets, args) = expanded
-            .split_once(" -- ")
-            .map_or((expanded.as_str(), ""), |(t, a)| (t, a));
+        let words: Vec<&str> = expanded.split_whitespace().collect();
+        let (targets, args) =
+            words
+                .iter()
+                .position(|w| *w == "--")
+                .map_or((words.as_slice(), &[][..]), |at| {
+                    (
+                        words.get(..at).unwrap_or_default(),
+                        words.get(at + 1..).unwrap_or_default(),
+                    )
+                });
         let mut run = MiriRun {
             line: line.to_owned(),
-            targets: targets.split_whitespace().map(str::to_owned).collect(),
+            targets: targets.iter().map(|w| (*w).to_owned()).collect(),
             filters: Vec::new(),
             skips: Vec::new(),
         };
-        let mut args = args.split_whitespace();
+        let mut args = args.iter().copied();
         while let Some(a) = args.next() {
             match a {
                 "--skip" => {
@@ -213,8 +283,10 @@ other:
 # comment
 miri:
     cargo +{{ nightly }} miri test -p a --lib
-    cargo +{{ nightly }} miri test -p b --lib -- mod_a:: mod_b {{ skips }}
+
+    @cargo +{{ nightly }} miri test -p b --lib -- mod_a:: mod_b {{ skips }}
     echo not a test line
+    cargo +{{ nightly }} miri test -p c --doc --
 
 skips := "--skip slow_one --skip other_slow"
 after:
@@ -237,12 +309,15 @@ after:
     #[test]
     fn parses_only_the_miri_recipe_and_expands_variables() {
         let runs = parse_recipe(JUSTFILE).unwrap();
-        assert_eq!(runs.len(), 2);
+        assert_eq!(runs.len(), 3, "the blank line does not end the recipe");
         assert_eq!(runs[0].targets, names(&["-p", "a", "--lib"]));
         assert!(runs[0].filters.is_empty() && runs[0].skips.is_empty());
         assert_eq!(runs[1].targets, names(&["-p", "b", "--lib"]));
         assert_eq!(runs[1].filters, names(&["mod_a::", "mod_b"]));
         assert_eq!(runs[1].skips, names(&["slow_one", "other_slow"]));
+        // A trailing `--` separates nothing: it is neither a target nor a filter.
+        assert_eq!(runs[2].targets, names(&["-p", "c", "--doc"]));
+        assert!(runs[2].filters.is_empty() && runs[2].skips.is_empty());
     }
 
     #[test]
@@ -252,6 +327,11 @@ after:
         assert!(parse_recipe("miri:\n    cargo miri test -p a -- --exact x\n").is_err());
         assert!(parse_recipe("miri:\n    cargo miri test -p a -- --skip\n").is_err());
         assert!(parse_recipe("miri:\n    cargo miri test -p a -- {{ x\n").is_err());
+        let concatenated = "v := \"a\" + \"b\"\nmiri:\n    cargo miri test -p a -- {{ v }}\n";
+        assert!(
+            parse_recipe(concatenated).is_err(),
+            "only a single string literal expands"
+        );
     }
 
     #[test]
@@ -297,9 +377,39 @@ after:
     }
 
     #[test]
+    fn finds_miri_cfgs_and_packages() {
+        for gated in [
+            "#[cfg(miri)]",
+            "#[cfg_attr(miri, ignore = \"slow\")]",
+            "#[cfg(not( miri ))]",
+            "#[cfg(any(test, miri))]",
+            "cfg!(miri)",
+        ] {
+            assert!(uses_miri_cfg(gated), "{gated}");
+        }
+        assert!(!uses_miri_cfg(
+            "// just miri skips this (slow)\nfn miri_like() {}"
+        ));
+        let targets = names(&["-p", "a", "--lib", "--package", "b", "--test", "p"]);
+        assert_eq!(packages(&targets), ["a", "b"]);
+    }
+
+    /// The recipe as committed: if a line stopped parsing, its filters would go unchecked.
+    #[test]
     fn the_repository_recipe_parses() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
         let runs = parse_recipe(&std::fs::read_to_string(root.join("justfile")).unwrap()).unwrap();
-        assert!(runs.iter().any(|r| !r.skips.is_empty()));
+        let targets: Vec<String> = runs.iter().map(|r| r.targets.join(" ")).collect();
+        assert_eq!(
+            targets,
+            [
+                "-p persia-format --lib",
+                "-p persia-format --doc",
+                "-p persia-engine --lib",
+                "-p persia-engine --test manifest --test wal --test document_encoding",
+            ]
+        );
+        assert!(runs[2].filters.contains(&"document::".to_owned()) && runs[2].skips.len() > 1);
+        assert!(runs[3].filters.is_empty() && runs[3].skips.len() > 1);
     }
 }

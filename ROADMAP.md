@@ -77,7 +77,8 @@ Deps: none.
 - [x] 0.6.6 Miri on the pure parsers of `persia-engine` (CI job and `just miri`), beside `persia-format`: documents, tombstones, section kinds, norms, the FST check, the manifest, WAL and document codecs; property tests, fixture readers and sweeps over 90 s are left to native runs
 - [x] 0.6.7 A container that cannot map its file falls back to positioned reads with a `tracing::warn!`, and says whether it is mapped (`is_mapped()`) and how many remaps failed (`mapping_failures()`)
 - [x] 0.6.8 `enable_mapped_reads` becomes an `unsafe fn` whose `# Safety` section states the caller's contract (no other process truncates or rewrites the mapped range, ADR-0010, ADR-0017)
-- [~] 0.6.9 Guard `just miri`'s filters: a repository check that each test filter of the recipe selects at least one test and each `--skip` matches only the tests it names, so a rename cannot silently drop Miri coverage (found in the 0.6.6 review)
+- [x] 0.6.9 Guard `just miri`'s filters: a repository check that each test filter of the recipe selects at least one test and each `--skip` matches only the tests it names, so a rename cannot silently drop Miri coverage (found in the 0.6.6 review)
+- [ ] 0.6.10 A test a `just miri` filter picks up does not slow the job unnoticed (found in the 0.6.9 review): the `miri` CI job reports the duration of each `cargo miri test` line and fails when one exceeds its budget, naming the slowest tests, so a new slow test under `document::` or in a codec test file is skipped or shrunk in its own PR, not found by a timeout
 
 ---
 

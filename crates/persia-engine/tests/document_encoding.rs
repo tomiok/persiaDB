@@ -1382,11 +1382,48 @@ fn encoded_id_bounds_the_input_at_max_document_len() {
     big.push(0xff);
     assert_eq!(Document::encoded_id(&big), too_large_at_0);
     // Over the limit is rejected before anything is read, even with a valid document in front.
-    let mut valid = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
-    valid.resize(MAX_DOCUMENT_LEN + 1, 0);
-    assert_eq!(Document::encoded_id(&valid), too_large_at_0);
+    let mut valid_then_zeros = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
+    valid_then_zeros.resize(MAX_DOCUMENT_LEN + 1, 0);
+    assert_eq!(Document::encoded_id(&valid_then_zeros), too_large_at_0);
     assert_eq!(
-        Document::decode(&valid, &schema).map(|d| d.id().to_owned()),
+        Document::decode(&valid_then_zeros, &schema).map(|d| d.id().to_owned()),
         too_large_at_0
     );
+}
+
+/// Invariant 5 at every cut of one fixed document with every field type and extra fields, for both field sets: the
+/// deterministic twin of `the_id_reads_without_the_schema`, small enough for `just miri` (which skips proptests).
+#[test]
+fn encoded_id_matches_decode_at_every_cut_of_a_fixed_document() {
+    let schema = all_types(false);
+    let mut doc = Document::new("doc-1")
+        .with(id(&schema, "a"), Value::String("text".into()))
+        .with(
+            id(&schema, "b"),
+            Value::Strings(vec!["k1".into(), "k2".into()]),
+        )
+        .with(id(&schema, "c"), Value::I64(-257))
+        .with(id(&schema, "d"), Value::F64(0.5))
+        .with(id(&schema, "e"), Value::Bool(true))
+        .with(id(&schema, "f"), Value::Datetime(MAX_DATETIME))
+        .with(
+            id(&schema, "g"),
+            Value::Json(json!({"n": [1, null], "s": "x"})),
+        );
+    doc.insert_extra("extra", json!({"k": [true]}));
+    for set in [FieldSet::All, FieldSet::Stored] {
+        let bytes = doc.encode(&schema, set).unwrap();
+        assert_eq!(Document::encoded_id(&bytes), Ok("doc-1".to_owned()));
+        for cut in 0..bytes.len() {
+            let prefix = bytes.get(..cut).unwrap();
+            match Document::encoded_id(prefix) {
+                Ok(id) => assert_eq!(id, "doc-1", "{set:?} cut {cut}"),
+                Err(e) => assert_eq!(
+                    Err(e),
+                    Document::decode(prefix, &schema).map(|_| ()),
+                    "{set:?} cut {cut}"
+                ),
+            }
+        }
+    }
 }
