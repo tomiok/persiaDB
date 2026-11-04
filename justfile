@@ -28,11 +28,12 @@ test:
 test-slow:
     PROPTEST_CASES=10000 cargo test --workspace --features slow --release
 
-# Dependency direction/allowlist, script tests, PROGRESS.md freshness
+# Dependency direction/allowlist, script tests, PROGRESS.md and fixture freshness, `just miri` filters
 repo-checks:
     cargo xtask check-deps
     cargo xtask progress --check
     cargo xtask fixtures --check
+    cargo xtask miri-filters
 
 # Miri covers persia-format and the pure parsers of persia-engine (ROADMAP 0.6.6): documents (CBOR, datetimes),
 # tombstone sidecars, segment section kinds, norms, the FST check, the manifest codec, WAL chunks and the document
@@ -49,7 +50,7 @@ miri:
     cargo +{{ nightly }} miri test -p persia-engine --test manifest --test wal --test document_encoding -- {{ miri_engine_codec_skips }}
 
 # Tests `just miri` leaves out of the engine parsers, by reason (see the recipe). `--skip` matches substrings, so each
-# names one test in full.
+# names exactly one test, and each filter selects at least one: `cargo xtask miri-filters` checks both (ROADMAP 0.6.9).
 miri_engine_lib_skips := "--skip format_parses_back_across_the_range --skip every_single_byte_flip_never_panics --skip every_written_fst_passes --skip paths_longer_than_the_bound_are_rejected --skip truncations_are_rejected --skip norms::tests::monotonic --skip rounds_down_by_under_an_eighth"
 miri_engine_codec_skips := "--skip a_diff_planned_on_an_older_manifest_applies_iff_its_segments_are_unchanged --skip any_json_form_with_every_option_reads_back --skip apply_accepts_only_valid_transitions --skip arbitrary_bytes_never_panic --skip commit_chains_round_trip --skip damaged_manifests_never_panic --skip diff_between_any_two_manifests_is_sound --skip golden_fixtures_decode_and_reencode_byte_for_byte --skip golden_fixtures_decode_reencode_and_replay --skip constructors_accept_exactly_valid_names --skip generated_chunks_detect_truncation_and_bit_flips --skip records_round_trip_and_reencode_identically --skip writer_matches_its_model --skip every_truncation_is_unexpected_eof --skip exactly_one_encoding --skip head_damage_is_rejected_or_canonical --skip every_bit_flip_is_rejected_or_canonical --skip every_bit_flip_is_corrupt --skip every_resealed_bit_flip_is_rejected_or_reencodes_to_itself --skip every_resealed_body_truncation_is_unexpected_eof --skip a_fault_at_every_call_poisons_the_writer --skip each_corruption_is_reported_at_its_offset --skip ids_and_payloads_at_their_limits_decode --skip truncating_at_every_byte --skip decoder_limits --skip every_non_canonical_rewrite --skip hostile_nesting_on_decode --skip hostile_nesting_on_validate --skip rotation_closes_chunks_at_the_target_and_keeps_order --skip a_stored_schema_leaving_any_option_to_defaults_is_corrupt --skip every_strict_prefix_is_corrupt --skip encoded_id_bounds_the_input_at_max_document_len --skip the_id_reads_without_the_schema"
 
