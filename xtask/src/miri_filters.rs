@@ -123,12 +123,91 @@ fn miri_cfg_in(dir: &Path) -> Result<Option<std::path::PathBuf>> {
 }
 
 /// Whether Rust source `text` has a `cfg(miri)` predicate (`cfg(miri)`, `cfg_attr(miri, …)`, `not(miri)`, `any(…,
-/// miri)`), ignoring whitespace.
+/// miri)`) in its code: comments and string or char literals do not count, whitespace is ignored.
 pub fn uses_miri_cfg(text: &str) -> bool {
-    let code: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+    let code: String = code_only(text)
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect();
     ["(miri)", "(miri,", ",miri)", ",miri,"]
         .iter()
         .any(|p| code.contains(p))
+}
+
+/// `text` with comments (line, nested block, doc) and string, raw string and char literals replaced by a space.
+/// A lexer only as deep as that needs: an unterminated comment or literal runs to the end of the text.
+fn code_only(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let at = |i: usize| chars.get(i).copied();
+    let n = chars.len();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while let Some(c) = at(i) {
+        let next = at(i + 1);
+        let ident = |j: Option<usize>| {
+            j.and_then(at)
+                .is_some_and(|p| p.is_alphanumeric() || p == '_')
+        };
+        // `r` starts a raw string on its own or after a lone `b` or `c` (`br"…"`, `cr"…"`), not inside `xr"…"`.
+        let lone_b_or_c =
+            matches!(i.checked_sub(1).and_then(at), Some('b' | 'c')) && !ident(i.checked_sub(2));
+        let may_start_raw = !ident(i.checked_sub(1)) || lone_b_or_c;
+        let end = match (c, next) {
+            ('/', Some('/')) => (i..=n).find(|&j| at(j).is_none_or(|c| c == '\n')),
+            ('/', Some('*')) => {
+                let mut depth = 0usize;
+                let mut j = i;
+                loop {
+                    match (at(j), at(j + 1)) {
+                        (None, _) => break Some(j),
+                        (Some('/'), Some('*')) => (depth, j) = (depth + 1, j + 2),
+                        (Some('*'), Some('/')) if depth == 1 => break Some(j + 2),
+                        (Some('*'), Some('/')) => (depth, j) = (depth - 1, j + 2),
+                        _ => j += 1,
+                    }
+                }
+            }
+            ('r', Some('"' | '#')) if may_start_raw => {
+                let hashes = (i + 1..=n).take_while(|&j| at(j) == Some('#')).count();
+                let open = i + 1 + hashes;
+                if at(open) == Some('"') {
+                    let closes = |j: usize| {
+                        at(j) == Some('"') && (1..=hashes).all(|k| at(j + k) == Some('#'))
+                    };
+                    (open + 1..=n)
+                        .find(|&j| at(j).is_none() || closes(j))
+                        .map(|j| (j + 1 + hashes).min(n))
+                } else {
+                    None
+                }
+            }
+            ('"', _) => {
+                let mut j = i + 1;
+                loop {
+                    match at(j) {
+                        None => break Some(j),
+                        Some('\\') => j += 2,
+                        Some('"') => break Some(j + 1),
+                        Some(_) => j += 1,
+                    }
+                }
+            }
+            // A char literal (`'"'`, `'\''`); anything else after `'` is a lifetime or a label, which is code.
+            ('\'', Some('\\')) => (i + 3..=n)
+                .find(|&j| at(j).is_none_or(|c| c == '\''))
+                .map(|j| j + 1),
+            ('\'', Some(_)) if at(i + 2) == Some('\'') => Some(i + 3),
+            _ => None,
+        };
+        if let Some(end) = end {
+            out.push(' ');
+            i = end.max(i + 1);
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Test names from `--list --format terse` output (`<name>: test` per test; benches and other lines are not tests).
@@ -384,12 +463,33 @@ after:
             "#[cfg(not( miri ))]",
             "#[cfg(any(test, miri))]",
             "cfg!(miri)",
+            // Code after each kind of comment or literal is still read.
+            "// cfg(miri) in a comment\n#[cfg(miri)]",
+            "/* a /* nested */ block */ #[cfg(miri)]",
+            "let s = \"a \\\" quote\"; #[cfg(miri)]",
+            "let s = r#\"raw \"# ; #[cfg(miri)]",
+            "let c = '\"'; let d = '\\''; #[cfg(miri)]",
+            "fn f<'a>(x: &'a str) {} #[cfg(miri)]",
+            "let r = rx; #[cfg(miri)]",
         ] {
             assert!(uses_miri_cfg(gated), "{gated}");
         }
-        assert!(!uses_miri_cfg(
-            "// just miri skips this (slow)\nfn miri_like() {}"
-        ));
+        for mention in [
+            "// just miri skips this (slow)\nfn miri_like() {}",
+            "// skipped under cfg(miri)\nfn f() {}",
+            "/// Doc: `#[cfg_attr(miri, ignore)]` would hide it.\nfn f() {}",
+            "//! Module doc: not(miri)\n",
+            "/* cfg(miri) /* nested cfg(miri) */ still a comment cfg(miri) */",
+            "let s = \"cfg(miri)\";",
+            "let s = \"escaped \\\" then cfg(miri)\";",
+            "let s = r#\"raw \" cfg(miri) \"#;",
+            "let s = br\"cfg(miri)\";",
+            "let s = br#\"a \" cfg(miri) \"#;",
+            "let c = '\"'; let s = \"cfg(miri)\";",
+            "fn f<'a>(x: &'a str) -> &'a str { \"cfg(miri)\" }",
+        ] {
+            assert!(!uses_miri_cfg(mention), "{mention}");
+        }
         let targets = names(&["-p", "a", "--lib", "--package", "b", "--test", "p"]);
         assert_eq!(packages(&targets), ["a", "b"]);
     }
