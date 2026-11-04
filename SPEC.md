@@ -1328,7 +1328,7 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
   key inward), `exists` from which documents have a value, and `not` as the complement among the view's documents;
   the deleted ones are then left out, so no filter selects one. A segment scans a column's keys by FOR block (§5.2.1): a
-  block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter selects is not decoded
++  numeric or datetime block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter selects is not decoded
   (it is still read and checked as a FOR block), and one whose bounds the filter selects whole selects its documents
   with a value without decoding their keys. A `bool`
   whose filters read only column keys (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool`
