@@ -1327,17 +1327,16 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   scored. Each view evaluates a `bool`'s filters once: `term` and `terms` on a `keyword` field from its postings,
   on another field (and `range`) from the column's order-preserving keys (§5.2.1, an exclusive bound being the next
   key inward), `exists` from which documents have a value, and `not` as the complement among the view's documents;
-  the deleted ones are then left out, so no filter selects one. A segment scans a column's keys by FOR block (§5.2.1): a
-+  numeric or datetime block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter selects is not decoded
-  (it is still read and checked as a FOR block), and one whose bounds the filter selects whole selects its documents
-  with a value without decoding their keys. A `bool`
-  whose filters read only column keys (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool`
-  field, and `and`, `or`, `not` of those) checks them per candidate instead, as column predicates, when its `must`
-  clauses match at most a quarter of the view's documents (by their cost estimate); the documents and scores are the
-  same either way. A segment's tombstones are excluded by its postings
-  iterator before a document is scored or offered to the top-k collector, so a deleted document cannot enter the
-  heap or raise the competitive threshold. Block upper bounds may still cover deleted documents; that only loosens
-  pruning.
+  the deleted ones are then left out, so no filter selects one. A segment scans a numeric or `datetime` column's keys
+  by FOR block (§5.2.1): a block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter
+  selects is not decoded (it is still read and checked as a FOR block), and one whose bounds the filter selects whole
+  selects its documents with a value without decoding their keys. A `bool` whose filters all read only column keys
+  (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool` field, and `and`, `or`, `not` of those)
+  checks them per candidate instead, as column predicates, when its `must` clauses match at most a quarter of the
+  view's documents (by their cost estimate); the documents and scores are the same either way. A segment's tombstones
+  are excluded by its postings iterator before a document is scored or offered to the top-k collector, so a deleted
+  document cannot enter the heap or raise the competitive threshold. Block upper bounds may still cover deleted
+  documents; that only loosens pruning.
 - Segments are searched in parallel: each non-empty view (a segment or the memtable with a document; an empty one
   matches nothing) is a task on a thread pool (the caller's choice: the calling thread, a shared default pool, or its
   own pool). Each view keeps its own top-k; they merge in view order into the global top-k (the order below), so the
@@ -1396,14 +1395,15 @@ and the memtable view's version. A search on another snapshot, collection, or me
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
 key or pass one over. The same snapshot and the same memtable view page exactly.
 
-Pruning (§7.3) applies when `sort` is `"score"` and no facet is asked for: then only the threshold of the hits after the
-cursor matters. A facet visits every match. A sort whose first key is a numeric or `datetime` field with `missing:
-"last"`, without a facet, skips in each segment the FOR blocks (§5.2.1) whose keys all rank after the worst of the
-hits the view keeps: a block's keys lie between its minimum and the minimum plus `2^width − 1`, and a document
-without a value ranks after every value; with that one key, a tie ranks after the kept hit too (docids ascend). A
-skipped match is not scored, and a column sort without a `score` key scores only the matches it keeps, so a
-corrupt norm of a match it does not keep is not found (as with pruning, §7.3). The hits are those of visiting every
-match. Any other sort visits every match.
+Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
+applies when `sort` is `"score"`: then only the threshold of the hits after the cursor matters. A sort whose first key
+is a numeric or `datetime` field with `missing: "last"` skips in each segment the FOR blocks (§5.2.1) whose keys all
+rank after the worst of the hits the view keeps: a block's keys lie between its minimum and the minimum plus
+`2^width − 1`, and a document without a value ranks after every value; with that one key, a tie ranks after the kept
+hit too (docids ascend). A skipped match is not scored, and a column sort without a `score` key scores only the
+matches it keeps, so a corrupt norm of a match it does not keep is not found (as with pruning, §7.3). Either way the
+hits are those of visiting every match. Every other sort visits every match: by score ascending or with further keys,
+led by a `keyword` or `bool` field, or led by a column with `missing: "first"`.
 
 ### 7.5 Facets
 `facets` lists at most 16 `keyword` fields with `facet: true` (§6.2.2; a field may repeat), each with `size` (top-N
