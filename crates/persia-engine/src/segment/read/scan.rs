@@ -13,7 +13,7 @@ use roaring::RoaringBitmap;
 use super::{ReadError, Segment, type_error};
 use crate::bitmap::Ascending;
 use crate::schema::{FieldId, FieldType};
-use crate::segment::SectionKind;
+use crate::segment::{Overlap, SectionKind};
 
 impl Segment {
     /// The documents that have a value in `field` (deleted ones included): for a `text` field, those with at least one
@@ -118,5 +118,37 @@ impl Segment {
             other => return Err(type_error(field, other, "column")),
         }
         Ok(())
+    }
+
+    /// The documents with a value in an `i64`, `f64`, `datetime` or `bool` field whose key `keep` accepts, deleted
+    /// ones included (ROADMAP 7.4.13): a numeric field reads only the FOR blocks `cover` finds
+    /// [`Overlap::Partial`] ([`crate::segment::NumericColumn::select`]); a `bool` field reads every key. `step` runs
+    /// per block and per key read.
+    ///
+    /// # Errors
+    /// As [`Self::try_column_keys`]; what `step` returns.
+    pub fn select_keys(
+        &self,
+        field: FieldId,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+        step: impl Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        match self.field(field)?.field_type() {
+            FieldType::I64 | FieldType::F64 | FieldType::Datetime => {
+                self.numeric_column(field)?.select(cover, keep, step)
+            }
+            _ => {
+                let mut docs = Ascending::default();
+                self.try_column_keys(field, |docid, key| {
+                    step()?;
+                    if keep(key) {
+                        docs.push(docid);
+                    }
+                    Ok(())
+                })?;
+                Ok(docs.finish())
+            }
+        }
     }
 }

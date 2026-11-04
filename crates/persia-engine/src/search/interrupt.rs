@@ -17,7 +17,7 @@ use crate::document::Document;
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::score::FieldHit;
-use crate::segment::{BlockMax, FieldStats, ReadError};
+use crate::segment::{BlockMax, FieldStats, KeyBlock, Overlap, ReadError};
 use crate::view::{KeyReader, KeywordReader, PostingsIterator, SearchView, TermEnum};
 
 /// How many steps a reader takes between two looks at its interrupts: a posting moved to, a block skipped, a term,
@@ -143,6 +143,11 @@ impl<K: KeyReader> KeyReader for Watched<'_, K> {
     fn key(&mut self, docid: u32) -> Result<Option<u64>, ReadError> {
         self.step()?;
         self.inner.key(docid)
+    }
+
+    fn block(&mut self, docid: u32) -> Result<Option<KeyBlock>, ReadError> {
+        self.step()?;
+        self.inner.block(docid)
     }
 }
 
@@ -280,6 +285,28 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
         self.view.try_column_keys(field, |docid, key| {
             self.steps.step()?;
             f(docid, key)
+        })
+    }
+
+    fn select_keys(
+        &self,
+        field: FieldId,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.view
+            .select_keys_stepped(field, cover, keep, || self.steps.step())
+    }
+
+    fn select_keys_stepped(
+        &self,
+        field: FieldId,
+        cover: impl Fn(u64, u64) -> Overlap,
+        keep: impl Fn(u64) -> bool,
+        step: impl Fn() -> Result<(), ReadError>,
+    ) -> Result<RoaringBitmap, ReadError> {
+        self.view.select_keys_stepped(field, cover, keep, || {
+            self.steps.step().and_then(|()| step())
         })
     }
 

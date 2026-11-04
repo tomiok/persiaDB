@@ -24,7 +24,8 @@ use std::ops::Bound;
 use std::sync::{Arc, LazyLock};
 
 use persia_engine::db::{
-    CollectionHit, CollectionSnapshot, Database, DatabaseOptions, Located, ManualClock, SegmentIds,
+    CollectionHit, CollectionSnapshot, Database, DatabaseOptions, Located, ManualClock,
+    SearchRequest, SegmentIds,
 };
 use persia_engine::document::{Document, MAX_DATETIME, MIN_DATETIME, Value};
 use persia_engine::memtable::MemtableView;
@@ -325,7 +326,8 @@ fn check(
     model: &BTreeMap<String, Values>,
     filter: &Filter,
 ) -> Result<(), TestCaseError> {
-    let all = 1000;
+    // Every live document: the top-k of every query holds every hit.
+    let all = model.len().max(1);
     let selected: BTreeSet<&String> = model
         .iter()
         .filter(|(id, v)| selects(filter, &v.document(id), &SCHEMA))
@@ -920,4 +922,247 @@ fn older_memtable_views_filter_as_when_taken() {
     for filter in &filters {
         check(c, &c.memtable(), &model, filter).unwrap();
     }
+}
+
+/// Values of document `i` of [`many_blocks`]: each column holds a few values per run of documents, so FOR blocks
+/// are narrow, some cut by the filters and some not (ROADMAP 7.4.13); "alpha" is rare, "common" in every document.
+fn banded(i: usize) -> Values {
+    let mut words = vec![2];
+    if i.is_multiple_of(29) {
+        words.push(0);
+    }
+    if i.is_multiple_of(3) {
+        words.push(1);
+    }
+    Values {
+        words: Some(words),
+        tags: vec![(i % 3) as u8],
+        n: (!i.is_multiple_of(11)).then_some(((i / 700) % NS.len()) as u8),
+        x: Some(((i / 1100) % XS.len()) as u8),
+        at: (!i.is_multiple_of(13)).then_some(((i / 900) % ATS.len()) as u8),
+        flag: Some(i.is_multiple_of(2)),
+    }
+}
+
+/// Two segments of 2 100 documents each (three FOR blocks), banded values, and a memtable that deletes and replaces
+/// some of them, some twice.
+static MANY_BLOCKS: LazyLock<(Database<SimFile>, BTreeMap<String, Values>)> = LazyLock::new(|| {
+    let mut db = database();
+    let mut model = BTreeMap::new();
+    for segment in 0..2 {
+        for i in 0..2_100 {
+            let id = format!("s{segment}-{i}");
+            let v = banded(i + segment * 1_300);
+            db.put("c", &v.document(&id), Durability::Buffered).unwrap();
+            model.insert(id, v);
+        }
+        db.commit().unwrap();
+    }
+    for i in (0..2_100).step_by(37) {
+        let id = format!("s{}-{i}", i % 2);
+        if i % 3 == 0 {
+            db.delete("c", &id, Durability::Buffered).unwrap();
+            model.remove(&id);
+        } else {
+            let v = banded(i * 7);
+            db.put("c", &v.document(&id), Durability::Buffered).unwrap();
+            model.insert(id, v);
+        }
+    }
+    // Some ids put twice in the memtable: the first copy is superseded there, as the segments' are.
+    for i in (0..2_100).step_by(74) {
+        let id = format!("s{}-{i}", i % 2);
+        let v = banded(i * 11);
+        db.put("c", &v.document(&id), Durability::Buffered).unwrap();
+        model.insert(id, v);
+    }
+    (db, model)
+});
+
+/// A rare `must` under `filter`, which views check per candidate when every filter reads only column keys
+/// (ROADMAP 7.4.13): the reference's documents, scored as without the filter, and explained as scored.
+fn rare(
+    c: &CollectionSnapshot,
+    memtable: &MemtableView,
+    model: &BTreeMap<String, Values>,
+    filter: &Filter,
+) -> Result<(), TestCaseError> {
+    let must = BoolQuery {
+        must: vec![term("alpha")],
+        ..BoolQuery::default()
+    };
+    let unfiltered = scored(
+        c,
+        memtable,
+        &search(c, memtable, &Query::Bool(must.clone()), 1000),
+    );
+    let query = with_filter(must, filter);
+    let hits = search(c, memtable, &query, 1000);
+    let filtered = scored(c, memtable, &hits);
+    let want: BTreeSet<String> = model
+        .iter()
+        .filter(|(id, v)| v.holds("alpha") && selects(filter, &v.document(id), &SCHEMA))
+        .map(|(id, _)| id.clone())
+        .collect();
+    prop_assert_eq!(
+        filtered.keys().cloned().collect::<BTreeSet<_>>(),
+        want,
+        "{:?}",
+        filter
+    );
+    for (id, s) in &filtered {
+        prop_assert_eq!(*s, unfiltered[id], "{}", id);
+    }
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(memtable)).unwrap();
+    let views = c.views(memtable).unwrap();
+    let request = SearchRequest {
+        limit: 100,
+        explain: true,
+        ..SearchRequest::default()
+    };
+    let page = views.search(&plan, &request, Pruning::default()).unwrap();
+    prop_assert_eq!(page.hits.len(), hits.len().min(100));
+    for hit in &page.hits {
+        let explained = hit.explanation.as_ref().map(|e| e.score().to_bits());
+        prop_assert_eq!(explained, Some(hit.score.to_bits()), "{:?}", hit.location);
+    }
+    Ok(())
+}
+
+/// Invariants 1–4 over segments of several FOR blocks whose keys come in bands, so a scan skips blocks or selects
+/// them whole (ROADMAP 7.4.13), with a frequent `must` (the filters' bitmap) and a rare one (checked per candidate).
+#[test]
+fn filters_over_banded_blocks_select_what_the_reference_selects() {
+    let cases = if cfg!(feature = "slow") { 128 } else { 6 };
+    let (db, model) = &*MANY_BLOCKS;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    assert_eq!(c.segments().len(), 2);
+    let memtable = c.memtable();
+    let f = &*FIELDS;
+    // Bands whose edges fall inside FOR blocks and on them, and none.
+    let fixed = [
+        range(
+            f.n,
+            Bound::Included(FilterValue::I64(0)),
+            Bound::Included(FilterValue::I64(1)),
+        ),
+        range(f.n, Bound::Excluded(FilterValue::I64(-1)), Bound::Unbounded),
+        range(
+            f.at,
+            Bound::Included(FilterValue::Datetime(0)),
+            Bound::Excluded(FilterValue::Datetime(MAX_DATETIME)),
+        ),
+        Filter::Terms {
+            field: f.n,
+            values: vec![FilterValue::I64(i64::MAX), FilterValue::I64(-1)],
+        },
+        Filter::Not(Box::new(range(
+            f.x,
+            Bound::Unbounded,
+            Bound::Included(FilterValue::F64(0.0)),
+        ))),
+        Filter::And(vec![
+            Filter::Exists { field: f.at },
+            Filter::Term {
+                field: f.flag,
+                value: FilterValue::Bool(true),
+            },
+        ]),
+    ];
+    for filter in &fixed {
+        check(c, &memtable, model, filter).unwrap();
+        rare(c, &memtable, model, filter).unwrap();
+    }
+    run(
+        "filters_over_banded_blocks_select_what_the_reference_selects",
+        cases,
+        filter(),
+        |filter| {
+            check(c, &memtable, model, &filter)?;
+            rare(c, &memtable, model, &filter)
+        },
+    );
+}
+
+/// Each read of [`persia_engine::db::Clock::now`] moves the clock 1 µs forward and is counted: a search reads it once
+/// per so many steps of its readers, so the reads measure its work.
+#[derive(Debug)]
+struct CountingClock {
+    start: std::time::Instant,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl persia_engine::db::Clock for CountingClock {
+    fn now(&self) -> std::time::Instant {
+        let n = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.start + std::time::Duration::from_micros(n)
+    }
+
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+/// The per-candidate path runs (ROADMAP 7.4.13): a rare `must` under column filters reads about what the `must` alone
+/// reads, where selecting the filters' bitmap reads the keys of every FOR block they cut.
+#[test]
+fn a_rare_must_checks_its_filters_per_candidate_without_a_scan() {
+    use persia_engine::db::{Execution, Threads};
+    let (db, _) = &*MANY_BLOCKS;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = &*FIELDS;
+    let reads = |query: &Query| {
+        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+        let clock = Arc::new(CountingClock {
+            start: std::time::Instant::now(),
+            reads: std::sync::atomic::AtomicU64::new(0),
+        });
+        let far = clock.start + std::time::Duration::from_secs(3_600);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), far);
+        views.top_k_with(&plan, 10, &exec).unwrap();
+        clock.reads.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let filters = vec![
+        Filter::Terms {
+            field: f.n,
+            values: vec![FilterValue::I64(0), FilterValue::I64(1)],
+        },
+        Filter::Not(Box::new(Filter::Term {
+            field: f.x,
+            value: FilterValue::F64(0.5),
+        })),
+        Filter::Exists { field: f.at },
+    ];
+    let must = BoolQuery {
+        must: vec![term("alpha")],
+        ..BoolQuery::default()
+    };
+    let alone = reads(&Query::Bool(must.clone()));
+    let checked = reads(&Query::Bool(BoolQuery {
+        filter: filters.clone(),
+        ..must
+    }));
+    assert!(
+        checked <= alone + 1,
+        "{checked} reads filtered, {alone} alone"
+    );
+    // The same filters under a frequent `must` select their bitmaps: the keys of the FOR blocks they cut are read.
+    let common = BoolQuery {
+        must: vec![term("common")],
+        ..BoolQuery::default()
+    };
+    let alone = reads(&Query::Bool(common.clone()));
+    let scanned = reads(&Query::Bool(BoolQuery {
+        filter: filters,
+        ..common
+    }));
+    assert!(scanned > alone, "{scanned} reads filtered, {alone} alone");
 }

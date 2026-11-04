@@ -26,8 +26,8 @@ use roaring::RoaringBitmap;
 
 pub use cache::{BlockCache, CacheStats};
 pub use columns::{
-    BoolColumn, KeywordColumn, KeywordCursor, KeywordOrds, Norms, NormsCursor, NumericColumn,
-    NumericCursor, NumericKeys,
+    BoolColumn, KeyBlock, KeywordColumn, KeywordCursor, KeywordOrds, Norms, NormsCursor,
+    NumericColumn, NumericCursor, NumericKeys, Overlap,
 };
 pub use error::{ReadError, SegmentCorruption, UnsupportedSegment};
 pub use footer::FieldStats;

@@ -1338,3 +1338,228 @@ fn memtable_keyword_ords_reject_a_docid_past_the_view() {
         })
     ));
 }
+
+/// Two segments of 2 100 documents (three FOR blocks each) whose `n` and `f` come in bands of 600 and 900
+/// documents, some missing, and a memtable that deletes and replaces some: a column sort without a facet skips the
+/// blocks that cannot beat its worst kept hit (ROADMAP 7.5.6).
+fn banded() -> Database<SimFile> {
+    let f = fields();
+    let mut db = database(schema());
+    let doc = |id: String, i: usize| {
+        let mut words = vec!["common"];
+        if i.is_multiple_of(5) {
+            words.push("alpha");
+        }
+        let mut d = Document::new(id)
+            .with(f.body, Value::String(words.join(" ")))
+            .with(f.tag, Value::String(TAGS[i % TAGS.len()].into()));
+        if !i.is_multiple_of(9) {
+            let band = i64::try_from(i / 600).unwrap();
+            d.insert(f.n, Value::I64(band * 10 + i64::try_from(i % 7).unwrap()));
+        }
+        if !i.is_multiple_of(4) {
+            d.insert(f.f, Value::F64(FLOATS[(i / 900) % FLOATS.len()]));
+        }
+        d
+    };
+    for segment in 0..2 {
+        for i in 0..2_100 {
+            let d = doc(format!("s{segment}-{i}"), i + segment * 300);
+            db.put("c", &d, Durability::Buffered).unwrap();
+        }
+        db.commit().unwrap();
+    }
+    for i in (0..2_100).step_by(41) {
+        let id = format!("s{}-{i}", i % 2);
+        if i % 3 == 0 {
+            db.delete("c", &id, Durability::Buffered).unwrap();
+        } else {
+            db.put("c", &doc(id, i * 3), Durability::Buffered).unwrap();
+        }
+    }
+    db
+}
+
+/// Invariant 1 over banded FOR blocks: every column sort, with or without a facet (which visits every match) and a
+/// later key, ranks as the model, page and cursor alike.
+#[test]
+fn column_sorts_over_banded_blocks_match_the_model() {
+    let db = banded();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    assert_eq!(c.segments().len(), 2);
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = fields();
+    let queries = [
+        Query::MatchAll,
+        term(f.body, "common"),
+        term(f.body, "alpha"),
+    ];
+    let facet = vec![FacetRequest::new(f.tag, 3, c.schema()).unwrap()];
+    for query in &queries {
+        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+        // Every match and its document, read once; each sort ranks them as `model` does.
+        let matches = model(&views, &plan, &[]);
+        for field in [f.n, f.f] {
+            for order in [Order::Asc, Order::Desc] {
+                for missing in [Missing::Last, Missing::First] {
+                    let lead = SortKey::Field {
+                        field,
+                        order,
+                        missing,
+                    };
+                    let then = [
+                        None,
+                        Some(SortKey::score()),
+                        Some(SortKey::field(f.tag, Order::Desc)),
+                    ];
+                    for then in then {
+                        let sort = Sort::new([lead].into_iter().chain(then), c.schema()).unwrap();
+                        let keys: Vec<SortKey> = sort.keys().collect();
+                        let mut all = matches.clone();
+                        let values =
+                            |(_, score, doc): &(Located, f64, Document)| -> Vec<ModelValue> {
+                                keys.iter().map(|&k| model_value(k, doc, *score)).collect()
+                            };
+                        all.sort_by(|a, b| {
+                            model_compare(&keys, &values(a), &values(b))
+                                .then(self::order(a.0).cmp(&self::order(b.0)))
+                        });
+                        let every: Vec<(Located, u64)> =
+                            all.iter().map(|(l, s, _)| (*l, s.to_bits())).collect();
+                        for (offset, limit) in [(0, 10), (7, 25)] {
+                            for facets in [Vec::new(), facet.clone()] {
+                                let request = SearchRequest {
+                                    sort: sort.clone(),
+                                    offset,
+                                    limit,
+                                    facets,
+                                    projection: Projection::None,
+                                    ..SearchRequest::default()
+                                };
+                                let expected: Vec<_> =
+                                    every.iter().skip(offset).take(limit).copied().collect();
+                                // A column sort walks every view exhaustively, whatever the strategy: one is enough.
+                                let results =
+                                    views.search(&plan, &request, Pruning::default()).unwrap();
+                                assert_eq!(
+                                    located(&results),
+                                    expected,
+                                    "{query:?} by {keys:?}, {offset}+{limit}"
+                                );
+                            }
+                        }
+                        // The page after a cursor mid-way: the model's next hits.
+                        let first = views
+                            .search(
+                                &plan,
+                                &SearchRequest {
+                                    sort: sort.clone(),
+                                    limit: 30,
+                                    projection: Projection::None,
+                                    ..SearchRequest::default()
+                                },
+                                Pruning::default(),
+                            )
+                            .unwrap();
+                        let Some(last) = first.hits.last() else {
+                            continue;
+                        };
+                        let next = views
+                            .search(
+                                &plan,
+                                &SearchRequest {
+                                    sort: sort.clone(),
+                                    limit: 20,
+                                    search_after: Some(last.cursor()),
+                                    projection: Projection::None,
+                                    ..SearchRequest::default()
+                                },
+                                Pruning::default(),
+                            )
+                            .unwrap();
+                        let want: Vec<_> = every.iter().skip(30).take(20).copied().collect();
+                        assert_eq!(located(&next), want, "{query:?} by {keys:?} after 30");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Each read of [`Clock::now`] moves the clock 1 µs forward and is counted: a search reads it once per so many steps
+/// of its readers and matches, so the reads measure its work.
+#[derive(Debug)]
+struct CountingClock {
+    start: std::time::Instant,
+    reads: std::sync::atomic::AtomicU64,
+}
+
+impl persia_engine::db::Clock for CountingClock {
+    fn now(&self) -> std::time::Instant {
+        let n = self
+            .reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.start + std::time::Duration::from_micros(n)
+    }
+
+    fn unix_micros(&self) -> i64 {
+        0
+    }
+}
+
+/// The clock reads of `request`, on the calling thread, under a deadline that never passes.
+fn reads(
+    views: &persia_engine::db::CollectionViews<'_>,
+    plan: &SearchPlan,
+    request: &SearchRequest,
+) -> u64 {
+    let clock = Arc::new(CountingClock {
+        start: std::time::Instant::now(),
+        reads: std::sync::atomic::AtomicU64::new(0),
+    });
+    let far = clock.start + std::time::Duration::from_secs(3_600);
+    let exec = Execution::default()
+        .threads(Threads::Current)
+        .deadline(clock.clone(), far);
+    views.search_with(plan, request, &exec).unwrap();
+    clock.reads.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Block skipping happens (ROADMAP 7.5.6): ascending by the banded `n`, the first block's hits beat every later block,
+/// so a sort without a facet visits a fraction of the matches; with a facet, or descending (each block beats the one
+/// before), it visits them all.
+#[test]
+fn a_column_sort_without_a_facet_skips_the_blocks_that_lose() {
+    let db = banded();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    let request = |order, facets: bool| SearchRequest {
+        sort: Sort::new([SortKey::field(f.n, order)], c.schema()).unwrap(),
+        limit: 10,
+        facets: if facets {
+            vec![FacetRequest::new(f.tag, 3, c.schema()).unwrap()]
+        } else {
+            Vec::new()
+        },
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let pruned = reads(&views, &plan, &request(Order::Asc, false));
+    let faceted = reads(&views, &plan, &request(Order::Asc, true));
+    let descending = reads(&views, &plan, &request(Order::Desc, false));
+    assert!(
+        pruned * 3 < descending,
+        "{pruned} reads pruned, {descending} descending"
+    );
+    assert!(
+        pruned * 3 < faceted,
+        "{pruned} reads pruned, {faceted} with a facet"
+    );
+}

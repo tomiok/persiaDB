@@ -13,12 +13,13 @@ use crate::schema::{CollectionSchema, Field, FieldId, FieldKind};
 use crate::score::{FieldParams, ScoreError, TermScorer};
 use crate::segment::{ReadError, prefix_successor};
 use crate::stats::StatisticsProvider;
-use crate::view::SearchView;
+use crate::view::{KeyReader, SearchView};
 
 use super::block_max_wand::BlockMaxWand;
 use super::boolean::{
     AllDocs, Conjunction, Disjunction, Empty, Exclusion, Optional, Scale, Scaled,
 };
+use super::check::{Check, Checked, checkable, per_candidate};
 use super::expand::{Expansion, TermSource, expand};
 use super::explain::{Explanation, explain_all};
 use super::filter::{FilterDocs, Filtered, Selections, select};
@@ -51,6 +52,8 @@ pub(super) enum Node {
         should: Vec<Node>,
         must_not: Vec<Node>,
         filter: Vec<Filter>,
+        /// Whether every filter reads only column keys, so a view may check them per candidate (ROADMAP 7.4.13).
+        checks: bool,
         /// Unique in the plan: where a search keeps what its filters select ([`Selections`]); unused by a `bool`
         /// without filters (an expansion's).
         slot: usize,
@@ -415,6 +418,7 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
         filter: q.filter.clone(),
+        checks: checkable(&q.filter, schema),
         // After the clauses: a `bool`'s slot follows its nested ones' (post-order).
         slot: p.slot(),
     })
@@ -567,6 +571,7 @@ fn plan_expansion<S: StatisticsProvider + ?Sized>(
             should: words,
             must_not: Vec::new(),
             filter: Vec::new(),
+            checks: true,
             slot: p.slot(),
         },
     })
@@ -607,6 +612,7 @@ fn build<'a, V: SearchView>(
             should,
             must_not,
             filter,
+            checks,
             slot,
         } => build_bool(
             Clauses {
@@ -614,6 +620,7 @@ fn build<'a, V: SearchView>(
                 should,
                 must_not,
                 filter,
+                checks: *checks,
                 slot: *slot,
             },
             view,
@@ -694,6 +701,7 @@ struct Clauses<'a> {
     should: &'a [Node],
     must_not: &'a [Node],
     filter: &'a [Filter],
+    checks: bool,
     slot: usize,
 }
 
@@ -712,6 +720,7 @@ fn build_bool<'a, V: SearchView>(
         should,
         must_not,
         filter,
+        checks,
         slot,
     } = clauses;
     let select = || select_kept(filter, view, slot, kept);
@@ -733,7 +742,9 @@ fn build_bool<'a, V: SearchView>(
     let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
         let required = conjunction(all(must, must_pruning)?);
-        (filtered(required, filter, select)?, optional)
+        let check = (checks && per_candidate(required.cost(), view.doc_count()))
+            .then_some(|| Check::new(filter, view));
+        (filtered(required, filter, select, check)?, optional)
     } else if !filter.is_empty() {
         let docs = select()?;
         let required: BoxedMatcher<'a> = if docs.is_empty() {
@@ -759,15 +770,20 @@ fn build_bool<'a, V: SearchView>(
     })
 }
 
-/// The documents of `required` that every filter selects (`select`); the filters are not read when there are none,
-/// or when `required` matches nothing in the view.
-fn filtered<'a>(
+/// The documents of `required` that every filter selects: checked per candidate with `check` when given (ROADMAP
+/// 7.4.13), else in the bitmap `select` builds. The filters are not read when there are none, or when `required`
+/// matches nothing in the view.
+fn filtered<'a, K: KeyReader + 'a>(
     required: BoxedMatcher<'a>,
     filter: &[Filter],
     select: impl FnOnce() -> Result<RoaringBitmap, ReadError>,
+    check: Option<impl FnOnce() -> Result<Check<K>, ReadError>>,
 ) -> Result<BoxedMatcher<'a>, ReadError> {
     if filter.is_empty() || required.cost() == 0 {
         return Ok(required);
+    }
+    if let Some(check) = check {
+        return Ok(Box::new(Checked::new(required, check()?)));
     }
     let docs = select()?;
     Ok(if docs.is_empty() {

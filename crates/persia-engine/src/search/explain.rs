@@ -12,9 +12,10 @@ use crate::query::Filter;
 use crate::schema::FieldId;
 use crate::score::TermScorer;
 use crate::segment::{ReadError, norms};
-use crate::view::SearchView;
+use crate::view::{KeyReader, SearchView};
 
 use super::boolean::Scale;
+use super::check::Check;
 use super::filter::{Selections, select};
 use super::phrase::PhraseMatcher;
 use super::plan::{Node, phrase_matcher, word_matcher};
@@ -176,6 +177,11 @@ enum Explainer<'a, V: SearchView> {
         must_not: Vec<Explainer<'a, V>>,
         filter: &'a [Filter],
         selected: Option<RoaringBitmap>,
+        /// The filters checked per document, when they can be and no selection was kept (ROADMAP 7.4.13): an
+        /// explanation reads a page's hits, not the whole column. Built the first time a hit reaches the `bool`,
+        /// from `checker`.
+        check: Option<Check<V::Keys<'a>>>,
+        checker: Option<&'a V>,
     },
     Scaled(Box<Explainer<'a, V>>, Scale),
     All,
@@ -208,14 +214,21 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 should,
                 must_not,
                 filter,
+                checks,
                 slot,
-            } => Self::Bool {
-                must: all(must)?,
-                should: all(should)?,
-                must_not: all(must_not)?,
-                filter,
-                selected: kept.and_then(|k| k.take(*slot)),
-            },
+            } => {
+                let selected = kept.and_then(|k| k.take(*slot));
+                let checker = (selected.is_none() && *checks && !filter.is_empty()).then_some(view);
+                Self::Bool {
+                    must: all(must)?,
+                    should: all(should)?,
+                    must_not: all(must_not)?,
+                    filter,
+                    selected,
+                    check: None,
+                    checker,
+                }
+            }
             Node::Scaled(inner, scale) => {
                 Self::Scaled(Box::new(Self::new(inner, view, kept)?), *scale)
             }
@@ -250,7 +263,25 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 must_not,
                 filter,
                 selected,
-            } => boolean(must, should, must_not, filter, selected, view, docid)?,
+                check,
+                checker,
+            } => {
+                if let Some(v) = checker.take() {
+                    *check = Some(Check::new(filter, v)?);
+                }
+                boolean(
+                    must,
+                    should,
+                    must_not,
+                    Filters {
+                        filter,
+                        selected,
+                        check: check.as_mut(),
+                    },
+                    view,
+                    docid,
+                )?
+            }
             Self::Scaled(inner, scale) => {
                 let Some(query) = inner.explain(view, docid)? else {
                     return Ok(None);
@@ -341,15 +372,26 @@ fn phrase<V: SearchView>(
     })))
 }
 
-fn boolean<V: SearchView>(
+/// A `bool`'s filters, as an explanation reads them: from the kept selection, by a check, or selected once now.
+struct Filters<'f, K> {
+    filter: &'f [Filter],
+    selected: &'f mut Option<RoaringBitmap>,
+    check: Option<&'f mut Check<K>>,
+}
+
+fn boolean<V: SearchView, K: KeyReader>(
     must: &mut [Explainer<'_, V>],
     should: &mut [Explainer<'_, V>],
     must_not: &mut [Explainer<'_, V>],
-    filter: &[Filter],
-    selected: &mut Option<RoaringBitmap>,
+    filters: Filters<'_, K>,
     view: &V,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
+    let Filters {
+        filter,
+        selected,
+        check,
+    } = filters;
     for clause in must_not.iter_mut() {
         if clause.explain(view, docid)?.is_some() {
             return Ok(None);
@@ -363,11 +405,13 @@ fn boolean<V: SearchView>(
         musts.push(e);
     }
     if !filter.is_empty() {
-        let docs = match selected {
-            Some(docs) => docs,
-            None => selected.insert(select(filter, view)?),
+        let passes = match (selected.as_ref(), check) {
+            (Some(docs), _) => docs.contains(docid),
+            // A selection holds live documents only; a check reads keys, which deleted documents keep.
+            (None, Some(check)) => view.is_live(docid) && check.passes(docid)?,
+            (None, None) => selected.insert(select(filter, view)?).contains(docid),
         };
-        if !docs.contains(docid) {
+        if !passes {
             return Ok(None);
         }
     }
@@ -438,8 +482,9 @@ mod tests {
         }
     }
 
-    /// `DOCS` documents with `n` = their docid; every 100th holds "red". The query: "red" with `n >= 1000`, and an
-    /// optional nested `bool` "blue" with `n >= 0` that no document matches.
+    /// `DOCS` documents with `n` = their docid; every second holds "red". The query: "red" with `n >= 1000`, and an
+    /// optional nested `bool` "blue" with `n >= 0` that no document matches. "red" matches half the documents, too
+    /// many to check `n` per candidate (ROADMAP 7.4.13): a search selects the filter's bitmap, and keeps it.
     fn fixture() -> (Arc<Segment>, SearchPlan) {
         let schema = SchemaBuilder::new("c")
             .field("body", FieldKind::Text(TextOptions::default()))
@@ -450,7 +495,7 @@ mod tests {
         let n = schema.field("n").unwrap().id();
         let mut b = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
         for i in 0..DOCS {
-            let text = if i % 100 == 0 { "red hat" } else { "green hat" };
+            let text = if i % 2 == 0 { "red hat" } else { "green hat" };
             let doc = Document::new(format!("d{i}"))
                 .with(body, Value::String(text.into()))
                 .with(n, Value::I64(i64::from(i)));
@@ -502,7 +547,7 @@ mod tests {
             100,
         )
         .unwrap();
-        assert_eq!(hits.len(), 20);
+        assert_eq!(hits.len(), 100);
         let docids: Vec<u32> = hits.iter().map(|h| h.docid).collect();
         let again = plan.explain_all(&view, &docids).unwrap();
         let explained = plan.explain_kept(&view, &docids, &kept).unwrap();
@@ -524,13 +569,14 @@ mod tests {
             plan.matcher_keeping(&view, Pruning::Exhaustive, &kept)
                 .unwrap(),
         );
-        // Selecting `n >= 1000` scans 3 000 keys: the readers look at their interrupts.
+        // Without a selection, `n >= 1000` reads only the hit's key, not the column (ROADMAP 7.4.13).
         let looks = Looks::default();
         let explained = plan
             .explain_all(&Interruptible::new(&view, &Steps::new(&looks)), &[1_000])
             .unwrap();
         assert!(explained[0].is_some());
-        assert!(looks.0.load(Ordering::Relaxed) >= 2);
+        // A scan of every one of the column's 3 000 keys would look at least twice.
+        assert!(looks.0.load(Ordering::Relaxed) < 2);
         // From the kept selection, a hit reads a few postings and no column.
         let looks = Looks::default();
         let kept_explained = plan

@@ -10,7 +10,7 @@ use core::cmp::Ordering;
 use super::request::RequestError;
 use super::{Matcher, Ticks, Watch};
 use crate::schema::{CollectionSchema, FieldId, FieldType};
-use crate::segment::{ReadError, SectionKind, SegmentCorruption};
+use crate::segment::{KeyBlock, ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeyReader, KeywordReader, SearchView};
 
 /// The most keys a [`Sort`] has (SPEC §7.4).
@@ -363,7 +363,10 @@ enum Reader<K, W> {
 }
 
 /// The best `k` matches of `matcher` in `view` by `sort`, best first, ties by docid; with `after`, only the matches
-/// ranking after the cursor's values (ties per [`Ties`]). `seen` is called with every match, in docid order.
+/// ranking after the cursor's values (ties per [`Ties`]). `seen`, if given, is called with every match, in docid order
+/// (a facet counts them). Without it, a sort whose first key is a column's (`missing: last`) skips the FOR blocks whose
+/// keys all rank after the worst of `k` kept hits (ROADMAP 7.5.6): their matches are not visited, and the score is read
+/// only for a match that enters the heap, unless a key needs it first.
 ///
 /// # Errors
 /// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes;
@@ -375,10 +378,9 @@ pub(crate) fn top_sorted<V: SearchView>(
     matcher: &mut (impl Matcher + ?Sized),
     k: usize,
     after: Option<(&[SortValue], Ties)>,
-    mut seen: impl FnMut(u32),
+    mut seen: Option<impl FnMut(u32)>,
     watch: &mut impl Watch,
 ) -> Result<Vec<SortedHit>, RequestError> {
-    // No bounds to prune a column sort by: only an interrupt matters.
     watch.check()?;
     let mut ticks = Ticks::default();
     let mut readers = sort
@@ -396,59 +398,167 @@ pub(crate) fn top_sorted<V: SearchView>(
         .collect::<Result<Vec<_>, ReadError>>()?;
     let mut heap = Heap::new(k);
     let mut scratch: Vec<Local> = Vec::with_capacity(sort.keys.len());
-    while let Some(docid) = matcher.next()? {
+    // A column sort reads the score only for a match that enters the heap; a key on the score needs it first.
+    let scores_first = sort.keys.iter().any(|&(_, kind)| kind == Kind::Score);
+    let lead = lead_column(sort).filter(|_| seen.is_none());
+    let only = sort.keys.len() == 1;
+    let mut bound: Option<KeyBlock> = None;
+    let mut unbounded = false;
+    let mut next = matcher.next()?;
+    while let Some(docid) = next {
         if ticks.due() {
             watch.check()?;
         }
-        seen(docid);
+        if let Some(seen) = seen.as_mut() {
+            seen(docid);
+        }
         if k == 0 {
+            next = matcher.next()?;
             continue;
         }
-        let score = matcher.score()? + 0.0;
-        scratch.clear();
-        for (&(key, _), reader) in sort.keys.iter().zip(&mut readers) {
-            scratch.push(match reader {
-                Reader::Score => Local::Score(score),
-                Reader::Keys(keys) => keys.key(docid)?.map_or(Local::Missing, Local::Num),
-                Reader::Keywords(words) => {
-                    let ords = words.ords(docid)?;
-                    let ord = match key.order() {
-                        Order::Asc => ords.first(),
-                        Order::Desc => ords.last(),
-                    };
-                    match ord.copied() {
-                        // Fail before the heap keeps the ord. Materializing the hit checks again.
-                        Some(ord) => {
-                            keyword_bytes(words, ord, key, docid)?;
-                            Local::Num(ord)
-                        }
-                        None => Local::Missing,
-                    }
-                }
-            });
-        }
-        if let Some((cursor, ties)) = after {
-            match compare_to_cursor(sort, &scratch, cursor, &readers, docid)? {
-                Ordering::Less => continue,
-                Ordering::Equal if !ties.admit(docid) => continue,
-                Ordering::Equal | Ordering::Greater => {}
+        // A FOR block whose keys all lose to the worst kept hit is skipped (ROADMAP 7.5.6); its bounds are read once.
+        if let Some(order) = lead
+            && let Some(&Local::Num(worst)) = heap.worst().and_then(|w| w.locals().first())
+            && let Some(Reader::Keys(keys)) = readers.first_mut()
+        {
+            if !unbounded && bound.is_none_or(|b| !(b.start..b.end).contains(&docid)) {
+                bound = keys.block(docid)?;
+                // A reader without bounds (the memtable, a `bool` column) has none for any document.
+                unbounded = bound.is_none();
+            }
+            if let Some(block) = bound.filter(|b| (b.start..b.end).contains(&docid))
+                && block_loses(order, only, block, worst)
+            {
+                next = matcher.advance(block.end)?;
+                continue;
             }
         }
-        // Docids ascend: a match tied with the worst kept one ranks after it.
-        if let Some(worst) = heap.worst()
-            && sort.compare_local(&scratch, worst.locals())? != Ordering::Less
-        {
-            continue;
-        }
-        // The values are copied into the entry. A push does not allocate a `Box<[Local]>`.
-        let entry = Entry::new(&scratch, docid, score);
-        heap.push(&entry, |a, b| rank(sort, a, b))?;
+        consider(
+            Considered {
+                sort,
+                docid,
+                scores_first,
+                after,
+            },
+            matcher,
+            &mut readers,
+            &mut scratch,
+            &mut heap,
+        )?;
+        next = matcher.next()?;
     }
+    finish(sort, heap, &readers)
+}
+
+/// The order of the first key when it is a column's and puts missing values last: a FOR block's bounds
+/// ([`KeyBlock`]) then bound every match of the block by it, those without a value ranking after every value.
+fn lead_column(sort: &Sort) -> Option<Order> {
+    match sort.keys.first() {
+        Some(&(
+            SortKey::Field {
+                order,
+                missing: Missing::Last,
+                ..
+            },
+            Kind::Column,
+        )) => Some(order),
+        _ => None,
+    }
+}
+
+/// Whether every match of `block` ranks after a kept hit whose first key is `worst`: its keys are all worse, or, when
+/// the sort has `only` that key, no better (a tie ranks after it by docid, which ascends in a view). A match without a
+/// value ranks last (`missing: last`).
+fn block_loses(order: Order, only: bool, block: KeyBlock, worst: u64) -> bool {
+    match order {
+        Order::Asc => block.min > worst || (only && block.min == worst),
+        Order::Desc => block.max < worst || (only && block.max == worst),
+    }
+}
+
+/// One match of [`top_sorted`] and what it is ranked with.
+#[derive(Clone, Copy)]
+struct Considered<'s> {
+    sort: &'s Sort,
+    docid: u32,
+    scores_first: bool,
+    after: Option<(&'s [SortValue], Ties)>,
+}
+
+/// Keeps the match `matcher` is on in `heap` if it ranks before the worst kept one (and after the cursor).
+fn consider<K: KeyReader, W: KeywordReader>(
+    c: Considered<'_>,
+    matcher: &mut (impl Matcher + ?Sized),
+    readers: &mut [Reader<K, W>],
+    scratch: &mut Vec<Local>,
+    heap: &mut Heap,
+) -> Result<(), RequestError> {
+    let Considered {
+        sort,
+        docid,
+        scores_first,
+        after,
+    } = c;
+    let score = if scores_first {
+        Some(matcher.score()? + 0.0)
+    } else {
+        None
+    };
+    scratch.clear();
+    for (&(key, _), reader) in sort.keys.iter().zip(readers.iter_mut()) {
+        scratch.push(match reader {
+            Reader::Score => Local::Score(score.unwrap_or(0.0)),
+            Reader::Keys(keys) => keys.key(docid)?.map_or(Local::Missing, Local::Num),
+            Reader::Keywords(words) => {
+                let ords = words.ords(docid)?;
+                let ord = match key.order() {
+                    Order::Asc => ords.first(),
+                    Order::Desc => ords.last(),
+                };
+                match ord.copied() {
+                    // Fail before the heap keeps the ord. Materializing the hit checks again.
+                    Some(ord) => {
+                        keyword_bytes(words, ord, key, docid)?;
+                        Local::Num(ord)
+                    }
+                    None => Local::Missing,
+                }
+            }
+        });
+    }
+    if let Some((cursor, ties)) = after {
+        match compare_to_cursor(sort, scratch, cursor, readers, docid)? {
+            Ordering::Less => return Ok(()),
+            Ordering::Equal if !ties.admit(docid) => return Ok(()),
+            Ordering::Equal | Ordering::Greater => {}
+        }
+    }
+    // Docids ascend: a match tied with the worst kept one ranks after it.
+    if let Some(worst) = heap.worst()
+        && sort.compare_local(scratch, worst.locals())? != Ordering::Less
+    {
+        return Ok(());
+    }
+    let score = match score {
+        Some(s) => s,
+        None => matcher.score()? + 0.0,
+    };
+    // The values are copied into the entry. A push does not allocate a `Box<[Local]>`.
+    let entry = Entry::new(scratch, docid, score);
+    heap.push(&entry, |a, b| rank(sort, a, b))
+}
+
+/// The hits of `heap`, best first, with their sort values.
+fn finish<K, W: KeywordReader>(
+    sort: &Sort,
+    heap: Heap,
+    readers: &[Reader<K, W>],
+) -> Result<Vec<SortedHit>, RequestError> {
     let entries = heap.into_sorted(sort)?;
     let mut hits = Vec::with_capacity(entries.len());
     for entry in entries {
         let mut values = Vec::with_capacity(usize::from(entry.len));
-        for ((local, reader), &(key, _)) in entry.locals().iter().zip(&readers).zip(&sort.keys) {
+        for ((local, reader), &(key, _)) in entry.locals().iter().zip(readers).zip(&sort.keys) {
             values.push(to_sort_value(*local, reader, key, entry.docid)?);
         }
         hits.push(SortedHit {
@@ -517,7 +627,7 @@ fn compare_to_cursor<K, W: KeywordReader>(
 }
 
 /// One kept hit. Sort values sit in the entry (`len` of them): a push copies the array and does not allocate.
-/// Column-sort pruning is ROADMAP 7.5.6 and is not this copy.
+/// Column-sort pruning (ROADMAP 7.5.6) skips whole FOR blocks before an entry is built.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
     values: [Local; MAX_SORT_KEYS],
@@ -696,6 +806,38 @@ fn locals_agree(entries: &[Entry]) -> bool {
 mod tests {
     use super::*;
     use crate::schema::{FieldKind, KeywordOptions, SchemaBuilder};
+
+    /// A block loses when every key in it ranks after the worst kept one; with one key, a tie loses too (ROADMAP 7.5.6).
+    #[test]
+    fn a_block_loses_only_when_no_key_in_it_can_rank_before_the_worst() {
+        let block = |min, max| KeyBlock {
+            start: 0,
+            end: 1024,
+            min,
+            max,
+        };
+        for (order, only, b, worst, loses) in [
+            (Order::Asc, true, block(10, 20), 9, true),
+            (Order::Asc, true, block(10, 20), 10, true),
+            (Order::Asc, false, block(10, 20), 10, false),
+            (Order::Asc, true, block(10, 20), 11, false),
+            (Order::Asc, true, block(0, u64::MAX), 0, true),
+            (Order::Asc, false, block(0, u64::MAX), 0, false),
+            (Order::Desc, true, block(10, 20), 21, true),
+            (Order::Desc, true, block(10, 20), 20, true),
+            (Order::Desc, false, block(10, 20), 20, false),
+            (Order::Desc, true, block(10, 20), 19, false),
+            (Order::Desc, true, block(0, u64::MAX), u64::MAX, true),
+            (Order::Desc, false, block(0, u64::MAX), u64::MAX, false),
+            (Order::Desc, true, block(0, u64::MAX), 5, false),
+        ] {
+            assert_eq!(
+                block_loses(order, only, b, worst),
+                loses,
+                "{order:?}, only {only}, {b:?}, worst {worst}"
+            );
+        }
+    }
 
     fn keyword_sort() -> (Sort, SortKey) {
         let schema = SchemaBuilder::new("c")

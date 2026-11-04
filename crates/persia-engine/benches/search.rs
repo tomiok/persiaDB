@@ -38,6 +38,11 @@ const DOCS: u64 = 50_000;
 /// Words `w0`.. `w199`, drawn skewed toward low numbers so lists range from long to short.
 const VOCABULARY: u64 = 200;
 
+/// Document `i`'s `at`: one second apart, from late 2023 (microseconds).
+fn time(i: u64) -> i64 {
+    1_700_000_000_000_000 + i64::try_from(i).unwrap() * 1_000_000
+}
+
 /// xorshift64*: a fixed seed, so every run indexes the same documents.
 struct Rng(u64);
 
@@ -56,8 +61,9 @@ impl Rng {
     }
 }
 
-/// The benchmark segment, its schema and the fields `body`, `price` and `tag`.
-fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 3]) {
+/// The benchmark segment, its schema and the fields `body`, `price`, `tag` and `at` (a datetime that grows with
+/// the docid, as an insertion time does, so its FOR blocks bound narrow ranges: ROADMAP 7.4.13, 7.5.6).
+fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 4]) {
     let schema = SchemaBuilder::new("bench")
         .field(
             "body",
@@ -67,12 +73,14 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 3]) {
             }),
         )
         .field("price", FieldKind::I64 { stored: false })
+        .field("at", FieldKind::Datetime { stored: false })
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .build()
         .unwrap();
     let body: FieldId = schema.field("body").unwrap().id();
     let price: FieldId = schema.field("price").unwrap().id();
     let tag: FieldId = schema.field("tag").unwrap().id();
+    let at: FieldId = schema.field("at").unwrap().id();
     let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     for i in 0..DOCS {
@@ -81,7 +89,8 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 3]) {
         let doc = Document::new(format!("d{i}"))
             .with(body, Value::String(text.join(" ")))
             .with(price, Value::I64(i64::try_from(rng.next() % 1000).unwrap()))
-            .with(tag, Value::String(format!("t{}", rng.next() % 10)));
+            .with(tag, Value::String(format!("t{}", rng.next() % 10)))
+            .with(at, Value::Datetime(time(i)));
         builder.add(&doc).unwrap();
     }
     let meta = SegmentMeta {
@@ -91,7 +100,7 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 3]) {
     };
     let bytes = SegmentWriter::new(&builder, meta).finish().unwrap();
     let segment = Arc::new(Segment::open(ByteSource::new(bytes.into()), &schema).unwrap());
-    (Arc::new(schema), segment, [body, price, tag])
+    (Arc::new(schema), segment, [body, price, tag, at])
 }
 
 fn bench(c: &mut Criterion) {
@@ -230,14 +239,15 @@ fn expansions(
 }
 
 /// A term under filters: `price < 100` selects about 10 %, `price < 500` about half, a `tag` about 10 %; and a
-/// filter alone.
+/// filter alone. `at` in its last 10 % selects whole FOR blocks (ROADMAP 7.4.13), and a rare term (`w150`, in about
+/// 5 % of the documents) is what a filter checked per candidate is for.
 fn filters(
     c: &mut Criterion,
     plan: &dyn Fn(&Query) -> SearchPlan,
     view: &SegmentView<'_>,
-    fields: [FieldId; 3],
+    fields: [FieldId; 4],
 ) {
-    let [body, price, tag] = fields;
+    let [body, price, tag, at] = fields;
     let term = Query::Term(TermQuery {
         field: body,
         term: "w3".into(),
@@ -258,11 +268,23 @@ fn filters(
         field: tag,
         value: FilterValue::Keyword("t3".into()),
     };
+    let recent = Filter::Range {
+        field: at,
+        lower: Bound::Included(FilterValue::Datetime(time(DOCS / 10 * 9))),
+        upper: Bound::Unbounded,
+    };
+    let rare = Query::Term(TermQuery {
+        field: body,
+        term: "w150".into(),
+    });
     let filters = [
         ("term/range_10pct", filtered(vec![term.clone()], below(100))),
         ("term/range_50pct", filtered(vec![term.clone()], below(500))),
-        ("term/keyword", filtered(vec![term], tagged)),
+        ("term/keyword", filtered(vec![term.clone()], tagged)),
         ("filter_only/range_10pct", filtered(vec![], below(100))),
+        ("term/recent_10pct", filtered(vec![term], recent.clone())),
+        ("filter_only/recent_10pct", filtered(vec![], recent)),
+        ("rare_term/range_10pct", filtered(vec![rare], below(100))),
     ];
     let mut group = c.benchmark_group("search_top10_filtered");
     for (name, query) in &filters {
@@ -275,8 +297,8 @@ fn filters(
 }
 
 /// A collection of the same documents, committed in `segments` segments, for whole requests (ROADMAP 7.5): its
-/// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`).
-fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 3]) {
+/// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`) and `at`.
+fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4]) {
     let schema = SchemaBuilder::new("bench")
         .field(
             "body",
@@ -286,6 +308,7 @@ fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 3
             }),
         )
         .field("price", FieldKind::I64 { stored: true })
+        .field("at", FieldKind::Datetime { stored: false })
         .field(
             "tag",
             FieldKind::Keyword(KeywordOptions {
@@ -296,7 +319,7 @@ fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 3
         .build()
         .unwrap();
     let id = |name| schema.field(name).unwrap().id();
-    let (body, price, tag) = (id("body"), id("price"), id("tag"));
+    let (body, price, tag, at) = (id("body"), id("price"), id("tag"), id("at"));
     let options = DatabaseOptions {
         clock: Arc::new(ManualClock::new(1_700_000_000_000_000)) as _,
         segment_ids: SegmentIds::seeded(1),
@@ -311,20 +334,22 @@ fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 3
         let doc = Document::new(format!("d{i}"))
             .with(body, Value::String(text.join(" ")))
             .with(price, Value::I64(i64::try_from(rng.next() % 1000).unwrap()))
-            .with(tag, Value::String(format!("t{}", rng.next() % 10)));
+            .with(tag, Value::String(format!("t{}", rng.next() % 10)))
+            .with(at, Value::Datetime(time(i)));
         db.put("bench", &doc, Durability::Buffered).unwrap();
         if (i + 1) % (DOCS / segments) == 0 {
             db.commit().unwrap();
         }
     }
     db.commit().unwrap();
-    (db, [body, price, tag])
+    (db, [body, price, tag, at])
 }
 
-/// Whole requests over a committed collection: 10 hits of a term by score (pruned) and by a column, a facet beside
-/// them (every match visited), and a deep page by cursor.
+/// Whole requests over a committed collection: 10 hits of a term by score (pruned), by a column of random values and
+/// by one that grows with the docid (oldest first: whole FOR blocks lose, ROADMAP 7.5.6; newest first: none can), a facet beside them (every
+/// match visited), and a deep page by cursor.
 fn requests(c: &mut Criterion) {
-    let (db, [body, price, tag]) = collection(1, false);
+    let (db, [body, price, tag, at]) = collection(1, false);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     let memtable = coll.memtable();
@@ -336,6 +361,8 @@ fn requests(c: &mut Criterion) {
     });
     let plan = SearchPlan::new(&query, schema, &coll.search_statistics(&memtable)).unwrap();
     let by_price = Sort::new([SortKey::field(price, Order::Asc)], schema).unwrap();
+    let newest = Sort::new([SortKey::field(at, Order::Desc)], schema).unwrap();
+    let oldest = Sort::new([SortKey::field(at, Order::Asc)], schema).unwrap();
     let facet = vec![FacetRequest::new(tag, 10, schema).unwrap()];
     let page = |sort: &Sort, facets: &[FacetRequest]| SearchRequest {
         sort: sort.clone(),
@@ -359,6 +386,8 @@ fn requests(c: &mut Criterion) {
     let requests = [
         ("score", page(&Sort::score(), &[])),
         ("sort_price", page(&by_price, &[])),
+        ("sort_newest", page(&newest, &[])),
+        ("sort_oldest", page(&oldest, &[])),
         ("score_facet", page(&Sort::score(), &facet)),
         (
             "sort_price_after_1000",
@@ -380,7 +409,7 @@ fn requests(c: &mut Criterion) {
 /// The same collection in 4 segments: 10 hits by score and by a column, the views on the calling thread and on rayon's
 /// global pool (ROADMAP 7.6.1).
 fn parallel(c: &mut Criterion) {
-    let (db, [body, price, _]) = collection(4, false);
+    let (db, [body, price, ..]) = collection(4, false);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     assert_eq!(coll.segments().len(), 4);
@@ -429,7 +458,7 @@ fn parallel(c: &mut Criterion) {
 /// explained (SPEC §7.7), and `explain_filtered` is `filtered` explained, one pass per view reusing the
 /// search's filter selection (ROADMAP 7.7.2, 7.7.3).
 fn suite(c: &mut Criterion) {
-    let (db, [body, price, tag]) = collection(4, true);
+    let (db, [body, price, tag, _]) = collection(4, true);
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     let memtable = coll.memtable();
@@ -534,7 +563,7 @@ fn suite(c: &mut Criterion) {
 /// documents and a memtable of 10 000 more, so every term is listed by five views, and `w1`'s 111 terms lose the cap
 /// of 50 to the memtable's counts too. Planning only: the expansion walk and its `df` lookups.
 fn collection_expansions(c: &mut Criterion) {
-    let (mut db, [body, price, tag]) = collection(4, false);
+    let (mut db, [body, price, tag, _]) = collection(4, false);
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     for i in 0..10_000 {
         let len = 5 + rng.next() % 30;

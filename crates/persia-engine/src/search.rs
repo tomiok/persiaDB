@@ -41,6 +41,7 @@
 
 mod block_max_wand;
 mod boolean;
+mod check;
 mod expand;
 mod explain;
 mod facet;
