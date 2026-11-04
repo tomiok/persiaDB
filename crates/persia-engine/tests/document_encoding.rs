@@ -1184,9 +1184,6 @@ fn encoded_id_rejects_hostile_headers_as_decode_does() {
     long_id.extend([0xf6, 0xa0, 0xa0]);
     let mut max_id = vec![0x85, 0x01, 0x79, 0x02, 0x00];
     max_id.extend(std::iter::repeat_n(b'i', MAX_ID_LEN));
-    // Over the limit is rejected before anything is read, even with a valid header in front.
-    let mut too_large = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
-    too_large.resize(MAX_DOCUMENT_LEN + 1, 0);
     let unexpected = |offset, expected, found| DecodeError::Corrupt {
         offset,
         reason: DocumentCorruption::Unexpected { expected, found },
@@ -1311,16 +1308,6 @@ fn encoded_id_rejects_hostile_headers_as_decode_does() {
                 reason: DocumentCorruption::NonCanonicalHead,
             },
         ),
-        (
-            "over MAX_DOCUMENT_LEN",
-            too_large,
-            DecodeError::Corrupt {
-                offset: 0,
-                reason: DocumentCorruption::TooLarge {
-                    len: MAX_DOCUMENT_LEN + 1,
-                },
-            },
-        ),
     ];
     for (name, bytes, want) in cases {
         assert_eq!(
@@ -1374,18 +1361,32 @@ fn encoded_id_does_not_read_past_the_id() {
             reason: DocumentCorruption::UnexpectedEof
         })
     );
-    // Garbage filling the input up to the limit still reads; one byte more is TooLarge first.
-    let mut big = header_and_id.to_vec();
+}
+
+/// `encoded_id` bounds its input at `MAX_DOCUMENT_LEN` as `decode` does (SPEC §6.4.2): garbage filling the input up
+/// to the limit after a valid header and id still reads; one byte more is `TooLarge` before anything is read.
+/// Its own test because each input is 16 MiB: `just miri` skips it (minutes to fill interpreted), the header
+/// tables above run there.
+#[test]
+fn encoded_id_bounds_the_input_at_max_document_len() {
+    let schema = all_types(false);
+    let too_large_at_0 = Err(DecodeError::Corrupt {
+        offset: 0,
+        reason: DocumentCorruption::TooLarge {
+            len: MAX_DOCUMENT_LEN + 1,
+        },
+    });
+    let mut big = vec![0x85, 0x01, 0x62, b'i', b'd'];
     big.resize(MAX_DOCUMENT_LEN, 0xff);
     assert_eq!(Document::encoded_id(&big), Ok("id".to_owned()));
     big.push(0xff);
+    assert_eq!(Document::encoded_id(&big), too_large_at_0);
+    // Over the limit is rejected before anything is read, even with a valid document in front.
+    let mut valid = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
+    valid.resize(MAX_DOCUMENT_LEN + 1, 0);
+    assert_eq!(Document::encoded_id(&valid), too_large_at_0);
     assert_eq!(
-        Document::encoded_id(&big),
-        Err(DecodeError::Corrupt {
-            offset: 0,
-            reason: DocumentCorruption::TooLarge {
-                len: MAX_DOCUMENT_LEN + 1
-            }
-        })
+        Document::decode(&valid, &schema).map(|d| d.id().to_owned()),
+        too_large_at_0
     );
 }
