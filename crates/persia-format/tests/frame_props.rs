@@ -14,7 +14,9 @@
 //!    more zeros appended. The scanner yields the frames left intact and ends `TornTail` at the first damaged
 //!    frame (or `Clean` if nothing changed), never `Corrupt`. Cuts strictly inside the magic or the low bytes of
 //!    `payload_len` are excluded: there a crash leaves non-zero bytes the model says cannot be followed by zeros
-//!    within one aligned field.
+//!    within one aligned field. The one exception is a CRC collision (about 2^-32 per damaged frame): when the
+//!    first damaged frame still passes validation, the scanner yields it as the reference reads it and ends in
+//!    the zeros after it.
 //! 4. Differential: on randomly mutated logs (bit flips, byte overwrites, field edits, truncation, zero fill,
 //!    appended garbage; CRCs optionally re-fixed so the padding, `reserved` and `flags` checks are reached) the
 //!    scanner yields the same frames and the same `ScanEnd` (variant, offset and error) as a naive reference
@@ -528,6 +530,32 @@ fn check_zero_filled_tails(specs: &[Spec], base: u64, grow: usize) -> Result<(),
             .take_while(|&&(s, e)| bytes[s..e] == log[s..e])
             .count();
         let (frames, end) = scan(&bytes, base);
+        // Unless the damaged frame still passes SPEC §4.4 validation: a cut before its `crc32c` leaves that field
+        // zero, and about one damaged frame in 2^32 also computes to zero. Such a frame is valid by definition (a
+        // 32-bit checksum's residual false accept), so the scan must yield it, read as the reference reads it,
+        // and end in the zeros after it.
+        if let Some((collided, collided_end)) = bounds
+            .get(intact)
+            .and_then(|&(s, _)| collided_frame(&bytes, base, s))
+        {
+            prop_assert_eq!(frames.len(), intact + 1, "cut {}", cut);
+            prop_assert_eq!(&frames[..intact], &full[..intact], "cut {}", cut);
+            prop_assert_eq!(RefFrame::of(&frames[intact]), collided, "cut {}", cut);
+            let at = base + collided_end as u64;
+            if collided_end == bytes.len() {
+                prop_assert_eq!(end, ScanEnd::Clean { offset: at }, "cut {}", cut);
+            } else {
+                let torn = matches!(end, ScanEnd::TornTail { offset, .. } if offset == at);
+                prop_assert!(
+                    torn,
+                    "cut {}: {:?}, expected a torn tail at {}",
+                    cut,
+                    end,
+                    at
+                );
+            }
+            continue;
+        }
         prop_assert_eq!(&frames[..], &full[..intact], "cut {}", cut);
         if intact == bounds.len() && grow == 0 {
             prop_assert_eq!(
@@ -551,6 +579,16 @@ fn check_zero_filled_tails(specs: &[Spec], base: u64, grow: usize) -> Result<(),
         }
     }
     Ok(())
+}
+
+/// The frame the naive reference reads at byte `s` of the damaged `bytes`, with its end, if one is valid there.
+fn collided_frame(bytes: &[u8], base: u64, s: usize) -> Option<(RefFrame, usize)> {
+    let frame = reference_scan(&bytes[s..], base + s as u64)
+        .0
+        .into_iter()
+        .next()?;
+    let end = s + ref_total_len(frame.stored.len() as u64) as usize;
+    Some((frame, end))
 }
 
 /// Invariant 4.
@@ -1141,5 +1179,52 @@ proptest! {
         }
         bytes.resize(bytes.len() + grow, 0);
         check_stream_matches_slice_scan(&bytes, base, chunk, mode)?;
+    }
+}
+
+/// Nightly run 41809845343 (`zero_filled_tail_is_torn_never_corrupt`, cc 89ccdeca...): zeroing this frame from
+/// byte 58 on (payload byte 34) also zeroes its `crc32c`, and the CRC of the zeroed `kind..padding` happens to be
+/// 0 too. The damaged frame is therefore valid under SPEC §4.4 and the scanner rightly yields it; invariant 3 must
+/// expect it rather than a torn tail.
+#[test]
+fn zero_filled_tail_whose_crc_collides_reads_as_a_valid_frame() {
+    // The proptest's minimal input; bytes past the cut do not matter (they are zeroed), so the shrinker left
+    // small values there.
+    let mut payload = vec![
+        126, 125, 118, 240, 62, 58, 128, 70, 169, 218, 181, 107, 149, 50, 51, 184, 63, 178, 111,
+        183, 225, 90, 220, 253, 84, 28, 89, 111, 125, 121, 38, 114, 201, 175,
+    ];
+    payload.resize(100, 0);
+    payload[59..].copy_from_slice(&[
+        1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 2, 0, 0, 0, 0, 2, 1, 0, 0, 0, 3, 0, 0, 0,
+        0, 3, 1, 0, 0, 0, 0, 0, 4, 4, 5,
+    ]);
+    let specs = vec![Spec {
+        kind: 5,
+        seq: 16_364_131_158_817_152_663,
+        payload,
+        compression: Compression::None,
+    }];
+    let (log, bounds) = encode_log(&specs);
+    assert_eq!(bounds, [(0, 136)]);
+    let mut damaged = log.clone();
+    damaged[58..].fill(0);
+    let crc_at = 24 + 104;
+    assert_eq!(
+        crc32c(&damaged[4..crc_at]),
+        0,
+        "the collision this test pins"
+    );
+    let (frames, end) = scan(&damaged, 12288);
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].stored_payload(), &damaged[24..124]);
+    assert_eq!(
+        end,
+        ScanEnd::Clean {
+            offset: 12288 + 136
+        }
+    );
+    for grow in [0, 8, 40] {
+        check_zero_filled_tails(&specs, 12288, grow).unwrap();
     }
 }
