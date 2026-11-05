@@ -12,6 +12,7 @@ use roaring::RoaringBitmap;
 
 use super::super::norms;
 use super::super::write::columns::{TAG_BOOL, TAG_KEYWORD, TAG_NUMERIC};
+use super::cache::Item;
 use super::error::{ReadError, SegmentCorruption};
 use super::stream::Stream;
 use crate::bitmap::Ascending;
@@ -974,30 +975,32 @@ impl BoolColumn {
     }
 }
 
-/// The values of a `keyword` field as doc values (SPEC §5.3.5): a dictionary, decoded when the column is opened, and
-/// per document the ordinals of its distinct values, ascending, read from their FOR blocks on demand.
+/// The values of a `keyword` field as doc values (SPEC §5.3.5): a dictionary, decoded and checked once per open
+/// segment while the block cache keeps it (ROADMAP 7.5.5), and per document the ordinals of its distinct values,
+/// ascending, read from their FOR blocks on demand.
 #[derive(Debug, Clone, Default)]
 pub struct KeywordColumn<'s> {
-    /// The values, back to back; value `i` ends at `value_ends[i]`.
-    values: Vec<u8>,
-    value_ends: Vec<usize>,
+    dictionary: Arc<KeywordDictionary>,
     /// `doc_count + 1` starts into `ords`, and the ords; `None` when no document has a value.
     lists: Option<(ForColumn<'s>, ForColumn<'s>)>,
 }
 
-impl<'s> KeywordColumn<'s> {
-    pub(super) fn read(
-        stream: Option<Stream<'s>>,
-        doc_count: u32,
-        strict: bool,
-    ) -> Result<Self, ReadError> {
-        let Some(stream) = stream else {
-            return Ok(Self::default());
-        };
-        let mut p = Parts::new(stream);
-        p.header(TAG_KEYWORD)?;
-        let starts_off = p.u64()?;
-        let ords_off = p.u64()?;
+/// A `keyword` column's distinct values in byte order, checked strictly increasing.
+#[derive(Debug, Default)]
+struct KeywordDictionary {
+    /// The values, back to back; value `i` ends at `value_ends[i]`.
+    values: Vec<u8>,
+    value_ends: Vec<usize>,
+}
+
+/// What a cached dictionary costs besides its bytes: the `Arc`, the two vectors' headers, and the cache entry.
+const DICTIONARY_OVERHEAD: u64 = 128;
+
+impl KeywordDictionary {
+    /// The dictionary at `p` (its count, the value ends, then the values), which must end at `end`; and what it
+    /// holds in memory, in bytes.
+    fn read(p: &mut Parts<'_>, end: u64) -> Result<(Self, u64), ReadError> {
+        let stream = p.stream;
         let at = p.at;
         let count = p.u64()?;
         let remaining = stream.len().saturating_sub(p.at);
@@ -1028,9 +1031,47 @@ impl<'s> KeywordColumn<'s> {
             prev = Some(value);
             start = end;
         }
-        if p.at != starts_off {
+        if p.at != end {
             return Err(p.bad(at, "starts_off"));
         }
+        let held = values
+            .capacity()
+            .saturating_add(value_ends.capacity().saturating_mul(size_of::<usize>()));
+        let cost = u64::try_from(held)
+            .unwrap_or(u64::MAX)
+            .saturating_add(DICTIONARY_OVERHEAD);
+        Ok((Self { values, value_ends }, cost))
+    }
+}
+
+impl<'s> KeywordColumn<'s> {
+    pub(super) fn read(
+        stream: Option<Stream<'s>>,
+        doc_count: u32,
+        strict: bool,
+    ) -> Result<Self, ReadError> {
+        let Some(stream) = stream else {
+            return Ok(Self::default());
+        };
+        let mut p = Parts::new(stream);
+        p.header(TAG_KEYWORD)?;
+        let starts_off = p.u64()?;
+        let ords_off = p.u64()?;
+        // The dictionary spans the header to `starts_off`. A segment's bytes do not change, so one decoded and
+        // checked before is the same for this open segment; `verify` (strict) reads it again.
+        let at = p.at;
+        let mut dict = Parts { stream, at };
+        let dictionary = if strict {
+            Arc::new(KeywordDictionary::read(&mut dict, starts_off)?.0)
+        } else {
+            stream.cached_item(Item::KeywordDictionary, || {
+                KeywordDictionary::read(&mut dict, starts_off)
+            })?
+        };
+        let skip = starts_off
+            .checked_sub(p.at)
+            .ok_or_else(|| p.bad(p.at, "starts_off"))?;
+        p.skip(skip)?;
         let docs = u64::from(doc_count);
         let mut starts = ForColumn::open(&mut p, docs.saturating_add(1), strict)?;
         if p.at != ords_off {
@@ -1048,8 +1089,7 @@ impl<'s> KeywordColumn<'s> {
             ords.preload()?;
         }
         let column = Self {
-            values,
-            value_ends,
+            dictionary,
             lists: Some((starts, ords)),
         };
         if strict {
@@ -1062,23 +1102,24 @@ impl<'s> KeywordColumn<'s> {
 
     /// Number of distinct values.
     pub fn len(&self) -> u64 {
-        u64::try_from(self.value_ends.len()).unwrap_or(u64::MAX)
+        u64::try_from(self.dictionary.value_ends.len()).unwrap_or(u64::MAX)
     }
 
     /// Whether no document has a value.
     pub fn is_empty(&self) -> bool {
-        self.value_ends.is_empty()
+        self.dictionary.value_ends.is_empty()
     }
 
     /// The value with ordinal `ord` (its rank in byte order).
     pub fn value(&self, ord: u64) -> Option<&[u8]> {
         let i = usize::try_from(ord).ok()?;
-        let end = *self.value_ends.get(i)?;
+        let dictionary = &*self.dictionary;
+        let end = *dictionary.value_ends.get(i)?;
         let start = match i.checked_sub(1) {
-            Some(p) => *self.value_ends.get(p)?,
+            Some(p) => *dictionary.value_ends.get(p)?,
             None => 0,
         };
-        self.values.get(start..end)
+        dictionary.values.get(start..end)
     }
 
     /// The ordinal of `value`, if a document has it.
@@ -1486,6 +1527,72 @@ mod tests {
 
     /// `n` by FOR block (ROADMAP 7.4.13, 7.5.6): a narrow band, a band with absent values, the two ends of the key
     /// space (width 64), one constant (width 0), and a short last block of a band again.
+    /// A segment with `k` a keyword field of many distinct values, opened with `cache`.
+    fn keyword_segment(
+        cache: &Arc<crate::segment::BlockCache>,
+    ) -> (Segment, crate::schema::FieldId) {
+        let schema = SchemaBuilder::new("c")
+            .field("k", FieldKind::Keyword(KeywordOptions::default()))
+            .build()
+            .unwrap();
+        let k = schema.field("k").unwrap().id();
+        let mut builder = SegmentBuilder::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        for i in 0..300_u32 {
+            let values = vec![format!("v{:03}", i % 97), format!("w{:03}", i % 13)];
+            builder
+                .add(&Document::new(format!("d{i}")).with(k, Value::Strings(values)))
+                .unwrap();
+        }
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&builder, meta).finish().unwrap();
+        let source = ByteSource::new(bytes.into());
+        let segment = Segment::open_with_cache(source, &schema, Arc::clone(cache)).unwrap();
+        (segment, k)
+    }
+
+    /// ROADMAP 7.5.5: a keyword column's dictionary is decoded once per open segment while the block cache keeps it,
+    /// and the columns over it read as one decoded each time; a cache too small for it decodes it per open, and a
+    /// dropped segment's dictionary leaves the cache.
+    #[test]
+    fn a_keyword_dictionary_is_decoded_once_while_cached() {
+        let cache = Arc::new(crate::segment::BlockCache::new(1 << 20));
+        let (segment, k) = keyword_segment(&cache);
+        let first = segment.keyword_column(k).unwrap();
+        let again = segment.keyword_column(k).unwrap();
+        assert!(Arc::ptr_eq(&first.dictionary, &again.dictionary));
+        assert_eq!(first.len(), 97 + 13);
+        let strict = KeywordColumn::read(
+            segment.stream(SectionKind::Columns, k.get()).unwrap(),
+            segment.doc_count(),
+            true,
+        )
+        .unwrap();
+        // `verify`'s strict open reads its own copy, equal to the cached one.
+        assert!(!Arc::ptr_eq(&strict.dictionary, &first.dictionary));
+        for d in 0..segment.doc_count() {
+            assert_eq!(again.values(d).unwrap(), strict.values(d).unwrap(), "{d}");
+        }
+        let cached = cache.stats().bytes;
+        let dictionary_bytes = u64::try_from(first.dictionary.values.capacity()).unwrap();
+        assert!(cached >= dictionary_bytes, "{cached} cached");
+        drop((first, again, strict));
+        drop(segment);
+        assert_eq!(cache.stats().bytes, 0, "the segment's entries left with it");
+
+        let tiny = Arc::new(crate::segment::BlockCache::new(0));
+        let (segment, k) = keyword_segment(&tiny);
+        let a = segment.keyword_column(k).unwrap();
+        let b = segment.keyword_column(k).unwrap();
+        assert!(!Arc::ptr_eq(&a.dictionary, &b.dictionary));
+        for d in 0..segment.doc_count() {
+            assert_eq!(a.values(d).unwrap(), b.values(d).unwrap());
+        }
+    }
+
     fn banded(i: u32, state: &mut u64) -> Option<i64> {
         let r = i64::try_from(lcg(state) % 100).unwrap();
         match i / 1024 {

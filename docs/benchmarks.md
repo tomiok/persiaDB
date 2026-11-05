@@ -302,6 +302,26 @@ every row, and the check loses from 18 %.
 `search_top10_filtered` queries keep their path (`term/range_10pct` 550 → 537 µs, `term/range_50pct` 723 → 724 µs,
 `rare_term/range_10pct` 227 → 221 µs against main in the same session).
 
+`search_keyword_columns` (ROADMAP 7.5.5): 40 000 documents in 4 segments plus 5 000 in the memtable, each with its
+own `sku` (a `keyword` field, `facet: true`: every segment's dictionary holds 10 000 values), 10 hits of `w3` per
+request, a fresh memtable view and views each time, every view on the calling thread. Command: `cargo bench -p
+persia-engine --bench keyword_columns -- --warm-up-time 2 --measurement-time 5`. 2026-11-05, rustc 1.99.0, AMD
+Ryzen 5 3600, Linux; main run from a worktree with the same bench file, alternating, twice (both runs within 2 %).
+
+| Recorded | `sort_sku` | `score_facet_sku` | `sort_sku_facet_sku` | `sort_price` |
+|---|--:|--:|--:|--:|
+| ROADMAP 7.5.5 | 1.94 ms | 5.57 ms | 5.84 ms | 854 µs |
+| main before 7.4.15–7.5.5 | 2.48 ms | 5.94 ms | 7.67 ms | 996 µs |
+
+A segment's dictionary is decoded and checked once while the block cache keeps it (`keyword_column` on one of these
+segments: 115 µs per call before, 12 µs after), and a memtable view copies a field's keyword column and column keys
+once, so a sort and a facet over the same field share the copy. On rayon's pool (`views.search`) the memtable view
+is the slowest task, so the wall time moves less: `sort_sku_facet_sku` 7.28 → 5.29 ms, `score_facet_sku` 5.29 →
+4.60 ms, `sort_sku` 1.84–1.93 → 1.98–2.05 ms: about 4 % slower, not explained (its memtable view, copied once either
+way, sets the wall time; on the calling thread the same request is 21 % faster). The one-segment
+`search_request/sort_price` and `score_facet` (a `tag` of 10 values, an empty memtable) have no dictionary worth
+keeping: −0.6 % to +4 % against main over three runs, within this machine's noise.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54

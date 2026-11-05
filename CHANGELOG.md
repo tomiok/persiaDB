@@ -67,6 +67,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a view; with column filters only the share is now a third (was a quarter). Both are fitted on the new
   `search_top10_filtered_sweep` benchmark (`docs/benchmarks.md`); `search_top10_filtered/term/keyword_range_10pct`
   677 µs → 412 µs (ROADMAP 7.4.16; SPEC §7.3). Results are unchanged.
+- `persia-engine`: a segment's `keyword_column` dictionary is decoded and checked once while the block cache keeps
+  it (an entry beside the decoded blocks, bounded by the same capacity and dropped with the segment, SPEC §10.6), and
+  a `MemtableView` copies a field's keyword column and column keys once and shares the copy, as its norms. New
+  benchmark `keyword_columns`: a sort and a facet over a 10 000-value `keyword` field in 4 segments and a memtable,
+  7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed

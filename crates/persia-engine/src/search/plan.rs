@@ -744,6 +744,9 @@ struct Clauses<'a> {
 /// empty one matches every document. Filters select before anything is scored (SPEC §7.3) and score 0, so a
 /// threshold on the `bool` still reaches its one `must` clause, and the `should` clauses when there is no `must`
 /// (their score is the whole score). `should` beside `must` stays exhaustive (ROADMAP 7.4.8).
+// Not inlined into the recursive `build`: since its filters were split (ROADMAP 7.4.16), inlining it made `build`
+// large enough to slow requests that build no `bool` (a sorted `term`, `search_keyword_columns/sort_price` +10 %).
+#[inline(never)]
 fn build_bool<'a, V: SearchView>(
     clauses: Clauses<'a>,
     view: &'a V,

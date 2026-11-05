@@ -1,25 +1,38 @@
 //! Decoded blocks shared by every reader of a segment, and optionally of many segments (SPEC §10.6, ROADMAP 5.3.11):
 //! a block is decoded, and its CRC checked, once while it stays cached, however many term lookups, posting lists,
-//! columns and document fetches read it.
+//! columns and document fetches read it. A `keyword` column's decoded dictionary is kept the same way (ROADMAP 7.5.5).
 
+use std::any::Any;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::super::SectionKind;
 
-/// A cached block: which segment ([`super::Segment::open`] instance), section and block.
+/// A cached item: which segment ([`super::Segment::open`] instance), section, and what of it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
     segment: u64,
     kind: SectionKind,
     field: u32,
-    index: u32,
+    item: Item,
 }
+
+/// What of a section an entry holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(super) enum Item {
+    /// Block `index`, decoded.
+    Block(u32),
+    /// A `keyword` column's dictionary, decoded and checked (ROADMAP 7.5.5).
+    KeywordDictionary,
+}
+
+/// A cached value: a decoded block (`Vec<u8>`) or another decoded item.
+type Value = Arc<dyn Any + Send + Sync>;
 
 #[derive(Debug)]
 struct Entry {
-    block: Arc<Vec<u8>>,
+    value: Value,
     /// When it was last used; an [`State::order`] item with another tick is stale.
     tick: u64,
     cost: u64,
@@ -36,22 +49,22 @@ struct State {
 }
 
 impl State {
-    fn touch(&mut self, key: Key) -> Option<Arc<Vec<u8>>> {
+    fn touch(&mut self, key: Key) -> Option<Value> {
         let tick = self.tick;
         let entry = self.blocks.get_mut(&key)?;
         entry.tick = tick;
-        let block = Arc::clone(&entry.block);
+        let value = Arc::clone(&entry.value);
         self.tick = tick.wrapping_add(1);
         self.order.push_back((key, tick));
         self.compact();
-        Some(block)
+        Some(value)
     }
 
-    fn insert(&mut self, key: Key, block: Arc<Vec<u8>>, cost: u64, capacity: u64) {
+    fn insert(&mut self, key: Key, value: Value, cost: u64, capacity: u64) {
         let tick = self.tick;
         self.tick = tick.wrapping_add(1);
         self.bytes = self.bytes.saturating_add(cost);
-        self.blocks.insert(key, Entry { block, tick, cost });
+        self.blocks.insert(key, Entry { value, tick, cost });
         self.order.push_back((key, tick));
         while self.bytes > capacity {
             let Some((key, tick)) = self.order.pop_front() else {
@@ -90,7 +103,8 @@ pub struct CacheStats {
     pub bytes: u64,
 }
 
-/// A least-recently-used cache of decoded section blocks (SPEC §10.6), bounded in bytes.
+/// A least-recently-used cache of decoded section blocks, and of `keyword` column dictionaries (SPEC §10.6), bounded
+/// in bytes.
 ///
 /// Every open [`super::Segment`] reads its block-framed sections through one, which keeps at most its capacity, in
 /// decoded bytes, for all the segments that use it: the process-wide [`BlockCache::shared`] (of
@@ -183,29 +197,46 @@ impl BlockCache {
         (kind, field, index): (SectionKind, u32, u32),
         decode: impl FnOnce() -> Result<Vec<u8>, E>,
     ) -> Result<Arc<Vec<u8>>, E> {
+        self.get_item(segment, (kind, field, Item::Block(index)), || {
+            let block = decode()?;
+            let cost = u64::try_from(block.capacity()).unwrap_or(u64::MAX);
+            Ok((block, cost))
+        })
+    }
+
+    /// Item `item` of section `(kind, field)` of segment instance `segment`, decoded by `decode` on a miss with what
+    /// it costs in bytes. An item is always decoded as the same type, so a hit of another type (none) decodes again.
+    pub(super) fn get_item<T: Any + Send + Sync, E>(
+        &self,
+        segment: u64,
+        (kind, field, item): (SectionKind, u32, Item),
+        decode: impl FnOnce() -> Result<(T, u64), E>,
+    ) -> Result<Arc<T>, E> {
         let key = Key {
             segment,
             kind,
             field,
-            index,
+            item,
         };
-        if let Some(block) = self.lock().touch(key) {
+        let hit = self.lock().touch(key).and_then(|v| v.downcast::<T>().ok());
+        if let Some(value) = hit {
             self.hits.fetch_add(1, Ordering::Relaxed);
-            return Ok(block);
+            return Ok(value);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
-        let block = Arc::new(decode()?);
-        let cost = u64::try_from(block.capacity()).unwrap_or(u64::MAX);
+        let (value, cost) = decode()?;
+        let value = Arc::new(value);
         if cost > self.capacity {
-            return Ok(block);
+            return Ok(value);
         }
         let mut state = self.lock();
         // Another reader may have decoded it meanwhile: keep one copy.
-        if let Some(cached) = state.touch(key) {
+        if let Some(cached) = state.touch(key).and_then(|v| v.downcast::<T>().ok()) {
             return Ok(cached);
         }
-        state.insert(key, Arc::clone(&block), cost, self.capacity);
-        Ok(block)
+        let shared: Value = value.clone();
+        state.insert(key, shared, cost, self.capacity);
+        Ok(value)
     }
 
     /// Drops the blocks of segment instance `segment` (when it is dropped: nothing can read them again).

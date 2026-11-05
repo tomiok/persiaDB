@@ -2,13 +2,14 @@
 //! [`BlockCache`] (ROADMAP 5.3.11), or a range at a time through a [`Cursor`] that keeps the last block it read, so
 //! sequential reads (postings blocks, skip entries, runs that span blocks) look each block up once.
 
+use std::any::Any;
 use std::sync::Arc;
 
 use persia_format::Reader;
 use persia_format::block::{BlockReader, ValidatedTable};
 
 use super::super::SectionKind;
-use super::cache::BlockCache;
+use super::cache::{BlockCache, Item};
 use super::error::{ReadError, SegmentCorruption};
 
 /// A block-framed section whose block table was validated when the segment was opened.
@@ -69,6 +70,21 @@ impl<'s> Stream<'s> {
         Self {
             cache: Some((cache, segment)),
             ..self
+        }
+    }
+
+    /// Item `item` of this section from the segment's cache, decoded by `decode` (with what it costs in bytes) on a
+    /// miss, or on every call for a stream without a cache (ROADMAP 7.5.5).
+    pub(super) fn cached_item<T: Any + Send + Sync>(
+        &self,
+        item: Item,
+        decode: impl FnOnce() -> Result<(T, u64), ReadError>,
+    ) -> Result<Arc<T>, ReadError> {
+        match self.cache {
+            Some((cache, segment)) => {
+                cache.get_item(segment, (self.kind, self.field, item), decode)
+            }
+            None => decode().map(|(value, _)| Arc::new(value)),
         }
     }
 

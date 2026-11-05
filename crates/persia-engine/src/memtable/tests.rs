@@ -433,8 +433,15 @@ fn a_step_error_stops_each_chunked_copy() {
     // Past the postings, in the values.
     stopped(view.keywords_stepped(f.tag, &stop(3_001)).map(drop));
     stopped(view.norms_stepped(f.body, &stop(2)).map(drop));
-    // A stopped norms copy is not kept: the next one copies again.
+    // A stopped copy is not kept: the next one copies again, whole.
     assert!(view.norms_stepped(f.body, &|| Ok(())).is_ok());
+    let mut keys = view.keys_stepped(f.n, &|| Ok(())).unwrap();
+    assert_eq!(
+        keys.key(2_999).unwrap(),
+        Some(persia_format::for_codec::i64_to_key(2_999 % 7))
+    );
+    let words = view.keywords_stepped(f.tag, &|| Ok(())).unwrap();
+    assert!(words.len() > 0);
     mem.put(&chunked_doc(&f, "after", 1)).unwrap();
 }
 
@@ -489,4 +496,44 @@ fn a_hold_counts_its_copy_of_the_statistics() {
     assert!(held > before, "{held} <= {before}");
     mem.release();
     assert_eq!(mem.size_in_bytes(), before);
+}
+
+/// ROADMAP 7.5.5: a view copies a field's column keys and keyword column once; later reads (a sort, a facet, a
+/// filter check of the same view, or of a clone of it) share that copy and step no more.
+#[test]
+fn column_copies_are_kept_per_view() {
+    let f = chunked();
+    let mut mem = Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap();
+    for i in 0..3_000 {
+        mem.put(&chunked_doc(&f, &format!("d{i}"), i % 7)).unwrap();
+    }
+    let view = mem.view();
+    let steps = std::cell::Cell::new(0_u32);
+    let step = || {
+        steps.set(steps.get() + 1);
+        Ok(())
+    };
+    let mut keys = view.keys_stepped(f.n, &step).unwrap();
+    let mut words = view.keywords_stepped(f.tag, &step).unwrap();
+    assert!(steps.replace(0) > 0);
+    // Writes after the view change nothing it copied.
+    mem.put(&chunked_doc(&f, "d1", 6)).unwrap();
+    for view in [view.clone(), view] {
+        let mut again = view.keys_stepped(f.n, &step).unwrap();
+        let mut words_again = view.keywords_stepped(f.tag, &step).unwrap();
+        assert_eq!(steps.get(), 0);
+        assert_eq!(words_again.len(), words.len());
+        for docid in 0..3_000 {
+            assert_eq!(
+                again.key(docid).unwrap(),
+                keys.key(docid).unwrap(),
+                "{docid}"
+            );
+            assert_eq!(
+                words_again.ords(docid).unwrap(),
+                words.ords(docid).unwrap(),
+                "{docid}"
+            );
+        }
+    }
 }
