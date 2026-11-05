@@ -255,9 +255,12 @@ Time per query.
 |---|--:|--:|--:|--:|
 | 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.14) | 826 µs | 618 µs | 25.8 ms | 21.7 ms |
 | 2026-11-02, same machine and session, the commit before 7.4.14 | 3.59 ms | 2.31 ms | 25.1 ms | 21.0 ms |
+| 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.15) | 720 µs | 611 µs | 24.9 ms | 20.8 ms |
+| 2026-11-05, same machine and session, main before 7.4.15 | 838 µs | 620 µs | 26.7 ms | 21.8 ms |
 
-The one-segment queries are about 3 % slower: a term that loses the cap is no longer cached, so each run reads its
-`df` from the segment again (ROADMAP 7.4.15 reuses the segments' own counts).
+The 7.4.14 one-segment queries were about 3 % slower: a term that loses the cap is no longer cached, so each run read its
+`df` from the segment again. Since 7.4.15 the views' walks are merged and each term's `df` is the sum of their own counts,
+with no lookup, which takes back that 3 % and more.
 
 ## `persia-engine` relevance
 

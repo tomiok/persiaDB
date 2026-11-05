@@ -17,7 +17,7 @@ use crate::document::Document;
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::score::FieldHit;
-use crate::segment::{BlockMax, FieldStats, KeyBlock, Overlap, ReadError};
+use crate::segment::{BlockMax, FieldStats, KeyBlock, Overlap, ReadError, Segment};
 use crate::view::{KeyReader, KeywordReader, PostingsIterator, SearchView, TermEnum};
 
 /// How many steps a reader takes between two looks at its interrupts: a posting moved to, a block skipped, a term,
@@ -195,6 +195,10 @@ impl<V: SearchView> SearchView for Interruptible<'_, V> {
 
     fn as_memtable(&self) -> Option<&MemtableView> {
         self.view.as_memtable()
+    }
+
+    fn as_segment(&self) -> Option<&Segment> {
+        self.view.as_segment()
     }
 
     fn is_live(&self, docid: u32) -> bool {

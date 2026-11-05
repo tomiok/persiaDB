@@ -56,6 +56,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `expansion_kept`; `SearchView::as_memtable` names a memtable view, so a term walk over one (bare or interruptible)
   passes its counts. A `prefix` or `fuzzy` memoizes each distinct term's `df` while its bounded per-expansion cache has room, and avoids recounting a matching memtable view while cached,
   and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
+- `persia-engine` (breaking): `TermSource::each_term` merges the views' term walks and calls back once per term, in
+  byte order, with `stats::TermCounts` (the memtable view's count and the segments' summed `df`, `stats::SegmentsDf`)
+  instead of `Option<MemtableDf>`; `StatisticsProvider::expansion_df` takes those counts, and a `SegmentStatistics`
+  of exactly the walked segments adds them instead of looking each term up in every segment. New
+  `SearchView::as_segment` (default method). `search_top10_expansion/prefix` 26.7 ms → 24.9 ms, `fuzzy` 21.8 ms →
+  20.8 ms (ROADMAP 7.4.15). Results are unchanged.
 
 ### Fixed
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed

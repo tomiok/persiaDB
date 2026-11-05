@@ -56,6 +56,7 @@ mod top_k;
 mod word;
 
 pub use expand::{EachTerm, Expansion, TermSource};
+pub(crate) use expand::{TermWalk, each_merged_term};
 pub use explain::{Explanation, FieldExplanation, PhraseExplanation, WordExplanation};
 pub(crate) use facet::FacetCounter;
 pub use facet::{

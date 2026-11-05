@@ -313,6 +313,13 @@ pub trait SearchView {
         None
     }
 
+    /// The segment this view reads (bare, or through a search's interruptible view of it); `None` for the memtable.
+    /// Its [`Self::terms`] count each term's documents, deleted ones included, as the collection statistics do, which
+    /// a `prefix` or `fuzzy` hands to them instead of looking the term up again (ROADMAP 7.4.15).
+    fn as_segment(&self) -> Option<&Segment> {
+        None
+    }
+
     /// The documents below [`Self::doc_count`] a search may not return: deleted, or replaced in the memtable.
     ///
     /// # Errors
@@ -625,6 +632,10 @@ impl SearchView for SegmentView<'_> {
 
     fn doc_count(&self) -> u32 {
         self.segment.doc_count()
+    }
+
+    fn as_segment(&self) -> Option<&Segment> {
+        Some(self.segment)
     }
 
     fn is_live(&self, docid: u32) -> bool {

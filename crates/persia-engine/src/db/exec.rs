@@ -20,9 +20,10 @@ use super::views::CollectionViews;
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource,
-    Watch,
+    TermWalk, Watch, each_merged_term,
 };
 use crate::segment::ReadError;
+use crate::view::SegmentView;
 
 /// Where the views of a search run.
 #[derive(Debug, Clone, Default)]
@@ -276,15 +277,21 @@ impl TermSource for ExecTerms<'_> {
     ) -> Result<(), ReadError> {
         // Read once first: a walk shorter than one look stops too.
         self.exec.interrupt().map_err(ReadError::Interrupted)?;
-        // One count over every view: many views of few terms each still look. The memtable first, as
-        // `CollectionViews` walks it.
+        // One count over every view: many views of few terms each still look. Merged as `CollectionViews` merges.
         let steps = Steps::new(self.exec);
-        Interruptible::new(self.views.memtable(), &steps)
-            .each_term(field, lower, upper, expansion, each)?;
-        for segment in self.views.segments() {
-            Interruptible::new(&segment, &steps).each_term(field, lower, upper, expansion, each)?;
+        let segments: Vec<SegmentView<'_>> = self.views.segments().collect();
+        let memtable = Interruptible::new(self.views.memtable(), &steps);
+        let watched: Vec<_> = segments
+            .iter()
+            .map(|s| Interruptible::new(s, &steps))
+            .collect();
+        let range = (lower, upper);
+        let mut walks = Vec::with_capacity(watched.len().saturating_add(1));
+        walks.push(TermWalk::of(&memtable, field, range, expansion)?);
+        for segment in &watched {
+            walks.push(TermWalk::of(segment, field, range, expansion)?);
         }
-        Ok(())
+        each_merged_term(walks, each)
     }
 }
 

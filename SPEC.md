@@ -1180,7 +1180,10 @@ the term itself included: the optimal string alignment distance over Unicode sca
 a substitution, or a swap of two adjacent characters each count 1, and no character is edited twice). A byte of a
 term that is not part of valid UTF-8 counts as a character no query character equals. When more than
 `max_expansions` terms qualify, those with the highest collection `df` (§7.2: the `df` scoring uses, not a view's
-own) are kept, ties broken by byte order. With no term kept the query matches nothing. A plan without the views'
+own) are kept, ties broken by byte order. The views' term walks are merged in byte order and each term's `df` is
+the sum of the counts the views' walks give it (a segment's counts its deleted documents, as §7.2 does; the memtable
+its live ones), so planning does not look a term up in each view again (ROADMAP 7.4.14, 7.4.15); statistics over other
+segments than the views' (global ones, §11.5) look it up. With no term kept the query matches nothing. A plan without the views'
 terms (`SearchPlan::new`) rejects both.
 
 The terms kept are one query. Each is scored as a `term` (§7.2) with the same document frequency: the largest `df`
