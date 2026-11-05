@@ -16,11 +16,11 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use super::clock::Clock;
-use super::views::CollectionViews;
+use super::views::{CollectionViews, each_view_term};
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource,
-    TermWalk, Watch, each_merged_term,
+    Watch,
 };
 use crate::segment::ReadError;
 use crate::view::SegmentView;
@@ -285,13 +285,7 @@ impl TermSource for ExecTerms<'_> {
             .iter()
             .map(|s| Interruptible::new(s, &steps))
             .collect();
-        let range = (lower, upper);
-        let mut walks = Vec::with_capacity(watched.len().saturating_add(1));
-        walks.push(TermWalk::of(&memtable, field, range, expansion)?);
-        for segment in &watched {
-            walks.push(TermWalk::of(segment, field, range, expansion)?);
-        }
-        each_merged_term(walks, each)
+        each_view_term(&memtable, &watched, field, (lower, upper), expansion, each)
     }
 }
 

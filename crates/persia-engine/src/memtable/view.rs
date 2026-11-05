@@ -626,12 +626,28 @@ impl SearchView for MemtableView {
         mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
         // `f` runs without the lock, and a search's interrupts, which `f` reads, stop a scan of a large column
-        // (ROADMAP 7.6.5).
+        // (ROADMAP 7.6.5). A filter scan shares the copy a sort or a check of this view keeps (ROADMAP 7.5.5): it
+        // reads that copy when there is one, and keeps the one it makes when it reads the whole column.
+        let slot = slot(&self.keys, field);
+        if let Some(keys) = slot.and_then(OnceLock::get) {
+            for &(docid, key) in keys.entries() {
+                f(docid, key)?;
+            }
+            return Ok(());
+        }
+        let mut keys = Vec::new();
         self.copy_chunked(
             &|| Ok(()),
             |inner, from| self.column_chunk(inner, field, from),
-            |(docid, key)| f(docid, key),
-        )
+            |(docid, key)| {
+                keys.push((docid, key));
+                f(docid, key)
+            },
+        )?;
+        if let Some(cell) = slot {
+            cell.get_or_init(|| MemtableKeys::new(keys));
+        }
+        Ok(())
     }
 
     fn keys(&self, field: FieldId) -> Result<MemtableKeys, ReadError> {

@@ -219,14 +219,36 @@ impl TermSource for CollectionViews<'_> {
         each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
         let segments: Vec<SegmentView<'_>> = self.segments().collect();
-        let range = (lower, upper);
-        let mut walks = Vec::with_capacity(segments.len().saturating_add(1));
-        walks.push(TermWalk::of(self.memtable(), field, range, expansion)?);
-        for segment in &segments {
-            walks.push(TermWalk::of(segment, field, range, expansion)?);
-        }
-        each_merged_term(walks, each)
+        each_view_term(
+            self.memtable(),
+            &segments,
+            field,
+            (lower, upper),
+            expansion,
+            each,
+        )
     }
+}
+
+/// The terms of `memtable` and `segments` (a collection's views, bare or under a search's interrupts) merged, as
+/// [`TermSource::each_term`] passes them: what [`CollectionViews`] and [`super::exec::ExecTerms`] both walk.
+///
+/// # Errors
+/// As [`TermSource::each_term`].
+pub(super) fn each_view_term<M: SearchView, S: SearchView>(
+    memtable: &M,
+    segments: &[S],
+    field: FieldId,
+    range: (Bound<&[u8]>, Bound<&[u8]>),
+    expansion: &Expansion,
+    each: &mut EachTerm<'_>,
+) -> Result<(), ReadError> {
+    let mut walks = Vec::with_capacity(segments.len().saturating_add(1));
+    walks.push(TermWalk::of(memtable, field, range, expansion)?);
+    for segment in segments {
+        walks.push(TermWalk::of(segment, field, range, expansion)?);
+    }
+    each_merged_term(walks, each)
 }
 
 impl CollectionViews<'_> {

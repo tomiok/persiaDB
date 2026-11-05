@@ -29,6 +29,11 @@ impl MemtableKeys {
             at: 0,
         }
     }
+
+    /// The keys, `(docid, key)` in docid order.
+    pub(super) fn entries(&self) -> &[(u32, u64)] {
+        &self.keys
+    }
 }
 
 impl KeyReader for MemtableKeys {

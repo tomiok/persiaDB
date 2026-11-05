@@ -66,8 +66,9 @@ pub(super) fn checks(filter: &Filter, schema: &CollectionSchema) -> bool {
     }
 }
 
-/// Whether `cost` candidates over a view of `doc_count` documents should be checked one at a time: at most `1 / share`
-/// of them ([`check_share`]; 1 always, 0 never).
+/// Whether `cost` candidates over a view of `doc_count` documents should be checked one at a time: `cost * share <=
+/// doc_count` ([`check_share`]). Share 0 never checks; share 1 checks whenever `cost` is at most `doc_count`, which an
+/// OR's cost (the sum of its clauses') can pass.
 pub(super) fn per_candidate(cost: u64, doc_count: u32, share: u64) -> bool {
     share != 0 && cost.saturating_mul(share) <= u64::from(doc_count)
 }

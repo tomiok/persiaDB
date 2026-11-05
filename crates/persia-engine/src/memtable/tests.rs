@@ -440,8 +440,21 @@ fn a_step_error_stops_each_chunked_copy() {
         keys.key(2_999).unwrap(),
         Some(persia_format::for_codec::i64_to_key(2_999 % 7))
     );
-    let words = view.keywords_stepped(f.tag, &|| Ok(())).unwrap();
-    assert!(words.len() > 0);
+    // The whole column: `i % 7` gives tags `t01493` to `t01499`, and every document holds one.
+    let mut words = view.keywords_stepped(f.tag, &|| Ok(())).unwrap();
+    let values: Vec<Vec<u8>> = (0..words.len())
+        .map(|o| words.value(o).unwrap().to_vec())
+        .collect();
+    let want: Vec<Vec<u8>> = (1_493..=1_499)
+        .map(|t| format!("t{t:05}").into_bytes())
+        .collect();
+    assert_eq!(values, want);
+    for docid in 0..3_000 {
+        let tag = format!("t{:05}", 1_499 - docid % 7);
+        let ords = words.ords(docid).unwrap().to_vec();
+        assert_eq!(ords.len(), 1);
+        assert_eq!(words.value(ords[0]), Some(tag.as_bytes()));
+    }
     mem.put(&chunked_doc(&f, "after", 1)).unwrap();
 }
 
@@ -536,4 +549,50 @@ fn column_copies_are_kept_per_view() {
             );
         }
     }
+}
+
+/// ROADMAP 7.5.5: a filter scan of a column (`try_column_keys`) reads a view's kept copy of its keys, and keeps the
+/// copy it makes when it reads the whole column, so a later sort or check of the view copies nothing.
+#[test]
+fn a_column_scan_shares_the_views_copy() {
+    let f = chunked();
+    let mut mem = Memtable::new(&f.schema, &AnalyzerRegistry::builtin()).unwrap();
+    for i in 0..3_000 {
+        mem.put(&chunked_doc(&f, &format!("d{i}"), i % 7)).unwrap();
+    }
+    let scan = |view: &MemtableView| {
+        let mut seen = Vec::new();
+        view.try_column_keys(f.n, |docid, key| {
+            seen.push((docid, key));
+            Ok(())
+        })
+        .unwrap();
+        seen
+    };
+    let steps = std::cell::Cell::new(0_u32);
+    let step = || {
+        steps.set(steps.get() + 1);
+        Ok(())
+    };
+    // A scan first: the sort after it steps no more.
+    let view = mem.view();
+    let scanned = scan(&view);
+    assert_eq!(scanned.len(), 3_000);
+    let mut keys = view.keys_stepped(f.n, &step).unwrap();
+    assert_eq!(steps.replace(0), 0);
+    for &(docid, key) in &scanned {
+        assert_eq!(keys.key(docid).unwrap(), Some(key));
+    }
+    // A sort first: the scan after it reads its copy, not the memtable written since.
+    let view = mem.view();
+    view.keys_stepped(f.n, &step).unwrap();
+    mem.put(&chunked_doc(&f, "late", 5)).unwrap();
+    assert_eq!(scan(&view), scanned);
+    // A scan stopped by `f` keeps nothing: the next one reads the whole column.
+    let view = mem.view();
+    let stopped = view.try_column_keys(f.n, |_, _| {
+        Err(ReadError::Interrupted(crate::search::Interrupt::Cancelled))
+    });
+    assert!(stopped.is_err());
+    assert_eq!(scan(&view).len(), 3_001);
 }

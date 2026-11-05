@@ -1272,7 +1272,23 @@ fn mixed(
                 .filter(|(_, v)| v.holds("beta"))
                 .map(|(id, _)| id.clone()),
         );
-        prop_assert_eq!(page.hits.len(), found.len().min(100));
+        // Every match, the reference's documents; the page is the first 100 of them, as ranked.
+        let every = views.top_k(&nested_plan, all, Pruning::Exhaustive).unwrap();
+        prop_assert_eq!(
+            scored(c, memtable, &every)
+                .into_keys()
+                .collect::<BTreeSet<_>>(),
+            found.clone(),
+            "nested {:?} at share {}",
+            filters,
+            share
+        );
+        let paged: Vec<(Located, u64)> = page
+            .hits
+            .iter()
+            .map(|h| (h.location, h.score.to_bits()))
+            .collect();
+        prop_assert_eq!(paged, bits(&every[..every.len().min(100)]));
         for hit in &page.hits {
             let explained = hit.explanation.as_ref().map(|e| e.score().to_bits());
             prop_assert_eq!(explained, Some(hit.score.to_bits()), "{:?}", hit.location);
@@ -1310,12 +1326,13 @@ fn mixed_filters_select_what_the_reference_selects_at_every_share() {
                     }
                     Op::Commit => drop(db.commit().unwrap()),
                 }
-            }
-            let snapshot = db.snapshot();
-            let c = snapshot.collection("c").unwrap();
-            let memtable = c.memtable();
-            for word in ["common", "alpha"] {
-                mixed(c, &memtable, &model, &filters, word)?;
+                // After every operation: puts and upserts, deletes, and commits that flush the memtable.
+                let snapshot = db.snapshot();
+                let c = snapshot.collection("c").unwrap();
+                let memtable = c.memtable();
+                for word in ["common", "alpha"] {
+                    mixed(c, &memtable, &model, &filters, word)?;
+                }
             }
             Ok(())
         },

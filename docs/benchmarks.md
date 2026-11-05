@@ -326,8 +326,9 @@ segments: 115 µs per call before, 12 µs after, in a one-off timing loop of 100
 and a memtable view copies a field's keyword column and column keys
 once, so a sort and a facet over the same field share the copy. On rayon's pool (`views.search`) the memtable view
 is the slowest task, so the wall time moves less: `sort_sku_facet_sku` 7.28 → 5.29 ms, `score_facet_sku` 5.29 →
-4.60 ms, `sort_sku` 1.84–1.93 → 1.98–2.05 ms: about 4 % slower, not explained (its memtable view, copied once either
-way, sets the wall time; on the calling thread the same request is 21 % faster). The one-segment
+4.60 ms, `sort_sku` slower, not explained: 1.92 and 1.94 → 2.01 and 1.99 ms in the two alternating
+runs (3–5 %), and 1.84–1.93 → 1.98–2.05 ms over every run (up to 11 % between extremes). Its memtable view, copied
+once either way, sets the wall time; on the calling thread the same request is 21 % faster. The one-segment
 `search_request/sort_price` and `score_facet` (a `tag` of 10 values, an empty memtable) have no dictionary worth
 keeping: −0.6 % to +4 % against main over three runs, within this machine's noise.
 

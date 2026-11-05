@@ -64,7 +64,8 @@ pub(super) fn select<V: SearchView>(
     Ok(docs)
 }
 
-/// `docs` (live documents of `view`) narrowed to those every filter of `filters` selects.
+/// `docs` (documents of `view`; deleted ones may be in it, and stay unless a filter drops them) narrowed to those every
+/// filter of `filters` selects.
 ///
 /// # Errors
 /// As [`select`].
