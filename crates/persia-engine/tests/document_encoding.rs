@@ -1184,9 +1184,6 @@ fn encoded_id_rejects_hostile_headers_as_decode_does() {
     long_id.extend([0xf6, 0xa0, 0xa0]);
     let mut max_id = vec![0x85, 0x01, 0x79, 0x02, 0x00];
     max_id.extend(std::iter::repeat_n(b'i', MAX_ID_LEN));
-    // Over the limit is rejected before anything is read, even with a valid header in front.
-    let mut too_large = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
-    too_large.resize(MAX_DOCUMENT_LEN + 1, 0);
     let unexpected = |offset, expected, found| DecodeError::Corrupt {
         offset,
         reason: DocumentCorruption::Unexpected { expected, found },
@@ -1311,16 +1308,6 @@ fn encoded_id_rejects_hostile_headers_as_decode_does() {
                 reason: DocumentCorruption::NonCanonicalHead,
             },
         ),
-        (
-            "over MAX_DOCUMENT_LEN",
-            too_large,
-            DecodeError::Corrupt {
-                offset: 0,
-                reason: DocumentCorruption::TooLarge {
-                    len: MAX_DOCUMENT_LEN + 1,
-                },
-            },
-        ),
     ];
     for (name, bytes, want) in cases {
         assert_eq!(
@@ -1374,18 +1361,69 @@ fn encoded_id_does_not_read_past_the_id() {
             reason: DocumentCorruption::UnexpectedEof
         })
     );
-    // Garbage filling the input up to the limit still reads; one byte more is TooLarge first.
-    let mut big = header_and_id.to_vec();
+}
+
+/// `encoded_id` bounds its input at `MAX_DOCUMENT_LEN` as `decode` does (SPEC §6.4.2): garbage filling the input up
+/// to the limit after a valid header and id still reads; one byte more is `TooLarge` before anything is read.
+/// Its own test because each input is 16 MiB: `just miri` skips it (minutes to fill interpreted), the header
+/// tables above run there.
+#[test]
+fn encoded_id_bounds_the_input_at_max_document_len() {
+    let schema = all_types(false);
+    let too_large_at_0 = Err(DecodeError::Corrupt {
+        offset: 0,
+        reason: DocumentCorruption::TooLarge {
+            len: MAX_DOCUMENT_LEN + 1,
+        },
+    });
+    let mut big = vec![0x85, 0x01, 0x62, b'i', b'd'];
     big.resize(MAX_DOCUMENT_LEN, 0xff);
     assert_eq!(Document::encoded_id(&big), Ok("id".to_owned()));
     big.push(0xff);
+    assert_eq!(Document::encoded_id(&big), too_large_at_0);
+    // Over the limit is rejected before anything is read, even with a valid document in front.
+    let mut valid_then_zeros = vec![0x85, 0x01, 0x61, b'1', 0xf6, 0xa0, 0xa0];
+    valid_then_zeros.resize(MAX_DOCUMENT_LEN + 1, 0);
+    assert_eq!(Document::encoded_id(&valid_then_zeros), too_large_at_0);
     assert_eq!(
-        Document::encoded_id(&big),
-        Err(DecodeError::Corrupt {
-            offset: 0,
-            reason: DocumentCorruption::TooLarge {
-                len: MAX_DOCUMENT_LEN + 1
-            }
-        })
+        Document::decode(&valid_then_zeros, &schema).map(|d| d.id().to_owned()),
+        too_large_at_0
     );
+}
+
+/// Invariant 5 at every cut of one fixed document with every field type and extra fields, for both field sets: the
+/// deterministic twin of `the_id_reads_without_the_schema`, small enough for `just miri` (which skips proptests).
+#[test]
+fn encoded_id_matches_decode_at_every_cut_of_a_fixed_document() {
+    let schema = all_types(false);
+    let mut doc = Document::new("doc-1")
+        .with(id(&schema, "a"), Value::String("text".into()))
+        .with(
+            id(&schema, "b"),
+            Value::Strings(vec!["k1".into(), "k2".into()]),
+        )
+        .with(id(&schema, "c"), Value::I64(-257))
+        .with(id(&schema, "d"), Value::F64(0.5))
+        .with(id(&schema, "e"), Value::Bool(true))
+        .with(id(&schema, "f"), Value::Datetime(MAX_DATETIME))
+        .with(
+            id(&schema, "g"),
+            Value::Json(json!({"n": [1, null], "s": "x"})),
+        );
+    doc.insert_extra("extra", json!({"k": [true]}));
+    for set in [FieldSet::All, FieldSet::Stored] {
+        let bytes = doc.encode(&schema, set).unwrap();
+        assert_eq!(Document::encoded_id(&bytes), Ok("doc-1".to_owned()));
+        for cut in 0..bytes.len() {
+            let prefix = bytes.get(..cut).unwrap();
+            match Document::encoded_id(prefix) {
+                Ok(id) => assert_eq!(id, "doc-1", "{set:?} cut {cut}"),
+                Err(e) => assert_eq!(
+                    Err(e),
+                    Document::decode(prefix, &schema).map(|_| ()),
+                    "{set:?} cut {cut}"
+                ),
+            }
+        }
+    }
 }

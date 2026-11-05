@@ -6,6 +6,7 @@
 mod check_deps;
 mod fixtures;
 mod github_setup;
+mod miri_filters;
 mod progress;
 mod repo_checks;
 
@@ -20,6 +21,7 @@ commands:
   check-deps   enforce crate dependency rules (CLAUDE.md \"Architecture\", \"Dependencies\")
   progress     regenerate PROGRESS.md from ROADMAP.md [--record [--date YYYY-MM-DD] | --check]
   fixtures     write the current format version's golden fixtures in tests/fixtures/format/ [--check]
+  miri-filters check that `just miri`'s test filters and --skips match the tests they name
   github-setup create/update GitHub labels and milestones [--repo OWNER/NAME] [--apply]";
 
 fn main() -> ExitCode {
@@ -41,6 +43,7 @@ fn run() -> Result<bool> {
         Some("check-deps") => check_deps::run(&repo_root()?),
         Some("progress") => progress::run(&repo_root()?, rest),
         Some("fixtures") => fixtures::run(&repo_root()?, rest),
+        Some("miri-filters") => miri_filters::run(&repo_root()?),
         Some("github-setup") => github_setup::run(&repo_root()?, rest),
         _ => {
             eprintln!("{USAGE}");
