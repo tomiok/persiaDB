@@ -176,10 +176,12 @@ enum Explainer<'a, V: SearchView> {
         should: Vec<Explainer<'a, V>>,
         must_not: Vec<Explainer<'a, V>>,
         filter: &'a [Filter],
+        split: usize,
+        /// What the filters select: every one, or those before `split` when the others are checked.
         selected: Option<RoaringBitmap>,
-        /// The filters checked per document, when they can be and no selection was kept (ROADMAP 7.4.13): an
-        /// explanation reads a page's hits, not the whole column. Built the first time a hit reaches the `bool`,
-        /// from `checker`.
+        /// The column filters (`filter[split..]`) checked per document, unless a selection of every filter was
+        /// kept (ROADMAP 7.4.13, 7.4.16): an explanation reads a page's hits, not the whole column. Built the first
+        /// time a hit reaches the `bool`, from `checker`.
         check: Option<Check<V::Keys<'a>>>,
         checker: Option<&'a V>,
     },
@@ -214,16 +216,22 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 should,
                 must_not,
                 filter,
-                checks,
+                split,
                 slot,
             } => {
-                let selected = kept.and_then(|k| k.take(*slot));
-                let checker = (selected.is_none() && *checks && !filter.is_empty()).then_some(view);
+                let has_column = *split < filter.len();
+                // As the search read them: a kept selection of every filter, or of the postings ones beside a check
+                // of the column ones; with none kept, the column ones are checked whenever there are some.
+                let (selected, checker) = match kept.and_then(|k| k.take(*slot)) {
+                    Some((docs, checked)) => (Some(docs), (checked && has_column).then_some(view)),
+                    None => (None, has_column.then_some(view)),
+                };
                 Self::Bool {
                     must: all(must)?,
                     should: all(should)?,
                     must_not: all(must_not)?,
                     filter,
+                    split: *split,
                     selected,
                     check: None,
                     checker,
@@ -262,12 +270,13 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 should,
                 must_not,
                 filter,
+                split,
                 selected,
                 check,
                 checker,
             } => {
                 if let Some(v) = checker.take() {
-                    *check = Some(Check::new(filter, v)?);
+                    *check = Some(Check::new(filter.get(*split..).unwrap_or_default(), v)?);
                 }
                 boolean(
                     must,
@@ -275,6 +284,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                     must_not,
                     Filters {
                         filter,
+                        split: *split,
                         selected,
                         check: check.as_mut(),
                     },
@@ -372,9 +382,11 @@ fn phrase<V: SearchView>(
     })))
 }
 
-/// A `bool`'s filters, as an explanation reads them: from the kept selection, by a check, or selected once now.
+/// A `bool`'s filters, as an explanation reads them: from the kept selection, selected once now, or the column ones
+/// (`filter[split..]`) by a check beside either for the others.
 struct Filters<'f, K> {
     filter: &'f [Filter],
+    split: usize,
     selected: &'f mut Option<RoaringBitmap>,
     check: Option<&'f mut Check<K>>,
 }
@@ -389,6 +401,7 @@ fn boolean<V: SearchView, K: KeyReader>(
 ) -> Result<Option<Explanation>, ReadError> {
     let Filters {
         filter,
+        split,
         selected,
         check,
     } = filters;
@@ -405,11 +418,22 @@ fn boolean<V: SearchView, K: KeyReader>(
         musts.push(e);
     }
     if !filter.is_empty() {
-        let passes = match (selected.as_ref(), check) {
-            (Some(docs), _) => docs.contains(docid),
-            // A selection holds live documents only; a check reads keys, which deleted documents keep.
-            (None, Some(check)) => view.is_live(docid) && check.passes(docid)?,
-            (None, None) => selected.insert(select(filter, view)?).contains(docid),
+        let passes = match check {
+            Some(check) => {
+                // The postings filters from their selection, then the column ones by their keys.
+                let postings = filter.get(..split).unwrap_or_default();
+                let selected = match selected.as_ref() {
+                    Some(docs) => docs.contains(docid),
+                    // A selection holds live documents only; a check reads keys, which deleted documents keep.
+                    None if postings.is_empty() => view.is_live(docid),
+                    None => selected.insert(select(postings, view)?).contains(docid),
+                };
+                selected && check.passes(docid)?
+            }
+            None => match selected.as_ref() {
+                Some(docs) => docs.contains(docid),
+                None => selected.insert(select(filter, view)?).contains(docid),
+            },
         };
         if !passes {
             return Ok(None);
@@ -591,7 +615,7 @@ mod tests {
         // And it is that selection it reads: one without the document explains nothing. The root is planned after
         // the nested `bool`, so its slot is 1.
         let kept = Selections::default();
-        kept.keep(1, &RoaringBitmap::new());
+        kept.keep(1, &RoaringBitmap::new(), false);
         assert_eq!(plan.explain_kept(&view, &[1_000], &kept).unwrap(), [None]);
     }
 }

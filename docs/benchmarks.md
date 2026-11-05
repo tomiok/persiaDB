@@ -262,6 +262,46 @@ The 7.4.14 one-segment queries were about 3 % slower: a term that loses the cap 
 `df` from the segment again. Since 7.4.15 the views' walks are merged and each term's `df` is the sum of their own counts,
 with no lookup, which takes back that 3 % and more.
 
+`search_top10_filtered_sweep` (ROADMAP 7.4.16): the sweep the per-candidate check shares are fitted on (SPEC §7.3).
+Top 10 over the single segment of 50 000 documents, a `must` clause from rare to frequent (one word, then `w0` OR
+another word, then `w0 OR w1 OR w2 [OR w3]`) under `price < 100` (10 %) alone and beside the `keyword` `tag = t3`
+(10 %), the column filter selected as a bitmap (share 0, what a `bool` with a `keyword` filter did before 7.4.16) or
+checked per candidate (share 1). The cost is the `must` clause's estimate, the per mille of the view the threshold
+compares (a disjunction's sums its words' `df`s). Command: `cargo bench -p persia-engine --bench search --
+search_top10_filtered_sweep --warm-up-time 1 --measurement-time 2`. 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux.
+Time per query; **bold** is the faster.
+
+| `must` | cost ‰ | `range` bitmap | `range` check | `keyword` + `range` bitmap | `keyword` + `range` check |
+|---|--:|--:|--:|--:|--:|
+| `w199` | 0 | 516 µs | **51.7 µs** | 589 µs | **82.8 µs** |
+| `w170` | 28 | 575 µs | **181 µs** | 611 µs | **223 µs** |
+| `w140` | 56 | 626 µs | **275 µs** | 631 µs | **284 µs** |
+| `w110` | 83 | 663 µs | **343 µs** | 656 µs | **322 µs** |
+| `w80` | 107 | 723 µs | **404 µs** | 661 µs | **357 µs** |
+| `w50` | 134 | 725 µs | **481 µs** | 647 µs | **377 µs** |
+| `w25` | 155 | 755 µs | **545 µs** | 656 µs | **386 µs** |
+| `w10` | 168 | 794 µs | **595 µs** | 685 µs | **412 µs** |
+| `w0` | 173 | 800 µs | **608 µs** | 664 µs | **414 µs** |
+| `w0 OR w190` | 181 | 736 µs | **419 µs** | **734 µs** | 754 µs |
+| `w0 OR w120` | 247 | 1.05 ms | **806 µs** | **755 µs** | 918 µs |
+| `w0 OR w60` | 298 | 1.20 ms | **1.09 ms** | **771 µs** | 975 µs |
+| `w0 OR w20` | 330 | 1.26 ms | **1.08 ms** | **796 µs** | 1.00 ms |
+| `w0 OR w1` | 345 | 1.29 ms | **1.20 ms** | **828 µs** | 1.00 ms |
+| `w0 OR w1 OR w2` | 516 | **1.82 ms** | 2.13 ms | **919 µs** | 1.47 ms |
+| `w0 OR … OR w3` | 687 | **2.23 ms** | 3.14 ms | **1.02 ms** | 1.88 ms |
+
+With column filters alone a check wins up to about 35 % of the view and loses from 50 %: `CHECK_SHARE` is 3 (a
+third; 7.4.13's first guess was a quarter). Beside a `keyword` filter its bitmap is selected either way and narrows
+the candidates, but a check leaves the `must` clause walking its matches among the `keyword`'s 10 % rather than
+among the 1 % of both filters: a check wins up to about 18 %, so `CHECK_SHARE_BESIDE_POSTINGS` is 5 (a fifth). The
+deciding cost is the `must` clause's, not the candidates the `keyword` bitmap leaves: those are at most 10 % here at
+every row, and the check loses from 18 %.
+
+`search_top10_filtered/term/keyword_range_10pct` (`w3` under `tag = t3` and `price < 100`), same machine and session:
+412 µs at the fitted share; 677 µs with both filters as one bitmap (`…/bitmap`, as before 7.4.16). The other
+`search_top10_filtered` queries keep their path (`term/range_10pct` 550 → 537 µs, `term/range_50pct` 723 → 724 µs,
+`rare_term/range_10pct` 227 → 221 µs against main in the same session).
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54

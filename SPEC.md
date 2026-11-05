@@ -1333,10 +1333,13 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the deleted ones are then left out, so no filter selects one. A segment scans a numeric or `datetime` column's keys
   by FOR block (§5.2.1): a block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter
   selects is not decoded (it is still read and checked as a FOR block), and one whose bounds the filter selects whole
-  selects its documents with a value without decoding their keys. A `bool` whose filters all read only column keys
+  selects its documents with a value without decoding their keys. A `bool`'s filters that read only column keys
   (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool` field, and `and`, `or`, `not` of those)
-  checks them per candidate instead, as column predicates, when its `must` clauses match at most a quarter of the
-  view's documents (by their cost estimate); the documents and scores are the same either way. A segment's tombstones
+  may be checked per candidate instead, as column predicates, when its `must` clauses match few of the view's
+  documents (by their cost estimate): at most a third with no other filter, at most a fifth beside filters that read
+  postings, norms or ords, which are then selected as a bitmap and the column ones checked among its documents
+  (ROADMAP 7.4.13, 7.4.16; the shares are fitted on a benchmark sweep, `docs/benchmarks.md`). The documents and
+  scores are the same either way. A segment's tombstones
   are excluded by its postings iterator before a document is scored or offered to the top-k collector, so a deleted
   document cannot enter the heap or raise the competitive threshold. Block upper bounds may still cover deleted
   documents; that only loosens pruning.

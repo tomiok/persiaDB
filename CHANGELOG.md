@@ -62,6 +62,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   of exactly the walked segments adds them instead of looking each term up in every segment. New
   `SearchView::as_segment` (default method). `search_top10_expansion/prefix` 26.7 ms → 24.9 ms, `fuzzy` 21.8 ms →
   20.8 ms (ROADMAP 7.4.15). Results are unchanged.
+- `persia-engine`: a `bool` with a `keyword` filter beside column filters (a `range`, numeric `term`s) selects the
+  `keyword` one as a bitmap and checks the column ones per candidate when its `must` clauses match at most a fifth of
+  a view; with column filters only the share is now a third (was a quarter). Both are fitted on the new
+  `search_top10_filtered_sweep` benchmark (`docs/benchmarks.md`); `search_top10_filtered/term/keyword_range_10pct`
+  677 µs → 412 µs (ROADMAP 7.4.16; SPEC §7.3). Results are unchanged.
 
 ### Fixed
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed

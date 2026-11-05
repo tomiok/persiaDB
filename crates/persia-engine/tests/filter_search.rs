@@ -6,6 +6,9 @@
 //! 2. A filter scores 0: a filtered query scores each document it matches as the same query without the filter.
 //! 3. With a filter, `should` clauses are optional (SPEC §7.1): every selected document matches.
 //! 4. Pruned and exhaustive top-k are the same hits, scores bit for bit (SPEC §7.3).
+//! 5. Several filters, some read from postings and some from column keys, select and score the same at every check
+//!    share: a bitmap of all of them, or of the postings ones with the column ones checked per candidate (ROADMAP
+//!    7.4.16), and explanations score each hit as the search did.
 
 #![allow(
     clippy::unwrap_used,
@@ -1165,4 +1168,259 @@ fn a_rare_must_checks_its_filters_per_candidate_without_a_scan() {
         ..common
     }));
     assert!(scanned > alone, "{scanned} reads filtered, {alone} alone");
+}
+
+/// The check shares a test runs a plan at (ROADMAP 7.4.16): never check, always check, the fitted one, and one so
+/// low only the rarest candidates are checked.
+const SHARES: [u64; 4] = [0, 1, 4, 1_000];
+
+/// Invariant 5: a `must` of `word` under every filter of `filters`, planned at every share of [`SHARES`]: the
+/// reference's documents, scored as without the filters, the same hits under every pruning strategy and share, and
+/// explained as scored.
+fn mixed(
+    c: &CollectionSnapshot,
+    memtable: &MemtableView,
+    model: &BTreeMap<String, Values>,
+    filters: &[Filter],
+    word: &str,
+) -> Result<(), TestCaseError> {
+    let stats = c.search_statistics(memtable);
+    let views = c.views(memtable).unwrap();
+    let all = model.len().max(1);
+    let must = BoolQuery {
+        must: vec![term(word)],
+        ..BoolQuery::default()
+    };
+    let unfiltered_plan = SearchPlan::new(&Query::Bool(must.clone()), c.schema(), &stats).unwrap();
+    let unfiltered = scored(
+        c,
+        memtable,
+        &views
+            .top_k(&unfiltered_plan, all, Pruning::Exhaustive)
+            .unwrap(),
+    );
+    let query = Query::Bool(BoolQuery {
+        filter: filters.to_vec(),
+        ..must
+    });
+    let want: BTreeSet<String> = model
+        .iter()
+        .filter(|(id, v)| {
+            v.holds(word) && filters.iter().all(|f| selects(f, &v.document(id), &SCHEMA))
+        })
+        .map(|(id, _)| id.clone())
+        .collect();
+    let bits = |hits: &[CollectionHit]| -> Vec<(Located, u64)> {
+        hits.iter()
+            .map(|h| (h.location, h.score.to_bits()))
+            .collect()
+    };
+    let mut first: Option<Vec<(Located, u64)>> = None;
+    for share in SHARES {
+        let plan = SearchPlan::new(&query, c.schema(), &stats)
+            .unwrap()
+            .with_check_share(share);
+        let exhaustive = views.top_k(&plan, all, Pruning::Exhaustive).unwrap();
+        let hits = scored(c, memtable, &exhaustive);
+        prop_assert_eq!(
+            hits.keys().cloned().collect::<BTreeSet<_>>(),
+            want.clone(),
+            "{:?} at share {}",
+            filters,
+            share
+        );
+        for (id, s) in &hits {
+            prop_assert_eq!(*s, unfiltered[id], "{}", id);
+        }
+        for pruning in STRATEGIES {
+            for k in [1, 3, all] {
+                let top = views.top_k(&plan, k, pruning).unwrap();
+                prop_assert_eq!(bits(&top), bits(&exhaustive[..k.min(exhaustive.len())]));
+            }
+        }
+        match &first {
+            Some(f) => prop_assert_eq!(f, &bits(&exhaustive), "share {}", share),
+            None => first = Some(bits(&exhaustive)),
+        }
+        let request = SearchRequest {
+            limit: 100,
+            explain: true,
+            ..SearchRequest::default()
+        };
+        let page = views.search(&plan, &request, Pruning::default()).unwrap();
+        prop_assert_eq!(page.hits.len(), exhaustive.len().min(100));
+        for hit in &page.hits {
+            let explained = hit.explanation.as_ref().map(|e| e.score().to_bits());
+            prop_assert_eq!(explained, Some(hit.score.to_bits()), "{:?}", hit.location);
+        }
+        // Nested beside a `should`: a hit of `beta` alone is explained without the filtered `bool`, so the
+        // explanation reads the filters as the search did (its kept selection, and its check).
+        let nested = Query::Bool(BoolQuery {
+            should: vec![query.clone(), term("beta")],
+            ..BoolQuery::default()
+        });
+        let nested_plan = SearchPlan::new(&nested, c.schema(), &stats)
+            .unwrap()
+            .with_check_share(share);
+        let page = views
+            .search(&nested_plan, &request, Pruning::default())
+            .unwrap();
+        let mut found = want.clone();
+        found.extend(
+            model
+                .iter()
+                .filter(|(_, v)| v.holds("beta"))
+                .map(|(id, _)| id.clone()),
+        );
+        prop_assert_eq!(page.hits.len(), found.len().min(100));
+        for hit in &page.hits {
+            let explained = hit.explanation.as_ref().map(|e| e.score().to_bits());
+            prop_assert_eq!(explained, Some(hit.score.to_bits()), "{:?}", hit.location);
+        }
+    }
+    Ok(())
+}
+
+/// Invariant 5 after every operation, over small collections: several random filters (`keyword` ones read postings),
+/// a frequent and a rare `must`.
+#[test]
+fn mixed_filters_select_what_the_reference_selects_at_every_share() {
+    let cases = if cfg!(feature = "slow") { 256 } else { 32 };
+    run(
+        "mixed_filters_select_what_the_reference_selects_at_every_share",
+        cases,
+        (
+            prop::collection::vec(op(), 1..16),
+            prop::collection::vec(filter(), 2..5),
+        ),
+        |(ops, filters)| {
+            let mut db = database();
+            let mut model = BTreeMap::<String, Values>::new();
+            for op in &ops {
+                match op {
+                    Op::Put(id, v) => {
+                        let id = format!("d{id}");
+                        db.put("c", &v.document(&id), Durability::Buffered).unwrap();
+                        model.insert(id, v.clone());
+                    }
+                    Op::Delete(id) => {
+                        let id = format!("d{id}");
+                        db.delete("c", &id, Durability::Buffered).unwrap();
+                        model.remove(&id);
+                    }
+                    Op::Commit => drop(db.commit().unwrap()),
+                }
+            }
+            let snapshot = db.snapshot();
+            let c = snapshot.collection("c").unwrap();
+            let memtable = c.memtable();
+            for word in ["common", "alpha"] {
+                mixed(c, &memtable, &model, &filters, word)?;
+            }
+            Ok(())
+        },
+    );
+}
+
+/// Invariant 5 over segments of several FOR blocks: a `keyword` filter beside column filters, fixed and random.
+#[test]
+fn mixed_filters_over_banded_blocks_select_what_the_reference_selects() {
+    let cases = if cfg!(feature = "slow") { 64 } else { 4 };
+    let (db, model) = &*MANY_BLOCKS;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let f = &*FIELDS;
+    let tag = |t: &str| Filter::Term {
+        field: f.tag,
+        value: FilterValue::Keyword(t.into()),
+    };
+    let fixed = vec![
+        tag("a"),
+        range(
+            f.n,
+            Bound::Included(FilterValue::I64(0)),
+            Bound::Included(FilterValue::I64(1)),
+        ),
+        Filter::Exists { field: f.at },
+    ];
+    for word in ["common", "alpha"] {
+        mixed(c, &memtable, model, &fixed, word).unwrap();
+    }
+    run(
+        "mixed_filters_over_banded_blocks_select_what_the_reference_selects",
+        cases,
+        (0..TAGS.len(), prop::collection::vec(filter(), 1..3)),
+        |(t, mut filters)| {
+            filters.push(tag(TAGS[t]));
+            for word in ["common", "alpha"] {
+                mixed(c, &memtable, model, &filters, word)?;
+            }
+            Ok(())
+        },
+    );
+}
+
+/// The per-candidate path runs beside a postings filter (ROADMAP 7.4.16): a rare `must` under a `keyword` filter and
+/// column filters reads about what it reads under the `keyword` filter alone, where a bitmap of the column filters
+/// reads the keys of every FOR block they cut.
+#[test]
+fn a_rare_must_checks_its_column_filters_beside_a_keyword_bitmap() {
+    use persia_engine::db::{Execution, Threads};
+    let (db, _) = &*MANY_BLOCKS;
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = &*FIELDS;
+    let reads = |query: &Query, share: u64| {
+        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable))
+            .unwrap()
+            .with_check_share(share);
+        let clock = Arc::new(CountingClock {
+            start: std::time::Instant::now(),
+            reads: std::sync::atomic::AtomicU64::new(0),
+        });
+        let far = clock.start + std::time::Duration::from_secs(3_600);
+        let exec = Execution::default()
+            .threads(Threads::Current)
+            .deadline(clock.clone(), far);
+        views.top_k_with(&plan, 10, &exec).unwrap();
+        clock.reads.load(std::sync::atomic::Ordering::Relaxed)
+    };
+    let keyword = Filter::Terms {
+        field: f.tag,
+        values: vec![
+            FilterValue::Keyword("a".into()),
+            FilterValue::Keyword("b".into()),
+        ],
+    };
+    let column = vec![
+        Filter::Terms {
+            field: f.n,
+            values: vec![FilterValue::I64(0), FilterValue::I64(1)],
+        },
+        Filter::Exists { field: f.at },
+    ];
+    let query = |word: &str, filters: Vec<Filter>| {
+        Query::Bool(BoolQuery {
+            must: vec![term(word)],
+            filter: filters,
+            ..BoolQuery::default()
+        })
+    };
+    let mut both = column.clone();
+    both.insert(1, keyword.clone());
+    let alone = reads(&query("alpha", vec![keyword.clone()]), 4);
+    let checked = reads(&query("alpha", both.clone()), 4);
+    assert!(
+        checked <= alone + 1,
+        "{checked} reads checked, {alone} keyword alone"
+    );
+    // Never checking selects the column filters' bitmap too.
+    let scanned = reads(&query("alpha", both), 0);
+    assert!(
+        scanned > checked,
+        "{scanned} reads scanned, {checked} checked"
+    );
 }
