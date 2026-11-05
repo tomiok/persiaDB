@@ -196,6 +196,12 @@ fn bench(c: &mut Criterion) {
         &view,
         fields,
     );
+    filter_sweep(
+        c,
+        &|q| SearchPlan::new(q, &schema, &stats).unwrap(),
+        &view,
+        fields,
+    );
 }
 
 /// Expanded at plan time over the segment's terms (7.4.12), then searched: `w1` starts 111 words, capped at 50; `w15`
@@ -280,11 +286,22 @@ fn filters(
     let filters = [
         ("term/range_10pct", filtered(vec![term.clone()], below(100))),
         ("term/range_50pct", filtered(vec![term.clone()], below(500))),
-        ("term/keyword", filtered(vec![term.clone()], tagged)),
+        ("term/keyword", filtered(vec![term.clone()], tagged.clone())),
         ("filter_only/range_10pct", filtered(vec![], below(100))),
-        ("term/recent_10pct", filtered(vec![term], recent.clone())),
+        (
+            "term/recent_10pct",
+            filtered(vec![term.clone()], recent.clone()),
+        ),
         ("filter_only/recent_10pct", filtered(vec![], recent)),
         ("rare_term/range_10pct", filtered(vec![rare], below(100))),
+        (
+            "term/keyword_range_10pct",
+            Query::Bool(BoolQuery {
+                must: vec![term.clone()],
+                filter: vec![tagged.clone(), below(100)],
+                ..BoolQuery::default()
+            }),
+        ),
     ];
     let mut group = c.benchmark_group("search_top10_filtered");
     for (name, query) in &filters {
@@ -293,9 +310,96 @@ fn filters(
             b.iter(|| black_box(plan.top_k(view, 10).unwrap()));
         });
     }
+    // The last one as before 7.4.16: both filters selected as one bitmap.
+    if let Some((name, query)) = filters.last() {
+        let plan = plan(query).with_check_share(0);
+        group.bench_function(format!("{name}/bitmap"), |b| {
+            b.iter(|| black_box(plan.top_k(view, 10).unwrap()));
+        });
+    }
     group.finish();
 }
 
+/// The per-candidate threshold's sweep (ROADMAP 7.4.16): `must` clauses from rare to frequent (single words, then
+/// disjunctions of the most common word with others), under `price < 100` alone and beside the `keyword` `tag = t3`,
+/// each with its column filter selected as a bitmap (`bitmap`, share 0) and checked per candidate (`check`, share 1).
+/// Each id names the `must`'s cost as a per mille of the view's documents. Where `check` stops winning fits the
+/// engine's check shares.
+fn filter_sweep(
+    c: &mut Criterion,
+    plan: &dyn Fn(&Query) -> SearchPlan,
+    view: &SegmentView<'_>,
+    fields: [FieldId; 4],
+) {
+    use persia_engine::search::Matcher;
+    use persia_engine::view::SearchView;
+    let [body, price, tag, _] = fields;
+    let term = |w: u64| {
+        Query::Term(TermQuery {
+            field: body,
+            term: format!("w{w}"),
+        })
+    };
+    let mut musts: Vec<Query> = [199, 170, 140, 110, 80, 50, 25, 10, 0]
+        .into_iter()
+        .map(term)
+        .collect();
+    for words in [
+        &[150, 190][..],
+        &[80, 190],
+        &[50, 150],
+        &[25, 120],
+        &[0, 190],
+        &[0, 120],
+        &[0, 60],
+        &[0, 20],
+        &[0, 1],
+        &[0, 1, 2],
+        &[0, 1, 2, 3],
+    ] {
+        musts.push(Query::Bool(BoolQuery {
+            should: words.iter().copied().map(term).collect(),
+            ..BoolQuery::default()
+        }));
+    }
+    let range = Filter::Range {
+        field: price,
+        lower: Bound::Unbounded,
+        upper: Bound::Excluded(FilterValue::I64(100)),
+    };
+    let keyword = Filter::Term {
+        field: tag,
+        value: FilterValue::Keyword("t3".into()),
+    };
+    let filters = [
+        ("range_10pct", vec![range.clone()]),
+        ("keyword_range_10pct", vec![keyword, range]),
+    ];
+    let mut group = c.benchmark_group("search_top10_filtered_sweep");
+    for must in &musts {
+        let cost = plan(must).matcher(view).unwrap().cost();
+        let per_mille = cost * 1000 / u64::from(view.doc_count());
+        let shape = if matches!(must, Query::Bool(_)) {
+            "or"
+        } else {
+            "term"
+        };
+        for (name, filter) in &filters {
+            let query = Query::Bool(BoolQuery {
+                must: vec![must.clone()],
+                filter: filter.clone(),
+                ..BoolQuery::default()
+            });
+            for (mode, share) in [("bitmap", 0), ("check", 1)] {
+                let plan = plan(&query).with_check_share(share);
+                group.bench_function(format!("{name}/{per_mille:04}/{shape}/{mode}"), |b| {
+                    b.iter(|| black_box(plan.top_k(view, 10).unwrap()));
+                });
+            }
+        }
+    }
+    group.finish();
+}
 /// A collection of the same documents, committed in `segments` segments, for whole requests (ROADMAP 7.5): its
 /// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`) and `at`.
 fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4]) {

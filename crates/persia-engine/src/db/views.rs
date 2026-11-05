@@ -20,7 +20,7 @@ use crate::memtable::MemtableView;
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, ExecError, Expansion, Interruptible, Pruning, SearchPlan, Steps, TermSource,
-    collect_where,
+    TermWalk, collect_where, each_merged_term,
 };
 use crate::segment::{ReadError, Tombstones};
 use crate::view::{SearchView, SegmentView};
@@ -207,8 +207,8 @@ impl CollectionSnapshot {
     }
 }
 
-/// The terms of the memtable, then of every segment: what a `prefix` or `fuzzy` planned for these views expands over
-/// ([`SearchPlan::with_terms`], SPEC §7.1). The memtable comes first with its own counts ([`TermSource::each_term`]).
+/// The terms of the memtable and of every segment, merged: what a `prefix` or `fuzzy` planned for these views expands
+/// over ([`SearchPlan::with_terms`], SPEC §7.1), each term once with every view's count ([`TermSource::each_term`]).
 impl TermSource for CollectionViews<'_> {
     fn each_term(
         &self,
@@ -218,13 +218,37 @@ impl TermSource for CollectionViews<'_> {
         expansion: &Expansion,
         each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
-        self.memtable()
-            .each_term(field, lower, upper, expansion, each)?;
-        for segment in self.segments() {
-            segment.each_term(field, lower, upper, expansion, each)?;
-        }
-        Ok(())
+        let segments: Vec<SegmentView<'_>> = self.segments().collect();
+        each_view_term(
+            self.memtable(),
+            &segments,
+            field,
+            (lower, upper),
+            expansion,
+            each,
+        )
     }
+}
+
+/// The terms of `memtable` and `segments` (a collection's views, bare or under a search's interrupts) merged, as
+/// [`TermSource::each_term`] passes them: what [`CollectionViews`] and [`super::exec::ExecTerms`] both walk.
+///
+/// # Errors
+/// As [`TermSource::each_term`].
+pub(super) fn each_view_term<M: SearchView, S: SearchView>(
+    memtable: &M,
+    segments: &[S],
+    field: FieldId,
+    range: (Bound<&[u8]>, Bound<&[u8]>),
+    expansion: &Expansion,
+    each: &mut EachTerm<'_>,
+) -> Result<(), ReadError> {
+    let mut walks = Vec::with_capacity(segments.len().saturating_add(1));
+    walks.push(TermWalk::of(memtable, field, range, expansion)?);
+    for segment in segments {
+        walks.push(TermWalk::of(segment, field, range, expansion)?);
+    }
+    each_merged_term(walks, each)
 }
 
 impl CollectionViews<'_> {

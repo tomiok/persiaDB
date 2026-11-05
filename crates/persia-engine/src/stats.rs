@@ -94,8 +94,8 @@ pub trait StatisticsProvider {
 
     /// As [`Self::df`], for a term a `prefix` or `fuzzy` ranks while it expands (SPEC §7.1, ROADMAP 7.4.14): most of
     /// them lose the `max_expansions` cap, so a cache does not keep the answer ([`Self::expansion_kept`] keeps the
-    /// winners). `memtable` is the memtable view's own count of the term when its term walk listed it; a provider
-    /// that adds that view adds this count instead of counting again.
+    /// winners). `counts` are what the views' own term walks counted ([`TermCounts`]): a provider that sums the same
+    /// views adds those counts instead of looking the term up in each view again (ROADMAP 7.4.15).
     ///
     /// # Errors
     /// As [`Self::df`].
@@ -103,7 +103,7 @@ pub trait StatisticsProvider {
         &self,
         field: FieldId,
         term: &[u8],
-        _memtable: Option<MemtableDf<'_>>,
+        _counts: TermCounts<'_>,
     ) -> Result<u64, ReadError> {
         self.df(field, term)
     }
@@ -140,6 +140,70 @@ impl<'a> MemtableDf<'a> {
     /// Its live documents holding the term.
     pub fn df(&self) -> u32 {
         self.df
+    }
+}
+
+/// The `df` of a term summed over the segments a merged term walk listed it in, and those segments: each segment's
+/// count from its own walk ([`SearchView::terms`]: every document holding it, deleted ones included, as [`Self::df`]
+/// of a [`SegmentStatistics`] counts). A walked segment that does not list a term in range holds none of it. It is the
+/// count of the field the expansion walks; only the engine's walk makes one, for the term it passes it with.
+#[derive(Debug, Clone, Copy)]
+pub struct SegmentsDf<'a> {
+    segments: &'a [&'a Segment],
+    df: u64,
+}
+
+impl<'a> SegmentsDf<'a> {
+    /// `df` over `segments`, as their walks counted it.
+    pub(crate) fn new(segments: &'a [&'a Segment], df: u64) -> Self {
+        Self { segments, df }
+    }
+
+    /// The segments walked, in walk order.
+    #[cfg(test)]
+    pub(crate) fn segments(&self) -> &'a [&'a Segment] {
+        self.segments
+    }
+
+    /// The documents of [`Self::segments`] holding the term.
+    pub fn df(&self) -> u64 {
+        self.df
+    }
+
+    /// Whether the walk covered exactly `segments`, in that order: its count is then their `df`.
+    fn covers(&self, segments: &[Arc<Segment>]) -> bool {
+        self.segments.len() == segments.len()
+            && self
+                .segments
+                .iter()
+                .zip(segments)
+                .all(|(walked, ours)| core::ptr::eq(*walked, Arc::as_ptr(ours)))
+    }
+}
+
+/// What the views' own term walks counted of a term an expansion ranks ([`StatisticsProvider::expansion_df`],
+/// ROADMAP 7.4.14, 7.4.15): the memtable view's live documents holding it, and the segments' documents. Only the
+/// engine's merged walk makes counts, so a provider can trust them for the views they name; the default names none.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct TermCounts<'a> {
+    memtable: Option<MemtableDf<'a>>,
+    segments: Option<SegmentsDf<'a>>,
+}
+
+impl<'a> TermCounts<'a> {
+    /// The counts of a walk of `memtable` and `segments`.
+    pub(crate) fn new(memtable: Option<MemtableDf<'a>>, segments: Option<SegmentsDf<'a>>) -> Self {
+        Self { memtable, segments }
+    }
+
+    /// The memtable view's count, when one was walked.
+    pub fn memtable(&self) -> Option<MemtableDf<'a>> {
+        self.memtable
+    }
+
+    /// The segments' count, when the walk knows which segments it covered.
+    pub fn segments(&self) -> Option<SegmentsDf<'a>> {
+        self.segments
     }
 }
 
@@ -277,11 +341,17 @@ impl StatisticsProvider for SegmentStatistics {
         &self,
         field: FieldId,
         term: &[u8],
-        _memtable: Option<MemtableDf<'_>>,
+        counts: TermCounts<'_>,
     ) -> Result<u64, ReadError> {
+        self.check_field(field)?;
+        // The walk counted every one of these segments: its sum is the answer, with no lookup (ROADMAP 7.4.15).
+        if let Some(walked) = counts.segments
+            && walked.covers(&self.segments)
+        {
+            return Ok(walked.df);
+        }
         // Read from the cache, never added to it: a term that loses the cap would take the place of one a later
         // search asks again.
-        self.check_field(field)?;
         match self.cached(field, term) {
             Some(df) => Ok(df),
             None => self.sum_df(field, term),
@@ -334,11 +404,13 @@ impl StatisticsProvider for SearchStatistics<'_> {
         &self,
         field: FieldId,
         term: &[u8],
-        memtable: Option<MemtableDf<'_>>,
+        counts: TermCounts<'_>,
     ) -> Result<u64, ReadError> {
-        let segments = self.segments.expansion_df(field, term, None)?;
+        let segments =
+            self.segments
+                .expansion_df(field, term, TermCounts::new(None, counts.segments))?;
         // The walk's count, when it is this view's: the same live documents `MemtableView::df` would walk again.
-        let memtable = match memtable {
+        let memtable = match counts.memtable {
             Some(m) if m.view.is_same_view(self.memtable) => m.df,
             _ => self.memtable.df(field, term)?,
         };
@@ -418,17 +490,32 @@ mod tests {
         let (schema, segment) = collection();
         let body = schema.field("body").unwrap().id();
         let stats = SegmentStatistics::new(&schema, &[segment]);
-        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 2);
-        assert_eq!(stats.expansion_df(body, b"aa", None).unwrap(), 1);
+        assert_eq!(
+            stats
+                .expansion_df(body, b"bb", TermCounts::default())
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            stats
+                .expansion_df(body, b"aa", TermCounts::default())
+                .unwrap(),
+            1
+        );
         assert_eq!(cached_terms(&stats), Vec::<Vec<u8>>::new());
         stats.expansion_kept(body, b"bb").unwrap();
         assert_eq!(cached_terms(&stats), [b"bb".to_vec()]);
         // Read from the cache once there.
-        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 2);
+        assert_eq!(
+            stats
+                .expansion_df(body, b"bb", TermCounts::default())
+                .unwrap(),
+            2
+        );
         // The field is checked as `df` checks it.
         let n = schema.field("n").unwrap().id();
         assert!(matches!(
-            stats.expansion_df(n, b"x", None),
+            stats.expansion_df(n, b"x", TermCounts::default()),
             Err(ReadError::FieldType { .. })
         ));
         assert!(matches!(
@@ -449,10 +536,15 @@ mod tests {
             .unwrap();
         let view = mem.view();
         let stats = SearchStatistics::new(&segments, &view);
-        assert_eq!(stats.expansion_df(body, b"bb", None).unwrap(), 3);
+        assert_eq!(
+            stats
+                .expansion_df(body, b"bb", TermCounts::default())
+                .unwrap(),
+            3
+        );
         let cloned = view.clone();
         // A count the walk gave this view is taken as it is (here a made-up 7, to see it used).
-        let given = |view| Some(MemtableDf::new(view, 7));
+        let given = |view| TermCounts::new(Some(MemtableDf::new(view, 7)), None);
         assert_eq!(stats.expansion_df(body, b"bb", given(&view)).unwrap(), 9);
         assert_eq!(stats.expansion_df(body, b"bb", given(&cloned)).unwrap(), 9);
         // Another view (a later cutoff, or another memtable) is counted here.
@@ -467,6 +559,48 @@ mod tests {
         stats.expansion_kept(body, b"bb").unwrap();
         assert_eq!(cached_terms(&segments), [b"bb".to_vec()]);
     }
+
+    /// ROADMAP 7.4.15: a walk's segment count is the answer when it covered exactly these segments, in order; any
+    /// other walk is looked up here. The made-up 7 shows which was used.
+    #[test]
+    fn an_expansion_takes_the_segments_count_of_the_same_segments_only() {
+        let (schema, a) = collection();
+        let (_, b) = collection();
+        let body = schema.field("body").unwrap().id();
+        let stats = SegmentStatistics::new(&schema, &[Arc::clone(&a), Arc::clone(&b)]);
+        let walked = |segments: &[&Segment]| {
+            stats.expansion_df(
+                body,
+                b"bb",
+                TermCounts::new(None, Some(SegmentsDf::new(segments, 7))),
+            )
+        };
+        assert_eq!(walked(&[&a, &b]).unwrap(), 7);
+        // Fewer, other or reordered segments: summed here (bb is in two documents of each).
+        assert_eq!(walked(&[&a]).unwrap(), 4);
+        assert_eq!(walked(&[&b, &a]).unwrap(), 4);
+        assert_eq!(walked(&[&a, &a]).unwrap(), 4);
+        assert_eq!(walked(&[]).unwrap(), 4);
+        // Still the field is checked first, and nothing enters the cache.
+        let n = schema.field("n").unwrap().id();
+        let ab: [&Segment; 2] = [&a, &b];
+        let counts = TermCounts::new(None, Some(SegmentsDf::new(&ab, 7)));
+        assert!(matches!(
+            stats.expansion_df(n, b"bb", counts),
+            Err(ReadError::FieldType { .. })
+        ));
+        assert_eq!(cached_terms(&stats), Vec::<Vec<u8>>::new());
+        // A search over the segments and a memtable passes the segment part on.
+        let mem = crate::memtable::Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let view = mem.view();
+        let search = SearchStatistics::new(&stats, &view);
+        let both = TermCounts::new(
+            Some(MemtableDf::new(&view, 1)),
+            Some(SegmentsDf::new(&ab, 7)),
+        );
+        assert_eq!(search.expansion_df(body, b"bb", both).unwrap(), 8);
+    }
+
     #[test]
     fn df_checks_the_field_with_or_without_segments() {
         let (schema, segment) = collection();

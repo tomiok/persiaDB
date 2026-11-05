@@ -7,28 +7,28 @@
 
 use core::cmp::Reverse;
 use core::ops::Bound;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
 use fst::Automaton;
 
+use crate::memtable::MemtableView;
 use crate::schema::FieldId;
-use crate::segment::ReadError;
-use crate::stats::{MemtableDf, StatisticsProvider};
+use crate::segment::{ReadError, SectionKind, Segment, SegmentCorruption};
+use crate::stats::{MemtableDf, SegmentsDf, StatisticsProvider, TermCounts};
 use crate::view::{SearchView, TermEnum};
 
-/// What [`TermSource::each_term`] calls with each term: its bytes, and the memtable view's count of it when that view
-/// listed it.
-pub type EachTerm<'e> = dyn FnMut(&[u8], Option<MemtableDf<'_>>) -> Result<(), ReadError> + 'e;
+/// What [`TermSource::each_term`] calls with each term: its bytes, and what the views' own walks counted of it.
+pub type EachTerm<'e> = dyn FnMut(&[u8], TermCounts<'_>) -> Result<(), ReadError> + 'e;
 
 /// The views a plan runs on, as a `prefix` or `fuzzy` expands over their terms (SPEC §7.1): a single view, or a
 /// collection's segments and memtable ([`crate::db::CollectionViews`]).
 pub trait TermSource {
-    /// Calls `each` with every term of the `text` or `keyword` field `field` between `lower` and `upper` (byte
-    /// order) that `expansion` accepts, view by view: a term comes once per view that lists it
-    /// ([`SearchView::terms`]). A term the memtable view lists comes with that view's count of it
-    /// ([`MemtableDf`], ROADMAP 7.4.14), so the statistics need not count it again; a collection walks its memtable
-    /// first, so the terms it shares with a segment are counted once.
+    /// Calls `each` once with every term of the `text` or `keyword` field `field` between `lower` and `upper` (byte
+    /// order) that `expansion` accepts in any view ([`SearchView::terms`]), in byte order, with what the views'
+    /// walks counted of it ([`TermCounts`]): the memtable view's live documents holding it (ROADMAP 7.4.14) and the
+    /// segments' documents (ROADMAP 7.4.15), so the statistics need not look it up in each view again. A source
+    /// that lists a term more than once has its `df` read each time.
     ///
     /// # Errors
     /// As [`SearchView::terms`]; what `each` returns.
@@ -51,13 +51,163 @@ impl<V: SearchView> TermSource for V {
         expansion: &Expansion,
         each: &mut EachTerm<'_>,
     ) -> Result<(), ReadError> {
-        // A memtable's walk counted each term's live documents: pass that on, so the statistics do not count again.
-        let memtable = self.as_memtable();
-        let mut terms = self.terms(field, lower, upper, expansion.clone())?;
-        while let Some((term, df)) = terms.next()? {
-            each(term, memtable.map(|m| MemtableDf::new(m, df)))?;
+        let walk = TermWalk::of(self, field, (lower, upper), expansion)?;
+        each_merged_term(vec![walk], each)
+    }
+}
+
+/// What a view in a merged term walk is: whose counts its walk gives.
+#[derive(Debug, Clone, Copy)]
+enum Walked<'a> {
+    Memtable(&'a MemtableView),
+    Segment(&'a Segment),
+    /// Neither: its counts are dropped, and the statistics look its terms up.
+    Other,
+}
+
+/// One view's terms in a merged walk ([`each_merged_term`]).
+pub(crate) struct TermWalk<'a> {
+    terms: Box<dyn TermEnum + 'a>,
+    walked: Walked<'a>,
+    /// The field walked, for the error of a walk out of order.
+    field: FieldId,
+}
+
+impl<'a> TermWalk<'a> {
+    /// The terms of `field` in `range` that `expansion` accepts in `view`.
+    ///
+    /// # Errors
+    /// As [`SearchView::terms`].
+    pub(crate) fn of<V: SearchView>(
+        view: &'a V,
+        field: FieldId,
+        (lower, upper): (Bound<&[u8]>, Bound<&[u8]>),
+        expansion: &Expansion,
+    ) -> Result<Self, ReadError> {
+        let walked = match (view.as_memtable(), view.as_segment()) {
+            (Some(memtable), _) => Walked::Memtable(memtable),
+            (None, Some(segment)) => Walked::Segment(segment),
+            (None, None) => Walked::Other,
+        };
+        let terms = view.terms(field, lower, upper, expansion.clone())?;
+        Ok(Self {
+            terms: Box::new(terms),
+            walked,
+            field,
+        })
+    }
+}
+
+/// Calls `each` once per term any of `walks` lists, in byte order, with the counts of the views that list it
+/// ([`TermSource::each_term`]): the walks are merged as they stream, so no term is looked up in a view again. A
+/// view that does not list a term in range holds none of it, so its count is 0: the counts are complete for the
+/// views walked. The memtable's is passed only when one memtable view is walked.
+///
+/// # Errors
+/// As [`TermEnum::next`]; what `each` returns; [`ReadError::Section`] when a walk lists a term after one not below it.
+pub(crate) fn each_merged_term(
+    mut walks: Vec<TermWalk<'_>>,
+    each: &mut EachTerm<'_>,
+) -> Result<(), ReadError> {
+    let mut memtables = walks.iter().filter_map(|w| match w.walked {
+        Walked::Memtable(m) => Some(m),
+        _ => None,
+    });
+    let memtable = match (memtables.next(), memtables.next()) {
+        (Some(m), None) => Some(m),
+        _ => None,
+    };
+    let segments: Vec<&Segment> = walks
+        .iter()
+        .filter_map(|w| match w.walked {
+            Walked::Segment(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let counts = |memtable_df: u32, segments_df: u64| {
+        TermCounts::new(
+            memtable.map(|m| MemtableDf::new(m, memtable_df)),
+            Some(SegmentsDf::new(&segments, segments_df)),
+        )
+    };
+    // One view (a single view, or a collection with only a memtable): its walk is the merge.
+    if let [walk] = walks.as_mut_slice() {
+        let (walked, field) = (walk.walked, walk.field);
+        let mut prev: Option<Vec<u8>> = None;
+        while let Some((term, df)) = walk.terms.next()? {
+            if prev.as_deref().is_some_and(|p| term <= p) {
+                return Err(out_of_order(field));
+            }
+            let last = prev.get_or_insert_with(Vec::new);
+            last.clear();
+            last.extend_from_slice(term);
+            match walked {
+                Walked::Memtable(_) => each(term, counts(df, 0))?,
+                Walked::Segment(_) => each(term, counts(0, u64::from(df)))?,
+                Walked::Other => each(term, counts(0, 0))?,
+            }
         }
-        Ok(())
+        return Ok(());
+    }
+    // Each walk's current term, the smallest first; ties by walk.
+    let mut heads = BinaryHeap::<Reverse<(Vec<u8>, usize, u32)>>::with_capacity(walks.len());
+    for (i, walk) in walks.iter_mut().enumerate() {
+        if let Some((term, df)) = walk.terms.next()? {
+            heads.push(Reverse((term.to_vec(), i, df)));
+        }
+    }
+    // Buffers of terms already passed, reused for the walks' next ones.
+    let mut spare: Vec<Vec<u8>> = Vec::new();
+    let mut listing: Vec<(usize, u32)> = Vec::with_capacity(walks.len());
+    while let Some(Reverse((term, first, df))) = heads.pop() {
+        listing.clear();
+        listing.push((first, df));
+        while heads
+            .peek()
+            .is_some_and(|Reverse((next, ..))| *next == term)
+        {
+            if let Some(Reverse((same, i, df))) = heads.pop() {
+                listing.push((i, df));
+                spare.push(same);
+            }
+        }
+        let (mut memtable_df, mut segments_df) = (0_u32, 0_u64);
+        for &(i, df) in &listing {
+            match walks.get(i).map(|w| w.walked) {
+                Some(Walked::Memtable(_)) => memtable_df = memtable_df.saturating_add(df),
+                Some(Walked::Segment(_)) => segments_df = segments_df.saturating_add(u64::from(df)),
+                _ => {}
+            }
+        }
+        each(&term, counts(memtable_df, segments_df))?;
+        for &(i, _) in &listing {
+            if let Some(walk) = walks.get_mut(i)
+                && let Some((next, df)) = walk.terms.next()?
+            {
+                // A walk lists each term once, ascending: one that does not would be merged with part of its count.
+                if next <= term.as_slice() {
+                    return Err(out_of_order(walk.field));
+                }
+                let mut bytes = spare.pop().unwrap_or_default();
+                bytes.clear();
+                bytes.extend_from_slice(next);
+                heads.push(Reverse((bytes, i, df)));
+            }
+        }
+        spare.push(term);
+    }
+    Ok(())
+}
+
+/// A view listed the terms of `field` out of byte order, or one twice: its dictionary is corrupt (SPEC §5.3.1).
+fn out_of_order(field: FieldId) -> ReadError {
+    ReadError::Section {
+        kind: SectionKind::TermDict,
+        field: field.get(),
+        position: 0,
+        reason: SegmentCorruption::Invalid {
+            what: "terms not strictly increasing in a term walk",
+        },
     }
 }
 
@@ -263,18 +413,12 @@ impl Automaton for Expansion {
     }
 }
 
-/// Approximate bytes the `df`s one expansion remembers hold at most: past them, a term a later view lists again is
-/// counted again.
-const MEMO_BYTES: usize = 4 << 20;
-/// What a remembered `df` costs besides its term's bytes: the key's header, the `df`, and hash-table slack.
-const MEMO_ENTRY_OVERHEAD: usize = 64;
-
 /// The terms of `field` in range that `expansion` takes from `terms`, at most `cap`: the highest collection `df`
 /// (`stats`) first, ties by bytes; returned in byte order with their `df`s (SPEC §7.1).
 ///
-/// Each distinct term's `df` is read once ([`StatisticsProvider::expansion_df`], remembered for this expansion only),
-/// with the memtable's own count when its walk listed the term, and only the kept terms reach the statistics' cache
-/// ([`StatisticsProvider::expansion_kept`], ROADMAP 7.4.14).
+/// `terms` lists each term once with the views' own counts ([`TermSource::each_term`]), so each `df` is read once
+/// ([`StatisticsProvider::expansion_df`]) without looking the term up in every view again (ROADMAP 7.4.14, 7.4.15),
+/// and only the kept terms reach the statistics' cache ([`StatisticsProvider::expansion_kept`]).
 ///
 /// # Errors
 /// As [`TermSource::each_term`]; a `df` that cannot be read.
@@ -290,22 +434,8 @@ pub(super) fn expand(
     if cap == 0 {
         return Ok(Vec::new());
     }
-    let mut seen = HashMap::<Vec<u8>, u64>::new();
-    let mut seen_bytes = 0_usize;
-    terms.each_term(field, range.0, range.1, expansion, &mut |term, memtable| {
-        let df = if let Some(&df) = seen.get(term) {
-            df
-        } else {
-            let df = stats.expansion_df(field, term, memtable)?;
-            let bytes = seen_bytes
-                .saturating_add(term.len())
-                .saturating_add(MEMO_ENTRY_OVERHEAD);
-            if bytes <= MEMO_BYTES {
-                seen.insert(term.to_vec(), df);
-                seen_bytes = bytes;
-            }
-            df
-        };
+    terms.each_term(field, range.0, range.1, expansion, &mut |term, counts| {
+        let df = stats.expansion_df(field, term, counts)?;
         // Full: a term ranking after the last kept one (or that one again) changes nothing. One evicted before
         // ranks after it too, since the last kept only moves up.
         if kept.len() >= cap
@@ -500,13 +630,12 @@ mod df_tests {
     use crate::memtable::{Memtable, MemtableView};
     use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaBuilder, TextOptions};
     use crate::segment::ReadError;
-    use crate::stats::{FieldTotals, MemtableDf, StatisticsProvider};
+    use crate::stats::{FieldTotals, MemtableDf, StatisticsProvider, TermCounts};
 
-    /// Views listing terms: the memtable's (with its counts) first, then each segment's.
+    /// A source listing each term once, in byte order, some with a memtable count.
     struct Lists<'a> {
         memtable: &'a MemtableView,
-        memtable_terms: Vec<(&'static str, u32)>,
-        segments: Vec<Vec<&'static str>>,
+        terms: Vec<(&'static str, Option<u32>)>,
     }
 
     impl TermSource for Lists<'_> {
@@ -518,14 +647,9 @@ mod df_tests {
             _expansion: &Expansion,
             each: &mut EachTerm<'_>,
         ) -> Result<(), ReadError> {
-            for &(term, df) in &self.memtable_terms {
-                let memtable = Some(MemtableDf::new(self.memtable, df));
-                each(term.as_bytes(), memtable)?;
-            }
-            for segment in &self.segments {
-                for term in segment {
-                    each(term.as_bytes(), None)?;
-                }
+            for &(term, df) in &self.terms {
+                let memtable = df.map(|df| MemtableDf::new(self.memtable, df));
+                each(term.as_bytes(), TermCounts::new(memtable, None))?;
             }
             Ok(())
         }
@@ -555,13 +679,12 @@ mod df_tests {
             &self,
             _: FieldId,
             term: &[u8],
-            memtable: Option<MemtableDf<'_>>,
+            counts: TermCounts<'_>,
         ) -> Result<u64, ReadError> {
             let term = String::from_utf8(term.to_vec()).unwrap();
-            let df = term.len() as u64 * 10 + memtable.map_or(0, |m| u64::from(m.df()));
-            self.asked
-                .borrow_mut()
-                .push((term, memtable.map(|m| m.df())));
+            let memtable = counts.memtable().map(|m| m.df());
+            let df = term.len() as u64 * 10 + memtable.map_or(0, u64::from);
+            self.asked.borrow_mut().push((term, memtable));
             Ok(df)
         }
 
@@ -582,33 +705,33 @@ mod df_tests {
         (Arc::new(schema), mem.view())
     }
 
-    /// ROADMAP 7.4.14: each distinct term's `df` is asked once, however many views list it, with the memtable's own
-    /// count when it listed the term; only the kept terms are reported kept.
+    /// ROADMAP 7.4.14: each term's `df` is asked once, with the counts the source gave; only the kept terms are
+    /// reported kept.
     #[test]
     fn each_term_is_asked_once_and_only_winners_are_kept() {
         let (schema, memtable) = view();
         let field = schema.field("body").unwrap().id();
         let lists = Lists {
             memtable: &memtable,
-            memtable_terms: vec![("ab", 5), ("abcd", 1)],
-            segments: vec![vec!["a", "ab", "abc"], vec!["ab", "abc", "abcd", "abcde"]],
+            terms: vec![
+                ("a", None),
+                ("ab", Some(5)),
+                ("abc", None),
+                ("abcd", Some(1)),
+                ("abcde", None),
+            ],
         };
         let stats = Counting::default();
         let unbounded = (Bound::Unbounded, Bound::Unbounded);
         let kept = expand(field, unbounded, &Expansion::all(), 2, &lists, &stats).unwrap();
         // df: a 10, ab 25, abc 30, abcd 41, abcde 50: the top two.
         assert_eq!(kept, [(b"abcd".to_vec(), 41), (b"abcde".to_vec(), 50)]);
-        let asked = stats.asked.into_inner();
-        let expected: Vec<(String, Option<u32>)> = [
-            ("ab", Some(5)),
-            ("abcd", Some(1)),
-            ("a", None),
-            ("abc", None),
-            ("abcde", None),
-        ]
-        .into_iter()
-        .map(|(t, m)| (t.to_owned(), m))
-        .collect();
+        let asked: Vec<(String, Option<u32>)> = stats.asked.into_inner();
+        let expected: Vec<(String, Option<u32>)> = lists
+            .terms
+            .iter()
+            .map(|&(t, m)| (t.to_owned(), m))
+            .collect();
         assert_eq!(asked, expected);
         assert_eq!(stats.kept.into_inner(), ["abcd", "abcde"]);
         // A cap of 0 asks nothing.
@@ -620,16 +743,23 @@ mod df_tests {
 }
 
 #[cfg(test)]
-mod memtable_source_tests {
+mod merge_tests {
     use core::ops::Bound;
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     use persia_analysis::AnalyzerRegistry;
+    use persia_format::ByteSource;
+    use proptest::prelude::*;
 
-    use super::{Expansion, TermSource};
+    use super::{Expansion, TermSource, TermWalk, Walked, each_merged_term};
     use crate::document::{Document, Value};
-    use crate::memtable::Memtable;
-    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+    use crate::memtable::{Memtable, MemtableView};
+    use crate::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
     use crate::search::{Interrupt, Interruptible, Interrupts, Steps};
+    use crate::segment::{ReadError, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+    use crate::stats::TermCounts;
+    use crate::view::{SegmentView, TermEnum};
 
     struct Never;
 
@@ -639,46 +769,256 @@ mod memtable_source_tests {
         }
     }
 
-    /// A memtable view used directly as a term source, bare or under a search's interrupts, hands each term's count
-    /// from its own walk to the statistics (ROADMAP 7.4.14).
-    #[test]
-    fn a_memtable_source_passes_its_walk_counts() {
-        let schema = SchemaBuilder::new("c")
+    /// Terms in byte order with their counts, as a view lists them.
+    struct Listed {
+        terms: Vec<(Vec<u8>, u32)>,
+        at: usize,
+    }
+
+    impl TermEnum for Listed {
+        fn next(&mut self) -> Result<Option<(&[u8], u32)>, ReadError> {
+            let next = self.terms.get(self.at).map(|(t, df)| (t.as_slice(), *df));
+            self.at += 1;
+            Ok(next)
+        }
+    }
+
+    fn schema() -> CollectionSchema {
+        SchemaBuilder::new("c")
             .field("body", FieldKind::Text(TextOptions::default()))
             .build()
-            .unwrap();
+            .unwrap()
+    }
+
+    fn segment(schema: &CollectionSchema, docs: &[&str]) -> Segment {
         let body = schema.field("body").unwrap().id();
-        let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
-        for (id, text) in [("a", "run runs"), ("b", "run"), ("c", "red")] {
-            mem.put(&Document::new(id).with(body, Value::String(text.into())))
+        let mut b = SegmentBuilder::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (i, text) in docs.iter().enumerate() {
+            b.add(&Document::new(format!("s{i}")).with(body, Value::String((*text).into())))
                 .unwrap();
         }
-        let view = mem.view();
+        let meta = SegmentMeta {
+            segment_id: 1,
+            created_at: 0,
+            merge_generation: 0,
+        };
+        let bytes = SegmentWriter::new(&b, meta).finish().unwrap();
+        Segment::open(ByteSource::new(bytes.into()), schema).unwrap()
+    }
+
+    fn memtable(schema: &CollectionSchema, docs: &[&str]) -> MemtableView {
+        let body = schema.field("body").unwrap().id();
+        let mut mem = Memtable::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+        for (i, text) in docs.iter().enumerate() {
+            mem.put(&Document::new(format!("m{i}")).with(body, Value::String((*text).into())))
+                .unwrap();
+        }
+        mem.view()
+    }
+
+    /// What a merged walk passed: each term with its memtable and segments counts, and how many segments it named.
+    type Passed = Vec<(Vec<u8>, Option<u32>, Option<(u64, usize)>)>;
+
+    fn merged(walks: Vec<TermWalk<'_>>) -> Passed {
+        let mut passed = Vec::new();
+        each_merged_term(walks, &mut |term, counts: TermCounts<'_>| {
+            passed.push((
+                term.to_vec(),
+                counts.memtable().map(|m| m.df()),
+                counts.segments().map(|s| (s.df(), s.segments().len())),
+            ));
+            Ok(())
+        })
+        .unwrap();
+        passed
+    }
+
+    proptest! {
+        /// ROADMAP 7.4.15: the merge passes every term any walk lists once, in byte order, with the memtable walk's
+        /// count (0 where it does not list the term) and the sum of the segment walks'.
+        #[test]
+        fn the_merge_is_the_union_with_summed_counts(
+            views in prop::collection::vec(
+                (any::<bool>(), prop::collection::btree_map(prop::collection::vec(0_u8..4, 0..4), 1_u32..100, 0..12)),
+                0..5,
+            ),
+        ) {
+            let schema = schema();
+            let seg = segment(&schema, &["x"]);
+            let mem = memtable(&schema, &[]);
+            // At most one memtable walk; the others are segments (the same one, which the merge does not mind).
+            let mut has_memtable = false;
+            let mut walks = Vec::new();
+            let mut want = BTreeMap::<Vec<u8>, (u32, u64)>::new();
+            for (is_memtable, terms) in &views {
+                let is_memtable = *is_memtable && !has_memtable;
+                has_memtable |= is_memtable;
+                for (term, df) in terms {
+                    let entry = want.entry(term.clone()).or_default();
+                    if is_memtable {
+                        entry.0 = *df;
+                    } else {
+                        entry.1 += u64::from(*df);
+                    }
+                }
+                walks.push(TermWalk {
+                    terms: Box::new(Listed { terms: terms.clone().into_iter().collect(), at: 0 }),
+                    walked: if is_memtable { Walked::Memtable(&mem) } else { Walked::Segment(&seg) },
+                    field: schema.field("body").unwrap().id(),
+                });
+            }
+            let segments = views.len() - usize::from(has_memtable);
+            let want: Passed = want
+                .into_iter()
+                .map(|(t, (m, s))| (t, has_memtable.then_some(m), Some((s, segments))))
+                .collect();
+            prop_assert_eq!(merged(walks), want);
+        }
+    }
+
+    /// Real views, bare or under a search's interrupts: a memtable and two segments merged give each term the
+    /// memtable's live count and the segments' summed `df`, as looking it up in each view does (ROADMAP 7.4.14,
+    /// 7.4.15).
+    #[test]
+    fn merged_views_count_as_their_lookups() {
+        let schema = Arc::new(schema());
+        let body = schema.field("body").unwrap().id();
+        let mem = memtable(&schema, &["run runs", "run", "red"]);
+        let a = segment(&schema, &["run rust", "rare"]);
+        let b = segment(&schema, &["runs", "rust run", "rye"]);
+        let (va, vb) = (SegmentView::new(&a, None), SegmentView::new(&b, None));
+        let range = (
+            Bound::Included(b"r".as_slice()),
+            Bound::Excluded(b"s".as_slice()),
+        );
+        let all = Expansion::all();
+        let bare = vec![
+            TermWalk::of(&mem, body, range, &all).unwrap(),
+            TermWalk::of(&va, body, range, &all).unwrap(),
+            TermWalk::of(&vb, body, range, &all).unwrap(),
+        ];
+        let lookup = |term: &str| {
+            let df = |s: &Segment| {
+                s.terms(body)
+                    .unwrap()
+                    .get(term.as_bytes())
+                    .unwrap()
+                    .map_or(0, |i| u64::from(i.df()))
+            };
+            (
+                term.as_bytes().to_vec(),
+                Some(mem.df(body, term.as_bytes()).unwrap()),
+                Some((df(&a) + df(&b), 2)),
+            )
+        };
+        let want: Passed = ["rare", "red", "run", "runs", "rust", "rye"]
+            .into_iter()
+            .map(lookup)
+            .collect();
+        assert_eq!(merged(bare), want);
+        let steps = Steps::new(&Never);
+        let (wm, wa, wb) = (
+            Interruptible::new(&mem, &steps),
+            Interruptible::new(&va, &steps),
+            Interruptible::new(&vb, &steps),
+        );
+        let watched = vec![
+            TermWalk::of(&wm, body, range, &all).unwrap(),
+            TermWalk::of(&wa, body, range, &all).unwrap(),
+            TermWalk::of(&wb, body, range, &all).unwrap(),
+        ];
+        assert_eq!(merged(watched), want);
+    }
+
+    /// Two memtable walks: whose count would it be? None is passed, and the statistics count the term themselves.
+    #[test]
+    fn two_memtable_walks_pass_no_memtable_count() {
+        let schema = schema();
+        let body = schema.field("body").unwrap().id();
+        let mem = memtable(&schema, &["run"]);
+        let all = Expansion::all();
+        let unbounded = (Bound::Unbounded, Bound::Unbounded);
+        let walks = vec![
+            TermWalk::of(&mem, body, unbounded, &all).unwrap(),
+            TermWalk::of(&mem, body, unbounded, &all).unwrap(),
+        ];
+        assert_eq!(merged(walks), [(b"run".to_vec(), None, Some((0, 0)))]);
+    }
+
+    /// A walk that lists a term again, or after a larger one, is a corrupt dictionary: merged, it would pass a term
+    /// twice with part of its count each time. One walk or several, the merge stops with a corruption.
+    #[test]
+    fn a_walk_out_of_order_is_corrupt() {
+        let schema = schema();
+        let body = schema.field("body").unwrap().id();
+        let seg = segment(&schema, &["x"]);
+        let walk = |terms: &[&str]| TermWalk {
+            terms: Box::new(Listed {
+                terms: terms.iter().map(|t| (t.as_bytes().to_vec(), 1)).collect(),
+                at: 0,
+            }),
+            walked: Walked::Segment(&seg),
+            field: body,
+        };
+        let corrupt = |walks: Vec<TermWalk<'_>>| {
+            let r = each_merged_term(walks, &mut |_, _| Ok(()));
+            assert!(r.as_ref().is_err_and(ReadError::is_corruption), "{r:?}");
+        };
+        for bad in [&["b", "a"][..], &["a", "a"]] {
+            corrupt(vec![walk(bad)]);
+            corrupt(vec![walk(&["a", "c"]), walk(bad)]);
+        }
+        // Ascending walks that share terms are fine.
+        let r = each_merged_term(vec![walk(&["a", "b"]), walk(&["a", "c"])], &mut |_, _| {
+            Ok(())
+        });
+        assert!(r.is_ok());
+    }
+
+    /// A single view as a term source passes its own counts: a memtable's live `df`, a segment's `df` with the
+    /// segment named.
+    #[test]
+    fn a_single_view_passes_its_walk_counts() {
+        let schema = schema();
+        let body = schema.field("body").unwrap().id();
+        let mem = memtable(&schema, &["run runs", "run", "red"]);
+        let seg = segment(&schema, &["run", "run"]);
         let walk = |source: &dyn TermSource| {
-            let mut listed = Vec::new();
+            let mut passed = Vec::new();
             source
                 .each_term(
                     body,
-                    Bound::Included(b"r".as_slice()),
-                    Bound::Excluded(b"s".as_slice()),
+                    Bound::Unbounded,
+                    Bound::Unbounded,
                     &Expansion::all(),
-                    &mut |term, memtable| {
-                        let memtable = memtable.expect("a memtable count");
-                        assert!(memtable.view().is_same_view(&view));
-                        listed.push((String::from_utf8(term.to_vec()).unwrap(), memtable.df()));
+                    &mut |term, counts| {
+                        if let Some(m) = counts.memtable() {
+                            assert!(m.view().is_same_view(&mem));
+                        }
+                        passed.push((
+                            String::from_utf8(term.to_vec()).unwrap(),
+                            counts.memtable().map(|m| m.df()),
+                            counts.segments().map(|s| (s.df(), s.segments().len())),
+                        ));
                         Ok(())
                     },
                 )
                 .unwrap();
-            listed
+            passed
         };
-        let expected = [
-            ("red".to_owned(), 1),
-            ("run".to_owned(), 2),
-            ("runs".to_owned(), 1),
-        ];
-        assert_eq!(walk(&view), expected);
+        let in_memtable = |t: &str, df| (t.to_owned(), Some(df), Some((0, 0)));
+        assert_eq!(
+            walk(&mem),
+            [
+                in_memtable("red", 1),
+                in_memtable("run", 2),
+                in_memtable("runs", 1)
+            ]
+        );
         let steps = Steps::new(&Never);
-        assert_eq!(walk(&Interruptible::new(&view, &steps)), expected);
+        assert_eq!(walk(&Interruptible::new(&mem, &steps)), walk(&mem));
+        let view = SegmentView::new(&seg, None);
+        assert_eq!(walk(&view), [("run".to_owned(), None, Some((2, 1)))]);
+        assert_eq!(walk(&Interruptible::new(&view, &steps)), walk(&view));
     }
 }

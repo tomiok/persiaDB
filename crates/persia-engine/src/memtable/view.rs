@@ -51,6 +51,10 @@ pub struct MemtableView {
     live: u32,
     /// Norms by field id, copied out on first use.
     norms: Vec<OnceLock<Arc<[u8]>>>,
+    /// Column keys and keyword columns by field id, copied out on first use: a sort, a facet and a filter check of
+    /// this view share one copy (ROADMAP 7.5.5).
+    keys: Vec<OnceLock<MemtableKeys>>,
+    keywords: Vec<OnceLock<MemtableKeywords>>,
 }
 
 impl MemtableView {
@@ -70,6 +74,8 @@ impl MemtableView {
             stats,
             live,
             norms: inner.fields.iter().map(|_| OnceLock::new()).collect(),
+            keys: inner.fields.iter().map(|_| OnceLock::new()).collect(),
+            keywords: inner.fields.iter().map(|_| OnceLock::new()).collect(),
             schema: Arc::clone(&inner.schema),
             shared,
         }
@@ -620,12 +626,28 @@ impl SearchView for MemtableView {
         mut f: impl FnMut(u32, u64) -> Result<(), ReadError>,
     ) -> Result<(), ReadError> {
         // `f` runs without the lock, and a search's interrupts, which `f` reads, stop a scan of a large column
-        // (ROADMAP 7.6.5).
+        // (ROADMAP 7.6.5). A filter scan shares the copy a sort or a check of this view keeps (ROADMAP 7.5.5): it
+        // reads that copy when there is one, and keeps the one it makes when it reads the whole column.
+        let slot = slot(&self.keys, field);
+        if let Some(keys) = slot.and_then(OnceLock::get) {
+            for &(docid, key) in keys.entries() {
+                f(docid, key)?;
+            }
+            return Ok(());
+        }
+        let mut keys = Vec::new();
         self.copy_chunked(
             &|| Ok(()),
             |inner, from| self.column_chunk(inner, field, from),
-            |(docid, key)| f(docid, key),
-        )
+            |(docid, key)| {
+                keys.push((docid, key));
+                f(docid, key)
+            },
+        )?;
+        if let Some(cell) = slot {
+            cell.get_or_init(|| MemtableKeys::new(keys));
+        }
+        Ok(())
     }
 
     fn keys(&self, field: FieldId) -> Result<MemtableKeys, ReadError> {
@@ -637,6 +659,10 @@ impl SearchView for MemtableView {
         field: FieldId,
         step: &dyn Fn() -> Result<(), ReadError>,
     ) -> Result<MemtableKeys, ReadError> {
+        let slot = slot(&self.keys, field);
+        if let Some(keys) = slot.and_then(OnceLock::get) {
+            return Ok(keys.clone());
+        }
         let mut keys = Vec::new();
         self.copy_chunked(
             step,
@@ -646,7 +672,11 @@ impl SearchView for MemtableView {
                 Ok(())
             },
         )?;
-        Ok(MemtableKeys::new(keys))
+        let keys = MemtableKeys::new(keys);
+        Ok(match slot {
+            Some(cell) => cell.get_or_init(|| keys).clone(),
+            None => keys,
+        })
     }
 
     fn keywords(&self, field: FieldId) -> Result<MemtableKeywords, ReadError> {
@@ -658,6 +688,10 @@ impl SearchView for MemtableView {
         field: FieldId,
         step: &dyn Fn() -> Result<(), ReadError>,
     ) -> Result<MemtableKeywords, ReadError> {
+        let slot = slot(&self.keywords, field);
+        if let Some(keywords) = slot.and_then(OnceLock::get) {
+            return Ok(keywords.clone());
+        }
         // The view's postings, then the bytes of the terms they use, each copied in chunks; the dictionary and the
         // ords are built without the lock.
         let mut postings = Vec::new();
@@ -690,7 +724,11 @@ impl SearchView for MemtableView {
                 Ok(())
             },
         )?;
-        keywords(field, self.docs, &postings, &used, bytes)
+        let keywords = keywords(field, self.docs, &postings, &used, bytes)?;
+        Ok(match slot {
+            Some(cell) => cell.get_or_init(|| keywords).clone(),
+            None => keywords,
+        })
     }
 
     fn norms(&self, field: FieldId) -> Result<MemtableNorms, ReadError> {
@@ -921,4 +959,9 @@ fn keyword_column(inner: &Inner, field: FieldId) -> Result<&Inverted, ReadError>
             what: "keyword column",
         }),
     }
+}
+
+/// The cell of `field` in a view's per-field cache; `None` for a field id past the schema (the read then fails).
+fn slot<T>(cells: &[OnceLock<T>], field: FieldId) -> Option<&OnceLock<T>> {
+    usize::try_from(field.get()).ok().and_then(|i| cells.get(i))
 }

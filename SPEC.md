@@ -1180,7 +1180,10 @@ the term itself included: the optimal string alignment distance over Unicode sca
 a substitution, or a swap of two adjacent characters each count 1, and no character is edited twice). A byte of a
 term that is not part of valid UTF-8 counts as a character no query character equals. When more than
 `max_expansions` terms qualify, those with the highest collection `df` (§7.2: the `df` scoring uses, not a view's
-own) are kept, ties broken by byte order. With no term kept the query matches nothing. A plan without the views'
+own) are kept, ties broken by byte order. The views' term walks are merged in byte order and each term's `df` is
+the sum of the counts the views' walks give it (a segment's counts its deleted documents, as §7.2 does; the memtable
+its live ones), so planning does not look a term up in each view again (ROADMAP 7.4.14, 7.4.15); statistics over other
+segments than the views' (global ones, §11.5) look it up. With no term kept the query matches nothing. A plan without the views'
 terms (`SearchPlan::new`) rejects both.
 
 The terms kept are one query. Each is scored as a `term` (§7.2) with the same document frequency: the largest `df`
@@ -1330,10 +1333,13 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the deleted ones are then left out, so no filter selects one. A segment scans a numeric or `datetime` column's keys
   by FOR block (§5.2.1): a block whose bounds (its minimum, and the minimum plus `2^width − 1`) hold no key the filter
   selects is not decoded (it is still read and checked as a FOR block), and one whose bounds the filter selects whole
-  selects its documents with a value without decoding their keys. A `bool` whose filters all read only column keys
+  selects its documents with a value without decoding their keys. A `bool`'s filters that read only column keys
   (`range`, and `term`, `terms` and `exists` on a numeric, `datetime` or `bool` field, and `and`, `or`, `not` of those)
-  checks them per candidate instead, as column predicates, when its `must` clauses match at most a quarter of the
-  view's documents (by their cost estimate); the documents and scores are the same either way. A segment's tombstones
+  may be checked per candidate instead, as column predicates, when its `must` clauses match few of the view's
+  documents (by their cost estimate): at most a third with no other filter, at most a fifth beside filters that read
+  postings, norms or ords, which are then selected as a bitmap and the column ones checked among its documents
+  (ROADMAP 7.4.13, 7.4.16; the shares are fitted on a benchmark sweep, `docs/benchmarks.md`). The documents and
+  scores are the same either way. A segment's tombstones
   are excluded by its postings iterator before a document is scored or offered to the top-k collector, so a deleted
   document cannot enter the heap or raise the competitive threshold. Block upper bounds may still cover deleted
   documents; that only loosens pruning.
@@ -2104,8 +2110,10 @@ dedup concurrent identical fetches. Segment footers and FSTs are pinned on open.
 Above it, an open segment reads its block-framed sections (SPEC §5.2) through a cache of **decoded** blocks keyed by
 `(open segment, section, block)`, LRU and bounded in bytes, which any number of segments may share (each opening of a
 segment has its own entries, dropped with it): once a block is in it, term lookups, posting lists, norms, columns and
-document fetches reuse it without decompressing it or checking its CRC again. Readers that miss the same block at the
-same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
+document fetches reuse it without decompressing it or checking its CRC again. The same cache keeps a `keyword` column's
+dictionary decoded and checked (keyed by open segment and field, its cost its decoded bytes), so sorts and facets
+over it do not decode it per request (ROADMAP 7.5.5); `Segment::verify` reads its own copy. Readers that miss the
+same block at the same time may each decode it; one copy is kept. Segments opened without a given cache share one per process
 (8 MiB, `BlockCache::shared`); the embedded API and the server are to open all their segments with one cache sized
 by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
 the block it is reading in each stream it reads, also after the cache evicts it.

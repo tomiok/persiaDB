@@ -16,13 +16,14 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use super::clock::Clock;
-use super::views::CollectionViews;
+use super::views::{CollectionViews, each_view_term};
 use crate::schema::FieldId;
 use crate::search::{
     EachTerm, Expansion, Hit, Interrupt, Interruptible, Interrupts, Pruning, Steps, TermSource,
     Watch,
 };
 use crate::segment::ReadError;
+use crate::view::SegmentView;
 
 /// Where the views of a search run.
 #[derive(Debug, Clone, Default)]
@@ -276,15 +277,15 @@ impl TermSource for ExecTerms<'_> {
     ) -> Result<(), ReadError> {
         // Read once first: a walk shorter than one look stops too.
         self.exec.interrupt().map_err(ReadError::Interrupted)?;
-        // One count over every view: many views of few terms each still look. The memtable first, as
-        // `CollectionViews` walks it.
+        // One count over every view: many views of few terms each still look. Merged as `CollectionViews` merges.
         let steps = Steps::new(self.exec);
-        Interruptible::new(self.views.memtable(), &steps)
-            .each_term(field, lower, upper, expansion, each)?;
-        for segment in self.views.segments() {
-            Interruptible::new(&segment, &steps).each_term(field, lower, upper, expansion, each)?;
-        }
-        Ok(())
+        let segments: Vec<SegmentView<'_>> = self.views.segments().collect();
+        let memtable = Interruptible::new(self.views.memtable(), &steps);
+        let watched: Vec<_> = segments
+            .iter()
+            .map(|s| Interruptible::new(s, &steps))
+            .collect();
+        each_view_term(&memtable, &watched, field, (lower, upper), expansion, each)
     }
 }
 

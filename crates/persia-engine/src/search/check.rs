@@ -4,9 +4,10 @@
 //!
 //! A filter can be checked this way when it reads only column keys: a `range`, and `term`, `terms` and `exists`
 //! on an `i64`, `f64`, `datetime` or `bool` field, and `and`, `or` and `not` of those. A `keyword` value reads
-//! postings, and `exists` on a `text` or `keyword` field reads norms or ords, so a `bool` with one of them selects a
-//! bitmap. A candidate comes from a matcher, which yields live documents only, so the deleted ones are left out
-//! already; `not` is then the complement among them.
+//! postings, and `exists` on a `text` or `keyword` field reads norms or ords: a `bool` selects those as a bitmap,
+//! then checks the others per candidate among the documents left (ROADMAP 7.4.16). A candidate comes from a matcher,
+//! which yields live documents only, so the deleted ones are left out already; `not` is then the complement among
+//! them.
 
 use super::filter::{among, between, key, key_range};
 use super::{Matcher, Pos, ScoreBound};
@@ -15,18 +16,37 @@ use crate::schema::{CollectionSchema, FieldType};
 use crate::segment::{Overlap, ReadError};
 use crate::view::{KeyReader, SearchView};
 
-/// A candidate is checked rather than a column scanned when the candidates are at most this share of the view's
-/// documents (`1 / CHECK_SHARE`): a check reads a key, a scan reads one per document and builds a bitmap, but a
-/// bitmap lets the matcher skip what it does not hold. A first guess that wins on `search_top10_filtered` (ROADMAP
-/// 7.4.13); fitting it from a sweep of costs is 7.4.16.
-const CHECK_SHARE: u64 = 4;
+/// A `bool`'s column filters are checked per candidate rather than scanned into a bitmap when its `must` clauses
+/// match at most `1 / CHECK_SHARE` of the view's documents: a check reads a key per candidate, a scan one per
+/// document (bar the FOR blocks its bounds settle) and builds a bitmap, which then lets the clauses skip what it does
+/// not hold. Fitted on `search_top10_filtered_sweep` (ROADMAP 7.4.16, docs/benchmarks.md): with column filters alone a
+/// check wins up to about 35 % of the view (and loses at 50 %).
+const CHECK_SHARE: u64 = 3;
+
+/// As [`CHECK_SHARE`], beside filters that read postings (a `keyword` value): their bitmap is selected either way, and
+/// a check leaves the clauses walking every candidate in it rather than in the smaller bitmap of all the filters. On the
+/// same sweep a check wins for a single word up to 17 % (the most common word; none costs more) and for an OR up to
+/// about 12 %, and loses for an OR from 18 %: a fifth keeps the single words and costs the ORs at 18–20 % a few
+/// percent.
+const CHECK_SHARE_BESIDE_POSTINGS: u64 = 5;
+
+/// The share a `bool` checks its column filters at: [`CHECK_SHARE_BESIDE_POSTINGS`] when it has filters that read
+/// postings, else [`CHECK_SHARE`].
+pub(super) fn check_share(beside_postings: bool) -> u64 {
+    if beside_postings {
+        CHECK_SHARE_BESIDE_POSTINGS
+    } else {
+        CHECK_SHARE
+    }
+}
 
 /// Whether every filter of `filters` reads only column keys, so it can be checked per candidate.
 pub(super) fn checkable(filters: &[Filter], schema: &CollectionSchema) -> bool {
     filters.iter().all(|f| checks(f, schema))
 }
 
-fn checks(filter: &Filter, schema: &CollectionSchema) -> bool {
+/// Whether `filter` reads only column keys, so it can be checked per candidate.
+pub(super) fn checks(filter: &Filter, schema: &CollectionSchema) -> bool {
     let column = |field| {
         schema.field_by_id(field).is_some_and(|f| {
             matches!(
@@ -46,9 +66,11 @@ fn checks(filter: &Filter, schema: &CollectionSchema) -> bool {
     }
 }
 
-/// Whether a matcher of `cost` candidates over a view of `doc_count` documents should check them one at a time.
-pub(super) fn per_candidate(cost: u64, doc_count: u32) -> bool {
-    cost.saturating_mul(CHECK_SHARE) <= u64::from(doc_count)
+/// Whether `cost` candidates over a view of `doc_count` documents should be checked one at a time: `cost * share <=
+/// doc_count` ([`check_share`]). Share 0 never checks; share 1 checks whenever `cost` is at most `doc_count`, which an
+/// OR's cost (the sum of its clauses') can pass.
+pub(super) fn per_candidate(cost: u64, doc_count: u32, share: u64) -> bool {
+    share != 0 && cost.saturating_mul(share) <= u64::from(doc_count)
 }
 
 /// What a column's keys must be for a document to pass.
@@ -276,5 +298,24 @@ impl<M: Matcher, K: KeyReader> Matcher for Checked<M, K> {
 
     fn set_min_competitive(&mut self, score: f64) {
         self.inner.set_min_competitive(score);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_share, per_candidate};
+
+    /// The shares fitted on `search_top10_filtered_sweep` (ROADMAP 7.4.16, docs/benchmarks.md): a third of a view
+    /// with column filters alone, a fifth beside filters that read postings.
+    #[test]
+    fn the_fitted_shares() {
+        assert_eq!((check_share(false), check_share(true)), (3, 5));
+        assert!(per_candidate(333, 1_000, check_share(false)));
+        assert!(!per_candidate(334, 1_000, check_share(false)));
+        assert!(per_candidate(200, 1_000, check_share(true)));
+        assert!(!per_candidate(201, 1_000, check_share(true)));
+        // 1 always checks, 0 never.
+        assert!(per_candidate(1_000, 1_000, 1));
+        assert!(!per_candidate(0, 1_000, 0));
     }
 }

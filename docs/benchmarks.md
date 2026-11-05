@@ -255,9 +255,82 @@ Time per query.
 |---|--:|--:|--:|--:|
 | 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.14) | 826 µs | 618 µs | 25.8 ms | 21.7 ms |
 | 2026-11-02, same machine and session, the commit before 7.4.14 | 3.59 ms | 2.31 ms | 25.1 ms | 21.0 ms |
+| 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.15, its commit; A/B with the row below, alternating, two runs each) | 708–724 µs | 611–616 µs | 25.2–25.6 ms | 21.2–21.6 ms |
+| 2026-11-05, same machine and session, main before 7.4.15 | 840–848 µs | 619–623 µs | 26.7–26.8 ms | 22.3–22.7 ms |
 
-The one-segment queries are about 3 % slower: a term that loses the cap is no longer cached, so each run reads its
-`df` from the segment again (ROADMAP 7.4.15 reuses the segments' own counts).
+The 7.4.14 one-segment queries were about 3 % slower: a term that loses the cap is no longer cached, so each run read its
+`df` from the segment again. Since 7.4.15 the views' walks are merged and each term's `df` is the sum of their own counts,
+with no lookup. The one-segment queries are 4–6 % faster in the A/B above, more than the lookups saved explain (the
+collection plan, with five views per term, saves about 125 µs): part of it is likely code layout, not fewer lookups.
+
+`search_top10_filtered_sweep` (ROADMAP 7.4.16): the sweep the per-candidate check shares are fitted on (SPEC §7.3).
+Top 10 over the single segment of 50 000 documents, a `must` clause from rare to frequent (one word, or an OR of two
+to four words) under `price < 100` (10 %) alone and beside the `keyword` `tag = t3` (10 %), the column filter selected
+as a bitmap (share 0, what a `bool` with a `keyword` filter did before 7.4.16) or checked per candidate (share 1).
+The cost is the `must` clause's estimate, the per mille of the view the threshold compares (an OR's sums its words'
+`df`s). Command: `cargo bench -p persia-engine --bench search -- search_top10_filtered_sweep --warm-up-time 1
+--measurement-time 2`. 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux; one run (a first run of the single words
+and the ORs from 181 ‰ agreed within 10 %). Time per query; **bold** is the faster.
+
+| `must` | cost ‰ | `range` bitmap | `range` check | `keyword` + `range` bitmap | `keyword` + `range` check |
+|---|--:|--:|--:|--:|--:|
+| `w199` | 0 | 517 µs | **54.3 µs** | 621 µs | **108 µs** |
+| `w170` | 28 | 578 µs | **187 µs** | 645 µs | **250 µs** |
+| `w140` | 56 | 635 µs | **266 µs** | 657 µs | **312 µs** |
+| `w150 OR w190` | 56 | 717 µs | **370 µs** | 699 µs | **447 µs** |
+| `w110` | 83 | 669 µs | **339 µs** | 665 µs | **345 µs** |
+| `w80` | 107 | 699 µs | **418 µs** | 668 µs | **372 µs** |
+| `w80 OR w190` | 116 | 700 µs | **353 µs** | 726 µs | **632 µs** |
+| `w50` | 134 | 740 µs | **492 µs** | 682 µs | **405 µs** |
+| `w25` | 155 | 755 µs | **552 µs** | 686 µs | **420 µs** |
+| `w10` | 168 | 761 µs | **587 µs** | 681 µs | **433 µs** |
+| `w0` | 173 | 775 µs | **604 µs** | 693 µs | **441 µs** |
+| `w0 OR w190` | 181 | 721 µs | **414 µs** | **750 µs** | 761 µs |
+| `w50 OR w150` | 182 | 935 µs | **664 µs** | **755 µs** | 794 µs |
+| `w25 OR w120` | 229 | 1.03 ms | **877 µs** | **768 µs** | 882 µs |
+| `w0 OR w120` | 247 | 1.03 ms | **791 µs** | **781 µs** | 917 µs |
+| `w0 OR w60` | 298 | 1.17 ms | **1.05 ms** | **798 µs** | 1.00 ms |
+| `w0 OR w20` | 330 | 1.21 ms | **1.03 ms** | **825 µs** | 1.01 ms |
+| `w0 OR w1` | 345 | 1.24 ms | **1.16 ms** | **846 µs** | 1.01 ms |
+| `w0 OR w1 OR w2` | 516 | **1.78 ms** | 2.02 ms | **946 µs** | 1.46 ms |
+| `w0 OR … OR w3` | 687 | **2.21 ms** | 3.08 ms | **1.04 ms** | 1.92 ms |
+
+With column filters alone a check wins up to about 35 % of the view, single words and ORs alike, and loses from
+50 %: `CHECK_SHARE` is 3 (a third; 7.4.13's first guess was a quarter). Beside a `keyword` filter its bitmap is
+selected either way, but a check leaves the `must` clause walking its matches among the `keyword`'s 10 % rather than
+among the 1 % of both filters. A check wins for every single word (up to 173 ‰, the most common word) and for ORs
+up to 116 ‰, and loses for ORs from 181 ‰ (by 1–5 % up to a fifth, more beyond). No single word costs more than
+173 ‰ here, so where a single word stops winning is not measured. `CHECK_SHARE_BESIDE_POSTINGS` is 5 (a fifth): a
+sixth (167 ‰) would give up the single words at 168–173 ‰ (a check is 36 % faster there) to spare ORs at 167–200 ‰
+a few percent. The deciding cost is the `must` clause's, not the candidates the `keyword` bitmap leaves: those are at
+most 10 % in every row, and the check still loses from 181 ‰.
+
+`search_top10_filtered/term/keyword_range_10pct` (`w3` under `tag = t3` and `price < 100`), same machine and session:
+412 µs at the fitted share; 677 µs with both filters as one bitmap (`…/bitmap`, as before 7.4.16). The other
+`search_top10_filtered` queries keep their path (`term/range_10pct` 550 → 537 µs, `term/range_50pct` 723 → 724 µs,
+`rare_term/range_10pct` 227 → 221 µs against main in the same session).
+
+`search_keyword_columns` (ROADMAP 7.5.5): 40 000 documents in 4 segments plus 5 000 in the memtable, each with its
+own `sku` (a `keyword` field, `facet: true`: every segment's dictionary holds 10 000 values), 10 hits of `w3` per
+request, a fresh memtable view and views each time, every view on the calling thread. Command: `cargo bench -p
+persia-engine --bench keyword_columns -- --warm-up-time 2 --measurement-time 5`. 2026-11-05, rustc 1.99.0, AMD
+Ryzen 5 3600, Linux; main run from a worktree with the same bench file, alternating, twice (both runs within 2 %).
+
+| Recorded | `sort_sku` | `score_facet_sku` | `sort_sku_facet_sku` | `sort_price` |
+|---|--:|--:|--:|--:|
+| ROADMAP 7.5.5 | 1.94 ms | 5.57 ms | 5.84 ms | 854 µs |
+| main before 7.4.15–7.5.5 | 2.48 ms | 5.94 ms | 7.67 ms | 996 µs |
+
+A segment's dictionary is decoded and checked once while the block cache keeps it (`keyword_column` on one of these
+segments: 115 µs per call before, 12 µs after, in a one-off timing loop of 100 calls, not a checked-in benchmark),
+and a memtable view copies a field's keyword column and column keys
+once, so a sort and a facet over the same field share the copy. On rayon's pool (`views.search`) the memtable view
+is the slowest task, so the wall time moves less: `sort_sku_facet_sku` 7.28 → 5.29 ms, `score_facet_sku` 5.29 →
+4.60 ms, `sort_sku` slower, not explained: 1.92 and 1.94 → 2.01 and 1.99 ms in the two alternating
+runs (3–5 %), and 1.84–1.93 → 1.98–2.05 ms over every run (up to 11 % between extremes). Its memtable view, copied
+once either way, sets the wall time; on the calling thread the same request is 21 % faster. The one-segment
+`search_request/sort_price` and `score_facet` (a `tag` of 10 values, an empty memtable) have no dictionary worth
+keeping: −0.6 % to +4 % against main over three runs, within this machine's noise.
 
 ## `persia-engine` relevance
 

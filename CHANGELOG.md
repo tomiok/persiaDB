@@ -12,8 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: faster numeric and `datetime` filters and sorts (ROADMAP 7.4.13, 7.5.6; SPEC §7.3, §7.4). A filter scan
   skips the FOR blocks whose bounds (minimum, and minimum plus `2^width − 1`) rule it out and takes whole those they
   rule in; a `bool` whose filters all read column keys (no `keyword` value, no `exists` on `text` or `keyword`) checks
-  them per candidate when its `must` clauses match at most a quarter of a view (with any other filter, it still builds
-  the bitmaps, ROADMAP 7.4.16); a sort led by a numeric or `datetime` field (`missing: "last"`, no facet) skips blocks
+  them per candidate when its `must` clauses match at most a third of a view (beside a `keyword` filter, a fifth: see
+  the ROADMAP 7.4.16 entry below); a sort led by a numeric or `datetime` field (`missing: "last"`, no facet) skips blocks
   that cannot beat its worst kept hit and scores only the hits it keeps. Results are unchanged. New in
   `persia_engine::segment`: `KeyBlock`, `Overlap`, `NumericKeys::block`, `NumericColumn::select`,
   `Segment::select_keys`; in `persia_engine::view`: `KeyReader::block` and `SearchView::select_keys` (default methods).
@@ -54,8 +54,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: `TermSource::each_term` calls back with the memtable view's own count of a term
   (`stats::MemtableDf`, `search::EachTerm`), and `StatisticsProvider` has provided `expansion_df` and
   `expansion_kept`; `SearchView::as_memtable` names a memtable view, so a term walk over one (bare or interruptible)
-  passes its counts. A `prefix` or `fuzzy` memoizes each distinct term's `df` while its bounded per-expansion cache has room, and avoids recounting a matching memtable view while cached,
-  and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
+  passes its counts. A `prefix` or `fuzzy` reads each distinct term's `df` once (a per-expansion memo, since
+  replaced by the merged walk of the ROADMAP 7.4.15 entry below), takes a matching memtable view's count instead of
+  counting it again, and caches only the terms it keeps (`search_expansion_collection/prefix/plan` 3.59 ms → 826 µs; ROADMAP 7.4.14).
+- `persia-engine` (breaking): `TermSource::each_term` merges the views' term walks and calls back once per term, in
+  byte order, with `stats::TermCounts` (the memtable view's count and the segments' summed `df`, `stats::SegmentsDf`)
+  instead of `Option<MemtableDf>`. A walk that lists a term twice or out of byte order is now an error
+  (`ReadError::Section`, a `TermDict` corruption) instead of a term passed twice. `StatisticsProvider::expansion_df`
+  takes those counts, and a `SegmentStatistics`
+  of exactly the walked segments adds them instead of looking each term up in every segment. New
+  `SearchView::as_segment` (default method). `search_expansion_collection/prefix/plan` 844 µs → 716 µs;
+  `search_top10_expansion` 4–6 % faster in an A/B (ROADMAP 7.4.15). Results are unchanged.
+- `persia-engine`: a `bool` with a `keyword` filter beside column filters (a `range`, numeric `term`s) selects the
+  `keyword` one as a bitmap and checks the column ones per candidate when its `must` clauses match at most a fifth of
+  a view; with column filters only the share is now a third (was a quarter). Both are fitted on the new
+  `search_top10_filtered_sweep` benchmark (`docs/benchmarks.md`); `search_top10_filtered/term/keyword_range_10pct`
+  677 µs → 412 µs (ROADMAP 7.4.16; SPEC §7.3). Results are unchanged.
+- `persia-engine`: a segment's `keyword_column` dictionary is decoded and checked once while the block cache keeps
+  it (an entry beside the decoded blocks, bounded by the same capacity and dropped with the segment, SPEC §10.6), and
+  a `MemtableView` copies a field's keyword column and column keys once and shares the copy, as its norms. New
+  benchmark `keyword_columns`: a sort and a facet over a 10 000-value `keyword` field in 4 segments and a memtable,
+  7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed

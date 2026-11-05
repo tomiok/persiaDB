@@ -26,24 +26,27 @@ use crate::view::{PostingsIterator, SearchView};
 /// The documents each `bool` of a plan selected with its filters in one view, by the `bool`'s slot in the plan:
 /// what a search's matcher selected, handed to the explanation of the view's hits, which then does not select them
 /// again (SPEC §7.7, ROADMAP 7.7.3). A `bool` whose filters a matcher did not read (its `must` clauses match
-/// nothing in the view) has none; the explanation never reaches its filters either.
+/// nothing in the view) has none; the explanation never reaches its filters either. Nor does one that checked
+/// column filters only, per candidate (ROADMAP 7.4.13): the explanation checks them too. One that checked its column
+/// filters beside postings ones keeps the postings ones' selection, marked so (ROADMAP 7.4.16).
 #[derive(Debug, Default)]
-pub(crate) struct Selections(RefCell<Vec<Option<RoaringBitmap>>>);
+pub(crate) struct Selections(RefCell<Vec<Option<(RoaringBitmap, bool)>>>);
 
 impl Selections {
-    /// Keeps `docs`, the selection of the `bool` at `slot`.
-    pub(super) fn keep(&self, slot: usize, docs: &RoaringBitmap) {
+    /// Keeps `docs`, the selection of the `bool` at `slot`: of every filter, or of the filters that read postings
+    /// only when `checked` (the others were checked per candidate, ROADMAP 7.4.16).
+    pub(super) fn keep(&self, slot: usize, docs: &RoaringBitmap, checked: bool) {
         let mut kept = self.0.borrow_mut();
         if kept.len() <= slot {
             kept.resize(slot.saturating_add(1), None);
         }
         if let Some(s) = kept.get_mut(slot) {
-            *s = Some(docs.clone());
+            *s = Some((docs.clone(), checked));
         }
     }
 
-    /// The selection kept for the `bool` at `slot`, taken out.
-    pub(super) fn take(&self, slot: usize) -> Option<RoaringBitmap> {
+    /// The selection kept for the `bool` at `slot`, taken out, and whether it is of the postings filters only.
+    pub(super) fn take(&self, slot: usize) -> Option<(RoaringBitmap, bool)> {
         self.0.borrow_mut().get_mut(slot).and_then(Option::take)
     }
 }
@@ -61,15 +64,29 @@ pub(super) fn select<V: SearchView>(
     Ok(docs)
 }
 
-/// The documents every filter selects, deleted ones included.
-fn all<V: SearchView>(filters: &[Filter], view: &V) -> Result<RoaringBitmap, ReadError> {
-    let mut docs = every_doc(view)?;
+/// `docs` (documents of `view`; deleted ones may be in it, and stay unless a filter drops them) narrowed to those every
+/// filter of `filters` selects.
+///
+/// # Errors
+/// As [`select`].
+pub(super) fn narrow<V: SearchView>(
+    docs: &mut RoaringBitmap,
+    filters: &[Filter],
+    view: &V,
+) -> Result<(), ReadError> {
     for filter in filters {
         if docs.is_empty() {
             break;
         }
-        docs &= eval(filter, view)?;
+        *docs &= eval(filter, view)?;
     }
+    Ok(())
+}
+
+/// The documents every filter selects, deleted ones included.
+fn all<V: SearchView>(filters: &[Filter], view: &V) -> Result<RoaringBitmap, ReadError> {
+    let mut docs = every_doc(view)?;
+    narrow(&mut docs, filters, view)?;
     Ok(docs)
 }
 
