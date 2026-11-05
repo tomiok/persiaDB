@@ -26,7 +26,9 @@ use crate::view::{PostingsIterator, SearchView};
 /// The documents each `bool` of a plan selected with its filters in one view, by the `bool`'s slot in the plan:
 /// what a search's matcher selected, handed to the explanation of the view's hits, which then does not select them
 /// again (SPEC §7.7, ROADMAP 7.7.3). A `bool` whose filters a matcher did not read (its `must` clauses match
-/// nothing in the view) has none; the explanation never reaches its filters either.
+/// nothing in the view) has none; the explanation never reaches its filters either. Nor does one that checked
+/// column filters only, per candidate (ROADMAP 7.4.13): the explanation checks them too. One that checked its column
+/// filters beside postings ones keeps the postings ones' selection, marked so (ROADMAP 7.4.16).
 #[derive(Debug, Default)]
 pub(crate) struct Selections(RefCell<Vec<Option<(RoaringBitmap, bool)>>>);
 

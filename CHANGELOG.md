@@ -60,8 +60,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   byte order, with `stats::TermCounts` (the memtable view's count and the segments' summed `df`, `stats::SegmentsDf`)
   instead of `Option<MemtableDf>`; `StatisticsProvider::expansion_df` takes those counts, and a `SegmentStatistics`
   of exactly the walked segments adds them instead of looking each term up in every segment. New
-  `SearchView::as_segment` (default method). `search_top10_expansion/prefix` 26.7 ms → 24.9 ms, `fuzzy` 21.8 ms →
-  20.8 ms (ROADMAP 7.4.15). Results are unchanged.
+  `SearchView::as_segment` (default method). `search_expansion_collection/prefix/plan` 844 µs → 716 µs;
+  `search_top10_expansion` 4–6 % faster in an A/B (ROADMAP 7.4.15). Results are unchanged.
 - `persia-engine`: a `bool` with a `keyword` filter beside column filters (a `range`, numeric `term`s) selects the
   `keyword` one as a bitmap and checks the column ones per candidate when its `must` clauses match at most a fifth of
   a view; with column filters only the share is now a third (was a quarter). Both are fitted on the new

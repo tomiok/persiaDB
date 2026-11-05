@@ -1525,8 +1525,6 @@ mod tests {
         }
     }
 
-    /// `n` by FOR block (ROADMAP 7.4.13, 7.5.6): a narrow band, a band with absent values, the two ends of the key
-    /// space (width 64), one constant (width 0), and a short last block of a band again.
     /// A segment with `k` a keyword field of many distinct values, opened with `cache`.
     fn keyword_segment(
         cache: &Arc<crate::segment::BlockCache>,
@@ -1593,6 +1591,8 @@ mod tests {
         }
     }
 
+    /// `n` by FOR block (ROADMAP 7.4.13, 7.5.6): a narrow band, a band with absent values, the two ends of the key
+    /// space (width 64), one constant (width 0), and a short last block of a band again.
     fn banded(i: u32, state: &mut u64) -> Option<i64> {
         let r = i64::try_from(lcg(state) % 100).unwrap();
         match i / 1024 {

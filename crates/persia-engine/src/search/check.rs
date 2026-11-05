@@ -24,8 +24,10 @@ use crate::view::{KeyReader, SearchView};
 const CHECK_SHARE: u64 = 3;
 
 /// As [`CHECK_SHARE`], beside filters that read postings (a `keyword` value): their bitmap is selected either way, and
-/// a check leaves the clauses walking every candidate in it rather than in the smaller bitmap of all the filters, so
-/// it wins only up to about 18 % of the view on the same sweep.
+/// a check leaves the clauses walking every candidate in it rather than in the smaller bitmap of all the filters. On the
+/// same sweep a check wins for a single word up to 17 % (the most common word; none costs more) and for an OR up to
+/// about 12 %, and loses for an OR from 18 %: a fifth keeps the single words and costs the ORs at 18–20 % a few
+/// percent.
 const CHECK_SHARE_BESIDE_POSTINGS: u64 = 5;
 
 /// The share a `bool` checks its column filters at: [`CHECK_SHARE_BESIDE_POSTINGS`] when it has filters that read
@@ -295,5 +297,24 @@ impl<M: Matcher, K: KeyReader> Matcher for Checked<M, K> {
 
     fn set_min_competitive(&mut self, score: f64) {
         self.inner.set_min_competitive(score);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{check_share, per_candidate};
+
+    /// The shares fitted on `search_top10_filtered_sweep` (ROADMAP 7.4.16, docs/benchmarks.md): a third of a view
+    /// with column filters alone, a fifth beside filters that read postings.
+    #[test]
+    fn the_fitted_shares() {
+        assert_eq!((check_share(false), check_share(true)), (3, 5));
+        assert!(per_candidate(333, 1_000, check_share(false)));
+        assert!(!per_candidate(334, 1_000, check_share(false)));
+        assert!(per_candidate(200, 1_000, check_share(true)));
+        assert!(!per_candidate(201, 1_000, check_share(true)));
+        // 1 always checks, 0 never.
+        assert!(per_candidate(1_000, 1_000, 1));
+        assert!(!per_candidate(0, 1_000, 0));
     }
 }

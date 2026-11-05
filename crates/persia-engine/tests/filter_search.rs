@@ -1170,9 +1170,9 @@ fn a_rare_must_checks_its_filters_per_candidate_without_a_scan() {
     assert!(scanned > alone, "{scanned} reads filtered, {alone} alone");
 }
 
-/// The check shares a test runs a plan at (ROADMAP 7.4.16): never check, always check, the fitted one, and one so
-/// low only the rarest candidates are checked.
-const SHARES: [u64; 4] = [0, 1, 4, 1_000];
+/// The check shares a test runs a plan at (ROADMAP 7.4.16): never check, always check, the two fitted ones (a third
+/// alone, a fifth beside postings filters), and one so low only the rarest candidates are checked.
+const SHARES: [u64; 5] = [0, 1, 3, 5, 1_000];
 
 /// Invariant 5: a `must` of `word` under every filter of `filters`, planned at every share of [`SHARES`]: the
 /// reference's documents, scored as without the filters, the same hits under every pruning strategy and share, and
@@ -1373,10 +1373,13 @@ fn a_rare_must_checks_its_column_filters_beside_a_keyword_bitmap() {
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
     let f = &*FIELDS;
-    let reads = |query: &Query, share: u64| {
-        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable))
-            .unwrap()
-            .with_check_share(share);
+    // `None`: the fitted shares, as a search plans.
+    let reads = |query: &Query, share: Option<u64>| {
+        let plan = SearchPlan::new(query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+        let plan = match share {
+            Some(share) => plan.with_check_share(share),
+            None => plan,
+        };
         let clock = Arc::new(CountingClock {
             start: std::time::Instant::now(),
             reads: std::sync::atomic::AtomicU64::new(0),
@@ -1411,14 +1414,14 @@ fn a_rare_must_checks_its_column_filters_beside_a_keyword_bitmap() {
     };
     let mut both = column.clone();
     both.insert(1, keyword.clone());
-    let alone = reads(&query("alpha", vec![keyword.clone()]), 4);
-    let checked = reads(&query("alpha", both.clone()), 4);
+    let alone = reads(&query("alpha", vec![keyword.clone()]), None);
+    let checked = reads(&query("alpha", both.clone()), None);
     assert!(
         checked <= alone + 1,
         "{checked} reads checked, {alone} keyword alone"
     );
     // Never checking selects the column filters' bitmap too.
-    let scanned = reads(&query("alpha", both), 0);
+    let scanned = reads(&query("alpha", both), Some(0));
     assert!(
         scanned > checked,
         "{scanned} reads scanned, {checked} checked"

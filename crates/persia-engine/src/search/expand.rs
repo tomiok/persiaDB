@@ -14,7 +14,7 @@ use fst::Automaton;
 
 use crate::memtable::MemtableView;
 use crate::schema::FieldId;
-use crate::segment::{ReadError, Segment};
+use crate::segment::{ReadError, SectionKind, Segment, SegmentCorruption};
 use crate::stats::{MemtableDf, SegmentsDf, StatisticsProvider, TermCounts};
 use crate::view::{SearchView, TermEnum};
 
@@ -69,6 +69,8 @@ enum Walked<'a> {
 pub(crate) struct TermWalk<'a> {
     terms: Box<dyn TermEnum + 'a>,
     walked: Walked<'a>,
+    /// The field walked, for the error of a walk out of order.
+    field: FieldId,
 }
 
 impl<'a> TermWalk<'a> {
@@ -91,6 +93,7 @@ impl<'a> TermWalk<'a> {
         Ok(Self {
             terms: Box::new(terms),
             walked,
+            field,
         })
     }
 }
@@ -101,7 +104,7 @@ impl<'a> TermWalk<'a> {
 /// views walked. The memtable's is passed only when one memtable view is walked.
 ///
 /// # Errors
-/// As [`TermEnum::next`]; what `each` returns.
+/// As [`TermEnum::next`]; what `each` returns; [`ReadError::Section`] when a walk lists a term after one not below it.
 pub(crate) fn each_merged_term(
     mut walks: Vec<TermWalk<'_>>,
     each: &mut EachTerm<'_>,
@@ -129,8 +132,15 @@ pub(crate) fn each_merged_term(
     };
     // One view (a single view, or a collection with only a memtable): its walk is the merge.
     if let [walk] = walks.as_mut_slice() {
-        let walked = walk.walked;
+        let (walked, field) = (walk.walked, walk.field);
+        let mut prev: Option<Vec<u8>> = None;
         while let Some((term, df)) = walk.terms.next()? {
+            if prev.as_deref().is_some_and(|p| term <= p) {
+                return Err(out_of_order(field));
+            }
+            let last = prev.get_or_insert_with(Vec::new);
+            last.clear();
+            last.extend_from_slice(term);
             match walked {
                 Walked::Memtable(_) => each(term, counts(df, 0))?,
                 Walked::Segment(_) => each(term, counts(0, u64::from(df)))?,
@@ -170,19 +180,35 @@ pub(crate) fn each_merged_term(
             }
         }
         each(&term, counts(memtable_df, segments_df))?;
-        spare.push(term);
         for &(i, _) in &listing {
             if let Some(walk) = walks.get_mut(i)
                 && let Some((next, df)) = walk.terms.next()?
             {
+                // A walk lists each term once, ascending: one that does not would be merged with part of its count.
+                if next <= term.as_slice() {
+                    return Err(out_of_order(walk.field));
+                }
                 let mut bytes = spare.pop().unwrap_or_default();
                 bytes.clear();
                 bytes.extend_from_slice(next);
                 heads.push(Reverse((bytes, i, df)));
             }
         }
+        spare.push(term);
     }
     Ok(())
+}
+
+/// A view listed the terms of `field` out of byte order, or one twice: its dictionary is corrupt (SPEC §5.3.1).
+fn out_of_order(field: FieldId) -> ReadError {
+    ReadError::Section {
+        kind: SectionKind::TermDict,
+        field: field.get(),
+        position: 0,
+        reason: SegmentCorruption::Invalid {
+            what: "terms not strictly increasing in a term walk",
+        },
+    }
 }
 
 /// Which terms in range an expansion takes: every one (a `prefix`, whose range is the prefix's), or those within
@@ -838,6 +864,7 @@ mod merge_tests {
                 walks.push(TermWalk {
                     terms: Box::new(Listed { terms: terms.clone().into_iter().collect(), at: 0 }),
                     walked: if is_memtable { Walked::Memtable(&mem) } else { Walked::Segment(&seg) },
+                    field: schema.field("body").unwrap().id(),
                 });
             }
             let segments = views.len() - usize::from(has_memtable);
@@ -916,6 +943,36 @@ mod merge_tests {
             TermWalk::of(&mem, body, unbounded, &all).unwrap(),
         ];
         assert_eq!(merged(walks), [(b"run".to_vec(), None, Some((0, 0)))]);
+    }
+
+    /// A walk that lists a term again, or after a larger one, is a corrupt dictionary: merged, it would pass a term
+    /// twice with part of its count each time. One walk or several, the merge stops with a corruption.
+    #[test]
+    fn a_walk_out_of_order_is_corrupt() {
+        let schema = schema();
+        let body = schema.field("body").unwrap().id();
+        let seg = segment(&schema, &["x"]);
+        let walk = |terms: &[&str]| TermWalk {
+            terms: Box::new(Listed {
+                terms: terms.iter().map(|t| (t.as_bytes().to_vec(), 1)).collect(),
+                at: 0,
+            }),
+            walked: Walked::Segment(&seg),
+            field: body,
+        };
+        let corrupt = |walks: Vec<TermWalk<'_>>| {
+            let r = each_merged_term(walks, &mut |_, _| Ok(()));
+            assert!(r.as_ref().is_err_and(ReadError::is_corruption), "{r:?}");
+        };
+        for bad in [&["b", "a"][..], &["a", "a"]] {
+            corrupt(vec![walk(bad)]);
+            corrupt(vec![walk(&["a", "c"]), walk(bad)]);
+        }
+        // Ascending walks that share terms are fine.
+        let r = each_merged_term(vec![walk(&["a", "b"]), walk(&["a", "c"])], &mut |_, _| {
+            Ok(())
+        });
+        assert!(r.is_ok());
     }
 
     /// A single view as a term source passes its own counts: a memtable's live `df`, a segment's `df` with the

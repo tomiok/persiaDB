@@ -345,7 +345,11 @@ fn filter_sweep(
         .map(term)
         .collect();
     for words in [
-        &[0, 190][..],
+        &[150, 190][..],
+        &[80, 190],
+        &[50, 150],
+        &[25, 120],
+        &[0, 190],
         &[0, 120],
         &[0, 60],
         &[0, 20],
@@ -375,6 +379,11 @@ fn filter_sweep(
     for must in &musts {
         let cost = plan(must).matcher(view).unwrap().cost();
         let per_mille = cost * 1000 / u64::from(view.doc_count());
+        let shape = if matches!(must, Query::Bool(_)) {
+            "or"
+        } else {
+            "term"
+        };
         for (name, filter) in &filters {
             let query = Query::Bool(BoolQuery {
                 must: vec![must.clone()],
@@ -383,7 +392,7 @@ fn filter_sweep(
             });
             for (mode, share) in [("bitmap", 0), ("check", 1)] {
                 let plan = plan(&query).with_check_share(share);
-                group.bench_function(format!("{name}/{per_mille:04}/{mode}"), |b| {
+                group.bench_function(format!("{name}/{per_mille:04}/{shape}/{mode}"), |b| {
                     b.iter(|| black_box(plan.top_k(view, 10).unwrap()));
                 });
             }

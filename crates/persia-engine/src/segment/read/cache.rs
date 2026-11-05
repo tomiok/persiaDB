@@ -64,7 +64,10 @@ impl State {
         let tick = self.tick;
         self.tick = tick.wrapping_add(1);
         self.bytes = self.bytes.saturating_add(cost);
-        self.blocks.insert(key, Entry { value, tick, cost });
+        // A key holds one entry: one replaced (an item decoded again) gives its bytes back.
+        if let Some(old) = self.blocks.insert(key, Entry { value, tick, cost }) {
+            self.bytes = self.bytes.saturating_sub(old.cost);
+        }
         self.order.push_back((key, tick));
         while self.bytes > capacity {
             let Some((key, tick)) = self.order.pop_front() else {
@@ -93,11 +96,11 @@ impl State {
 /// Counters of a [`BlockCache`], from [`BlockCache::stats`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CacheStats {
-    /// Reads served from the cache.
+    /// Reads served from the cache (blocks and `keyword` dictionaries).
     pub hits: u64,
-    /// Reads that decoded the block.
+    /// Reads that decoded what they read.
     pub misses: u64,
-    /// Blocks cached now.
+    /// Entries cached now: blocks and `keyword` dictionaries.
     pub blocks: u64,
     /// Decoded bytes cached now.
     pub bytes: u64,
@@ -349,6 +352,22 @@ mod tests {
             Arc::ptr_eq(&get(&cache, 0, 0, 100), &blocks[0])
                 || Arc::ptr_eq(&get(&cache, 0, 0, 100), &blocks[1])
         );
+    }
+
+    /// An item decoded again under a key (its type not the one cached) replaces the entry, and the bytes count it
+    /// once.
+    #[test]
+    fn a_replaced_entry_gives_its_bytes_back() {
+        let cache = BlockCache::new(1 << 10);
+        let key = (SectionKind::Columns, 1, Item::KeywordDictionary);
+        let a = cache
+            .get_item(0, key, || Ok::<_, ()>((7_u32, 100)))
+            .unwrap();
+        assert_eq!((*a, cache.stats().bytes), (7, 100));
+        let b = cache.get_item(0, key, || Ok::<_, ()>((7_u64, 60))).unwrap();
+        assert_eq!(*b, 7);
+        let stats = cache.stats();
+        assert_eq!((stats.blocks, stats.bytes), (1, 60));
     }
 
     #[test]

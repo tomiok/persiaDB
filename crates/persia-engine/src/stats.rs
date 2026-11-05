@@ -145,7 +145,8 @@ impl<'a> MemtableDf<'a> {
 
 /// The `df` of a term summed over the segments a merged term walk listed it in, and those segments: each segment's
 /// count from its own walk ([`SearchView::terms`]: every document holding it, deleted ones included, as [`Self::df`]
-/// of a [`SegmentStatistics`] counts). A walked segment that does not list a term in range holds none of it.
+/// of a [`SegmentStatistics`] counts). A walked segment that does not list a term in range holds none of it. It is the
+/// count of the field the expansion walks; only the engine's walk makes one, for the term it passes it with.
 #[derive(Debug, Clone, Copy)]
 pub struct SegmentsDf<'a> {
     segments: &'a [&'a Segment],
@@ -159,7 +160,8 @@ impl<'a> SegmentsDf<'a> {
     }
 
     /// The segments walked, in walk order.
-    pub fn segments(&self) -> &'a [&'a Segment] {
+    #[cfg(test)]
+    pub(crate) fn segments(&self) -> &'a [&'a Segment] {
         self.segments
     }
 

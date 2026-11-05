@@ -437,7 +437,8 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         clauses.iter().map(|c| plan(c, schema, p)).collect()
     };
     // The filters that read postings first, then those a view may check per candidate: a `bool`'s filters all
-    // hold, so their order does not change what it selects.
+    // hold, so their order does not change what it selects. It changes what is read: a column after an empty
+    // postings selection is not, so its corruption, if any, is not reported by that search.
     let (mut filter, column): (Vec<Filter>, Vec<Filter>) =
         q.filter.iter().cloned().partition(|f| !checks(f, schema));
     let split = filter.len();
@@ -745,7 +746,8 @@ struct Clauses<'a> {
 /// threshold on the `bool` still reaches its one `must` clause, and the `should` clauses when there is no `must`
 /// (their score is the whole score). `should` beside `must` stays exhaustive (ROADMAP 7.4.8).
 // Not inlined into the recursive `build`: since its filters were split (ROADMAP 7.4.16), inlining it made `build`
-// large enough to slow requests that build no `bool` (a sorted `term`, `search_keyword_columns/sort_price` +10 %).
+// large enough to slow requests that build no `bool`: a sorted `term` (`search_keyword_columns/sort_price` on
+// rayon's pool) went 430 → 480 µs from 7.4.15 to 7.4.16, and back to about 444 µs with this (one-off A/B runs).
 #[inline(never)]
 fn build_bool<'a, V: SearchView>(
     clauses: Clauses<'a>,
