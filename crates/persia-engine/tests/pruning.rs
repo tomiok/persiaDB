@@ -820,6 +820,40 @@ fn block_max_wand_skips_through_the_first_block_to_end() {
             "doc {d} scoring {s} skipped under {min}"
         );
     }
+    // The disjunction's own block bound (ROADMAP 7.4.8) is that sum, through the first block to end; and `should`
+    // beside `must` bounds the same range, so under it a ReqOpt skips docs 0 to 127 but not doc 200.
+    let Query::Bool(BoolQuery { should, .. }) = or else {
+        unreachable!()
+    };
+    let req_opt = Query::Bool(BoolQuery {
+        must: vec![should[0].clone()],
+        should: vec![should[1].clone()],
+        ..BoolQuery::default()
+    });
+    for q in [
+        Query::Bool(BoolQuery {
+            should,
+            ..BoolQuery::default()
+        }),
+        req_opt,
+    ] {
+        let plan = SearchPlan::new(&q, &schema, &stats).unwrap();
+        let bound = block_at_0(&q);
+        assert_eq!(
+            (bound.up_to, bound.score.to_bits()),
+            (127, min.to_bits()),
+            "{q:?}"
+        );
+        let all = exhaust(&plan, &view);
+        let got = returned_under(&plan, &view, Pruning::BlockMaxWand, min);
+        assert!(got.contains(&200), "{got:?}");
+        for (d, s) in &all {
+            assert!(
+                *s <= min || got.contains(d),
+                "doc {d} scoring {s} skipped under {min}"
+            );
+        }
+    }
 }
 
 /// A phrase's bound is its terms' smallest `max_tf`: here a document holds the phrase as often as each term.
