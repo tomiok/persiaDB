@@ -231,6 +231,25 @@ repeated words), so a term alone skips few blocks. Time per query.
 | | `or` | 1.36 ms | 902 µs | 1.17 ms |
 | | `or_rare` | 780 µs | 270 µs | 432 µs |
 
+Conjunctions and `should` beside `must` (ROADMAP 7.4.8): `and` is `w3 AND w40`, `and_common` `w0 AND w1`,
+`must_should` `w3` with `should` `w40`, `w120`, and `must_should_rare` `w0` with `should` `w150`, `w190`. Before
+7.4.8 every strategy walked these exhaustively, all three within 1 % of each other (`and` 415 to 419 µs,
+`and_common` 480 to 487 µs, `must_should` 967 to 981 µs, `must_should_rare` 675 to 677 µs). After, from one run on the
+same machine (2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux), in which unchanged exhaustive paths ran about 6 %
+slower than in the before run (machine drift), so compare within a row:
+
+| query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
+|---|--:|--:|--:|
+| `and` | 444 µs | 444 µs | 448 µs |
+| `and_common` | 507 µs | 516 µs | 525 µs |
+| `must_should` | 1.07 ms | 767 µs | 772 µs |
+| `must_should_rare` | 746 µs | 303 µs | 313 µs |
+
+This corpus's blocks are much alike, so block-max AND finds nothing to skip in `and` and `and_common` and costs
+1 to 4 % for checking the bounds (a corpus whose block bounds differ skips most blocks:
+`block_max_and_skips_blocks_that_cannot_beat_the_threshold` in `tests/pruning.rs`). A `must` beside `should`
+gains most where its own bound cannot beat the threshold: then only documents holding a `should` clause are scored.
+
 `search_suite` (ROADMAP 7.8.3): whole requests end to end over the same 50 000 documents in 4 segments (`body` with
 positions), on rayon's global pool: search, merge, and the page's 10 documents read (each planned once, outside the timed loop). `term` is `w3`; `and` is the
 user text `w3 w40` (SPEC §7.1.1); `or` is `w3 OR w40 OR w120`; `phrase` is the user text `"w0 w1"`; `filtered` is

@@ -286,7 +286,7 @@ fn shape() -> impl Strategy<Value = Shape> {
                 prop::option::of(0..3_u8),
             )
                 .prop_map(|(m, s, n, t)| Shape::Bool(m, s, n, t)),
-            2 => (inner.clone(), prop_oneof![Just(0.5), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
+            2 => (inner.clone(), prop_oneof![Just(0.5), Just(0.01), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
             1 => (inner, prop_oneof![Just(0.0), Just(-0.0), 0.0..5.0_f64]).prop_map(|(s, c)| Shape::Constant(Box::new(s), c)),
         ]
     })
@@ -611,7 +611,10 @@ fn conjunctions_and_optional_clauses_prune() {
 #[test]
 fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
     let (schema, f) = schema();
-    let filler = (0..40).map(|j| format!(" f{j}")).collect::<String>();
+    let filler = (0..40)
+        .map(|j| format!(" f{j}"))
+        .collect::<Vec<_>>()
+        .concat();
     let docs: Vec<Document> = (0..4096_usize)
         .map(|i| {
             let body = match i {
@@ -647,6 +650,53 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
     let (count, hits) = handed(&plan, &view, 10, Pruning::MaxScore);
     assert_eq!(bits(&hits), bits(&want));
     assert_eq!(count, all);
+}
+
+/// `ReqOpt` never jumps past the range it checked (found in the 7.4.8 review): where `must` alone cannot beat the
+/// threshold, the walk goes to the `should` side's next document only up to that range's end. Here `a`'s first block
+/// (docs 0 to 127) scores low and its second (128 to 199, `a` three times) high, and the boosted-down `b` is on docs
+/// 0 and 200 only: from doc 1, `b`'s next is 200, past the block where `a` alone beats the threshold.
+#[test]
+fn req_opt_does_not_skip_past_the_range_it_checked() {
+    let (schema, f) = schema();
+    let docs: Vec<Document> = (0..2400_usize)
+        .map(|i| {
+            let body = match i {
+                0 => "a b",
+                1..128 => "a x",
+                128..200 => "a a a",
+                200 => "b b b b b",
+                _ => "z",
+            };
+            Document::new(format!("d{i}")).with(f.body, Value::String(body.to_owned()))
+        })
+        .collect();
+    let segment = Arc::new(segment(&schema, &docs));
+    let stats = SegmentStatistics::new(&Arc::new(schema.clone()), &[Arc::clone(&segment)]);
+    let view = SegmentView::new(&segment, None);
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: f.body,
+            term: t.into(),
+        })
+    };
+    let query = Query::Bool(BoolQuery {
+        must: vec![term("a")],
+        should: vec![Query::Boost(BoostQuery {
+            query: Box::new(term("b")),
+            boost: 0.01,
+        })],
+        ..BoolQuery::default()
+    });
+    let plan = SearchPlan::new(&query, &schema, &stats).unwrap();
+    for k in [1, 2, 5] {
+        let want = plan.top_k_with(&view, k, Pruning::Exhaustive).unwrap();
+        assert_eq!(want.first().map(|h| h.docid), Some(128));
+        for pruning in PRUNED {
+            let got = plan.top_k_with(&view, k, pruning).unwrap();
+            assert_eq!(bits(&got), bits(&want), "top {k} with {pruning:?}");
+        }
+    }
 }
 
 /// A threshold no document beats ends every pruned walk at once, and a lower one or NaN set later is ignored; one
@@ -823,7 +873,7 @@ fn block_max_wand_skips_through_the_first_block_to_end() {
     // The disjunction's own block bound (ROADMAP 7.4.8) is that sum, through the first block to end; and `should`
     // beside `must` bounds the same range, so under it a ReqOpt skips docs 0 to 127 but not doc 200.
     let Query::Bool(BoolQuery { should, .. }) = or else {
-        unreachable!()
+        panic!()
     };
     let req_opt = Query::Bool(BoolQuery {
         must: vec![should[0].clone()],

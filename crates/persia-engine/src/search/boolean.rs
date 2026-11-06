@@ -112,7 +112,8 @@ impl<M: Matcher> Conjunction<M> {
                 }
             };
             if region.score > min {
-                return Ok(Some((target, region.up_to)));
+                // A range ends no earlier than its target (`up_to` is at least it), so the walk always moves on.
+                return Ok(Some((target, region.up_to.max(target))));
             }
             // `up_to` is at least `target`; `max` keeps the walk moving whatever a bound says.
             let Some(after) = region.up_to.max(target).checked_add(1) else {
@@ -477,17 +478,17 @@ impl<R: Matcher, E: Matcher> Matcher for Exclusion<R, E> {
     }
 }
 
-/// The documents `required` matches, scored by it plus `optional` where that matches too (a `bool`'s `should`
-/// clauses beside `must` ones; Lucene's ReqOpt).
+/// The documents `required` matches, scored by it plus `should` where that matches too (a `bool`'s `should`
+/// clauses beside `must` ones; Lucene's `ReqOptSumScorer`).
 ///
-/// Given a threshold (ROADMAP 7.4.8), it checks the bound of `required` plus that of `optional` (0 where `optional`
+/// Given a threshold (ROADMAP 7.4.8), it checks the bound of `required` plus that of `should` (0 where `should`
 /// has no document) from each target, and skips through the first of their ranges to end when they cannot beat it.
-/// Where `required`'s bound alone cannot, a document `optional` misses scores at most the threshold, so it walks
-/// the documents both match. Neither side gets the threshold (but `optional` when `required` scores 0): what one
+/// Where `required`'s bound alone cannot, a document `should` misses scores at most the threshold, so it walks
+/// the documents both match. Neither side gets the threshold (but `should` when `required` scores 0): what one
 /// may skip depends on what the other scores there, and every document returned keeps its whole score.
 pub(super) struct Optional<R, O> {
     required: R,
-    optional: O,
+    should: O,
     pos: Pos,
     pruning: Pruning,
     /// The threshold of [`Matcher::set_min_competitive`], when pruning.
@@ -495,15 +496,15 @@ pub(super) struct Optional<R, O> {
     /// The last bounds taken, of both sides and of `required` alone: they cover every document from where they were
     /// taken through `up_to`.
     region: Option<(ScoreBound, f64)>,
-    /// The last block bounds of `required` (0) and `optional` (1).
+    /// The last block bounds of `required` (0) and `should` (1).
     blocks: BoundCache,
 }
 
 impl<R: Matcher, O: Matcher> Optional<R, O> {
-    pub(super) fn new(required: R, optional: O, pruning: Pruning) -> Self {
+    pub(super) fn new(required: R, should: O, pruning: Pruning) -> Self {
         Self {
             required,
-            optional,
+            should,
             pos: Pos::Unstarted,
             pruning,
             min: None,
@@ -522,7 +523,7 @@ impl<R: Matcher, O: Matcher> Optional<R, O> {
         let Some(required) = self.blocks.bound(0, &mut self.required, target, pruning)? else {
             return Ok(None);
         };
-        let both = match self.blocks.bound(1, &mut self.optional, target, pruning)? {
+        let both = match self.blocks.bound(1, &mut self.should, target, pruning)? {
             Some(optional) => ScoreBound {
                 up_to: required.up_to.min(optional.up_to),
                 score: required.score + optional.score,
@@ -556,7 +557,8 @@ impl<R: Matcher, O: Matcher> Optional<R, O> {
                 }
             };
             if region.score > min {
-                return Ok(Some((target, region.up_to, required > min)));
+                // As in [`Conjunction::competitive`]: never ending before `target`.
+                return Ok(Some((target, region.up_to.max(target), required > min)));
             }
             let Some(after) = region.up_to.max(target).checked_add(1) else {
                 return Ok(None);
@@ -582,10 +584,11 @@ impl<R: Matcher, O: Matcher> Optional<R, O> {
             if alone {
                 return Ok(Some(doc));
             }
-            // A document `optional` misses scores `required`'s alone, at most `min` here.
-            match self.optional.advance(doc)? {
+            // A document `should` misses scores `required`'s alone, at most `min` through `up_to`.
+            match self.should.advance(doc)? {
                 Some(d) if d == doc => return Ok(Some(doc)),
-                Some(d) => target = d,
+                // Not past `up_to`: beyond it, `required` alone may beat `min` again.
+                Some(d) => target = up_to.checked_add(1).map_or(d, |after| d.min(after)),
                 None => match up_to.checked_add(1) {
                     Some(after) => target = after,
                     None => return Ok(None),
@@ -640,18 +643,18 @@ impl<R: Matcher, O: Matcher> Matcher for Optional<R, O> {
             return Ok(0.0);
         };
         let mut score = self.required.score()?;
-        // `required` only moves forward, so `optional` is only ever advanced forward too.
-        if self.optional.advance(doc)? == Some(doc) {
-            score += self.optional.score()?;
+        // `required` only moves forward, so `should` is only ever advanced forward too.
+        if self.should.advance(doc)? == Some(doc) {
+            score += self.should.score()?;
         }
         Ok(score)
     }
 
     fn max_score(&self) -> f64 {
-        self.required.max_score() + self.optional.max_score()
+        self.required.max_score() + self.should.max_score()
     }
 
-    /// `required`'s block bound plus `optional`'s (nothing where it has no document), through the first to end.
+    /// `required`'s block bound plus `should`'s (nothing where it has no document), through the first to end.
     fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
         let bound = self.bound(target, Pruning::BlockMaxWand);
         if bound.is_err() {
@@ -662,14 +665,14 @@ impl<R: Matcher, O: Matcher> Matcher for Optional<R, O> {
         Ok(bound?.map(|(both, _)| both))
     }
 
-    /// When `required` cannot score above 0 (a filter bitmap), the total is the optional score, so `optional` gets
+    /// When `required` cannot score above 0 (a filter bitmap), the total is the optional score, so `should` gets
     /// the threshold too, and prunes when it is a pruning `should` disjunction.
     fn set_min_competitive(&mut self, score: f64) {
         if self.pruning == Pruning::Exhaustive || score.is_nan() {
             return;
         }
         if self.required.max_score() <= 0.0 {
-            self.optional.set_min_competitive(score);
+            self.should.set_min_competitive(score);
         }
         if self.min.is_none() {
             // The walk was `required`'s so far; `required` never moves back, so before its first document it is
