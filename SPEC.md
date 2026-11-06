@@ -2061,7 +2061,10 @@ above.
   holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0019, ROADMAP 2.3.8;
   `persia store sweep`). A lock counts only on a local disk file system: where `flock` is emulated with per-process
   locks (Linux NFS, some FUSE mounts), a lock taken may be a writer's of the same process, so the file's use is
-  unknown and only a forced sweep removes it (ADR-0019 decision 6).
+  unknown and only a forced sweep removes it (ADR-0019 decision 6). A listing or sweep that took the lock of a file it
+  keeps unlocks it before closing it: a child forked meanwhile holds a copy of the descriptor until its `exec`, and
+  would keep the lock past the close (§4.5.1; ADR-0019 decision 7). The container's `side_files` and
+  `sweep_stale_files` do the same.
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

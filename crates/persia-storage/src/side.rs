@@ -54,13 +54,33 @@ pub(crate) fn try_lock<F: ContainerFile>(file: &F) -> io::Result<Option<bool>> {
     }
 }
 
-/// Whether a writer uses `file`, found by taking its lock for a moment ([`try_lock`]); the lock, if taken, is held until
-/// `file` is dropped. A lock taken where locks belong to the process ([`ContainerFile::locks_per_handle`]) proves
-/// nothing: [`InUse::Unknown`].
+/// Whether a writer uses `file`, found by taking its lock for a moment ([`try_lock`]). With [`InUse::No`] this handle
+/// holds the lock: release it with [`unlock_kept`] if the file stays. A lock taken where locks belong to the process
+/// ([`ContainerFile::locks_per_handle`]) proves nothing: [`InUse::Unknown`].
 pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<InUse> {
     let locked = try_lock(file)?;
     let per_handle = locked != Some(true) || file.locks_per_handle();
     Ok(InUse::of(locked, per_handle))
+}
+
+/// Releases the lock this handle took on a side file it keeps, then returns `result`, the caller's outcome (an unlock
+/// failure is added to its error, or becomes the error).
+///
+/// Closing the file is not enough: `flock` belongs to the open file description, and a child that another thread
+/// forked keeps a copy of the descriptor until its `exec` (SPEC §4.5.1). The lock would outlive the listing or sweep,
+/// and the next one would find the stale file in use and keep it (ROADMAP 2.3.11). A removed file needs no unlock: its
+/// name is gone, so no one can meet the lock. Call it only for a lock that is this handle's own ([`InUse::No`]): where
+/// locks belong to the process (POSIX record locks behind `flock`, ADR-0019) a fork inherits none, and the close
+/// releases them anyway, a lock this process's writer holds included.
+pub(crate) fn unlock_kept<F: ContainerFile, T>(file: &F, result: io::Result<T>) -> io::Result<T> {
+    match (result, file.unlock()) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Ok(_), Err(err)) | (Err(err), Ok(())) => Err(err),
+        (Err(err), Err(unlock)) => Err(io::Error::new(
+            err.kind(),
+            format!("{err}; unlocking the file then failed: {unlock}"),
+        )),
+    }
 }
 
 impl InUse {

@@ -200,6 +200,7 @@ Deps: M1.
 - [x] 2.3.8 Sweep stale `@tmp.*` files a crashed writer left (ADR-0012): which process may delete them (pid no longer running, or age), and when (open, or a `persia` CLI command)
 - [x] 2.3.9 `windows-latest` CI job for `persia-storage` (found in the 2.3 review): the `cfg(windows)` code (positioned reads, reserved names) is otherwise never compiled; directory fsync on Windows is 2.4.8
 - [x] 2.3.10 Choose mapped reads (2.3.6) automatically on local disk file systems only (ADR-0017): detect the file system type portably (`statfs` `f_type` / `MNT_LOCAL` / `GetDriveTypeW`; std exposes none, so FFI needs an ADR or an allowed crate); network and FUSE mounts keep `pread`
+- [~] 2.3.11 A listing or sweep of temporary files unlocks a file it keeps before closing it (ADR-0019 decision 7; found by a one-off failure of `a_temporary_a_live_process_holds_is_kept_until_the_process_is_gone`): a child that another thread forked kept the lock past the close until its `exec`, and the next sweep kept a stale file as in use; [T] `ForkedFs` keeps a duplicate of every descriptor (`tests/sweep_inherited_locks.rs`)
 
 ## 2.4 Single-file container adapter (SPEC §4)
 - 2.4.1 Open/create container: write header, init both superblock slots

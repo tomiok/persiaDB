@@ -237,15 +237,25 @@ impl<V: Vfs> LocalStorage<V> {
             InUse::Unknown => remove == Some(true),
             InUse::Yes => false,
         };
-        let mut removed = false;
-        if removable {
+        let kept = if removable {
             // While the lock is held: a `put` that created the file but has not locked it yet finds it gone, and
             // takes another name.
             match self.vfs.remove_file(&path) {
-                Ok(()) => removed = true,
+                Ok(()) => None,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(err) => return Err(with_path(err, &path)),
+                Err(err) => Some(Err(err)),
             }
+        } else {
+            Some(Ok(()))
+        };
+        let removed = kept.is_none();
+        if let Some(kept) = kept {
+            let kept = if in_use == InUse::No {
+                side::unlock_kept(&file, kept)
+            } else {
+                kept
+            };
+            kept.map_err(|err| with_path(err, &path))?;
         }
         drop(file);
         Ok(Some(SideFile {

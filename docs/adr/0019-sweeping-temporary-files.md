@@ -3,7 +3,7 @@
 - Status: proposed
 - Date: 2026-10-17
 - Related: SPEC §4.5.1, §10.1.1; amends ADR-0012 (consequence "a crash can leave temporary files behind");
-  ADR-0014, ADR-0016; ROADMAP 2.3.8, 2.4.15, 2.4.19
+  ADR-0014, ADR-0016; ROADMAP 2.3.8, 2.3.11, 2.4.15, 2.4.19
 
 ## Context
 
@@ -50,6 +50,13 @@ takes.
    counts only on a local disk file system (`ContainerFile::locks_per_handle`, through ADR-0021's `is_local_disk`);
    elsewhere a temporary file's use is `Unknown`, as on Windows. A local store's sweep then removes it only when
    forced; a container's sweep never does (an operator removes those by hand, with the container closed).
+7. **A lock taken on a file that stays is released explicitly** (ROADMAP 2.3.11). `flock` belongs to the open file
+   description, and a child that another thread forks receives a copy of every descriptor until its `exec`, so a
+   close alone may leave the lock held for a moment after the listing or sweep returns (SPEC §4.5.1, as for the
+   writer lock). The next listing or sweep would then find a stale file in use and keep it. So a listing, and a sweep
+   whose removal failed, unlock the file before closing it. A removed file is not unlocked: its name is gone, so no
+   one can meet the lock. Where the use was `Unknown` (per-process locks) nothing is unlocked: those locks are not
+   inherited, and the close releases them.
 
 ## Consequences
 
