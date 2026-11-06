@@ -84,8 +84,9 @@ use crate::view::SearchView;
 ///
 /// Pruning reaches the matchers a threshold on the whole score applies to: a term, the `should` clauses of a
 /// `bool` without `must` (a filter scores 0, so with filters too), the `must` clause of a `bool` with one and no
-/// `should` (filters or not), and what `must_not` or `boost` wraps. Conjunctions and `should` clauses beside `must`
-/// are walked whole.
+/// `should` (filters or not), and what `must_not` or `boost` wraps. A conjunction of several `must` clauses, and
+/// `should` clauses beside `must`, check their clauses' bounds against the threshold and skip what cannot beat it
+/// (ROADMAP 7.4.8); their clauses get no threshold.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pruning {
@@ -115,6 +116,84 @@ pub struct ScoreBound {
 /// (0 for a clause that misses), the sum is at least the score: exactly, without rounding slack.
 fn sum_in_order(values: impl IntoIterator<Item = f64>) -> f64 {
     values.into_iter().fold(0.0, |sum, v| sum + v)
+}
+
+/// A clause's bound from `target` under `pruning` (SPEC §7.3): its [`Matcher::block_bound`] under block-max WAND;
+/// its whole-list [`Matcher::max_score`] otherwise, through the end of the view (`MaxScore` uses no block bounds).
+/// `None` only when the clause matches nothing from `target` on.
+fn bound_from(
+    clause: &mut (impl Matcher + ?Sized),
+    target: u32,
+    pruning: Pruning,
+) -> Result<Option<ScoreBound>, ReadError> {
+    match pruning {
+        Pruning::BlockMaxWand => clause.block_bound(target),
+        Pruning::MaxScore | Pruning::Exhaustive => Ok(Some(ScoreBound {
+            up_to: u32::MAX,
+            score: clause.max_score(),
+        })),
+    }
+}
+
+/// [`Matcher::block_bound`] of a disjunction of `clauses` (in query order): the block bounds of the clauses with a
+/// document from `target` on, summed in query order, through the first of their ranges to end. A document there
+/// scores the sum of the clauses it matches, each at most its bound, and a clause it misses adds nothing where its
+/// bound (at least 0) adds something, so the sum bounds it exactly ([`sum_in_order`]). `None` when no clause has a
+/// document from `target` on.
+fn union_bound<M: Matcher>(
+    clauses: &mut [M],
+    target: u32,
+) -> Result<Option<ScoreBound>, ReadError> {
+    let mut bound = None::<ScoreBound>;
+    for clause in clauses {
+        if let Some(b) = clause.block_bound(target)? {
+            bound = Some(match bound {
+                Some(sum) => ScoreBound {
+                    up_to: sum.up_to.min(b.up_to),
+                    score: sum.score + b.score,
+                },
+                None => b,
+            });
+        }
+    }
+    Ok(bound)
+}
+
+/// Per clause, the last block bound taken and the target it was taken at: it still holds for a later target up to
+/// its `up_to` (or for any later target, when `None`: no document from there on), so a clause whose block has not
+/// ended is not asked again (as block-max WAND caches them).
+#[derive(Debug, Default)]
+struct BoundCache(Vec<Option<(u32, Option<ScoreBound>)>>);
+
+impl BoundCache {
+    fn new(clauses: usize) -> Self {
+        Self(vec![None; clauses])
+    }
+
+    /// [`bound_from`] of clause `i`, from the cache while it covers `target` (block bounds only: whole-list ones
+    /// are read as cheaply).
+    fn bound(
+        &mut self,
+        i: usize,
+        clause: &mut (impl Matcher + ?Sized),
+        target: u32,
+        pruning: Pruning,
+    ) -> Result<Option<ScoreBound>, ReadError> {
+        if pruning != Pruning::BlockMaxWand {
+            return bound_from(clause, target, pruning);
+        }
+        if let Some(&Some((from, bound))) = self.0.get(i)
+            && from <= target
+            && bound.is_none_or(|b| target <= b.up_to)
+        {
+            return Ok(bound);
+        }
+        let bound = clause.block_bound(target)?;
+        if let Some(slot) = self.0.get_mut(i) {
+            *slot = Some((target, bound));
+        }
+        Ok(bound)
+    }
 }
 
 /// Why a query cannot be planned.

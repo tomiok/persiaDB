@@ -743,8 +743,9 @@ struct Clauses<'a> {
 
 /// A `bool` (SPEC §7.1): every `must` and `filter`, at least one `should` when there is neither, no `must_not`; an
 /// empty one matches every document. Filters select before anything is scored (SPEC §7.3) and score 0, so a
-/// threshold on the `bool` still reaches its one `must` clause, and the `should` clauses when there is no `must`
-/// (their score is the whole score). `should` beside `must` stays exhaustive (ROADMAP 7.4.8).
+/// threshold on the `bool` reaches its one `must` clause, the `should` clauses when there is no `must` (their score
+/// is the whole score), and otherwise the conjunction of its `must` clauses and the `should` clauses beside them,
+/// which check their clauses' bounds against it (ROADMAP 7.4.8).
 // Not inlined into the recursive `build`: since its filters were split (ROADMAP 7.4.16), inlining it made `build`
 // large enough to slow requests that build no `bool`: a sorted `term` (`search_keyword_columns/sort_price` on
 // rayon's pool) went 430 → 480 µs from 7.4.15 to 7.4.16, and back to about 444 µs with this (one-off A/B runs).
@@ -768,8 +769,9 @@ fn build_bool<'a, V: SearchView>(
     };
     // The score is the `should` clauses' when they are required, or the one `must` clause's without `should`.
     // No `must`: a filter adds 0, so the threshold reaches `should` whether or not a filter is present.
-    // One `must` and no `should`: the threshold reaches that clause. Anything else, including `should` beside
-    // `must`, is exhaustive — the slack depends on the document (ROADMAP 7.4.8).
+    // One `must` and no `should`: the threshold reaches that clause. Several `must`, or `should` beside `must`: the
+    // conjunction and the optional matcher take it and check their clauses' bounds against it, the clauses get none
+    // (what one may skip depends on what the others score; ROADMAP 7.4.8).
     let (must_pruning, should_pruning) = match (must.len(), should.is_empty()) {
         (0, _) => (Pruning::Exhaustive, pruning),
         (1, true) => (pruning, Pruning::Exhaustive),
@@ -777,7 +779,7 @@ fn build_bool<'a, V: SearchView>(
     };
     let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
-        let required = conjunction(all(must, must_pruning)?);
+        let required = conjunction(all(must, must_pruning)?, pruning);
         let filters = Filters {
             filter,
             split,
@@ -800,7 +802,7 @@ fn build_bool<'a, V: SearchView>(
         (optional.unwrap_or_else(|| Box::new(Empty)), None)
     };
     let scored = match optional {
-        Some(optional) => Box::new(Optional::new(required, optional)),
+        Some(optional) => Box::new(Optional::new(required, optional, pruning)),
         None => required,
     };
     let excluded = disjunction(all(must_not, Pruning::Exhaustive)?, Pruning::Exhaustive);
@@ -888,7 +890,7 @@ fn keep(ctx: Build<'_>, slot: usize, docs: &RoaringBitmap, checked: bool) {
 }
 
 /// AND of at least one clause; no document if a clause has none in the view.
-fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>) -> BoxedMatcher<'_> {
+fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>, pruning: Pruning) -> BoxedMatcher<'_> {
     if clauses.iter().any(|c| c.cost() == 0) {
         return Box::new(Empty);
     }
@@ -897,7 +899,7 @@ fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>) -> BoxedMatcher<'_> {
     {
         return only;
     }
-    Box::new(Conjunction::new(clauses))
+    Box::new(Conjunction::new(clauses, pruning))
 }
 
 /// OR of the clauses that can match, pruning with `pruning`; `None` when none can.

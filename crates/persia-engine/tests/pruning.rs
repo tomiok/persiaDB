@@ -26,8 +26,8 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::Memtable;
 use persia_engine::query::{
-    BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, PhraseQuery, PhraseTerm, Query,
-    QueryLimits, TermQuery, WeightedTerm,
+    BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, Filter, FilterValue, PhraseQuery,
+    PhraseTerm, Query, QueryLimits, TermQuery, WeightedTerm,
 };
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
@@ -165,6 +165,8 @@ enum Shape {
     OrNot(Vec<Shape>, Box<Shape>),
     And(Vec<Shape>),
     AndOr(Box<Shape>, Vec<Shape>),
+    /// Any `bool` (ROADMAP 7.4.8): `must`, `should`, `must_not`, and a filter on a tag.
+    Bool(Vec<Shape>, Vec<Shape>, Vec<Shape>, Option<u8>),
     Boost(Box<Shape>, f64),
     Constant(Box<Shape>, f64),
 }
@@ -230,6 +232,18 @@ impl Shape {
                 should: all(should),
                 ..BoolQuery::default()
             }),
+            Self::Bool(must, should, must_not, tag) => Query::Bool(BoolQuery {
+                must: all(must),
+                should: all(should),
+                must_not: all(must_not),
+                filter: tag
+                    .iter()
+                    .map(|t| Filter::Term {
+                        field: f.tag,
+                        value: FilterValue::Keyword(TAGS[usize::from(*t) % TAGS.len()].to_owned()),
+                    })
+                    .collect(),
+            }),
             Self::Boost(s, b) => Query::Boost(BoostQuery {
                 query: Box::new(s.query(f)),
                 boost: *b,
@@ -264,7 +278,15 @@ fn shape() -> impl Strategy<Value = Shape> {
             2 => (clauses.clone(), inner.clone()).prop_map(|(s, n)| Shape::OrNot(s, Box::new(n))),
             1 => prop::collection::vec(inner.clone(), 1..3).prop_map(Shape::And),
             1 => (inner.clone(), clauses).prop_map(|(m, s)| Shape::AndOr(Box::new(m), s)),
-            2 => (inner.clone(), prop_oneof![Just(0.5), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
+            // Several `must`, `should` beside them, exclusions and a filter (ROADMAP 7.4.8).
+            3 => (
+                prop::collection::vec(inner.clone(), 0..4),
+                prop::collection::vec(inner.clone(), 0..4),
+                prop::collection::vec(inner.clone(), 0..2),
+                prop::option::of(0..3_u8),
+            )
+                .prop_map(|(m, s, n, t)| Shape::Bool(m, s, n, t)),
+            2 => (inner.clone(), prop_oneof![Just(0.5), Just(0.01), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
             1 => (inner, prop_oneof![Just(0.0), Just(-0.0), 0.0..5.0_f64]).prop_map(|(s, c)| Shape::Constant(Box::new(s), c)),
         ]
     })
@@ -547,6 +569,136 @@ fn pruning_skips_most_documents() {
     assert_eq!(count, all);
 }
 
+/// Invariant 3 for conjunctions and `should` beside `must` (ROADMAP 7.4.8), over 6000 documents.
+#[test]
+fn conjunctions_and_optional_clauses_prune() {
+    let case = build(7, 6000, 0);
+    let mem = case.memtable.view();
+    let arcs = [Arc::clone(&case.segment)];
+    let segment_stats = SegmentStatistics::new(&Arc::new(case.schema.clone()), &arcs);
+    let stats = SearchStatistics::new(&segment_stats, &mem);
+    let view = SegmentView::new(&case.segment, None);
+    let pruned = |shape: &Shape, pruning| {
+        let plan = SearchPlan::new(&shape.query(&case.fields), &case.schema, &stats).unwrap();
+        let (all, want) = handed(&plan, &view, 10, Pruning::Exhaustive);
+        let (count, hits) = handed(&plan, &view, 10, pruning);
+        assert_eq!(bits(&hits), bits(&want), "{shape:?} with {pruning:?}");
+        (count, all)
+    };
+    // The commonest word beside rare ones: once the threshold is above `w0`'s bound, a document must hold a rare
+    // word, whole-list bounds (`MaxScore`) or block ones.
+    let rare = Shape::Bool(
+        vec![Shape::Term(0)],
+        vec![Shape::Term(30), Shape::Term(35)],
+        vec![],
+        None,
+    );
+    for pruning in PRUNED {
+        let (count, all) = pruned(&rare, pruning);
+        assert!(
+            count * 3 < all,
+            "{pruning:?}: {count} of {all} documents scored"
+        );
+    }
+    // Exhaustive yields every match.
+    let (count, all) = pruned(&rare, Pruning::Exhaustive);
+    assert_eq!(count, all);
+}
+
+/// Block-max AND (ROADMAP 7.4.8): `a` and `b` on the first 2048 documents, the first 30 short (scoring high), the
+/// last holding both twice (scoring highest, so the whole-list bound stays above the threshold), the rest long; once
+/// the top 10 hold short ones, no block of long documents can beat them together, so the conjunction skips them.
+#[test]
+fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
+    let (schema, f) = schema();
+    let filler = (0..40)
+        .map(|j| format!(" f{j}"))
+        .collect::<Vec<_>>()
+        .concat();
+    let docs: Vec<Document> = (0..4096_usize)
+        .map(|i| {
+            let body = match i {
+                0..30 => "a b".to_owned(),
+                2047 => "a a b b".to_owned(),
+                30..2048 => format!("a b{filler}"),
+                _ => filler.clone(),
+            };
+            Document::new(format!("d{i}")).with(f.body, Value::String(body))
+        })
+        .collect();
+    let segment = Arc::new(segment(&schema, &docs));
+    let stats = SegmentStatistics::new(&Arc::new(schema.clone()), &[Arc::clone(&segment)]);
+    let view = SegmentView::new(&segment, None);
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: f.body,
+            term: t.into(),
+        })
+    };
+    let and = Query::Bool(BoolQuery {
+        must: vec![term("a"), term("b")],
+        ..BoolQuery::default()
+    });
+    let plan = SearchPlan::new(&and, &schema, &stats).unwrap();
+    let (all, want) = handed(&plan, &view, 10, Pruning::Exhaustive);
+    assert_eq!(all, 2048);
+    let (count, hits) = handed(&plan, &view, 10, Pruning::BlockMaxWand);
+    assert_eq!(bits(&hits), bits(&want));
+    assert!(count < 300, "{count} of {all} documents scored");
+    assert_eq!(want.first().map(|h| h.docid), Some(2047));
+    // Doc 2047 keeps the whole-list bound above the threshold: `MaxScore` scores every match.
+    let (count, hits) = handed(&plan, &view, 10, Pruning::MaxScore);
+    assert_eq!(bits(&hits), bits(&want));
+    assert_eq!(count, all);
+}
+
+/// `ReqOpt` never jumps past the range it checked (found in the 7.4.8 review): where `must` alone cannot beat the
+/// threshold, the walk goes to the `should` side's next document only up to that range's end. Here `a`'s first block
+/// (docs 0 to 127) scores low and its second (128 to 199, `a` three times) high, and the boosted-down `b` is on docs
+/// 0 and 200 only: from doc 1, `b`'s next is 200, past the block where `a` alone beats the threshold.
+#[test]
+fn req_opt_does_not_skip_past_the_range_it_checked() {
+    let (schema, f) = schema();
+    let docs: Vec<Document> = (0..2400_usize)
+        .map(|i| {
+            let body = match i {
+                0 => "a b",
+                1..128 => "a x",
+                128..200 => "a a a",
+                200 => "b b b b b",
+                _ => "z",
+            };
+            Document::new(format!("d{i}")).with(f.body, Value::String(body.to_owned()))
+        })
+        .collect();
+    let segment = Arc::new(segment(&schema, &docs));
+    let stats = SegmentStatistics::new(&Arc::new(schema.clone()), &[Arc::clone(&segment)]);
+    let view = SegmentView::new(&segment, None);
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: f.body,
+            term: t.into(),
+        })
+    };
+    let query = Query::Bool(BoolQuery {
+        must: vec![term("a")],
+        should: vec![Query::Boost(BoostQuery {
+            query: Box::new(term("b")),
+            boost: 0.01,
+        })],
+        ..BoolQuery::default()
+    });
+    let plan = SearchPlan::new(&query, &schema, &stats).unwrap();
+    for k in [1, 2, 5] {
+        let want = plan.top_k_with(&view, k, Pruning::Exhaustive).unwrap();
+        assert_eq!(want.first().map(|h| h.docid), Some(128));
+        for pruning in PRUNED {
+            let got = plan.top_k_with(&view, k, pruning).unwrap();
+            assert_eq!(bits(&got), bits(&want), "top {k} with {pruning:?}");
+        }
+    }
+}
+
 /// A threshold no document beats ends every pruned walk at once, and a lower one or NaN set later is ignored; one
 /// below every score skips nothing, and NaN is ignored.
 #[test]
@@ -717,6 +869,40 @@ fn block_max_wand_skips_through_the_first_block_to_end() {
             *s <= min || got.contains(d),
             "doc {d} scoring {s} skipped under {min}"
         );
+    }
+    // The disjunction's own block bound (ROADMAP 7.4.8) is that sum, through the first block to end; and `should`
+    // beside `must` bounds the same range, so under it a ReqOpt skips docs 0 to 127 but not doc 200.
+    let Query::Bool(BoolQuery { should, .. }) = or else {
+        panic!()
+    };
+    let req_opt = Query::Bool(BoolQuery {
+        must: vec![should[0].clone()],
+        should: vec![should[1].clone()],
+        ..BoolQuery::default()
+    });
+    for q in [
+        Query::Bool(BoolQuery {
+            should,
+            ..BoolQuery::default()
+        }),
+        req_opt,
+    ] {
+        let plan = SearchPlan::new(&q, &schema, &stats).unwrap();
+        let bound = block_at_0(&q);
+        assert_eq!(
+            (bound.up_to, bound.score.to_bits()),
+            (127, min.to_bits()),
+            "{q:?}"
+        );
+        let all = exhaust(&plan, &view);
+        let got = returned_under(&plan, &view, Pruning::BlockMaxWand, min);
+        assert!(got.contains(&200), "{got:?}");
+        for (d, s) in &all {
+            assert!(
+                *s <= min || got.contains(d),
+                "doc {d} scoring {s} skipped under {min}"
+            );
+        }
     }
 }
 

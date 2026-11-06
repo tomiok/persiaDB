@@ -1319,9 +1319,18 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
   A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must` (a filter scores 0,
   so with filters too), the `must` clause of a `bool` with one and no `should` (a filter scores 0, so with filters
-  too), and what `must_not` and `boost` wrap; other clauses are walked exhaustively. A disjunction prunes with block-max WAND by default;
-  `MaxScore` (whole-list bounds only) is the other strategy, and where a clause has no block bounds (a nested `bool`,
-  a phrase) block-max WAND uses its whole-list bound.
+  too), and what `must_not` and `boost` wrap. A `bool` with several `must` clauses, or with `should` clauses beside
+  `must`, takes the threshold itself (ROADMAP 7.4.8), and its clauses get none (what one may skip depends on what
+  the others score there; but its `should` clauses do when its `must` clauses cannot score above 0, the whole score
+  being theirs): from each target it sums its clauses' bounds in query order, as the score is, through
+  the first of their ranges to end, and skips that range when the sum is at most the threshold (block-max AND; a
+  `should` side without a document there adds nothing). Where the `must` clauses' bound alone is at most the
+  threshold, a document the `should` clauses miss scores at most it, so only documents holding a `should` clause
+  are scored in that range, and the walk to the next one never passes the range's end (as Lucene's ReqOpt). Every document a pruned matcher returns has its exhaustive score. A
+  disjunction's block bound is the block bounds of its clauses with a document there, summed in query order.
+  Clauses under `constant_score` are walked exhaustively. A disjunction prunes with block-max WAND by default;
+  `MaxScore` (whole-list bounds only) is the other strategy, and where a clause has no block bounds (a phrase)
+  block-max WAND uses its whole-list bound.
   A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was

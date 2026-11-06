@@ -8,7 +8,7 @@
 
 use crate::segment::ReadError;
 
-use super::{Matcher, Pos, ScoreBound, raise, sum_in_order};
+use super::{Matcher, Pos, ScoreBound, raise, sum_in_order, union_bound};
 
 /// A disjunction of at least two clauses, scored as [`super::boolean::Disjunction`].
 pub(super) struct BlockMaxWand<M> {
@@ -240,6 +240,15 @@ impl<M: Matcher> Matcher for BlockMaxWand<M> {
 
     fn max_score(&self) -> f64 {
         sum_in_order(self.bounds.iter().copied())
+    }
+
+    /// The clauses' block bounds from `target`, summed in query order ([`union_bound`]).
+    fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        let bound = union_bound(&mut self.clauses, target);
+        if bound.is_err() {
+            self.pos = Pos::Done;
+        }
+        bound
     }
 
     fn set_min_competitive(&mut self, score: f64) {

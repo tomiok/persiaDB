@@ -166,11 +166,16 @@ fn bench(c: &mut Criterion) {
         should: vec![term("w3"), term("w150"), term("w190")],
         ..BoolQuery::default()
     });
+    let [and_common, must_should, must_should_rare] = conjunctions(&term);
     let pruned = [
         ("term", &queries[0].1),
         ("or", &queries[2].1),
         ("or_rare", &or_rare),
         ("or50", &or50),
+        ("and", &queries[1].1),
+        ("and_common", &and_common),
+        ("must_should", &must_should),
+        ("must_should_rare", &must_should_rare),
     ];
     let strategies = [
         ("exhaustive", Pruning::Exhaustive),
@@ -202,6 +207,27 @@ fn bench(c: &mut Criterion) {
         &view,
         fields,
     );
+}
+
+/// Conjunctions and `should` beside `must` (ROADMAP 7.4.8): two common words; a common `must` beside rarer
+/// `should`s; the commonest word beside two rare ones, which must hold one of them to beat a warm threshold.
+fn conjunctions(term: &impl Fn(&str) -> Query) -> [Query; 3] {
+    [
+        Query::Bool(BoolQuery {
+            must: vec![term("w0"), term("w1")],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![term("w3")],
+            should: vec![term("w40"), term("w120")],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![term("w0")],
+            should: vec![term("w150"), term("w190")],
+            ..BoolQuery::default()
+        }),
+    ]
 }
 
 /// Expanded at plan time over the segment's terms (7.4.12), then searched: `w1` starts 111 words, capped at 50; `w15`
