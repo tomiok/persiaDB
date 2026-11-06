@@ -54,13 +54,13 @@ pub(crate) fn try_lock<F: ContainerFile>(file: &F) -> io::Result<Option<bool>> {
     }
 }
 
-/// Whether a writer uses `file`, found by taking its lock for a moment ([`try_lock`]). With [`InUse::No`] this handle
-/// holds the lock: release it with [`unlock_kept`] if the file stays. A lock taken where locks belong to the process
-/// ([`ContainerFile::locks_per_handle`]) proves nothing: [`InUse::Unknown`].
-pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<InUse> {
+/// Whether a writer uses `file`, found by taking its lock for a moment ([`try_lock`]), and whether this handle took
+/// it: then it holds the lock, to release with [`unlock_kept`] if the file stays. A lock taken where locks belong to
+/// the process ([`ContainerFile::locks_per_handle`]) proves nothing: [`InUse::Unknown`].
+pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<(InUse, bool)> {
     let locked = try_lock(file)?;
     let per_handle = locked != Some(true) || file.locks_per_handle();
-    Ok(InUse::of(locked, per_handle))
+    Ok((InUse::of(locked, per_handle), locked == Some(true)))
 }
 
 /// Releases the lock this handle took on a side file it keeps, then returns `result`, the caller's outcome (an unlock
@@ -69,9 +69,9 @@ pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<InUse> {
 /// Closing the file is not enough: `flock` belongs to the open file description, and a child that another thread
 /// forked keeps a copy of the descriptor until its `exec` (SPEC §4.5.1). The lock would outlive the listing or sweep,
 /// and the next one would find the stale file in use and keep it (ROADMAP 2.3.11). A removed file needs no unlock: its
-/// name is gone, so no one can meet the lock. Call it only for a lock that is this handle's own ([`InUse::No`]): where
-/// locks belong to the process (POSIX record locks behind `flock`, ADR-0019) a fork inherits none, and the close
-/// releases them anyway, a lock this process's writer holds included.
+/// name is gone, so no one can meet the lock. Also called where the lock may belong to the process
+/// ([`InUse::Unknown`]): where it does, the close would release it (a lock this process's writer holds included), so
+/// the unlock changes nothing; where it belongs to the open file after all, the unlock is needed.
 pub(crate) fn unlock_kept<F: ContainerFile, T>(file: &F, result: io::Result<T>) -> io::Result<T> {
     match (result, file.unlock()) {
         (Ok(value), Ok(())) => Ok(value),
@@ -107,5 +107,99 @@ mod tests {
         assert_eq!(InUse::of(Some(false), false), InUse::Yes);
         // Windows: no lock at all.
         assert_eq!(InUse::of(None, true), InUse::Unknown);
+    }
+}
+
+#[cfg(test)]
+mod unlock_tests {
+    use std::io;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use super::unlock_kept;
+    use crate::container::ContainerFile;
+
+    /// A file whose only behaviour is `unlock`: it counts the calls and fails them if `fails`.
+    #[derive(Debug)]
+    struct Unlocking {
+        fails: bool,
+        calls: AtomicU32,
+    }
+
+    impl ContainerFile for Unlocking {
+        fn file_len(&self) -> io::Result<u64> {
+            Ok(0)
+        }
+        fn read_exact_at(&self, _: &mut [u8], _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn write_all_at(&self, _: &[u8], _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn sync_data(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn sync_all(&self) -> io::Result<()> {
+            Ok(())
+        }
+        fn set_len(&self, _: u64) -> io::Result<()> {
+            Ok(())
+        }
+        fn try_lock(&self) -> io::Result<bool> {
+            Ok(true)
+        }
+        fn unlock(&self) -> io::Result<()> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            if self.fails {
+                Err(io::Error::other("unlock failed"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn file(fails: bool) -> Unlocking {
+        Unlocking {
+            fails,
+            calls: AtomicU32::new(0),
+        }
+    }
+
+    fn removal_failed() -> io::Result<u8> {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "remove failed",
+        ))
+    }
+
+    /// Every outcome unlocks once; an unlock failure becomes the error, or is added to the caller's, whose kind stays.
+    #[test]
+    fn the_unlock_runs_once_and_its_failure_is_never_lost() {
+        let f = file(false);
+        assert_eq!(unlock_kept(&f, Ok(7_u8)).unwrap(), 7);
+        assert_eq!(f.calls.load(Ordering::Relaxed), 1);
+
+        let f = file(true);
+        let err = unlock_kept(&f, Ok(7_u8)).unwrap_err();
+        assert_eq!(err.to_string(), "unlock failed");
+        assert_eq!(f.calls.load(Ordering::Relaxed), 1);
+
+        let f = file(false);
+        let err = unlock_kept(&f, removal_failed()).unwrap_err();
+        assert_eq!(
+            (err.kind(), err.to_string()),
+            (io::ErrorKind::PermissionDenied, "remove failed".into())
+        );
+        assert_eq!(f.calls.load(Ordering::Relaxed), 1);
+
+        let f = file(true);
+        let err = unlock_kept(&f, removal_failed()).unwrap_err();
+        assert_eq!(
+            (err.kind(), err.to_string()),
+            (
+                io::ErrorKind::PermissionDenied,
+                "remove failed; unlocking the file then failed: unlock failed".into()
+            )
+        );
+        assert_eq!(f.calls.load(Ordering::Relaxed), 1);
     }
 }

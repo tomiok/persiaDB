@@ -55,15 +55,17 @@ takes.
    close alone may leave the lock held for a moment after the listing or sweep returns (SPEC §4.5.1, as for the
    writer lock). The next listing or sweep would then find a stale file in use and keep it. So a listing, and a sweep
    whose removal failed, unlock the file before closing it. A removed file is not unlocked: its name is gone, so no
-   one can meet the lock. Where the use was `Unknown` (per-process locks) nothing is unlocked: those locks are not
-   inherited, and the close releases them.
+   one can meet the lock. Where the use was `Unknown` (locks that may belong to the process) a lock taken is released
+   too: if it is the process's, the close would release it anyway, a writer's of the same process included (decision
+   6); if it belongs to the open file after all, the unlock is needed. A `put` that fails leaving its temporary file
+   still only closes it (ROADMAP 2.3.12).
 
 ## Consequences
 
 - A crash's leftovers are bounded by how often an operator sweeps; nothing grows without limit once sweeping is
   scheduled, and nothing is removed behind anyone's back.
 - Each `put` makes three more system calls (a lock, then `fstat` and `stat` for the identity check by path); the lock is released when its handle
-  is closed.
+  is closed, once no descriptor a fork copied is left (decision 7).
 - A sweep that takes a file in the instant before its writer locks it costs that writer one more temporary name,
   never an error.
 - On Windows a local store's temporary files accumulate unless an operator forces a sweep while the store is idle.

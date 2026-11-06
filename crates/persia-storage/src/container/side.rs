@@ -114,10 +114,10 @@ impl<F: ContainerFile + 'static> Container<F> {
                 SideFileKind::Quarantine => InUse::No,
                 SideFileKind::Temporary => match vfs.open(&path, false) {
                     Ok(file) => match side::in_use(&file).map_err(Error::io("lock"))? {
-                        InUse::No => {
-                            side::unlock_kept(&file, Ok(InUse::No)).map_err(Error::io("unlock"))?
+                        (in_use, true) => {
+                            side::unlock_kept(&file, Ok(in_use)).map_err(Error::io("unlock"))?
                         }
-                        in_use => in_use,
+                        (in_use, false) => in_use,
                     },
                     // Finished meanwhile: renamed or removed by its writer.
                     Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
@@ -232,23 +232,26 @@ fn remove_unless_held<F: ContainerFile>(vfs: &dyn Vfs<File = F>, path: &Path) ->
     // check, and the writer lock this handle holds excludes compactions.
     // Where locks belong to the process (NFS, FUSE; ADR-0019) a lock taken proves nothing: a create in this process
     // may hold it, so the file is kept.
-    let own_lock = match side::try_lock(&file).map_err(Error::io("lock"))? {
+    // A file kept with its lock taken is unlocked before the close, which a forked copy of the descriptor would
+    // outlive (SPEC §4.5.1, ADR-0019 decision 7).
+    let locked = match side::try_lock(&file).map_err(Error::io("lock"))? {
         Some(false) => return Ok(false),
-        Some(true) if !file.locks_per_handle() => return Ok(false),
+        Some(true) if !file.locks_per_handle() => {
+            return side::unlock_kept(&file, Ok(false)).map_err(Error::io("unlock"));
+        }
         Some(true) => true,
         None => false,
     };
-    let failed: io::Result<bool> = match vfs.remove_file(path) {
+    let failed = match vfs.remove_file(path) {
         // The name is gone (removed here or by its creator): no one can meet the lock.
         Ok(()) => return Ok(true),
         Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(err) => Err(err),
+        Err(err) => err,
     };
-    // Kept: free it for the next sweep.
-    let failed = if own_lock {
-        side::unlock_kept(&file, failed)
+    let failed = if locked {
+        side::unlock_kept(&file, Err(failed))
     } else {
-        failed
+        Err(failed)
     };
     drop(file);
     failed.map_err(Error::io("remove side file"))

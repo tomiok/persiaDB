@@ -231,7 +231,7 @@ impl<V: Vfs> LocalStorage<V> {
             }
             Err(err) => return Err(with_path(err, &path)),
         };
-        let in_use = side::in_use(&file).map_err(|err| with_path(err, &path))?;
+        let (in_use, locked) = side::in_use(&file).map_err(|err| with_path(err, &path))?;
         let removable = match in_use {
             InUse::No => remove.is_some(),
             InUse::Unknown => remove == Some(true),
@@ -250,7 +250,7 @@ impl<V: Vfs> LocalStorage<V> {
         };
         let removed = kept.is_none();
         if let Some(kept) = kept {
-            let kept = if in_use == InUse::No {
+            let kept = if locked {
                 side::unlock_kept(&file, kept)
             } else {
                 kept
