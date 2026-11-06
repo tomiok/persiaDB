@@ -40,6 +40,12 @@ impl MemtableKeys {
     pub(crate) fn size_in_bytes(&self) -> usize {
         self.keys.len().saturating_mul(size_of::<(u32, u64)>())
     }
+
+    /// Whether `other` reads the same copy (a clone of this one).
+    #[cfg(test)]
+    pub(crate) fn same_copy(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.keys, &other.keys)
+    }
 }
 
 impl KeyReader for MemtableKeys {

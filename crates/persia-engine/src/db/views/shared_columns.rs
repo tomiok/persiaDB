@@ -256,8 +256,11 @@ fn a_copy_is_shared_by_views_of_the_same_documents() {
         assert_eq!(again.key(docid).unwrap(), keys.key(docid).unwrap());
     }
     assert_eq!(mem.size_in_bytes(), cached);
+    assert!(again.same_copy(&keys));
     // An older view copies its own (fewer documents) and leaves the shared one.
     let old_words = older.keywords(f.sku).unwrap();
+    assert!(!older.keys(f.price).unwrap().same_copy(&keys));
+    assert!(mem.view().keys(f.price).unwrap().same_copy(&keys));
     assert!(!std::ptr::eq(
         old_words.value(0).unwrap(),
         words.value(0).unwrap()
@@ -269,6 +272,9 @@ fn a_copy_is_shared_by_views_of_the_same_documents() {
     // More documents: a new copy replaces the shared one.
     mem.put(&doc(&f, 31, 0)).unwrap();
     let newer = mem.view().keywords(f.sku).unwrap();
+    let newer_keys = mem.view().keys(f.price).unwrap();
+    assert!(!newer_keys.same_copy(&keys));
+    assert!(mem.view().keys(f.price).unwrap().same_copy(&newer_keys));
     assert!(!std::ptr::eq(
         newer.value(0).unwrap(),
         words.value(0).unwrap()
