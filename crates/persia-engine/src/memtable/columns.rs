@@ -1,6 +1,7 @@
 //! The memtable's column values for sorting and facets (ROADMAP 7.5.1, 7.5.3): a column field's keys, and a
 //! `keyword` field's values as a dictionary in byte order with each document's ords, as a segment's `Columns` section
-//! holds them (SPEC §5.3.5). Each is copied out of the memtable as of a view once per call, in chunks under its read
+//! holds them (SPEC §5.3.5). Each is copied out of the memtable as of a view once per view (or once for the views of the
+//! same documents, [`super::cache`]), in chunks under its read
 //! lock ([`super::view`], ROADMAP 7.6.6), and built here without it.
 
 use std::sync::Arc;
@@ -34,6 +35,17 @@ impl MemtableKeys {
     pub(super) fn entries(&self) -> &[(u32, u64)] {
         &self.keys
     }
+
+    /// Heap bytes of the copy.
+    pub(crate) fn size_in_bytes(&self) -> usize {
+        self.keys.len().saturating_mul(size_of::<(u32, u64)>())
+    }
+
+    /// Whether `other` reads the same copy (a clone of this one).
+    #[cfg(test)]
+    pub(crate) fn same_copy(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.keys, &other.keys)
+    }
 }
 
 impl KeyReader for MemtableKeys {
@@ -63,6 +75,9 @@ pub struct MemtableKeywords {
     docs: u32,
     /// The field, for a corruption error.
     field: FieldId,
+    /// Heap bytes of the copy, counted once when it is built: the copy is never changed after, and the
+    /// memtable reads [`Self::size_in_bytes`] on every write while it is cached.
+    bytes: usize,
 }
 
 /// Postings `[from, from + n)` of a `keyword` field's `inverted` that are in a view of `docs` documents, as
@@ -157,13 +172,16 @@ pub(super) fn keywords(
         rest = after;
     }
     starts.push(doc_ords.len());
-    Ok(MemtableKeywords {
+    let mut column = MemtableKeywords {
         values,
         starts: starts.into(),
         ords: doc_ords.into(),
         docs,
         field,
-    })
+        bytes: 0,
+    };
+    column.bytes = column.count_bytes();
+    Ok(column)
 }
 
 /// The ordinal of term id `term`, `ords[i]` for `used[i] == term`, or [`missing_term`] when `used` does not hold it:
@@ -229,6 +247,28 @@ impl MemtableKeywords {
                 what: "keyword ords out of range for the document",
             },
         }
+    }
+
+    /// Documents `0..docs` are in the column.
+    pub(crate) fn docs(&self) -> u32 {
+        self.docs
+    }
+
+    /// Heap bytes of the copy: the values, their boxes, and the document ords. Counted when it was built.
+    pub(crate) fn size_in_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Walks the copy for [`Self::size_in_bytes`]: O(distinct values).
+    pub(super) fn count_bytes(&self) -> usize {
+        let values = self
+            .values
+            .iter()
+            .fold(0_usize, |sum, v| sum.saturating_add(v.len()));
+        values
+            .saturating_add(self.values.len().saturating_mul(size_of::<Box<[u8]>>()))
+            .saturating_add(self.starts.len().saturating_mul(size_of::<usize>()))
+            .saturating_add(self.ords.len().saturating_mul(size_of::<u64>()))
     }
 }
 

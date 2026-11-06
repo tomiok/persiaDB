@@ -1382,7 +1382,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   keyword values, and norms; ROADMAP 7.6.5, 7.6.6), and reading the page's documents run to their end first. Those
   copies step between their chunks, never under the lock: one step per term tried and one additional step per matched term after its `df` is counted, column key, kill version, length,
   keyword posting and keyword value, so an expansion that matches nothing in a large memtable or a filter, sort or
-  facet over one stops too; norms one step per chunk, since copying a norm costs less than a step.
+  facet over one stops too; norms one step per chunk, since copying a norm costs less than a step. When another view
+  of the same documents has shared a field's column keys or `keyword` column (§10.6, ROADMAP 7.5.7), a view reads
+  that shared copy: it copies nothing and takes no step for the copy, and a filter scan of those keys still steps once
+  per key.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1488,7 +1491,7 @@ each view and while its readers walk (§7.3). Which relaxation level a hit match
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
    (§8.2.1); a commit syncs whatever is still buffered.
 2. Op applied to the **memtable** (visible to searches).
-3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object).
+3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object). The size counts the column copies its views share (§10.6), so reads can bring a flush earlier; where a flush falls never changes what a snapshot shows.
    Writes that never pause for 10 s and stay under the size are flushed by the auto-commit interval (§14
    `commit_interval`, ROADMAP 6.3.4), which bounds the WAL that recovery replays.
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).
@@ -2127,6 +2130,13 @@ same block at the same time may each decode it; one copy is kept. Segments opene
 by their configuration (planned: ROADMAP 10.2.5, 11.4.7). The capacity bounds what the cache keeps: a reader keeps
 the block it is reading in each stream it reads, also after the cache evicts it.
 It holds no state of its own on disk.
+
+The memtable's views share one copy per field of its column keys and of a `keyword` column's dictionary and ords
+(ROADMAP 7.5.7), as the segments share their decoded dictionaries. A view's copy is the part of the column below its
+document count, which later writes never change (they append; which documents are live is read from the view's own
+kill versions, never from the copy), so views of the same documents share it whatever operations each saw, and a view
+of other documents copies its own. The memtable keeps, per field, the copy of the most documents copied so far, counts
+it in its size (the flush threshold, §8.2), and drops it with itself (a flush starts a new memtable).
 
 ---
 

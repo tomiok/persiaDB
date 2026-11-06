@@ -353,6 +353,76 @@ once either way, sets the wall time; on the calling thread the same request is 2
 `search_request/sort_price` and `score_facet` (a `tag` of 10 values, an empty memtable) have no dictionary worth
 keeping: −0.6 % to +4 % against main over three runs, within this machine's noise.
 
+`search_keyword_columns` after ROADMAP 7.5.7 (the memtable's views share their column copies), the same requests
+on the calling thread and on rayon's global pool (`search_keyword_columns_pool`, added to the bench in 7.5.7).
+2026-11-06, same machine and command; main (3c171e3, with the same bench file, from a worktree) and the branch
+alternating, twice (`main` and `7.5.7` columns are each run's median; the two runs agree within 3 %, the pool's facet
+rows within 10 %):
+
+| Request | main, thread | 7.5.7, thread | main, pool | 7.5.7, pool |
+|---|--:|--:|--:|--:|
+| `sort_sku` | 2.18 / 2.13 ms | 0.999 / 1.02 ms | 1.80 / 1.83 ms | 0.564 / 0.560 ms |
+| `score_facet_sku` | 5.68 / 5.73 ms | 4.84 / 4.77 ms | 4.57 / 4.83 ms | 3.92 / 4.30 ms |
+| `sort_sku_facet_sku` | 6.29 / 6.14 ms | 5.08 / 5.07 ms | 4.93 / 5.11 ms | 4.46 / 4.48 ms |
+| `sort_price` | 1.04 / 1.01 ms | 0.820 / 0.808 ms | 485 / 483 µs | 424 / 434 µs |
+
+Each iteration takes a new memtable view of the same 5 000 documents, so after the first one every view reads the
+copy shared by the first one. In the probe described below (the memtable view's task, medians over two runs of it at
+7.5.5 and two on this branch), the memtable view of `sort_sku` takes 96–97 µs on the calling thread on this branch
+against 910 µs at 7.5.5, and 138–139 µs on the pool against 1 320–1 490 µs, so on the pool the four segment views
+now set the wall time. The facet rows move less: counting every match in the segments dominates them.
+
+**The 7.5.5 pool regression** (`sort_sku` 3–5 % slower than before 7.5.5 on the pool, 21 % faster on the calling
+thread). Found with a throwaway probe (not checked in): the bench's setup, then 3 000 `sort_sku` requests timed in
+three stages (views and plan, `search_with`, dropping the page, views and memtable view), with the start and end of
+each view's task recorded around `Execution::run`. Medians over two runs, before 7.5.5 (7aa3a1d) and at 7.5.5
+(00ab8b7):
+
+| | before 7.5.5, thread | 7.5.5, thread | before 7.5.5, pool | 7.5.5, pool |
+|---|--:|--:|--:|--:|
+| memtable view's task | 1 000 µs | 910 µs | 1 440–1 560 µs | 1 320–1 490 µs |
+| `search_with` | 2 410 µs | 1 850 µs | 1 580–1 680 µs | 1 510–1 600 µs |
+| drop after the search | 1 µs | 89 µs | 2 µs | 230–310 µs |
+| whole request | 2 420 µs | 1 950 µs | 1 590–1 700 µs | 1 760–1 910 µs |
+
+The search itself was not slower at 7.5.5, on the calling thread or on the pool. The drop was. Before 7.5.5 the
+memtable view's keyword column (5 000 boxed values, the ords and the starts) was built by the sort and freed with it,
+inside the view's task on the worker, in parallel with the segments. At 7.5.5 the view keeps it until the view drops, after the search, on the
+calling thread, alone on the critical path. On the pool the copy was allocated on a rayon worker, and freeing it on
+another thread cost about 3 times as much as on the thread that allocated it: 230–310 µs against 89 µs. That fits
+glibc's allocator, which keeps only a few freed chunks per size in the freeing thread's cache and returns the rest to
+the allocating thread's arena under its lock (not measured apart). On the calling
+thread the 89 µs is less than what the segments' cached dictionaries save (4 × 100 µs); on the pool those savings are
+off the critical path, so only the drop showed. At 7.5.7 the shared copy outlives the request (it is freed when a copy
+of more documents replaces it, or with the memtable), and the drop is 0–2 µs on both.
+
+**Pool against calling thread.** Before 7.5.7, the memtable view's task alone took 1.4–1.6 times longer on the pool
+than on the calling thread (p10 950–1 050 µs, p90 2.0–2.3 ms, against 880–1 060 µs on the calling thread), and each
+segment view about 2.2 to 2.5 times longer (700 µs against 330 µs before 7.5.5, 550 µs against 220 µs at 7.5.5).
+On the pool the five views run at once on a 6-core, 12-thread CPU: they share cores (SMT), memory bandwidth and the
+allocator, and a worker may run on the other core complex than the one whose cache holds the memtable the writer
+filled. The probe did not separate these. Their sum is why the pool's wall time is well above the slowest view's
+time on the calling thread, and why it varies (up to 11 % between runs). A request that no longer copies the memtable
+is less exposed to it: with the probe at 7.5.7, `sort_sku` on the pool is 525 µs (the bench above: 560–564 µs), the
+memtable view's task 138–139 µs.
+
+`search_keyword_columns_write` (ROADMAP 7.5.7) upserts one memtable document before each `sort_sku` request
+(untimed setup, `BatchSize::PerIteration`), so every request's memtable view has one more document than the last.
+It copies its columns again and replaces the shared copy, the worst case for the cache. The replaced copy is freed
+after the memtable's locks are released, so a writer does not wait for it. Same session, main and the branch
+alternating, twice:
+
+| | main | 7.5.7 |
+|---|--:|--:|
+| `sort_sku`, calling thread | 2.59 / 2.60 ms | 2.50 / 2.51 ms |
+| `sort_sku_pool` | 3.80 / 3.98 ms | 3.79 / 3.86 ms |
+
+No slower than main: the request copies once either way. The pool is slower than the calling thread here, unlike in
+the read-only rows. A likely cause is that the pool's workers go idle during each untimed upsert and must be woken
+for the next request; this was not measured apart. The memtable grows by one docid per iteration (a few thousand
+over a run), and criterion picks the iteration count from the elapsed time, so a faster build's later requests copy a
+few more documents: compare builds at equal iteration counts, which criterion prints.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54

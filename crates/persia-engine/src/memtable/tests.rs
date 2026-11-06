@@ -596,3 +596,139 @@ fn a_column_scan_shares_the_views_copy() {
     assert!(stopped.is_err());
     assert_eq!(scan(&view).len(), 3_001);
 }
+
+/// The keyword column `words` as `(values in ord order, each document's values)`, to compare two copies.
+fn keyword_rows(words: &mut MemtableKeywords, docs: u32) -> (Vec<Vec<u8>>, Vec<Vec<Vec<u8>>>) {
+    use crate::view::KeywordReader;
+    let values = (0..words.len())
+        .map(|o| words.value(o).unwrap().to_vec())
+        .collect();
+    let rows = (0..docs)
+        .map(|d| {
+            let ords = words.ords(d).unwrap().to_vec();
+            ords.iter()
+                .map(|&o| words.value(o).unwrap().to_vec())
+                .collect()
+        })
+        .collect();
+    (values, rows)
+}
+
+/// A `put` that interns new `keyword` terms and then fails (a `text` token over `MAX_TERM_LEN`, analyzed after the
+/// `keyword` field) leaves the documents as they were: the view after it shares the copy of the view before it, and
+/// that copy is its own. The next `put` takes the docid and term ids the failed one rolled back; a view of it copies
+/// again, and gets its value.
+#[test]
+fn a_failed_put_between_two_views_keeps_their_shared_copy() {
+    use crate::schema::KeywordOptions;
+    use crate::view::KeywordReader;
+
+    // `sku` before `body`, so a put interns its `sku` value before `body` rejects it.
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "sku",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let (sku, body) = (
+        schema.field("sku").unwrap().id(),
+        schema.field("body").unwrap().id(),
+    );
+    let put = |id: &str, value: &str, text: &str| {
+        Document::new(id)
+            .with(sku, Value::String(value.into()))
+            .with(body, Value::String(text.into()))
+    };
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    // Whitespace only: the builtin analyzers drop a token over `MAX_TERM_LEN` instead of rejecting it.
+    for field in &mut write(&mem.shared).unwrap().fields {
+        if let MemField::Text { analyzer, .. } = field {
+            *analyzer = Arc::new(Analyzer::builder(WhitespaceTokenizer).build());
+        }
+    }
+    for i in 0..20 {
+        mem.put(&put(&format!("d{i}"), &format!("v{:02}", i % 6), "w"))
+            .unwrap();
+    }
+    let before = mem.view();
+    let mut shared = before.keywords(sku).unwrap();
+    let long = "q".repeat(MAX_TERM_LEN + 1);
+    assert!(mem.put(&put("bad", "fresh-value", &long)).is_err());
+    let after = mem.view();
+    assert_eq!(after.doc_count(), before.doc_count());
+    let mut read = after.keywords(sku).unwrap();
+    assert!(std::ptr::eq(
+        read.value(0).unwrap(),
+        shared.value(0).unwrap()
+    ));
+    let mut own = after.unshared().keywords(sku).unwrap();
+    assert_eq!(keyword_rows(&mut read, 20), keyword_rows(&mut own, 20));
+    assert_eq!(keyword_rows(&mut shared, 20), keyword_rows(&mut own, 20));
+    // The rolled-back docid and term id, taken by a value sorting first.
+    mem.put(&put("good", "a-first", "w")).unwrap();
+    let next = mem.view();
+    let mut copied = next.keywords(sku).unwrap();
+    assert!(!std::ptr::eq(
+        copied.value(0).unwrap(),
+        shared.value(0).unwrap()
+    ));
+    assert_eq!(copied.value(0), Some(&b"a-first"[..]));
+    let mut own = next.unshared().keywords(sku).unwrap();
+    assert_eq!(keyword_rows(&mut copied, 21), keyword_rows(&mut own, 21));
+}
+
+/// The cached copies' size is stored, not walked on each write (`flush_if_full` reads it after every `put` and
+/// `delete`), and it stays the size a full walk of the copies counts, across puts, deletes and new copies.
+#[test]
+fn the_shared_copies_size_is_their_full_count_after_puts_and_deletes() {
+    use crate::schema::KeywordOptions;
+
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "sku",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let sku = schema.field("sku").unwrap().id();
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    let cached = |mem: &Memtable| {
+        let inner = read(&mem.shared);
+        (inner.columns.size_in_bytes(), inner.columns.count_bytes())
+    };
+    let empty = cached(&mem).0;
+    for round in 0..6_u32 {
+        for i in 0..40 {
+            let value = "v".repeat(usize::try_from(1 + (i * 7 + round) % 13).unwrap());
+            mem.put(&Document::new(format!("d{i}-{round}")).with(sku, Value::String(value)))
+                .unwrap();
+        }
+        for i in (0..40).step_by(3) {
+            mem.delete(&format!("d{i}-{}", round / 2)).unwrap();
+        }
+        let view = mem.view();
+        let words = view.keywords(sku).unwrap();
+        assert_eq!(words.size_in_bytes(), words.count_bytes());
+        let copied = cached(&mem);
+        assert_eq!(copied.0, copied.1);
+        assert!(copied.0 >= empty + words.count_bytes());
+        // Writes after the copy leave the cache, and its size, as they were: a replacement would hold `zz`.
+        mem.put(&Document::new(format!("late-{round}")).with(sku, Value::String("zz".into())))
+            .unwrap();
+        mem.delete(&format!("d1-{round}")).unwrap();
+        assert_eq!(cached(&mem), copied);
+        // A view of them copies again, and replaces the cached copy with a larger one.
+        mem.view().keywords(sku).unwrap();
+        let (stored, counted) = cached(&mem);
+        assert_eq!(stored, counted);
+        assert!(stored > copied.0);
+    }
+}

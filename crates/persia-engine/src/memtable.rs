@@ -41,6 +41,7 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+mod cache;
 mod columns;
 mod flush;
 mod view;
@@ -169,6 +170,8 @@ pub(crate) struct Inner {
     pub(crate) live: u32,
     /// While set, what every new view sees instead of the latest writes ([`Memtable::hold`]).
     pub(crate) held: Option<HeldView>,
+    /// The column copies its views share (ROADMAP 7.5.7).
+    pub(crate) columns: cache::ColumnCache,
 }
 
 /// The state a held memtable shows its new views: the documents, operations and live statistics when
@@ -355,6 +358,7 @@ impl Memtable {
             stats,
             live: 0,
             held: None,
+            columns: cache::ColumnCache::new(schema.fields().len()),
         };
         Ok(Self {
             schema,
@@ -856,6 +860,8 @@ impl Inner {
             // The live statistics, and their copy while a batch holds the memtable.
             .saturating_add(stats_bytes(&self.stats))
             .saturating_add(self.held.as_ref().map_or(0, |h| stats_bytes(&h.stats)))
+            // The column copies its views share; at most one of each per field (ROADMAP 7.5.7).
+            .saturating_add(self.columns.size_in_bytes())
     }
 }
 
