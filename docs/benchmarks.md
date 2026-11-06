@@ -233,10 +233,12 @@ repeated words), so a term alone skips few blocks. Time per query.
 
 Conjunctions and `should` beside `must` (ROADMAP 7.4.8): `and` is `w3 AND w40`, `and_common` `w0 AND w1`,
 `must_should` `w3` with `should` `w40`, `w120`, and `must_should_rare` `w0` with `should` `w150`, `w190`. Before
-7.4.8 every strategy walked these exhaustively, all three within 1 % of each other (`and` 415 to 419 µs,
-`and_common` 480 to 487 µs, `must_should` 967 to 981 µs, `must_should_rare` 675 to 677 µs). After, from one run on the
-same machine (2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux), in which unchanged exhaustive paths ran about 6 %
-slower than in the before run (machine drift), so compare within a row:
+7.4.8 every strategy walked these exhaustively, the three strategies of each query within 1.5 % of each other
+(`and` 415 to 419 µs, `and_common` 480 to 487 µs, `must_should` 967 to 981 µs, `must_should_rare` 675 to 677 µs).
+After, from one run on the same machine (2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux), in which the exhaustive
+walks ran 6 % (`and`) to 10 % (`must_should_rare`) slower than in the before run, so compare within a row. Those
+walks do what they did before 7.4.8 (an in-tree A/B of `must_should` with the earlier `Optional` measured the same), so
+the drift is taken to be the machine's:
 
 | query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
 |---|--:|--:|--:|

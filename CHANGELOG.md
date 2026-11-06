@@ -228,7 +228,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   evaluation, scores bit for bit: bounds are summed in query order, as scores are, so they hold exactly. `Matcher`
   gains `max_score`, `block_bound` and `set_min_competitive`; `TopK::threshold` gives the score a hit must beat, and
   `search::collect` passes it down. `view::PostingsIterator::term_bound` gives a list's `max_tf` and `min_norm`.
-  Conjunctions and `should` clauses beside `must` are not pruned yet.
 - `persia-engine`: query execution over a segment or the memtable (ROADMAP 7.4.1–7.4.3, SPEC §7.2, §7.3).
   `search::SearchPlan::new` builds a query's scorers once from the collection statistics; `SearchPlan::matcher`
   gives a `search::Matcher` per view: `term` and `combined` postings, AND (leapfrogging from the cheapest clause),

@@ -209,7 +209,6 @@ fn bench(c: &mut Criterion) {
     );
 }
 
-/// Expanded at plan time over the segment's terms (7.4.12), then searched: `w1` starts 111 words, capped at 50; `w15`
 /// Conjunctions and `should` beside `must` (ROADMAP 7.4.8): two common words; a common `must` beside rarer
 /// `should`s; the commonest word beside two rare ones, which must hold one of them to beat a warm threshold.
 fn conjunctions(term: &impl Fn(&str) -> Query) -> [Query; 3] {
@@ -231,6 +230,7 @@ fn conjunctions(term: &impl Fn(&str) -> Query) -> [Query; 3] {
     ]
 }
 
+/// Expanded at plan time over the segment's terms (7.4.12), then searched: `w1` starts 111 words, capped at 50; `w15`
 /// is one edit from 21.
 fn expansions(
     c: &mut Criterion,
