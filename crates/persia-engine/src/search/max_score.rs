@@ -7,7 +7,7 @@
 
 use crate::segment::ReadError;
 
-use super::{Matcher, Pos, raise, sum_in_order};
+use super::{Matcher, Pos, ScoreBound, raise, sum_in_order, union_bound};
 
 /// What a clause adds to the current document's bound.
 #[derive(Debug, Clone, Copy)]
@@ -189,6 +189,15 @@ impl<M: Matcher> Matcher for MaxScore<M> {
 
     fn max_score(&self) -> f64 {
         sum_in_order(self.bounds.iter().copied())
+    }
+
+    /// The clauses' block bounds from `target`, summed in query order ([`union_bound`]).
+    fn block_bound(&mut self, target: u32) -> Result<Option<ScoreBound>, ReadError> {
+        let bound = union_bound(&mut self.clauses, target);
+        if bound.is_err() {
+            self.pos = Pos::Done;
+        }
+        bound
     }
 
     /// Moves clauses into the non-essential set while their bounds together, in query order, stay at most `score`:

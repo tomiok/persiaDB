@@ -7,7 +7,7 @@ use crate::segment::ReadError;
 use crate::view::{PostingsIterator, SearchView};
 
 use super::boolean::Conjunction;
-use super::{Matcher, Pos, bounded_norm};
+use super::{Matcher, Pos, Pruning, bounded_norm};
 
 /// The postings of one phrase term as a [`Matcher`] (it scores nothing), with its relative position.
 pub(super) struct PhrasePostings<P> {
@@ -85,7 +85,7 @@ impl<'a, V: SearchView + 'a> PhraseMatcher<'a, V> {
         };
         Self {
             max: scorer.score(&[Some(bound)]),
-            terms: Conjunction::new(terms),
+            terms: Conjunction::new(terms, Pruning::Exhaustive),
             field,
             norms,
             scorer,

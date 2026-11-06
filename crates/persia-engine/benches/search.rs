@@ -166,11 +166,31 @@ fn bench(c: &mut Criterion) {
         should: vec![term("w3"), term("w150"), term("w190")],
         ..BoolQuery::default()
     });
+    // Conjunctions and `should` beside `must` (ROADMAP 7.4.8): two common words; a common `must` beside rarer
+    // `should`s; the commonest word beside two rare ones, which must hold one of them to beat a warm threshold.
+    let and_common = Query::Bool(BoolQuery {
+        must: vec![term("w0"), term("w1")],
+        ..BoolQuery::default()
+    });
+    let must_should = Query::Bool(BoolQuery {
+        must: vec![term("w3")],
+        should: vec![term("w40"), term("w120")],
+        ..BoolQuery::default()
+    });
+    let must_should_rare = Query::Bool(BoolQuery {
+        must: vec![term("w0")],
+        should: vec![term("w150"), term("w190")],
+        ..BoolQuery::default()
+    });
     let pruned = [
         ("term", &queries[0].1),
         ("or", &queries[2].1),
         ("or_rare", &or_rare),
         ("or50", &or50),
+        ("and", &queries[1].1),
+        ("and_common", &and_common),
+        ("must_should", &must_should),
+        ("must_should_rare", &must_should_rare),
     ];
     let strategies = [
         ("exhaustive", Pruning::Exhaustive),

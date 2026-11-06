@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-engine`: top-k pruning reaches conjunctions and `should` clauses beside `must` (ROADMAP 7.4.8; SPEC §7.3).
+  A `bool` with several `must` clauses skips the ranges where its clauses' block bounds together cannot beat the
+  worst kept hit (block-max AND), and one with `should` beside `must` also scores only documents holding a `should`
+  clause where the `must` side alone cannot beat it (as Lucene's ReqOpt). A disjunction's `Matcher::block_bound` is
+  now its clauses' block bounds summed, not its whole-list bound. Results are unchanged.
 - `persia-engine`: faster numeric and `datetime` filters and sorts (ROADMAP 7.4.13, 7.5.6; SPEC §7.3, §7.4). A filter scan
   skips the FOR blocks whose bounds (minimum, and minimum plus `2^width − 1`) rule it out and takes whole those they
   rule in; a `bool` whose filters all read column keys (no `keyword` value, no `exists` on `text` or `keyword`) checks
