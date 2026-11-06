@@ -717,12 +717,18 @@ fn the_shared_copies_size_is_their_full_count_after_puts_and_deletes() {
         let view = mem.view();
         let words = view.keywords(sku).unwrap();
         assert_eq!(words.size_in_bytes(), words.count_bytes());
-        // Writes after the copy leave it, and its size, as they were.
+        let copied = cached(&mem);
+        assert_eq!(copied.0, copied.1);
+        assert!(copied.0 >= empty + words.count_bytes());
+        // Writes after the copy leave the cache, and its size, as they were: a replacement would hold `zz`.
         mem.put(&Document::new(format!("late-{round}")).with(sku, Value::String("zz".into())))
             .unwrap();
         mem.delete(&format!("d1-{round}")).unwrap();
+        assert_eq!(cached(&mem), copied);
+        // A view of them copies again, and replaces the cached copy with a larger one.
+        mem.view().keywords(sku).unwrap();
         let (stored, counted) = cached(&mem);
         assert_eq!(stored, counted);
-        assert!(stored >= empty + words.count_bytes());
+        assert!(stored > copied.0);
     }
 }

@@ -7,6 +7,7 @@
 mod support;
 
 use persia_engine::db::{Execution, SearchResults, Threads};
+use persia_engine::search::SortValue;
 use support::{Shape, SortSku, database, upsert};
 
 const SHAPE: Shape = Shape {
@@ -40,9 +41,13 @@ fn run_mode(exec: &Execution) {
     let hits = ids(&request.run(&snapshot, exec));
     assert_eq!(hits.get(..5), Some(&upserted[..]), "{hits:?}");
     // The snapshot taken before the flush misses the writes after it.
-    let stale = ids(&request.run(&before_flush, exec));
+    let before = request.run(&before_flush, exec);
+    let stale = ids(&before);
     assert_eq!(stale.get(..3), upserted.get(..3), "{stale:?}");
-    assert!(!stale.contains(&SHAPE.upserted(4)), "{stale:?}");
+    // By write 4's own `sku`: its id is also a generated document of the snapshot before the flush.
+    let write_4 = SortValue::Keyword(format!("sku-{:016x}", 4).into_bytes());
+    let skus: Vec<&SortValue> = before.hits.iter().filter_map(|h| h.sort.first()).collect();
+    assert!(!skus.contains(&&write_4), "{skus:?}");
 }
 
 #[test]
