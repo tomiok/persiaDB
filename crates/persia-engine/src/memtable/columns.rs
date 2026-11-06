@@ -75,6 +75,9 @@ pub struct MemtableKeywords {
     docs: u32,
     /// The field, for a corruption error.
     field: FieldId,
+    /// Heap bytes of the copy, counted once when it is built: the copy is never changed after, and the
+    /// memtable reads [`Self::size_in_bytes`] on every write while it is cached.
+    bytes: usize,
 }
 
 /// Postings `[from, from + n)` of a `keyword` field's `inverted` that are in a view of `docs` documents, as
@@ -169,13 +172,16 @@ pub(super) fn keywords(
         rest = after;
     }
     starts.push(doc_ords.len());
-    Ok(MemtableKeywords {
+    let mut column = MemtableKeywords {
         values,
         starts: starts.into(),
         ords: doc_ords.into(),
         docs,
         field,
-    })
+        bytes: 0,
+    };
+    column.bytes = column.count_bytes();
+    Ok(column)
 }
 
 /// The ordinal of term id `term`, `ords[i]` for `used[i] == term`, or [`missing_term`] when `used` does not hold it:
@@ -248,8 +254,13 @@ impl MemtableKeywords {
         self.docs
     }
 
-    /// Heap bytes of the copy: the values, their boxes, and the document ords.
+    /// Heap bytes of the copy: the values, their boxes, and the document ords. Counted when it was built.
     pub(crate) fn size_in_bytes(&self) -> usize {
+        self.bytes
+    }
+
+    /// Walks the copy for [`Self::size_in_bytes`]: O(distinct values).
+    pub(super) fn count_bytes(&self) -> usize {
         let values = self
             .values
             .iter()

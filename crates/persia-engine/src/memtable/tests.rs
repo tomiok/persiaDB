@@ -681,3 +681,48 @@ fn a_failed_put_between_two_views_keeps_their_shared_copy() {
     let mut own = next.unshared().keywords(sku).unwrap();
     assert_eq!(keyword_rows(&mut copied, 21), keyword_rows(&mut own, 21));
 }
+
+/// The cached copies' size is stored, not walked on each write (`flush_if_full` reads it after every `put` and
+/// `delete`), and it stays the size a full walk of the copies counts, across puts, deletes and new copies.
+#[test]
+fn the_shared_copies_size_is_their_full_count_after_puts_and_deletes() {
+    use crate::schema::KeywordOptions;
+
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "sku",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let sku = schema.field("sku").unwrap().id();
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    let cached = |mem: &Memtable| {
+        let inner = read(&mem.shared);
+        (inner.columns.size_in_bytes(), inner.columns.count_bytes())
+    };
+    let empty = cached(&mem).0;
+    for round in 0..6_u32 {
+        for i in 0..40 {
+            let value = "v".repeat(usize::try_from(1 + (i * 7 + round) % 13).unwrap());
+            mem.put(&Document::new(format!("d{i}-{round}")).with(sku, Value::String(value)))
+                .unwrap();
+        }
+        for i in (0..40).step_by(3) {
+            mem.delete(&format!("d{i}-{}", round / 2)).unwrap();
+        }
+        let view = mem.view();
+        let words = view.keywords(sku).unwrap();
+        assert_eq!(words.size_in_bytes(), words.count_bytes());
+        // Writes after the copy leave it, and its size, as they were.
+        mem.put(&Document::new(format!("late-{round}")).with(sku, Value::String("zz".into())))
+            .unwrap();
+        mem.delete(&format!("d1-{round}")).unwrap();
+        let (stored, counted) = cached(&mem);
+        assert_eq!(stored, counted);
+        assert!(stored >= empty + words.count_bytes());
+    }
+}

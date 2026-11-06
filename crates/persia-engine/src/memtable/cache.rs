@@ -103,14 +103,22 @@ impl ColumnCache {
 
     /// Heap bytes of the cached copies. A copy a view still holds after the cache replaced it is the view's, not
     /// counted here.
+    /// O(fields): a keyword column's count is stored with it, as the memtable reads this on every write.
     pub(crate) fn size_in_bytes(&self) -> usize {
+        self.total(MemtableKeywords::size_in_bytes)
+    }
+
+    /// [`Self::size_in_bytes`], with each keyword column walked again instead of its stored count.
+    #[cfg(test)]
+    pub(crate) fn count_bytes(&self) -> usize {
+        self.total(MemtableKeywords::count_bytes)
+    }
+
+    fn total(&self, words: fn(&MemtableKeywords) -> usize) -> usize {
         let slots = self.slots();
         let copies = slots.iter().fold(0_usize, |sum, s| {
             let keys = s.keys.as_ref().map_or(0, |(_, k)| k.size_in_bytes());
-            let words = s
-                .keywords
-                .as_ref()
-                .map_or(0, MemtableKeywords::size_in_bytes);
+            let words = s.keywords.as_ref().map_or(0, words);
             sum.saturating_add(keys).saturating_add(words)
         });
         copies.saturating_add(slots.capacity().saturating_mul(size_of::<Slot>()))
