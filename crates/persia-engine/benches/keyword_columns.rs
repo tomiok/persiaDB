@@ -82,7 +82,9 @@ fn bench(c: &mut Criterion) {
     // One upsert of a memtable document before each request (not timed): every request's memtable view has one
     // document more than the last, so it copies its columns again and replaces the shared copy (ROADMAP 7.5.7). Each
     // mode starts from a fresh database, and each request reads the snapshot after its write: one taken before would
-    // miss the writes, and any flush they cause.
+    // miss the writes, and any flush they cause. An upsert replaces a document, so the memtable grows by one docid per
+    // iteration, and criterion picks the iteration count from the elapsed time: a faster build runs more, so its later
+    // requests copy more documents. Compare two builds only at equal iteration counts (criterion prints them).
     drop((snapshot, db));
     let mut group = c.benchmark_group("search_keyword_columns_write");
     for (name, exec) in [

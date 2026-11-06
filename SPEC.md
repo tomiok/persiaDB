@@ -1382,9 +1382,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   keyword values, and norms; ROADMAP 7.6.5, 7.6.6), and reading the page's documents run to their end first. Those
   copies step between their chunks, never under the lock: one step per term tried and one additional step per matched term after its `df` is counted, column key, kill version, length,
   keyword posting and keyword value, so an expansion that matches nothing in a large memtable or a filter, sort or
-  facet over one stops too; norms one step per chunk, since copying a norm costs less than a step. A view
-  that reads the column keys or `keyword` column another view of the same documents shared (§10.6, ROADMAP 7.5.7)
-  copies nothing and takes no step for the copy; a filter scan of those keys still steps once per key.
+  facet over one stops too; norms one step per chunk, since copying a norm costs less than a step. When another view
+  of the same documents has shared a field's column keys or `keyword` column (§10.6, ROADMAP 7.5.7), a view reads
+  that shared copy: it copies nothing and takes no step for the copy, and a filter scan of those keys still steps once
+  per key.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a

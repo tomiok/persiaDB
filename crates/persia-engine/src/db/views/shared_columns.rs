@@ -320,31 +320,54 @@ proptest! {
 /// reader takes returns what the same view copying its own columns returns.
 #[test]
 fn readers_on_the_pool_match_own_copies_while_a_writer_advances() {
-    use std::sync::Mutex;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use std::sync::{Barrier, Mutex};
+
+    const READERS: u32 = 3;
 
     let (db, f) = database();
     let db = Mutex::new(db);
     let done = AtomicBool::new(false);
+    // The readers and the writer start together, and the writer waits halfway for a read of every reader, so reads
+    // overlap writes before and after it.
+    let start = Barrier::new(usize::try_from(READERS + 1).unwrap());
+    let read_once = AtomicU32::new(0);
     let pool = Execution::default().threads(Threads::Global);
     let own_exec = Execution::default().threads(Threads::Current);
     std::thread::scope(|s| {
-        for _ in 0..3 {
-            s.spawn(|| {
-                let mut reads = 0_u32;
-                while !done.load(Ordering::Acquire) || reads < 20 {
-                    let snapshot = db.lock().unwrap().snapshot();
-                    let c = snapshot.collection("c").unwrap();
-                    let requests = requests(c.schema(), &f);
-                    let memtable = c.memtable();
-                    let shared = search(c, &memtable, &requests, &pool);
-                    let own = search(c, &memtable.unshared(), &requests, &own_exec);
-                    assert_eq!(shared, own, "memtable version {}", memtable.version());
-                    reads += 1;
-                }
-            });
-        }
+        let readers: Vec<_> = (0..READERS)
+            .map(|_| {
+                s.spawn(|| {
+                    start.wait();
+                    let mut reads = 0_u32;
+                    while !done.load(Ordering::Acquire) || reads < 20 {
+                        let snapshot = db.lock().unwrap().snapshot();
+                        let c = snapshot.collection("c").unwrap();
+                        let requests = requests(c.schema(), &f);
+                        let memtable = c.memtable();
+                        let shared = search(c, &memtable, &requests, &pool);
+                        let own = search(c, &memtable.unshared(), &requests, &own_exec);
+                        assert_eq!(shared, own, "memtable version {}", memtable.version());
+                        reads += 1;
+                        if reads == 1 {
+                            read_once.fetch_add(1, Ordering::Release);
+                        }
+                    }
+                })
+            })
+            .collect();
+        start.wait();
         for round in 0..400_u32 {
+            if round == 200 {
+                // A reader that panicked ends: its panic fails the test when the scope joins it.
+                while read_once.load(Ordering::Acquire) < READERS
+                    && !readers
+                        .iter()
+                        .any(std::thread::ScopedJoinHandle::is_finished)
+                {
+                    std::thread::yield_now();
+                }
+            }
             let mut db = db.lock().unwrap();
             let id = (round * 7) % 90;
             if round % 11 == 5 {
