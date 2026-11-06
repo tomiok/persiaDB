@@ -108,7 +108,9 @@ impl MemtableView {
     /// Shares `keys`, this view's whole copy of column `field`, with later views of the same documents.
     fn share_keys(&self, field: FieldId, keys: &MemtableKeys) {
         if self.share {
-            read(&self.shared).columns.keep_keys(field, self.docs, keys);
+            // The read guard and the cache's lock end with this statement; the replaced copy is freed after them.
+            let replaced = read(&self.shared).columns.keep_keys(field, self.docs, keys);
+            drop(replaced);
         }
     }
 
@@ -122,7 +124,8 @@ impl MemtableView {
     /// Shares `keywords`, this view's keyword column of `field`, with later views of the same documents.
     fn share_keywords(&self, field: FieldId, keywords: &MemtableKeywords) {
         if self.share {
-            read(&self.shared).columns.keep_keywords(field, keywords);
+            let replaced = read(&self.shared).columns.keep_keywords(field, keywords);
+            drop(replaced);
         }
     }
 

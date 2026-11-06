@@ -53,13 +53,23 @@ impl ColumnCache {
         (*cached == docs).then(|| keys.clone())
     }
 
-    /// Keeps `keys`, the keys of column `field` for documents `0..docs`, unless a copy of more documents is cached.
-    pub(crate) fn keep_keys(&self, field: FieldId, docs: u32, keys: &MemtableKeys) {
+    /// Keeps `keys`, the keys of column `field` for documents `0..docs`, unless a copy of as many documents or more is
+    /// cached (of two views of the same documents copying at once, the first to finish is kept; the other reads its
+    /// own until it drops). Returns the copy it replaced, for the caller to drop once it holds no lock: freeing a large
+    /// copy is slow (`docs/benchmarks.md`, ROADMAP 7.5.7), and a writer must not wait for it.
+    #[must_use = "drop the replaced copy outside the memtable's locks"]
+    pub(crate) fn keep_keys(
+        &self,
+        field: FieldId,
+        docs: u32,
+        keys: &MemtableKeys,
+    ) -> Option<(u32, MemtableKeys)> {
         let mut slots = self.slots();
-        if let Some(slot) = slot_mut(&mut slots, field)
-            && slot.keys.as_ref().is_none_or(|(cached, _)| *cached < docs)
-        {
-            slot.keys = Some((docs, keys.clone()));
+        let slot = slot_mut(&mut slots, field)?;
+        if slot.keys.as_ref().is_none_or(|(cached, _)| *cached < docs) {
+            slot.keys.replace((docs, keys.clone()))
+        } else {
+            None
         }
     }
 
@@ -70,16 +80,24 @@ impl ColumnCache {
         (keywords.docs() == docs).then(|| keywords.clone())
     }
 
-    /// Keeps `keywords`, a keyword column of `field`, unless a copy of more documents is cached.
-    pub(crate) fn keep_keywords(&self, field: FieldId, keywords: &MemtableKeywords) {
+    /// Keeps `keywords`, a keyword column of `field`, unless a copy of as many documents or more is cached; returns
+    /// the copy it replaced, as [`Self::keep_keys`].
+    #[must_use = "drop the replaced copy outside the memtable's locks"]
+    pub(crate) fn keep_keywords(
+        &self,
+        field: FieldId,
+        keywords: &MemtableKeywords,
+    ) -> Option<MemtableKeywords> {
         let mut slots = self.slots();
-        if let Some(slot) = slot_mut(&mut slots, field)
-            && slot
-                .keywords
-                .as_ref()
-                .is_none_or(|cached| cached.docs() < keywords.docs())
+        let slot = slot_mut(&mut slots, field)?;
+        if slot
+            .keywords
+            .as_ref()
+            .is_none_or(|cached| cached.docs() < keywords.docs())
         {
-            slot.keywords = Some(keywords.clone());
+            slot.keywords.replace(keywords.clone())
+        } else {
+            None
         }
     }
 

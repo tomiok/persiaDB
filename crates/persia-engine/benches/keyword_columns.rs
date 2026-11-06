@@ -3,7 +3,8 @@
 //! `price`. Each request takes a fresh memtable view and views, as a request does: 10 hits of `w3` sorted by `sku`,
 //! by score with a `sku` facet, both at once, and sorted by `price`, every view on the calling thread
 //! (`search_keyword_columns`) and on rayon's global pool (`search_keyword_columns_pool`, ROADMAP 7.5.7). Deterministic
-//! input (a fixed-seed generator).
+//! input (a fixed-seed generator). `search_keyword_columns_write` upserts one memtable document before each `sort_sku`
+//! request, so each request copies the memtable's columns again.
 //! Run: `cargo bench -p persia-engine --bench keyword_columns`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
@@ -11,13 +12,13 @@
 use std::hint::black_box;
 use std::sync::Arc;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use persia_engine::db::{
     Database, DatabaseOptions, Execution, ManualClock, SearchRequest, SegmentIds, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{Query, TermQuery};
-use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+use persia_engine::schema::{FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
 use persia_engine::search::{FacetRequest, Order, Projection, SearchPlan, Sort, SortKey};
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
@@ -38,7 +39,8 @@ impl Rng {
     }
 }
 
-fn bench(c: &mut Criterion) {
+/// The database the requests run on, and its `body`, `price` and `sku` fields.
+fn database() -> (Database<SimFile>, [FieldId; 3]) {
     let schema = SchemaBuilder::new("bench")
         .field("body", FieldKind::Text(TextOptions::default()))
         .field("price", FieldKind::I64 { stored: false })
@@ -72,6 +74,11 @@ fn bench(c: &mut Criterion) {
             db.commit().unwrap();
         }
     }
+    (db, [body, price, sku])
+}
+
+fn bench(c: &mut Criterion) {
+    let (mut db, [body, price, sku]) = database();
     let snapshot = db.snapshot();
     let coll = snapshot.collection("bench").unwrap();
     assert_eq!(coll.segments().len(), 4);
@@ -123,6 +130,42 @@ fn bench(c: &mut Criterion) {
         }
         group.finish();
     }
+    // One upsert of a memtable document before each request (not timed): every request's memtable view has one
+    // document more than the last, so it copies its columns again and replaces the shared copy (ROADMAP 7.5.7). The
+    // memtable grows by one docid per iteration, the same for every build of this bench.
+    let sort_sku = &requests[0].1;
+    let mut upserts = 0_u64;
+    let mut group = c.benchmark_group("search_keyword_columns_write");
+    for (name, exec) in [
+        ("sort_sku", Execution::default().threads(Threads::Current)),
+        (
+            "sort_sku_pool",
+            Execution::default().threads(Threads::Global),
+        ),
+    ] {
+        group.bench_function(name, |b| {
+            b.iter_batched(
+                || {
+                    let i = SEGMENTS * PER_SEGMENT + upserts % IN_MEMTABLE;
+                    upserts += 1;
+                    let doc = Document::new(format!("d{i}"))
+                        .with(body, Value::String(format!("w3 w{}", upserts % 20)))
+                        .with(price, Value::I64(i64::try_from(upserts % 1000).unwrap()))
+                        .with(sku, Value::String(format!("sku-{upserts:016x}")));
+                    db.put("bench", &doc, Durability::Buffered).unwrap();
+                },
+                |()| {
+                    let memtable = coll.memtable();
+                    let stats = coll.search_statistics(&memtable);
+                    let plan = SearchPlan::new(&query, schema, &stats).unwrap();
+                    let views = coll.views(&memtable).unwrap();
+                    black_box(views.search_with(&plan, sort_sku, &exec).unwrap())
+                },
+                BatchSize::PerIteration,
+            );
+        });
+    }
+    group.finish();
 }
 
 criterion_group!(benches, bench);

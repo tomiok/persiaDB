@@ -1384,7 +1384,7 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   keyword posting and keyword value, so an expansion that matches nothing in a large memtable or a filter, sort or
   facet over one stops too; norms one step per chunk, since copying a norm costs less than a step. A view
   that reads the column keys or `keyword` column another view of the same documents shared (§10.6, ROADMAP 7.5.7)
-  copies nothing and takes no step for them.
+  copies nothing and takes no step for the copy; a filter scan of those keys still steps once per key.
   Returning the best so far is relaxation's budget (§7.6), not this.
 - Memtable is searched like a tiny segment (near-real-time visibility after `put` returns), after the segments.
   Until the commit that flushes it tombstones them (§8.3), the copies in the segments of every id the memtable has a
@@ -1490,7 +1490,7 @@ each view and while its readers walk (§7.3). Which relaxation level a hit match
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
    (§8.2.1); a commit syncs whatever is still buffered.
 2. Op applied to the **memtable** (visible to searches).
-3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object).
+3. When memtable exceeds size/age threshold (default 64 MiB / 10 s idle), it is **flushed** into a new segment (frame/object). The size counts the column copies its views share (§10.6), so reads can bring a flush earlier; where a flush falls never changes what a snapshot shows.
    Writes that never pause for 10 s and stay under the size are flushed by the auto-commit interval (§14
    `commit_interval`, ROADMAP 6.3.4), which bounds the WAL that recovery replays.
 4. A **commit** publishes a new manifest (local: SPEC §4.5; remote: SPEC §10.4).

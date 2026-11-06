@@ -508,12 +508,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   frames (SPEC §4.7; ADR-0017).
 
 ### Changed
-- `persia-engine`: the memtable's views share their copies of a field's column keys and `keyword` column (ROADMAP
-  7.5.7; SPEC §10.6). A request takes a new memtable view, and views of the same documents now copy a column once
-  between them instead of once each; the memtable keeps one copy per field (the one of the most documents) and counts
-  it in `Memtable::size_in_bytes`. `search_keyword_columns/sort_sku` 2.16 → 1.01 ms on the calling thread and 1.82 →
-  0.56 ms on rayon's pool; the pool slowdown 7.5.5 left (the view's copy freed on the calling thread after the
-  search) is gone. Results are unchanged.
 - `persia-engine`: `SegmentWriter::finish` writes every section straight into the segment buffer as it encodes it,
   instead of holding each section and copying it in (ROADMAP 5.1.6): postings are grouped by term as 4-byte indices,
   term lists are measured in one pass from their bit widths and varint lengths, without encoding them (writing the

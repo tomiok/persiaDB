@@ -402,7 +402,24 @@ On the pool the five views run at once on a 6-core, 12-thread CPU: they share co
 allocator, and a worker may run on the other core complex than the one whose cache holds the memtable the writer
 filled. The probe did not separate these. Their sum is why the pool's wall time is well above the slowest view's
 time on the calling thread, and why it varies (up to 11 % between runs). A request that no longer copies the memtable
-is less exposed to it: `sort_sku` on the pool is 525 µs, with the memtable view's task at 140 µs.
+is less exposed to it: with the probe at 7.5.7, `sort_sku` on the pool is 525 µs (the bench above: 560–564 µs), the
+memtable view's task 140 µs.
+
+`search_keyword_columns_write` (ROADMAP 7.5.7) upserts one memtable document before each `sort_sku` request
+(untimed setup, `BatchSize::PerIteration`), so every request's memtable view has one more document than the last.
+It copies its columns again and replaces the shared copy, the worst case for the cache. The replaced copy is freed
+after the memtable's locks are released, so a writer does not wait for it. Same session, main and the branch
+alternating, twice:
+
+| | main | 7.5.7 |
+|---|--:|--:|
+| `sort_sku`, calling thread | 2.59 / 2.60 ms | 2.50 / 2.51 ms |
+| `sort_sku_pool` | 3.80 / 3.98 ms | 3.79 / 3.86 ms |
+
+No slower than main: the request copies once either way. The pool is slower than the calling thread here, unlike in
+the read-only rows. A likely cause is that the pool's workers go idle during each untimed upsert and must be woken
+for the next request; this was not measured apart. The memtable grows by one docid per iteration (a few thousand
+over a run).
 
 ## `persia-engine` relevance
 

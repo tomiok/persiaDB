@@ -56,17 +56,20 @@ fn database() -> (Database<SimFile>, Fields) {
     (db, fields)
 }
 
-/// Document `id`, version `v`: a word every version holds, its `sku` (none for some), a price and a flag.
+/// Document `id`, version `v`: a word every version holds, its `sku` and `price` (each missing in some), and a flag.
 fn doc(f: &Fields, id: u32, v: u32) -> Document {
     let mut doc = Document::new(format!("d{id}"))
         .with(f.body, Value::String(format!("all w{}", v % 3)))
-        .with(f.price, Value::I64(i64::from((id * 7 + v * 13) % 50)))
         .with(f.flag, Value::Bool((id + v).is_multiple_of(2)));
     if !(id + v).is_multiple_of(5) {
         doc = doc.with(
             f.sku,
             Value::String(format!("sku-{:02}", (id * 3 + v) % 17)),
         );
+    }
+    // Some documents have no price, so a column's key count is not its document count.
+    if (id * 2 + v) % 7 != 3 {
+        doc = doc.with(f.price, Value::I64(i64::from((id * 7 + v * 13) % 50)));
     }
     doc
 }
@@ -357,4 +360,67 @@ fn readers_on_the_pool_match_own_copies_while_a_writer_advances() {
         }
         done.store(true, Ordering::Release);
     });
+}
+
+/// The keyword column `words` as `(values in ord order, each document's values)`, to compare two copies.
+fn keyword_rows(
+    words: &mut crate::memtable::MemtableKeywords,
+    docs: u32,
+) -> (Vec<Vec<u8>>, Vec<Vec<Vec<u8>>>) {
+    use crate::view::KeywordReader;
+    let values = (0..words.len())
+        .map(|o| words.value(o).unwrap().to_vec())
+        .collect();
+    let rows = (0..docs)
+        .map(|d| {
+            let ords = words.ords(d).unwrap().to_vec();
+            ords.iter()
+                .map(|&o| words.value(o).unwrap().to_vec())
+                .collect()
+        })
+        .collect();
+    (values, rows)
+}
+
+/// While a memtable is held (a `put_batch` not durable yet), new views see the documents before the hold: they share
+/// one copy of those, which is their own. After the release a view sees the batch and replaces it.
+#[test]
+fn views_of_a_held_memtable_share_the_copy_of_the_hold() {
+    use crate::memtable::Memtable;
+    use crate::view::{KeyReader, SearchView};
+    use persia_analysis::AnalyzerRegistry;
+
+    let (schema, f) = schema();
+    let mut mem = Memtable::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    for id in 0..25 {
+        mem.put(&doc(&f, id, 0)).unwrap();
+    }
+    mem.hold();
+    for id in 25..40 {
+        mem.put(&doc(&f, id, 1)).unwrap();
+    }
+    mem.delete("d2").unwrap();
+    let (a, b) = (mem.view(), mem.view());
+    assert_eq!(a.doc_count(), 25);
+    let mut keys = a.keys(f.price).unwrap();
+    let mut again = b.keys(f.price).unwrap();
+    assert!(again.same_copy(&keys));
+    let mut own = b.unshared().keys(f.price).unwrap();
+    for docid in 0..25 {
+        let key = own.key(docid).unwrap();
+        assert_eq!(keys.key(docid).unwrap(), key, "{docid}");
+        assert_eq!(again.key(docid).unwrap(), key, "{docid}");
+    }
+    let mut words = a.keywords(f.sku).unwrap();
+    let mut own_words = b.unshared().keywords(f.sku).unwrap();
+    assert_eq!(
+        keyword_rows(&mut words, 25),
+        keyword_rows(&mut own_words, 25)
+    );
+    mem.release();
+    let released = mem.view();
+    assert_eq!(released.doc_count(), 40);
+    let newer = released.keys(f.price).unwrap();
+    assert!(!newer.same_copy(&keys));
+    assert!(mem.view().keys(f.price).unwrap().same_copy(&newer));
 }
