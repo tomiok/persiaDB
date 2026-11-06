@@ -369,6 +369,9 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 #[cfg(test)]
+mod shared_columns;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::{Database, DatabaseOptions, SearchRequest};

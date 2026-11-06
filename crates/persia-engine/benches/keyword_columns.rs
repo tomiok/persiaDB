@@ -1,7 +1,8 @@
 //! Requests over a `keyword` column with a large dictionary (ROADMAP 7.5.5): 40 000 documents committed in 4 segments
 //! plus 5 000 in the memtable, each with its own `sku` (so every segment's dictionary holds 10 000 values) and a
 //! `price`. Each request takes a fresh memtable view and views, as a request does: 10 hits of `w3` sorted by `sku`,
-//! by score with a `sku` facet, both at once, and sorted by `price`, every view on the calling thread. Deterministic
+//! by score with a `sku` facet, both at once, and sorted by `price`, every view on the calling thread
+//! (`search_keyword_columns`) and on rayon's global pool (`search_keyword_columns_pool`, ROADMAP 7.5.7). Deterministic
 //! input (a fixed-seed generator).
 //! Run: `cargo bench -p persia-engine --bench keyword_columns`.
 
@@ -95,21 +96,33 @@ fn bench(c: &mut Criterion) {
         ("sort_sku_facet_sku", page(&by_sku, &facet)),
         ("sort_price", page(&by_price, &[])),
     ];
-    // On the calling thread: the time is the work of every view, not the slowest view's.
-    let exec = Execution::default().threads(Threads::Current);
-    let mut group = c.benchmark_group("search_keyword_columns");
-    for (name, request) in &requests {
-        group.bench_function(*name, |b| {
-            b.iter(|| {
-                let memtable = coll.memtable();
-                let stats = coll.search_statistics(&memtable);
-                let plan = SearchPlan::new(&query, schema, &stats).unwrap();
-                let views = coll.views(&memtable).unwrap();
-                black_box(views.search_with(&plan, request, &exec).unwrap())
+    // On the calling thread the time is the work of every view; on rayon's pool, the slowest view's (the memtable's,
+    // here) and the pool's dispatch.
+    let execs = [
+        (
+            "search_keyword_columns",
+            Execution::default().threads(Threads::Current),
+        ),
+        (
+            "search_keyword_columns_pool",
+            Execution::default().threads(Threads::Global),
+        ),
+    ];
+    for (group_name, exec) in &execs {
+        let mut group = c.benchmark_group(*group_name);
+        for (name, request) in &requests {
+            group.bench_function(*name, |b| {
+                b.iter(|| {
+                    let memtable = coll.memtable();
+                    let stats = coll.search_statistics(&memtable);
+                    let plan = SearchPlan::new(&query, schema, &stats).unwrap();
+                    let views = coll.views(&memtable).unwrap();
+                    black_box(views.search_with(&plan, request, exec).unwrap())
+                });
             });
-        });
+        }
+        group.finish();
     }
-    group.finish();
 }
 
 criterion_group!(benches, bench);

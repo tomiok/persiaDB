@@ -55,6 +55,9 @@ pub struct MemtableView {
     /// this view share one copy (ROADMAP 7.5.5).
     keys: Vec<OnceLock<MemtableKeys>>,
     keywords: Vec<OnceLock<MemtableKeywords>>,
+    /// Whether the view reads and fills the copies the memtable's views share (ROADMAP 7.5.7); off only in tests, as
+    /// the reference a shared copy must match.
+    share: bool,
 }
 
 impl MemtableView {
@@ -76,8 +79,50 @@ impl MemtableView {
             norms: inner.fields.iter().map(|_| OnceLock::new()).collect(),
             keys: inner.fields.iter().map(|_| OnceLock::new()).collect(),
             keywords: inner.fields.iter().map(|_| OnceLock::new()).collect(),
+            share: true,
             schema: Arc::clone(&inner.schema),
             shared,
+        }
+    }
+
+    /// This view with nothing copied yet, which neither reads nor fills the copies shared by the memtable's views: what
+    /// a shared copy must match.
+    #[cfg(test)]
+    pub(crate) fn unshared(&self) -> Self {
+        Self {
+            norms: self.norms.iter().map(|_| OnceLock::new()).collect(),
+            keys: self.keys.iter().map(|_| OnceLock::new()).collect(),
+            keywords: self.keywords.iter().map(|_| OnceLock::new()).collect(),
+            share: false,
+            ..self.clone()
+        }
+    }
+
+    /// The keys of column `field` another view of the same documents copied (ROADMAP 7.5.7, [`super::cache`]).
+    fn shared_keys(&self, field: FieldId) -> Option<MemtableKeys> {
+        self.share
+            .then(|| read(&self.shared).columns.keys(field, self.docs))
+            .flatten()
+    }
+
+    /// Shares `keys`, this view's whole copy of column `field`, with later views of the same documents.
+    fn share_keys(&self, field: FieldId, keys: &MemtableKeys) {
+        if self.share {
+            read(&self.shared).columns.keep_keys(field, self.docs, keys);
+        }
+    }
+
+    /// The keyword column of `field` another view of the same documents copied.
+    fn shared_keywords(&self, field: FieldId) -> Option<MemtableKeywords> {
+        self.share
+            .then(|| read(&self.shared).columns.keywords(field, self.docs))
+            .flatten()
+    }
+
+    /// Shares `keywords`, this view's keyword column of `field`, with later views of the same documents.
+    fn share_keywords(&self, field: FieldId, keywords: &MemtableKeywords) {
+        if self.share {
+            read(&self.shared).columns.keep_keywords(field, keywords);
         }
     }
 
@@ -627,9 +672,17 @@ impl SearchView for MemtableView {
     ) -> Result<(), ReadError> {
         // `f` runs without the lock, and a search's interrupts, which `f` reads, stop a scan of a large column
         // (ROADMAP 7.6.5). A filter scan shares the copy a sort or a check of this view keeps (ROADMAP 7.5.5): it
-        // reads that copy when there is one, and keeps the one it makes when it reads the whole column.
+        // reads that copy when there is one, and keeps the one it makes when it reads the whole column. Either is
+        // the one another view of the same documents shared, when there is one (ROADMAP 7.5.7).
         let slot = slot(&self.keys, field);
-        if let Some(keys) = slot.and_then(OnceLock::get) {
+        let kept = slot.and_then(OnceLock::get).cloned().or_else(|| {
+            let shared = self.shared_keys(field)?;
+            Some(match slot {
+                Some(cell) => cell.get_or_init(|| shared).clone(),
+                None => shared,
+            })
+        });
+        if let Some(keys) = kept {
             for &(docid, key) in keys.entries() {
                 f(docid, key)?;
             }
@@ -644,8 +697,10 @@ impl SearchView for MemtableView {
                 f(docid, key)
             },
         )?;
+        let keys = MemtableKeys::new(keys);
+        self.share_keys(field, &keys);
         if let Some(cell) = slot {
-            cell.get_or_init(|| MemtableKeys::new(keys));
+            cell.get_or_init(|| keys);
         }
         Ok(())
     }
@@ -663,6 +718,12 @@ impl SearchView for MemtableView {
         if let Some(keys) = slot.and_then(OnceLock::get) {
             return Ok(keys.clone());
         }
+        if let Some(shared) = self.shared_keys(field) {
+            return Ok(match slot {
+                Some(cell) => cell.get_or_init(|| shared).clone(),
+                None => shared,
+            });
+        }
         let mut keys = Vec::new();
         self.copy_chunked(
             step,
@@ -673,6 +734,7 @@ impl SearchView for MemtableView {
             },
         )?;
         let keys = MemtableKeys::new(keys);
+        self.share_keys(field, &keys);
         Ok(match slot {
             Some(cell) => cell.get_or_init(|| keys).clone(),
             None => keys,
@@ -691,6 +753,12 @@ impl SearchView for MemtableView {
         let slot = slot(&self.keywords, field);
         if let Some(keywords) = slot.and_then(OnceLock::get) {
             return Ok(keywords.clone());
+        }
+        if let Some(shared) = self.shared_keywords(field) {
+            return Ok(match slot {
+                Some(cell) => cell.get_or_init(|| shared).clone(),
+                None => shared,
+            });
         }
         // The view's postings, then the bytes of the terms they use, each copied in chunks; the dictionary and the
         // ords are built without the lock.
@@ -725,6 +793,7 @@ impl SearchView for MemtableView {
             },
         )?;
         let keywords = keywords(field, self.docs, &postings, &used, bytes)?;
+        self.share_keywords(field, &keywords);
         Ok(match slot {
             Some(cell) => cell.get_or_init(|| keywords).clone(),
             None => keywords,
