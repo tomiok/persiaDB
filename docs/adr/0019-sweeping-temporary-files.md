@@ -57,8 +57,14 @@ takes.
    whose removal failed, unlock the file before closing it. A removed file is not unlocked: its name is gone, so no
    one can meet the lock. Where the use was `Unknown` (locks that may belong to the process) a lock taken is released
    too: if it is the process's, the close would release it anyway, a writer's of the same process included (decision
-   6); if it belongs to the open file after all, the unlock is needed. A `put` that fails leaving its temporary file
-   still only closes it (ROADMAP 2.3.12).
+   6); if it belongs to the open file after all, the unlock is needed. A `put` or `put_if_absent` that fails leaving
+   its temporary file (its removal failed too: after a failed rename or link, a failed identity check or write in
+   `write_temp`, or a link that succeeded) unlocks it before closing it as well (ROADMAP 2.3.12). A write whose
+   temporary name is gone (renamed over the object, or removed) does not unlock: the lock then follows the file to the
+   object's name, or to no name, and nothing takes the lock of an object file (objects are used only through the
+   store, SPEC §10.1.1), so a forked copy holding it until its `exec` delays no one; skipping it costs a successful
+   write no system call, and no unlock can fail a durable `put`. An unlock failure is never swallowed: it is added to
+   the write's error, which stays the `source` (with its kind and OS error code), as the failed removal is.
 
 ## Consequences
 

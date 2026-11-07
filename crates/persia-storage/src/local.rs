@@ -186,7 +186,13 @@ impl<V: Vfs> LocalStorage<V> {
             } else {
                 Ok(())
             };
-            walked.and(synced)?;
+            match (walked, synced) {
+                // The walk's error is the one to report, the failed sync is added to it.
+                (Err(err), Err(sync)) => {
+                    return Err(side::then_failed(err, "syncing the directory", sync));
+                }
+                (walked, synced) => walked.and(synced)?,
+            }
         }
         found.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(found)
@@ -421,29 +427,32 @@ impl<V: Vfs> LocalStorage<V> {
             // One that locked this file between its creation and here has removed it (the name is no longer this
             // file), or holds it now: then this `put` removes it itself, as a listing would leave it, and either way
             // takes another name.
-            let claimed = side::try_lock(&file).and_then(|locked| match locked {
-                Some(true) => self
-                    .vfs
-                    .same_file(&file, &path)
-                    .map(|ours| ours.then_some(true)),
-                // Only where files lock (Unix), where removing an open file is fine.
-                Some(false) => match self.vfs.remove_file(&path) {
-                    Err(err) if err.kind() != io::ErrorKind::NotFound => Err(err),
-                    _ => Ok(None),
+            // A name this `put` leaves behind after an error is unlocked first, if it holds the lock (ADR-0019 decision
+            // 7): a child forked meanwhile would keep it past the close.
+            let locked = match side::try_lock(&file) {
+                Ok(Some(true)) => match self.vfs.same_file(&file, &path) {
+                    Ok(true) => true,
+                    // The name is gone or another file's: no one can meet this file's lock.
+                    Ok(false) => continue,
+                    Err(err) => return Err(self.discard_temp(&path, Some(file), err)),
                 },
-                None => Ok(Some(false)),
-            });
-            let locked = match claimed {
-                Ok(Some(locked)) => locked,
-                Ok(None) => continue,
+                // Only where files lock (Unix), where removing an open file is fine.
+                Ok(Some(false)) => match self.vfs.remove_file(&path) {
+                    Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                        // Closed first, as on every path that holds no lock.
+                        drop(file);
+                        return Err(self.discard_temp(&path, None, err));
+                    }
+                    _ => continue,
+                },
+                Ok(None) => false,
                 Err(err) => {
                     drop(file);
-                    return Err(self.discard_temp(&path, err));
+                    return Err(self.discard_temp(&path, None, err));
                 }
             };
             if let Err(err) = file.write_all_at(data, 0).and_then(|()| file.sync_all()) {
-                drop(file);
-                return Err(self.discard_temp(&path, err));
+                return Err(self.discard_temp(&path, locked.then_some(file), err));
             }
             return Ok((path, locked.then_some(file)));
         }
@@ -478,19 +487,12 @@ impl<V: Vfs> LocalStorage<V> {
     }
 
     /// `put_if_absent` after the temporary file is written; the caller removes it.
-    fn link_or_resolve(
-        &self,
-        key: &Key,
-        data: &Bytes,
-        path: &Path,
-        temp: &Path,
-    ) -> Result<PutOutcome> {
-        let io = |err| io_error(Op::PutIfAbsent, key, err);
+    fn link_or_resolve(&self, data: &Bytes, path: &Path, temp: &Path) -> io::Result<PutOutcome> {
         for _ in 0..LINK_ATTEMPTS {
             match self.vfs.hard_link(temp, path) {
                 Ok(()) => return Ok(PutOutcome::Created),
                 Err(err) if err.kind() == io::ErrorKind::AlreadyExists => {}
-                Err(err) => return Err(io(err)),
+                Err(err) => return Err(err),
             }
             // SPEC §10.1: the object found may be this caller's own earlier attempt.
             match self.read_file(path) {
@@ -498,12 +500,12 @@ impl<V: Vfs> LocalStorage<V> {
                 Ok(_) => return Ok(PutOutcome::AlreadyExists),
                 // Deleted since the link failed: the name is free again.
                 Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-                Err(err) => return Err(io(err)),
+                Err(err) => return Err(err),
             }
         }
-        Err(io(io::Error::other(
+        Err(io::Error::other(
             "the object was replaced and deleted on every attempt",
-        )))
+        ))
     }
 
     /// Appends every object below `dir` (whose keys start with `base`) to `out`; with `filter`, only names whose
@@ -620,37 +622,40 @@ impl<V: Vfs> Storage for LocalStorage<V> {
     fn put(&self, key: &Key, data: Bytes) -> Result<()> {
         let (dir, path, temp, lock) = self.prepare(Op::Put, key, &data)?;
         let io = |err| io_error(Op::Put, key, err);
-        let renamed = self
-            .vfs
-            .rename(&temp, &path)
-            .map_err(|err| self.discard_temp(&temp, err));
-        // Held until the temporary name is gone, so a sweep never takes the file (ADR-0012).
-        drop(lock);
-        renamed.map_err(io)?;
+        // The lock is held until the temporary name is gone, so a sweep never takes the file (ADR-0012). After a
+        // rename it follows the file to the object's name, where nothing takes locks: the close releases it, or a
+        // forked copy of the descriptor does at its `exec`, and no one waits for it meanwhile. So only a failed
+        // `put` unlocks, and an unlock never turns a durable `put` into an error.
+        match self.vfs.rename(&temp, &path) {
+            Ok(()) => drop(lock),
+            Err(err) => return Err(io(self.discard_temp(&temp, lock, err))),
+        }
         self.vfs.sync_dir(&dir).map_err(io)
     }
 
     fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
         let (dir, path, temp, lock) = self.prepare(Op::PutIfAbsent, key, &data)?;
         let io = |err| io_error(Op::PutIfAbsent, key, err);
-        let linked = self.link_or_resolve(key, &data, &path, &temp);
-        let removed = self.vfs.remove_file(&temp);
-        // Held until the temporary name is gone, so a sweep never takes the file (ADR-0012).
-        drop(lock);
-        let outcome = match linked {
-            Ok(outcome) => outcome,
-            Err(err) => {
-                // The link error is the one to report; a failed cleanup only leaves a skipped temporary file.
-                return Err(match removed {
-                    Ok(()) => err,
-                    Err(cleanup) => io(io::Error::other(format!(
-                        "{err}; removing temporary file {} also failed: {cleanup}",
-                        temp.display()
-                    ))),
-                });
-            }
+        let linked = self.link_or_resolve(&data, &path, &temp);
+        // As in `put`: once the temporary name is gone the lock is left to the close; while it stays, the lock is
+        // released first, so a forked copy of the descriptor cannot keep it (ADR-0019 decision 7).
+        let removed = match (self.vfs.remove_file(&temp), &lock) {
+            (Err(err), Some(file)) => Err(side::unlock_after(file, err)),
+            (removed, _) => removed,
         };
-        removed.map_err(io)?;
+        drop(lock);
+        let outcome = match (linked, removed) {
+            (Ok(outcome), Ok(())) => outcome,
+            // The link error is the one to report; a failed cleanup only leaves a skipped temporary file.
+            (Err(err), Err(cleanup)) => {
+                return Err(io(side::then_failed(
+                    err,
+                    format!("removing temporary file {}", temp.display()),
+                    cleanup,
+                )));
+            }
+            (Err(err), Ok(())) | (Ok(_), Err(err)) => return Err(io(err)),
+        };
         // For every outcome: an object found may be this caller's earlier attempt or another writer's, linked but not
         // yet synced. What this call reports is durable.
         self.vfs.sync_dir(&dir).map_err(io)?;
@@ -818,17 +823,27 @@ impl<V: Vfs> LocalStorage<V> {
         read_all(&self.open_regular(path)?)
     }
 
-    /// Removes a temporary file after `err`, and returns `err`, noting a failed removal in it: a leftover temporary
+    /// Removes a temporary file after `err`, and returns `err`, adding a failed removal to it: a leftover temporary
     /// file is skipped by `list` and holds no acknowledged data, so the write's own error is the one to report.
-    fn discard_temp(&self, temp: &Path, err: io::Error) -> io::Error {
-        match self.vfs.remove_file(temp) {
+    ///
+    /// `lock` is the file's handle if it holds the file's lock. If the name stays, the lock is released before the
+    /// handle is closed: a child forked meanwhile keeps a copy of the descriptor until its `exec`, and with it the
+    /// lock, so the next sweep would find the stale file in use (ADR-0019 decision 7). A removed name needs no unlock:
+    /// no one can meet the lock.
+    fn discard_temp(&self, temp: &Path, lock: Option<V::File>, err: io::Error) -> io::Error {
+        let removed = self.vfs.remove_file(temp);
+        let removed = match (removed, &lock) {
+            (Err(cleanup), Some(file)) => Err(side::unlock_after(file, cleanup)),
+            (removed, _) => removed,
+        };
+        // Closed here, after the unlock and before the caller reports the error.
+        drop(lock);
+        match removed {
             Ok(()) => err,
-            Err(cleanup) => io::Error::new(
-                err.kind(),
-                format!(
-                    "{err}; removing temporary file {} also failed: {cleanup}",
-                    temp.display()
-                ),
+            Err(cleanup) => side::then_failed(
+                err,
+                format!("removing temporary file {}", temp.display()),
+                cleanup,
             ),
         }
     }
