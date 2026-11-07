@@ -2067,7 +2067,8 @@ above.
   keeps unlocks it before closing it: a child forked meanwhile holds a copy of the descriptor until its `exec`, and
   would keep the lock past the close (§4.5.1; ADR-0019 decision 7). So does a `put` or `put_if_absent` that fails and
   cannot remove its temporary file; one whose temporary name is gone (renamed, linked and removed) leaves the lock to
-  the close, since nothing locks an object file.
+  the close, since nothing locks an object file (objects are used only through the store: opening one in place, e.g.
+  as a container, which locks its file, is outside the contract).
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

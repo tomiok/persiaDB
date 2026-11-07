@@ -45,7 +45,8 @@ pub enum InUse {
     Unknown,
 }
 
-/// Takes `file`'s lock if it can: `Some(true)` with the lock held until `file` is dropped, `Some(false)` if another
+/// Takes `file`'s lock if it can: `Some(true)` with the lock held until [`ContainerFile::unlock`], or until
+/// `file` and every descriptor duplicated from it (a forked child's) are closed, `Some(false)` if another
 /// handle holds it, `None` where files cannot be locked (Windows).
 pub(crate) fn try_lock<F: ContainerFile>(file: &F) -> io::Result<Option<bool>> {
     match file.try_lock() {

@@ -61,10 +61,10 @@ takes.
    its temporary file (its removal failed too: after a failed rename or link, a failed identity check or write in
    `write_temp`, or a link that succeeded) unlocks it before closing it as well (ROADMAP 2.3.12). A write whose
    temporary name is gone (renamed over the object, or removed) does not unlock: the lock then follows the file to the
-   object's name, or to no name, and nothing takes the lock of an object file, so a forked copy holding it until its
-   `exec` delays no one; skipping it costs a successful write no system call, and no unlock can fail a durable `put`.
-   An unlock failure is never swallowed: it is added to the write's error, which stays the `source` (with its kind and
-   OS error code), as the failed removal is.
+   object's name, or to no name, and nothing takes the lock of an object file (objects are used only through the
+   store, SPEC §10.1.1), so a forked copy holding it until its `exec` delays no one; skipping it costs a successful
+   write no system call, and no unlock can fail a durable `put`. An unlock failure is never swallowed: it is added to
+   the write's error, which stays the `source` (with its kind and OS error code), as the failed removal is.
 
 ## Consequences
 

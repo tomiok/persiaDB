@@ -439,12 +439,17 @@ impl<V: Vfs> LocalStorage<V> {
                 // Only where files lock (Unix), where removing an open file is fine.
                 Ok(Some(false)) => match self.vfs.remove_file(&path) {
                     Err(err) if err.kind() != io::ErrorKind::NotFound => {
+                        // Closed first, as on every path that holds no lock.
+                        drop(file);
                         return Err(self.discard_temp(&path, None, err));
                     }
                     _ => continue,
                 },
                 Ok(None) => false,
-                Err(err) => return Err(self.discard_temp(&path, None, err)),
+                Err(err) => {
+                    drop(file);
+                    return Err(self.discard_temp(&path, None, err));
+                }
             };
             if let Err(err) = file.write_all_at(data, 0).and_then(|()| file.sync_all()) {
                 return Err(self.discard_temp(&path, locked.then_some(file), err));

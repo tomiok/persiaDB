@@ -225,6 +225,7 @@ impl<F: ContainerFile + 'static> Container<F> {
                 op,
                 source: side::then_failed(source, "syncing the directory", sync),
             }),
+            // `remove_unless_held` returns only `Error::Io`; were it to return another error, it is kept as the source.
             (Err(err), Err(sync)) => Err(Error::Io {
                 op: "remove side file",
                 source: side::then_failed(io::Error::other(err), "syncing the directory", sync),

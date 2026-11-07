@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use persia_storage::container::{Container, ContainerFile, Mode};
 use persia_storage::vfs::{DirEntry, EntryKind, RealFs, Vfs};
-use persia_storage::{InUse, Key, LocalStorage, Storage};
+use persia_storage::{Error, InUse, Key, LocalStorage, Storage};
 
 /// The real file system, keeping a duplicate of every file it opens or creates: the copies a child of this process
 /// holds between `fork` and `exec`. The `fail_*` flags make that call fail without effect (`fail_removes` after
@@ -84,7 +84,13 @@ impl Vfs for ForkedFs {
     }
 
     fn hard_link(&self, from: &Path, to: &Path) -> io::Result<()> {
-        Self::injected(&self.fail_links, "link")?;
+        // A kind of its own, so a test sees whether the error reported keeps it.
+        if self.fail_links.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "injected: link failed",
+            ));
+        }
         RealFs.hard_link(from, to)
     }
 
@@ -365,6 +371,24 @@ fn a_write_that_failed_leaving_its_temporary_leaves_it_free() {
             messages.join(" | ").contains("injected: remove failed"),
             "{step:?}: the removal's error is lost: {messages:?}"
         );
+        // The step's own `io::Error`: the source of the combined one, or the reported one itself when only the
+        // removal failed.
+        let Error::Io {
+            source: reported, ..
+        } = &err
+        else {
+            panic!("{step:?}: not an I/O error: {err:?}")
+        };
+        let own = std::error::Error::source(reported)
+            .and_then(|s| s.downcast_ref::<io::Error>())
+            .unwrap_or(reported);
+        assert_eq!(own.to_string(), cause, "{step:?}");
+        assert_eq!(reported.kind(), own.kind(), "{step:?}: the kind is lost");
+        match step {
+            FailedStep::Link => assert_eq!(own.kind(), io::ErrorKind::PermissionDenied),
+            FailedStep::Write => assert_eq!(own.raw_os_error(), Some(9), "{step:?}"),
+            _ => {}
+        }
         let swept = store.sweep_temporaries(false).unwrap();
         assert!(swept[0].removed, "{step:?}: {swept:?}");
         assert!(store.temporaries().unwrap().is_empty(), "{step:?}");
@@ -418,4 +442,13 @@ fn a_container_sweep_whose_removal_and_sync_failed_reports_both() {
     let messages = chain(&err).join(" | ");
     assert!(messages.contains("injected: remove failed"), "{messages}");
     assert!(messages.contains("injected: sync failed"), "{messages}");
+    // `Error::Io` → the combined `io::Error` → the removal's own error.
+    let removal = std::error::Error::source(&err)
+        .and_then(std::error::Error::source)
+        .map(ToString::to_string);
+    assert_eq!(
+        removal.as_deref(),
+        Some("injected: remove failed"),
+        "the removal's error is not the source: {messages}"
+    );
 }
