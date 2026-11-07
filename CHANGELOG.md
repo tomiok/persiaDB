@@ -122,6 +122,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: term proximity (ROADMAP 7.3.5; SPEC §7.2, §7.3, §7.7; ADR-0036). A `bool` adds, after its `must`
+  clauses, `Σ λ · min(idf) · 1/d²` over its adjacent `must` words (`term` or `combined`), `d` their least distance
+  in a `text` field with `positions` (one more when reversed; nothing beyond 5 apart), `λ = 1`. On by default where
+  positions are indexed; `SearchPlan::without_proximity` leaves it out. Pruning stays exact: the bonus is at most
+  `Σ λ · min(idf)`, which every bound of the `bool` adds. New in `persia_engine::search`: `ProximityExplanation`,
+  `PairExplanation`, `SearchPlan::without_proximity` and `SearchPlan::proximity`.
+- `persia-engine` (breaking): `Explanation::Bool` has a `proximity` field, the bonus and its pairs.
 - `persia-blob`: the blob manifest, a blob's chunk list (ROADMAP 9.1.3; SPEC §9.1.1; ADR-0034, ADR-0035).
   `BlobManifest` (`blob_id`, size, chunk size, `UploadId`, chunk CRCs) with `encode`, `decode` (corrupt input is
   `Error::Corrupt`, a newer version or flag `UnsupportedVersion` / `UnsupportedFlags`) and `encoded_len_for`, which

@@ -440,6 +440,29 @@ blocks to skip. Most of the gain is the column reads saved. Where blocks do lose
 `a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the
 exhaustive one with a facet reads.
 
+Term proximity (ROADMAP 7.3.5, ADR-0036): the AND rows, whose body has positions, before (c2488c9, from a worktree
+with its own target directory) and after, alternating, twice; `and_no_proximity` is the same plan without the
+bonus. Command: `cargo bench -p persia-engine --bench search -- 'search_top10/and|search_top10_pruning/(and|and_common|must_should|must_should_rare)/|search_suite/and'`.
+2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux.
+
+| Row | before | 7.3.5 |
+|---|--:|--:|
+| `search_top10/and` | 423, 422 µs | 591, 582 µs |
+| `search_top10/and_no_proximity` | | 433, 431 µs |
+| `search_top10_pruning/and/exhaustive` | 418, 408 µs | 869, 875 µs |
+| `search_top10_pruning/and/max_score` | 416, 411 µs | 579, 580 µs |
+| `search_top10_pruning/and/block_max_wand` | 435, 427 µs | 589, 595 µs |
+| `search_top10_pruning/and_common/block_max_wand` | 499, 491 µs | 715, 715 µs |
+| `search_top10_pruning/must_should/block_max_wand` | 786, 791 µs | 774, 783 µs |
+| `search_top10_pruning/must_should_rare/block_max_wand` | 318, 320 µs | 319, 317 µs |
+| `search_suite/and` | 284, 287 µs | 555, 587 µs |
+
+The bonus reads both words' positions for every document a conjunction scores: twice the cost exhaustively. Pruned,
+a candidate whose clauses plus the bonus's bound cannot beat the threshold is skipped before its positions are read
+(+39 % on `search_top10/and`; +106 % before that skip, a first version). `must_should` (one `must`) has no pair.
+`search_suite/and` (user text over a collection) still doubles. The bonus opens its own postings of the pair's
+terms, decoding again the docids and frequencies the words' matchers decode: ROADMAP 15.2.6.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
@@ -455,6 +478,10 @@ is added here when the mean moves.
 | Recorded | mean nDCG@10 | lowest |
 |---|--:|---|
 | 2026-11-01 (ROADMAP 7.8.2) | 0.8824 | 0.7173 `garden`, 0.7364 `bread`, 0.7453 `"cast iron" pan`, 0.7648 `tent` |
+
+The proximity bonus (ROADMAP 7.3.5, ADR-0036) left every row unchanged: under AND each multi-word query matches 1
+to 3 documents, and only 5 of those matches (4 queries) have their words apart, none reordered. ROADMAP 15.1.6
+adds judged queries the bonus can decide.
 
 ## `persia-blob` hashing and chunking
 

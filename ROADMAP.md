@@ -474,7 +474,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
 - [x] 7.3.3 Score upper bounds per term/block (for WAND)
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
-- [ ] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3)
+- [~] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3). Done as the pair distance of adjacent `must` words, `λ · min(idf) · 1/d²` up to 5 apart, on where positions are indexed (ADR-0036)
 
 ## 7.4 Matching & top-k
 - [x] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -812,12 +812,14 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.1.3 End-to-end harness (embedded and server modes), latency histograms (HdrHistogram), throughput
 - [ ] 15.1.4 Comparison methodology doc + optional adapters to compare other engines (fair configs, published scripts)
 - [ ] 15.1.5 CI regression gate (> 5% slowdown fails) with stored baselines
+- [ ] 15.1.6 Judged queries proximity can decide: in the 7.8.2 corpus every multi-word query matches 1 to 3 documents under AND, and only 5 of those matches (4 queries) have their words apart, none reordered by the bonus, so the nDCG gate (7.8.4) did not move with 7.3.5. Add documents that hold a query's words both together and apart (and long bodies where they are far), judged, so the gate measures proximity; record the new baseline with the bonus on and off (found in 7.3.5)
 
 ## 15.2 Performance work (driven by profiles)
 - [ ] 15.2.1 SIMD bit-unpacking (runtime feature detection) behind safe wrappers
 - [ ] 15.2.2 Postings decode & scoring hot-path allocation audit
 - [ ] 15.2.3 FST/term-dict memory & mmap layout tuning
 - [ ] 15.2.4 Cache sizing guidance and defaults from measurements
+- [ ] 15.2.6 Proximity from the words' own postings: the bonus (7.3.5) opens a second postings iterator per pair term and field, so a conjunction decodes each docid and frequency block twice and `search_suite/and` doubles (284 → 571 µs; `search_top10/and` +39 %, docs/benchmarks.md); read the positions through the word matchers (a `Matcher` method for a field's positions at the current document), and bench before and after (found in 7.3.5)
 - [ ] 15.2.5 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4); `MaxScore` still scans every essential clause per candidate and sums every bound per lookup, O(clauses²): 41.6 ms vs 24.5 ms for block-max WAND on `search_top10_pruning/or50` (7.4.7). (was 7.4.9)
 
 ## 15.3 Reliability & chaos

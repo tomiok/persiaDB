@@ -1153,6 +1153,7 @@ returned as it is, and copied as bytes, never re-validated.
   "limit": 20, "offset": 0,               // or "search_after": cursor
   "facets": ["brand"],
   "relax": { "min_results": 1 },          // overrides collection default
+  "proximity": true,                      // the bonus of adjacent words (§7.2); false leaves it out
   "explain": false
 }
 ```
@@ -1284,10 +1285,31 @@ the phrase frequency, the number of distinct positions `s` such that every phras
 position relative to the first term, and `idf(t)` is the sum of its terms' `idf`s, each from that term's own `df`. So a phrase of one
 term scores as a `term` query (unless an analyzer stacks a token on itself, at one position: a start counts once),
 and a phrase matches what holds it at least once.
-A `bool` scores the sum of its `must` clauses plus the sum of its matching `should` clauses, each added in query order
+A `bool` scores the sum of its `must` clauses, then its proximity bonus (below), plus the sum of its matching `should`
+clauses, each added in query order
 (so a document's score does not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
 score, and `match_all` scores 0. A `prefix` or `fuzzy` is that sum over the terms it kept, each with the shared `idf`
 and, for `fuzzy`, the edit-distance weight of §7.1.
+
+**Proximity** (ADR-0036). A `bool` adds a bonus for its *adjacent words*: two `must` clauses next to each other in
+query order that are both words (a `term` or a `combined`, not under `boost`). For such a pair `(i, j)` and a `text`
+field `f` with `positions` in which both words have a term (`t_{i,f}`, `t_{j,f}`), `d_f` is the least, over an
+occurrence of `t_{i,f}` at position `p` and one of `t_{j,f}` at `q` (`p ≠ q` when the two terms are the same), of
+`q − p` when `q > p` and `p − q + 1` otherwise (reversed, or stacked at one position, costs one more). The pair's
+closeness is `π = max_f π(d_f)` over the fields holding both terms in the document, with `π(d) = 1/d²` for `d ≤ 5`
+and 0 beyond (0 with no such field). Then
+```
+bonus = Σ_{adjacent pairs (i, j), query order}  (λ · min(idf_i, idf_j)) · π_{i,j}        λ = 1
+```
+with each word's `idf` as above (a `combined`'s from its largest `df`); a pair with no field where both words have a
+term is left out. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
+pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
+included), nor a field without positions; a single word is no `bool` (§7.1.1). A plan may leave the bonus out
+(`"proximity": false` in a request, `SearchPlan::without_proximity`): the bonus is then 0 and not added. With
+`B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
+`π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
+and goes through the nDCG@10 gate (§16.1).
+
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
@@ -1327,7 +1349,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the others score there; but its `should` clauses do when its `must` clauses cannot score above 0, the whole score
   being theirs): from each target it sums its clauses' bounds in query order, as the score is, through
   the first of their ranges to end, and skips that range when the sum is at most the threshold (block-max AND; a
-  `should` side without a document there adds nothing). Where the `must` clauses' bound alone is at most the
+  `should` side without a document there adds nothing). A `bool` with a proximity bonus (§7.2) adds its `B` after its `must`
+  clauses' bounds, where its score adds the bonus, so each of these bounds still holds exactly; the `must` side's bound
+  below includes it. A document whose clauses, scored, plus `B` are at most the threshold is skipped
+  before its positions are read. Where the `must` clauses' bound alone is at most the
   threshold, a document the `should` clauses miss scores at most it, so only documents holding a `should` clause
   are scored in that range, and the walk to the next one never passes the range's end (as Lucene's ReqOpt). Every document a pruned matcher returns has its exhaustive score. A
   disjunction's block bound is the block bounds of its clauses with a document there, summed in query order.
@@ -1480,7 +1505,9 @@ the frequency, the norm byte and the length it stands for (none for a `keyword` 
 `w_f / (1 − b_f + b_f · len_f(d)/avglen_f)` and the contribution `tf · factor`; the contributions summed in that
 order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length, factor, `tf~`, `k1` and summed `idf`.
 A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
-nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
+nothing and are not listed); a `bool` with proximity pairs (§7.2) also lists, between them, its bonus and per pair the
+first word's index, `λ · min(idf)`, the field the closeness came from, `d`, `π` and their product (0 when no field
+holds both within the window); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
 time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents

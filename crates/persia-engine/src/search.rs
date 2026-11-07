@@ -50,6 +50,7 @@ mod interrupt;
 mod max_score;
 mod phrase;
 mod plan;
+mod proximity;
 mod request;
 mod sort;
 mod top_k;
@@ -57,7 +58,10 @@ mod word;
 
 pub use expand::{EachTerm, Expansion, TermSource};
 pub(crate) use expand::{TermWalk, each_merged_term};
-pub use explain::{Explanation, FieldExplanation, PhraseExplanation, WordExplanation};
+pub use explain::{
+    Explanation, FieldExplanation, PairExplanation, PhraseExplanation, ProximityExplanation,
+    WordExplanation,
+};
 pub(crate) use facet::FacetCounter;
 pub use facet::{
     DEFAULT_FACET_SIZE, FacetCounts, FacetRequest, FacetValue, MAX_FACET_SIZE, MAX_FACETS,

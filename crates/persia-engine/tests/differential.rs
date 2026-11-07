@@ -418,6 +418,7 @@ impl Model {
             k1,
             b,
             keyword: false,
+            positions: true,
         };
         Corpus {
             fields: vec![
@@ -427,6 +428,7 @@ impl Model {
                     k1: 1.2,
                     b: 0.0,
                     keyword: true,
+                    positions: false,
                 },
             ],
             counted,

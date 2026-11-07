@@ -8,6 +8,8 @@
 //!    each with its exhaustive score bit for bit, and every match it skips scores at most the threshold in force.
 //! 3. Pruning prunes: on skewed queries it returns far fewer documents to the collector than there are matches.
 //! 4. The bounds hold: every score is at most `max_score`, and at most the `block_bound` of the range it is in.
+//! 5. All of it with the proximity bonus of adjacent `must` words (ROADMAP 7.3.5, SPEC §7.2) and without: the bonus
+//!    is at most its bound `B`, which every bound of the `bool` adds (ADR-0036).
 
 #![allow(
     clippy::unwrap_used,
@@ -468,15 +470,18 @@ fn check(case: &Case, shapes: &[Shape], k: usize, quantiles: &[f64], every: usiz
         query
             .validate(&case.schema, &QueryLimits::default())
             .unwrap();
-        let plan = SearchPlan::new(&query, &case.schema, &stats).unwrap();
-        let what = format!("{shape:?}");
-        same_top_k(&plan, &seg, &[1, 2, 10, k, 100], &what);
-        same_top_k(&plan, &mem, &[1, 10, k], &what);
-        let (all_seg, all_mem) = (exhaust(&plan, &seg), exhaust(&plan, &mem));
-        bounds_hold(&plan, &seg, &all_seg, &what);
-        bounds_hold(&plan, &mem, &all_mem, &what);
-        threshold_contract(&plan, &seg, &all_seg, quantiles, every, &what);
-        threshold_contract(&plan, &mem, &all_mem, quantiles, every, &what);
+        let with = SearchPlan::new(&query, &case.schema, &stats).unwrap();
+        // With the proximity bonus of adjacent `must` words (the default, ROADMAP 7.3.5) and without it.
+        for plan in [with.clone(), with.without_proximity()] {
+            let what = format!("{shape:?}, proximity {}", plan.proximity());
+            same_top_k(&plan, &seg, &[1, 2, 10, k, 100], &what);
+            same_top_k(&plan, &mem, &[1, 10, k], &what);
+            let (all_seg, all_mem) = (exhaust(&plan, &seg), exhaust(&plan, &mem));
+            bounds_hold(&plan, &seg, &all_seg, &what);
+            bounds_hold(&plan, &mem, &all_mem, &what);
+            threshold_contract(&plan, &seg, &all_seg, quantiles, every, &what);
+            threshold_contract(&plan, &mem, &all_mem, quantiles, every, &what);
+        }
     }
 }
 
@@ -639,7 +644,9 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
         must: vec![term("a"), term("b")],
         ..BoolQuery::default()
     });
-    let plan = SearchPlan::new(&and, &schema, &stats).unwrap();
+    // Block bounds alone: the proximity bonus (ROADMAP 7.3.5) also skips per document, checked last.
+    let with = SearchPlan::new(&and, &schema, &stats).unwrap();
+    let plan = with.clone().without_proximity();
     let (all, want) = handed(&plan, &view, 10, Pruning::Exhaustive);
     assert_eq!(all, 2048);
     let (count, hits) = handed(&plan, &view, 10, Pruning::BlockMaxWand);
@@ -650,6 +657,17 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
     let (count, hits) = handed(&plan, &view, 10, Pruning::MaxScore);
     assert_eq!(bits(&hits), bits(&want));
     assert_eq!(count, all);
+    // With the bonus, a match whose clauses plus the bonus's bound cannot beat the threshold is skipped before its
+    // positions are read, under either strategy.
+    let (_, want) = handed(&with, &view, 10, Pruning::Exhaustive);
+    for pruning in PRUNED {
+        let (count, hits) = handed(&with, &view, 10, pruning);
+        assert_eq!(bits(&hits), bits(&want), "{pruning:?}");
+        assert!(
+            count < 300,
+            "{pruning:?}: {count} of {all} documents scored"
+        );
+    }
 }
 
 /// `ReqOpt` never jumps past the range it checked (found in the 7.4.8 review): where `must` alone cannot beat the

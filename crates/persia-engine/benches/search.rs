@@ -103,6 +103,19 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 4]) {
     (Arc::new(schema), segment, [body, price, tag, at])
 }
 
+/// `search_top10/and_no_proximity`: `and` scores the proximity of its two words (ROADMAP 7.3.5, the body has
+/// positions); this is it without, so the bonus's cost shows.
+fn no_proximity(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    and: SearchPlan,
+    view: &SegmentView<'_>,
+) {
+    let and = and.without_proximity();
+    group.bench_function("and_no_proximity", |b| {
+        b.iter(|| black_box(and.top_k(view, 10).unwrap()));
+    });
+}
+
 fn bench(c: &mut Criterion) {
     let (schema, segment, fields) = segment();
     let [body, ..] = fields;
@@ -159,6 +172,8 @@ fn bench(c: &mut Criterion) {
             b.iter(|| black_box(plan.top_k(&view, 10).unwrap()));
         });
     }
+    let and = SearchPlan::new(&queries[1].1, &schema, &stats).unwrap();
+    no_proximity(&mut group, and, &view);
     group.finish();
 
     // The strategies side by side; `or_rare` is a common word beside two rare ones.
