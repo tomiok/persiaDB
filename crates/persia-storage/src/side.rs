@@ -76,11 +76,22 @@ pub(crate) fn unlock_kept<F: ContainerFile, T>(file: &F, result: io::Result<T>) 
     match (result, file.unlock()) {
         (Ok(value), Ok(())) => Ok(value),
         (Ok(_), Err(err)) | (Err(err), Ok(())) => Err(err),
-        (Err(err), Err(unlock)) => Err(io::Error::new(
-            err.kind(),
-            format!("{err}; unlocking the file then failed: {unlock}"),
+        (Err(error), Err(unlock)) => Err(io::Error::new(
+            error.kind(),
+            UnlockAfterError { error, unlock },
         )),
     }
+}
+
+/// The caller's error followed by a failed unlock ([`unlock_kept`]). The caller's error is the
+/// [`source`](std::error::Error::source), so its OS error code stays inspectable (`raw_os_error`) through the
+/// `io::Error` that wraps this one.
+#[derive(Debug, thiserror::Error)]
+#[error("{error}; unlocking the file then failed: {unlock}")]
+struct UnlockAfterError {
+    #[source]
+    error: io::Error,
+    unlock: io::Error,
 }
 
 impl InUse {
@@ -201,5 +212,19 @@ mod unlock_tests {
             )
         );
         assert_eq!(f.calls.load(Ordering::Relaxed), 1);
+    }
+
+    /// When both fail, the caller's error stays reachable as the source, OS error code included.
+    #[test]
+    fn a_double_failure_keeps_the_callers_os_error_as_its_source() {
+        let removal = io::Error::from_raw_os_error(13);
+        let (kind, text) = (removal.kind(), removal.to_string());
+        let err = unlock_kept(&file(true), Err::<(), _>(removal)).unwrap_err();
+        assert_eq!(err.kind(), kind);
+        let source = std::error::Error::source(&err)
+            .and_then(|s| s.downcast_ref::<io::Error>())
+            .expect("the caller's error is the source");
+        assert_eq!(source.raw_os_error(), Some(13));
+        assert_eq!(source.to_string(), text);
     }
 }

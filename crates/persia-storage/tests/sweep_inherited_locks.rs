@@ -107,6 +107,26 @@ impl ForkedFs {
     }
 }
 
+/// A temporary directory whose file system has per-handle locks, or `None` (after saying so) where it has not:
+/// overlayfs (a container's `/tmp`), NFS and FUSE report every temporary file `Unknown` (ADR-0019 decision 6), which
+/// these tests do not cover. CI's temporary directory is a local disk; `sys::tests::a_temporary_file_is_on_a_local_disk`
+/// fails if it is not, so this skip cannot hide the suite there.
+fn local_tempdir() -> Option<tempfile::TempDir> {
+    let dir = tempfile::tempdir().unwrap();
+    let probe = dir.path().join("probe");
+    std::fs::write(&probe, b"").unwrap();
+    if RealFs.open(&probe, false).unwrap().locks_per_handle() {
+        std::fs::remove_file(&probe).unwrap();
+        Some(dir)
+    } else {
+        eprintln!(
+            "skipped: locks are not per handle on the file system of {}",
+            dir.path().display()
+        );
+        None
+    }
+}
+
 fn report(files: &[persia_storage::SideFile]) -> Vec<(PathBuf, InUse, bool)> {
     files
         .iter()
@@ -118,7 +138,7 @@ fn report(files: &[persia_storage::SideFile]) -> Vec<(PathBuf, InUse, bool)> {
 /// Without it the tests below would pass on code that leaks the lock.
 #[test]
 fn a_duplicate_descriptor_keeps_the_lock_after_close() {
-    let dir = tempfile::tempdir().unwrap();
+    let Some(dir) = local_tempdir() else { return };
     let path = dir.path().join("f");
     std::fs::write(&path, b"x").unwrap();
     let fs = ForkedFs::default();
@@ -136,7 +156,7 @@ fn a_duplicate_descriptor_keeps_the_lock_after_close() {
 /// descriptor either opened is still duplicated.
 #[test]
 fn a_sweep_after_a_listing_removes_a_stale_temporary_despite_forked_copies() {
-    let dir = tempfile::tempdir().unwrap();
+    let Some(dir) = local_tempdir() else { return };
     let root = dir.path().join("store");
     let fs = ForkedFs::default();
     let store = LocalStorage::open_in(fs.clone(), &root).unwrap();
@@ -165,7 +185,7 @@ fn a_sweep_after_a_listing_removes_a_stale_temporary_despite_forked_copies() {
 /// removes it.
 #[test]
 fn a_sweep_whose_removal_failed_leaves_the_temporary_free() {
-    let dir = tempfile::tempdir().unwrap();
+    let Some(dir) = local_tempdir() else { return };
     let root = dir.path().join("store");
     let fs = ForkedFs::default();
     let store = LocalStorage::open_in(fs.clone(), &root).unwrap();
@@ -186,7 +206,7 @@ fn a_sweep_whose_removal_failed_leaves_the_temporary_free() {
 /// `sweep_stale_files` whose removal failed leaves it free too, so the next one removes it.
 #[test]
 fn container_side_files_stay_free_after_a_listing_or_a_failed_sweep() {
-    let dir = tempfile::tempdir().unwrap();
+    let Some(dir) = local_tempdir() else { return };
     // Canonical, as the container reports it (macOS `/var` is a symbolic link to `/private/var`).
     let dir_path = std::fs::canonicalize(dir.path()).unwrap();
     let path = dir_path.join("app.persia");
