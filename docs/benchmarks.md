@@ -425,9 +425,14 @@ few more documents: compare builds at equal iteration counts, which criterion pr
 
 ## `persia-engine` relevance
 
-`cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2): 18 user-text queries with graded judgments over 54
-store items and how-to articles (`crates/persia-engine/tests/relevance/`), BM25F over `title` (boost 2) and `body`,
-`en` analyzer. Per-query values are in `tests/relevance/baseline.txt`, which the test checks to four decimals; a row
+`cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
+54 store items and how-to articles (`crates/persia-engine/tests/relevance/`), BM25F over `title` (boost 2) and `body`,
+`en` analyzer. Per-query values are in `tests/relevance/baseline.txt`, the baseline of the regression gate: every value
+and the mean must stay within `0.0001` (one unit in the fourth decimal, the rounding a platform's `ln`/`powf` may flip)
+of it. A drop beyond that fails as a regression, and a rise fails too, so an improvement lands only with the baseline
+replaced on purpose by the table the failure prints, the PR naming the queries that moved. The tolerance is below
+half the smallest change one judged document makes moving by one rank, so the gate sees every ranking change among
+judged documents in the top 10. It runs in `cargo test --workspace` (0.05 s; CI's `test` job, Linux and macOS). A row
 is added here when the mean moves.
 
 | Recorded | mean nDCG@10 | lowest |
