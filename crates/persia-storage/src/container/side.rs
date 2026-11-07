@@ -212,10 +212,25 @@ impl<F: ContainerFile + 'static> Container<F> {
             }
         }
         // Even after an error: what was removed stays removed across a crash.
-        if !removed.is_empty() {
-            vfs.sync_dir(&dir).map_err(Error::io("sync directory"))?;
+        let synced = if removed.is_empty() {
+            Ok(())
+        } else {
+            vfs.sync_dir(&dir)
+        };
+        match (result, synced) {
+            (Ok(()), Ok(())) => Ok(removed),
+            (Ok(()), Err(sync)) => Err(Error::io("sync directory")(sync)),
+            // The removal's error is the one to report, the failed sync is added to it.
+            (Err(Error::Io { op, source }), Err(sync)) => Err(Error::Io {
+                op,
+                source: side::then_failed(source, "syncing the directory", sync),
+            }),
+            (Err(err), Err(sync)) => Err(Error::Io {
+                op: "remove side file",
+                source: side::then_failed(io::Error::other(err), "syncing the directory", sync),
+            }),
+            (Err(err), Ok(())) => Err(err),
         }
-        result.map(|()| removed)
     }
 }
 
