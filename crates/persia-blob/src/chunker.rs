@@ -134,12 +134,12 @@ impl<R: Read> Chunker<R> {
 
     /// The next chunk, or `None` once the reader has ended (an empty blob has no chunks).
     ///
-    /// Reads until the chunk is full or the reader ends; [`io::ErrorKind::Interrupted`] is retried.
+    /// Reads until the chunk is full or the reader ends; [`std::io::ErrorKind::Interrupted`] is retried.
     ///
     /// # Errors
     /// - [`Error::Read`] when the reader fails;
     /// - [`Error::InvalidChunking`] with [`BlobRefDefect::TooManyChunks`] when the blob needs more than `u32::MAX`
-    ///   chunks;
+    ///   chunks (its `size` is the bytes read so far: a lower bound of the blob's);
     /// - [`Error::ChunkerFailed`] after either of those.
     pub fn next_chunk(&mut self) -> Result<Option<Chunk>> {
         match self.state {
@@ -174,6 +174,11 @@ impl<R: Read> Chunker<R> {
             .map_err(Error::Read)?;
         if bytes.is_empty() {
             return Ok(None);
+        }
+        // `read_to_end` grows the buffer by doubling, and the last chunk may be short: do not hand the caller (and
+        // its upload queue) much more capacity than bytes.
+        if bytes.capacity().saturating_sub(bytes.len()) > bytes.len() / 8 {
+            bytes.shrink_to_fit();
         }
         let len = u64_from_usize(bytes.len());
         if self.next_index >= self.max_chunks {
@@ -452,6 +457,56 @@ mod tests {
         check(&data[..6], cs, &chunks, blob);
     }
 
+    /// Panics if read again after it returned end of input.
+    struct OnceEnded<'a> {
+        data: &'a [u8],
+        ended: bool,
+    }
+
+    impl Read for OnceEnded<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            assert!(!self.ended, "read after end of input");
+            let n = self.data.len().min(buf.len());
+            if n == 0 {
+                self.ended = true;
+            }
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn the_reader_is_not_called_after_its_end() {
+        // A short last chunk, an end at a chunk boundary, and an empty blob.
+        for len in [10, 8, 0] {
+            let data = vec![3_u8; len];
+            let reader = OnceEnded {
+                data: &data,
+                ended: false,
+            };
+            let (chunks, blob) = collect(Chunker::new(reader, ChunkSize::new(4).unwrap()));
+            check(&data, ChunkSize::new(4).unwrap(), &chunks, blob);
+        }
+    }
+
+    #[test]
+    fn chunk_buffers_hold_little_spare_capacity() {
+        // 5 MiB chunks grow from 64 KiB by doubling (to 8 MiB) unless shrunk; the last chunk is short.
+        let cs = ChunkSize::new(5 << 20).unwrap();
+        let data = vec![1_u8; (5 << 20) * 2 + 100];
+        let mut chunker = Chunker::new(&data[..], cs);
+        while let Some(c) = chunker.next_chunk().unwrap() {
+            let bytes = c.into_bytes();
+            assert!(
+                bytes.capacity() - bytes.len() <= bytes.len() / 8,
+                "{} for {}",
+                bytes.capacity(),
+                bytes.len()
+            );
+        }
+    }
+
     #[test]
     fn chunk_all_feeds_the_sink_in_order() {
         let data = b"abcdefghij";
@@ -492,6 +547,27 @@ mod tests {
             pieces in proptest::collection::vec(0_usize..700, 1..6),
         ) {
             prop_assume!(pieces.iter().any(|&p| p > 0));
+            let cs = ChunkSize::new(chunk).unwrap();
+            let (whole, whole_blob) = collect(Chunker::new(&data[..], cs));
+            check(&data, cs, &whole, whole_blob);
+            let reader = Pieces { data: &data, lens: pieces, next: 0 };
+            let (pieced, pieced_blob) = collect(Chunker::new(reader, cs));
+            prop_assert_eq!(pieced, whole);
+            prop_assert_eq!(pieced_blob, whole_blob);
+        }
+
+        /// The same with chunks larger than the first buffer (64 KiB) and not powers of two, so buffer growth and the
+        /// full-size capacity are exercised across reads.
+        #[cfg(feature = "slow")]
+        #[test]
+        fn independent_of_how_bytes_arrive_for_large_chunks(
+            len in 0_usize..600_000,
+            chunk in prop_oneof![(64_u32 << 10) - 3..(64 << 10) + 3, 100_000_u32..300_000],
+            pieces in proptest::collection::vec(0_usize..200_000, 1..6),
+            seed in any::<u8>(),
+        ) {
+            prop_assume!(pieces.iter().any(|&p| p > 0));
+            let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap().wrapping_mul(31).wrapping_add(seed)).collect();
             let cs = ChunkSize::new(chunk).unwrap();
             let (whole, whole_blob) = collect(Chunker::new(&data[..], cs));
             check(&data, cs, &whole, whole_blob);

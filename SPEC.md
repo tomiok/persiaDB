@@ -1949,7 +1949,9 @@ The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034), en
 72  4·n  chunk_crc   u32 per chunk, the CRC32C of its bytes, in chunk order; n = ceil(size / chunk_size)
 ..  4    crc32c      u32 over every byte before it
 ```
-Its length is `76 + 4·n`, so a reader that holds the blob's `BlobRef` knows it before fetching. The trailer is
+Version 1 without flags is `76 + 4·n` bytes long. A reader fetches the whole object and may use that length, once it has
+read `version` and `flags`, as a sanity bound (a later flag's layout, ROADMAP 9.3.3, may be longer). The magic starts
+and the CRC32C trailer ends every version and flag layout, so a damaged `version` or `flags` reads as corruption. The trailer is
 redundant inside a `BlobIndex` frame but not in a remote object, like the manifest's (§8.7) and the tombstone
 sidecars' (§8.3). Reading checks, in this order: at least 76 bytes, the magic, the CRC32C trailer, then `version` (0 is
 corruption, above 1 is unsupported), then `flags` (a bit this build does not know is unsupported: a newer writer's
@@ -1967,40 +1969,65 @@ Decoding allocates at most its input's length. Each value has exactly one encodi
 chunk but the last is full, and an empty blob has no chunks. The boundaries depend only on `size` and `chunk_size`,
 never on how the bytes were delivered. The SHA-256 is computed over the bytes in order while they are chunked.
 
-**Staging and binding** (ADR-0034). An upload draws a random 128-bit `upload_id` and writes its chunks under
-`(upload_id, chunk_idx)`, never under a `blob_id`. When the last byte is read the id is known; the blob becomes
-addressable only when its **blob manifest** (`blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk;
-encoding in §9.1.1) is durable. If the id is already bound, the upload is a duplicate: its staged chunks are deleted
-best-effort (GC is the backstop) and `put_blob` returns a `BlobRef` with the bound blob's `chunk_size`. Dedup
-never skips reading the bytes.
+**Staging and binding** (ADR-0034). An upload draws a 128-bit `upload_id` at random, like a `segment_id` (§8.7: a
+keyed pseudo-random function seeded from the operating system; uniqueness matters, not unpredictability, because
+integrity never depends on it), and writes its chunks under `(upload_id, chunk_idx)`, never under a `blob_id`. A
+staged chunk is never overwritten. When the last byte is read the id is known; the blob becomes addressable only when
+its **blob manifest** (`blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk; encoding in §9.1.1) is
+durable, and only after every chunk write it names was acknowledged. If the id is already bound, the upload is a
+duplicate and `put_blob` returns a `BlobRef` with the bound blob's `chunk_size`; the duplicate's staged chunks are
+deleted best-effort remotely (GC is the backstop) and left to the pack rewrite locally. Before it returns the bound
+blob, `put_blob` decodes its manifest and checks it names the id (`check_blob_id`): a manifest that does not decode or
+names another blob is `Corrupt`, never silently reused, and `verify` reports it (ROADMAP 9.5.3). Dedup never skips
+reading the bytes.
 
 ### 9.3 Local layout (`.persia.blobs`)
 Pack file: header + append-only `BlobChunk` frames `{upload_id, chunk_idx, len, crc, bytes}` + `BlobIndex` frames
 holding blob manifests (with the chunk frames' offsets) + superblock like SPEC §4.3. A blob is visible once the
 superblock commit that covers its `BlobIndex` frame is durable; chunk frames no committed `BlobIndex` names are staging
-or orphans. GC rewrites live blobs into a new pack (like container compaction).
+or orphans. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
+size), then each chunk's length and CRC32C. GC rewrites live blobs into a new pack (like container compaction).
 
 ### 9.4 Remote layout
 ```
 blobs/<hex[0..2]>/<hex(blob_id)>              blob manifest, created with put_if_absent (the binding)
-blobs/uploads/<upload_id:032x>/<chunk_idx:010> staged chunk: the chunk's raw bytes
+blobs/uploads/<upload_id:032x>/<chunk_idx:010> staged chunk: the chunk's raw bytes, created with put_if_absent
 ```
-`hex(blob_id)` is 64 lowercase hex characters. Binding: `Created` binds the id; `AlreadyExists` (resolved against
-the writer's own bytes, §10.1) means another upload bound it first, so this one is a duplicate (§9.2); an error leaves
-the outcome unknown and the writer reads the key to resolve it, keeping its chunks meanwhile (as §10.4). A backend
-without `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, then whole chunks, and
-checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`). A resumed upload (ROADMAP 9.3.2) names its
-`upload_id`, keeps the run of full-length chunks from chunk 0, re-hashes their bytes and continues after them; hasher
-state is never persisted. Blobs below a size threshold may be stored as one object (ROADMAP 9.3.3).
+`hex(blob_id)` is 64 lowercase hex characters (`uploads` is not two hex digits, so the two kinds of key never meet).
+Binding: `Created` binds the id; `AlreadyExists` (resolved against the writer's own bytes, §10.1) means another upload
+bound it first, so this one is a duplicate (§9.2); an error leaves the outcome unknown: the writer retries the same
+`put_if_absent` (same bytes) until it gets an answer, and never deletes the chunks of an upload whose binding outcome
+was once unknown (an S3 conditional write still in flight may land later), leaving them to GC. A backend without
+`conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
+(`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
+gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
+**Resume** (ROADMAP 9.3.2). The resume token is the `upload_id` and the `chunk_size` the upload started with (chunk
+objects do not record it). The writer lists the staged chunks, keeps the run of full-length chunks from chunk 0,
+re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
+a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
+bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
+resuming client should pass `expected_id` (§9.6). Blobs below a size threshold may be stored as one object (ROADMAP
+9.3.3).
 
 ### 9.5 Write ordering and GC
-1. Write blob chunks, then the blob manifest (binding). Durable.
+1. Write blob chunks; once every chunk write is acknowledged, write the blob manifest (binding). Durable.
 2. Commit the document referencing it.
-A crash between 1 and 2 leaves an **orphan blob** (harmless); a crash during 1 leaves staged chunks (harmless). GC:
-mark = blob_ids referenced by live manifests, then the upload ids their blob manifests name; sweep = unmarked blob
-manifests and staged chunks of unmarked uploads, older than a grace period (default 24 h; for staged chunks counted
-from the upload's newest chunk, so an idle upload stays resumable that long). A referenced blob must never be
-missing; `verify` checks this.
+A crash between 1 and 2 leaves an **orphan blob** (harmless); a crash during 1 leaves staged chunks (harmless).
+GC runs only in the writer (the process holding the container's writer lock, or the writer lease remotely, §11.3),
+the same process that runs `put_blob`, and keeps a **pin set** with it:
+- `put_blob` pins its `upload_id` before its first chunk write (or, on resume, before listing), and the `blob_id` it
+  returns (bound or deduplicated) before it binds or looks it up; both stay pinned until the document referencing the
+  blob is durable (an acknowledged WAL record or a commit), or the caller drops the upload.
+- Mark: the `blob_id`s referenced by live manifests and snapshots and by WAL records from `wal_start` on (§8.2),
+  pinned ids, then the upload ids their blob manifests name, and pinned upload ids.
+- Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
+  grace period (default 24 h; for staged chunks counted from the upload's newest chunk, so an idle upload stays
+  resumable that long). A blob manifest is deleted before its upload's chunks, so a crash mid-sweep leaves chunks
+  without a manifest, never a manifest without chunks. Checking an object against the pin set and deleting it is one
+  step under the pin set's lock, so a pin taken after the mark still protects it. Remotely the sweep lists
+  `blobs/<xx>/` per hex prefix and `blobs/uploads/` apart (a `list` is recursive, §10.1).
+The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
+document references. A referenced blob must never be missing; `verify` checks this.
 
 ### 9.6 API
 `put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id }) -> BlobRef`, `get_blob(id) -> Stream`,

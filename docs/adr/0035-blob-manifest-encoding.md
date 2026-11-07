@@ -17,8 +17,9 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
 1. **Layout** (SPEC §9.1.1), little-endian, fixed-width like the tombstone sidecar (ADR-0030): magic `"PBLM"`,
    encoding `version u32 = 1`, `flags u32`, `blob_id` (32 bytes), `size u64`, `chunk_size u32`, `upload_id u128`,
    one `u32` CRC32C per chunk, and a CRC32C trailer over everything before it. The header is 72 bytes, so the CRC list
-   starts 8-aligned; the length is `76 + 4·n` with `n = ceil(size / chunk_size)`, which a reader holding the
-   `BlobRef` knows before fetching.
+   starts 8-aligned; the length is `76 + 4·n` with `n = ceil(size / chunk_size)` for version 1 without flags, a sanity
+   bound a reader can use once it has read the version and flags (it fetches the whole object). The magic starts and
+   the trailer ends every version and flag layout.
 2. **Chunk lengths are not stored.** Chunks are fixed-size (ADR-0034 item 1): every chunk's range follows from `size`
    and `chunk_size`. Storing them would only add states to reject.
 3. **Own trailer.** A remote blob manifest is a bare object, so it carries its CRC32C; inside a frame the trailer is
@@ -32,7 +33,10 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
    in a `u32`, exactly `4·n` CRC bytes before the trailer (checked before allocating), and an empty blob only with
    the SHA-256 of no bytes as its id. Every other violation is corruption. Fields are fixed-width and `flags` must be
    0, so each value has exactly one encoding.
-6. **Golden files** live in `tests/fixtures/blob-manifest/v1/`, checked by `persia-blob`'s tests and written when
+6. **Lookup checks.** A manifest's checksums cover only its own bytes, so a reader checks it against what it looked it
+   up by: `check_blob_id` (the id of its key or `BlobIndex` entry) and `check_ref` (id, size and chunk size of the
+   `BlobRef`), each a mismatch `Corrupt` (SPEC §9.3, §9.4).
+7. **Golden files** live in `tests/fixtures/blob-manifest/v1/`, checked by `persia-blob`'s tests and written when
    missing with `PERSIA_WRITE_BLOB_MANIFEST_FIXTURES=1`, as for the other object encodings (SPEC §15). `cargo xtask
    fixtures` cannot write them: `xtask` may depend on `persia-format` only (CLAUDE.md "Architecture"), and the codec
    belongs to `persia-blob`.

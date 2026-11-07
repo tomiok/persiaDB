@@ -32,7 +32,7 @@ use core::ops::Range;
 
 use persia_format::checksum::crc32c;
 use persia_format::widen::{u64_from_usize, usize_from_u32};
-use persia_format::{BlobId, Reader, Writer};
+use persia_format::{BlobId, BlobRef, Reader, Writer};
 
 use crate::chunking::ChunkSize;
 use crate::error::{Error, Result};
@@ -42,6 +42,8 @@ use crate::hash::blob_id_of;
 pub const MAGIC: [u8; 4] = *b"PBLM";
 /// The encoding version this build writes and reads.
 pub const VERSION: u32 = 1;
+/// The name errors give the encoding.
+const ENCODING: &str = "blob manifest";
 /// The `flags` bits this build knows: none (ADR-0034 item 8 reserves the field for ROADMAP 9.3.3).
 pub const KNOWN_FLAGS: u32 = 0;
 
@@ -161,11 +163,51 @@ impl BlobManifest {
         self.chunk_size.chunk_range(self.size, index)
     }
 
-    /// The length of a blob manifest's encoding for a blob of `size` bytes in chunks of `chunk_size`, so a reader
-    /// that holds the blob's `BlobRef` can bound what it fetches.
+    /// Checks that this manifest is the one of the blob `blob_id`: what a reader that looked the manifest up by an id
+    /// (its key, SPEC §9.4, or a `BlobIndex` entry, §9.3) must check before serving chunks, since a manifest's
+    /// checksums cover only its own bytes.
     ///
     /// # Errors
-    /// [`Error::InvalidChunking`] when the blob needs more than `u32::MAX` chunks.
+    /// [`Error::Corrupt`] when the manifest names another blob.
+    pub fn check_blob_id(&self, blob_id: BlobId) -> Result<()> {
+        if self.blob_id == blob_id {
+            Ok(())
+        } else {
+            Err(Error::Corrupt {
+                encoding: ENCODING,
+                what: "the manifest names another blob than the one looked up",
+            })
+        }
+    }
+
+    /// Checks that this manifest describes the blob `blob_ref` refers to: same id, size and chunk size (SPEC §9.4).
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] for the first field that differs.
+    pub fn check_ref(&self, blob_ref: &BlobRef) -> Result<()> {
+        self.check_blob_id(blob_ref.blob_id())?;
+        let corrupt = |what| {
+            Err(Error::Corrupt {
+                encoding: ENCODING,
+                what,
+            })
+        };
+        if self.size != blob_ref.size() {
+            return corrupt("the manifest's size differs from the blob reference's");
+        }
+        if self.chunk_size.get() != blob_ref.chunk_size() {
+            return corrupt("the manifest's chunk size differs from the blob reference's");
+        }
+        Ok(())
+    }
+
+    /// The length of the version-1, no-flags encoding of the manifest of a blob of `size` bytes in chunks of
+    /// `chunk_size`: `76 + 4·n`. A reader fetches the whole object; once it has read the version and flags it can use
+    /// this as a sanity bound (a later layout, ROADMAP 9.3.3, may be longer).
+    ///
+    /// # Errors
+    /// - [`Error::InvalidChunking`] when the blob needs more than `u32::MAX` chunks;
+    /// - [`Error::InvalidManifest`] when the length does not fit in a `usize` (a 32-bit target).
     pub fn encoded_len_for(size: u64, chunk_size: ChunkSize) -> Result<usize> {
         let count = usize_from_u32(chunk_size.chunk_count(size)?);
         count
@@ -211,7 +253,10 @@ impl BlobManifest {
     /// - [`Error::UnsupportedVersion`] for an encoding version above [`VERSION`];
     /// - [`Error::UnsupportedFlags`] for a `flags` bit this build does not know (a newer writer's layout).
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let corrupt = |what| Error::Corrupt { what };
+        let corrupt = |what| Error::Corrupt {
+            encoding: ENCODING,
+            what,
+        };
         let short = || corrupt("shorter than a header and a trailer");
         if bytes.len() < HEAD_LEN + TRAILER_LEN {
             return Err(short());
@@ -231,11 +276,19 @@ impl BlobManifest {
         match r.read_u32().map_err(eof)? {
             0 => return Err(corrupt("encoding version 0")),
             VERSION => {}
-            version => return Err(Error::UnsupportedVersion { version }),
+            version => {
+                return Err(Error::UnsupportedVersion {
+                    encoding: ENCODING,
+                    version,
+                });
+            }
         }
         let flags = r.read_u32().map_err(eof)?;
         if flags & !KNOWN_FLAGS != 0 {
-            return Err(Error::UnsupportedFlags { flags });
+            return Err(Error::UnsupportedFlags {
+                encoding: ENCODING,
+                flags,
+            });
         }
         let blob_id = BlobId::from_bytes(r.read_array().map_err(eof)?);
         let size = r.read_u64().map_err(eof)?;

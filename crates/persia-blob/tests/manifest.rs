@@ -21,6 +21,8 @@
 //! 7. A header claiming up to `u32::MAX` chunks over a tiny body fails as `Corrupt`, quickly: the length is checked
 //!    before the CRC list is read. Unsafe is denied, so there is no allocator hook: this asserts the outcome.
 //! 8. `Error::is_corruption` is true for `Corrupt` only.
+//! 9. A manifest checks against what it was looked up by (SPEC §9.4): another `blob_id`, or a `BlobRef` with another
+//!    id, size or chunk size, is `Corrupt`.
 //!
 //! The order tests tell `Corrupt` rules apart by their `what` text (`rule_of`): that is the only place the rule
 //! shows. A reworded message fails `rule_of` loudly; update its table, not the assertion.
@@ -317,9 +319,9 @@ fn rule_of(what: &str) -> Rule {
 fn verdict_of(r: &Result<BlobManifest, Error>) -> Verdict {
     match r {
         Ok(_) => Verdict::Valid,
-        Err(Error::Corrupt { what }) => Verdict::Corrupt(rule_of(what)),
-        Err(Error::UnsupportedVersion { version }) => Verdict::Version(*version),
-        Err(Error::UnsupportedFlags { flags }) => Verdict::Flags(*flags),
+        Err(Error::Corrupt { what, .. }) => Verdict::Corrupt(rule_of(what)),
+        Err(Error::UnsupportedVersion { version, .. }) => Verdict::Version(*version),
+        Err(Error::UnsupportedFlags { flags, .. }) => Verdict::Flags(*flags),
         Err(e) => panic!("decode returned a non-decode error: {e:?}"),
     }
 }
@@ -1059,9 +1061,27 @@ fn a_header_claiming_u32_max_chunks_over_a_tiny_body_fails_fast() {
 #[test]
 fn is_corruption_is_true_for_corrupt_only() {
     let cases = [
-        (Error::Corrupt { what: "x" }, true),
-        (Error::UnsupportedVersion { version: 2 }, false),
-        (Error::UnsupportedFlags { flags: 1 }, false),
+        (
+            Error::Corrupt {
+                encoding: "blob manifest",
+                what: "x",
+            },
+            true,
+        ),
+        (
+            Error::UnsupportedVersion {
+                encoding: "blob manifest",
+                version: 2,
+            },
+            false,
+        ),
+        (
+            Error::UnsupportedFlags {
+                encoding: "blob manifest",
+                flags: 1,
+            },
+            false,
+        ),
         (Error::InvalidManifest { what: "x" }, false),
         (
             Error::InvalidChunking(BlobRefDefect::ChunkSize { chunk_size: 0 }),
@@ -1264,5 +1284,37 @@ proptest! {
             bytes[at.index(covered)] = value;
         }
         check_decode(&reseal(bytes)).map_err(TestCaseError::fail)?;
+    }
+}
+
+#[test]
+fn checks_against_the_lookup() {
+    use persia_format::BlobRef;
+    use std::collections::BTreeMap;
+
+    let m = golden_three();
+    let id = m.blob_id();
+    let other = BlobId::from_bytes([9; 32]);
+    m.check_blob_id(id).unwrap();
+    let e = m.check_blob_id(other).unwrap_err();
+    assert!(e.is_corruption(), "{e}");
+
+    let blob_ref = |id, size, chunk| BlobRef::new(id, size, "a/b", chunk, BTreeMap::new()).unwrap();
+    m.check_ref(&blob_ref(id, 13, 5)).unwrap();
+    for (r, what) in [
+        (blob_ref(other, 13, 5), "names another blob"),
+        (blob_ref(id, 12, 5), "size differs"),
+        (blob_ref(id, 13, 4), "chunk size differs"),
+    ] {
+        match m.check_ref(&r) {
+            Err(Error::Corrupt {
+                encoding,
+                what: got,
+            }) => {
+                assert_eq!(encoding, "blob manifest");
+                assert!(got.contains(what), "{got}");
+            }
+            other => panic!("expected Corrupt for {what}, got {other:?}"),
+        }
     }
 }
