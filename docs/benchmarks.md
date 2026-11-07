@@ -424,44 +424,38 @@ over a run), and criterion picks the iteration count from the elapsed time, so a
 few more documents: compare builds at equal iteration counts, which criterion prints.
 
 `search_request/score_then_newest` (ROADMAP 7.4.11): the one-segment `search_request` collection, 10 hits of `w3`
-sorted by score, then `at` descending (a tie-break by recency). Command: `cargo bench -p persia-engine --bench search
--- search_request/score`. 2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux; before is 5862e6f with the same bench
-file, from a worktree (its own target directory in the second run), alternating with the branch, twice.
+sorted by score, then `at` descending (a tie-break by recency). Term proximity (ROADMAP 7.3.5, ADR-0036): the AND
+rows, whose body has positions; `and_no_proximity` is `and` without the bonus. Command: `cargo bench -p
+persia-engine --bench search -- 'search_request/score|search_top10/and|search_top10_pruning/(and|and_common)/|search_suite/and'`.
+2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Before 7.4.11 is 5862e6f with the same bench file, before 7.3.5 is
+c2488c9, each from a worktree with its own target directory; the three alternating, twice (first run, second run).
 
-| Recorded | `score` | `score_then_newest` | `score_facet` |
-|---|--:|--:|--:|
-| ROADMAP 7.4.11 | 430, 428 µs | 550, 546 µs | 815, 805 µs |
-| before (5862e6f) | 442, 434 µs | 719, 693 µs | 862, 838 µs |
-
-Before, a sort with a key after the score visited every match and read each one's `at` key. Now it prunes like the
-score alone, strictly below the worst kept hit, and a match scoring below that is rejected before any column is
-read. Pruning alone (the branch without that early reject) measured 713 µs: one term over this corpus has few
-blocks to skip. Most of the gain is the column reads saved. Where blocks do lose (`tests/search_request.rs`,
-`a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the
-exhaustive one with a facet reads.
-
-Term proximity (ROADMAP 7.3.5, ADR-0036): the AND rows, whose body has positions, before (c2488c9, from a worktree
-with its own target directory) and after, alternating, twice; `and_no_proximity` is the same plan without the
-bonus. Command: `cargo bench -p persia-engine --bench search -- 'search_top10/and|search_top10_pruning/(and|and_common|must_should|must_should_rare)/|search_suite/and'`.
-2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux.
-
-| Row | before | 7.3.5 |
+| Row | before | after |
 |---|--:|--:|
-| `search_top10/and` | 423, 422 µs | 591, 582 µs |
-| `search_top10/and_no_proximity` | | 433, 431 µs |
-| `search_top10_pruning/and/exhaustive` | 418, 408 µs | 869, 875 µs |
-| `search_top10_pruning/and/max_score` | 416, 411 µs | 579, 580 µs |
-| `search_top10_pruning/and/block_max_wand` | 435, 427 µs | 589, 595 µs |
-| `search_top10_pruning/and_common/block_max_wand` | 499, 491 µs | 715, 715 µs |
-| `search_top10_pruning/must_should/block_max_wand` | 786, 791 µs | 774, 783 µs |
-| `search_top10_pruning/must_should_rare/block_max_wand` | 318, 320 µs | 319, 317 µs |
-| `search_suite/and` | 284, 287 µs | 555, 587 µs |
+| `search_request/score` | 456, 448 µs | 451, 459 µs |
+| `search_request/score_then_newest` | 720, 728 µs | 510, 518 µs |
+| `search_request/score_facet` | 870, 881 µs | 849, 876 µs |
+| `search_top10/and` | 439, 437 µs | 528, 542 µs |
+| `search_top10/and_no_proximity` | | 448, 456 µs |
+| `search_top10_pruning/and/exhaustive` | 430, 433 µs | 748, 786 µs |
+| `search_top10_pruning/and/max_score` | 437, 432 µs | 516, 539 µs |
+| `search_top10_pruning/and/block_max_wand` | 444, 445 µs | 531, 552 µs |
+| `search_top10_pruning/and_common/block_max_wand` | 510, 520 µs | 634, 656 µs |
+| `search_suite/and` | 271, 238 µs | 389, 351 µs |
 
-The bonus reads both words' positions for every document a conjunction scores: twice the cost exhaustively. Pruned,
-a candidate whose clauses plus the bonus's bound cannot beat the threshold is skipped before its positions are read
-(+39 % on `search_top10/and`; +106 % before that skip, a first version). `must_should` (one `must`) has no pair.
-`search_suite/and` (user text over a collection) still doubles. The bonus opens its own postings of the pair's
-terms, decoding again the docids and frequencies the words' matchers decode: ROADMAP 15.2.6.
+7.4.11: before, a sort with a key after the score visited every match and read each one's `at` key. Now it prunes
+like the score alone, strictly below the worst kept hit, and a match scoring below that is rejected before any
+column is read. Pruning alone (a first version, without that early reject) measured 713 µs: one term over this corpus
+has few blocks to skip, so most of the gain is the column reads saved. Where blocks do lose (`tests/search_request.rs`,
+`a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the exhaustive
+one with a facet reads.
+
+7.3.5: the bonus reads both words' positions for each document a conjunction scores, through the words' own postings
+(`Matcher::field_positions`): +75 % exhaustively. Pruned, a candidate whose clauses plus the bonus's bound cannot beat
+the threshold is skipped before its positions are read: `search_top10/and` +22 %, `search_suite/and` +44 % (its
+before runs vary by 13 %). Two first versions measured more: their own postings per pair term (decoding every docid
+and frequency block twice) gave +106 % on `search_top10/and` and ×2 on `search_suite/and`; with the early skip, +39 %
+and ×2. `must_should` (one `must`) has no pair and is unchanged.
 
 ## `persia-engine` relevance
 
@@ -471,8 +465,8 @@ terms, decoding again the docids and frequencies the words' matchers decode: ROA
 and the mean must stay within `0.0001` (one unit in the fourth decimal, the rounding a platform's `ln`/`powf` may flip)
 of it. A drop beyond that fails as a regression, and a rise fails too, so an improvement lands only with the baseline
 replaced on purpose by the table the failure prints, the PR naming the queries that moved. The tolerance is below
-half the smallest change one judged document makes moving by one rank, so the gate sees every ranking change among
-judged documents in the top 10. It runs in `cargo test --workspace` (0.05 s; CI's `test` job, Linux and macOS). A row
+half the smallest change one judged document makes moving by one rank, so the gate sees every such move in the top 10
+(two documents of one grade trading places change nothing). It runs in `cargo test --workspace` (0.05 s; CI's `test` job, Linux and macOS). A row
 is added here when the mean moves.
 
 | Recorded | mean nDCG@10 | lowest |

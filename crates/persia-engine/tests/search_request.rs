@@ -1674,3 +1674,72 @@ fn a_sort_led_by_the_score_prunes_with_further_keys() {
         );
     }
 }
+
+/// Two segments of 1 500 documents whose last 100 are short (the best score, all tied), the others long, and `n`
+/// cycling 0..7: on the calling thread the second segment starts from the first one's threshold, and its tied
+/// documents come after its first look at it (ROADMAP 7.4.11, found in the batch review).
+fn tiered_segments() -> Database<SimFile> {
+    let f = fields();
+    let mut db = database(schema());
+    for i in 0..3_000_usize {
+        let body = if i % 1_500 >= 1_400 {
+            "common".to_owned()
+        } else {
+            format!("common {}", ["filler"; 15].join(" "))
+        };
+        let d = Document::new(format!("s{i}"))
+            .with(f.body, Value::String(body))
+            .with(f.n, Value::I64(i64::try_from(i % 7).unwrap()));
+        db.put("c", &d, Durability::Buffered).unwrap();
+        if i == 1_499 {
+            db.commit().unwrap();
+        }
+    }
+    db.commit().unwrap();
+    db
+}
+
+/// A threshold from another view applies strictly too: a later view's match tied with it on the score may win on
+/// the later key (ROADMAP 7.4.11; SPEC §7.4). Pages by cursor equal the exhaustive ones, by `n` either way.
+#[test]
+fn a_shared_threshold_skips_only_below_for_a_sort_led_by_the_score() {
+    let db = tiered_segments();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    assert_eq!(c.segments().len(), 2);
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    for later in [Order::Desc, Order::Asc] {
+        let sort = Sort::new([SortKey::score(), SortKey::field(f.n, later)], c.schema()).unwrap();
+        let request = |after: Option<Cursor>| SearchRequest {
+            sort: sort.clone(),
+            limit: 10,
+            search_after: after,
+            projection: Projection::None,
+            ..SearchRequest::default()
+        };
+        for pruning in [Pruning::MaxScore, Pruning::BlockMaxWand] {
+            let exec = Execution::new(pruning).threads(Threads::Current);
+            let all = Execution::new(Pruning::Exhaustive).threads(Threads::Current);
+            let (mut after, mut want): (Option<Cursor>, Option<Cursor>) = (None, None);
+            for page in 0..25 {
+                let got = views
+                    .search_with(&plan, &request(after.clone()), &exec)
+                    .unwrap();
+                let full = views
+                    .search_with(&plan, &request(want.clone()), &all)
+                    .unwrap();
+                assert_eq!(
+                    located(&got),
+                    located(&full),
+                    "{pruning:?} by {later:?}, page {page}"
+                );
+                after = got.hits.last().map(persia_engine::db::SearchHit::cursor);
+                want = full.hits.last().map(persia_engine::db::SearchHit::cursor);
+            }
+        }
+    }
+}

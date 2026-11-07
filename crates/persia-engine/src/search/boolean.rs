@@ -4,9 +4,11 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use crate::schema::FieldId;
 use crate::segment::ReadError;
 use crate::view::SearchView;
 
+use super::proximity::Words;
 use super::{BoundCache, Matcher, Pos, Pruning, ScoreBound, raise, sum_in_order, union_bound};
 
 /// The documents every clause matches (AND), leapfrogging from the cheapest clause; the score is the sum of the
@@ -45,11 +47,11 @@ pub(super) trait Bonus {
     /// At least every [`Self::bonus`].
     fn bound(&self) -> f64;
 
-    /// The bonus of `docid`, a document every clause holds, at or after every one asked before.
+    /// The bonus of the document every clause is on, read through `words`.
     ///
     /// # Errors
     /// A corruption of the view.
-    fn bonus(&mut self, docid: u32) -> Result<f64, ReadError>;
+    fn bonus(&mut self, words: &mut dyn Words) -> Result<f64, ReadError>;
 }
 
 /// No bonus: a plain conjunction.
@@ -60,8 +62,33 @@ impl Bonus for NoBonus {
         0.0
     }
 
-    fn bonus(&mut self, _: u32) -> Result<f64, ReadError> {
+    fn bonus(&mut self, _: &mut dyn Words) -> Result<f64, ReadError> {
         Ok(0.0)
+    }
+}
+
+/// A conjunction's clauses as [`Words`]: `must` clause `i` (query order) is `clauses[order[i]]`.
+struct Clauses<'c, M> {
+    clauses: &'c mut [M],
+    order: &'c [usize],
+}
+
+impl<M: Matcher> Words for Clauses<'_, M> {
+    fn positions(
+        &mut self,
+        clause: usize,
+        field: FieldId,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError> {
+        let Some(c) = self
+            .order
+            .get(clause)
+            .and_then(|&i| self.clauses.get_mut(i))
+        else {
+            return Ok(());
+        };
+        out.extend_from_slice(c.field_positions(field)?);
+        Ok(())
     }
 }
 
@@ -294,7 +321,10 @@ impl<M: Matcher, B: Bonus> Matcher for Conjunction<M, B> {
             _ => self.clause_sum()?,
         };
         if let Some(b) = &mut self.bonus {
-            sum += b.bonus(doc)?;
+            sum += b.bonus(&mut Clauses {
+                clauses: &mut self.clauses,
+                order: &self.order,
+            })?;
         }
         Ok(sum)
     }

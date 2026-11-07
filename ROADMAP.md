@@ -474,7 +474,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
 - [x] 7.3.3 Score upper bounds per term/block (for WAND)
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
-- [~] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3). Done as the pair distance of adjacent `must` words, `λ · min(idf) · 1/d²` up to 5 apart, on where positions are indexed (ADR-0036)
+- [x] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3). Done as the pair distance of adjacent `must` words, `λ · min(idf) · 1/d²` up to 5 apart, on where positions are indexed (ADR-0036)
 
 ## 7.4 Matching & top-k
 - [x] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -489,7 +489,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.4.7 A disjunction for many clauses (relaxation expansions, SPEC §7.6: up to 50 prefix or fuzzy terms): a heap instead of a scan of every clause per document, and phrase candidates that copy positions only while starts survive; bench `search_top10/or` with 50 clauses before and after (found in the 7.4 review)
 - [x] 7.4.8 Prune conjunctions and `should` clauses beside `must` with block bounds (block-max AND, required plus optional as Lucene's ReqOpt): today a threshold reaches only a term, a pure `should` disjunction and what `must_not`/`boost` wrap (SPEC §7.3, found in 7.4.4)
 - [x] 7.4.10 Pruning trusts block bounds on the read path: a block whose decoded `tf` exceeds its Skip `max_tf` (or a norm below `min_norm`) drops hits silently instead of `Corrupt`; check `tf <= max_tf` at block decode, and add a fuzz arm that runs pruned `top_k_with` (both strategies) over corrupted segment bytes: `Err` or a result, never a hang (`Segment::verify` already checks it; found in the 7.4.4 review)
-- [~] 7.4.11 (v1.0) Configurable tie-break: a secondary key by column (for example `updated_at` descending) before docid. Today the order is score descending, then docid (7.4.3). A request already gives one with a sort list (`["score", {"field": ...}]`, 7.5.1), which visited every match: done as pruning for sorts led by the score with further keys (strictly below the worst kept hit, SPEC §7.4); a collection-level default needs a manifest version and is 32.5.1
+- [x] 7.4.11 (v1.0) Configurable tie-break: a secondary key by column (for example `updated_at` descending) before docid. Today the order is score descending, then docid (7.4.3). A request already gives one with a sort list (`["score", {"field": ...}]`, 7.5.1), which visited every match: done as pruning for sorts led by the score with further keys (strictly below the worst kept hit, SPEC §7.4); a collection-level default needs a manifest version and is 32.5.1
 - [x] 7.4.12 Plan `prefix` and `fuzzy`: expand each over the collection's terms once, at plan time (every view's `SearchView::terms`, ROADMAP 6.1.5), so every view scores the same terms; keep at most `max_expansions` and specify in SPEC §7.1 which terms win the cap (collection df descending, then bytes: each view's `TermEnum` df is its own, a segment's counting deleted documents, so rank by `StatisticsProvider::df`). Score every kept term with that largest kept `df` (one shared `idf`) and, for `fuzzy`, the edit-distance weight; the query bytes are not analyzed (SPEC §7.1). `SearchPlan::new` rejects them today (`SearchError::NeedsTerms`; found in 6.1.5, shares the walk with 8.2.3 and 8.2.4.2)
 - [x] 7.4.13 Faster filters: a `range` scans every key of the column (~12 ns per document on `search_top10_filtered`); skip FOR blocks whose keys cannot match by their minimum and bit width (every key is at most `min + 2^width − 1`, no format change), and for a selective `must` check the column per candidate instead of building the whole bitmap (SPEC §7.3's "column predicates"), picked by cost (found in 7.4.5)
 - [x] 7.4.14 Expansion `df` lookups: planning reads the collection `df` of every term each view lists, before the cap rejects it, so the memtable walks the term's postings again (its `TermEnum` just counted them) and the snapshot's capped `df` cache fills with terms that lose the cap; reuse the view's count for the memtable and bypass the cache for losing terms. Bench with a memtable and several segments (found in the 7.4.12 review)
@@ -522,7 +522,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.8.1 Differential suite vs. reference engine (random corpora/queries)
 - [x] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
 - [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
-- [~] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
+- [x] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
 - [x] 7.8.5 The reference model's norm oracle is independent of the implementation: it states SPEC §5.3.4's rounding (keep the top 4 bits of `n − 24`) instead of copying the codec, checks it against the SPEC's properties (`q <= n`, exact below 40, less than `(n − 24) / 8` low, monotonic), and checks the engine's codec against it for every length up to 2^17 and by proptest to 2^31 (found in the 2026-11-02 audit)
 - [x] 7.8.6 The differential suite compares ranked order to the reference directly (every pair of hits, within the score tolerance). Made explicit only: each score within tolerance of the reference plus the engine's own order already implied it, so it adds no detection power today (found in the 2026-11-02 audit)
 
@@ -618,6 +618,7 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.1.4 Typed documents via `serde` (`put_struct`) + dynamic `Document`
 - [ ] 10.1.5 Error type, `Result` aliases, stable error codes
 - [ ] 10.1.6 Async-friendly wrapper (`spawn_blocking`) as optional feature `tokio`
+- [ ] 10.1.7 The request's `"proximity"` (SPEC §7.1, §7.2): `search` plans `false` as `SearchPlan::without_proximity`, and a cursor records whether its search scored proximity, so a cursor from a search with the other setting is an error rather than pages over other scores (SPEC §7.4; found in the 7.3.5 review). [T] A page after a cursor from a proximity-on search, asked with `"proximity": false`, is an error; with the same setting it pages exactly
 
 ## 10.2 Concurrency semantics
 - [ ] 10.2.1 `Send + Sync` handles; reader snapshots; single-writer errors
@@ -819,7 +820,6 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.2.2 Postings decode & scoring hot-path allocation audit
 - [ ] 15.2.3 FST/term-dict memory & mmap layout tuning
 - [ ] 15.2.4 Cache sizing guidance and defaults from measurements
-- [ ] 15.2.6 Proximity from the words' own postings: the bonus (7.3.5) opens a second postings iterator per pair term and field, so a conjunction decodes each docid and frequency block twice and `search_suite/and` doubles (284 → 571 µs; `search_top10/and` +39 %, docs/benchmarks.md); read the positions through the word matchers (a `Matcher` method for a field's positions at the current document), and bench before and after (found in 7.3.5)
 - [ ] 15.2.5 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4); `MaxScore` still scans every essential clause per candidate and sums every bound per lookup, O(clauses²): 41.6 ms vs 24.5 ms for block-max WAND on `search_top10_pruning/or50` (7.4.7). (was 7.4.9)
 
 ## 15.3 Reliability & chaos

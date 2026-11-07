@@ -1153,7 +1153,7 @@ returned as it is, and copied as bytes, never re-validated.
   "limit": 20, "offset": 0,               // or "search_after": cursor
   "facets": ["brand"],
   "relax": { "min_results": 1 },          // overrides collection default
-  "proximity": true,                      // the bonus of adjacent words (§7.2); false leaves it out
+  "proximity": true,                      // the bonus of adjacent words (§7.2); false leaves it out (ROADMAP 10.1.7)
   "explain": false
 }
 ```
@@ -1302,7 +1302,7 @@ and 0 beyond (0 with no such field). Then
 bonus = Σ_{adjacent pairs (i, j), query order}  (λ · min(idf_i, idf_j)) · π_{i,j}        λ = 1
 ```
 with each word's `idf` as above (a `combined`'s from its largest `df`); a pair with no field where both words have a
-term is left out. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
+term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a single term. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
 pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
 included), nor a field without positions; a single word is no `bool` (§7.1.1). A plan may leave the bonus out
 (`"proximity": false` in a request, `SearchPlan::without_proximity`): the bonus is then 0 and not added. With
@@ -1352,7 +1352,8 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   `should` side without a document there adds nothing). A `bool` with a proximity bonus (§7.2) adds its `B` after its `must`
   clauses' bounds, where its score adds the bonus, so each of these bounds still holds exactly; the `must` side's bound
   below includes it. A document whose clauses, scored, plus `B` are at most the threshold is skipped
-  before its positions are read. Where the `must` clauses' bound alone is at most the
+  before its positions are read. Its clauses are scored for that before a filter checked per candidate or a
+  `must_not` clause rejects it, so a corrupt norm of such a document can fail the search. Where the `must` clauses' bound alone is at most the
   threshold, a document the `should` clauses miss scores at most it, so only documents holding a `should` clause
   are scored in that range, and the walk to the next one never passes the range's end (as Lucene's ReqOpt). Every document a pruned matcher returns has its exhaustive score. A
   disjunction's block bound is the block bounds of its clauses with a document there, summed in query order.
@@ -1439,7 +1440,8 @@ only hits that rank after the cursor count, `offset` included. A cursor whose va
 number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
-key or pass one over. The same snapshot and the same memtable view page exactly.
+key or pass one over. The same snapshot and the same memtable view page exactly. A cursor pages exactly under the query and plan options
+that produced it (`proximity` included, §7.2), which it does not record yet (ROADMAP 10.1.7).
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the

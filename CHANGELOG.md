@@ -12,7 +12,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
   `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
   the matches scoring below the worst kept hit (ties are still compared on the later keys), and rejects such a match
-  before reading its columns. `search_request/score_then_newest` 719 → 550 µs. Results are unchanged.
+  before reading its columns. `search_request/score_then_newest` 724 → 514 µs. Results are unchanged.
 - `persia-engine`: the memtable's views share their copies of a field's column keys and `keyword` column (ROADMAP
   7.5.7; SPEC §10.6). A request takes a new memtable view, and views of the same documents now copy a column once
   between them instead of once each; the memtable keeps one copy per field (the one of the most documents) and counts
@@ -127,7 +127,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   in a `text` field with `positions` (one more when reversed; nothing beyond 5 apart), `λ = 1`. On by default where
   positions are indexed; `SearchPlan::without_proximity` leaves it out. Pruning stays exact: the bonus is at most
   `Σ λ · min(idf)`, which every bound of the `bool` adds. New in `persia_engine::search`: `ProximityExplanation`,
-  `PairExplanation`, `SearchPlan::without_proximity` and `SearchPlan::proximity`.
+  `PairExplanation`, `SearchPlan::without_proximity` and `SearchPlan::proximity`. The
+  bonus costs time on AND queries over fields with positions: `search_top10/and` +22 %, `search_suite/and` +44 %,
+  `+75 %` exhaustively (docs/benchmarks.md); `Matcher::field_positions` is a new provided method.
 - `persia-engine` (breaking): `Explanation::Bool` has a `proximity` field, the bonus and its pairs.
 - `persia-blob`: the blob manifest, a blob's chunk list (ROADMAP 9.1.3; SPEC §9.1.1; ADR-0034, ADR-0035).
   `BlobManifest` (`blob_id`, size, chunk size, `UploadId`, chunk CRCs) with `encode`, `decode` (corrupt input is

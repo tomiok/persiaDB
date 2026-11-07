@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **329 of 526** MVP leaves done (63%), 3 in progress (last snapshot 2026-11-07). Post-MVP work is 0 of 179 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **332 of 526** MVP leaves done (63%), 0 in progress (last snapshot 2026-11-07). Post-MVP work is 0 of 179 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -248,15 +248,15 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M4** Text analysis | ✅ done | 29/29 |
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
-| **M7** Query engine & ranking | 🔨 in progress | 48/51 |
-| **M8** Zero-results avoidance | ⏳ blocked | 0/29 |
+| **M7** Query engine & ranking | ✅ done | 51/51 |
+| **M8** Zero-results avoidance | ▶️ ready | 0/29 |
 | **M9** Blob store | 🔨 in progress | 4/21 |
-| **M10** Embedded API | ⏳ blocked | 0/19 |
+| **M10** Embedded API | ⏳ blocked | 0/20 |
 | **M11** Server | ⏳ blocked | 0/23 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/24 |
 | **M14** SDKs | ⏳ blocked | 0/19 |
-| **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | 0/24 |
+| **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | 0/23 |
 <!-- END GENERATED progress:milestones -->
 
 ### After v1.0

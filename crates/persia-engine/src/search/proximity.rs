@@ -9,7 +9,6 @@
 
 use crate::schema::FieldId;
 use crate::segment::ReadError;
-use crate::view::{PostingsIterator, SearchView};
 
 use super::boolean::Bonus;
 
@@ -19,8 +18,8 @@ pub(crate) const LAMBDA: f64 = 1.0;
 /// The largest distance that counts: beyond it a pair's closeness is 0.
 pub(crate) const WINDOW: u32 = 5;
 
-/// One pair of adjacent required words, planned: the first one's `must` index (the second is the next), `λ · min(idf)`, and per field with positions
-/// holding both, the two terms.
+/// One pair of adjacent required words, planned: the first one's `must` index (the second is the next),
+/// `λ · min(idf)`, and per field with positions holding both, the two terms.
 #[derive(Debug, Clone)]
 pub(super) struct PairPlan {
     pub(super) first: usize,
@@ -92,21 +91,19 @@ pub(crate) fn distance(a: &[u32], b: &[u32], same: bool) -> Option<u32> {
     best
 }
 
-/// One field of a pair over a view: both terms' postings, when the view holds both.
-struct PairField<P> {
-    field: FieldId,
-    first: P,
-    second: P,
-    same: bool,
-    /// The first term's positions at the document, copied to compare with the second's.
-    scratch: Vec<u32>,
-}
-
-/// One pair over a view.
-struct Pair<P> {
-    first: usize,
-    weight: f64,
-    fields: Vec<PairField<P>>,
+/// The positions a pair reads: a word's, by its `must` index, in a field, at the document the words are on.
+pub(super) trait Words {
+    /// Appends to `out` the positions of `must` clause `clause` in `field` at the current document (none when the
+    /// word is not in that field there).
+    ///
+    /// # Errors
+    /// A corruption of the view.
+    fn positions(
+        &mut self,
+        clause: usize,
+        field: FieldId,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError>;
 }
 
 /// A pair's closeness at a document, and where it came from (SPEC §7.7).
@@ -118,90 +115,68 @@ pub(super) struct Nearest {
     pub(super) closeness: f64,
 }
 
-/// A `bool`'s bonus over a view: its own postings of the pairs' terms, read only for the documents scored.
-pub(super) struct Proximity<P> {
-    pairs: Vec<Pair<P>>,
-    bound: f64,
+/// A `bool`'s bonus: its pairs, read from the positions its words' own postings are on (no postings of its own, so
+/// nothing is decoded twice), only for the documents scored.
+pub(super) struct Proximity<'p> {
+    plan: &'p ProximityPlan,
+    /// Scratch: the two words' positions in a field.
+    first: Vec<u32>,
+    second: Vec<u32>,
 }
 
-impl<P: PostingsIterator> Proximity<P> {
-    /// The pairs of `plan` over `view`, each field the view holds both terms of.
-    pub(super) fn new<'a, V>(plan: &ProximityPlan, view: &'a V) -> Result<Self, ReadError>
-    where
-        V: SearchView<Postings<'a> = P>,
-    {
-        let mut pairs = Vec::with_capacity(plan.pairs.len());
-        for pair in &plan.pairs {
-            let mut fields = Vec::with_capacity(pair.fields.len());
-            for (field, first, second) in &pair.fields {
-                let (Some(a), Some(b)) = (
-                    view.postings(*field, first)?,
-                    view.postings(*field, second)?,
-                ) else {
-                    continue;
-                };
-                fields.push(PairField {
-                    field: *field,
-                    first: a,
-                    second: b,
-                    same: first == second,
-                    scratch: Vec::new(),
-                });
-            }
-            pairs.push(Pair {
-                first: pair.first,
-                weight: pair.weight,
-                fields,
-            });
+impl<'p> Proximity<'p> {
+    pub(super) fn new(plan: &'p ProximityPlan) -> Self {
+        Self {
+            plan,
+            first: Vec::new(),
+            second: Vec::new(),
         }
-        Ok(Self {
-            pairs,
-            bound: plan.bound,
-        })
     }
 
-    /// Per pair, its first word's `must` index, its weight and its closeness at `docid`, as the bonus reads them.
+    /// Per pair, its first word's `must` index, its weight and its closeness at the document `words` are on, as
+    /// the bonus reads them.
     ///
     /// # Errors
     /// A corruption of the view.
-    pub(super) fn explain(&mut self, docid: u32) -> Result<Vec<(usize, f64, Nearest)>, ReadError> {
-        (0..self.pairs.len())
-            .map(|i| {
-                let c = self.closeness(i, docid)?;
-                let (first, weight) = self.pairs.get(i).map_or((0, 0.0), |p| (p.first, p.weight));
-                Ok((first, weight, c))
-            })
+    pub(super) fn explain(
+        &mut self,
+        words: &mut dyn Words,
+    ) -> Result<Vec<(usize, f64, Nearest)>, ReadError> {
+        let plan = self.plan;
+        plan.pairs
+            .iter()
+            .map(|pair| Ok((pair.first, pair.weight, self.nearest(pair, words)?)))
             .collect()
     }
 
-    /// Pair `i`'s best field at `docid`: the least distance (first field in query order on a tie).
-    fn closeness(&mut self, i: usize, docid: u32) -> Result<Nearest, ReadError> {
+    /// `pair`'s best field: the least distance (the first field in query order on a tie).
+    fn nearest(&mut self, pair: &PairPlan, words: &mut dyn Words) -> Result<Nearest, ReadError> {
         let mut best = Nearest {
             field: None,
             distance: None,
             closeness: 0.0,
         };
-        let Some(pair) = self.pairs.get_mut(i) else {
-            return Ok(best);
-        };
-        for f in &mut pair.fields {
-            if f.first.advance(docid)? != Some(docid) || f.second.advance(docid)? != Some(docid) {
+        let second = pair.first.saturating_add(1);
+        for (field, a, b) in &pair.fields {
+            self.first.clear();
+            words.positions(pair.first, *field, &mut self.first)?;
+            if self.first.is_empty() {
                 continue;
             }
-            let d = if f.same {
-                distance(f.first.positions()?, &[], true)
+            let d = if a == b {
+                // One term: its own occurrences pair (the second word's list is the same).
+                distance(&self.first, &[], true)
             } else {
-                // Two iterators: copy one list to compare it with the other's.
-                f.scratch.clear();
-                f.scratch.extend_from_slice(f.first.positions()?);
-                distance(&f.scratch, f.second.positions()?, false)
+                self.second.clear();
+                words.positions(second, *field, &mut self.second)?;
+                distance(&self.first, &self.second, false)
             };
             if let Some(d) = d
                 && d <= WINDOW
                 && best.distance.is_none_or(|b| d < b)
             {
                 best = Nearest {
-                    field: Some(f.field),
+                    field: Some(*field),
                     distance: Some(d),
                     closeness: closeness(d),
                 };
@@ -211,19 +186,17 @@ impl<P: PostingsIterator> Proximity<P> {
     }
 }
 
-impl<P: PostingsIterator> Bonus for Proximity<P> {
+impl Bonus for Proximity<'_> {
     fn bound(&self) -> f64 {
-        self.bound
+        self.plan.bound
     }
 
     /// `Σ weight · closeness`, in pair order.
-    fn bonus(&mut self, docid: u32) -> Result<f64, ReadError> {
+    fn bonus(&mut self, words: &mut dyn Words) -> Result<f64, ReadError> {
+        let plan = self.plan;
         let mut sum = 0.0;
-        for i in 0..self.pairs.len() {
-            let c = self.closeness(i, docid)?;
-            if let Some(pair) = self.pairs.get(i) {
-                sum += pair.weight * c.closeness;
-            }
+        for pair in &plan.pairs {
+            sum += pair.weight * self.nearest(pair, words)?.closeness;
         }
         Ok(sum)
     }
@@ -254,16 +227,60 @@ mod tests {
         assert_eq!(closeness(0), 0.0);
     }
 
-    /// The bonus never exceeds its bound, bit for bit, whatever the closeness (SPEC §7.3).
+    /// Words at fixed positions: clause `i` holds `at[i]` in every field.
+    struct Fixed(Vec<Vec<u32>>);
+
+    impl Words for Fixed {
+        fn positions(
+            &mut self,
+            clause: usize,
+            _: FieldId,
+            out: &mut Vec<u32>,
+        ) -> Result<(), ReadError> {
+            out.extend_from_slice(self.0.get(clause).map_or(&[][..], Vec::as_slice));
+            Ok(())
+        }
+    }
+
+    /// `Bonus::bonus` against `ProximityPlan::bound`, bit for bit, over many pairs with adversarial weights
+    /// (tiny, huge, irrational, the same repeated) and every closeness, adjacent words the worst case (SPEC §7.3).
     #[test]
     fn the_bonus_is_at_most_its_bound() {
-        let weights = [0.0, 1e-300, 0.1, 1.0 / 3.0, 2.75, 17.5, 1e300];
-        for &a in &weights {
-            for &b in &weights {
-                let bound = 0.0 + a + b;
-                for &(ca, cb) in &[(1.0, 1.0), (1.0, 0.25), (0.04, 1.0), (0.0, 0.0)] {
-                    let bonus = 0.0 + a * ca + b * cb;
-                    assert!(bonus <= bound, "{a} {b} {ca} {cb}");
+        let weights = [
+            0.0,
+            1e-300,
+            0.1,
+            1.0 / 3.0,
+            2.75,
+            17.5,
+            1e300,
+            f64::MAX / 64.0,
+        ];
+        let field = FieldId::new(0);
+        for n in [1_usize, 2, 7, 40] {
+            for offset in 0..weights.len() {
+                let pairs: Vec<PairPlan> = (0..n)
+                    .map(|i| PairPlan {
+                        first: i,
+                        weight: weights[(i + offset) % weights.len()],
+                        fields: vec![(field, b"a".to_vec(), b"b".to_vec())],
+                    })
+                    .collect();
+                let plan = ProximityPlan::new(pairs).unwrap();
+                // Word `i` at position `gap · i`: every pair `gap` apart, in order.
+                for gap in 1..=6 {
+                    let at = (0..=n)
+                        .map(|i| vec![u32::try_from(i).unwrap() * gap])
+                        .collect();
+                    let bonus = Proximity::new(&plan).bonus(&mut Fixed(at)).unwrap();
+                    assert!(bonus <= plan.bound, "{n} pairs, offset {offset}, gap {gap}");
+                    if gap == 1 {
+                        assert_eq!(
+                            bonus.to_bits(),
+                            plan.bound.to_bits(),
+                            "adjacent: the bound itself"
+                        );
+                    }
                 }
             }
         }

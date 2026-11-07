@@ -46,7 +46,7 @@ queries it applies to, and whether it is on by default.
 
 4. **Where it applies.** Only to pairs of required words in a `bool`, which is what user text compiles to (§7.1.1,
    default AND). It does not apply to `should`, `filter` or `must_not` clauses, to a `phrase` (already exact),
-   to `prefix`/`fuzzy` expansions, to `keyword` terms, to fields without positions, or under `constant_score`.
+   to `prefix`/`fuzzy` expansions (even one that kept a single term and plans to a word), to `keyword` terms, to fields without positions, or under `constant_score`.
    A `bool` with fewer than two adjacent words gets no bonus. A single word query has no `bool` (§7.1.1) and is
    unchanged. Relaxation's levels (M8) build their own queries; whether they get proximity is decided there.
 
@@ -56,7 +56,7 @@ queries it applies to, and whether it is on by default.
    scoring is) turns it off, and the pruning proptest and benchmarks run both ways. A collection-level setting (`ranking.proximity: {"weight": λ}` or `false`)
    would be a schema option, so a new manifest `version` (SPEC §8.7: "a schema option added later is a new
    manifest version"): it is ROADMAP 32.5.1 (v1.1), with 7.4.11's collection tie-break, so 7.3.5 does not change
-   the on-disk format.
+   the on-disk format. Wiring the request's `"proximity"` and recording it in a cursor is ROADMAP 10.1.7.
 
 6. **Pruning stays exact.** Let `B = Σ_pairs (λ · min(idf_i, idf_j))`, in pair order: the bonus with every `π = 1`.
    - Each pair term satisfies `(λ·m)·π ≤ (λ·m)·1 = λ·m`, since `0 ≤ π ≤ 1` and a correctly rounded product is
@@ -77,17 +77,22 @@ queries it applies to, and whether it is on by default.
    measure it (7.8.3 `search_top10/and`, `search_request`), with proximity on and off.
 
 7. **Evaluation cost.** The bonus needs positions, so it is computed only for a document that is scored, after its
-   bound did not let it be skipped: for each adjacent pair and each field holding both terms, the two position lists
-   are read and merged (stopping at `d = 1`). Fields without positions read nothing.
+   bound did not let it be skipped: under a threshold, a candidate whose clauses plus `B` cannot beat it is skipped
+   before any position is read (item 6's bound, per document). For each adjacent pair and each field holding both
+   terms, the two position lists are read from the words' own postings, already on the document (a `Matcher` method,
+   `field_positions`), and merged, stopping at `d = 1`. A first version opened its own postings of each pair term,
+   which decoded every docid and frequency block twice (`search_suite/and` ×2). Fields without positions read
+   nothing.
 
 8. **Explain** (§7.7): a `bool` with pairs lists its bonus between its `must` and `should` clauses (`proximity`),
    per pair its first word's index, `λ · min(idf)`, the field, `d`, `π` and their product, also when it is 0. The
    root's score stays the hit's, bit for bit.
 
 9. **Reference and tests.** The reference engine (`tests/reference`) computes the bonus by scanning token
-   indices (its positions), independently of the postings. The differential suite covers queries with adjacent
-   words, proximity on and off. A proptest checks pruned (both strategies) == exhaustive with proximity, and a unit
-   test checks `bonus ≤ B` at the boundary cases (`π = 1`, many pairs, large `idf`). The nDCG@10 gate (7.8.4) reports
+   indices (its positions), independently of the postings. The differential suites compare queries with adjacent
+   words to it, proximity on and off. The pruning proptest checks pruned (both strategies) == exhaustive and every
+   bound, proximity on and off, and a unit test checks the bonus against `B` bit for bit over many pairs with
+   adversarial weights. The nDCG@10 gate (7.8.4) reports
    the change; its baseline is updated in the same PR with the queries that moved.
 
 ## Alternatives considered
@@ -117,7 +122,7 @@ queries it applies to, and whether it is on by default.
   corpus matches 1 to 3 documents and only 5 of those matches have their words apart; none reorders. ROADMAP 15.1.6
   adds judged queries proximity can decide. The bonus does apply: the top hit of `running shoes` gets `1.867`
   (`min(idf)`, the words adjacent in the title).
-- Cost (docs/benchmarks.md): `search_top10/and` 423 → 586 µs pruned, 413 → 872 µs exhaustive; `search_suite/and`
-  286 → 571 µs. A candidate whose clauses plus `B` cannot beat the threshold is skipped before its positions are
-  read (item 6's bound, used per document as well as per range). Reading positions through the words' own postings
-  is ROADMAP 15.2.6.
+- Cost (docs/benchmarks.md, alternating with c2488c9): `search_top10/and` 438 → 535 µs pruned (+22 %), 432 → 767 µs
+  exhaustive (+75 %); `search_suite/and` 255 → 370 µs (+44 %). Two first versions cost more (item 7). Whether the
+  default stays on while the judged corpus shows no gain (ROADMAP 15.1.6) is the maintainer's call, raised in both
+  reviews.

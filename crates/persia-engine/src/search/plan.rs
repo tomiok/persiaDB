@@ -180,7 +180,25 @@ impl SearchPlan {
     }
 
     /// This plan without the proximity bonus (SPEC §7.2, ADR-0036): each `bool` scores its clauses' sum alone, as
-    /// `"proximity": false` asks.
+    /// a request's `"proximity": false` will ask (ROADMAP 10.1.7).
+    ///
+    /// ```
+    /// use persia_engine::query::{BoolQuery, Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::SearchPlan;
+    /// use persia_engine::stats::SegmentStatistics;
+    /// use std::sync::Arc;
+    ///
+    /// let text = FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() });
+    /// let schema = Arc::new(SchemaBuilder::new("c").field("body", text).build()?);
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let term = |t: &str| Query::Term(TermQuery { field: body, term: t.into() });
+    /// let and = Query::Bool(BoolQuery { must: vec![term("red"), term("shoes")], ..BoolQuery::default() });
+    /// let plan = SearchPlan::new(&and, &schema, &SegmentStatistics::new(&schema, &[]))?;
+    /// assert!(plan.proximity()); // on by default
+    /// assert!(!plan.without_proximity().proximity());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     #[must_use]
     pub fn without_proximity(mut self) -> Self {
         self.proximity = false;
@@ -468,7 +486,7 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
     filter.extend(column);
     let must = all(&q.must)?;
     Ok(Node::Bool {
-        proximity: proximity_pairs(&must, schema),
+        proximity: proximity_pairs(&q.must, &must, schema),
         must,
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
@@ -479,9 +497,14 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
     })
 }
 
-/// The pairs of adjacent `must` words of a `bool` (SPEC §7.2, ADR-0036): two `term` or `combined` clauses next to
-/// each other, with the fields that have positions and hold a term of both. A pair with no such field is left out.
-fn proximity_pairs(must: &[Node], schema: &CollectionSchema) -> Option<ProximityPlan> {
+/// The pairs of adjacent `must` words of a `bool` (SPEC §7.2, ADR-0036): two `term` or `combined` clauses of `query`
+/// next to each other (planned as `must`), with the fields that have positions and hold a term of both. A pair with
+/// no such field is left out.
+fn proximity_pairs(
+    query: &[Query],
+    must: &[Node],
+    schema: &CollectionSchema,
+) -> Option<ProximityPlan> {
     let positions = |field| {
         matches!(
             schema.field_by_id(field).map(Field::kind),
@@ -490,6 +513,11 @@ fn proximity_pairs(must: &[Node], schema: &CollectionSchema) -> Option<Proximity
     };
     let mut pairs = Vec::new();
     for (first, w) in must.windows(2).enumerate() {
+        // A `prefix` or `fuzzy` that keeps one term plans to a word too; it does not pair (SPEC §7.2).
+        let word = |i: usize| matches!(query.get(i), Some(Query::Term(_) | Query::Combined(_)));
+        if !(word(first) && word(first.saturating_add(1))) {
+            continue;
+        }
         let [
             Node::Word {
                 terms: a,
@@ -857,7 +885,7 @@ fn build_bool<'a, V: SearchView>(
     };
     let optional = disjunction(all(should, should_pruning)?, should_pruning);
     let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
-        let required = conjunction(all(must, must_pruning)?, pruning, proximity, view)?;
+        let required = conjunction(all(must, must_pruning)?, pruning, proximity);
         let filters = Filters {
             filter,
             split,
@@ -969,28 +997,27 @@ fn keep(ctx: Build<'_>, slot: usize, docs: &RoaringBitmap, checked: bool) {
 
 /// AND of at least one clause, with the proximity bonus of `pairs` (SPEC §7.2); no document if a clause has none in
 /// the view.
-fn conjunction<'a, V: SearchView>(
+fn conjunction<'a>(
     mut clauses: Vec<BoxedMatcher<'a>>,
     pruning: Pruning,
-    pairs: Option<&ProximityPlan>,
-    view: &'a V,
-) -> Result<BoxedMatcher<'a>, ReadError> {
+    pairs: Option<&'a ProximityPlan>,
+) -> BoxedMatcher<'a> {
     if clauses.iter().any(|c| c.cost() == 0) {
-        return Ok(Box::new(Empty));
+        return Box::new(Empty);
     }
     if clauses.len() == 1
         && let Some(only) = clauses.pop()
     {
-        return Ok(only);
+        return only;
     }
-    Ok(match pairs {
+    match pairs {
         Some(pairs) => Box::new(Conjunction::with_bonus(
             clauses,
             pruning,
-            Some(Proximity::new(pairs, view)?),
+            Some(Proximity::new(pairs)),
         )),
         None => Box::new(Conjunction::new(clauses, pruning)),
-    })
+    }
 }
 
 /// OR of the clauses that can match, pruning with `pruning`; `None` when none can.

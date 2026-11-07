@@ -300,9 +300,22 @@ pub trait Matcher {
     /// enter a top-k whose worst hit scores `score`, because each hit it keeps has a lower docid and wins the tie
     /// (ROADMAP 7.4.4). A threshold at or below the one in force, or NaN, is ignored. By default nothing is skipped.
     fn set_min_competitive(&mut self, _score: f64) {}
+
+    /// The positions of the current document in `field`, when this is a word holding it there (a `bool`'s proximity
+    /// reads them, SPEC §7.2); empty otherwise. By default empty.
+    ///
+    /// # Errors
+    /// A corruption of the view.
+    fn field_positions(&mut self, _field: FieldId) -> Result<&[u32], ReadError> {
+        Ok(&[])
+    }
 }
 
 impl<M: Matcher + ?Sized> Matcher for Box<M> {
+    fn field_positions(&mut self, field: FieldId) -> Result<&[u32], ReadError> {
+        (**self).field_positions(field)
+    }
+
     fn cost(&self) -> u64 {
         (**self).cost()
     }

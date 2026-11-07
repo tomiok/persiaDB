@@ -19,7 +19,7 @@ use super::check::Check;
 use super::filter::{Selections, select};
 use super::phrase::PhraseMatcher;
 use super::plan::{Node, phrase_matcher, word_matcher};
-use super::proximity::Proximity;
+use super::proximity::{Proximity, Words};
 use super::word::WordMatcher;
 use super::{Matcher, Pruning, sum_in_order};
 
@@ -98,7 +98,7 @@ pub struct PairExplanation {
     pub weight: f64,
     /// The field the closeness came from; `None` when no field holds both within the window.
     pub field: Option<FieldId>,
-    /// The least distance there.
+    /// The least distance there, within the window; `None` when no field has one.
     pub distance: Option<u32>,
     /// `1 / distance²`, or 0.
     pub closeness: f64,
@@ -218,7 +218,7 @@ enum Explainer<'a, V: SearchView> {
         check: Option<Check<V::Keys<'a>>>,
         checker: Option<&'a V>,
         /// Its proximity pairs over the view, when the plan scores them.
-        proximity: Option<Proximity<V::Postings<'a>>>,
+        proximity: Option<Proximity<'a>>,
     },
     Scaled(Box<Explainer<'a, V>>, Scale),
     All,
@@ -280,7 +280,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                     check: None,
                     checker,
                     proximity: match pairs {
-                        Some(pairs) if proximity => Some(Proximity::new(pairs, view)?),
+                        Some(pairs) if proximity => Some(Proximity::new(pairs)),
                         _ => None,
                     },
                 }
@@ -446,7 +446,7 @@ fn boolean<V: SearchView, K: KeyReader>(
     should: &mut [Explainer<'_, V>],
     must_not: &mut [Explainer<'_, V>],
     filters: Filters<'_, K>,
-    proximity: Option<&mut Proximity<V::Postings<'_>>>,
+    proximity: Option<&mut Proximity<'_>>,
     view: &V,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
@@ -509,7 +509,7 @@ fn boolean<V: SearchView, K: KeyReader>(
     let mut required = sum_in_order(musts.iter().map(Explanation::score));
     let proximity = match proximity {
         Some(p) => {
-            let e = bonus(p, docid)?;
+            let e = bonus(p, must)?;
             required += e.score;
             Some(e)
         }
@@ -529,14 +529,34 @@ fn boolean<V: SearchView, K: KeyReader>(
     }))
 }
 
-/// The proximity bonus at `docid`, pair by pair, summed in pair order as [`Proximity`] adds it.
-fn bonus<P: crate::view::PostingsIterator>(
-    p: &mut Proximity<P>,
-    docid: u32,
+/// A `bool`'s `must` explainers as [`Words`], once each has reached the document: a word's matcher is on it.
+struct Musts<'m, 'a, V: SearchView>(&'m mut [Explainer<'a, V>]);
+
+impl<V: SearchView> Words for Musts<'_, '_, V> {
+    fn positions(
+        &mut self,
+        clause: usize,
+        field: FieldId,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError> {
+        if let Some(Explainer::Word {
+            matcher: Some(m), ..
+        }) = self.0.get_mut(clause)
+        {
+            out.extend_from_slice(m.field_positions(field)?);
+        }
+        Ok(())
+    }
+}
+
+/// The proximity bonus of the document `must` is on, pair by pair, summed in pair order as [`Proximity`] adds it.
+fn bonus<V: SearchView>(
+    p: &mut Proximity<'_>,
+    must: &mut [Explainer<'_, V>],
 ) -> Result<ProximityExplanation, ReadError> {
     let mut score = 0.0;
     let mut pairs = Vec::new();
-    for (first, weight, c) in p.explain(docid)? {
+    for (first, weight, c) in p.explain(&mut Musts(must))? {
         let part = weight * c.closeness;
         score += part;
         pairs.push(PairExplanation {

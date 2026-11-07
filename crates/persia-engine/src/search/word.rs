@@ -165,6 +165,19 @@ impl<'a, V: SearchView + 'a> WordMatcher<'a, V> {
 }
 
 impl<'a, V: SearchView + 'a> Matcher for WordMatcher<'a, V> {
+    /// The positions of the field's postings when they are on the current document.
+    fn field_positions(&mut self, field: FieldId) -> Result<&[u32], ReadError> {
+        let doc = self.pos.doc();
+        match self
+            .fields
+            .iter_mut()
+            .find(|f| f.field == field && doc.is_some() && f.postings.doc() == doc)
+        {
+            Some(f) => f.postings.positions(),
+            None => Ok(&[]),
+        }
+    }
+
     fn cost(&self) -> u64 {
         self.fields.iter().fold(0_u64, |sum, f| {
             sum.saturating_add(u64::from(f.postings.df()))

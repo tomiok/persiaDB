@@ -344,3 +344,33 @@ fn the_bonus_sits_between_must_and_should() {
     assert_eq!(hits[0].docid, 0);
     assert_eq!(hits[0].score.to_bits(), score.to_bits());
 }
+
+/// Invariant 2 (found in the 7.3.5 review): a `prefix` that keeps one term, or a `fuzzy` whose only term is the
+/// exact one, plans to a word but is not one: no pair, whatever else the collection holds.
+#[test]
+fn a_prefix_or_fuzzy_of_one_term_does_not_pair() {
+    use persia_engine::query::{FuzzyQuery, PrefixQuery};
+    let f = fixture(&[("running shoes", "", ""), ("walking", "", "")]);
+    let view = SegmentView::new(&f.segment, None);
+    let stats = SegmentStatistics::new(&f.schema, &[Arc::clone(&f.segment)]);
+    let plan = |q: &Query| SearchPlan::with_terms(q, &f.schema, &stats, &view).unwrap();
+    let prefix = Query::Prefix(PrefixQuery {
+        field: f.body,
+        prefix: "sho".into(),
+        max_expansions: 50,
+    });
+    let fuzzy = Query::Fuzzy(FuzzyQuery {
+        field: f.body,
+        term: "shoes".into(),
+        distance: 1,
+        max_expansions: 50,
+    });
+    for expansion in [prefix, fuzzy] {
+        let p = plan(&and(vec![term(f.body, "running"), expansion.clone()]));
+        let e = f.explain(&p, 0);
+        assert_eq!(bonus(&e), None, "{expansion:?}: {e:?}");
+    }
+    // The words themselves do pair.
+    let p = plan(&and(vec![term(f.body, "running"), term(f.body, "shoes")]));
+    assert!(bonus(&f.explain(&p, 0)).is_some());
+}

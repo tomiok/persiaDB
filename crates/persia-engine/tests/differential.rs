@@ -612,6 +612,30 @@ fn check(
             );
         }
 
+        // Invariant 1 without the proximity bonus (SPEC §7.2): the same matches, scored as the reference does
+        // without it.
+        let off = plan.clone().without_proximity();
+        let no_bonus = views
+            .search(&off, &request, Pruning::Exhaustive)
+            .unwrap()
+            .hits;
+        prop_assert_eq!(no_bonus.len(), want.len());
+        for h in &no_bonus {
+            let v = &live[h.document.id()];
+            let (score, scale) = match corpus.eval_with(q, &v.doc, false) {
+                None if optional => (0.0, 0.0),
+                s => s.unwrap(),
+            };
+            prop_assert!(
+                (h.score - score).abs() <= EPSILON * scale.max(1.0),
+                "{}: {} vs reference {} without proximity for {:?}",
+                h.document.id(),
+                h.score,
+                score,
+                query
+            );
+        }
+
         // Invariant 2: the order is the reference's: no hit ranks above one the reference scores higher beyond the
         // scores' tolerance (every pair, since a tolerance is not transitive), so a page of `k` is the reference's top
         // `k` up to near-ties.
