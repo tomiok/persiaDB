@@ -231,21 +231,31 @@ impl<V: Vfs> LocalStorage<V> {
             }
             Err(err) => return Err(with_path(err, &path)),
         };
-        let in_use = side::in_use(&file).map_err(|err| with_path(err, &path))?;
+        let (in_use, locked) = side::in_use(&file).map_err(|err| with_path(err, &path))?;
         let removable = match in_use {
             InUse::No => remove.is_some(),
             InUse::Unknown => remove == Some(true),
             InUse::Yes => false,
         };
-        let mut removed = false;
-        if removable {
+        let kept = if removable {
             // While the lock is held: a `put` that created the file but has not locked it yet finds it gone, and
             // takes another name.
             match self.vfs.remove_file(&path) {
-                Ok(()) => removed = true,
+                Ok(()) => None,
                 Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-                Err(err) => return Err(with_path(err, &path)),
+                Err(err) => Some(Err(err)),
             }
+        } else {
+            Some(Ok(()))
+        };
+        let removed = kept.is_none();
+        if let Some(kept) = kept {
+            let kept = if locked {
+                side::unlock_kept(&file, kept)
+            } else {
+                kept
+            };
+            kept.map_err(|err| with_path(err, &path))?;
         }
         drop(file);
         Ok(Some(SideFile {

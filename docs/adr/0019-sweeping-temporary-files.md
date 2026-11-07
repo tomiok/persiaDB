@@ -3,7 +3,7 @@
 - Status: proposed
 - Date: 2026-10-17
 - Related: SPEC §4.5.1, §10.1.1; amends ADR-0012 (consequence "a crash can leave temporary files behind");
-  ADR-0014, ADR-0016; ROADMAP 2.3.8, 2.4.15, 2.4.19
+  ADR-0014, ADR-0016; ROADMAP 2.3.8, 2.3.11, 2.4.15, 2.4.19
 
 ## Context
 
@@ -50,13 +50,22 @@ takes.
    counts only on a local disk file system (`ContainerFile::locks_per_handle`, through ADR-0021's `is_local_disk`);
    elsewhere a temporary file's use is `Unknown`, as on Windows. A local store's sweep then removes it only when
    forced; a container's sweep never does (an operator removes those by hand, with the container closed).
+7. **A lock taken on a file that stays is released explicitly** (ROADMAP 2.3.11). `flock` belongs to the open file
+   description, and a child that another thread forks receives a copy of every descriptor until its `exec`, so a
+   close alone may leave the lock held for a moment after the listing or sweep returns (SPEC §4.5.1, as for the
+   writer lock). The next listing or sweep would then find a stale file in use and keep it. So a listing, and a sweep
+   whose removal failed, unlock the file before closing it. A removed file is not unlocked: its name is gone, so no
+   one can meet the lock. Where the use was `Unknown` (locks that may belong to the process) a lock taken is released
+   too: if it is the process's, the close would release it anyway, a writer's of the same process included (decision
+   6); if it belongs to the open file after all, the unlock is needed. A `put` that fails leaving its temporary file
+   still only closes it (ROADMAP 2.3.12).
 
 ## Consequences
 
 - A crash's leftovers are bounded by how often an operator sweeps; nothing grows without limit once sweeping is
   scheduled, and nothing is removed behind anyone's back.
 - Each `put` makes three more system calls (a lock, then `fstat` and `stat` for the identity check by path); the lock is released when its handle
-  is closed.
+  is closed, once no descriptor a fork copied is left (decision 7).
 - A sweep that takes a file in the instant before its writer locks it costs that writer one more temporary name,
   never an error.
 - On Windows a local store's temporary files accumulate unless an operator forces a sweep while the store is idle.

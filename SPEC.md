@@ -276,7 +276,9 @@ nothing. The container is reopened, and recovery decides what survived.
   writer removes them only on an operator's explicit request, naming them (`remove_quarantine_files`; the CLI names
   those listed before its own open). Both kinds can be listed
   by path without opening the container (`side_files`), each temporary file with whether its lock is held
-  (ADR-0019, ROADMAP 2.4.19; `persia container sweep`).
+  (ADR-0019, ROADMAP 2.4.19; `persia container sweep`). Both unlock a temporary file they took the lock of and keep
+  before closing it, as the writer lock is released (below), so a later sweep does not find it in use (ADR-0019
+  decision 7, ROADMAP 2.3.11).
 - **Writer lock.** A read-write open holds an exclusive lock while it is open, and fails at once if another handle
   holds it, in this process or another (§8.4). On Unix it is an advisory `flock` on the container file; after
   locking, the open checks that the path still names the locked file and reopens if not: a compaction (§4.6) may
@@ -2061,7 +2063,9 @@ above.
   holding it; on Windows, where files are not locked, it removes none unless forced (ADR-0019, ROADMAP 2.3.8;
   `persia store sweep`). A lock counts only on a local disk file system: where `flock` is emulated with per-process
   locks (Linux NFS, some FUSE mounts), a lock taken may be a writer's of the same process, so the file's use is
-  unknown and only a forced sweep removes it (ADR-0019 decision 6).
+  unknown and only a forced sweep removes it (ADR-0019 decision 6). A listing or sweep that took the lock of a file it
+  keeps unlocks it before closing it: a child forked meanwhile holds a copy of the descriptor until its `exec`, and
+  would keep the lock past the close (§4.5.1; ADR-0019 decision 7).
 - **Writes.** `put` writes a temporary file, fsyncs it, renames it over the object and fsyncs the directory.
   `put_if_absent` does the same but hard-links the temporary file to the object name instead of renaming (link fails
   if the name exists, atomically), then removes the temporary file and fsyncs the directory, whatever the outcome

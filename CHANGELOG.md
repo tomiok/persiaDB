@@ -88,6 +88,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
+- `persia-storage`: `LocalStorage::temporaries` and `Container::side_files` could leave a stale temporary file
+  locked for a moment after returning, when another thread of the process spawned a child meanwhile (the child holds
+  a copy of every descriptor until its `exec`): a `sweep_temporaries` or `sweep_stale_files` right after reported the
+  file in use and kept it. A listing, and a sweep whose removal failed, now unlock a file they keep before closing it
+  (ROADMAP 2.3.11, ADR-0019 decision 7). No data was at risk: the sweep kept a file it could have removed.
 - `persia-engine`: a document upserted while a merge of its old copy ran read as absent once the merge committed
   (`CollectionSnapshot::get`, `lookup`, and a read-only open beside the writer): the merge, catching up with the
   upsert (ROADMAP 6.5.9), keeps the old copy deleted in the merged segment, which goes last, and the lookup stopped
