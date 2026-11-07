@@ -35,7 +35,9 @@ SHA-256 (collision resistant, hardware-accelerated on modern x86-64 and ARMv8 CP
 - Deduplication is safe across untrusted clients, and `verify` can prove a blob matches its id.
 - Hashing runs once per upload, never on reads. Approximate throughput: 1.5–2 GB/s per core with SHA extensions,
   which is faster than typical network ingest; several hundred MB/s without them, which can bound upload
-  throughput on fast networks or NVMe. To be confirmed by a benchmark (ROADMAP 9.1.2).
+  throughput on fast networks or NVMe. Measured (ROADMAP 9.1.1, 9.1.2, `cargo bench -p persia-blob --bench blob`, one
+  x86-64 core with SHA extensions): SHA-256 1.87 GiB/s; the chunker (SHA-256, CRC32C, and copying each 4 MiB chunk out
+  of the reader) 1.31 GiB/s.
 - Ids are 32 bytes instead of 16, which is negligible in the `BlobRefs` column.
 - The remote layout `blobs/<hex[0..2]>/<blob_id>/…` (SPEC §9.4) uses the 64-character hex form.
 

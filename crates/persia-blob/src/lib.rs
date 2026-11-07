@@ -10,10 +10,12 @@
 // Sizes convert with `From`, `persia_format::widen` or `try_from`, never a silent `as` (CLAUDE.md checked ops).
 #![cfg_attr(not(test), deny(clippy::as_conversions))]
 
+pub mod chunker;
 pub mod chunking;
 pub mod error;
 pub mod hash;
 
+pub use chunker::{Chunk, ChunkedBlob, Chunker, chunk_all};
 pub use chunking::ChunkSize;
 pub use error::{Error, Result};
 pub use hash::{ContentHasher, blob_id_of};

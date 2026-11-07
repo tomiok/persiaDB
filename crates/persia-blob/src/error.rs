@@ -12,4 +12,10 @@ pub enum Error {
     /// needs more than `u32::MAX` chunks of it.
     #[error("invalid chunking: {0}")]
     InvalidChunking(#[from] BlobRefDefect),
+    /// Reading the blob's bytes from the caller's reader failed.
+    #[error("reading the blob failed: {0}")]
+    Read(#[source] std::io::Error),
+    /// A [`Chunker`](crate::Chunker) that already returned an error was called again.
+    #[error("the chunker failed earlier")]
+    ChunkerFailed,
 }

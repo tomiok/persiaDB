@@ -1,10 +1,10 @@
 //! Blob ingest throughput (ROADMAP 9.1.1, 9.1.2): every uploaded byte is hashed with SHA-256 (ADR-0002), so the
 //! hasher bounds `put_blob`. Run: `cargo bench -p persia-blob --bench blob`.
 
-#![allow(missing_docs, clippy::cast_possible_truncation)]
+#![allow(missing_docs, clippy::cast_possible_truncation, clippy::unwrap_used)]
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use persia_blob::{ContentHasher, blob_id_of};
+use persia_blob::{ChunkSize, ContentHasher, blob_id_of, chunk_all};
 use std::hint::black_box;
 
 /// Incompressible-looking bytes from a fixed LCG (blobs are usually already compressed, SPEC §9.2).
@@ -46,5 +46,23 @@ fn hashing(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, hashing);
+/// A 32 MiB blob cut into default 4 MiB chunks: SHA-256, CRC32C and the copy out of the reader.
+fn chunking(c: &mut Criterion) {
+    let src = data(32 << 20);
+    let mut group = c.benchmark_group("blob_chunk");
+    group.throughput(Throughput::Bytes(src.len() as u64));
+    group.sample_size(20);
+    group.bench_function("chunk_all_32MiB_4MiB", |b| {
+        b.iter(|| {
+            chunk_all(black_box(&src[..]), ChunkSize::DEFAULT, |c| {
+                black_box(c);
+                Ok(())
+            })
+            .unwrap()
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(benches, hashing, chunking);
 criterion_main!(benches);
