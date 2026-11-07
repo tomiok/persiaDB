@@ -229,7 +229,7 @@ flowchart TD
 | `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 and M7 still in progress. Relaxation is M8. |
 | `persia-cli` | The `persia` binary. | Inspect, dump, file sweep, and `verify`. See [CLI](#cli). |
 | `persia` | The embedded facade: `Db`, `Collection`. | Placeholder for M10: the dependency edges, no types. |
-| `persia-blob` | Content-addressed chunks, dedup, GC. | Placeholder for M9: the dependency edges, no types. |
+| `persia-blob` | Content-addressed chunks, dedup, GC. | Core model implemented: content hash, fixed-size chunker, blob manifest encoding. The pack file, remote layout, `put_blob`/`get_blob` and GC are still in progress in M9. |
 | `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Placeholders for M11. The server binary exits with "not implemented". |
 
 `persia-server` is drawn in [`docs/architecture.md`](./docs/architecture.md) above `persia`. Today it is a placeholder binary that prints "not implemented (M11)" and exits with status 1, so it stays out of the figure.

@@ -433,3 +433,14 @@ is added here when the mean moves.
 | Recorded | mean nDCG@10 | lowest |
 |---|--:|---|
 | 2026-11-01 (ROADMAP 7.8.2) | 0.8824 | 0.7173 `garden`, 0.7364 `bread`, 0.7453 `"cast iron" pan`, 0.7648 `tent` |
+
+## `persia-blob` hashing and chunking
+
+`cargo bench -p persia-blob --bench blob`: incompressible bytes. `sha256` is `blob_hash/sha256_one_shot_4MiB` (the
+blob id of 4 MiB, ADR-0002); `chunk_all` is `blob_chunk/chunk_all_32MiB_4MiB`, a 32 MiB blob cut into default 4 MiB
+chunks (SHA-256, CRC32C, and the copy of each chunk out of the reader, SPEC §9.2). One core, Zen 2 with SHA
+extensions. Bytes per second.
+
+| Recorded | `sha256` | `chunk_all` |
+|---|--:|--:|
+| 2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 9.1.1, 9.1.2, 63be88a) | 1.87 GiB/s | 1.31 GiB/s |

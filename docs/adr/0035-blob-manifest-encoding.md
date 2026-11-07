@@ -29,10 +29,11 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
    (ADR-0034 item 8): no bit is assigned, and a bit this build does not know is *unsupported*, not corruption,
    because it means a newer writer's layout. Assigning one is a SPEC change. The container format version does not
    change: no existing structure changes, and the pack file (ROADMAP 9.2.1) is new.
-5. **Validation order:** length ≥ 76, magic, trailer, version, flags, then `chunk_size` in `1..=64 MiB`, `n` fits
-   in a `u32`, exactly `4·n` CRC bytes before the trailer (checked before allocating), and an empty blob only with
-   the SHA-256 of no bytes as its id. Every other violation is corruption. Fields are fixed-width and `flags` must be
-   0, so each value has exactly one encoding.
+5. **Validation order:** length ≥ 76, magic, trailer, version (0 is corruption, above 1 unsupported), flags (a bit
+   this build does not know is unsupported, item 4), then `chunk_size` in `1..=64 MiB`, `n` fits in a `u32`, exactly
+   `4·n` CRC bytes before the trailer (checked before allocating), and an empty blob only with the SHA-256 of no
+   bytes as its id. Every other violation is corruption. Fields are fixed-width and a v1 reader accepts only `flags`
+   0, so each value it accepts has exactly one encoding.
 6. **Lookup checks.** A manifest's checksums cover only its own bytes, so a reader checks it against what it looked it
    up by: `check_blob_id` (the id of its key or `BlobIndex` entry) and `check_ref` (id, size and chunk size of the
    `BlobRef`), each a mismatch `Corrupt` (SPEC §9.3, §9.4).

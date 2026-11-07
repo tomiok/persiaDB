@@ -29,5 +29,10 @@ fuzz_target!(|data: &[u8]| {
         "a decoded manifest re-encodes to its input"
     );
     assert_eq!(manifest.encoded_len(), input.len());
-    assert_eq!(manifest.chunk_crcs().len(), manifest.chunk_count() as usize);
+    // The CRC list must have exactly as many entries as `size` and `chunk_size` give chunks (SPEC §9.1.1).
+    let expected = manifest
+        .chunk_size()
+        .chunk_count(manifest.size())
+        .expect("an accepted manifest has a valid chunk count");
+    assert_eq!(manifest.chunk_crcs().len(), expected as usize);
 });

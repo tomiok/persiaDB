@@ -38,7 +38,7 @@ impl ContentHasher {
     /// Feeds the next bytes of the blob.
     pub fn update(&mut self, bytes: &[u8]) {
         self.sha.update(bytes);
-        // 2^64 bytes cannot be fed in practice; saturating keeps the count an upper bound rather than wrapping.
+        // 2^64 bytes cannot be fed in practice; saturating pins the count at `u64::MAX` rather than wrapping to a small value.
         self.len = self
             .len
             .saturating_add(persia_format::widen::u64_from_usize(bytes.len()));

@@ -162,7 +162,7 @@ const SHA256_EMPTY: [u8; 32] = [
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
-/// Any valid manifest: chunk sizes from 1 byte to 64 MiB, 0..=40 chunks (so blobs past 4 GiB), a last chunk of any
+/// Any valid manifest: chunk sizes from 1 byte to 64 MiB, 0..=80 chunks (so blobs past 4 GiB: 80 × 64 MiB is 5 GiB), a last chunk of any
 /// length, any blob id (the codec cannot check it against bytes it does not hold) and upload ids at the edges.
 fn manifest() -> impl Strategy<Value = BlobManifest> {
     let chunk = prop_oneof![
@@ -181,11 +181,11 @@ fn manifest() -> impl Strategy<Value = BlobManifest> {
     ];
     (
         chunk,
-        0..=40_u32,
+        0..=80_u32,
         any::<prop::sample::Index>(),
         any::<[u8; 32]>(),
         upload,
-        prop::collection::vec(any::<u32>(), 40),
+        prop::collection::vec(any::<u32>(), 80),
     )
         .prop_map(|(chunk, n, last, id, upload, crcs)| {
             let size = if n == 0 {

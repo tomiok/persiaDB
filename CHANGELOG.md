@@ -132,7 +132,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   ADR-0034). `ContentHasher` and `blob_id_of` compute a `BlobId` (SHA-256, `sha2` without default features, hardware
   backends detected at runtime); `ChunkSize` (`1..=64 MiB`, default 4 MiB) gives a blob's chunk count and each chunk's
   byte range (fixed-size chunks, ADR-0034). SHA-256 measured 1.87 GiB/s on one core with SHA extensions
-  (`cargo bench -p persia-blob --bench blob`).
+  (`cargo bench -p persia-blob --bench blob`, `docs/benchmarks.md`).
 - `persia inspect container <file> [--id <id>]` (ROADMAP 6.6.10): read-only, without the writer lock, prints the
   active superblock (`seq`, `wal_start`, `log_end`), every frame from `wal_start` (offset, length, `frame_seq`, kind,
   whether after `log_end`) with the `seq` of each Manifest frame, and with `--id` the WAL records that put or delete
