@@ -88,6 +88,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
+- `persia-storage`: a `LocalStorage::put` or `put_if_absent` that failed and could not remove its temporary file left
+  it locked for a moment when another thread spawned a child meanwhile, so the next `sweep_temporaries` reported the
+  stale file in use and kept it. A failed write now unlocks the temporary file it leaves before closing it (ROADMAP
+  2.3.12, ADR-0019 decision 7). Its errors keep both failures: the write's own error stays in the `source` chain
+  (with its kind and OS error code: `put_if_absent`'s no longer becomes `Other` beside a failed cleanup), and the failed
+  removal, and an unlock failure after it, are added to the message, never swallowed. A sweep (`sweep_temporaries`,
+  `sweep_stale_files`) whose removal and then directory sync both failed now reports both, not only one. No data was
+  at risk.
 - `persia-storage`: `LocalStorage::temporaries` and `Container::side_files` could leave a stale temporary file
   locked for a moment after returning, when another thread of the process spawned a child meanwhile (the child holds
   a copy of every descriptor until its `exec`): a `sweep_temporaries` or `sweep_stale_files` right after reported the

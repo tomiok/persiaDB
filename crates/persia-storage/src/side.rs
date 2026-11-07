@@ -2,6 +2,7 @@
 //! corrupt container tail (ADR-0014). None of them holds acknowledged data, except possibly a quarantine copy, which
 //! is for an operator to inspect.
 
+use std::borrow::Cow;
 use std::io;
 use std::path::PathBuf;
 
@@ -44,7 +45,8 @@ pub enum InUse {
     Unknown,
 }
 
-/// Takes `file`'s lock if it can: `Some(true)` with the lock held until `file` is dropped, `Some(false)` if another
+/// Takes `file`'s lock if it can: `Some(true)` with the lock held until [`ContainerFile::unlock`], or until
+/// `file` and every descriptor duplicated from it (a forked child's) are closed, `Some(false)` if another
 /// handle holds it, `None` where files cannot be locked (Windows).
 pub(crate) fn try_lock<F: ContainerFile>(file: &F) -> io::Result<Option<bool>> {
     match file.try_lock() {
@@ -73,25 +75,47 @@ pub(crate) fn in_use<F: ContainerFile>(file: &F) -> io::Result<(InUse, bool)> {
 /// ([`InUse::Unknown`]): where it does, the close would release it (a lock this process's writer holds included), so
 /// the unlock changes nothing; where it belongs to the open file after all, the unlock is needed.
 pub(crate) fn unlock_kept<F: ContainerFile, T>(file: &F, result: io::Result<T>) -> io::Result<T> {
-    match (result, file.unlock()) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Ok(_), Err(err)) | (Err(err), Ok(())) => Err(err),
-        (Err(error), Err(unlock)) => Err(io::Error::new(
-            error.kind(),
-            UnlockAfterError { error, unlock },
-        )),
+    match result {
+        Ok(value) => file.unlock().map(|()| value),
+        Err(error) => Err(unlock_after(file, error)),
     }
 }
 
-/// The caller's error followed by a failed unlock ([`unlock_kept`]). The caller's error is the
-/// [`source`](std::error::Error::source), so its OS error code stays inspectable (`raw_os_error`) through the
-/// `io::Error` that wraps this one.
+/// `error`, after releasing the lock this handle took on a file whose name survives the failure ([`unlock_kept`]):
+/// a failed unlock is added to it, never replaces it.
+pub(crate) fn unlock_after<F: ContainerFile>(file: &F, error: io::Error) -> io::Error {
+    match file.unlock() {
+        Ok(()) => error,
+        Err(unlock) => then_failed(error, "unlocking the file", unlock),
+    }
+}
+
+/// `error` with the failure of the step that followed it (`later`, from doing `step`) added. Both stay in the message;
+/// `error` keeps its kind and is the [`source`](std::error::Error::source), so its OS error code stays inspectable
+/// (`raw_os_error`) through the `io::Error` returned.
+pub(crate) fn then_failed(
+    error: io::Error,
+    step: impl Into<Cow<'static, str>>,
+    later: io::Error,
+) -> io::Error {
+    io::Error::new(
+        error.kind(),
+        ThenFailed {
+            error,
+            step: step.into(),
+            later,
+        },
+    )
+}
+
+/// An error, and the failure of a step that followed it ([`then_failed`]).
 #[derive(Debug, thiserror::Error)]
-#[error("{error}; unlocking the file then failed: {unlock}")]
-struct UnlockAfterError {
+#[error("{error}; {step} then failed: {later}")]
+struct ThenFailed {
     #[source]
     error: io::Error,
-    unlock: io::Error,
+    step: Cow<'static, str>,
+    later: io::Error,
 }
 
 impl InUse {
