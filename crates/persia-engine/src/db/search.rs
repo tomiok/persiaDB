@@ -422,8 +422,9 @@ impl Search<'_> {
         let steps = Steps::new(self.exec);
         let view = &Interruptible::new(view, &steps);
         let counting = !self.request.facets.is_empty();
-        // A facet counts every match, and only the score's own order has bounds to prune by (SPEC §7.4).
-        let prune = sort.is_score() && !counting;
+        // A facet counts every match, and only a sort led by the score has bounds to prune by (SPEC §7.4): with
+        // further keys, strictly below the worst kept hit (ROADMAP 7.4.11).
+        let prune = sort.is_score_led() && !counting;
         let pruning = if prune {
             self.exec.pruning
         } else {

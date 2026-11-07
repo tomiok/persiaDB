@@ -361,6 +361,17 @@ fn sort_key() -> impl Strategy<Value = SortKey> {
     ]
 }
 
+/// Sort keys, half of them led by the score descending (pruned, ROADMAP 7.4.11), with up to three more.
+fn sort_keys() -> impl Strategy<Value = Vec<SortKey>> {
+    (any::<bool>(), prop::collection::vec(sort_key(), 0..4)).prop_map(|(led, mut keys)| {
+        if led {
+            keys.insert(0, SortKey::score());
+            keys.truncate(4);
+        }
+        keys
+    })
+}
+
 fn query() -> impl Strategy<Value = Query> {
     let f = fields();
     prop_oneof![
@@ -413,7 +424,7 @@ fn requests_match_a_model() {
         (
             prop::collection::vec(op(), 1..30),
             query(),
-            prop::collection::vec(sort_key(), 0..4),
+            sort_keys(),
             0..6_usize,
             0..7_usize,
             1..4_usize,
@@ -1562,4 +1573,104 @@ fn a_column_sort_without_a_facet_skips_the_blocks_that_lose() {
         pruned * 3 < faceted,
         "{pruned} reads pruned, {faceted} with a facet"
     );
+}
+
+/// One segment of 3 000 `common` documents: the first 200 short (`common` alone, the best score, all tied), the
+/// others long (a lower score), and the memtable 50 more short ones; `n` cycles 0..7. A sort led by the score with a
+/// later key (ROADMAP 7.4.11) keeps the tied short documents its key ranks best.
+fn tiered() -> Database<SimFile> {
+    let f = fields();
+    let mut db = database(schema());
+    let doc = |id: String, i: usize, short: bool| {
+        let body = if short {
+            "common".to_owned()
+        } else {
+            format!("common {}", ["filler"; 15].join(" "))
+        };
+        Document::new(id)
+            .with(f.body, Value::String(body))
+            .with(f.tag, Value::String(TAGS[i % TAGS.len()].into()))
+            .with(f.n, Value::I64(i64::try_from(i % 7).unwrap()))
+    };
+    for i in 0..3_000 {
+        db.put("c", &doc(format!("s{i}"), i, i < 200), Durability::Buffered)
+            .unwrap();
+    }
+    db.commit().unwrap();
+    for i in 0..50 {
+        db.put(
+            "c",
+            &doc(format!("m{i}"), i + 3, true),
+            Durability::Buffered,
+        )
+        .unwrap();
+    }
+    db
+}
+
+/// A sort led by the score prunes with further keys too (ROADMAP 7.4.11; SPEC §7.4): the long documents score below
+/// the worst kept hit and are skipped, while the tied short ones are all compared by `n`. The hits, and every page
+/// of a cursor walk, are those of the exhaustive search; with a facet (every match visited) it reads several times
+/// more.
+#[test]
+fn a_sort_led_by_the_score_prunes_with_further_keys() {
+    let db = tiered();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    for later in [Order::Desc, Order::Asc] {
+        let sort = Sort::new([SortKey::score(), SortKey::field(f.n, later)], c.schema()).unwrap();
+        let request = |facets: bool, after: Option<Cursor>| SearchRequest {
+            sort: sort.clone(),
+            limit: 10,
+            facets: if facets {
+                vec![FacetRequest::new(f.tag, 3, c.schema()).unwrap()]
+            } else {
+                Vec::new()
+            },
+            search_after: after,
+            projection: Projection::None,
+            ..SearchRequest::default()
+        };
+        let exhaustive = views
+            .search(&plan, &request(false, None), Pruning::Exhaustive)
+            .unwrap();
+        let best = if later == Order::Desc { 6 } else { 0 };
+        assert!(
+            exhaustive
+                .hits
+                .iter()
+                .all(|h| h.sort[1] == SortValue::Key(persia_format::for_codec::i64_to_key(best))),
+            "the tied short documents with the best `n` rank first"
+        );
+        for pruning in [Pruning::MaxScore, Pruning::BlockMaxWand] {
+            let mut after = None;
+            let mut want: Option<Cursor> = None;
+            for page in 0..30 {
+                let got = views
+                    .search(&plan, &request(false, after.clone()), pruning)
+                    .unwrap();
+                let all = views
+                    .search(&plan, &request(false, want.clone()), Pruning::Exhaustive)
+                    .unwrap();
+                assert_eq!(
+                    located(&got),
+                    located(&all),
+                    "{pruning:?} by {later:?}, page {page}"
+                );
+                after = got.hits.last().map(persia_engine::db::SearchHit::cursor);
+                want = all.hits.last().map(persia_engine::db::SearchHit::cursor);
+            }
+        }
+        let pruned = reads(&views, &plan, &request(false, None));
+        let faceted = reads(&views, &plan, &request(true, None));
+        assert!(
+            pruned * 3 < faceted,
+            "{pruned} reads pruned, {faceted} with a facet, by {later:?}"
+        );
+    }
 }

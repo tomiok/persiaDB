@@ -1417,14 +1417,20 @@ are indices into the view that returned the cursor, so using it elsewhere would 
 key or pass one over. The same snapshot and the same memtable view page exactly.
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
-applies when `sort` is `"score"`: then only the threshold of the hits after the cursor matters. A sort whose first key
+applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the
+hits after the cursor matters. With the score alone a match scoring at most the worst kept hit is skipped (it loses
+the tie by location). With further keys, such as `["score", {"field": "updated_at", "order": "desc"}]` to break
+ties by recency (ROADMAP 7.4.11), a match scoring as much may still win on a later key, so only one scoring below it
+is skipped, in every view, whichever view the threshold came from; a match scoring below it is not compared on the
+later keys either (their columns are not read). A sort whose first key
 is a numeric or `datetime` field with `missing: "last"` skips in each segment the FOR blocks (§5.2.1) whose keys all
 rank after the worst of the hits the view keeps: a block's keys lie between its minimum and the minimum plus
 `2^width − 1`, and a document without a value ranks after every value; with that one key, a tie ranks after the kept
 hit too (docids ascend). A skipped match is not scored, and a column sort without a `score` key scores only the
 matches it keeps, so a corrupt norm of a match it does not keep is not found (as with pruning, §7.3). Either way the
-hits are those of visiting every match. Every other sort visits every match: by score ascending or with further keys,
-led by a `keyword` or `bool` field, or led by a column with `missing: "first"`.
+hits are those of visiting every match. Every other sort visits every match: led by the score ascending, by a
+`keyword` or `bool` field, or by a column with `missing: "first"`. A collection-level default tie-break would be a
+schema option, so a new manifest `version` (§8.7); it is not part of v1 (ROADMAP 32.5.1).
 
 ### 7.5 Facets
 `facets` lists at most 16 `keyword` fields with `facet: true` (§6.2.2; a field may repeat), each with `size` (top-N
