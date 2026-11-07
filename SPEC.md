@@ -41,6 +41,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 | **Commit** | Atomic publication of a new manifest. |
 | **Frame** | Checksummed record in the single-file container (SPEC §4). |
 | **Blob** | Opaque client file, content-addressed, stored by chunks (SPEC §9). |
+| **Blob manifest** | A blob's chunk list; writing it binds the verified `blob_id` to the staged chunks (SPEC §9.1.1). |
 | **Shard** | An independent Database that owns a hash range of document ids (SPEC §11). |
 | **Relaxation** | Controlled loosening of a query to avoid empty results (SPEC §7.6). |
 
@@ -1910,7 +1911,7 @@ Documents may reference one blob (v1): `blob_ref = { blob_id, size, mime, chunk_
 The index NEVER contains blob bytes — only the reference. `blob_id` is the **SHA-256** of the blob's bytes (32 bytes;
 hex-encoded, lowercase, wherever it appears as text) (ADR-0002). Persia always computes it from the bytes it receives;
 if a caller supplies an expected id, a mismatch is an error. Chunks must not become addressable under a
-`blob_id` before it is verified (upload staging: SPEC §18.8). `BlobRef`/`BlobId` are value types in `persia-format` so
+`blob_id` before it is verified (upload staging: §9.2, ADR-0034). `BlobRef`/`BlobId` are value types in `persia-format` so
 that documents and segments can carry them without depending on `persia-blob`.
 
 Fields: `size` is the blob length in bytes (0 is valid); `chunk_size` is the chunk length used to store it (SPEC
@@ -1935,27 +1936,64 @@ writer produces; a `version` above 1 is unsupported. Writing a new `version` mus
 bit or a format major bump (SPEC §15), so a reader rejects the container at open rather than mid-query or
 mid-replay; the byte is a safety net. The largest encoding is 37 295 bytes.
 
+### 9.1.1 Blob manifest
+The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034): `version`, `flags` (all bits reserved,
+zero in v1), `blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk (`ceil(size / chunk_size)` of them)
+and a CRC32C trailer over everything before it (a remote blob manifest is not inside a frame). Byte layout: ROADMAP
+9.1.3.
+
 ### 9.2 Properties
 - Content-addressed ⇒ automatic **dedup**, idempotent `put`.
 - Chunked (default **4 MiB**), each chunk with CRC32C ⇒ resumable upload, **range reads**, streaming.
 - Not compressed (clients' files are already compressed).
 - Metadata (mime, filename, tags) lives in the document and is indexed per schema; the engine never inspects blob content.
 
+**Chunking** is fixed-size (ADR-0034): chunk `i` holds bytes `[i·chunk_size, min((i+1)·chunk_size, size))`, every
+chunk but the last is full, and an empty blob has no chunks. The boundaries depend only on `size` and `chunk_size`,
+never on how the bytes were delivered. The SHA-256 is computed over the bytes in order while they are chunked.
+
+**Staging and binding** (ADR-0034). An upload draws a random 128-bit `upload_id` and writes its chunks under
+`(upload_id, chunk_idx)`, never under a `blob_id`. When the last byte is read the id is known; the blob becomes
+addressable only when its **blob manifest** (`blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk;
+encoding in §9.1.1) is durable. If the id is already bound, the upload is a duplicate: its staged chunks are deleted
+best-effort (GC is the backstop) and `put_blob` returns a `BlobRef` with the bound blob's `chunk_size`. Dedup
+never skips reading the bytes.
+
 ### 9.3 Local layout (`.persia.blobs`)
-Pack file: header + append-only `BlobChunk` frames `{blob_id, chunk_idx, len, crc, bytes}` + periodic `BlobIndex` frames
-(`blob_id → [chunk offsets]`) + superblock like SPEC §4.3. GC rewrites live blobs into a new pack (like container compaction).
+Pack file: header + append-only `BlobChunk` frames `{upload_id, chunk_idx, len, crc, bytes}` + `BlobIndex` frames
+holding blob manifests (with the chunk frames' offsets) + superblock like SPEC §4.3. A blob is visible once the
+superblock commit that covers its `BlobIndex` frame is durable; chunk frames no committed `BlobIndex` names are staging
+or orphans. GC rewrites live blobs into a new pack (like container compaction).
 
 ### 9.4 Remote layout
-`blobs/<hex[0..2]>/<hex(blob_id)>/<chunk_idx>` objects (64-character lowercase hex) (or one object per blob below a size threshold, configurable).
+```
+blobs/<hex[0..2]>/<hex(blob_id)>              blob manifest, created with put_if_absent (the binding)
+blobs/uploads/<upload_id:032x>/<chunk_idx:010> staged chunk: the chunk's raw bytes
+```
+`hex(blob_id)` is 64 lowercase hex characters. Binding: `Created` binds the id; `AlreadyExists` (resolved against
+the writer's own bytes, §10.1) means another upload bound it first, so this one is a duplicate (§9.2); an error leaves
+the outcome unknown and the writer reads the key to resolve it, keeping its chunks meanwhile (as §10.4). A backend
+without `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, then whole chunks, and
+checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`). A resumed upload (ROADMAP 9.3.2) names its
+`upload_id`, keeps the run of full-length chunks from chunk 0, re-hashes their bytes and continues after them; hasher
+state is never persisted. Blobs below a size threshold may be stored as one object (ROADMAP 9.3.3).
 
 ### 9.5 Write ordering and GC
-1. Write blob chunks (and blob index). Durable.
+1. Write blob chunks, then the blob manifest (binding). Durable.
 2. Commit the document referencing it.
-A crash between 1 and 2 leaves an **orphan blob** (harmless). GC: mark = blob_ids referenced by live manifests;
-sweep = orphans older than a grace period (default 24 h). A referenced blob must never be missing; `verify` checks this.
+A crash between 1 and 2 leaves an **orphan blob** (harmless); a crash during 1 leaves staged chunks (harmless). GC:
+mark = blob_ids referenced by live manifests, then the upload ids their blob manifests name; sweep = unmarked blob
+manifests and staged chunks of unmarked uploads, older than a grace period (default 24 h; for staged chunks counted
+from the upload's newest chunk, so an idle upload stays resumable that long). A referenced blob must never be
+missing; `verify` checks this.
 
 ### 9.6 API
-`put_blob(reader) -> BlobRef`, `get_blob(id) -> Stream`, `get_blob_range(id, range)`, `delete` via document delete + GC.
+`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id }) -> BlobRef`, `get_blob(id) -> Stream`,
+`get_blob_range(id, range)`, `delete` via document delete + GC.
+`expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
+`BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
+`expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
+sha-256=:<base64>:` header (RFC 9530).
 Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order.
 
 ---
@@ -2333,8 +2371,4 @@ Comparison against other engines is reported with methodology, never cherry-pick
 5. Resharding strategy (split-by-hash-range using immutable segments + filtering merge).
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.
 7. Language analyzers scope for v1 (en, es, pt first).
-8. Blob upload staging: the id is known only after hashing the last byte, but §9.3/§9.4 key chunks by `blob_id`.
-   Proposal to evaluate: stage chunks under an upload id, then bind them to the verified `blob_id` with the
-   `BlobIndex` frame (local) or a per-blob index object written with `put_if_absent` (remote); dedup check after
-   hashing; resumable uploads re-hash stored chunks or persist hasher state. Also: how an expected id is passed
-   (API/gRPC). Must be decided (ADR) before ROADMAP 9.2.
+8. ~~Blob upload staging and expected id~~: resolved by ADR-0034, upload-id staging bound by a blob manifest (§9.2–§9.6).
