@@ -9,6 +9,12 @@ publish.workspace = true
 [dependencies]
 persia-format.workspace = true
 persia-storage.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+proptest.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
@@ -16,3 +22,7 @@ slow = []
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "blob"
+harness = false

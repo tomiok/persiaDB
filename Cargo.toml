@@ -33,7 +33,8 @@ roaring = "0.11.5"
 zstd = { version = "0.14.0", default-features = false }
 crc32c = "0.6.8"
 xxhash-rust = { version = "0.8.19", features = ["xxh3"] }
-sha2 = "0.11.0"
+# No default features: `oid` (ASN.1 object ids) is unused; the hardware backends are detected at runtime (ADR-0002).
+sha2 = { version = "0.11.0", default-features = false }
 memmap2 = "0.9.11"
 # ADR-0021: the OS calls std lacks (file system type, Windows file identity). Both already in the graph (memmap2, clap).
 libc = "0.2.190"

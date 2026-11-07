@@ -576,10 +576,10 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 Deps: M1, M2.
 
 ## 9.1 Core model (SPEC §9)
-- [ ] 9.1.0 ADR: blob upload staging and expected-id API (SPEC §18.8); update SPEC §9.3/§9.4/§9.6
-- [ ] 9.1.1 Content hasher per ADR-0002 producing `BlobId` (type from 1.10.1), chunking parameters
-- [ ] 9.1.2 Streaming chunker (`Read` → chunks with CRC and running content hash)
-- [ ] 9.1.3 Blob manifest (chunk list) encode/decode
+- [x] 9.1.0 ADR: blob upload staging and expected-id API (SPEC §18.8); update SPEC §9.3/§9.4/§9.6
+- [x] 9.1.1 Content hasher per ADR-0002 producing `BlobId` (type from 1.10.1), chunking parameters
+- [x] 9.1.2 Streaming chunker (`Read` → chunks with CRC and running content hash)
+- [x] 9.1.3 Blob manifest (chunk list) encode/decode
 
 ## 9.2 Local pack file
 - [ ] 9.2.1 Pack header/superblock + `BlobChunk`/`BlobIndex` frames (SPEC §9.3)
@@ -589,18 +589,19 @@ Deps: M1, M2.
 - [ ] 9.2.5 Fuzz pack reader
 
 ## 9.3 Remote layout
-- [ ] 9.3.1 Key layout `blobs/<xx>/<id>/<chunk>` via `Storage`
-- [ ] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check
+- [ ] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)
+- [ ] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check (SPEC §9.4: the resume token is `upload_id` + `chunk_size`; a `Chunker` that starts at chunk k with a hasher fed the stored chunks; `AlreadyExists` on a chunk restarts under a new upload id)
 - [ ] 9.3.3 Small-blob single-object optimization (threshold)
 
 ## 9.4 Integration with documents
 - [ ] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
 - [ ] 9.4.2 Streaming API: `put_blob(reader)`, `get_blob_range(id, range)`
 - [ ] 9.4.3 Document `blob_ref` stored in `BlobRefs` section; included in hits
+- [ ] 9.4.4 Decide, before the blob manifest encoding is released (SPEC §15), whether `put_blob`'s chunk size has a floor or the blob manifest a size cap: `chunk_size` 1 lets a 4 GiB blob need a 16 GiB manifest (ADR-0035 Consequences)
 
 ## 9.5 Garbage collection
-- [ ] 9.5.1 Mark: collect referenced ids from all live manifests/snapshots
-- [ ] 9.5.2 Sweep: orphans older than grace period; pack-file rewrite for local
+- [ ] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name
+- [ ] 9.5.2 Sweep (SPEC §9.5): unmarked blob manifests before their upload's staged chunks, older than the grace period, each pin check and delete under the pin set's lock; remote listing per `blobs/<xx>/` prefix and `blobs/uploads/`; pack-file rewrite for local
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
 - [ ] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
 - [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects

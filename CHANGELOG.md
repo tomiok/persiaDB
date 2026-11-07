@@ -118,6 +118,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-blob`: the blob manifest, a blob's chunk list (ROADMAP 9.1.3; SPEC §9.1.1; ADR-0034, ADR-0035).
+  `BlobManifest` (`blob_id`, size, chunk size, `UploadId`, chunk CRCs) with `encode`, `decode` (corrupt input is
+  `Error::Corrupt`, a newer version or flag `UnsupportedVersion` / `UnsupportedFlags`) and `encoded_len_for`, which
+  gives the version-1 length for a blob; `check_blob_id` and `check_ref` check a manifest against what it was looked up
+  by (SPEC §9.3, §9.4). Fuzz target `blob_manifest`.
+- `persia-blob`: the streaming chunker (ROADMAP 9.1.2; SPEC §9.2; ADR-0034). `Chunker` cuts the bytes of any `Read`
+  into fixed-size `Chunk`s (index, offset, bytes, CRC32C) while hashing them, and once the reader ends `summary()` gives
+  the `ChunkedBlob` (`blob_id`, size, chunk count); `chunk_all` drives it with a sink. The chunks do not depend on how
+  the reader delivers its bytes, and a reader that returns more bytes after its end is not read again. Chunking runs
+  at 1.31 GiB/s on one core (`cargo bench -p persia-blob --bench blob`).
+- `persia-blob`: the content hash and chunking parameters of the blob store (ROADMAP 9.1.1; SPEC §9.1, §9.2; ADR-0002,
+  ADR-0034). `ContentHasher` and `blob_id_of` compute a `BlobId` (SHA-256, `sha2` without default features, hardware
+  backends detected at runtime); `ChunkSize` (`1..=64 MiB`, default 4 MiB) gives a blob's chunk count and each chunk's
+  byte range (fixed-size chunks, ADR-0034). SHA-256 measured 1.87 GiB/s on one core with SHA extensions
+  (`cargo bench -p persia-blob --bench blob`, `docs/benchmarks.md`).
 - `persia inspect container <file> [--id <id>]` (ROADMAP 6.6.10): read-only, without the writer lock, prints the
   active superblock (`seq`, `wal_start`, `log_end`), every frame from `wal_start` (offset, length, `frame_seq`, kind,
   whether after `log_end`) with the `seq` of each Manifest frame, and with `--id` the WAL records that put or delete
@@ -616,6 +631,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Website: the "On this page" rail is a fixed width at the viewport edge, and long headings wrap inside it.
 
 ### Format
+- Blob manifest encoding 1 (SPEC §9.1.1; ADR-0035): `PBLM` magic, encoding version, `flags` (reserved), `blob_id`,
+  `size`, `chunk_size`, `upload_id`, one CRC32C per chunk, CRC32C trailer; `76 + 4·n` bytes. Golden files in
+  `tests/fixtures/blob-manifest/v1/`.
 - Tombstone sidecar encoding 1 (SPEC §8.3; ADR-0030): `PTMB` magic, encoding version, `segment_id`, sidecar version,
   `doc_count`, deleted count, the deleted docids as a portable roaring bitmap, CRC32C trailer. Golden files in
   `tests/fixtures/tombstones/v1/`.

@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **325 of 523** MVP leaves done (62%), 0 in progress (last snapshot 2026-11-07). Post-MVP work is 0 of 178 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **329 of 524** MVP leaves done (63%), 0 in progress (last snapshot 2026-11-07). Post-MVP work is 0 of 178 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -229,7 +229,7 @@ flowchart TD
 | `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 and M7 still in progress. Relaxation is M8. |
 | `persia-cli` | The `persia` binary. | Inspect, dump, file sweep, and `verify`. See [CLI](#cli). |
 | `persia` | The embedded facade: `Db`, `Collection`. | Placeholder for M10: the dependency edges, no types. |
-| `persia-blob` | Content-addressed chunks, dedup, GC. | Placeholder for M9: the dependency edges, no types. |
+| `persia-blob` | Content-addressed chunks, dedup, GC. | Core model implemented: content hash, fixed-size chunker, blob manifest encoding. The pack file, remote layout, `put_blob`/`get_blob` and GC are still in progress in M9. |
 | `persia-proto`, `persia-server` | gRPC and HTTP. The server depends on `persia` and `persia-proto`. | Placeholders for M11. The server binary exits with "not implemented". |
 
 `persia-server` is drawn in [`docs/architecture.md`](./docs/architecture.md) above `persia`. Today it is a placeholder binary that prints "not implemented (M11)" and exits with status 1, so it stays out of the figure.
@@ -250,7 +250,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
 | **M7** Query engine & ranking | 🔨 in progress | 48/51 |
 | **M8** Zero-results avoidance | ⏳ blocked | 0/29 |
-| **M9** Blob store | ▶️ ready | 0/20 |
+| **M9** Blob store | 🔨 in progress | 4/21 |
 | **M10** Embedded API | ⏳ blocked | 0/19 |
 | **M11** Server | ⏳ blocked | 0/23 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |

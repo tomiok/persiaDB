@@ -507,6 +507,8 @@ after:
                 "-p persia-format --doc",
                 "-p persia-engine --lib",
                 "-p persia-engine --test manifest --test wal --test document_encoding",
+                "-p persia-blob --lib",
+                "-p persia-blob --doc",
             ]
         );
         assert!(runs[2].filters.contains(&"document::".to_owned()) && runs[2].skips.len() > 1);
