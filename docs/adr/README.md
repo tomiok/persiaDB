@@ -57,3 +57,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |
 | [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |
 | [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted |
+| [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted |

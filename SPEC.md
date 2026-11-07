@@ -1937,10 +1937,25 @@ bit or a format major bump (SPEC §15), so a reader rejects the container at ope
 mid-replay; the byte is a safety net. The largest encoding is 37 295 bytes.
 
 ### 9.1.1 Blob manifest
-The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034): `version`, `flags` (all bits reserved,
-zero in v1), `blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk (`ceil(size / chunk_size)` of them)
-and a CRC32C trailer over everything before it (a remote blob manifest is not inside a frame). Byte layout: ROADMAP
-9.1.3.
+The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034), encoded as (ADR-0035), little-endian:
+```
+0   4    magic       bytes "PBLM" (0x50 0x42 0x4C 0x4D)
+4   4    version     u32 = 1 (the encoding)
+8   4    flags       u32, all bits reserved: 0 in v1
+12  32   blob_id     SHA-256 bytes
+44  8    size        u64
+52  4    chunk_size  u32, 1..=64 MiB
+56  16   upload_id   u128 (text form: 32 lowercase hex digits)
+72  4·n  chunk_crc   u32 per chunk, the CRC32C of its bytes, in chunk order; n = ceil(size / chunk_size)
+..  4    crc32c      u32 over every byte before it
+```
+Its length is `76 + 4·n`, so a reader that holds the blob's `BlobRef` knows it before fetching. The trailer is
+redundant inside a `BlobIndex` frame but not in a remote object, like the manifest's (§8.7) and the tombstone
+sidecars' (§8.3). Reading checks, in this order: at least 76 bytes, the magic, the CRC32C trailer, then `version` (0 is
+corruption, above 1 is unsupported), then `flags` (a bit this build does not know is unsupported: a newer writer's
+layout, ROADMAP 9.3.3), then: `chunk_size` in range, `n` fits in a `u32`, exactly `4·n` bytes of CRCs before the
+trailer, and `size` 0 only with the SHA-256 of no bytes as `blob_id`. Anything else that does not hold is corruption.
+Decoding allocates at most its input's length. Each value has exactly one encoding.
 
 ### 9.2 Properties
 - Content-addressed ⇒ automatic **dedup**, idempotent `put`.
@@ -2300,8 +2315,8 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
   by CI forever. `cargo xtask fixtures` writes (and CI checks) only the directory of the version the build writes;
   a released version's directory is never regenerated.
 - Encodings that live inside frames or objects rather than in the container layout have their own version field and
-  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024; tombstone sidecars: `tests/fixtures/tombstones/v1/`, ADR-0030),
-  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`, `PERSIA_WRITE_TOMBSTONE_FIXTURES=1`),
+  golden files under `tests/fixtures/<encoding>/v<version>/` (manifests: `tests/fixtures/manifest/v1/`, ADR-0024; tombstone sidecars: `tests/fixtures/tombstones/v1/`, ADR-0030; blob manifests: `tests/fixtures/blob-manifest/v1/`, ADR-0035),
+  checked by the owning crate's tests; missing ones are written on request (`PERSIA_WRITE_MANIFEST_FIXTURES=1`, `PERSIA_WRITE_TOMBSTONE_FIXTURES=1`, `PERSIA_WRITE_BLOB_MANIFEST_FIXTURES=1`),
   existing ones never.
 - Whole databases written by the engine's commit path, which exercise every encoding inside a container together,
   live in `tests/fixtures/database/v<major>.<minor>/` (container format version), checked by `persia-engine`'s tests

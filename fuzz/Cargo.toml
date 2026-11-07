@@ -16,6 +16,7 @@ persia-format = { path = "../crates/persia-format" }
 persia-storage = { path = "../crates/persia-storage" }
 persia-engine = { path = "../crates/persia-engine" }
 persia-analysis = { path = "../crates/persia-analysis" }
+persia-blob = { path = "../crates/persia-blob" }
 # Same version as the workspace: the `segment` target rebuilds edited TermDict and IdMap FSTs.
 fst = "=0.4.7"
 # Same version and features as the workspace, to build the fixed segment of the `segment` target.
@@ -204,6 +205,13 @@ bench = false
 [[bin]]
 name = "filter_json"
 path = "fuzz_targets/filter_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "blob_manifest"
+path = "fuzz_targets/blob_manifest.rs"
 test = false
 doc = false
 bench = false

@@ -2,7 +2,7 @@
 
 - Status: accepted
 - Date: 2026-11-07
-- Related: SPEC §9.1–§9.6, §10.1, §10.4, §18.8; ROADMAP 9.1.0–9.1.3, 9.2, 9.3, 9.5; ADR-0002, ADR-0011, ADR-0024
+- Related: SPEC §9.1–§9.6, §10.1, §10.4, §18.8; ROADMAP 9.1.0–9.1.3, 9.2, 9.3, 9.5; ADR-0002, ADR-0011, ADR-0024, ADR-0035
 
 ## Context
 
@@ -29,8 +29,8 @@ only atomic primitive; a blob can be larger than memory; uploads from servers ca
    (§9.4). Chunks stay there for life: there is no rename or copy step.
 3. **Bind with a blob manifest, written only after the id is verified.** The *blob manifest* is the blob's chunk
    list: `blob_id`, `size`, `chunk_size`, `upload_id`, one CRC32C per chunk, and a CRC32C trailer of its own (a remote
-   one is not inside a frame, like the manifest and tombstone sidecars, ADR-0024/ADR-0030). Byte layout: ROADMAP
-   9.1.3 (SPEC §9.1.1). A blob exists, and is addressable by its id, only once its blob manifest is durable:
+   one is not inside a frame, like the manifest and tombstone sidecars, ADR-0024/ADR-0030). Byte layout: ADR-0035
+   (SPEC §9.1.1). A blob exists, and is addressable by its id, only once its blob manifest is durable:
    - locally inside a `BlobIndex` frame of the pack, published by the pack's superblock commit (§9.3, ROADMAP 9.2);
    - remotely as `blobs/<hex[0..2]>/<hex(blob_id)>`, written with `put_if_absent`. `Created` binds it. `AlreadyExists`
      (already resolved against our own bytes, §10.1) means another upload bound the id first: the blob is
