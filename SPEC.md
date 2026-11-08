@@ -1153,7 +1153,6 @@ returned as it is, and copied as bytes, never re-validated.
   "limit": 20, "offset": 0,               // or "search_after": cursor
   "facets": ["brand"],
   "relax": { "min_results": 1 },          // overrides collection default
-  "proximity": true,                      // the bonus of adjacent words (§7.2); false leaves it out (ROADMAP 10.1.7)
   "explain": false
 }
 ```
@@ -1305,7 +1304,7 @@ with each word's `idf` as above (a `combined`'s from its largest `df`); a pair w
 term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a single term. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
 pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
 included), nor a field without positions; a single word is no `bool` (§7.1.1). A plan may leave the bonus out
-(`"proximity": false` in a request, `SearchPlan::without_proximity`): the bonus is then 0 and not added. With
+(`SearchPlan::without_proximity`; a request's `"proximity": false` is planned, ROADMAP 10.1.7): the bonus is then 0 and not added. With
 `B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
@@ -1440,8 +1439,8 @@ only hits that rank after the cursor count, `offset` included. A cursor whose va
 number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
-key or pass one over. The same snapshot and the same memtable view page exactly. A cursor pages exactly under the query and plan options
-that produced it (`proximity` included, §7.2), which it does not record yet (ROADMAP 10.1.7).
+key or pass one over. The same snapshot and the same memtable view page exactly, under the query and plan options
+that produced the cursor (`proximity` included, §7.2). The cursor does not record those yet, so a page under other options is not detected and may repeat or pass over hits; recording them and rejecting a mismatch is ROADMAP 10.1.7. A request cannot change `proximity` today (it has no such field), so only a caller building its own plans can.
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the

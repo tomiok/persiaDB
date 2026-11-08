@@ -1,6 +1,6 @@
 # ADR-0036: Term proximity scoring
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-07
 - Related: SPEC §7.2, §7.3, §7.7; ROADMAP 7.3.5, 7.4.4, 7.4.8, 7.8.4, 5.3.4; ROADMAP 32.5.1 (collection ranking defaults)
 
@@ -52,8 +52,8 @@ queries it applies to, and whether it is on by default.
 
 5. **On by default where positions exist.** Positions are opt-in per field (`positions: false` by default,
    §6.2.2), so collections that never asked for them see no change in ranking or cost. A field with positions gets
-   proximity. A request's `"proximity": false` (`SearchPlan::without_proximity`: the switch is the plan's, as
-   scoring is) turns it off, and the pruning proptest and benchmarks run both ways. A collection-level setting (`ranking.proximity: {"weight": λ}` or `false`)
+   proximity. `SearchPlan::without_proximity` (the switch is the plan's, as scoring is) turns it off, and the
+   pruning proptest and benchmarks run both ways. A request's `"proximity": false` is future work (below). A collection-level setting (`ranking.proximity: {"weight": λ}` or `false`)
    would be a schema option, so a new manifest `version` (SPEC §8.7: "a schema option added later is a new
    manifest version"): it is ROADMAP 32.5.1 (v1.1), with 7.4.11's collection tie-break, so 7.3.5 does not change
    the on-disk format. Wiring the request's `"proximity"` and recording it in a cursor is ROADMAP 10.1.7.

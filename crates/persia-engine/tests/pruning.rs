@@ -657,8 +657,8 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
     let (count, hits) = handed(&plan, &view, 10, Pruning::MaxScore);
     assert_eq!(bits(&hits), bits(&want));
     assert_eq!(count, all);
-    // With the bonus, a match whose clauses plus the bonus's bound cannot beat the threshold is skipped before its
-    // positions are read, under either strategy.
+    // With the bonus, the bound it adds still lets either strategy skip most matches (none of them holds `a b`
+    // adjacent); that the bound is in every skip is `a_match_only_its_bonus_lifts_is_not_skipped`.
     let (_, want) = handed(&with, &view, 10, Pruning::Exhaustive);
     for pruning in PRUNED {
         let (count, hits) = handed(&with, &view, 10, pruning);
@@ -667,6 +667,56 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
             count < 300,
             "{pruning:?}: {count} of {all} documents scored"
         );
+    }
+}
+
+/// The proximity bound is part of every skip (ROADMAP 7.3.5, invariant 5): `a` and `b` on the first 2048 documents,
+/// seven apart (no bonus) on all but the last, which holds them adjacent among more words, so its clauses score below
+/// the others' and only its bonus lifts it to the top. A skip that left the bound out of the document's or the block's
+/// bound would pass over it, as its clause sum cannot beat the threshold.
+#[test]
+fn a_match_only_its_bonus_lifts_is_not_skipped() {
+    let (schema, f) = schema();
+    let words = |n: usize| {
+        (0..n)
+            .map(|j| format!(" f{j}"))
+            .collect::<Vec<_>>()
+            .concat()
+    };
+    let docs: Vec<Document> = (0..4096_usize)
+        .map(|i| {
+            let body = match i {
+                2047 => format!("a b{}", words(9)),
+                0..2047 => format!("a{} b", words(6)),
+                _ => words(40),
+            };
+            Document::new(format!("d{i}")).with(f.body, Value::String(body))
+        })
+        .collect();
+    let segment = Arc::new(segment(&schema, &docs));
+    let stats = SegmentStatistics::new(&Arc::new(schema.clone()), &[Arc::clone(&segment)]);
+    let view = SegmentView::new(&segment, None);
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: f.body,
+            term: t.into(),
+        })
+    };
+    let and = Query::Bool(BoolQuery {
+        must: vec![term("a"), term("b")],
+        ..BoolQuery::default()
+    });
+    let with = SearchPlan::new(&and, &schema, &stats).unwrap();
+    let off = exhaust(&with.clone().without_proximity(), &view);
+    let on = exhaust(&with, &view);
+    // The premise: without its bonus doc 2047 scores below the others, with it above them all.
+    assert!(off[&2047] < off[&0], "{} vs {}", off[&2047], off[&0]);
+    assert!(on.iter().all(|(&d, &s)| d == 2047 || s < on[&2047]));
+    let (_, want) = handed(&with, &view, 1, Pruning::Exhaustive);
+    assert_eq!(want.first().map(|h| h.docid), Some(2047));
+    for pruning in PRUNED {
+        let (_, hits) = handed(&with, &view, 1, pruning);
+        assert_eq!(bits(&hits), bits(&want), "{pruning:?}");
     }
 }
 

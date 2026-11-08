@@ -619,7 +619,17 @@ fn check(
             .search(&off, &request, Pruning::Exhaustive)
             .unwrap()
             .hits;
-        prop_assert_eq!(no_bonus.len(), want.len());
+        let ids: BTreeMap<&str, f64> = no_bonus
+            .iter()
+            .map(|h| (h.document.id(), h.score))
+            .collect();
+        prop_assert_eq!(ids.len(), no_bonus.len(), "an id twice without proximity");
+        prop_assert_eq!(
+            ids.keys().copied().collect::<Vec<_>>(),
+            want.keys().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "without proximity: {:?}",
+            query
+        );
         for h in &no_bonus {
             let v = &live[h.document.id()];
             let (score, scale) = match corpus.eval_with(q, &v.doc, false) {
