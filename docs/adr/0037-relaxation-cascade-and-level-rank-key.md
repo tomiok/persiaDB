@@ -44,13 +44,36 @@ cascade return?
    search explains it, and a later step's by a `bool` whose one `must` clause is the step's query (its `must_not`
    clauses do not score, so they add nothing). ROADMAP 8.3.4 states the level in the explanation itself.
 
+6. **The level leads the rank key; no score offset** (ROADMAP 8.1.3). Hits compare by step, then by the sort, then
+   by location. An `f64` offset cannot keep every stricter hit above every looser one over the whole score range.
+   Scores are any finite value `≥ 0` (`constant_score` takes any, `boost`s nest to `1000^32`). A strictly increasing
+   map that puts one copy of that range wholly below another would need twice the floating-point values the range
+   holds (pigeonhole). An additive offset big enough to separate the levels also rounds away the scores' low bits,
+   which ties or reorders hits inside a level. So each hit keeps its step's own score. For clients that sort or show
+   one number, a hit also carries a **rank score**, `2^−(step+1) · (1 + (1 − 1/(1 + s)))`, rounded at each
+   operation. Each operation is monotonic and the power of two is exact, so step `i`'s values lie in
+   `[2^−(i+1), 2^−i]`: non-decreasing in the score within a step, and never below a later step's. It may tie where
+   scores differ (rounding), never invert. Property tests check both claims over every non-negative `f64` bit
+   pattern's binade.
+7. **Cursors carry the step and the cascade's last step** (ROADMAP 8.1.3). A page after a cursor builds the same
+   steps through that last one. It does not search the steps before the cursor's (they rank before it) unless it
+   counts facets, which count every step built (item 4). It searches the cursor's step after the cursor and later
+   steps from their top. Each step keeps its own pruning threshold: one from a stricter step says nothing about a
+   looser one, whose hits all rank below. Offset and cursor pages are therefore slices of one ranking, every page
+   reports the same `level` and `applied`, and with `fill` a cursor page relaxes further while it has room. A plain
+   search rejects a cursor from a step after L0, and any search rejects one whose step is after its last
+   (`RequestError::CursorStep`).
+
 ## Consequences
 
 - Every later level only builds queries; ranking, paging, counting and facets come from the orchestrator.
 - A relaxed step re-plans the earlier steps' queries inside its `must_not`. Expansions (`prefix`, `fuzzy`) expand
   again over the same views, to the same terms.
-- Until ROADMAP 8.1.3, a request with a `search_after` cursor runs L0 alone, and hits keep their step's own score
-  with no offset. Until ROADMAP 8.1.4, `budget_ms` is not applied and no response is `truncated`.
+- Scores down a relaxed page are not monotonic across steps. Clients that need one descending number use the rank
+  score.
+- A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not
+  need), so it reports the same cascade as the first page.
+- Until ROADMAP 8.1.4, `budget_ms` is not applied and no response is `truncated`.
 
 ## Alternatives considered
 
@@ -59,3 +82,7 @@ cascade return?
   skips. Matches are always known.
 - **Decide on the page's hits** (after `offset` or the cursor). Page 2 could then relax where page 1 did not, so
   the pages would not be slices of one ranking.
+- **An additive score offset per level** (SPEC §7.6's first wording). It is not correct over the whole score range
+  (item 6), and it would change the scores clients see.
+- **A cursor that re-decides the cascade from the top.** Exact, but every page would re-search the steps before
+  the cursor's to count them. Recording the last step costs nothing.

@@ -789,6 +789,7 @@ fn bad_requests_are_errors() {
             values,
             location: Located::Memtable(0),
             origin: origin(&snapshot, &memtable),
+            relaxed: None,
         })
     };
     let wrong_count = SearchRequest {
@@ -1080,6 +1081,7 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
             values: vec![SortValue::Key(persia_format::for_codec::i64_to_key(-1))],
             location,
             origin: origin(&snapshot, &memtable),
+            relaxed: None,
         }),
         ..base.clone()
     };

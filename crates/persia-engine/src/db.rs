@@ -82,7 +82,9 @@ pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::ReadOnlyDatabase;
 pub use relaxed::{Relaxation, RelaxedHit, RelaxedResults, RelaxedSearchError};
-pub use search::{Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults};
+pub use search::{
+    Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults, StepCursor,
+};
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
 pub use verify::{Tail, VerifyReport};
 pub use views::{CollectionHit, CollectionViews};

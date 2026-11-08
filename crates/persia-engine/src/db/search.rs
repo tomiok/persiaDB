@@ -81,6 +81,19 @@ pub struct Cursor {
     pub location: Located,
     /// The snapshot, collection and memtable view that produced the hit.
     pub origin: CursorOrigin,
+    /// The relaxation step of the hit and the last step of its page's cascade (SPEC §7.6), from
+    /// [`super::RelaxedHit::cursor`]; `None` for a hit of a search that did not relax, which is step 0 of a cascade
+    /// that stopped at L0.
+    pub relaxed: Option<StepCursor>,
+}
+
+/// Where in the relaxation cascade a [`Cursor`]'s hit is (SPEC §7.6, ROADMAP 8.1.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StepCursor {
+    /// The step that found the hit: 0 is L0's query.
+    pub step: usize,
+    /// The last step its page's cascade built, at least `step`.
+    pub last: usize,
 }
 
 /// A hit of a search (SPEC §7.5.1).
@@ -107,6 +120,7 @@ impl SearchHit {
             values: self.sort.clone(),
             location: self.location,
             origin: self.origin.clone(),
+            relaxed: None,
         }
     }
 }
@@ -172,7 +186,8 @@ impl CollectionViews<'_> {
     /// # Errors
     /// [`RequestError::Window`] when `offset + limit` is above [`MAX_WINDOW`]; [`RequestError::Cursor`] for a
     /// cursor that does not fit the sort; [`RequestError::CursorView`] for a cursor from another snapshot,
-    /// collection or memtable view; [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
+    /// collection or memtable view; [`RequestError::CursorStep`] for a cursor from a relaxation step after L0
+    /// ([`super::RelaxedHit::cursor`]); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
     /// [`RequestError::MismatchedSortValue`] if two sort values are not of the key's type;
     /// [`RequestError::HitSegment`] if a hit names a segment the views do not have (the hit is not skipped);
     /// [`RequestError::Read`] as [`SearchPlan::matcher`], or for a document that cannot be read.
@@ -199,6 +214,16 @@ impl CollectionViews<'_> {
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
         let window = self.check_request(request)?;
+        if let Some(StepCursor { step, last }) =
+            request.search_after.as_ref().and_then(|c| c.relaxed)
+            && step > 0
+        {
+            return Err(RequestError::CursorStep {
+                step,
+                last,
+                reason: "a search that does not relax returns L0's hits only, which rank before it",
+            });
+        }
         let collected = self.collect(
             plan,
             &Part {
@@ -242,6 +267,15 @@ impl CollectionViews<'_> {
             })?;
         if let Some(cursor) = &request.search_after {
             request.sort.check(&cursor.values)?;
+            if let Some(StepCursor { step, last }) = cursor.relaxed
+                && step > last
+            {
+                return Err(RequestError::CursorStep {
+                    step,
+                    last,
+                    reason: "its step is after the last step of its cascade",
+                });
+            }
             let origin = self.cursor_origin();
             if cursor.origin != origin {
                 return Err(RequestError::CursorView {
