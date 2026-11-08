@@ -2376,7 +2376,8 @@ Defaults: `memtable_bytes` 64 MiB (with a 10 s idle flush), `commit_interval` 60
 - **Storage conformance**: every `Storage` backend passes one shared suite of the §10.1 contract, including a
   model-based random operation sequence and concurrent `put_if_absent` races.
 - Integration against MinIO, fake-gcs-server, Azurite via docker-compose.
-- Synthetic load + soak tests, relevance regression suite (fixed corpora + judged queries; nDCG@10 tracked).
+- Synthetic load + soak tests, relevance regression suite (fixed corpora + judged queries; nDCG@10 per query and its
+  mean gated in CI against a recorded baseline, with a tolerance of one unit of its last recorded digit (0.0001). A move beyond that fails in either direction, so an improvement updates the baseline on purpose, and a changed query set or order fails (docs/benchmarks.md).
 
 ### 16.2 Performance (targets, to be validated by benchmarks — not promises)
 | Metric | Target |

@@ -522,7 +522,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.8.1 Differential suite vs. reference engine (random corpora/queries)
 - [x] 7.8.2 Relevance sanity corpus with judged queries; nDCG@10 baseline recorded
 - [x] 7.8.3 Criterion benchmarks: single term, AND/OR, phrase, filtered, sorted, facets
-- [ ] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
+- [~] 7.8.4 (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks)
 - [x] 7.8.5 The reference model's norm oracle is independent of the implementation: it states SPEC §5.3.4's rounding (keep the top 4 bits of `n − 24`) instead of copying the codec, checks it against the SPEC's properties (`q <= n`, exact below 40, less than `(n − 24) / 8` low, monotonic), and checks the engine's codec against it for every length up to 2^17 and by proptest to 2^31 (found in the 2026-11-02 audit)
 - [x] 7.8.6 The differential suite compares ranked order to the reference directly (every pair of hits, within the score tolerance). Made explicit only: each score within tolerance of the reference plus the engine's own order already implied it, so it adds no detection power today (found in the 2026-11-02 audit)
 
