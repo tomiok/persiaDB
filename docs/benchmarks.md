@@ -423,6 +423,23 @@ for the next request; this was not measured apart. The memtable grows by one doc
 over a run), and criterion picks the iteration count from the elapsed time, so a faster build's later requests copy a
 few more documents: compare builds at equal iteration counts, which criterion prints.
 
+`search_request/score_then_newest` (ROADMAP 7.4.11): the one-segment `search_request` collection, 10 hits of `w3`
+sorted by score, then `at` descending (a tie-break by recency). Command: `cargo bench -p persia-engine --bench search
+-- search_request/score`. 2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux; before is 5862e6f with the same bench
+file, from a worktree (its own target directory in the second run), alternating with the branch, twice.
+
+| Recorded | `score` | `score_then_newest` | `score_facet` |
+|---|--:|--:|--:|
+| ROADMAP 7.4.11 | 430, 428 µs | 550, 546 µs | 815, 805 µs |
+| before (5862e6f) | 442, 434 µs | 719, 693 µs | 862, 838 µs |
+
+Before, a sort with a key after the score visited every match and read each one's `at` key. Now it prunes like the
+score alone, strictly below the worst kept hit, and a match scoring below that is rejected before any column is
+read. Pruning alone (the branch without that early reject) measured 713 µs: one term over this corpus has few
+blocks to skip. Most of the gain is the column reads saved. Where blocks do lose (`tests/search_request.rs`,
+`a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the
+exhaustive one with a facet reads.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

@@ -475,7 +475,7 @@ fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4
     (db, [body, price, tag, at])
 }
 
-/// Whole requests over a committed collection: 10 hits of a term by score (pruned), by a column of random values and
+/// Whole requests over a committed collection: 10 hits of a term by score (pruned, and with a later key), by a column of random values and
 /// by one that grows with the docid (oldest first: whole FOR blocks lose, ROADMAP 7.5.6; newest first: none can), a facet beside them (every
 /// match visited), and a deep page by cursor.
 fn requests(c: &mut Criterion) {
@@ -493,6 +493,9 @@ fn requests(c: &mut Criterion) {
     let by_price = Sort::new([SortKey::field(price, Order::Asc)], schema).unwrap();
     let newest = Sort::new([SortKey::field(at, Order::Desc)], schema).unwrap();
     let oldest = Sort::new([SortKey::field(at, Order::Asc)], schema).unwrap();
+    // A tie-break after the score (ROADMAP 7.4.11): pruned like the score alone, ties at the threshold compared.
+    let score_newest =
+        Sort::new([SortKey::score(), SortKey::field(at, Order::Desc)], schema).unwrap();
     let facet = vec![FacetRequest::new(tag, 10, schema).unwrap()];
     let page = |sort: &Sort, facets: &[FacetRequest]| SearchRequest {
         sort: sort.clone(),
@@ -515,6 +518,7 @@ fn requests(c: &mut Criterion) {
     let cursor = deep.hits.last().map(SearchHit::cursor);
     let requests = [
         ("score", page(&Sort::score(), &[])),
+        ("score_then_newest", page(&score_newest, &[])),
         ("sort_price", page(&by_price, &[])),
         ("sort_newest", page(&newest, &[])),
         ("sort_oldest", page(&oldest, &[])),

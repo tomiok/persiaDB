@@ -8,7 +8,7 @@
 use core::cmp::Ordering;
 
 use super::request::RequestError;
-use super::{Matcher, Ticks, Watch};
+use super::{Hit, Interrupt, Matcher, Ticks, Watch};
 use crate::schema::{CollectionSchema, FieldId, FieldType};
 use crate::segment::{KeyBlock, ReadError, SectionKind, SegmentCorruption};
 use crate::view::{KeyReader, KeywordReader, SearchView};
@@ -204,6 +204,15 @@ impl Sort {
         matches!(*self.keys, [(SortKey::Score { order: Order::Desc }, _)])
     }
 
+    /// Whether its first key is the score descending, with or without further keys: a match scoring below the `k`-th
+    /// kept hit ranks after it whatever the later keys, so pruning applies (SPEC §7.4, ROADMAP 7.4.11).
+    pub(crate) fn is_score_led(&self) -> bool {
+        matches!(
+            self.keys.first(),
+            Some((SortKey::Score { order: Order::Desc }, _))
+        )
+    }
+
     /// Checks that `values` (a cursor's) has one value per key, of the key's type.
     ///
     /// # Errors
@@ -368,6 +377,12 @@ enum Reader<K, W> {
 /// keys all rank after the worst of `k` kept hits (ROADMAP 7.5.6): their matches are not visited, and the score is read
 /// only for a match that enters the heap, unless a key needs it first.
 ///
+/// A [`Sort::is_score_led`] sort without `seen` prunes: the matcher may skip the matches scoring below the worst
+/// of `k` kept hits, or below a threshold `watch` gives: such a match ranks after `k` hits whatever its later keys.
+/// One scoring as much may still win on a later key, so every threshold is applied as the next float below it
+/// (`set_min_competitive` skips at most its argument; ROADMAP 7.4.11). Rises are published to `watch`, and the kept
+/// hits handed to it at the end, as [`super::collect_where`] does.
+///
 /// # Errors
 /// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes;
 /// [`RequestError::MismatchedSortValue`] if a kept value is not of its key's type; [`RequestError::Interrupted`] when
@@ -381,7 +396,14 @@ pub(crate) fn top_sorted<V: SearchView>(
     mut seen: Option<impl FnMut(u32)>,
     watch: &mut impl Watch,
 ) -> Result<Vec<SortedHit>, RequestError> {
-    watch.check()?;
+    // Without `seen` (a facet counts every match), a score-led sort prunes.
+    let prune = seen.is_none() && sort.is_score_led();
+    if prune && k == 0 {
+        watch.check()?;
+        return Ok(Vec::new());
+    }
+    let mut threshold: Option<f64> = None;
+    look(watch, matcher, prune)?;
     let mut ticks = Ticks::default();
     let mut readers = sort
         .keys
@@ -407,7 +429,7 @@ pub(crate) fn top_sorted<V: SearchView>(
     let mut next = matcher.next()?;
     while let Some(docid) = next {
         if ticks.due() {
-            watch.check()?;
+            look(watch, matcher, prune)?;
         }
         if let Some(seen) = seen.as_mut() {
             seen(docid);
@@ -445,9 +467,43 @@ pub(crate) fn top_sorted<V: SearchView>(
             &mut scratch,
             &mut heap,
         )?;
+        // A score-led sort's worst kept hit has its score first.
+        if prune
+            && let Some(&Local::Score(worst)) = heap.worst().and_then(|w| w.locals().first())
+            && threshold.is_none_or(|old| worst > old)
+        {
+            threshold = Some(worst);
+            matcher.set_min_competitive(worst.next_down());
+            watch.publish(worst);
+        }
         next = matcher.next()?;
     }
-    finish(sort, heap, &readers)
+    let hits = finish(sort, heap, &readers)?;
+    if prune {
+        let kept: Vec<Hit> = hits
+            .iter()
+            .map(|h| Hit {
+                docid: h.docid,
+                score: h.score,
+            })
+            .collect();
+        watch.finish(&kept);
+    }
+    Ok(hits)
+}
+
+/// Looks at `watch`, applying the threshold it gives, strictly ([`top_sorted`]), when the collector prunes.
+fn look(
+    watch: &mut impl Watch,
+    matcher: &mut (impl Matcher + ?Sized),
+    prune: bool,
+) -> Result<(), Interrupt> {
+    if let Some(t) = watch.check()?
+        && prune
+    {
+        matcher.set_min_competitive(t.next_down());
+    }
+    Ok(())
 }
 
 /// The order of the first key when it is a column's and puts missing values last: a FOR block's bounds
@@ -504,6 +560,14 @@ fn consider<K: KeyReader, W: KeywordReader>(
     } else {
         None
     };
+    // Led by the score, a match scoring below the worst kept hit loses on the first key: read no column for it.
+    if let Some(s) = score
+        && sort.is_score_led()
+        && let Some(&Local::Score(worst)) = heap.worst().and_then(|w| w.locals().first())
+        && s < worst
+    {
+        return Ok(());
+    }
     scratch.clear();
     for (&(key, _), reader) in sort.keys.iter().zip(readers.iter_mut()) {
         scratch.push(match reader {

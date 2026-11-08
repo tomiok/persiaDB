@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
+  `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
+  the matches scoring below the worst kept hit (ties are still compared on the later keys), and rejects such a match
+  before reading its columns. `search_request/score_then_newest` 719 → 550 µs. Results are unchanged.
 - `persia-engine`: the memtable's views share their copies of a field's column keys and `keyword` column (ROADMAP
   7.5.7; SPEC §10.6). A request takes a new memtable view, and views of the same documents now copy a column once
   between them instead of once each; the memtable keeps one copy per field (the one of the most documents) and counts
