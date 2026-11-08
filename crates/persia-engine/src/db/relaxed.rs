@@ -58,16 +58,95 @@ impl RelaxedHit {
     }
 }
 
-/// What the cascade did (SPEC §7.6).
+/// What the relaxation cascade did, as a response states it (SPEC §7.6): its `level`, what it `applied`, the query's
+/// `original` and `effective` text, the terms it `corrected`, and whether its budget `truncated` it.
+///
+/// ```
+/// use persia_engine::db::{Database, DatabaseOptions, Execution, SearchRequest};
+/// use persia_engine::document::{Document, Value};
+/// use persia_engine::query::{Query, TermQuery};
+/// use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
+/// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+/// use persia_engine::wal::Durability;
+/// use persia_storage::container::sim::SimFile;
+///
+/// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+/// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+/// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+/// db.create_collection(schema)?;
+/// db.put("c", &Document::new("a").with(body, Value::String("red shoes".into())), Durability::Fsync)?;
+///
+/// let snapshot = db.snapshot();
+/// let c = snapshot.collection("c").ok_or("no collection")?;
+/// let memtable = c.memtable();
+/// let views = c.views(&memtable)?;
+/// // The collection's defaults, as a query that gives no `relax` gets them.
+/// let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default())?;
+/// let red = Query::Term(TermQuery { field: body, term: "red".into() });
+/// let out = views.search_relaxed(&red, &SearchRequest::default(), &relax, &Execution::default())?;
+/// let relaxation = &out.relaxation;
+/// // `red` has a hit at L0: nothing was relaxed.
+/// assert_eq!(relaxation.level, RelaxLevel::Exact);
+/// assert_eq!(relaxation.level.name(), "exact");
+/// assert!(!relaxation.relaxed());
+/// assert!(!relaxation.truncated);
+/// // Defined, filled by later leaves (ROADMAP 8.1.7, 8.2.4.3).
+/// assert_eq!((relaxation.original.as_deref(), relaxation.effective.as_deref()), (None, None));
+/// assert!(relaxation.corrected.is_empty());
+/// // Each hit states the step that found it, at L0 here.
+/// assert_eq!(out.hits[0].level, RelaxLevel::Exact);
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Relaxation {
-    /// The level of the last step built: [`RelaxLevel::Exact`] when L0 found enough or no later level built a step.
+    /// The level of the last step built (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no later level
+    /// built a step. Every page of one query on one snapshot states the same, unless the budget truncated it.
     pub level: RelaxLevel,
-    /// What each step after L0 applied, in the order they were built.
+    /// What each step after L0 applied, in the order they were built (`"applied"`): `"drop_terms:75%"`, `"fuzzy"`.
+    /// Empty when nothing was relaxed.
     pub applied: Vec<String>,
+    /// The user text the query was compiled from (`"original"`). `None` until ROADMAP 8.1.7 records each compiled
+    /// clause's source span and text in [`crate::query::Compiled`].
+    pub original: Option<String>,
+    /// The text of the last step's query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. `None`
+    /// until ROADMAP 8.1.7 (spans), which it is rendered from.
+    pub effective: Option<String>,
+    /// The terms the fuzzy level replaced, in query order (`"corrected"`). Empty until ROADMAP 8.2.4.3 synthesizes
+    /// the corrected query ("did you mean").
+    pub corrected: Vec<Correction>,
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
     /// completed before it, and `level` and `applied` describe those steps.
     pub truncated: bool,
+}
+
+impl Relaxation {
+    /// What a cascade that built steps through `level`, applying `applied`, did. The text and corrections wait on
+    /// ROADMAP 8.1.7 and 8.2.4.3.
+    fn of(level: RelaxLevel, applied: Vec<String>, truncated: bool) -> Self {
+        Self {
+            level,
+            applied,
+            original: None,
+            effective: None,
+            corrected: Vec::new(),
+            truncated,
+        }
+    }
+
+    /// Whether the cascade built a step after L0, so the response may hold hits a strict query does not match.
+    pub fn relaxed(&self) -> bool {
+        !self.applied.is_empty()
+    }
+}
+
+/// A term the fuzzy level replaced (SPEC §7.6 `"corrected"`, ROADMAP 8.2.4.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Correction {
+    /// The term as the user wrote it: `"zapatilas"`.
+    pub original: String,
+    /// What the response searched instead: `"zapatillas"`.
+    pub corrected: String,
 }
 
 /// What a relaxed search returns.
@@ -276,11 +355,7 @@ impl CollectionViews<'_> {
         Ok(RelaxedResults {
             hits,
             facets,
-            relaxation: Relaxation {
-                level,
-                applied,
-                truncated,
-            },
+            relaxation: Relaxation::of(level, applied, truncated),
         })
     }
 
