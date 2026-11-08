@@ -461,7 +461,7 @@ and ×2. `must_should` (one `must`) has no pair and is unchanged.
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over
 54 store items and how-to articles (`crates/persia-engine/tests/relevance/`), BM25F over `title` (boost 2) and `body`,
-`en` analyzer. Per-query values are in `tests/relevance/baseline.txt`, the baseline of the regression gate: every value
+`en` analyzer. Per-query values are in `crates/persia-engine/tests/relevance/baseline.txt`, the baseline of the regression gate: every value
 and the mean must stay within `0.0001` (one unit in the fourth decimal, the rounding a platform's `ln`/`powf` may flip)
 of it. A drop beyond that fails as a regression, and a rise fails too, so an improvement lands only with the baseline
 replaced on purpose by the table the failure prints, the PR naming the queries that moved. The tolerance is below
