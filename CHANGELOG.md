@@ -9,8 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
-- `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for a cursor of a search that did not
-  relax).
+- `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for step 0 of a cascade that stopped at L0, as
+  every cursor of a search that did not relax), and `SearchHit` a crate-private one with the same value, so it can
+  no longer be built outside the crate.
 - `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
   `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
   the matches scoring below the worst kept hit (ties are still compared on the later keys), and rejects such a match
@@ -129,15 +130,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   each `RelaxedHit` states its `level`, `step` and `rank_score`. `original` and `effective` are `None` until ROADMAP
   8.1.7 (clause spans), and `corrected` is empty until ROADMAP 8.2.4.3 (did you mean).
 - `persia-engine`: the relaxation budget (ROADMAP 8.1.4; SPEC §7.6; ADR-0037). `budget_ms` runs from the moment L0
-  finishes, on the clock given by `Execution::clock` (else the deadline's, else the system clock). It is checked
+  finishes, on the clock given by `Execution::budget_clock` (else the deadline's, else the system clock). It is checked
   before each level and step and inside each step's search, so a step it passes is dropped whole. The response then
-  holds the completed steps' hits with `Relaxation::truncated` set. L0 is never cut by it; the request's own deadline
-  and token remain errors.
+  holds the completed steps' hits with `Relaxation::truncated` set. L0 is never cut by it; the request's own deadline and
+  token remain errors.
 - `persia-engine`: relaxed hits rank by step, then by the sort, and page across steps (ROADMAP 8.1.3; SPEC §7.4,
   §7.6; ADR-0037). Every hit of a stricter step ranks above every hit of a looser one, whatever their scores; each
   keeps its step's own score. `RelaxedHit::rank_score` (`relax::rank_score`) gives one number that never increases
   down a page sorted by score. `Cursor::relaxed` (`StepCursor`: the hit's step, the cascade's last step), set by
-  `RelaxedHit::cursor`, lets `search_relaxed` page after any hit; offset and cursor pages are slices of one ranking.
+  the cursor of a relaxed hit (`RelaxedHit::cursor`, or its inner `SearchHit::cursor`), lets `search_relaxed` page after any hit; offset and cursor pages are slices of one ranking.
   A plain search given a cursor from a later step, or a cursor whose step is after its last, is
   `RequestError::CursorStep`.
 - `persia-engine`: the relaxation cascade (ROADMAP 8.1.2; SPEC §7.6; ADR-0037). `CollectionViews::search_relaxed`

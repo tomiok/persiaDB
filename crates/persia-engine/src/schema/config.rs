@@ -73,6 +73,17 @@ pub struct RelaxationConfig {
     pub budget_ms: u32,
 }
 
+impl RelaxationConfig {
+    /// `min_results`' range (SPEC §6.2.3), for the collection's setting and a query's override alike.
+    pub const MIN_RESULTS: core::ops::RangeInclusive<u32> = 1..=10_000;
+    /// [`Self::MIN_RESULTS`] as an error names it.
+    pub(crate) const MIN_RESULTS_ALLOWED: &'static str = "1..=10000";
+    /// `budget_ms`' range (SPEC §6.2.3).
+    pub const BUDGET_MS: core::ops::RangeInclusive<u32> = 1..=60_000;
+    /// [`Self::BUDGET_MS`] as an error names it.
+    pub(crate) const BUDGET_MS_ALLOWED: &'static str = "1..=60000";
+}
+
 impl Default for RelaxationConfig {
     fn default() -> Self {
         Self {
@@ -98,6 +109,20 @@ pub enum Levels {
 }
 
 impl Levels {
+    /// What breaks SPEC §6.2.3's rule for custom levels (distinct, in cascade order), if anything.
+    pub(crate) fn problem(&self) -> Option<&'static str> {
+        let Self::Custom(levels) = self else {
+            return None;
+        };
+        levels.windows(2).find_map(|pair| match pair {
+            [a, b] if a == b => Some("a level is listed twice"),
+            [a, b] if a > b => {
+                Some("levels must be in cascade order (synonyms, drop_terms, prefix, fuzzy)")
+            }
+            _ => None,
+        })
+    }
+
     /// The levels that run, in cascade order.
     pub fn resolve(&self) -> &[Level] {
         match self {

@@ -40,21 +40,13 @@ pub struct RelaxedHit {
     /// [`rank_score`] of the step and the score: never below a later step's, so it does not increase down a page
     /// sorted by score descending.
     pub rank_score: f64,
-    /// The last step of the cascade that returned the hit, for its cursor.
-    last: usize,
 }
 
 impl RelaxedHit {
-    /// The cursor of the page after this hit (SPEC §7.4, §7.6): [`SearchHit::cursor`] with the hit's step and the
-    /// last step of its cascade, for [`CollectionViews::search_relaxed`].
+    /// The cursor of the page after this hit (SPEC §7.4, §7.6), for [`CollectionViews::search_relaxed`]: the same as
+    /// [`SearchHit::cursor`] of [`Self::hit`], which records the hit's step and the last step of its cascade too.
     pub fn cursor(&self) -> Cursor {
-        Cursor {
-            relaxed: Some(StepCursor {
-                step: self.step,
-                last: self.last,
-            }),
-            ..self.hit.cursor()
-        }
+        self.hit.cursor()
     }
 }
 
@@ -101,7 +93,8 @@ impl RelaxedHit {
 #[non_exhaustive]
 pub struct Relaxation {
     /// The level of the last step built (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no later level
-    /// built a step. Every page of one query on one snapshot states the same, unless the budget truncated it.
+    /// built a step. Without `fill`, every page of one query on one snapshot states the same, unless the budget
+    /// truncated it; with `fill`, a deeper page may build, and state, more steps.
     pub level: RelaxLevel,
     /// What each step after L0 applied, in the order they were built (`"applied"`): `"drop_terms:75%"`, `"fuzzy"`.
     /// Empty when nothing was relaxed.
@@ -190,20 +183,29 @@ struct Start {
 impl Start {
     /// From the top without a cursor; from `cursor`'s step otherwise, one without a step being step 0 of a cascade
     /// that stopped at L0.
-    fn of(cursor: Option<&Cursor>) -> Self {
-        match cursor {
-            None => Self {
+    ///
+    /// # Errors
+    /// [`RequestError::CursorStep`] for a cursor from a step after L0 when `relax` does not relax: every hit it
+    /// returns ranks before the cursor, as for a plain search.
+    fn of(cursor: Option<&Cursor>, relax: &RelaxPlan) -> Result<Self, RequestError> {
+        let Some(cursor) = cursor else {
+            return Ok(Self {
                 step: 0,
                 last: None,
-            },
-            Some(cursor) => {
-                let at = cursor.relaxed.unwrap_or(StepCursor { step: 0, last: 0 });
-                Self {
-                    step: at.step,
-                    last: Some(at.last),
-                }
-            }
+            });
+        };
+        let at = cursor.relaxed.unwrap_or(StepCursor { step: 0, last: 0 });
+        if at.step > 0 && !relax.relaxes() {
+            return Err(RequestError::CursorStep {
+                step: at.step,
+                last: at.last,
+                reason: "a search that does not relax returns L0's hits only, which rank before it",
+            });
         }
+        Ok(Self {
+            step: at.step,
+            last: Some(at.last),
+        })
     }
 
     /// The hits the cascade counts: from the top, enough to tell `min_results` and fill the window; after a cursor
@@ -247,8 +249,44 @@ impl CollectionViews<'_> {
     /// is full or the last step is passed (with `fill`, until the page is full). A cursor without a step
     /// ([`SearchHit::cursor`]) is step 0 of a cascade that stopped at L0.
     ///
+    /// ```
+    /// use persia_engine::db::{Database, DatabaseOptions, Execution, SearchRequest};
+    /// use persia_engine::document::{Document, Value};
+    /// use persia_engine::query::{Query, TermQuery};
+    /// use persia_engine::relax::{RelaxOptions, RelaxPlan};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::wal::Durability;
+    /// use persia_storage::container::sim::SimFile;
+    ///
+    /// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let mut db = Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default())?;
+    /// db.create_collection(schema)?;
+    /// for (id, text) in [("a", "red shoes"), ("b", "red hat")] {
+    ///     db.put("c", &Document::new(id).with(body, Value::String(text.into())), Durability::Fsync)?;
+    /// }
+    /// let snapshot = db.snapshot();
+    /// let c = snapshot.collection("c").ok_or("no collection")?;
+    /// let memtable = c.memtable();
+    /// let views = c.views(&memtable)?;
+    /// let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default())?;
+    /// let red = Query::Term(TermQuery { field: body, term: "red".into() });
+    /// let exec = Execution::default();
+    ///
+    /// let page = SearchRequest { limit: 1, ..SearchRequest::default() };
+    /// let first = views.search_relaxed(&red, &page, &relax, &exec)?;
+    /// // The next page starts after the last hit, at that hit's step of the cascade.
+    /// let next = SearchRequest { search_after: first.hits.last().map(|h| h.cursor()), ..page };
+    /// let second = views.search_relaxed(&red, &next, &relax, &exec)?;
+    /// let ids: Vec<&str> = first.hits.iter().chain(&second.hits).map(|h| h.hit.document.id()).collect();
+    /// assert_eq!(ids.len(), 2);
+    /// assert_ne!(ids[0], ids[1]);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
     /// # Errors
-    /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last;
+    /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
+    /// after L0 when `relax` does not relax;
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned.
     pub fn search_relaxed(
         &self,
@@ -259,21 +297,20 @@ impl CollectionViews<'_> {
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let window = self.check_request(request)?;
         let collection = self.collection();
-        let schema = collection.schema();
         let stats = collection.search_statistics(self.memtable());
-        let start = Start::of(request.search_after.as_ref());
+        let start = Start::of(request.search_after.as_ref(), relax)?;
         let min_results = usize::try_from(relax.min_results()).unwrap_or(usize::MAX);
         let need = start.need(window, min_results);
         let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
         let counting = !request.facets.is_empty();
 
         let mut ran: Vec<Ran> = Vec::new();
-        let mut earlier: Vec<Query> = Vec::new();
+        let mut earlier: Vec<Cow<'_, Query>> = Vec::new();
         let mut applied = Vec::new();
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
-        let clock = exec.budget_clock();
+        let clock = exec.relax_clock();
         let mut truncated = false;
         'levels: for planned in relax.planned() {
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
@@ -288,12 +325,7 @@ impl CollectionViews<'_> {
             let steps: Vec<(Cow<'_, Query>, String)> = if ran.is_empty() {
                 vec![(Cow::Borrowed(query), String::new())]
             } else {
-                let previous = earlier.last().unwrap_or(query);
-                let input = LevelInput {
-                    original: query,
-                    previous,
-                    schema,
-                };
+                let input = LevelInput { original: query };
                 planned
                     .transform
                     .steps(&input)
@@ -342,7 +374,7 @@ impl CollectionViews<'_> {
                     level: planned.level,
                     searched,
                 });
-                earlier.push(step.into_owned());
+                earlier.push(step);
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
@@ -365,7 +397,7 @@ impl CollectionViews<'_> {
     fn budgeted_step(
         &self,
         step: &Query,
-        earlier: &[Query],
+        earlier: &[Cow<'_, Query>],
         stats: &SearchStatistics<'_>,
         part: &Part<'_>,
         exec: &Execution,
@@ -384,7 +416,7 @@ impl CollectionViews<'_> {
     fn search_step(
         &self,
         step: &Query,
-        earlier: &[Query],
+        earlier: &[Cow<'_, Query>],
         stats: &SearchStatistics<'_>,
         part: &Part<'_>,
         exec: &Execution,
@@ -446,12 +478,16 @@ impl CollectionViews<'_> {
                 Vec::new()
             };
             let page = self.page_hits(&segments, page, explanations, &request.projection)?;
-            hits.extend(page.into_iter().map(|hit| RelaxedHit {
-                rank_score: rank_score(step, hit.score),
-                hit,
-                level,
-                step,
-                last,
+            // Step 0 of a cascade that stopped at L0 is what a cursor without a step means.
+            let at = (step, last) != (0, 0);
+            hits.extend(page.into_iter().map(|mut hit| {
+                hit.relaxed = at.then_some(StepCursor { step, last });
+                RelaxedHit {
+                    rank_score: rank_score(step, hit.score),
+                    hit,
+                    level,
+                    step,
+                }
             }));
         }
         Ok((hits, facets.into_iter().map(FacetCounter::finish).collect()))
@@ -468,11 +504,11 @@ fn is_deadline(e: &RelaxedSearchError) -> bool {
 }
 
 /// The plan of a step's `query` with the `earlier` steps' queries excluded (SPEC §7.6): a document they match is
-/// theirs. L0, with none earlier, is planned as it is. A `bool` with one `must` clause and only `must_not` beside it
+/// theirs. L0, with none earlier, is planned as it is (no copy). A `bool` with one `must` clause and only `must_not` beside it
 /// scores that clause's score exactly (`0.0 + s`), so the step ranks as its query alone.
 fn plan_step(
     query: &Query,
-    earlier: &[Query],
+    earlier: &[Cow<'_, Query>],
     schema: &CollectionSchema,
     stats: &SearchStatistics<'_>,
     terms: &ExecTerms<'_>,
@@ -482,7 +518,7 @@ fn plan_step(
     }
     let excluded = Query::Bool(BoolQuery {
         must: vec![query.clone()],
-        must_not: earlier.to_vec(),
+        must_not: earlier.iter().map(|q| q.as_ref().clone()).collect(),
         ..BoolQuery::default()
     });
     SearchPlan::with_terms(&excluded, schema, stats, terms)

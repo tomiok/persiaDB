@@ -3,9 +3,9 @@
 use std::collections::BTreeSet;
 
 use super::{
-    CollectionSchema, Field, FieldId, FieldKind, FieldType, Levels, MAX_FIELDS, MAX_NAME_LEN,
+    CollectionSchema, Field, FieldId, FieldKind, FieldType, MAX_FIELDS, MAX_NAME_LEN,
     MAX_SYNONYM_BYTES, MAX_SYNONYM_GROUP_LEN, MAX_SYNONYM_GROUPS, MAX_SYNONYM_TERM_LEN,
-    NameProblem, Parts, SchemaError,
+    NameProblem, Parts, RelaxationConfig, SchemaError,
 };
 
 const COLLECTION_PATTERN: &str = "[a-z][a-z0-9_-]*";
@@ -234,32 +234,19 @@ fn check_relaxation(parts: &Parts) -> Result<(), SchemaError> {
     check_u32(
         "relaxation.min_results",
         relax.min_results,
-        1..=10_000,
-        "1..=10000",
+        RelaxationConfig::MIN_RESULTS,
+        RelaxationConfig::MIN_RESULTS_ALLOWED,
     )?;
     check_u32(
         "relaxation.budget_ms",
         relax.budget_ms,
-        1..=60_000,
-        "1..=60000",
+        RelaxationConfig::BUDGET_MS,
+        RelaxationConfig::BUDGET_MS_ALLOWED,
     )?;
-    if let Levels::Custom(levels) = &relax.levels {
-        for pair in levels.windows(2) {
-            if let [a, b] = pair {
-                if a == b {
-                    return Err(SchemaError::Levels {
-                        problem: "a level is listed twice",
-                    });
-                }
-                if a > b {
-                    return Err(SchemaError::Levels {
-                        problem: "levels must be in cascade order (synonyms, drop_terms, prefix, fuzzy)",
-                    });
-                }
-            }
-        }
+    match relax.levels.problem() {
+        Some(problem) => Err(SchemaError::Levels { problem }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 fn check_synonyms(groups: &[Vec<String>]) -> Result<(), SchemaError> {

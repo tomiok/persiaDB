@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::query::TermQuery;
-use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+use crate::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 
 const ALL: [RelaxLevel; 6] = [
     RelaxLevel::Exact,
@@ -243,14 +243,8 @@ fn input_query() -> (CollectionSchema, Query) {
 
 #[test]
 fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
-    let (schema, query) = input_query();
-    // A previous step that differs: L0 is the original, whatever came before.
-    let previous = Query::MatchAll;
-    let input = LevelInput {
-        original: &query,
-        previous: &previous,
-        schema: &schema,
-    };
+    let (_, query) = input_query();
+    let input = LevelInput { original: &query };
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::default()).unwrap();
     let steps: Vec<Vec<Step>> = plan
         .planned()
@@ -279,12 +273,8 @@ impl LevelTransform for Fixed {
 
 #[test]
 fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() {
-    let (schema, query) = input_query();
-    let input = LevelInput {
-        original: &query,
-        previous: &query,
-        schema: &schema,
-    };
+    let (_, query) = input_query();
+    let input = LevelInput { original: &query };
     let step = Step {
         query: Query::MatchAll,
         applied: "prefix".into(),

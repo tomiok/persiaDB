@@ -114,8 +114,9 @@ impl CancelToken {
     }
 }
 
-/// How a search over a collection runs: pruning, threads, a deadline and a cancellation token (SPEC §7.3, ROADMAP
-/// 7.6). The default prunes with [`Pruning::default`] on [`Threads::Global`], with neither a deadline nor a token.
+/// How a search over a collection runs: pruning, threads, a deadline, a cancellation token, and the clock of the relaxation
+/// budget (SPEC §7.3, §7.6, ROADMAP 7.6, 8.1.4). The default prunes with [`Pruning::default`] on [`Threads::Global`], with
+/// neither a deadline nor a token, and reads the budget on the system clock.
 ///
 /// ```
 /// use std::sync::Arc;
@@ -183,14 +184,24 @@ impl Execution {
     /// Reads the relaxation cascade's time budget (`budget_ms`, SPEC §7.6) on `clock`: a test's
     /// [`super::ManualClock`], or the database's own clock. Without one, the budget reads [`Self::deadline`]'s clock,
     /// or else [`SystemClock`].
+    ///
+    /// ```
+    /// use std::sync::Arc;
+    /// use persia_engine::db::{Execution, ManualClock};
+    ///
+    /// // A test moves the clock itself, so no search reads the wall clock.
+    /// let clock = Arc::new(ManualClock::new(0));
+    /// let exec = Execution::default().budget_clock(clock);
+    /// # let _ = exec;
+    /// ```
     #[must_use]
-    pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
+    pub fn budget_clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
         self
     }
 
-    /// The clock the relaxation budget reads: [`Self::clock`]'s, else the deadline's, else the system's.
-    pub(super) fn budget_clock(&self) -> Arc<dyn Clock> {
+    /// The clock the relaxation budget reads: [`Self::budget_clock`]'s, else the deadline's, else the system's.
+    pub(super) fn relax_clock(&self) -> Arc<dyn Clock> {
         static SYSTEM: LazyLock<Arc<dyn Clock>> = LazyLock::new(|| Arc::new(SystemClock));
         self.clock
             .as_ref()
@@ -199,12 +210,12 @@ impl Execution {
             .clone()
     }
 
-    /// This execution, also stopping with [`Interrupt::DeadlineExceeded`] once [`Self::budget_clock`] reads `end`:
+    /// This execution, also stopping with [`Interrupt::DeadlineExceeded`] once [`Self::relax_clock`] reads `end`:
     /// how a relaxation step after L0 keeps to the cascade's budget. Whether the budget or this execution's own
     /// deadline stopped it is told by [`Self::interrupt`] of this execution, which reads no budget.
     pub(super) fn within_budget(&self, end: Instant) -> Self {
         Self {
-            budget: Some((self.budget_clock(), end)),
+            budget: Some((self.relax_clock(), end)),
             ..self.clone()
         }
     }

@@ -20,7 +20,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use persia_storage::container::sim::SimFile;
 
-use crate::db::{Database, DatabaseOptions, Execution, SearchRequest, StepCursor, Threads};
+use crate::db::{
+    Database, DatabaseOptions, Execution, ManualClock, SearchRequest, StepCursor, Threads,
+};
 use crate::document::{Document, Value};
 use crate::query::{Query, TermQuery};
 use crate::relax::{LevelInput, LevelTransform, RelaxLevel, RelaxOptions, RelaxPlan, Step};
@@ -107,8 +109,12 @@ fn step(query: Query, applied: &str) -> Step {
     }
 }
 
+/// On the calling thread, with the budget read on a clock that never moves: a cascade is truncated only where a test
+/// moves the clock (`mod budget`), never by how long a step took on the machine.
 fn exec() -> Execution {
-    Execution::new(Pruning::default()).threads(Threads::Current)
+    Execution::new(Pruning::default())
+        .threads(Threads::Current)
+        .budget_clock(Arc::new(ManualClock::new(0)))
 }
 
 /// A plan of L0 and the stubs given, every other level dropped.
@@ -751,14 +757,23 @@ mod random {
             })
     }
 
-    fn build(case: &Case) -> (Database<SimFile>, FieldId, FieldId) {
+    /// The case's documents; `tag` is `t0` or `t1` by the parity of `n`, a facet.
+    fn build(case: &Case) -> (Database<SimFile>, FieldId, FieldId, FieldId) {
         let schema = SchemaBuilder::new("c")
             .field("body", FieldKind::Text(TextOptions::default()))
             .field("n", FieldKind::I64 { stored: false })
+            .field(
+                "tag",
+                FieldKind::Keyword(KeywordOptions {
+                    facet: true,
+                    ..KeywordOptions::default()
+                }),
+            )
             .build()
             .unwrap();
         let body = schema.field("body").unwrap().id();
         let n = schema.field("n").unwrap().id();
+        let tag = schema.field("tag").unwrap().id();
         let mut db =
             Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default()).unwrap();
         db.create_collection(schema).unwrap();
@@ -766,13 +781,40 @@ mod random {
             let text: Vec<&str> = words.iter().map(|&w| WORDS[w]).collect();
             let doc = Document::new(format!("d{i}"))
                 .with(body, Value::String(text.join(" ")))
-                .with(n, Value::I64(*value));
+                .with(n, Value::I64(*value))
+                .with(tag, Value::String(tag_of(*value)));
             db.put("c", &doc, Durability::Buffered).unwrap();
             if case.commits.contains(&i) {
                 db.commit().unwrap();
             }
         }
-        (db, body, n)
+        (db, body, n, tag)
+    }
+
+    fn tag_of(n: i64) -> String {
+        format!("t{}", n.rem_euclid(2))
+    }
+
+    /// Facet counts of `ids` (documents `d{i}`), as `(value, count)` sorted by value.
+    fn tag_counts<'a>(case: &Case, ids: impl Iterator<Item = &'a str>) -> Vec<(Vec<u8>, u64)> {
+        let mut counts = std::collections::BTreeMap::<Vec<u8>, u64>::new();
+        for id in ids {
+            let i: usize = id.strip_prefix('d').unwrap().parse().unwrap();
+            *counts
+                .entry(tag_of(case.docs[i].1).into_bytes())
+                .or_default() += 1;
+        }
+        counts.into_iter().collect()
+    }
+
+    fn counted(out: &super::super::RelaxedResults) -> Vec<(Vec<u8>, u64)> {
+        let mut got: Vec<_> = out.facets[0]
+            .values
+            .iter()
+            .map(|v| (v.value.clone(), v.count))
+            .collect();
+        got.sort_unstable();
+        got
     }
 
     /// L0 `w0 AND w1`, then `w0 OR w1` (synonyms), then `w2` and `w3` (two `drop_terms` steps), nothing at prefix, and
@@ -841,8 +883,9 @@ mod random {
         strip(hits)
     }
 
+    #[allow(clippy::too_many_lines)] // One case, every invariant against the same oracle.
     fn check(case: &Case) -> Result<(), TestCaseError> {
-        let (db, body, n) = build(case);
+        let (db, body, n, tag) = build(case);
         let snapshot = db.snapshot();
         let c = snapshot.collection("c").unwrap();
         let memtable = c.memtable();
@@ -887,6 +930,41 @@ mod random {
                     .all(|w| w[0].rank_score >= w[1].rank_score)
             );
         }
+        // Facets count every step built, each document once; explanations score their hits, bit for bit. Without
+        // `fill`, a page by offset or by cursor builds the same steps and counts the same.
+        let facets = vec![FacetRequest::new(tag, 10, c.schema()).unwrap()];
+        let faceted = SearchRequest {
+            facets: facets.clone(),
+            explain: true,
+            ..base.clone()
+        };
+        let out = views
+            .search_relaxed(&l0, &faceted, &relax, &exec())
+            .unwrap();
+        let union = tag_counts(case, want.iter().map(|(id, ..)| id.as_str()));
+        prop_assert_eq!(counted(&out), union.clone());
+        for hit in &out.hits {
+            let e = hit.hit.explanation.as_ref().unwrap();
+            prop_assert_eq!(e.score().to_bits(), hit.hit.score.to_bits());
+        }
+        if !case.fill {
+            let first = SearchRequest {
+                sort: sort.clone(),
+                facets,
+                ..request(case.k)
+            };
+            let page = views.search_relaxed(&l0, &first, &relax, &exec()).unwrap();
+            prop_assert_eq!(counted(&page), union.clone());
+            if let Some(last) = page.hits.last() {
+                let next = SearchRequest {
+                    search_after: Some(last.cursor()),
+                    ..first.clone()
+                };
+                let next = views.search_relaxed(&l0, &next, &relax, &exec()).unwrap();
+                prop_assert_eq!(counted(&next), union.clone());
+                prop_assert_eq!(&next.relaxation, &page.relaxation);
+            }
+        }
         // Every pruning strategy and thread layout gives the same hits, bit for bit.
         for pruning in [
             Pruning::Exhaustive,
@@ -894,7 +972,9 @@ mod random {
             Pruning::BlockMaxWand,
         ] {
             for threads in [Threads::Current, Threads::Global] {
-                let e = Execution::new(pruning).threads(threads);
+                let e = Execution::new(pruning)
+                    .threads(threads)
+                    .budget_clock(Arc::new(ManualClock::new(0)));
                 let got = views.search_relaxed(&l0, &base, &relax, &e).unwrap();
                 prop_assert_eq!(rows(&got.hits), want.clone(), "{:?}", pruning);
             }
@@ -936,7 +1016,7 @@ mod budget {
     use std::time::{Duration, Instant};
 
     use super::*;
-    use crate::db::{Clock, ManualClock};
+    use crate::db::Clock;
     use crate::search::Interrupt;
 
     /// Moves `by` on every read of [`Clock::now`].
@@ -1010,7 +1090,7 @@ mod budget {
         let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
         let relax = plan(&budget(1, 10), &[(RelaxLevel::Synonyms, &synonyms)]);
         // 10 ms a read, 1 ms of budget: past it at the first read after L0.
-        let exec = exec().clock(Ticking::new(10));
+        let exec = exec().budget_clock(Ticking::new(10));
         let out = views
             .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
             .unwrap();
@@ -1040,7 +1120,7 @@ mod budget {
         let relax = plan(&budget(50, 10), &[])
             .with_level(RelaxLevel::Synonyms, Arc::clone(&synonyms) as _)
             .with_level(RelaxLevel::DropTerms, Arc::clone(&drop) as _);
-        let exec = exec().clock(Arc::clone(&clock) as _);
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
         let out = views
             .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
             .unwrap();
@@ -1078,7 +1158,7 @@ mod budget {
         let relax = plan(&budget(10, 10), &[(RelaxLevel::Synonyms, &synonyms)]);
         // Reads after L0: the budget's start (t), before the level (t + 4), before the step (t + 8, within 10), then
         // the step's search reads t + 12, past it.
-        let exec = exec().clock(Ticking::new(4));
+        let exec = exec().budget_clock(Ticking::new(4));
         let out = views
             .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
             .unwrap();
@@ -1088,6 +1168,49 @@ mod budget {
         assert!(out.relaxation.truncated);
         assert_eq!(out.relaxation.level, RelaxLevel::Exact);
         assert_eq!(out.relaxation.applied.len(), 0);
+    }
+
+    #[test]
+    fn a_truncated_step_counts_no_facet_and_its_cursor_page_resumes() {
+        let (db, body, tag) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+        let relax = plan(&budget(10, 10), &[(RelaxLevel::Synonyms, &synonyms)]);
+        let request = SearchRequest {
+            facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+            ..request(10)
+        };
+        // As `a_step_the_budget_passes_inside_is_dropped_whole`: the step is built, then cut inside its search.
+        let out = views
+            .search_relaxed(
+                &term(body, "red"),
+                &request,
+                &relax,
+                &exec().budget_clock(Ticking::new(4)),
+            )
+            .unwrap();
+        assert!(out.relaxation.truncated);
+        let counted: u64 = out.facets[0].values.iter().map(|v| v.count).sum();
+        assert_eq!(counted, 2, "only red's documents: hat's step was dropped");
+        // Its last hit's cursor records the last step completed, L0; a page after it with time to spare resumes.
+        let cursor = out.hits.last().unwrap().cursor();
+        assert_eq!(cursor.relaxed, None);
+        let next = SearchRequest {
+            search_after: Some(cursor),
+            ..request
+        };
+        let out = views
+            .search_relaxed(&term(body, "red"), &next, &relax, &exec())
+            .unwrap();
+        assert!(!out.relaxation.truncated);
+        assert_eq!(
+            out.hits.len(),
+            0,
+            "the cursor's cascade stopped at L0, and a page after it does too"
+        );
     }
 
     #[test]
@@ -1112,7 +1235,6 @@ mod budget {
         assert!(out.relaxation.truncated);
         assert_eq!(out.hits.len(), 2);
     }
-
     #[test]
     fn the_requests_own_deadline_and_token_are_errors_not_a_truncation() {
         let (db, body, _) = database();
@@ -1126,7 +1248,7 @@ mod budget {
         // The deadline at 20 ms passes while synonyms builds, inside the budget.
         let at = clock.now() + Duration::from_millis(20);
         let exec = exec()
-            .clock(Arc::clone(&clock) as _)
+            .budget_clock(Arc::clone(&clock) as _)
             .deadline(Arc::clone(&clock) as _, at);
         let err = views
             .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
@@ -1174,7 +1296,10 @@ fn the_response_states_what_the_cascade_did() {
     ]);
     let relax = plan(
         &min(1),
-        &[(RelaxLevel::Synonyms, &none), (RelaxLevel::DropTerms, &drop)],
+        &[
+            (RelaxLevel::Synonyms, &none),
+            (RelaxLevel::DropTerms, &drop),
+        ],
     );
     // L0 has no hit; synonyms builds nothing and is not listed; drop_terms' first step has no hit either.
     let out = views
@@ -1190,7 +1315,11 @@ fn the_response_states_what_the_cascade_did() {
     assert_eq!(r.original, None);
     assert_eq!(r.effective, None);
     assert_eq!(r.corrected, []);
-    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::DropTerms && h.step == 2));
+    assert!(
+        out.hits
+            .iter()
+            .all(|h| h.level == RelaxLevel::DropTerms && h.step == 2)
+    );
     // A query with hits at L0 states that nothing was relaxed.
     let out = views
         .search_relaxed(&term(body, "red"), &request(10), &relax, &exec())
@@ -1198,4 +1327,100 @@ fn the_response_states_what_the_cascade_did() {
     assert!(!out.relaxation.relaxed());
     assert_eq!(out.relaxation.level, RelaxLevel::Exact);
     assert_eq!(out.relaxation.applied.len(), 0);
+}
+
+#[test]
+fn with_fill_each_page_states_the_steps_it_built() {
+    let (db, body, tag) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let fill = RelaxOptions {
+        fill: Some(true),
+        ..min(1)
+    };
+    let relax = plan(&fill, &[(RelaxLevel::Synonyms, &synonyms)]);
+    let base = SearchRequest {
+        facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+        ..request(2)
+    };
+    let red = term(body, "red");
+    // Page 1 (window 2) is full at L0: it builds nothing more, and counts red's documents only.
+    let first = views.search_relaxed(&red, &base, &relax, &exec()).unwrap();
+    assert_eq!(first.relaxation.applied.len(), 0);
+    let count =
+        |out: &super::RelaxedResults| -> u64 { out.facets[0].values.iter().map(|v| v.count).sum() };
+    assert_eq!(count(&first), 2);
+    // Page 2, by cursor or by offset, needs more: it builds synonyms and counts its documents too.
+    let by_cursor = SearchRequest {
+        search_after: Some(first.hits[1].cursor()),
+        ..base.clone()
+    };
+    let by_offset = SearchRequest {
+        offset: 2,
+        ..base.clone()
+    };
+    for next in [by_cursor, by_offset] {
+        let second = views.search_relaxed(&red, &next, &relax, &exec()).unwrap();
+        assert_eq!(second.relaxation.applied, ["synonyms"]);
+        assert_eq!(second.relaxation.level, RelaxLevel::Synonyms);
+        assert_eq!(count(&second), 4);
+        assert_eq!(second.hits.len(), 2);
+    }
+}
+
+#[test]
+fn cursors_from_other_searches_page_as_their_step_says() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let relax = plan(&min(10), &[(RelaxLevel::Synonyms, &synonyms)]);
+    let red = term(body, "red");
+    // A plain search's cursor (no step) is step 0 of a cascade that stopped at L0: L0 after it, and no further.
+    let plain =
+        SearchPlan::with_terms(&red, c.schema(), &c.search_statistics(&memtable), &views).unwrap();
+    let first = views.search_with(&plain, &request(1), &exec()).unwrap();
+    assert_eq!(first.hits[0].cursor().relaxed, None);
+    let next = SearchRequest {
+        search_after: Some(first.hits[0].cursor()),
+        ..request(10)
+    };
+    let out = views.search_relaxed(&red, &next, &relax, &exec()).unwrap();
+    assert_eq!(out.hits.len(), 1);
+    assert_eq!(
+        (out.hits[0].step, out.relaxation.level),
+        (0, RelaxLevel::Exact)
+    );
+    // The inner hit's cursor is the relaxed hit's: it keeps the step.
+    let relaxed = views
+        .search_relaxed(&red, &request(10), &relax, &exec())
+        .unwrap();
+    let later = relaxed.hits.last().unwrap();
+    assert_eq!(later.hit.cursor(), later.cursor());
+    assert_eq!(
+        later.cursor().relaxed,
+        Some(StepCursor { step: 1, last: 1 })
+    );
+    // A cursor from a step this plan no longer builds (another plan) pages nothing, without an error.
+    let nothing = Stub::new(Vec::new());
+    let fewer = plan(&min(10), &[(RelaxLevel::Synonyms, &nothing)]);
+    let after = SearchRequest {
+        search_after: Some(later.cursor()),
+        ..request(10)
+    };
+    let out = views.search_relaxed(&red, &after, &fewer, &exec()).unwrap();
+    assert_eq!(out.hits.len(), 0);
+    // `relax: false` with a cursor from a later step is an error, as for a plain search.
+    let off = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::disabled()).unwrap();
+    assert!(matches!(
+        views.search_relaxed(&red, &after, &off, &exec()),
+        Err(super::RelaxedSearchError::Request(
+            RequestError::CursorStep { step: 1, .. }
+        ))
+    ));
 }

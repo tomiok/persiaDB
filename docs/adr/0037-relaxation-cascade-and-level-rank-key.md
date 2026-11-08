@@ -19,9 +19,9 @@ cascade return?
 1. **A plan of levels, each building steps** (`relax::RelaxPlan`, ROADMAP 8.1.1). The collection's `relaxation`
    settings, already part of the stored schema (SPEC §6.2.3), give the defaults. A query's `RelaxOptions` override
    each setting they give, with the same range rules, so no manifest change is needed. A level's transform turns the
-   query as compiled (and the last query built before it) into zero or more *steps*, strictest first: L2's ladder is
-   several steps. A transform runs only when the cascade reaches its level, and one that builds no step skips the
-   level. Until ROADMAP 8.2 only L0 builds one.
+   query as compiled into zero or more *steps*, strictest first (L2's ladder is several steps; the levels of ROADMAP
+   8.2 add the inputs they need). A transform runs only when the cascade reaches its level, and one that builds no
+   step skips the level. Until ROADMAP 8.2 only L0 builds one.
 2. **Each step excludes the steps before it** (ROADMAP 8.1.2). Step `i` searches
    `bool { must: [query_i], must_not: [query_0 … query_{i-1}] }`. A `must_not` clause does not score, and a `bool`
    with one `must` clause scores exactly that clause's score (`0.0 + s`). So a document is a hit of the first step
@@ -32,12 +32,13 @@ cascade return?
    `i` collects `need − found` hits (pruned as any search, SPEC §7.3) and stops the cascade once `found ≥ min_results`
    (with `fill`, also `found ≥ need`). Without `fill`, the decision to relax therefore does not depend on the page:
    a page of one still relaxes when the query has fewer than `min_results` hits. With `fill`, a deeper page may relax
-   further. A query that has them at L0 (with `fill`, `need` of them) runs exactly one search of its query, as a
-   plain search does, with a window of `need`: the request's own unless `min_results` is larger, when L0 collects
-   (and prunes for) `min_results` hits, since fewer would not tell whether it has them. The default `min_results` is
-   1, so by default the window is the request's. The `search_relaxed` benchmarks (`docs/benchmarks.md`) check that.
+   further, so its `level`, `applied` and facets may state more steps than the first page. A query that has them at
+   L0 (with `fill`, `need` of them) runs exactly one search of its query, as a plain search does, with a window of
+   `need`: the request's own unless `min_results` is larger, when L0 collects (and prunes for) `min_results` hits,
+   since fewer would not tell whether it has them. The default `min_results` is 1, so by default the window is the
+   request's. The `search_relaxed` benchmarks (`docs/benchmarks.md`) check that.
 4. **Facets count the union of the steps run.** Each step counts its own matches. They are disjoint (item 2), so the
-   sum counts every document the response can return once, whatever the page. This is the interim rule ROADMAP
+   sum counts every document the response can return once, the same on every page without `fill`. This is the interim rule ROADMAP
    8.1.9 confirms or replaces.
 5. **The page is the steps' hits in step order**, each step's in the request's sort, from `offset`. A hit carries
    its step and level. An explained hit is explained by its step's plan: L0's by the query's own plan, as a plain
@@ -62,11 +63,12 @@ cascade return?
    steps through that last one. It does not search the steps before the cursor's (they rank before it) unless it
    counts facets, which count every step built (item 4). It searches the cursor's step after the cursor and later
    steps from their top. Each step keeps its own pruning threshold: one from a stricter step says nothing about a
-   looser one, whose hits all rank below. Offset and cursor pages are therefore slices of one ranking, every page
+   looser one, whose hits all rank below. Offset and cursor pages are therefore slices of one ranking, without `fill` every page
    reports the same `level` and `applied`, and with `fill` a cursor page relaxes further while it has room. A plain
-   search rejects a cursor from a step after L0, and any search rejects one whose step is after its last
+   search, or one with `relax: false`, rejects a cursor from a step after L0, and any search rejects one whose step is
+   after its last
    (`RequestError::CursorStep`).
-8. **The budget starts when L0 finishes** (ROADMAP 8.1.4). It reads an injected clock (`Execution::clock`, else
+8. **The budget starts when L0 finishes** (ROADMAP 8.1.4). It reads an injected clock (`Execution::budget_clock`, else
    the deadline's, else the system clock), so tests never read the wall clock. L0 is never cut by it: only the
    request's own deadline and token govern L0, and they stay errors in every step. The budget is checked before each
    level builds, before each step, and inside each step through the same interrupt reads as a deadline (SPEC §7.3):
@@ -82,11 +84,14 @@ cascade return?
 
 - Every later level only builds queries; ranking, paging, counting and facets come from the orchestrator.
 - A relaxed step re-plans the earlier steps' queries inside its `must_not`. Expansions (`prefix`, `fuzzy`) expand
-  again over the same views, to the same terms.
+  again over the same views, to the same terms. Step `i` copies the queries of the `i` steps before it into its
+  `must_not`, quadratic in steps, which are few (L2's ladder is the longest level). L0 is searched as given, never
+  copied.
 - Scores down a relaxed page are not monotonic across steps. Clients that need one descending number use the rank
   score.
 - A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not
-  need), so it reports the same cascade as the first page.
+  need), so without `fill` it reports the same cascade as the first page.
+- `relax::Step` and the transform trait stay crate-private until a level outside the engine needs them.
 
 ## Alternatives considered
 
