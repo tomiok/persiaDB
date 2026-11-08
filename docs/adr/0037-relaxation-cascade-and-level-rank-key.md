@@ -30,23 +30,27 @@ cascade return?
    queries' postings in each later step, which is cheap next to what a relaxed query already pays.
 3. **Hits count from the top.** The cascade needs `need = max(offset + limit, min_results)` hits from the top. Step
    `i` collects `need − found` hits (pruned as any search, SPEC §7.3) and stops the cascade once `found ≥ min_results`
-   (with `fill`, also `found ≥ need`). The decision to relax therefore does not depend on the page: a page of one
-   still relaxes when the query has fewer than `min_results` hits. A query that has them at L0 runs exactly one
-   search of its query with the request's window, as a plain search does. The `search_relaxed` benchmarks
-   (`docs/benchmarks.md`) check that.
+   (with `fill`, also `found ≥ need`). Without `fill`, the decision to relax therefore does not depend on the page:
+   a page of one still relaxes when the query has fewer than `min_results` hits. With `fill`, a deeper page may relax
+   further. A query that has them at L0 (with `fill`, `need` of them) runs exactly one search of its query, as a
+   plain search does, with a window of `need`: the request's own unless `min_results` is larger, when L0 collects
+   (and prunes for) `min_results` hits, since fewer would not tell whether it has them. The default `min_results` is
+   1, so by default the window is the request's. The `search_relaxed` benchmarks (`docs/benchmarks.md`) check that.
 4. **Facets count the union of the steps run.** Each step counts its own matches. They are disjoint (item 2), so the
    sum counts every document the response can return once, whatever the page. This is the interim rule ROADMAP
    8.1.9 confirms or replaces.
 5. **The page is the steps' hits in step order**, each step's in the request's sort, from `offset`. A hit carries
-   its step and level. An explained hit is explained by its step's plan: a `bool` whose one `must` clause is the
-   step's query (ROADMAP 8.3.4 states the level in the explanation itself).
+   its step and level. An explained hit is explained by its step's plan: L0's by the query's own plan, as a plain
+   search explains it, and a later step's by a `bool` whose one `must` clause is the step's query (its `must_not`
+   clauses do not score, so they add nothing). ROADMAP 8.3.4 states the level in the explanation itself.
 
 ## Consequences
 
 - Every later level only builds queries; ranking, paging, counting and facets come from the orchestrator.
 - A relaxed step re-plans the earlier steps' queries inside its `must_not`. Expansions (`prefix`, `fuzzy`) expand
   again over the same views, to the same terms.
-- Until ROADMAP 8.1.3, a request with a `search_after` cursor runs L0 alone.
+- Until ROADMAP 8.1.3, a request with a `search_after` cursor runs L0 alone, and hits keep their step's own score
+  with no offset. Until ROADMAP 8.1.4, `budget_ms` is not applied and no response is `truncated`.
 
 ## Alternatives considered
 

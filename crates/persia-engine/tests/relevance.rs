@@ -19,7 +19,7 @@
 //!    decimal on a boundary (one unit, `0.0001`). Per query, it is less than half the smallest change one judged
 //!    document makes moving by one rank, so every ranking change among judged documents in the top 10 fails the
 //!    gate.
-//! 3. Every judged query has hits at L0, so a search through the collection's relaxation cascade (SPEC §7.6, ROADMAP
+//! 4. Every judged query has hits at L0, so a search through the collection's relaxation cascade (SPEC §7.6, ROADMAP
 //!    8.1.2) stays at L0 and ranks as without it: relaxation does not move the gate.
 //!
 //! nDCG@10 is `DCG@10 / IDCG@10`, with `DCG@10 = Σ_{i=1..10} (2^grade_i − 1) / log2(i + 1)` over the hits in rank

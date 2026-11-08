@@ -210,6 +210,49 @@ fn an_empty_l0_escalates_to_the_first_level_that_builds_a_step_and_stops_there()
 }
 
 #[test]
+fn a_level_of_several_steps_runs_them_in_order_and_stops_between_them() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    // `red` matches a and b, `hat` b, d and e: b is the first step's.
+    let drop = Stub::new(vec![
+        step(term(body, "red"), "drop_terms:75%"),
+        step(term(body, "hat"), "drop_terms:50%"),
+    ]);
+    let after = Stub::new(vec![step(term(body, "shoes"), "prefix")]);
+    let stubs = [(RelaxLevel::DropTerms, &drop), (RelaxLevel::Prefix, &after)];
+    let purple = term(body, "purple");
+    let out = views
+        .search_relaxed(&purple, &request(10), &plan(&min(3), &stubs), &exec())
+        .unwrap();
+    let got = ids(&out);
+    assert_eq!(got.len(), 4, "{got:?}");
+    let mut first: Vec<_> = got[..2].to_vec();
+    first.sort_unstable();
+    assert_eq!(first, [("a", 1), ("b", 1)]);
+    let mut second: Vec<_> = got[2..].to_vec();
+    second.sort_unstable();
+    assert_eq!(second, [("d", 2), ("e", 2)]);
+    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::DropTerms));
+    assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    // The level's transform runs once for both steps; 4 hits reach 3, so the next level is not built.
+    assert_eq!((drop.calls(), after.calls()), (1, 0));
+    // 2 hits reach 2 after the level's first step: its second is neither searched nor listed.
+    let out = views
+        .search_relaxed(&purple, &request(10), &plan(&min(2), &stubs), &exec())
+        .unwrap();
+    let mut got = ids(&out);
+    got.sort_unstable();
+    assert_eq!(got, [("a", 1), ("b", 1)]);
+    assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%"]);
+    assert_eq!(after.calls(), 0);
+}
+
+#[test]
 fn min_results_counts_the_hits_of_every_step_and_each_document_once() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();

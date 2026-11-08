@@ -1485,10 +1485,13 @@ The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its qu
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. Hits
 count from the top: the cascade needs `max(offset + limit, min_results)` of them, each step collects (pruned, §7.3)
 the ones still missing, and the cascade stops once the hits found reach `min_results` (with `fill`, also
-`offset + limit`) or the steps run out. Whether a query relaxes therefore does not depend on the page, and a query
-with `min_results` hits at L0 runs one search of its query, as without relaxation. The page is the steps' hits in
-step order, each step's by the request's sort, from `offset`. Facets count the matches of every step run (§7.5).
-Until ROADMAP 8.1.3, a request with a `search_after` cursor runs L0 alone.
+`offset + limit`) or the steps run out. Without `fill`, whether a query relaxes therefore does not depend on the
+page; with `fill`, a deeper page may relax further. A query whose L0 has `min_results` hits (with `fill`, also
+`offset + limit`) runs one search of its query, as without relaxation, collecting `min_results` hits when that is
+more than `offset + limit`. The page is the steps' hits in step order, each step's by the request's sort, from
+`offset`. Facets count the matches of every step run (§7.5). Until ROADMAP 8.1.3, a request with a `search_after`
+cursor runs L0 alone, and each hit keeps its step's own score with no score offset, so scores are not comparable
+across steps. Until ROADMAP 8.1.4, `budget_ms` is not applied: the cascade runs every step it needs.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the
