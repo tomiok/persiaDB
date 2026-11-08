@@ -44,6 +44,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
 | **Blob manifest** | A blob's chunk list; writing it binds the verified `blob_id` to the staged chunks (SPEC §9.1.1). |
 | **Shard** | An independent Database that owns a hash range of document ids (SPEC §11). |
 | **Relaxation** | Controlled loosening of a query to avoid empty results (SPEC §7.6). |
+| **Step** | One query the relaxation cascade runs: a level builds zero or more, strictest first (SPEC §7.6). |
 
 ---
 
@@ -1441,7 +1442,8 @@ over every match, whatever the page: per segment from its keyword column (§5.3.
 memtable from its postings, then merged by value bytes, so counts are exact. The values returned are the `size` with the
 highest count, then ascending bytes; a value no match holds is not returned. When the
 relaxation cascade runs (§7.6), a facet counts the matches of every step it ran, each document once (at its first
-step), whatever the page; ROADMAP 8.1.9 confirms or replaces this interim rule.
+step). Without `fill` that is the same on every page; with `fill` a deeper page may build, and count, more steps.
+ROADMAP 8.1.9 confirms or replaces this interim rule.
 
 #### 7.5.1 Hits
 A hit returns its location, score, sort values (§7.4: its cursor) and document: the id, the blob reference when it has
@@ -1474,9 +1476,10 @@ Rules:
   `level` is the level of the last step the cascade built (`exact` when L0 had enough or no later level built a
   step), `applied` what each step after L0 applied in build order (empty when nothing was relaxed), `original` the
   user text, `effective` the text of the last step's query, `corrected` each term the fuzzy level replaced, in
-  query order, and `truncated` whether the budget cut the cascade (below). Every page of one query on one snapshot
-  states the same, unless the budget truncated it. Each hit also states its `level`, its step and its rank score
-  (below). The engine's `Relaxation` (ROADMAP 8.1.5) defines every field. `original` and `effective` stay empty until
+  query order, and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
+  one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
+  steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
+  8.1.5) defines every field. `original` and `effective` stay empty until
   each compiled clause records its source span (ROADMAP 8.1.7), and `corrected` until the fuzzy level synthesizes
   the corrected query (ROADMAP 8.2.4.3).
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
@@ -1525,11 +1528,13 @@ Paging (ROADMAP 8.1.3): `offset` counts the hits from the top across steps. A hi
 and the cascade's last step on its page. A search after it builds the steps through that last one (the same
 queries: the same snapshot and query build them alike), skips the steps before the cursor's (still excluded, and
 still searched when the request counts facets, §7.5), and searches the cursor's step after the cursor and the later
-steps from their top while the page has room. So every page reports the same `level` and `applied`. With `fill` it
-builds past the last step while the page has room. The pages of one query on one snapshot, by `offset` or by
-cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cursor without a step (from a search
-that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is after its last is an error,
-and so is a plain search given a cursor from a step after L0: every hit it returns ranks before the cursor.
+steps from their top while the page has room. So, without `fill`, every page reports the same `level` and
+`applied`. With `fill` it builds past the last step while the page has room. The pages of one query on one
+snapshot, by `offset` or by cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cursor
+without a step (from a search that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is
+after its last is an error, and so is a cursor from a step after L0 given to a plain search or to one with
+`relax: false`: every hit it returns ranks before the cursor. A cursor from a step the plan no longer builds
+(another `relax`) pages nothing.
 
 Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
 deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and
@@ -1538,8 +1543,10 @@ builds its steps, before each step, and inside each step's planning and search, 
 passed, the cascade stops. A step in progress is dropped whole: it has not seen all its matches, so the hits it holds
 need not be its best, and a page of them would rank hits the full step ranks lower or does not return. The response
 holds the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
-describe those steps, and a hit's cursor records the last of them as the cascade's last step. A cascade that ends
-before the budget passes is not truncated.
+describe those steps, and a hit's cursor records the last of them as the cascade's last step (on a cursor page, that
+or the cursor's own last step, whichever is later, so the next page tries again). On a cursor page with facets, the
+steps before the cursor's are searched to count them and spend the budget too, so such a page may be truncated
+before any hit. A cascade that ends before the budget passes is not truncated.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the

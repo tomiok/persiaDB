@@ -111,20 +111,21 @@ pub struct SearchHit {
     pub explanation: Option<Explanation>,
     /// The snapshot, collection and memtable view. [`Self::cursor`] copies it.
     pub origin: CursorOrigin,
+    /// Its relaxation step and its cascade's last step (SPEC §7.6), unless step 0 of a cascade that stopped at L0.
+    /// [`Self::cursor`] copies it, so the cursor of any hit pages from where the hit is.
+    pub(super) relaxed: Option<StepCursor>,
 }
 
 impl SearchHit {
-    /// The cursor of the page after this hit, including the view that produced it.
-    ///
-    /// It is a plain search's cursor: it records no relaxation step, so it reads as step 0 of a cascade that stopped
-    /// at L0. For a hit of `search_relaxed`, page with [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor), which
-    /// also records the hit's step and its cascade's last step (SPEC §7.6).
+    /// The cursor of the page after this hit, including the view that produced it, and for a hit of
+    /// `search_relaxed` its step and its cascade's last step (SPEC §7.6), as
+    /// [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor) gives.
     pub fn cursor(&self) -> Cursor {
         Cursor {
             values: self.sort.clone(),
             location: self.location,
             origin: self.origin.clone(),
-            relaxed: None,
+            relaxed: self.relaxed,
         }
     }
 }
@@ -380,6 +381,7 @@ impl CollectionViews<'_> {
                 document,
                 explanation: explanations.next().flatten(),
                 origin: origin.clone(),
+                relaxed: None,
             });
         }
         Ok(hits)
