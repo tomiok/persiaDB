@@ -122,10 +122,10 @@ pub struct SearchResults {
 
 /// A hit before its document is read.
 #[derive(Debug, Clone)]
-struct Ranked {
-    location: Located,
-    score: f64,
-    values: Vec<SortValue>,
+pub(super) struct Ranked {
+    pub(super) location: Located,
+    pub(super) score: f64,
+    pub(super) values: Vec<SortValue>,
 }
 
 impl CollectionViews<'_> {
@@ -198,6 +198,39 @@ impl CollectionViews<'_> {
         request: &SearchRequest,
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
+        let window = self.check_request(request)?;
+        let collected = self.collect(
+            plan,
+            &Part {
+                sort: &request.sort,
+                after: request.search_after.as_ref(),
+                facets: &request.facets,
+                explain: request.explain,
+                window,
+            },
+            exec,
+        )?;
+        // Reading the page's documents is the last stage a deadline stops.
+        exec.interrupt()?;
+        let segments: Vec<_> = self.segments().collect();
+        let page: Vec<Ranked> = collected.ranked.into_iter().skip(request.offset).collect();
+        let explanations = if request.explain {
+            self.explain_page(plan, &segments, &page, collected.kept, exec)?
+        } else {
+            Vec::new()
+        };
+        Ok(SearchResults {
+            hits: self.page_hits(&segments, page, explanations, &request.projection)?,
+            facets: collected
+                .facets
+                .into_iter()
+                .map(FacetCounter::finish)
+                .collect(),
+        })
+    }
+
+    /// The window of `request` (`offset + limit`), once its page, cursor and facets are checked (SPEC §7.4, §7.5).
+    pub(super) fn check_request(&self, request: &SearchRequest) -> Result<usize, RequestError> {
         let window = request
             .offset
             .checked_add(request.limit)
@@ -227,17 +260,27 @@ impl CollectionViews<'_> {
                 max: MAX_FACETS,
             });
         }
+        Ok(window)
+    }
+
+    /// The best `part.window` hits of `plan` over every view by `part.sort`, after `part.after` when given, with
+    /// each view's matches counted for `part.facets` and, when `part.explain`, what its `bool`s selected.
+    pub(super) fn collect(
+        &self,
+        plan: &SearchPlan,
+        part: &Part<'_>,
+        exec: &Execution,
+    ) -> Result<Collected, RequestError> {
         let search = Search {
             plan,
-            request,
+            part: *part,
             exec,
-            window,
         };
         // Read once before any view: a search with no view to run stops too.
         exec.interrupt()?;
         let segments: Vec<_> = self.segments().collect();
         let run = self.with_documents(&segments);
-        let thresholds = Thresholds::new(segments.len().saturating_add(1), &run, window);
+        let thresholds = Thresholds::new(segments.len().saturating_add(1), &run, part.window);
         let found = exec.run(&run, |index| {
             let mut watch = thresholds.watch(exec, index);
             match segments.get(index) {
@@ -250,12 +293,8 @@ impl CollectionViews<'_> {
         });
         // In view order: every hit of a view is placed after the earlier views' on a full tie.
         let mut ranked = Vec::new();
-        let mut facets: Vec<FacetCounter> = request
-            .facets
-            .iter()
-            .copied()
-            .map(FacetCounter::new)
-            .collect();
+        let mut facets: Vec<FacetCounter> =
+            part.facets.iter().copied().map(FacetCounter::new).collect();
         let mut kept = Vec::new();
         for Searched {
             hits,
@@ -263,32 +302,39 @@ impl CollectionViews<'_> {
             kept: selections,
         } in found?
         {
-            ranked = merge(&request.sort, ranked, hits, window)?;
+            ranked = merge(part.sort, ranked, hits, part.window)?;
             for (facet, counted) in facets.iter_mut().zip(counted) {
                 facet.merge(counted);
             }
             kept.push(selections);
         }
-        // Reading the page's documents is the last stage a deadline stops.
-        exec.interrupt()?;
+        Ok(Collected {
+            ranked,
+            facets,
+            kept,
+        })
+    }
 
-        let page: Vec<Ranked> = ranked.into_iter().skip(request.offset).collect();
-        let mut explanations = if request.explain {
-            self.explain_page(plan, &segments, &page, kept, exec)?
-        } else {
-            Vec::new()
-        }
-        .into_iter();
+    /// The hits of `page` with their documents read and projected, each with its explanation in `explanations`
+    /// (none when it is shorter).
+    pub(super) fn page_hits(
+        &self,
+        segments: &[SegmentView<'_>],
+        page: Vec<Ranked>,
+        explanations: Vec<Option<Explanation>>,
+        projection: &Projection,
+    ) -> Result<Vec<SearchHit>, RequestError> {
+        let mut explanations = explanations.into_iter();
         let origin = self.cursor_origin();
         let mut hits = Vec::with_capacity(page.len());
         for hit in page {
             let mut document = match hit.location {
                 Located::Segment { index, docid } => {
-                    segment_view(&segments, index)?.document(docid)?
+                    segment_view(segments, index)?.document(docid)?
                 }
                 Located::Memtable(docid) => self.memtable().document(docid)?,
             };
-            request.projection.apply(&mut document);
+            projection.apply(&mut document);
             hits.push(SearchHit {
                 location: hit.location,
                 score: hit.score,
@@ -298,15 +344,12 @@ impl CollectionViews<'_> {
                 origin: origin.clone(),
             });
         }
-        Ok(SearchResults {
-            hits,
-            facets: facets.into_iter().map(FacetCounter::finish).collect(),
-        })
+        Ok(hits)
     }
 
     /// The explanation of each hit of `page`, in page order (SPEC §7.7): one pass per view holding hits, in view
     /// order, each stoppable before it starts and while it reads (SPEC §7.3).
-    fn explain_page(
+    pub(super) fn explain_page(
         &self,
         plan: &SearchPlan,
         segments: &[SegmentView<'_>],
@@ -400,16 +443,32 @@ struct Searched {
     kept: (usize, Selections),
 }
 
-/// A search's request, run over one view at a time.
+/// What one plan of a search collects: a sort, a cursor, facets, whether the page is explained, and how many hits.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct Part<'r> {
+    pub(super) sort: &'r Sort,
+    pub(super) after: Option<&'r Cursor>,
+    pub(super) facets: &'r [FacetRequest],
+    pub(super) explain: bool,
+    pub(super) window: usize,
+}
+
+/// What [`CollectionViews::collect`] found: the best hits, the facets counted, and each view's selections.
+pub(super) struct Collected {
+    pub(super) ranked: Vec<Ranked>,
+    pub(super) facets: Vec<FacetCounter>,
+    pub(super) kept: Vec<(usize, Selections)>,
+}
+
+/// A search's part, run over one view at a time.
 struct Search<'r> {
     plan: &'r SearchPlan,
-    request: &'r SearchRequest,
+    part: Part<'r>,
     exec: &'r Execution,
-    window: usize,
 }
 
 impl Search<'_> {
-    /// The best `window` hits of `view`, at `rank` in collection order ([`order`]), and its matches counted for each
+    /// The best `part.window` hits of `view`, at `rank` in collection order ([`order`]), and its matches counted for each
     /// facet, and what its `bool`s selected when the page is explained.
     fn view<V: SearchView>(
         &self,
@@ -418,10 +477,10 @@ impl Search<'_> {
         watch: &mut ViewWatch<'_>,
         location: impl Fn(u32) -> Located,
     ) -> Result<Searched, RequestError> {
-        let sort = &self.request.sort;
+        let sort = self.part.sort;
         let steps = Steps::new(self.exec);
         let view = &Interruptible::new(view, &steps);
-        let counting = !self.request.facets.is_empty();
+        let counting = !self.part.facets.is_empty();
         // A facet counts every match, and only a sort led by the score has bounds to prune by (SPEC §7.4): with
         // further keys, strictly below the worst kept hit (ROADMAP 7.4.11).
         let prune = sort.is_score_led() && !counting;
@@ -432,15 +491,14 @@ impl Search<'_> {
         };
         // An explained page takes its filters' selections from these rather than selecting again (SPEC §7.7).
         let kept = Selections::default();
-        let mut matcher = if self.request.explain {
+        let mut matcher = if self.part.explain {
             self.plan.matcher_keeping(view, pruning, &kept)?
         } else {
             self.plan.matcher_with(view, pruning)?
         };
         let after = self
-            .request
-            .search_after
-            .as_ref()
+            .part
+            .after
             .map(|c| (c.values.as_slice(), ties(rank, c.location)));
         let mut docs = Ascending::default();
         let mut seen = |docid| {
@@ -462,7 +520,7 @@ impl Search<'_> {
                     core::cmp::Ordering::Greater => false,
                 })
             };
-            collect_where(&mut matcher, self.window, prune, keep, watch)?
+            collect_where(&mut matcher, self.part.window, prune, keep, watch)?
                 .into_iter()
                 .map(|h| Ranked {
                     location: location(h.docid),
@@ -473,14 +531,22 @@ impl Search<'_> {
         } else {
             // Without a facet, no match must be seen: a column sort may skip those that cannot rank (ROADMAP 7.5.6).
             let seen = counting.then_some(seen);
-            top_sorted(sort, view, &mut matcher, self.window, after, seen, watch)?
-                .into_iter()
-                .map(|h| Ranked {
-                    location: location(h.docid),
-                    score: h.score,
-                    values: h.values,
-                })
-                .collect()
+            top_sorted(
+                sort,
+                view,
+                &mut matcher,
+                self.part.window,
+                after,
+                seen,
+                watch,
+            )?
+            .into_iter()
+            .map(|h| Ranked {
+                location: location(h.docid),
+                score: h.score,
+                values: h.values,
+            })
+            .collect()
         };
         // A view without a hit has none on the page to explain.
         let kept = if hits.is_empty() {
@@ -488,10 +554,10 @@ impl Search<'_> {
         } else {
             kept
         };
-        let mut facets = Vec::with_capacity(self.request.facets.len());
+        let mut facets = Vec::with_capacity(self.part.facets.len());
         if counting {
             let docs: RoaringBitmap = docs.finish();
-            for &request in &self.request.facets {
+            for &request in self.part.facets {
                 watch.check()?;
                 let mut facet = FacetCounter::new(request);
                 facet.add(view, &docs)?;

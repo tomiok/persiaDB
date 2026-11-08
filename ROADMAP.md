@@ -533,7 +533,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 
 ## 8.1 Framework
 - [~] 8.1.1 `RelaxPlan` = ordered levels with per-level query transforms; configurable via schema/query (SPEC §7.6)
-- [ ] 8.1.2 Orchestrator: run L0, evaluate `min_results`, escalate, stop or fill
+- [~] 8.1.2 Orchestrator: run L0, evaluate `min_results`, escalate, stop or fill
 - [ ] 8.1.3 Score offset per level to guarantee ordering across levels
 - [ ] 8.1.4 Budget (`budget_ms`) and `truncated` flag
 - [ ] 8.1.5 Response metadata struct (`level`, `applied`, `original`, `effective`, `corrected`)

@@ -19,6 +19,8 @@
 //!    decimal on a boundary (one unit, `0.0001`). Per query, it is less than half the smallest change one judged
 //!    document makes moving by one rank, so every ranking change among judged documents in the top 10 fails the
 //!    gate.
+//! 4. Every judged query has hits at L0, so a search through the collection's relaxation cascade (SPEC §7.6, ROADMAP
+//!    8.1.2) stays at L0 and ranks as without it: relaxation does not move the gate.
 //!
 //! nDCG@10 is `DCG@10 / IDCG@10`, with `DCG@10 = Σ_{i=1..10} (2^grade_i − 1) / log2(i + 1)` over the hits in rank
 //! order, and `IDCG@10` the same over the judgments sorted by grade.
@@ -36,9 +38,12 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
-use persia_engine::db::{Database, DatabaseOptions, ManualClock, SearchRequest, SegmentIds};
+use persia_engine::db::{
+    Database, DatabaseOptions, Execution, ManualClock, SearchRequest, SegmentIds,
+};
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
+use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{AnalyzerRef, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::search::{Projection, Pruning, SearchPlan};
 use persia_engine::wal::Durability;
@@ -146,7 +151,16 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
                 .search(&plan, &request, Pruning::default())
                 .unwrap()
                 .hits;
-            let ranked = hits.iter().map(|h| h.document.id().to_owned()).collect();
+            let ranked: Vec<String> = hits.iter().map(|h| h.document.id().to_owned()).collect();
+            // Every judged query has `min_results` hits at L0, so the collection's relaxation cascade (SPEC §7.6)
+            // leaves it there and ranks it the same: the gate does not move with relaxation (ROADMAP 8.1.2).
+            let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
+            let relaxed = views
+                .search_relaxed(&text.query, &request, &relax, &Execution::default())
+                .unwrap();
+            assert_eq!(relaxed.relaxation.level, RelaxLevel::Exact, "{q:?} relaxed");
+            let relaxed: Vec<&str> = relaxed.hits.iter().map(|h| h.hit.document.id()).collect();
+            assert_eq!(relaxed, ranked, "{q:?}");
             let judged = j["grades"]
                 .as_object()
                 .unwrap()
