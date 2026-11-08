@@ -440,6 +440,24 @@ blocks to skip. Most of the gain is the column reads saved. Where blocks do lose
 `a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the
 exhaustive one with a facet reads.
 
+`search_relaxed/*` (ROADMAP 8.1.2): the 4-segment collection on the calling thread, `w3 w40` as user text, 10 hits,
+planned and searched each iteration. `plain` is `SearchPlan::with_terms` then `search_with`, `l0` is
+`search_relaxed` with the collection's levels (L0 has `min_results` hits, so no later level is built), and `off` is
+`relax: false`. Command: `cargo bench -p persia-engine --bench search -- search_relaxed`. 2026-11-08, rustc 1.99.0,
+AMD Ryzen 5 3600, Linux.
+
+| Recorded | `plain` | `l0` | `off` |
+|---|--:|--:|--:|
+| ROADMAP 8.1.2 | 448 µs | 449 µs | 447 µs |
+
+The same branch against 9691454 (main, worktree with its own target directory) on `search_top10/*`, whose code it
+does not touch, and on `search_request` and `search_suite`, whose `search_with` it splits into stages: at the default
+16 codegen units `search_request/score` measured 440–448 µs on main and 487–509 µs on the branch. The 8.1.1 commit
+alone, which adds the `relax` module and changes no search code, measured 502 µs. Built with one codegen unit
+(`CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`), main and the branch agree: `search_request/score` 466, 454 µs vs 449, 467 µs,
+`search_top10/term` 463, 448 µs vs 452, 450 µs, and `search_request/score_facet` 847, 854 µs vs 839, 889 µs. The
+default build's gap is codegen-unit layout from new code in the crate, not the cascade's work.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

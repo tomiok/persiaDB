@@ -122,6 +122,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: the relaxation cascade (ROADMAP 8.1.2; SPEC §7.6; ADR-0037). `CollectionViews::search_relaxed`
+  plans and searches a query, then each step of a `RelaxPlan` in turn while the hits found from the top are fewer
+  than `min_results` (with `fill`, until the page is full). Each step excludes the earlier steps' matches, so a
+  document appears once, at its first step and that step's score. It returns `RelaxedResults`: each `RelaxedHit` with
+  its step and level, the facets over every step run, and a `Relaxation` (`level`, `applied`). When L0 already has
+  `min_results` hits it costs what planning and `search_with` cost (`search_relaxed/*`). A cursor runs L0 alone until
+  ROADMAP 8.1.3.
 - `persia-engine`: the relaxation cascade's plan (ROADMAP 8.1.1; SPEC §7.6). `persia_engine::relax::RelaxPlan` lists
   the levels a search may run, L0 (`exact`) first, each with the transform that builds its queries (its steps). It is
   built from the collection's `relaxation` settings and a query's `RelaxOptions`, which override each setting they

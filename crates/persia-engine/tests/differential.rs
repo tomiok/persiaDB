@@ -15,6 +15,8 @@
 //!    counts, and the contributions sum to its `tf~` (SPEC §7.7). Explaining every docid of a view in one pass
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
+//! 5. Relaxed with the collection's levels, none of which builds a step before ROADMAP 8.2, a search returns what
+//!    L0 alone returns, for a `min_results` the hits reach and one above the page (SPEC §7.6, ROADMAP 8.1.2).
 
 #![allow(
     clippy::unwrap_used,
@@ -43,6 +45,7 @@ use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, Filter, FilterValue, PhraseQuery,
     PhraseTerm, Query, QueryLimits, TermQuery, WeightedTerm,
 };
+use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -681,6 +684,33 @@ fn check(
                     prop_assert_eq!(bits(&second), bits(&full[first.len()..end]).clone());
                 }
             }
+        }
+
+        // Invariant 5: relaxed with the collection's levels, none of which builds a step yet (ROADMAP 8.2), a search
+        // is L0's, whether it has `min_results` hits or not; a `min_results` above the page counts from the top.
+        for min_results in [1, 10_000] {
+            let relax = RelaxPlan::new(
+                schema.relaxation(),
+                &RelaxOptions {
+                    min_results: Some(min_results),
+                    ..RelaxOptions::default()
+                },
+            )
+            .unwrap();
+            let exec = Execution::default().threads(Threads::Current);
+            let relaxed = views
+                .search_relaxed(&query, &request, &relax, &exec)
+                .unwrap();
+            let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
+            prop_assert_eq!(bits(&hits), bits(&full));
+            prop_assert_eq!(relaxed.relaxation.level, RelaxLevel::Exact);
+            let page = SearchRequest {
+                limit: case.k,
+                ..SearchRequest::default()
+            };
+            let relaxed = views.search_relaxed(&query, &page, &relax, &exec).unwrap();
+            let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
+            prop_assert_eq!(&bits(&hits)[..], &bits(&full)[..case.k.min(full.len())]);
         }
     }
     Ok(())

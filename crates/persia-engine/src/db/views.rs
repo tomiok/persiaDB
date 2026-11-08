@@ -283,6 +283,11 @@ impl CollectionViews<'_> {
         self.snapshot.seq
     }
 
+    /// The snapshot of the collection these views belong to.
+    pub(super) fn collection(&self) -> &CollectionSnapshot {
+        self.snapshot
+    }
+
     /// The collection these views search.
     pub(crate) fn collection_name(&self) -> &str {
         self.snapshot.schema().name()

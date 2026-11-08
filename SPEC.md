@@ -1438,8 +1438,9 @@ values, 1 to 1 000, default 10).
 A facet counts, per value, the live documents the query matches that hold it (a document counts once per distinct value),
 over every match, whatever the page: per segment from its keyword column (§5.3.5) for the matching bitmap, in the
 memtable from its postings, then merged by value bytes, so counts are exact. The values returned are the `size` with the
-highest count, then ascending bytes; a value no match holds is not returned. Which matches a facet counts when the
-relaxation cascade runs (§7.6) is specified with it (ROADMAP 8.1.9).
+highest count, then ascending bytes; a value no match holds is not returned. When the
+relaxation cascade runs (§7.6), a facet counts the matches of every step it ran, each document once (at its first
+step), whatever the page; ROADMAP 8.1.9 confirms or replaces this interim rule.
 
 #### 7.5.1 Hits
 A hit returns its location, score, sort values (§7.4: its cursor) and document: the id, the blob reference when it has
@@ -1479,6 +1480,15 @@ collection's settings stand for the keys it leaves out. `relax: false` is `enabl
 its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Until ROADMAP 8.2 only L0 builds a query.
+
+The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
+excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. Hits
+count from the top: the cascade needs `max(offset + limit, min_results)` of them, each step collects (pruned, §7.3)
+the ones still missing, and the cascade stops once the hits found reach `min_results` (with `fill`, also
+`offset + limit`) or the steps run out. Whether a query relaxes therefore does not depend on the page, and a query
+with `min_results` hits at L0 runs one search of its query, as without relaxation. The page is the steps' hits in
+step order, each step's by the request's sort, from `offset`. Facets count the matches of every step run (§7.5).
+Until ROADMAP 8.1.3, a request with a `search_after` cursor runs L0 alone.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the

@@ -2,7 +2,8 @@
 //! (of 3 clauses, and of 50 as a relaxation expansion builds, 7.4.7) and a phrase with the default pruning
 //! (block-max WAND), each strategy of 7.4.4 side by side, prefix and fuzzy expansions planned and searched (7.4.12),
 //! and a term under filters (7.4.5): a numeric range, a keyword, and a filter alone; and whole requests (7.5): sorted
-//! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`).
+//! by a column, with a facet, and a page after a cursor; and the query suite of 7.8.3 end to end (`search_suite`); and
+//! a request through the relaxation cascade when L0 has enough hits (`search_relaxed`, 8.1.2).
 //! Deterministic input (a fixed-seed generator), so runs compare. Run: `cargo bench -p persia-engine --bench search`.
 
 #![allow(missing_docs, clippy::unwrap_used)]
@@ -23,6 +24,7 @@ use persia_engine::query::{
     BoolQuery, DefaultFields, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, QueryCompiler, QueryLimits, TermQuery,
 };
+use persia_engine::relax::{RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -743,12 +745,62 @@ fn collection_expansions(c: &mut Criterion) {
     }
     group.finish();
 }
+
+/// The relaxation cascade at L0 (ROADMAP 8.1.2): a request whose query has `min_results` hits at L0, over 4 segments
+/// on the calling thread, planned and searched each iteration, as `plain` (`SearchPlan::with_terms`, then
+/// `search_with`), through `search_relaxed` with the collection's levels, and with `relax: false`. The three should
+/// cost the same: the cascade builds no later level when L0 has enough hits.
+fn relaxed(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let query = compile_text(schema, "w3 w40");
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let relax = RelaxPlan::new(schema.relaxation(), &RelaxOptions::default()).unwrap();
+    let off = RelaxPlan::new(schema.relaxation(), &RelaxOptions::disabled()).unwrap();
+    let mut group = c.benchmark_group("search_relaxed");
+    group.bench_function("plain", |b| {
+        b.iter(|| {
+            let stats = coll.search_statistics(&memtable);
+            let plan = SearchPlan::with_terms(&query, schema, &stats, &exec.terms(&views)).unwrap();
+            black_box(views.search_with(&plan, &request, &exec).unwrap())
+        });
+    });
+    for (name, relax) in [("l0", &relax), ("off", &off)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                black_box(
+                    views
+                        .search_relaxed(&query, &request, relax, &exec)
+                        .unwrap(),
+                )
+            });
+        });
+    }
+    group.finish();
+}
+
+/// `text` compiled as user text over the default fields (`body`), as a request's `q` is.
+fn compile_text(schema: &CollectionSchema, text: &str) -> Query {
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    compiler
+        .compile(text, &DefaultFields::all(schema), &QueryLimits::default())
+        .query
+}
 criterion_group!(
     benches,
     bench,
     requests,
     parallel,
     suite,
-    collection_expansions
+    collection_expansions,
+    relaxed
 );
 criterion_main!(benches);
