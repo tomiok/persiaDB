@@ -13,6 +13,7 @@ pub mod manifest;
 pub mod memtable;
 pub mod merge;
 pub mod query;
+pub mod relax;
 pub mod schema;
 pub mod score;
 pub mod search;

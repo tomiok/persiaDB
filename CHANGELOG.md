@@ -122,6 +122,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: the relaxation cascade's plan (ROADMAP 8.1.1; SPEC §7.6). `persia_engine::relax::RelaxPlan` lists
+  the levels a search may run, L0 (`exact`) first, each with the transform that builds its queries (its steps). It is
+  built from the collection's `relaxation` settings and a query's `RelaxOptions`, which override each setting they
+  give (`RelaxOptions::disabled()` is `relax: false`, L0 only). An override out of range is `RelaxError`. Only L0
+  builds a query so far; L1–L5 build none until ROADMAP 8.2, so the cascade skips them.
 - `persia-blob`: the blob manifest, a blob's chunk list (ROADMAP 9.1.3; SPEC §9.1.1; ADR-0034, ADR-0035).
   `BlobManifest` (`blob_id`, size, chunk size, `UploadId`, chunk CRCs) with `encode`, `decode` (corrupt input is
   `Error::Corrupt`, a newer version or flag `UnsupportedVersion` / `UnsupportedFlags`) and `encoded_len_for`, which
