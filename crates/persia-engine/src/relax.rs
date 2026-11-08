@@ -341,8 +341,11 @@ impl RelaxPlan {
 ///   scores lie in `[2^−(i+1), 2^−i]`: none is below a later step's, whose band ends where this one starts;
 /// - within a step, a higher score never has a lower rank score.
 ///
-/// So the rank scores of a page sorted by score descending never increase down the page. They can tie where scores
-/// differ, as rounding merges them (above about `2^53` every score rounds `g` to 1). From step 1022 on, where
+/// So down a relaxed page whose request sorts by score descending (the cascade's order: step ascending, then score
+/// descending), the rank scores never increase. They can tie where scores differ, as rounding merges them: from
+/// about `2^52.4` every score gives the step's top rank score (`1 + g` rounds to 2; `g` itself reaches 1 at `2^54`),
+/// and up to `2^−53` its bottom one. So a step's lowest rank score can equal the next step's highest, and ordering
+/// by the rank score alone cannot tell those hits' steps apart: the hit's step can. From step 1022 on, where
 /// `2^−(step+1)` is no longer a normal number, it is 0. The hit's score itself is its step's.
 ///
 /// ```

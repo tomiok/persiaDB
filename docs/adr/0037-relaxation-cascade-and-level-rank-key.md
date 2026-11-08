@@ -46,14 +46,17 @@ cascade return?
 
 6. **The level leads the rank key; no score offset** (ROADMAP 8.1.3). Hits compare by step, then by the sort, then
    by location. An `f64` offset cannot keep every stricter hit above every looser one over the whole score range.
-   Scores are any finite value `≥ 0` (`constant_score` takes any, `boost`s nest to `1000^32`). A strictly increasing
+   Scores are any value `≥ 0`, `+∞` included (`constant_score` takes any finite one, `boost`s nest to `1000^32` and
+   overflow). A strictly increasing
    map that puts one copy of that range wholly below another would need twice the floating-point values the range
    holds (pigeonhole). An additive offset big enough to separate the levels also rounds away the scores' low bits,
    which ties or reorders hits inside a level. So each hit keeps its step's own score. For clients that sort or show
    one number, a hit also carries a **rank score**, `2^−(step+1) · (1 + (1 − 1/(1 + s)))`, rounded at each
-   operation. Each operation is monotonic and the power of two is exact, so step `i`'s values lie in
-   `[2^−(i+1), 2^−i]`: non-decreasing in the score within a step, and never below a later step's. It may tie where
-   scores differ (rounding), never invert. Property tests check both claims over every non-negative `f64` bit
+   operation. Each operation is monotonic and the power of two is exact, so for `i < 1022` step `i`'s values lie in
+   `[2^−(i+1), 2^−i]`: non-decreasing in the score within a step, and never below a later step's. From step 1022 on,
+   where `2^−(i+1)` is not a normal number, the rank score is 0, which is still never below a later step's. It may
+   tie where scores differ (rounding), and where adjacent bands meet (a step's score-0 hit and the next step's huge
+   one both give `2^−(i+1)`), never invert. Property tests check both claims over every non-negative `f64` bit
    pattern's binade.
 7. **Cursors carry the step and the cascade's last step** (ROADMAP 8.1.3). A page after a cursor builds the same
    steps through that last one. It does not search the steps before the cursor's (they rank before it) unless it

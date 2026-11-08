@@ -117,7 +117,7 @@ _Nothing ready._
 - `7.8.4` (v1.0) nDCG@10 relevance regression gate in CI, building on the 7.8.2 baseline (7.8.3 stays the Criterion benchmarks) (M7)
 - `8.1.1` `RelaxPlan` = ordered levels with per-level query transforms; configurable via schema/query (SPEC §7.6) (M8)
 - `8.1.2` Orchestrator: run L0, evaluate `min_results`, escalate, stop or fill (M8)
-- `8.1.3` Score offset per level to guarantee ordering across levels (M8)
+- `8.1.3` Ordering across levels: the level leads the rank key (every stricter hit above every looser one at any score; an `f64` score offset cannot give that for every score, ADR-0037), a monotone rank score per hit, and paging (offset, cursor) across levels (M8)
 
 ## Ready next (first 15 MVP todo leaves whose milestone deps are done)
 

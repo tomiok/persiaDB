@@ -1497,15 +1497,19 @@ cascade runs every step it needs.
 Ranking across levels (ROADMAP 8.1.3, ADR-0037): hits compare by their step first (ascending), then by the request's
 sort and location (§7.4), so every hit of a stricter step ranks above every hit of a looser one, at any score. This
 is the "score offset per level": no offset added to an `f64` score can give it for every score. Scores range over
-all finite values `≥ 0` (a `constant_score` may be any, `boost`s nest), and a strictly increasing map of that range
+all values `≥ 0`, `+∞` included (a `constant_score` may be any finite one, and `boost`s and sums over large ones
+can overflow), and a strictly increasing map of that range
 into a part of it below another copy of it would need twice as many floating-point values as the range holds. An
 added offset large enough to separate two levels also rounds away the low bits of their scores, which ties or
 reorders hits within a level. So each hit keeps its step's own score, and also reports its level, its step and a
 *rank score* for clients that order by one number: `2^−(step+1) · (1 + g(score))`, where `g(s) = 1 − 1/(1 + s)` is
 evaluated in that order, rounded at each operation. Every operation is monotonic and the power of two is exact, so
 step `i`'s rank scores lie in `[2^−(i+1), 2^−i]` and never decrease with the score within it, and no hit of a step
-has one below any hit of a later step. The rank score therefore does not increase down a page sorted by score
-descending, and ties there only where the scores round alike (from step 1022 on it is 0). Within a step, pruning
+has one below any hit of a later step (`+∞` gives the step's top). The rank score therefore does not increase down
+a page whose request sorts by score descending (step ascending, then score descending). It ties there where the
+scores round alike, and where two steps' bands meet: a step's lowest (scores up to about `2^−53`) equals the next
+step's highest (scores from about `2^52.4`), so only the hit's step tells such hits apart. From step 1022 on it is
+0. Within a step, pruning
 (§7.3) and column-sort skipping (§7.4) are those of the step's own search, with its earlier steps excluded.
 Thresholds are not shared across steps: a looser hit ranks below a stricter one whatever it scores.
 

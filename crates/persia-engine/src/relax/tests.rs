@@ -321,7 +321,9 @@ fn any_score() -> impl proptest::strategy::Strategy<Value = f64> {
         Just(f64::from_bits(1)),
         Just(f64::MAX),
         Just(f64::INFINITY),
-        Just(9_007_199_254_740_992.0), // 2^53, where `g` starts rounding to 1.
+        // Where rounding saturates: `1 + g` reaches 2 from about 2^52.4, `g` itself reaches 1 at 2^54.
+        Just(6_004_799_503_160_661.0),
+        Just(18_014_398_509_481_984.0),
     ]
 }
 
@@ -367,6 +369,14 @@ fn rank_scores_at_the_edges() {
     // Adjacent small scores stay apart; adjacent huge ones round together, as the doc says.
     assert!(rank_score(0, 1.0) < rank_score(0, 1.0f64.next_up().next_up().next_up()));
     assert_eq!(rank_score(0, 1e300), rank_score(0, 1e300f64.next_up()));
+    // Where that starts: the step's top rank score from about 2^52.4 (`1 + g` rounds to 2; `g` reaches 1 only at
+    // 2^54), its bottom one up to 2^−53 (`1 + g` rounds to 1). So a step's lowest and the next step's highest tie.
+    let top = 6_004_799_503_160_661.0_f64;
+    assert_eq!(rank_score(0, top), 1.0);
+    assert!(rank_score(0, top.next_down()) < 1.0);
+    assert_eq!(rank_score(0, 2f64.powi(-53)), 0.5);
+    assert!(rank_score(0, 2f64.powi(-53).next_up()) > 0.5);
+    assert_eq!(rank_score(0, 2f64.powi(-53)), rank_score(1, top));
     // The last normal band, then 0.
     assert_eq!(rank_score(1021, 0.0), f64::MIN_POSITIVE);
     assert_eq!(rank_score(1022, f64::MAX), 0.0);

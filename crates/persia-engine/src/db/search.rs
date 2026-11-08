@@ -115,6 +115,10 @@ pub struct SearchHit {
 
 impl SearchHit {
     /// The cursor of the page after this hit, including the view that produced it.
+    ///
+    /// It is a plain search's cursor: it records no relaxation step, so it reads as step 0 of a cascade that stopped
+    /// at L0. For a hit of `search_relaxed`, page with [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor), which
+    /// also records the hit's step and its cascade's last step (SPEC §7.6).
     pub fn cursor(&self) -> Cursor {
         Cursor {
             values: self.sort.clone(),
