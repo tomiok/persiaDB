@@ -1472,6 +1472,14 @@ Rules:
 - Relaxation has a time/work budget (`relax.budget_ms`, default 50 ms); exceeding it returns best-so-far with `truncated: true`.
 - Disable per query with `relax: false`.
 
+The plan (ROADMAP 8.1.1): L0, then the levels `relaxation.levels` names in cascade order, then L5 unless `fallback`
+is `"none"`. A query's `relax` object takes the keys of §6.2.3's `relaxation`, each overriding the collection's
+setting and held to the same rule (one out of range is an error, also when the query disables the cascade). The
+collection's settings stand for the keys it leaves out. `relax: false` is `enabled: false`: L0 only. A level builds
+its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
+level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
+skipped and not listed in `applied`. Until ROADMAP 8.2 only L0 builds a query.
+
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the
 clauses that match the document. A word (a `term`, a `combined`, or a term a `prefix` or `fuzzy` kept) gives its
