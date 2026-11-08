@@ -1159,3 +1159,43 @@ mod budget {
         ));
     }
 }
+
+#[test]
+fn the_response_states_what_the_cascade_did() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let none = Stub::new(Vec::new());
+    let drop = Stub::new(vec![
+        step(term(body, "purple"), "drop_terms:75%"),
+        step(term(body, "shoes"), "drop_terms:50%"),
+    ]);
+    let relax = plan(
+        &min(1),
+        &[(RelaxLevel::Synonyms, &none), (RelaxLevel::DropTerms, &drop)],
+    );
+    // L0 has no hit; synonyms builds nothing and is not listed; drop_terms' first step has no hit either.
+    let out = views
+        .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec())
+        .unwrap();
+    let r = &out.relaxation;
+    assert_eq!(r.level, RelaxLevel::DropTerms);
+    assert_eq!(r.level.name(), "drop_terms");
+    assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    assert!(r.relaxed());
+    assert!(!r.truncated);
+    // Filled by ROADMAP 8.1.7 (text) and 8.2.4.3 (corrections).
+    assert_eq!(r.original, None);
+    assert_eq!(r.effective, None);
+    assert_eq!(r.corrected, []);
+    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::DropTerms && h.step == 2));
+    // A query with hits at L0 states that nothing was relaxed.
+    let out = views
+        .search_relaxed(&term(body, "red"), &request(10), &relax, &exec())
+        .unwrap();
+    assert!(!out.relaxation.relaxed());
+    assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+    assert_eq!(out.relaxation.applied.len(), 0);
+}

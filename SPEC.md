@@ -1469,8 +1469,16 @@ Rules:
 ```jsonc
 "relaxation": { "level": "fuzzy", "applied": ["drop_terms:75%","fuzzy"],
                 "original": "zapatilas rojs", "effective": "zapatillas rojas",
-                "corrected": {"zapatilas":"zapatillas","rojs":"rojas"} }
+                "corrected": {"zapatilas":"zapatillas","rojs":"rojas"}, "truncated": false }
 ```
+  `level` is the level of the last step the cascade built (`exact` when L0 had enough or no later level built a
+  step), `applied` what each step after L0 applied in build order (empty when nothing was relaxed), `original` the
+  user text, `effective` the text of the last step's query, `corrected` each term the fuzzy level replaced, in
+  query order, and `truncated` whether the budget cut the cascade (below). Every page of one query on one snapshot
+  states the same, unless the budget truncated it. Each hit also states its `level`, its step and its rank score
+  (below). The engine's `Relaxation` (ROADMAP 8.1.5) defines every field. `original` and `effective` stay empty until
+  each compiled clause records its source span (ROADMAP 8.1.7), and `corrected` until the fuzzy level synthesizes
+  the corrected query (ROADMAP 8.2.4.3).
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).

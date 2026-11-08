@@ -124,6 +124,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: the relaxation response metadata (ROADMAP 8.1.5; SPEC §7.6). `db::Relaxation` states `level`,
+  `applied`, `original`, `effective`, `corrected` (`db::Correction`) and `truncated`, with `Relaxation::relaxed()`;
+  each `RelaxedHit` states its `level`, `step` and `rank_score`. `original` and `effective` are `None` until ROADMAP
+  8.1.7 (clause spans), and `corrected` is empty until ROADMAP 8.2.4.3 (did you mean).
 - `persia-engine`: the relaxation budget (ROADMAP 8.1.4; SPEC §7.6; ADR-0037). `budget_ms` runs from the moment L0
   finishes, on the clock given by `Execution::clock` (else the deadline's, else the system clock). It is checked
   before each level and step and inside each step's search, so a step it passes is dropped whole. The response then
