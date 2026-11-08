@@ -1472,7 +1472,8 @@ Rules:
                 "corrected": {"zapatilas":"zapatillas","rojs":"rojas"} }
 ```
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
-- Relaxation has a time/work budget (`relax.budget_ms`, default 50 ms); exceeding it returns best-so-far with `truncated: true`.
+- Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
+  `truncated: true` (below).
 - Disable per query with `relax: false`.
 
 The plan (ROADMAP 8.1.1): L0, then the levels `relaxation.levels` names in cascade order, then L5 unless `fallback`
@@ -1491,8 +1492,7 @@ the ones still missing, and the cascade stops once the hits found reach `min_res
 page; with `fill`, a deeper page may relax further. A query whose L0 has `min_results` hits (with `fill`, also
 `offset + limit`) runs one search of its query, as without relaxation, collecting `min_results` hits when that is
 more than `offset + limit`. The page is the steps' hits in step order, each step's by the request's sort, from
-`offset`. Facets count the matches of every step run (§7.5). Until ROADMAP 8.1.4, `budget_ms` is not applied: the
-cascade runs every step it needs.
+`offset`. Facets count the matches of every step run (§7.5).
 
 Ranking across levels (ROADMAP 8.1.3, ADR-0037): hits compare by their step first (ascending), then by the request's
 sort and location (§7.4), so every hit of a stricter step ranks above every hit of a looser one, at any score. This
@@ -1522,6 +1522,15 @@ builds past the last step while the page has room. The pages of one query on one
 cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cursor without a step (from a search
 that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is after its last is an error,
 and so is a plain search given a cursor from a step after L0: every hit it returns ranks before the cursor.
+
+Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected; the system's by default) from
+the moment L0 finishes, so L0 is never cut by it. The request's own deadline and cancellation (§7.3) still apply to
+every step, L0 included, and are errors. The budget is checked before each level builds its steps, before each
+step, and inside each step's planning and search, at the reads of §7.3. Once it has passed, the cascade stops. A
+step in progress is dropped whole: a page cut short would rank hits a full step does not return. The response holds
+the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
+describe those steps, and a hit's cursor records the last of them as the cascade's last step. A cascade that ends
+before the budget passes is not truncated.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the

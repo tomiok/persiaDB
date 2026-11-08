@@ -66,6 +66,16 @@ cascade return?
    reports the same `level` and `applied`, and with `fill` a cursor page relaxes further while it has room. A plain
    search rejects a cursor from a step after L0, and any search rejects one whose step is after its last
    (`RequestError::CursorStep`).
+8. **The budget starts when L0 finishes** (ROADMAP 8.1.4). It reads an injected clock (`Execution::clock`, the
+   system clock by default), so tests never read the wall clock. L0 is never cut by it: only the request's own
+   deadline and token govern L0, and they stay errors in every step. The budget is checked before each level builds,
+   before each step, and inside each step through the same interrupt reads as a deadline (SPEC §7.3): the step runs
+   on a copy of the execution whose extra deadline is the budget's end. A step the budget stops is dropped whole,
+   since a cut page would rank hits a full step does not return. The response is the completed steps' hits with
+   `truncated: true`, `level` and `applied` describe those steps, and cursors record the last completed step. A
+   deadline error inside a step counts as the budget only when the request's own execution is not interrupted.
+   Latency is therefore at most L0's plus about `budget_ms` (plus one reader step between two interrupt reads, and
+   reading the page).
 
 ## Consequences
 
@@ -76,7 +86,6 @@ cascade return?
   score.
 - A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not
   need), so it reports the same cascade as the first page.
-- Until ROADMAP 8.1.4, `budget_ms` is not applied and no response is `truncated`.
 
 ## Alternatives considered
 
@@ -89,3 +98,5 @@ cascade return?
   (item 6), and it would change the scores clients see.
 - **A cursor that re-decides the cascade from the top.** Exact, but every page would re-search the steps before
   the cursor's to count them. Recording the last step costs nothing.
+- **A budget from the start of the search, L0 included.** It bounds the total latency, but a slow L0 would leave no
+  time to relax exactly the queries that need it. Not chosen when the 8.1.4 wording was agreed (2026-11-08).

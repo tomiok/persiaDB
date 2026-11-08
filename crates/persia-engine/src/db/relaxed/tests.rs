@@ -927,3 +927,212 @@ mod random {
         }
     }
 }
+
+mod budget {
+    //! The cascade's budget (ROADMAP 8.1.4, SPEC §7.6), on injected clocks only: it starts when L0 finishes, is
+    //! checked before each level and step and inside each step's search, and drops a step it passes whole.
+
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::db::{Clock, ManualClock};
+    use crate::search::Interrupt;
+
+    /// Moves `by` on every read of [`Clock::now`].
+    #[derive(Debug)]
+    struct Ticking {
+        now: Mutex<Instant>,
+        by: Duration,
+    }
+
+    impl Ticking {
+        fn new(by_ms: u64) -> Arc<Self> {
+            Arc::new(Self {
+                now: Mutex::new(Instant::now()),
+                by: Duration::from_millis(by_ms),
+            })
+        }
+    }
+
+    impl Clock for Ticking {
+        fn now(&self) -> Instant {
+            let mut now = self.now.lock().unwrap();
+            *now += self.by;
+            *now
+        }
+
+        fn unix_micros(&self) -> i64 {
+            0
+        }
+    }
+
+    /// Builds fixed steps and moves `clock` by `by` each time it does: a level whose building takes time.
+    #[derive(Debug)]
+    struct Slow {
+        steps: Vec<Step>,
+        clock: Arc<ManualClock>,
+        by: Duration,
+        calls: AtomicUsize,
+    }
+
+    impl LevelTransform for Slow {
+        fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            self.clock.advance(self.by);
+            self.steps.clone()
+        }
+    }
+
+    fn slow(clock: &Arc<ManualClock>, by_ms: u64, steps: Vec<Step>) -> Arc<Slow> {
+        Arc::new(Slow {
+            steps,
+            clock: Arc::clone(clock),
+            by: Duration::from_millis(by_ms),
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    fn budget(ms: u32, n: u32) -> RelaxOptions {
+        RelaxOptions {
+            budget_ms: Some(ms),
+            ..min(n)
+        }
+    }
+
+    #[test]
+    fn l0_is_never_cut_and_a_budget_passed_after_it_stops_before_the_next_level() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+        let relax = plan(&budget(1, 10), &[(RelaxLevel::Synonyms, &synonyms)]);
+        // 10 ms a read, 1 ms of budget: past it at the first read after L0.
+        let exec = exec().clock(Ticking::new(10));
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap();
+        assert_eq!(out.hits.len(), 2);
+        assert!(out.hits.iter().all(|h| h.step == 0));
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+        assert_eq!(out.relaxation.applied.len(), 0);
+        assert_eq!(synonyms.calls(), 0);
+    }
+
+    #[test]
+    fn a_level_that_ends_past_the_budget_keeps_the_steps_completed_before() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        // Each level takes 30 ms to build: synonyms' step starts at 30 ms of a 50 ms budget, drop_terms' at 60.
+        let synonyms = slow(&clock, 30, vec![step(term(body, "hat"), "synonyms")]);
+        let drop = slow(
+            &clock,
+            30,
+            vec![step(term(body, "shoes"), "drop_terms:50%")],
+        );
+        let relax = plan(&budget(50, 10), &[])
+            .with_level(RelaxLevel::Synonyms, Arc::clone(&synonyms) as _)
+            .with_level(RelaxLevel::DropTerms, Arc::clone(&drop) as _);
+        let exec = exec().clock(Arc::clone(&clock) as _);
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap();
+        let steps: Vec<usize> = out.hits.iter().map(|h| h.step).collect();
+        assert_eq!(steps, [0, 0, 1, 1]);
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Synonyms);
+        assert_eq!(out.relaxation.applied, ["synonyms"]);
+        // drop_terms was built, then found the budget spent before its step ran.
+        assert_eq!(drop.calls.load(Ordering::Relaxed), 1);
+        // The page's cursor records the last step completed.
+        assert_eq!(
+            out.hits.last().unwrap().cursor().relaxed,
+            Some(StepCursor { step: 1, last: 1 })
+        );
+        // The same cascade with time to spare is not truncated and reaches drop_terms.
+        let roomy = plan(&budget(1_000, 10), &[])
+            .with_level(RelaxLevel::Synonyms, Arc::clone(&synonyms) as _)
+            .with_level(RelaxLevel::DropTerms, Arc::clone(&drop) as _);
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &roomy, &exec)
+            .unwrap();
+        assert!(!out.relaxation.truncated);
+        assert_eq!(out.hits.len(), 5);
+    }
+
+    #[test]
+    fn a_step_the_budget_passes_inside_is_dropped_whole() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+        let relax = plan(&budget(10, 10), &[(RelaxLevel::Synonyms, &synonyms)]);
+        // Reads after L0: the budget's start (t), before the level (t + 4), before the step (t + 8, within 10), then
+        // the step's search reads t + 12, past it.
+        let exec = exec().clock(Ticking::new(4));
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap();
+        assert_eq!(synonyms.calls(), 1);
+        assert_eq!(out.hits.len(), 2);
+        assert!(out.hits.iter().all(|h| h.step == 0));
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+        assert_eq!(out.relaxation.applied.len(), 0);
+    }
+
+    #[test]
+    fn the_requests_own_deadline_and_token_are_errors_not_a_truncation() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let synonyms = slow(&clock, 30, vec![step(term(body, "hat"), "synonyms")]);
+        let relax = plan(&budget(50, 10), &[]).with_level(RelaxLevel::Synonyms, synonyms as _);
+        // The deadline at 20 ms passes while synonyms builds, inside the budget.
+        let at = clock.now() + Duration::from_millis(20);
+        let exec = exec()
+            .clock(Arc::clone(&clock) as _)
+            .deadline(Arc::clone(&clock) as _, at);
+        let err = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                super::super::RelaxedSearchError::Request(RequestError::Interrupted(
+                    Interrupt::DeadlineExceeded
+                ))
+            ),
+            "{err}"
+        );
+        // A token cancelled is an error too.
+        let token = crate::db::CancelToken::new();
+        token.cancel();
+        let err = views
+            .search_relaxed(
+                &term(body, "red"),
+                &request(10),
+                &relax,
+                &super::exec().cancel(token),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            super::super::RelaxedSearchError::Request(RequestError::Interrupted(
+                Interrupt::Cancelled
+            ))
+        ));
+    }
+}

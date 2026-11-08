@@ -17,6 +17,7 @@
 //! and the pages are slices of one ranking.
 
 use std::borrow::Cow;
+use std::time::Instant;
 
 use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
@@ -24,7 +25,7 @@ use super::views::CollectionViews;
 use crate::query::{BoolQuery, Query};
 use crate::relax::{LevelInput, RelaxLevel, RelaxPlan, rank_score};
 use crate::schema::CollectionSchema;
-use crate::search::{FacetCounter, FacetCounts, RequestError, SearchError, SearchPlan};
+use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
 use crate::stats::SearchStatistics;
 
 /// A hit of a relaxed search: the hit, and the step of the cascade that found it.
@@ -64,6 +65,9 @@ pub struct Relaxation {
     pub level: RelaxLevel,
     /// What each step after L0 applied, in the order they were built.
     pub applied: Vec<String>,
+    /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
+    /// completed before it, and `level` and `applied` describe those steps.
+    pub truncated: bool,
 }
 
 /// What a relaxed search returns.
@@ -122,6 +126,33 @@ impl Start {
             }
         }
     }
+
+    /// The hits the cascade counts: from the top, enough to tell `min_results` and fill the window; after a cursor
+    /// only the window, the decision being its page's (`last`).
+    fn need(self, window: usize, min_results: usize) -> usize {
+        if self.last.is_none() {
+            window.max(min_results)
+        } else {
+            window
+        }
+    }
+
+    /// Whether the cascade builds step `i`, with `found` hits found before it, `need` from [`Self::need`].
+    fn builds(
+        self,
+        i: usize,
+        found: usize,
+        relax: &RelaxPlan,
+        min_results: usize,
+        need: usize,
+    ) -> bool {
+        i == 0
+            || relax.relaxes()
+                && match self.last {
+                    None => found < min_results || relax.fill() && found < need,
+                    Some(last) => i <= last || relax.fill() && found < need,
+                }
+    }
 }
 
 impl CollectionViews<'_> {
@@ -151,34 +182,27 @@ impl CollectionViews<'_> {
         let collection = self.collection();
         let schema = collection.schema();
         let stats = collection.search_statistics(self.memtable());
-        let terms = exec.terms(self);
         let start = Start::of(request.search_after.as_ref());
         let min_results = usize::try_from(relax.min_results()).unwrap_or(usize::MAX);
-        // Hits counted from the top: enough to tell `min_results`, and the page's window. After a cursor the decision
-        // was made by its page (`start.last`), so only the window counts.
-        let need = if start.last.is_none() {
-            window.max(min_results)
-        } else {
-            window
-        };
-        // Whether the cascade builds step `i`, `found` hits found before it.
-        let builds = |i: usize, found: usize| {
-            i == 0
-                || relax.relaxes()
-                    && match start.last {
-                        None => found < min_results || relax.fill() && found < need,
-                        Some(last) => i <= last || relax.fill() && found < need,
-                    }
-        };
+        let need = start.need(window, min_results);
+        let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
         let counting = !request.facets.is_empty();
 
         let mut ran: Vec<Ran> = Vec::new();
         let mut earlier: Vec<Query> = Vec::new();
         let mut applied = Vec::new();
         let mut found = 0usize;
+        // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
+        let mut budget: Option<Instant> = None;
+        let clock = exec.budget_clock();
+        let mut truncated = false;
         'levels: for planned in relax.planned() {
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
             if !builds(ran.len(), found) {
+                break;
+            }
+            if budget.is_some_and(|end| clock.now() >= end) {
+                truncated = true;
                 break;
             }
             // L0 searches the query itself, not a copy.
@@ -203,6 +227,10 @@ impl CollectionViews<'_> {
                 if !builds(i, found) {
                     break 'levels;
                 }
+                if budget.is_some_and(|end| clock.now() >= end) {
+                    truncated = true;
+                    break 'levels;
+                }
                 // Hits this step is to collect: none before the cursor's step, or once the page is full.
                 let wanted = if i >= start.step {
                     need.saturating_sub(found)
@@ -210,20 +238,21 @@ impl CollectionViews<'_> {
                     0
                 };
                 let searched = if wanted > 0 || counting {
-                    let plan = plan_step(&step, &earlier, schema, &stats, &terms)?;
-                    let collected = self.collect(
-                        &plan,
-                        &Part {
-                            sort: &request.sort,
-                            after: request.search_after.as_ref().filter(|_| i == start.step),
-                            facets: &request.facets,
-                            explain: request.explain,
-                            window: wanted,
-                        },
-                        exec,
-                    )?;
-                    found = found.saturating_add(collected.ranked.len());
-                    Some((plan, collected))
+                    let part = Part {
+                        sort: &request.sort,
+                        after: request.search_after.as_ref().filter(|_| i == start.step),
+                        facets: &request.facets,
+                        explain: request.explain,
+                        window: wanted,
+                    };
+                    let Some(searched) =
+                        self.budgeted_step(&step, &earlier, &stats, &part, exec, budget)?
+                    else {
+                        truncated = true;
+                        break 'levels;
+                    };
+                    found = found.saturating_add(searched.1.ranked.len());
+                    Some(searched)
                 } else {
                     None
                 };
@@ -235,6 +264,9 @@ impl CollectionViews<'_> {
                     searched,
                 });
                 earlier.push(step.into_owned());
+                if budget.is_none() {
+                    budget = clock.now().checked_add(relax.budget());
+                }
             }
         }
         let level = ran.last().map_or(RelaxLevel::Exact, |r| r.level);
@@ -244,10 +276,49 @@ impl CollectionViews<'_> {
         Ok(RelaxedResults {
             hits,
             facets,
-            relaxation: Relaxation { level, applied },
+            relaxation: Relaxation {
+                level,
+                applied,
+                truncated,
+            },
         })
     }
 
+    /// [`Self::search_step`], within the budget's `end` once there is one. `None` when the budget passed while the
+    /// step ran: the step is dropped whole, as a page cut short would rank hits a full step does not return. The
+    /// request's own deadline or token stays an error.
+    fn budgeted_step(
+        &self,
+        step: &Query,
+        earlier: &[Query],
+        stats: &SearchStatistics<'_>,
+        part: &Part<'_>,
+        exec: &Execution,
+        budget: Option<Instant>,
+    ) -> Result<Option<(SearchPlan, Collected)>, RelaxedSearchError> {
+        let Some(end) = budget else {
+            return self.search_step(step, earlier, stats, part, exec).map(Some);
+        };
+        match self.search_step(step, earlier, stats, part, &exec.within_budget(end)) {
+            Ok(searched) => Ok(Some(searched)),
+            Err(e) if is_deadline(&e) && exec.interrupt().is_ok() => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    /// Plans `step` with the `earlier` steps excluded ([`plan_step`]) and collects `part` of it under `exec`.
+    fn search_step(
+        &self,
+        step: &Query,
+        earlier: &[Query],
+        stats: &SearchStatistics<'_>,
+        part: &Part<'_>,
+        exec: &Execution,
+    ) -> Result<(SearchPlan, Collected), RelaxedSearchError> {
+        let terms = exec.terms(self);
+        let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
+        let collected = self.collect(&plan, part, exec)?;
+        Ok((plan, collected))
+    }
     /// The page of the steps `ran`: their hits in step order from `request.offset` (counted from the cursor's step
     /// `first`), at most `request.limit`, each explained by its step's plan when asked, and the facets of every step
     /// summed. `last` is the cascade's last step, for the hits' cursors.
@@ -310,6 +381,15 @@ impl CollectionViews<'_> {
         }
         Ok((hits, facets.into_iter().map(FacetCounter::finish).collect()))
     }
+}
+
+/// Whether `e` is a deadline that passed, while planning or searching.
+fn is_deadline(e: &RelaxedSearchError) -> bool {
+    matches!(
+        e,
+        RelaxedSearchError::Plan(SearchError::Interrupted(Interrupt::DeadlineExceeded))
+            | RelaxedSearchError::Request(RequestError::Interrupted(Interrupt::DeadlineExceeded))
+    )
 }
 
 /// The plan of a step's `query` with the `earlier` steps' queries excluded (SPEC §7.6): a document they match is
