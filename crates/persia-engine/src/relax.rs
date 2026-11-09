@@ -43,15 +43,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::query::Query;
-use crate::schema::{
-    CollectionSchema, Fallback, FilterRelaxation, Level, Levels, RelaxationConfig,
-};
-
-/// `min_results`' range (SPEC §6.2.3): a query's override is held to the collection's own.
-pub const MIN_RESULTS_RANGE: core::ops::RangeInclusive<u32> = 1..=10_000;
-
-/// `budget_ms`' range (SPEC §6.2.3).
-pub const BUDGET_MS_RANGE: core::ops::RangeInclusive<u32> = 1..=60_000;
+use crate::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -108,7 +100,7 @@ impl fmt::Display for RelaxLevel {
 pub struct RelaxOptions {
     /// `false` runs L0 only (`relax: false`).
     pub enabled: Option<bool>,
-    /// Relax while there are fewer hits than this, in [`MIN_RESULTS_RANGE`].
+    /// Relax while there are fewer hits than this, in [`RelaxationConfig::MIN_RESULTS`].
     pub min_results: Option<u32>,
     /// The levels after L0, before the fallback.
     pub levels: Option<Levels>,
@@ -118,7 +110,7 @@ pub struct RelaxOptions {
     pub fill: Option<bool>,
     /// Whether filters may be relaxed.
     pub filters: Option<FilterRelaxation>,
-    /// The cascade's time budget in milliseconds, in [`BUDGET_MS_RANGE`].
+    /// The cascade's time budget in milliseconds, in [`RelaxationConfig::BUDGET_MS`].
     pub budget_ms: Option<u32>,
 }
 
@@ -154,31 +146,25 @@ pub enum RelaxError {
     },
 }
 
-/// What a level's transform builds from: the query as compiled and the queries the cascade built before.
-#[derive(Debug, Clone, Copy)]
-#[non_exhaustive]
-pub struct LevelInput<'a> {
+/// What a level's transform builds from: the query as compiled. The levels of ROADMAP 8.2 add what they need (the
+/// schema, statistics, the steps built before).
+#[derive(Debug)]
+pub(crate) struct LevelInput<'a> {
     /// L0's query, as compiled.
-    pub original: &'a Query,
-    /// The query of the last step built before this level: L0's for L1.
-    pub previous: &'a Query,
-    /// The collection's schema.
-    pub schema: &'a CollectionSchema,
+    pub(crate) original: &'a Query,
 }
 
 /// One query a level runs (ROADMAP 8.1.2): a level may run several, strictest first (L2's `minimum_should_match`
 /// ladder, ROADMAP 8.2.2.2), each its own step of the cascade.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Step {
+pub(crate) struct Step {
     /// The query.
-    pub query: Query,
+    pub(crate) query: Query,
     /// What the step applied, as the response's `applied` lists it (SPEC §7.6): `"drop_terms:75%"`, `"fuzzy"`.
-    pub applied: String,
+    pub(crate) applied: String,
 }
 
 /// Builds a level's steps (SPEC §7.6). Called only once the cascade reaches the level; no step skips the level.
-// The orchestrator (ROADMAP 8.1.2) is what calls it; until then only the tests do.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) trait LevelTransform: Send + Sync + fmt::Debug {
     /// The level's steps for `input`, strictest first.
     fn steps(&self, input: &LevelInput<'_>) -> Vec<Step>;
@@ -224,7 +210,6 @@ fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
 
 /// A level of a [`RelaxPlan`] and its transform.
 #[derive(Debug, Clone)]
-#[cfg_attr(not(test), allow(dead_code))] // Read by the orchestrator, ROADMAP 8.1.2.
 pub(crate) struct PlannedLevel {
     pub(crate) level: RelaxLevel,
     pub(crate) transform: Arc<dyn LevelTransform>,
@@ -246,16 +231,28 @@ impl RelaxPlan {
     /// `fallback` is [`Fallback::None`]. Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
     ///
     /// # Errors
-    /// [`RelaxError::OutOfRange`] for a `min_results` outside [`MIN_RESULTS_RANGE`] or a `budget_ms` outside
-    /// [`BUDGET_MS_RANGE`]; [`RelaxError::Levels`] for custom levels that repeat one or are out of cascade order.
+    /// [`RelaxError::OutOfRange`] for a `min_results` outside [`RelaxationConfig::MIN_RESULTS`] or a `budget_ms` outside
+    /// [`RelaxationConfig::BUDGET_MS`]; [`RelaxError::Levels`] for custom levels that repeat one or are out of cascade order.
     /// A collection's settings were checked when its schema was built; a query's are checked here.
     pub fn new(collection: &RelaxationConfig, options: &RelaxOptions) -> Result<Self, RelaxError> {
         let min_results = options.min_results.unwrap_or(collection.min_results);
-        check("min_results", min_results, MIN_RESULTS_RANGE, "1..=10000")?;
+        check(
+            "min_results",
+            min_results,
+            RelaxationConfig::MIN_RESULTS,
+            RelaxationConfig::MIN_RESULTS_ALLOWED,
+        )?;
         let budget_ms = options.budget_ms.unwrap_or(collection.budget_ms);
-        check("budget_ms", budget_ms, BUDGET_MS_RANGE, "1..=60000")?;
+        check(
+            "budget_ms",
+            budget_ms,
+            RelaxationConfig::BUDGET_MS,
+            RelaxationConfig::BUDGET_MS_ALLOWED,
+        )?;
         let levels = options.levels.as_ref().unwrap_or(&collection.levels);
-        check_levels(levels)?;
+        if let Some(problem) = levels.problem() {
+            return Err(RelaxError::Levels { problem });
+        }
         let enabled = options.enabled.unwrap_or(collection.enabled);
         let fallback = options.fallback.unwrap_or(collection.fallback);
         let mut planned = vec![RelaxLevel::Exact];
@@ -310,7 +307,6 @@ impl RelaxPlan {
         self.budget
     }
 
-    #[cfg_attr(not(test), allow(dead_code))] // Read by the orchestrator, ROADMAP 8.1.2.
     pub(crate) fn planned(&self) -> &[PlannedLevel] {
         &self.levels
     }
@@ -388,27 +384,6 @@ fn check(
             allowed,
         })
     }
-}
-
-fn check_levels(levels: &Levels) -> Result<(), RelaxError> {
-    let Levels::Custom(levels) = levels else {
-        return Ok(());
-    };
-    for pair in levels.windows(2) {
-        if let [a, b] = pair {
-            if a == b {
-                return Err(RelaxError::Levels {
-                    problem: "a level is listed twice",
-                });
-            }
-            if a > b {
-                return Err(RelaxError::Levels {
-                    problem: "levels must be in cascade order (synonyms, drop_terms, prefix, fuzzy)",
-                });
-            }
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]

@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 2e2626d60ec004b97e8ded442e1f27dfae3cc9397fa5b58c52050403d9fb1042 # macOS CI on main a1a3615: the budget read the wall clock and cut the cascade before its last step (min_results = 13, fill, k = 2)
