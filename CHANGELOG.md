@@ -10,7 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 - `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for step 0 of a cascade that stopped at L0, as
-  every cursor of a search that did not relax), and `SearchHit` a crate-private one with the same value, so it can
+  every cursor of a search that did not relax), and `SearchHit` a private one with the same value, so it can
   no longer be built outside the crate.
 - `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
   `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
