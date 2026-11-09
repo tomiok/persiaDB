@@ -1508,7 +1508,7 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
 mod limits {
     use super::*;
     use crate::query::{BoolQuery, PrefixQuery, QueryError, QueryLimits};
-    use crate::search::SearchError;
+    use crate::search::{FacetRequest, SearchError};
 
     fn any_of(body: FieldId, words: &[&str]) -> Query {
         Query::Bool(BoolQuery {
@@ -1557,7 +1557,7 @@ mod limits {
             step(term(body, "red"), "red"),
         ]);
         let relax = plan(&min(1), &[(RelaxLevel::DropTerms, &drop)]).with_limits(terms(3));
-        assert_eq!(relax.limits(), &terms(3));
+        assert_eq!(relax.limits(), Some(&terms(3)));
         let out = views
             .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec())
             .unwrap();
@@ -1739,5 +1739,120 @@ mod limits {
         // `shoes` first, then the colors it did not match; the skipped step holds none.
         let steps: Vec<usize> = whole.hits.iter().map(|h| h.step).collect();
         assert_eq!(steps, [2, 2, 3, 3]);
+    }
+
+    #[test]
+    fn a_cut_step_pages_by_cursor_and_is_excluded_as_cut() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let levels = Stub::new(vec![
+            step(prefix(body, "sh", 50), "prefix"),
+            step(any_of(body, &["red", "blue"]), "colors"),
+        ]);
+        // One expansion: the prefix is cut to it. Excluded uncut, its 50 would leave `colors` no room.
+        let limits = QueryLimits {
+            max_terms: 4,
+            max_expansions: 1,
+            ..QueryLimits::default()
+        };
+        let relax = plan(
+            &RelaxOptions {
+                fill: Some(true),
+                ..min(1)
+            },
+            &[(RelaxLevel::Prefix, &levels)],
+        )
+        .with_limits(limits);
+        let purple = term(body, "purple");
+        let whole = views
+            .search_relaxed(&purple, &request(10), &relax, &exec())
+            .unwrap();
+        assert_eq!(whole.relaxation.applied, ["prefix:cut", "colors"]);
+        assert_eq!(sorted(&whole), [("a", 1), ("b", 2), ("c", 1), ("e", 2)]);
+        let paged = by_cursor(&views, &purple, &request(1), &relax);
+        assert_eq!(strip(&paged), strip(&whole.hits));
+    }
+
+    #[test]
+    fn a_skipped_step_counts_no_facet() {
+        let (db, body, tag) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let drop = Stub::new(vec![
+            step(any_of(body, &["red", "shoes", "hat", "blue"]), "wide"),
+            step(term(body, "hat"), "hat"),
+        ]);
+        let relax = plan(&min(1), &[(RelaxLevel::DropTerms, &drop)]).with_limits(terms(3));
+        let request = SearchRequest {
+            facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+            ..request(10)
+        };
+        let out = views
+            .search_relaxed(&term(body, "purple"), &request, &relax, &exec())
+            .unwrap();
+        // `hat`: b and d (y), e (x). The wide step would have counted a and c too.
+        let counts: Vec<(&[u8], u64)> = out.facets[0]
+            .values
+            .iter()
+            .map(|v| (v.value.as_slice(), v.count))
+            .collect();
+        assert_eq!(counts, [(&b"y"[..], 2), (&b"x"[..], 1)]);
+    }
+
+    #[test]
+    fn a_skipped_last_step_leaves_the_level_and_text_of_the_step_before() {
+        use persia_analysis::AnalyzerRegistry;
+
+        use crate::query::{DefaultFields, QueryCompiler};
+
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+        let fields = DefaultFields::all(c.schema());
+        let text = |query: Query, applied: &str, text: &str| Step {
+            effective: Some(text.into()),
+            ..step(query, applied)
+        };
+        let drop = Stub::new(vec![text(term(body, "shoes"), "shoes", "shoes")]);
+        let wide = Stub::new(vec![text(
+            any_of(body, &["red", "shoes", "hat", "blue"]),
+            "wide",
+            "red shoes hat blue",
+        )]);
+        let relax = plan(
+            &min(3),
+            &[(RelaxLevel::DropTerms, &drop), (RelaxLevel::Fuzzy, &wide)],
+        );
+        // The compilation's own limits apply: the plan sets none.
+        let tight = terms(3);
+        let purple = compiler.compile("purple", &fields, &tight);
+        assert_eq!(purple.limits, tight);
+        let out = views
+            .search_relaxed(&purple, &request(10), &relax, &exec())
+            .unwrap();
+        let r = &out.relaxation;
+        assert_eq!(r.applied, ["shoes", "wide:skipped"]);
+        assert_eq!(r.level, RelaxLevel::DropTerms);
+        assert!(r.relaxed());
+        assert_eq!(r.effective.as_deref(), Some("shoes"));
+        // The plan's limits win over the compilation's.
+        let relax = relax.with_limits(QueryLimits::default());
+        let out = views
+            .search_relaxed(&purple, &request(10), &relax, &exec())
+            .unwrap();
+        assert_eq!(out.relaxation.applied, ["shoes", "wide"]);
+        assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
+        assert_eq!(
+            out.relaxation.effective.as_deref(),
+            Some("red shoes hat blue")
+        );
     }
 }

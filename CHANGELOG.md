@@ -17,12 +17,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   under every strategy (`search_top10_pruning/or4_msm2`, `or4_msm3`, `or50_msm2`); beside `must` it is one clause
   of the conjunction.
 - `persia-engine` (breaking): `Compiled` records where its query came from (ROADMAP 8.1.7; SPEC §7.1.1, §7.6): `text`,
-  the user text read, and `clauses`, one `CompiledClause` per clause that compiled, with its byte span in that text,
-  whether it excludes, and its parts. `Compiled::source` and `Compiled::parts` read a clause by its index in
-  `clauses`. `Compiled::effective` joins the clauses' text. It is
-  `#[non_exhaustive]` now, so a pattern names its fields with `..`. `CollectionViews::search_relaxed` takes a `Query`
-  or a `Compiled` (`RelaxedQuery`): for a compiled one the response's `Relaxation::original` is the text read and
-  `effective` the last step's text (at L0, the clauses that compiled); a programmatic query has neither.
+  the user text read, `clauses`, one `CompiledClause` per clause that compiled, with its byte span in that text,
+  whether it excludes, and its parts, and `limits`. `Compiled::source` and `Compiled::parts` read a clause by its
+  index in `clauses`. `Compiled::effective` joins the clauses' text. It is `#[non_exhaustive]` now, so a pattern names
+  its fields with `..`. `CollectionViews::search_relaxed` takes a `Query` or a `Compiled` (`impl Into<RelaxedQuery>`):
+  for a compiled one the response's `Relaxation::original` is the text read and `effective` the last step's text (at
+  L0, the clauses that compiled); a programmatic query has neither. An argument that only deref-coerced to `&Query`
+  (`&Box<Query>`, `&&Query`) now needs `&*` or `.as_ref()`.
 - `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for step 0 of a cascade that stopped at L0, as
   every cursor of a search that did not relax), and `SearchHit` a private one with the same value, so it can
   no longer be built outside the crate.
@@ -141,13 +142,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
-- `persia-engine`: relaxed queries stay within `QueryLimits` (ROADMAP 8.1.8; SPEC §7.1.3, §7.6). `RelaxPlan::with_limits` sets
-  the limits (the default ones otherwise); each step after L0 is checked as the query it runs, with the earlier steps it
+- `persia-engine`: relaxed queries stay within `QueryLimits` (ROADMAP 8.1.8; SPEC §7.1.3, §7.6). The limits are those
+  of `RelaxPlan::with_limits` (`RelaxPlan::limits`), else the ones a `Compiled` query was compiled with (its new
+  `limits` field), else the defaults. Each step after L0 is checked as the query it runs, with the earlier steps it
   excludes. A step over them has its `prefix` and `fuzzy` `max_expansions` cut to what is left, the largest first and
-  none below 1 (`applied`: `"prefix:cut"`); one no cut fits is not searched and excludes nothing from later steps
-  (`"prefix:skipped"`, `Relaxation::CUT` and `Relaxation::SKIPPED`). `Relaxation::level` is now the level of the last
-  step searched, and `Relaxation::relaxed` is false when every step after L0 was skipped. A step that is invalid for
-  another reason fails the search (`SearchError::Query`).
+  none below 1, those under its own `must_not` counted but not cut (`applied`: `"prefix:cut"`); one no cut fits is not
+  searched and excludes nothing from later steps (`"prefix:skipped"`, `Relaxation::CUT` and `Relaxation::SKIPPED`).
+  `Relaxation::level` is now the level of the last step built and not skipped, and `Relaxation::relaxed` is false when
+  every step after L0 was skipped. A step, or an L0, that is invalid for another reason fails the search
+  (`SearchError::Query`).
 - `persia-engine`: the relaxation response metadata (ROADMAP 8.1.5; SPEC §7.6). `db::Relaxation` states `level`,
   `applied`, `original`, `effective`, `corrected` (`db::Correction`) and `truncated`, with `Relaxation::relaxed()`;
   each `RelaxedHit` states its `level`, `step` and `rank_score`. `original` and `effective` are `None` until ROADMAP

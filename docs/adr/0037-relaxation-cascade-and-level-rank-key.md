@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-11-08
-- Related: SPEC §6.2.3, §7.3, §7.4, §7.5, §7.6; ROADMAP 8.1.1–8.1.5, 8.1.9, 8.3.2, 8.3.4
+- Related: SPEC §6.2.3, §7.3, §7.4, §7.5, §7.6; ROADMAP 8.1.1–8.1.8, 8.1.9, 8.1.13, 8.3.2, 8.3.4
 
 ## Context
 
@@ -79,7 +79,21 @@ cascade return?
    that ranking. The response is the completed steps' hits with `truncated: true`, `level` and `applied` describe
    those steps, and cursors record the last completed step. A deadline error inside a step counts as the budget only
    when the request's own execution is not interrupted. Latency is therefore at most L0's plus about `budget_ms`
-   (plus one reader step between two interrupt reads, and reading the page).
+. **The response states the user text** (ROADMAP 8.1.7). `search_relaxed` takes a `Query` or a `Compiled` one. A
+   compiled query records the text read and each clause's byte span in it, so `original` is that text and `effective`
+   the last step's text, rendered from the spans: at L0, the clauses that compiled. A programmatic query has neither:
+   it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy), so rendering
+   one would show text the user never wrote and that does not compile back to the query.
+10. **Steps are held to the limits as they run, cut or skipped** (ROADMAP 8.1.8). Item 2 makes a step's real query
+    `bool { must: [q_i], must_not: [earlier] }`, so that whole query is checked against `QueryLimits` (the search's,
+    else the compilation's, else the defaults), the exclusions in full. Over a limit, the step's `prefix` and `fuzzy`
+    `max_expansions` are lowered, largest first and none below 1, to use exactly what is left; each keeps its most
+    frequent terms, so the least important expansions go first. Expansions under the step's own `must_not` count but
+    are not cut, since excluding less would widen the step. A step no cut fits is skipped: not searched, listed as
+    `"<applied>:skipped"`, and not excluded from later steps, which are checked the same way. Skipping keeps the
+    cascade going (pillar 3), and not excluding it is what not having searched it means: its matches can still be a
+    later step's. The decisions depend only on the steps and the limits, so a cursor's page skips the same steps.
+    Synonym expansions are not cuttable yet (ROADMAP 8.1.13).
 
 ## Consequences
 
@@ -93,6 +107,8 @@ cascade return?
 - A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not
   need), so without `fill` it reports the same cascade as the first page.
 - `relax::Step` and the transform trait stay crate-private until a level outside the engine needs them.
+- A step over the limits is never an error: the response says what was cut or skipped in `applied`. A level that
+  builds an invalid query still fails the search, as it would when planned.
 
 ## Alternatives considered
 
@@ -107,3 +123,8 @@ cascade return?
   the cursor's to count them. Recording the last step costs nothing.
 - **A budget from the start of the search, L0 included.** It bounds the total latency, but a slow L0 would leave no
   time to relax exactly the queries that need it. Not chosen when the 8.1.4 wording was agreed (2026-11-08).
+- **Fail a step over the limits, or stop the cascade there.** Either returns fewer hits, or none, for queries the
+  cascade exists to rescue; a later, smaller step may still fit. Chosen with the user on 2026-11-09: skip and list.
+- **Exclude a skipped step anyway.** That would hide its matches from every later step although nothing ranked them.
+- **Render `effective` for programmatic queries** from the AST. Not faithful (item 9); chosen with the user on
+  2026-11-09: absent.

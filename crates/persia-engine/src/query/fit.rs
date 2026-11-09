@@ -31,7 +31,15 @@ pub(crate) struct StepLimits<'a> {
 
 impl<'a> StepLimits<'a> {
     /// Limits for the steps after `first` (L0's query), which every one of them excludes.
-    pub(crate) fn new(schema: &'a CollectionSchema, limits: QueryLimits, first: &Query) -> Self {
+    ///
+    /// # Errors
+    /// What [`Query::validate`] rejects in `first` other than a limit.
+    pub(crate) fn new(
+        schema: &'a CollectionSchema,
+        limits: QueryLimits,
+        first: &Query,
+    ) -> Result<Self, QueryError> {
+        first.check(schema, &QueryLimits::UNLIMITED, &mut Usage::default(), 2)?;
         let mut this = Self {
             schema,
             limits,
@@ -40,7 +48,7 @@ impl<'a> StepLimits<'a> {
         };
         this.full = this.excluded.add(&limits, 1, 0, 0).is_err();
         this.exclude(first);
-        this
+        Ok(this)
     }
 
     /// Counts `query`, searched by a step, as excluded from every later step.
@@ -59,12 +67,8 @@ impl<'a> StepLimits<'a> {
     /// What [`Query::validate`] rejects other than a limit: a level built an invalid query. Checked first, as a check
     /// stops at its first error, which could be a limit.
     pub(crate) fn fit(&self, query: &Query) -> Result<Fit, QueryError> {
-        query.check(
-            self.schema,
-            &QueryLimits::UNLIMITED,
-            &mut Usage::default(),
-            2,
-        )?;
+        let mut whole = Usage::default();
+        query.check(self.schema, &QueryLimits::UNLIMITED, &mut whole, 2)?;
         if self.full {
             return Ok(Fit::Skipped);
         }
@@ -74,10 +78,17 @@ impl<'a> StepLimits<'a> {
         let mut cut = query.clone();
         let mut caps = Vec::new();
         caps_of(&mut cut, &mut caps);
+        // What the caps a cut may lower share: the limit, less the exclusions' expansions and the step's own
+        // `must_not` ones, which are not cut.
+        let cuttable = caps
+            .iter()
+            .map(|c| usize::try_from(**c).unwrap_or(usize::MAX))
+            .fold(0usize, usize::saturating_add);
         let room = self
             .limits
             .max_expansions
-            .saturating_sub(self.excluded.expansions);
+            .saturating_sub(self.excluded.expansions)
+            .saturating_sub(whole.expansions.saturating_sub(cuttable));
         if caps.is_empty() || !share(&mut caps, room) {
             return Ok(Fit::Skipped);
         }
@@ -95,18 +106,16 @@ impl<'a> StepLimits<'a> {
     }
 }
 
-/// The `max_expansions` of every `prefix` and `fuzzy` in `query`, in query order.
+/// The `max_expansions` of every `prefix` and `fuzzy` in `query` a cut may lower, in query order: not those under a
+/// `must_not`.
 fn caps_of<'q>(query: &'q mut Query, caps: &mut Vec<&'q mut u32>) {
     match query {
         Query::Prefix(q) => caps.push(&mut q.max_expansions),
         Query::Fuzzy(q) => caps.push(&mut q.max_expansions),
+        // An exclusion's expansions count but are not cut: fewer would exclude less, so the step would match more than
+        // its level built (SPEC §7.1.3).
         Query::Bool(q) => {
-            for clause in q
-                .must
-                .iter_mut()
-                .chain(&mut q.should)
-                .chain(&mut q.must_not)
-            {
+            for clause in q.must.iter_mut().chain(&mut q.should) {
                 caps_of(clause, caps);
             }
         }
@@ -156,7 +165,7 @@ mod tests {
     #![allow(clippy::unwrap_used)] // Tests: inputs are fixed.
 
     use super::*;
-    use crate::query::{BoolQuery, FuzzyQuery, PrefixQuery, TermQuery};
+    use crate::query::{BoolQuery, BoostQuery, FuzzyQuery, PrefixQuery, TermQuery};
     use crate::schema::{FieldId, FieldKind, SchemaBuilder, TextOptions};
 
     fn schema() -> (CollectionSchema, FieldId) {
@@ -217,11 +226,11 @@ mod tests {
     #[test]
     fn a_step_that_fits_beside_its_exclusions_is_searched_as_built() {
         let (schema, body) = schema();
-        let fitting = StepLimits::new(&schema, limits(4, 100), &terms(body, 2));
+        let fitting = StepLimits::new(&schema, limits(4, 100), &terms(body, 2)).unwrap();
         assert_eq!(fitting.fit(&terms(body, 2)), Ok(Fit::Fits));
         // The exclusions count: two terms of L0 and two of the step are all four.
         assert_eq!(fitting.fit(&terms(body, 3)), Ok(Fit::Skipped));
-        let alone = StepLimits::new(&schema, limits(4, 100), &Query::MatchAll);
+        let alone = StepLimits::new(&schema, limits(4, 100), &Query::MatchAll).unwrap();
         assert_eq!(alone.fit(&terms(body, 3)), Ok(Fit::Fits));
     }
 
@@ -229,7 +238,7 @@ mod tests {
     fn expansions_are_cut_to_what_the_exclusions_leave_the_largest_first() {
         let (schema, body) = schema();
         // L0 holds 50 of the 80 expansions: the step's 50 + 30 share the 30 left.
-        let fitting = StepLimits::new(&schema, limits(100, 80), &prefix(body, 50));
+        let fitting = StepLimits::new(&schema, limits(100, 80), &prefix(body, 50)).unwrap();
         let step = any(vec![prefix(body, 50), fuzzy(body, 30)]);
         assert_eq!(
             fitting.fit(&step),
@@ -254,11 +263,11 @@ mod tests {
     fn a_step_no_cut_fits_is_skipped() {
         let (schema, body) = schema();
         // Too many terms: cutting expansions does not help.
-        let fitting = StepLimits::new(&schema, limits(3, 1000), &Query::MatchAll);
+        let fitting = StepLimits::new(&schema, limits(3, 1000), &Query::MatchAll).unwrap();
         let step = any(vec![prefix(body, 50), terms(body, 3)]);
         assert_eq!(fitting.fit(&step), Ok(Fit::Skipped));
         // Without a prefix or fuzzy there is nothing to cut.
-        let fitting = StepLimits::new(&schema, limits(1000, 0), &Query::MatchAll);
+        let fitting = StepLimits::new(&schema, limits(1000, 0), &Query::MatchAll).unwrap();
         assert_eq!(fitting.fit(&terms(body, 2)), Ok(Fit::Fits));
         assert_eq!(fitting.fit(&prefix(body, 1)), Ok(Fit::Skipped));
         // Too deep: a step sits two levels down, under `must`.
@@ -266,20 +275,25 @@ mod tests {
             max_depth: 2,
             ..QueryLimits::default()
         };
-        let fitting = StepLimits::new(&schema, shallow, &Query::MatchAll);
+        let fitting = StepLimits::new(&schema, shallow, &Query::MatchAll).unwrap();
         assert_eq!(fitting.fit(&prefix(body, 5)), Ok(Fit::Fits));
         assert_eq!(fitting.fit(&any(vec![prefix(body, 5)])), Ok(Fit::Skipped));
         // L0 at the limit leaves room for a step without terms only; one past it (the caller's, held to other
         // limits), for no step at all.
-        let exact = StepLimits::new(&schema, limits(2, 1000), &terms(body, 2));
+        let exact = StepLimits::new(&schema, limits(2, 1000), &terms(body, 2)).unwrap();
         assert_eq!(exact.fit(&Query::MatchAll), Ok(Fit::Fits));
         assert_eq!(exact.fit(&terms(body, 1)), Ok(Fit::Skipped));
-        let over = StepLimits::new(&schema, limits(2, 1000), &terms(body, 3));
+        let over = StepLimits::new(&schema, limits(2, 1000), &terms(body, 3)).unwrap();
         assert_eq!(over.fit(&Query::MatchAll), Ok(Fit::Skipped));
     }
 
-    /// A step: `terms` terms and a prefix per cap, under one `should`, or alone when it is one leaf.
-    fn step(field: FieldId, terms: usize, caps: &[u32]) -> Query {
+    /// A step: `terms` terms and a prefix or fuzzy per cap, under one `should`, or alone when it is one leaf; beside
+    /// them a `must_not` of a prefix per `excluded` cap when there is one, all of it under a `boost` when `boosted`.
+    fn step(
+        field: FieldId,
+        (terms, caps, excluded, boosted): &(usize, Vec<u32>, Vec<u32>, bool),
+    ) -> Query {
+        let terms = *terms;
         let mut leaves: Vec<Query> = (0..terms)
             .map(|i| {
                 Query::Term(TermQuery {
@@ -288,11 +302,31 @@ mod tests {
                 })
             })
             .collect();
-        leaves.extend(caps.iter().map(|&c| prefix(field, c)));
-        match leaves.len() {
+        leaves.extend(caps.iter().enumerate().map(|(i, &c)| {
+            if i % 2 == 0 {
+                prefix(field, c)
+            } else {
+                fuzzy(field, c)
+            }
+        }));
+        let mut query = match leaves.len() {
             1 => leaves.pop().unwrap(),
             _ => any(leaves),
+        };
+        if !excluded.is_empty() {
+            query = Query::Bool(BoolQuery {
+                must: vec![query],
+                must_not: excluded.iter().map(|&c| prefix(field, c)).collect(),
+                ..BoolQuery::default()
+            });
         }
+        if *boosted {
+            query = Query::Boost(BoostQuery {
+                query: Box::new(query),
+                boost: 2.0,
+            });
+        }
+        query
     }
 
     fn caps(query: &Query) -> Vec<u32> {
@@ -309,7 +343,12 @@ mod tests {
         #[test]
         fn every_step_searched_is_within_the_limits(
             steps in proptest::collection::vec(
-                (0_usize..4, proptest::collection::vec(1_u32..100, 0..4)),
+                (
+                    0_usize..4,
+                    proptest::collection::vec(1_u32..100, 0..4),
+                    proptest::collection::vec(1_u32..100, 0..2),
+                    proptest::bool::ANY,
+                ),
                 1..6,
             ),
             max_terms in 1_usize..12,
@@ -319,8 +358,8 @@ mod tests {
         ) {
             let (schema, body) = schema();
             let limits = QueryLimits { max_terms, max_clauses, max_expansions, max_depth, ..QueryLimits::default() };
-            let queries: Vec<Query> = steps.iter().map(|(t, c)| step(body, *t, c)).collect();
-            let mut fitting = StepLimits::new(&schema, limits, &queries[0]);
+            let queries: Vec<Query> = steps.iter().map(|s| step(body, s)).collect();
+            let mut fitting = StepLimits::new(&schema, limits, &queries[0]).unwrap();
             let mut searched = vec![queries[0].clone()];
             for query in &queries[1..] {
                 let runs = |q: &Query| Query::Bool(BoolQuery {
@@ -362,9 +401,41 @@ mod tests {
     }
 
     #[test]
+    fn a_steps_own_exclusions_count_but_are_not_cut() {
+        let (schema, body) = schema();
+        let fitting = StepLimits::new(&schema, limits(100, 30), &Query::MatchAll).unwrap();
+        let with_not = |wanted: u32| {
+            Query::Bool(BoolQuery {
+                must: vec![prefix(body, wanted)],
+                must_not: vec![fuzzy(body, 20)],
+                ..BoolQuery::default()
+            })
+        };
+        // The fuzzy exclusion keeps its 20; the prefix gets the 10 left.
+        assert_eq!(fitting.fit(&with_not(50)), Ok(Fit::Cut(with_not(10))));
+        // An exclusion alone over the limit cannot be cut: skipped.
+        let fitting = StepLimits::new(&schema, limits(100, 15), &Query::MatchAll).unwrap();
+        assert_eq!(fitting.fit(&with_not(1)), Ok(Fit::Skipped));
+    }
+
+    #[test]
+    fn an_invalid_l0_is_an_error() {
+        let (schema, body) = schema();
+        let empty = Query::Prefix(PrefixQuery {
+            field: body,
+            prefix: String::new(),
+            max_expansions: 5,
+        });
+        assert!(matches!(
+            StepLimits::new(&schema, limits(1, 1), &empty),
+            Err(QueryError::EmptyPrefix { .. })
+        ));
+    }
+
+    #[test]
     fn an_invalid_step_is_an_error_not_a_skip() {
         let (schema, body) = schema();
-        let fitting = StepLimits::new(&schema, limits(1000, 1000), &Query::MatchAll);
+        let fitting = StepLimits::new(&schema, limits(1000, 1000), &Query::MatchAll).unwrap();
         let empty = |max_expansions| {
             Query::Prefix(PrefixQuery {
                 field: body,
@@ -377,7 +448,7 @@ mod tests {
             Err(QueryError::EmptyPrefix { .. })
         ));
         // Also when it is over a limit: whether it is valid is checked before the limits.
-        let fitting = StepLimits::new(&schema, limits(1000, 2), &Query::MatchAll);
+        let fitting = StepLimits::new(&schema, limits(1000, 2), &Query::MatchAll).unwrap();
         assert!(matches!(
             fitting.fit(&empty(50)),
             Err(QueryError::EmptyPrefix { .. })

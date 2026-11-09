@@ -537,14 +537,16 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [x] 8.1.3 Ordering across levels: the level leads the rank key (every stricter hit above every looser one at any score; an `f64` score offset cannot give that for every score, ADR-0037), a monotone rank score per hit, and paging (offset, cursor) across levels
 - [x] 8.1.4 Budget (`budget_ms`) and `truncated` flag
 - [x] 8.1.5 Response metadata struct (`level`, `applied`, `original`, `effective`, `corrected`)
-- [~] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
-- [~] 8.1.7 Source span and original text of each compiled clause in `Compiled`, for `original`/`effective`/`corrected` and the L3/L4 length rules (found in the 7.1 review)
-- [~] 8.1.8 Relaxed queries within `QueryLimits`: cut expansions to the remaining budget, report it in `applied` (SPEC §7.1.3, found in the 7.1 review). Count the earlier steps a step excludes too (its `must_not`, ADR-0037 item 2), whose expansions planning repeats (found in the 8.1 review)
+- [x] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
+- [x] 8.1.7 Source span and original text of each compiled clause in `Compiled`, for `original`/`effective`/`corrected` and the L3/L4 length rules (found in the 7.1 review)
+- [x] 8.1.8 Relaxed queries within `QueryLimits`: cut expansions to the remaining budget, report it in `applied` (SPEC §7.1.3, found in the 7.1 review). Count the earlier steps a step excludes too (its `must_not`, ADR-0037 item 2), whose expansions planning repeats (found in the 8.1 review)
 - [ ] 8.1.9 Facets under relaxation: specify in SPEC §7.5 which matches a facet counts when the cascade runs (§7.6: the strict query, the level returned, or the union `fill` collects) and implement it with M8 (found in the 7.5 review). 8.1.2 counts the union of the steps built as an interim rule (ADR-0037 item 4); with `fill` a deeper page may count more steps
 - [ ] 8.1.10 Make SPEC §7.6's response example agree with the cascade: `applied` lists every step built in order, and whether L4 `fuzzy` builds on the full query or on the last `drop_terms` step (the example's `effective` keeps both words) is for 8.2 to decide; settle it with the first of 8.2.2 or 8.2.4 (found in the 8.1 review)
 - [ ] 8.1.11 Cursor pages with facets search every step before the cursor's again only to count it, spending the budget (SPEC §7.6, a page may be truncated before any hit): carry the counts with the cursor, or count once per snapshot and query, and bench a deep facet page (found in the 8.1 review)
 - [ ] 8.1.12 Scores can overflow to `+∞` (`constant_score` near `f64::MAX` under a `boost`, or a `bool` summing large ones; SPEC §7.2 allows each): decide whether to clamp to `f64::MAX`, reject the query, or keep `+∞`, and how JSON responses (§12), which have no `Infinity`, carry it. The cascade and `rank_score` already order `+∞` correctly (found in the 8.1.3 review)
 - [ ] 8.1.13 Synonym expansions within `QueryLimits` (SPEC §7.1.3): the cascade's fitting (`query::StepLimits`, ROADMAP 8.1.8) cuts only `prefix` and `fuzzy` `max_expansions`, so an L1 step over `max_terms` or `max_clauses` is skipped whole. 8.2.1 must mark its synonym alternatives as cuttable (least important first) so the fitting drops some instead (found in 8.1.8)
+- [ ] 8.1.14 Each 8.2 level renders its steps' `effective` text from the compiled clauses' spans (`relax::Step::effective`, ROADMAP 8.1.7): a level that leaves it `None` makes the response's `effective` absent for a compiled query (found in the 8.1 batch review)
+- [ ] 8.1.15 Filters in the reference model (`tests/reference/search.rs`), so `minimum_should_match` beside a `filter` (and every filter path) is tested differentially, not only by hand and pruned-against-exhaustive (found in the 8.1 batch review)
 
 ## 8.2 Levels
 - [ ] 8.2.1 L1 synonyms: expand terms with synonym groups

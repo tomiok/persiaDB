@@ -82,7 +82,7 @@ impl RelaxedHit {
 /// assert_eq!(relaxation.level.name(), "exact");
 /// assert!(!relaxation.relaxed());
 /// assert!(!relaxation.truncated);
-/// // Defined, filled by later leaves (ROADMAP 8.1.7, 8.2.4.3).
+/// // A programmatic query has no user text, so no `original` or `effective`; `corrected` waits on ROADMAP 8.2.4.3.
 /// assert_eq!((relaxation.original.as_deref(), relaxation.effective.as_deref()), (None, None));
 /// assert!(relaxation.corrected.is_empty());
 /// // Each hit states the step that found it, at L0 here.
@@ -92,9 +92,10 @@ impl RelaxedHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Relaxation {
-    /// The level of the last step searched (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no later level
-    /// built a step that fits the limits. Without `fill`, every page of one query on one snapshot states the same, unless the budget
-    /// truncated it; with `fill`, a deeper page may build, and state, more steps.
+    /// The level of the last step built and not skipped (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no
+    /// later level built a step that fits the limits. A step built is one the cascade reached: searched, or on a
+    /// cursor's page only excluded. Without `fill`, every page of one query on one snapshot states the same, unless the
+    /// budget truncated it; with `fill`, a deeper page may build, and state, more steps.
     pub level: RelaxLevel,
     /// What each step after L0 applied, in the order they were built (`"applied"`): `"drop_terms:75%"`, `"fuzzy"`.
     /// Empty when no level built a step. A step held to the limits (SPEC §7.1.3, [`RelaxPlan::with_limits`]) states
@@ -107,7 +108,8 @@ pub struct Relaxation {
     pub original: Option<String>,
     /// The text of the last step's query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. Rendered
     /// from its clauses' source text ([`crate::query::CompiledClause::span`]), so at L0 it is [`Compiled::effective`]:
-    /// the clauses that compiled, without stopwords or text past a limit. `None` when [`Self::original`] is.
+    /// the clauses that compiled, without stopwords or text past a limit. `None` when [`Self::original`] is, and when the
+    /// last step's level renders no text for its query (no level after L0 builds one yet; ROADMAP 8.2 renders it).
     pub effective: Option<String>,
     /// The terms the fuzzy level replaced, in query order (`"corrected"`). Empty until ROADMAP 8.2.4.3 synthesizes
     /// the corrected query ("did you mean").
@@ -115,6 +117,8 @@ pub struct Relaxation {
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
     /// completed before it, and `level` and `applied` describe those steps.
     pub truncated: bool,
+    /// Whether a step after L0 was built and not skipped: [`Self::relaxed`].
+    relaxed: bool,
 }
 
 impl Relaxation {
@@ -125,10 +129,10 @@ impl Relaxation {
     /// steps do not exclude its matches (SPEC §7.1.3).
     pub const SKIPPED: &str = ":skipped";
 
-    /// What a cascade that built steps through `level`, applying `applied`, did, for a query compiled from
-    /// `original` whose last step reads `effective`. The corrections wait on ROADMAP 8.2.4.3.
+    /// What a cascade that built steps through `level` (`relaxed` when that step is after L0), applying `applied`, did,
+    /// for a query compiled from `original` whose last step reads `effective`. The corrections wait on ROADMAP 8.2.4.3.
     fn of(
-        level: RelaxLevel,
+        (level, relaxed): (RelaxLevel, bool),
         applied: Vec<String>,
         text: (Option<String>, Option<String>),
         truncated: bool,
@@ -141,12 +145,14 @@ impl Relaxation {
             effective,
             corrected: Vec::new(),
             truncated,
+            relaxed,
         }
     }
 
-    /// Whether the cascade searched a step after L0, so the response may hold hits a strict query does not match.
+    /// Whether the cascade built a step after L0 that it did not skip, so the response may hold hits a strict query
+    /// does not match. False when every step after L0 was skipped.
     pub fn relaxed(&self) -> bool {
-        self.applied.iter().any(|a| !a.ends_with(Self::SKIPPED))
+        self.relaxed
     }
 }
 
@@ -245,6 +251,10 @@ impl<'q, 's> Built<'q, 's> {
     }
 
     /// The next step held to the limits ([`held`]); L0 (`query`) as it is.
+    ///
+    /// # Errors
+    /// [`SearchError::Query`] for an invalid step, or an invalid L0 (checked at the first step after it, as a cursor's
+    /// page may not plan L0).
     fn fit(
         &mut self,
         query: &Query,
@@ -254,10 +264,10 @@ impl<'q, 's> Built<'q, 's> {
         if self.ran.is_empty() {
             return Ok((Some(step), label));
         }
-        let (schema, limits) = (self.schema, self.limits);
-        let fitting = self
-            .fitting
-            .get_or_insert_with(|| StepLimits::new(schema, limits, query));
+        let fitting = match &mut self.fitting {
+            Some(fitting) => fitting,
+            slot @ None => slot.insert(StepLimits::new(self.schema, self.limits, query)?),
+        };
         held(fitting, step, label)
     }
 
@@ -367,9 +377,9 @@ impl CollectionViews<'_> {
     /// [`RelaxPlan::fill`], also `offset + limit`) or the steps run out. Each step is planned over these views
     /// ([`SearchPlan::with_terms`] under `exec`, with [`super::CollectionSnapshot::search_statistics`] of their
     /// memtable view) and searched as [`Self::search_with`] searches, its earlier steps' matches excluded.
-    /// Each step after L0 is held to [`RelaxPlan::limits`] as the query it runs, with the earlier steps it excludes
-    /// (SPEC §7.1.3): over them, its expansions are cut to fit ([`Relaxation::CUT`]), or it is skipped, not searched
-    /// and not excluded from later steps ([`Relaxation::SKIPPED`]).
+    /// Each step after L0 is held to [`RelaxPlan::limits`] (else a compiled query's own) as the query it runs, with the
+    /// earlier steps it excludes (SPEC §7.1.3): over them, its expansions are cut to fit ([`Relaxation::CUT`]), or it is
+    /// skipped, not searched and not excluded from later steps ([`Relaxation::SKIPPED`]).
     ///
     /// With a `search_after` cursor ([`RelaxedHit::cursor`]), the steps through the cursor's last one are built
     /// again, those before the cursor's step are not searched for hits (they rank before it; with facets they are
@@ -444,7 +454,13 @@ impl CollectionViews<'_> {
         let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
         let counting = !request.facets.is_empty();
 
-        let mut built = Built::new(collection.schema(), *relax.limits());
+        // The plan's limits, else those the query was compiled with (SPEC §7.1.3).
+        let limits = relax
+            .limits()
+            .copied()
+            .or_else(|| compiled.map(|c| c.limits))
+            .unwrap_or_default();
+        let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
@@ -515,10 +531,12 @@ impl CollectionViews<'_> {
             effective,
             ..
         } = built;
+        // The last step built and not skipped, and whether it is after L0.
         let level = ran
             .iter()
-            .rfind(|r| !r.skipped)
-            .map_or(RelaxLevel::Exact, |r| r.level);
+            .enumerate()
+            .rfind(|(_, r)| !r.skipped)
+            .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0));
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
         let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
         let (hits, facets) = self.relaxed_page(ran, request, start.step, last, exec)?;
