@@ -1347,9 +1347,9 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   conjunction takes the threshold (block-max AND) and the score is the same sum. Under block-max WAND its pivot is
   also at least its `m`-th clause in document order (a document before that one's holds fewer clauses), and
   `MaxScore` stops looking a document's clauses up once those found and those left cannot reach `m`. Exhaustively,
-  a document on fewer than `m` clauses is passed over. When `m` is the number of clauses that can match in the
-  view, it is their conjunction, summed in query order as the disjunction sums them. A bound stays the disjunction's:
-  `m` only removes matches, so it lowers no score.
+  a document on fewer than `m` clauses is passed over, on to the `m`-th smallest of the clauses' next documents.
+  When `m` is the number of clauses that can match in the view, it is their conjunction, summed in query order as
+  the disjunction sums them. A bound stays the disjunction's: `m` only removes matches, so it lowers no score.
   A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
@@ -1465,7 +1465,7 @@ A hit returns its location, score, sort values (§7.4: its cursor) and document:
 one (§9.1), and its stored fields (§6.4.2) after the projection. The projection is every stored and extra field
 (default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
 `strict` an extra field; another name is an error. A document lacking a projected field returns without it.
-| L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term, each percentage `p` of the `n` terms the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one is not built again). Stopwords/low-IDF terms dropped first |
+
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,
 stopping at the first level that satisfies `min_results` (or continuing to fill `limit` if `relax.fill = true`):
@@ -1474,7 +1474,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 |---|---|---|
 | L0 | `exact` | All query terms required (AND), analyzed |
 | L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
-| L2 | `drop_terms` | `minimum_should_match` steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term. Stopwords/low-IDF terms dropped first |
+| L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term, each percentage `p` of the `n` terms the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one is not built again). Stopwords/low-IDF terms dropped first |
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST (cap expansions, default 50); corrected terms reported |
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |

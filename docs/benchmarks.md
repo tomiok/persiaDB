@@ -252,21 +252,24 @@ This corpus's blocks are much alike, so block-max AND finds nothing to skip in `
 `block_max_and_skips_blocks_that_cannot_beat_the_threshold` in `tests/pruning.rs`). A `must` beside `should`
 gains most where its own bound cannot beat the threshold: then only documents holding a `should` clause are scored.
 
-`minimum_should_match` (ROADMAP 8.1.6, L2 `drop_terms`): `or4` is `w3 OR w20 OR w60 OR w120`, `or4_msm2` and
-`or4_msm3` the same with at least 2 and 3 of them, and `or50_msm2` `or50` with at least 2. One run (2026-11-09, rustc
-1.99.0, AMD Ryzen 5 3600, Linux). Each strategy prunes a count as it prunes a plain disjunction: block-max WAND takes the
-same time with and without one. A count only drops documents, so the exhaustive walk gets cheaper as it rises: it
-scores fewer of them. An A/B against `main` in the same session (`--save-baseline main` from a worktree), over the
-`term`, `and`, `or`, `or_rare` and `or50` rows of both groups, moved every row by −3 % to +3.5 %, with mixed signs and
-`and` (whose code did not change) moving as much: noise, not a regression of the plain disjunctions.
+`minimum_should_match` (ROADMAP 8.1.6, L2 `drop_terms`): `or4` is `w3 OR w20 OR w60 OR w120`, and `or4_msm2` and
+`or4_msm3` are the same four with at least 2 and at least 3 required. `or50` is 50 clauses, every fourth word (`w0`,
+`w4`, … `w196`), and `or50_msm2` is `or50` with at least 2 required. One run (2026-11-09, rustc 1.99.0, AMD Ryzen 5
+3600, Linux). A count of 2 costs block-max WAND what the plain disjunction does (`or4` against `or4_msm2`, `or50`
+against `or50_msm2`). A count of 3 makes it cheaper (`or4_msm3`), because fewer documents can reach the pivot. A
+count only drops documents, so the exhaustive walk gets cheaper as the count rises: it scores fewer documents and
+skips from a document on too few clauses to the first one that could hold enough. An A/B against `main` in the same
+session (`--save-baseline main` from a worktree), over the `term`, `and`, `or`, `or_rare` and `or50` rows of both
+groups, moved every row by −3 % to +3.5 %, with mixed signs and `and` (whose code did not change) moving as much:
+noise, not a regression of the plain disjunctions.
 
 | query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
 |---|--:|--:|--:|
-| `or4` | 2.14 ms | 1.40 ms | 1.57 ms |
-| `or4_msm2` | 1.53 ms | 1.36 ms | 1.57 ms |
-| `or4_msm3` | 1.27 ms | 1.36 ms | 1.25 ms |
-| `or50` | 24.0 ms | 41.4 ms | 24.7 ms |
-| `or50_msm2` | 23.8 ms | 41.5 ms | 25.5 ms |
+| `or4` | 2.09 ms | 1.45 ms | 1.54 ms |
+| `or4_msm2` | 1.58 ms | 1.45 ms | 1.54 ms |
+| `or4_msm3` | 984 µs | 1.35 ms | 1.17 ms |
+| `or50` | 24.3 ms | 41.5 ms | 23.9 ms |
+| `or50_msm2` | 23.8 ms | 41.7 ms | 23.2 ms |
 
 `search_suite` (ROADMAP 7.8.3): whole requests end to end over the same 50 000 documents in 4 segments (`body` with
 positions), on rayon's global pool: search, merge, and the page's 10 documents read (each planned once, outside the timed loop). `term` is `w3`; `and` is the

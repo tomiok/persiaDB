@@ -243,7 +243,8 @@ impl<M: Matcher> Matcher for Conjunction<M> {
 /// Up to this many clauses, a [`Disjunction`] looks at each to move on; above it, it keeps a heap.
 const SCAN_MAX: usize = 8;
 
-/// The documents any clause matches (OR); the score is the sum of the matching clauses', in query order.
+/// The documents at least `at_least` clauses match: any clause for a plain OR, or a `minimum_should_match` count
+/// (SPEC §7.1). The score is the sum of the matching clauses', in query order.
 ///
 /// Above [`SCAN_MAX`] clauses, those after the current document wait in a min-heap by document, so moving on
 /// touches only the clauses that were on it or are passed over, not every clause (ROADMAP 7.4.7: relaxation
@@ -257,6 +258,8 @@ pub(super) struct Disjunction<M> {
     current: Vec<usize>,
     /// The fewest clauses a document it returns holds (`minimum_should_match`, SPEC §7.1): 1 for a plain OR.
     at_least: usize,
+    /// Scratch for [`Self::pivot`]: the clauses' documents, or the heap entries taken off it.
+    ahead: Vec<Reverse<(u32, usize)>>,
     pos: Pos,
 }
 
@@ -272,8 +275,57 @@ impl<M: Matcher> Disjunction<M> {
             current: Vec::with_capacity(clauses.len()),
             clauses,
             at_least,
+            ahead: Vec::new(),
             pos: Pos::Unstarted,
         }
+    }
+
+    /// The first document after `doc` (which too few clauses match) that `at_least` clauses could match: the
+    /// `at_least`-th smallest of the clauses' documents once those on `doc` move past it, as block-max WAND's
+    /// pivot. A document before it can match fewer clauses than that, since a clause matches nothing before its
+    /// document. `None` when fewer than `at_least` clauses have a document left. The clauses on `doc` are moved
+    /// and (above [`SCAN_MAX`]) queued, so [`Self::current`] is left empty.
+    fn pivot(&mut self, doc: u32) -> Result<Option<u32>, ReadError> {
+        let Some(after) = doc.checked_add(1) else {
+            return Ok(None);
+        };
+        let rank = self.at_least.saturating_sub(1);
+        let mut current = std::mem::take(&mut self.current);
+        self.ahead.clear();
+        let pivot = if self.clauses.len() <= SCAN_MAX {
+            for &i in &current {
+                if let Some(clause) = self.clauses.get_mut(i) {
+                    clause.advance(after)?;
+                }
+            }
+            // Every clause has started: one without a document is exhausted.
+            let docs = self.clauses.iter().enumerate();
+            self.ahead
+                .extend(docs.filter_map(|(i, c)| c.doc().map(|d| Reverse((d, i)))));
+            if self.ahead.len() > rank {
+                // Largest first under `Reverse`: the `rank`-th from the end is the `at_least`-th smallest.
+                let nth = self.ahead.len() - 1 - rank;
+                let (_, &mut Reverse((d, _)), _) = self.ahead.select_nth_unstable(nth);
+                Some(d)
+            } else {
+                None
+            }
+        } else {
+            for &i in &current {
+                self.requeue(i, after)?;
+            }
+            for _ in 0..rank {
+                if let Some(entry) = self.queue.pop() {
+                    self.ahead.push(entry);
+                }
+            }
+            let pivot = self.queue.peek().map(|&Reverse((d, _))| d);
+            self.queue.extend(self.ahead.drain(..));
+            pivot
+        };
+        current.clear();
+        self.current = current;
+        Ok(pivot)
     }
 
     /// Moves clause `i` to its first document at or after `target` and queues it, unless it has none.
@@ -381,9 +433,9 @@ impl<M: Matcher> Matcher for Disjunction<M> {
                 self.dequeue(target, started)?
             };
             match doc {
-                // Too few clauses on it: the next document, every clause now started.
-                Some(d) if self.current.len() < self.at_least => match d.checked_add(1) {
-                    Some(after) => (target, started) = (after, true),
+                // Too few clauses on it: on to the first document enough could match, every clause now started.
+                Some(d) if self.current.len() < self.at_least => match self.pivot(d)? {
+                    Some(pivot) => (target, started) = (pivot, true),
                     None => break None,
                 },
                 doc => break doc,
