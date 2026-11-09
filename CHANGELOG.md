@@ -141,6 +141,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: relaxed queries stay within `QueryLimits` (ROADMAP 8.1.8; SPEC §7.1.3, §7.6). `RelaxPlan::with_limits` sets
+  the limits (the default ones otherwise); each step after L0 is checked as the query it runs, with the earlier steps it
+  excludes. A step over them has its `prefix` and `fuzzy` `max_expansions` cut to what is left, the largest first and
+  none below 1 (`applied`: `"prefix:cut"`); one no cut fits is not searched and excludes nothing from later steps
+  (`"prefix:skipped"`, `Relaxation::CUT` and `Relaxation::SKIPPED`). `Relaxation::level` is now the level of the last
+  step searched, and `Relaxation::relaxed` is false when every step after L0 was skipped. A step that is invalid for
+  another reason fails the search (`SearchError::Query`).
 - `persia-engine`: the relaxation response metadata (ROADMAP 8.1.5; SPEC §7.6). `db::Relaxation` states `level`,
   `applied`, `original`, `effective`, `corrected` (`db::Correction`) and `truncated`, with `Relaxation::relaxed()`;
   each `RelaxedHit` states its `level`, `step` and `rank_score`. `original` and `effective` are `None` until ROADMAP

@@ -22,7 +22,7 @@ use std::time::Instant;
 use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
-use crate::query::{BoolQuery, Compiled, Query};
+use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
 use crate::relax::{LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
 use crate::schema::CollectionSchema;
 use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
@@ -92,12 +92,14 @@ impl RelaxedHit {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct Relaxation {
-    /// The level of the last step built (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no later level
-    /// built a step. Without `fill`, every page of one query on one snapshot states the same, unless the budget
+    /// The level of the last step searched (`"level"`): [`RelaxLevel::Exact`] when L0 found enough or no later level
+    /// built a step that fits the limits. Without `fill`, every page of one query on one snapshot states the same, unless the budget
     /// truncated it; with `fill`, a deeper page may build, and state, more steps.
     pub level: RelaxLevel,
     /// What each step after L0 applied, in the order they were built (`"applied"`): `"drop_terms:75%"`, `"fuzzy"`.
-    /// Empty when nothing was relaxed.
+    /// Empty when no level built a step. A step held to the limits (SPEC §7.1.3, [`RelaxPlan::with_limits`]) states
+    /// it: [`Self::CUT`] after one whose expansions were cut to fit (`"prefix:cut"`), [`Self::SKIPPED`] after one that
+    /// fits no cut, which was not searched (`"prefix:skipped"`).
     pub applied: Vec<String>,
     /// The user text the query was compiled from (`"original"`), as read: [`Compiled::text`]. `None` when the query
     /// was not compiled from `q` (a programmatic query): it has no user text, and the AST has no faithful `q` form
@@ -116,6 +118,13 @@ pub struct Relaxation {
 }
 
 impl Relaxation {
+    /// Ends an [`Self::applied`] entry whose step had its `prefix` and `fuzzy` expansions cut to fit the limits beside
+    /// the steps it excludes: the largest `max_expansions` first, none below 1 (SPEC §7.1.3).
+    pub const CUT: &str = ":cut";
+    /// Ends an [`Self::applied`] entry whose step did not fit the limits even cut: it was not searched, and later
+    /// steps do not exclude its matches (SPEC §7.1.3).
+    pub const SKIPPED: &str = ":skipped";
+
     /// What a cascade that built steps through `level`, applying `applied`, did, for a query compiled from
     /// `original` whose last step reads `effective`. The corrections wait on ROADMAP 8.2.4.3.
     fn of(
@@ -135,9 +144,9 @@ impl Relaxation {
         }
     }
 
-    /// Whether the cascade built a step after L0, so the response may hold hits a strict query does not match.
+    /// Whether the cascade searched a step after L0, so the response may hold hits a strict query does not match.
     pub fn relaxed(&self) -> bool {
-        !self.applied.is_empty()
+        self.applied.iter().any(|a| !a.ends_with(Self::SKIPPED))
     }
 }
 
@@ -203,6 +212,88 @@ pub enum RelaxedSearchError {
 struct Ran {
     level: RelaxLevel,
     searched: Option<(SearchPlan, Collected)>,
+    /// Not searched: it does not fit the limits (SPEC §7.1.3), and later steps do not exclude it.
+    skipped: bool,
+}
+
+/// The steps the cascade built so far, and what each excludes from the next.
+struct Built<'q, 's> {
+    ran: Vec<Ran>,
+    /// The queries of the steps built and not skipped: every later step excludes them.
+    earlier: Vec<Cow<'q, Query>>,
+    applied: Vec<String>,
+    /// The text of the last step searched (SPEC §7.6 `effective`).
+    effective: Option<String>,
+    schema: &'s CollectionSchema,
+    limits: QueryLimits,
+    /// Each step after L0 is held to the limits beside the steps it excludes, L0 first (SPEC §7.1.3). Built at the
+    /// first such step: a query with enough hits at L0 does not walk its query for them.
+    fitting: Option<StepLimits<'s>>,
+}
+
+impl<'q, 's> Built<'q, 's> {
+    fn new(schema: &'s CollectionSchema, limits: QueryLimits) -> Self {
+        Self {
+            ran: Vec::new(),
+            earlier: Vec::new(),
+            applied: Vec::new(),
+            effective: None,
+            schema,
+            limits,
+            fitting: None,
+        }
+    }
+
+    /// The next step held to the limits ([`held`]); L0 (`query`) as it is.
+    fn fit(
+        &mut self,
+        query: &Query,
+        step: Cow<'q, Query>,
+        label: String,
+    ) -> Result<(Option<Cow<'q, Query>>, String), SearchError> {
+        if self.ran.is_empty() {
+            return Ok((Some(step), label));
+        }
+        let (schema, limits) = (self.schema, self.limits);
+        let fitting = self
+            .fitting
+            .get_or_insert_with(|| StepLimits::new(schema, limits, query));
+        held(fitting, step, label)
+    }
+
+    /// A step of `level` that does not fit: listed, not searched, excluded from none.
+    fn skip(&mut self, level: RelaxLevel, label: String) {
+        self.applied.push(label);
+        self.ran.push(Ran {
+            level,
+            searched: None,
+            skipped: true,
+        });
+    }
+
+    /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it): excluded from every later one.
+    fn push(
+        &mut self,
+        level: RelaxLevel,
+        step: Cow<'q, Query>,
+        label: String,
+        text: Option<String>,
+        searched: Option<(SearchPlan, Collected)>,
+    ) {
+        if !self.ran.is_empty() {
+            self.applied.push(label);
+            if let Some(fitting) = &mut self.fitting {
+                fitting.exclude(&step);
+            }
+        }
+        self.ran.push(Ran {
+            level,
+            searched,
+            skipped: false,
+        });
+        self.earlier.push(step);
+        self.effective = text;
+    }
 }
 
 /// Where the cascade starts and how far it must go: from a request's cursor, or from the top.
@@ -276,6 +367,9 @@ impl CollectionViews<'_> {
     /// [`RelaxPlan::fill`], also `offset + limit`) or the steps run out. Each step is planned over these views
     /// ([`SearchPlan::with_terms`] under `exec`, with [`super::CollectionSnapshot::search_statistics`] of their
     /// memtable view) and searched as [`Self::search_with`] searches, its earlier steps' matches excluded.
+    /// Each step after L0 is held to [`RelaxPlan::limits`] as the query it runs, with the earlier steps it excludes
+    /// (SPEC §7.1.3): over them, its expansions are cut to fit ([`Relaxation::CUT`]), or it is skipped, not searched
+    /// and not excluded from later steps ([`Relaxation::SKIPPED`]).
     ///
     /// With a `search_after` cursor ([`RelaxedHit::cursor`]), the steps through the cursor's last one are built
     /// again, those before the cursor's step are not searched for hits (they rank before it; with facets they are
@@ -350,11 +444,7 @@ impl CollectionViews<'_> {
         let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
         let counting = !request.facets.is_empty();
 
-        let mut ran: Vec<Ran> = Vec::new();
-        let mut earlier: Vec<Cow<'_, Query>> = Vec::new();
-        let mut applied = Vec::new();
-        // The text of the last step built (SPEC §7.6 `effective`).
-        let mut effective: Option<String> = None;
+        let mut built = Built::new(collection.schema(), *relax.limits());
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
@@ -362,7 +452,7 @@ impl CollectionViews<'_> {
         let mut truncated = false;
         'levels: for planned in relax.planned() {
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            if !builds(ran.len(), found) {
+            if !builds(built.ran.len(), found) {
                 break;
             }
             if budget.is_some_and(|end| clock.now() >= end) {
@@ -373,9 +463,9 @@ impl CollectionViews<'_> {
                 original: query,
                 compiled,
             };
-            let steps = level_steps(planned, ran.is_empty(), input);
+            let steps = level_steps(planned, built.ran.is_empty(), input);
             for (step, label, text) in steps {
-                let i = ran.len();
+                let i = built.ran.len();
                 if !builds(i, found) {
                     break 'levels;
                 }
@@ -383,6 +473,11 @@ impl CollectionViews<'_> {
                     truncated = true;
                     break 'levels;
                 }
+                let (step, label) = built.fit(query, step, label)?;
+                let Some(step) = step else {
+                    built.skip(planned.level, label);
+                    continue;
+                };
                 // Hits this step is to collect: none before the cursor's step, or once the page is full.
                 let wanted = if i >= start.step {
                     need.saturating_sub(found)
@@ -398,7 +493,7 @@ impl CollectionViews<'_> {
                         window: wanted,
                     };
                     let Some(searched) =
-                        self.budgeted_step(&step, &earlier, &stats, &part, exec, budget)?
+                        self.budgeted_step(&step, &built.earlier, &stats, &part, exec, budget)?
                     else {
                         truncated = true;
                         break 'levels;
@@ -408,21 +503,22 @@ impl CollectionViews<'_> {
                 } else {
                     None
                 };
-                if i > 0 {
-                    applied.push(label);
-                }
-                ran.push(Ran {
-                    level: planned.level,
-                    searched,
-                });
-                earlier.push(step);
-                effective = text;
+                built.push(planned.level, step, label, text, searched);
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
             }
         }
-        let level = ran.last().map_or(RelaxLevel::Exact, |r| r.level);
+        let Built {
+            ran,
+            applied,
+            effective,
+            ..
+        } = built;
+        let level = ran
+            .iter()
+            .rfind(|r| !r.skipped)
+            .map_or(RelaxLevel::Exact, |r| r.level);
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
         let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
         let (hits, facets) = self.relaxed_page(ran, request, start.step, last, exec)?;
@@ -497,7 +593,13 @@ impl CollectionViews<'_> {
         let mut skip = request.offset;
         let mut room = request.limit;
         let mut hits = Vec::with_capacity(room);
-        for (step, Ran { level, searched }) in ran.into_iter().enumerate() {
+        for (
+            step,
+            Ran {
+                level, searched, ..
+            },
+        ) in ran.into_iter().enumerate()
+        {
             let Some((plan, collected)) = searched else {
                 continue;
             };
@@ -562,6 +664,23 @@ fn level_steps<'a>(
         .into_iter()
         .map(|s| (Cow::Owned(s.query), s.applied, s.effective))
         .collect()
+}
+
+/// `step` held to the limits beside the steps it excludes (SPEC §7.1.3): as built, with its expansions cut (`label`
+/// gets [`Relaxation::CUT`]), or `None` when no cut fits (`label` gets [`Relaxation::SKIPPED`]).
+///
+/// # Errors
+/// [`SearchError::Query`] for a step that is invalid for a reason other than a limit.
+fn held<'a>(
+    fitting: &StepLimits<'_>,
+    step: Cow<'a, Query>,
+    label: String,
+) -> Result<(Option<Cow<'a, Query>>, String), SearchError> {
+    Ok(match fitting.fit(&step)? {
+        Fit::Fits => (Some(step), label),
+        Fit::Cut(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
+        Fit::Skipped => (None, label + Relaxation::SKIPPED),
+    })
 }
 
 /// Whether `e` is a deadline that passed, while planning or searching.

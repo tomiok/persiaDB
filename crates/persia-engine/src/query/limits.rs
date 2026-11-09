@@ -23,6 +23,17 @@ pub struct QueryLimits {
     pub max_text_len: usize,
 }
 
+impl QueryLimits {
+    /// Limits nothing reaches, to check what a query holds and not its size.
+    pub(crate) const UNLIMITED: Self = Self {
+        max_terms: usize::MAX,
+        max_clauses: usize::MAX,
+        max_expansions: usize::MAX,
+        max_depth: usize::MAX,
+        max_text_len: usize::MAX,
+    };
+}
+
 impl Default for QueryLimits {
     fn default() -> Self {
         Self {

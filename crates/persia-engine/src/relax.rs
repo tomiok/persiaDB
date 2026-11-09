@@ -42,7 +42,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::query::{Compiled, Query};
+use crate::query::{Compiled, Query, QueryLimits};
 use crate::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
@@ -229,6 +229,7 @@ pub struct RelaxPlan {
     fill: bool,
     filters: FilterRelaxation,
     budget: Duration,
+    limits: QueryLimits,
 }
 
 impl RelaxPlan {
@@ -280,6 +281,7 @@ impl RelaxPlan {
             fill: options.fill.unwrap_or(collection.fill),
             filters: options.filters.unwrap_or(collection.filters),
             budget: Duration::from_millis(u64::from(budget_ms)),
+            limits: QueryLimits::default(),
         })
     }
 
@@ -311,6 +313,21 @@ impl RelaxPlan {
     /// The cascade's time budget (`budget_ms`).
     pub fn budget(&self) -> Duration {
         self.budget
+    }
+
+    /// The limits each step after L0 is held to, with the earlier steps it excludes (SPEC §7.1.3, §7.6): those of
+    /// [`Self::with_limits`], [`QueryLimits::default`] otherwise.
+    pub fn limits(&self) -> &QueryLimits {
+        &self.limits
+    }
+
+    /// This plan with its steps held to `limits`: the ones the query was compiled or validated with. A step that does
+    /// not fit them beside the earlier steps it excludes has its `prefix` and `fuzzy` expansions cut, and is skipped
+    /// when no cut is enough (SPEC §7.6). A cursor's next page needs the same limits to build the same steps.
+    #[must_use]
+    pub fn with_limits(mut self, limits: QueryLimits) -> Self {
+        self.limits = limits;
+        self
     }
 
     pub(crate) fn planned(&self) -> &[PlannedLevel] {

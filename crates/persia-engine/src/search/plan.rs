@@ -611,13 +611,7 @@ fn plan_expansion<S: StatisticsProvider + ?Sized>(
     })
 }
 /// Limits no filter reaches: planning checks a filter's fields and values, not its size.
-const UNLIMITED: QueryLimits = QueryLimits {
-    max_terms: usize::MAX,
-    max_clauses: usize::MAX,
-    max_expansions: usize::MAX,
-    max_depth: usize::MAX,
-    max_text_len: usize::MAX,
-};
+const UNLIMITED: QueryLimits = QueryLimits::UNLIMITED;
 
 /// The matcher of `node`. `pruning` is what a threshold on its score may skip with; the clauses a threshold on the
 /// whole score says nothing about (a conjunction's, optional ones, exclusions, under a constant score) are built
