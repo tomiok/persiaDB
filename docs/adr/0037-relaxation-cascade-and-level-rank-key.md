@@ -63,8 +63,9 @@ cascade return?
    steps through that last one. It does not search the steps before the cursor's (they rank before it) unless it
    counts facets, which count every step built (item 4). It searches the cursor's step after the cursor and later
    steps from their top. Each step keeps its own pruning threshold: one from a stricter step says nothing about a
-   looser one, whose hits all rank below. Offset and cursor pages are therefore slices of one ranking, without `fill` every page
-   reports the same `level` and `applied`, and with `fill` a cursor page relaxes further while it has room. A plain
+   looser one, whose hits all rank below. Offset and cursor pages are therefore slices of one ranking. Without `fill`,
+   they normally report the same `level` and `applied`, except when the budget truncates a cursor page; with `fill`,
+   a cursor page relaxes further while it has room. A plain
    search, or one with `relax: false`, rejects a cursor from a step after L0, and any search rejects one whose step is
    after its last
    (`RequestError::CursorStep`).
