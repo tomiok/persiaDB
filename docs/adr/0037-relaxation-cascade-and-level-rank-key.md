@@ -66,16 +66,17 @@ cascade return?
    reports the same `level` and `applied`, and with `fill` a cursor page relaxes further while it has room. A plain
    search rejects a cursor from a step after L0, and any search rejects one whose step is after its last
    (`RequestError::CursorStep`).
-8. **The budget starts when L0 finishes** (ROADMAP 8.1.4). It reads an injected clock (`Execution::clock`, the
-   system clock by default), so tests never read the wall clock. L0 is never cut by it: only the request's own
-   deadline and token govern L0, and they stay errors in every step. The budget is checked before each level builds,
-   before each step, and inside each step through the same interrupt reads as a deadline (SPEC §7.3): the step runs
-   on a copy of the execution whose extra deadline is the budget's end. A step the budget stops is dropped whole,
-   since a cut page would rank hits a full step does not return. The response is the completed steps' hits with
-   `truncated: true`, `level` and `applied` describe those steps, and cursors record the last completed step. A
-   deadline error inside a step counts as the budget only when the request's own execution is not interrupted.
-   Latency is therefore at most L0's plus about `budget_ms` (plus one reader step between two interrupt reads, and
-   reading the page).
+8. **The budget starts when L0 finishes** (ROADMAP 8.1.4). It reads an injected clock (`Execution::clock`, else
+   the deadline's, else the system clock), so tests never read the wall clock. L0 is never cut by it: only the
+   request's own deadline and token govern L0, and they stay errors in every step. The budget is checked before each
+   level builds, before each step, and inside each step through the same interrupt reads as a deadline (SPEC §7.3):
+   the step runs on a copy of the execution whose extra deadline is the budget's end. A step the budget stops is
+   dropped whole: it has not seen all its matches, so the hits it holds need not be its best. Returning them would
+   rank hits the full step ranks lower, or does not return at all, and a later page by cursor would not continue
+   that ranking. The response is the completed steps' hits with `truncated: true`, `level` and `applied` describe
+   those steps, and cursors record the last completed step. A deadline error inside a step counts as the budget only
+   when the request's own execution is not interrupted. Latency is therefore at most L0's plus about `budget_ms`
+   (plus one reader step between two interrupt reads, and reading the page).
 
 ## Consequences
 

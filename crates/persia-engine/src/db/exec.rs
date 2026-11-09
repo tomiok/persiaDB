@@ -12,7 +12,7 @@
 use core::ops::Bound;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::Instant;
 
 use super::clock::{Clock, SystemClock};
@@ -180,20 +180,23 @@ impl Execution {
         self
     }
 
-    /// Reads the relaxation cascade's time budget (`budget_ms`, SPEC §7.6) from `clock`, instead of [`SystemClock`]:
-    /// a test's [`super::ManualClock`], or the database's own clock.
+    /// Reads the relaxation cascade's time budget (`budget_ms`, SPEC §7.6) on `clock`: a test's
+    /// [`super::ManualClock`], or the database's own clock. Without one, the budget reads [`Self::deadline`]'s clock,
+    /// or else [`SystemClock`].
     #[must_use]
     pub fn clock(mut self, clock: Arc<dyn Clock>) -> Self {
         self.clock = Some(clock);
         self
     }
 
-    /// The clock the relaxation budget reads.
+    /// The clock the relaxation budget reads: [`Self::clock`]'s, else the deadline's, else the system's.
     pub(super) fn budget_clock(&self) -> Arc<dyn Clock> {
-        self.clock.clone().unwrap_or_else(|| {
-            let system: Arc<dyn Clock> = Arc::new(SystemClock);
-            system
-        })
+        static SYSTEM: LazyLock<Arc<dyn Clock>> = LazyLock::new(|| Arc::new(SystemClock));
+        self.clock
+            .as_ref()
+            .or(self.deadline.as_ref().map(|(clock, _)| clock))
+            .unwrap_or(&SYSTEM)
+            .clone()
     }
 
     /// This execution, also stopping with [`Interrupt::DeadlineExceeded`] once [`Self::budget_clock`] reads `end`:

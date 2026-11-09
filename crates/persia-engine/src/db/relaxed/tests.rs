@@ -1091,6 +1091,29 @@ mod budget {
     }
 
     #[test]
+    fn without_a_budget_clock_the_budget_reads_the_deadlines() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let clock = Arc::new(ManualClock::new(0));
+        let synonyms = slow(&clock, 60, vec![step(term(body, "hat"), "synonyms")]);
+        let relax = plan(&budget(50, 10), &[]).with_level(RelaxLevel::Synonyms, synonyms as _);
+        // A deadline far away on the manual clock, and no budget clock: the budget reads the manual one too, which
+        // synonyms moves 60 ms, past the 50 ms budget, before its step.
+        let far = clock.now() + Duration::from_secs(3600);
+        let exec = Execution::new(Pruning::default())
+            .threads(Threads::Current)
+            .deadline(Arc::clone(&clock) as _, far);
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &relax, &exec)
+            .unwrap();
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.hits.len(), 2);
+    }
+
+    #[test]
     fn the_requests_own_deadline_and_token_are_errors_not_a_truncation() {
         let (db, body, _) = database();
         let snapshot = db.snapshot();

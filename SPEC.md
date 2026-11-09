@@ -1523,12 +1523,13 @@ cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cu
 that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is after its last is an error,
 and so is a plain search given a cursor from a step after L0: every hit it returns ranks before the cursor.
 
-Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected; the system's by default) from
-the moment L0 finishes, so L0 is never cut by it. The request's own deadline and cancellation (§7.3) still apply to
-every step, L0 included, and are errors. The budget is checked before each level builds its steps, before each
-step, and inside each step's planning and search, at the reads of §7.3. Once it has passed, the cascade stops. A
-step in progress is dropped whole: a page cut short would rank hits a full step does not return. The response holds
-the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
+Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
+deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and
+cancellation (§7.3) still apply to every step, L0 included, and are errors. The budget is checked before each level
+builds its steps, before each step, and inside each step's planning and search, at the reads of §7.3. Once it has
+passed, the cascade stops. A step in progress is dropped whole: it has not seen all its matches, so the hits it holds
+need not be its best, and a page of them would rank hits the full step ranks lower or does not return. The response
+holds the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
 describe those steps, and a hit's cursor records the last of them as the cascade's last step. A cascade that ends
 before the budget passes is not truncated.
 

@@ -125,10 +125,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 - `persia-engine`: the relaxation budget (ROADMAP 8.1.4; SPEC §7.6; ADR-0037). `budget_ms` runs from the moment L0
-  finishes, on the clock given by `Execution::clock` (the system clock by default). It is checked before each level
-  and step and inside each step's search, so a step it passes is dropped whole. The response then holds the
-  completed steps' hits with `Relaxation::truncated` set. L0 is never cut by it; the request's own deadline and
-  token remain errors.
+  finishes, on the clock given by `Execution::clock` (else the deadline's, else the system clock). It is checked
+  before each level and step and inside each step's search, so a step it passes is dropped whole. The response then
+  holds the completed steps' hits with `Relaxation::truncated` set. L0 is never cut by it; the request's own deadline
+  and token remain errors.
 - `persia-engine`: relaxed hits rank by step, then by the sort, and page across steps (ROADMAP 8.1.3; SPEC §7.4,
   §7.6; ADR-0037). Every hit of a stricter step ranks above every hit of a looser one, whatever their scores; each
   keeps its step's own score. `RelaxedHit::rank_score` (`relax::rank_score`) gives one number that never increases
