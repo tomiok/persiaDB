@@ -204,7 +204,7 @@ impl Start {
         }
         Ok(Self {
             step: at.step,
-            last: Some(at.last),
+            last: Some(if relax.relaxes() { at.last } else { 0 }),
         })
     }
 
