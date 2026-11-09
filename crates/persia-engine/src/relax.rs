@@ -305,7 +305,7 @@ impl RelaxPlan {
         self.filters
     }
 
-    /// The cascade's time budget (`budget_ms`). The cascade applies it from ROADMAP 8.1.4.
+    /// The cascade's time budget (`budget_ms`).
     pub fn budget(&self) -> Duration {
         self.budget
     }
