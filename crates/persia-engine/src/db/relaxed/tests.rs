@@ -1,4 +1,4 @@
-//! The cascade with stub levels (ROADMAP 8.1.2): each stub builds fixed steps and counts its calls.
+//! The cascade with stub levels (ROADMAP 8.1.2, 8.1.3): each stub builds fixed steps and counts its calls.
 //!
 //! Invariants:
 //! 1. A query with `min_results` hits at L0 returns what [`CollectionViews::search_with`] returns, and no later level
@@ -7,7 +7,11 @@
 //!    `fill`, also `offset + limit`); a level that builds no step is skipped.
 //! 3. A document is a hit of the first step that matches it, once, at the score of that step's query alone.
 //! 4. The page is the steps' hits in step order, from `offset`; facets count every step's matches.
-//! 5. `relax: false`, and a request with a cursor (until ROADMAP 8.1.3), run L0 alone.
+//! 5. `relax: false` runs L0 alone.
+//! 6. Hits rank by step first (ROADMAP 8.1.3); pages by cursor or by offset are slices of one ranking, every page
+//!    tells the same cascade and counts the same facets, and with `fill` cursor pages relax past the first page.
+//! 7. A cursor from a step after L0 is an error for a plain search, as one whose step is after its last.
+//! 8. Rank scores never increase down a page by score.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
@@ -16,14 +20,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use persia_storage::container::sim::SimFile;
 
-use crate::db::{Database, DatabaseOptions, Execution, SearchRequest, Threads};
+use crate::db::{Database, DatabaseOptions, Execution, SearchRequest, StepCursor, Threads};
 use crate::document::{Document, Value};
 use crate::query::{Query, TermQuery};
 use crate::relax::{LevelInput, LevelTransform, RelaxLevel, RelaxOptions, RelaxPlan, Step};
 use crate::schema::{
     FieldId, FieldKind, KeywordOptions, Levels, RelaxationConfig, SchemaBuilder, TextOptions,
 };
-use crate::search::{FacetRequest, Projection, Pruning, SearchPlan};
+use crate::search::{FacetRequest, Projection, Pruning, RequestError, SearchPlan};
 use crate::wal::Durability;
 
 /// Builds fixed steps and counts its calls.
@@ -480,13 +484,12 @@ fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_now() 
 }
 
 #[test]
-fn relax_false_and_a_cursor_run_l0_alone() {
+fn relax_false_runs_l0_alone() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
-    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
     // `relax: false` over a collection whose defaults relax.
     let disabled = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::disabled()).unwrap();
     assert!(!disabled.relaxes());
@@ -494,20 +497,433 @@ fn relax_false_and_a_cursor_run_l0_alone() {
         .search_relaxed(&term(body, "purple"), &request(10), &disabled, &exec())
         .unwrap();
     assert_eq!(out.hits.len(), 0);
+}
 
-    let relax = plan(&min(10), &[(RelaxLevel::Synonyms, &synonyms)]);
+/// Every page of `limit` hits by cursor from the first, concatenated.
+fn by_cursor(
+    views: &crate::db::CollectionViews<'_>,
+    query: &Query,
+    base: &SearchRequest,
+    relax: &RelaxPlan,
+) -> Vec<super::RelaxedHit> {
+    let mut all = Vec::new();
+    let mut request = base.clone();
+    loop {
+        let page = views
+            .search_relaxed(query, &request, relax, &exec())
+            .unwrap();
+        let Some(last) = page.hits.last() else {
+            return all;
+        };
+        request.search_after = Some(last.cursor());
+        all.extend(page.hits);
+        assert!(all.len() <= 100, "paging does not end");
+    }
+}
+
+fn strip(hits: &[super::RelaxedHit]) -> Vec<(String, usize, u64)> {
+    hits.iter()
+        .map(|h| {
+            (
+                h.hit.document.id().to_owned(),
+                h.step,
+                h.hit.score.to_bits(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_cursor_pages_across_steps_as_offsets_do() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let drop = Stub::new(vec![step(term(body, "shoes"), "drop_terms:50%")]);
+    let stubs = [
+        (RelaxLevel::Synonyms, &synonyms),
+        (RelaxLevel::DropTerms, &drop),
+    ];
     let red = term(body, "red");
-    let first = views
-        .search_relaxed(&red, &request(1), &relax, &exec())
-        .unwrap();
-    assert_eq!(synonyms.calls(), 1);
+    // 3 hits needed: red's 2 and hat's d and e (4); shoes is not reached.
+    let relax = plan(&min(3), &stubs);
+    let full = views
+        .search_relaxed(&red, &request(10), &relax, &exec())
+        .unwrap()
+        .hits;
+    assert_eq!(full.len(), 4);
+    for k in 1..=4 {
+        let paged = by_cursor(&views, &red, &request(k), &relax);
+        assert_eq!(strip(&paged), strip(&full), "pages of {k}");
+        for offset in 0..5 {
+            let page = SearchRequest {
+                offset,
+                ..request(k)
+            };
+            let got = views.search_relaxed(&red, &page, &relax, &exec()).unwrap();
+            let end = (offset + k).min(full.len());
+            assert_eq!(strip(&got.hits), strip(&full[offset.min(end)..end]));
+            // Every page tells the same cascade.
+            assert_eq!(got.relaxation.level, RelaxLevel::Synonyms);
+            assert_eq!(got.relaxation.applied, ["synonyms"]);
+        }
+    }
+    // With `fill`, pages by cursor keep relaxing past the first page's last step: shoes adds c.
+    let filling = plan(
+        &RelaxOptions {
+            fill: Some(true),
+            ..min(1)
+        },
+        &stubs,
+    );
+    let paged = by_cursor(&views, &red, &request(2), &filling);
+    let ids: Vec<(&str, usize)> = paged
+        .iter()
+        .map(|h| (h.hit.document.id(), h.step))
+        .collect();
+    assert_eq!(ids.len(), 5);
+    assert_eq!(ids[4], ("c", 2));
+}
+
+#[test]
+fn a_cursor_page_counts_the_facets_of_the_steps_before_it() {
+    let (db, body, tag) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let relax = plan(&min(3), &[(RelaxLevel::Synonyms, &synonyms)]);
+    let base = SearchRequest {
+        facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+        ..request(3)
+    };
+    let red = term(body, "red");
+    let first = views.search_relaxed(&red, &base, &relax, &exec()).unwrap();
     let next = SearchRequest {
-        search_after: Some(first.hits[0].hit.cursor()),
+        search_after: Some(first.hits[2].cursor()),
+        ..base
+    };
+    let second = views.search_relaxed(&red, &next, &relax, &exec()).unwrap();
+    assert_eq!(second.hits.len(), 1);
+    assert_eq!(second.hits[0].step, 1);
+    assert_eq!(second.facets, first.facets);
+}
+
+#[test]
+fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let relax = plan(&min(5), &[(RelaxLevel::Synonyms, &synonyms)]);
+    let red = term(body, "red");
+    let out = views
+        .search_relaxed(&red, &request(10), &relax, &exec())
+        .unwrap();
+    let later = out.hits.last().unwrap();
+    assert_eq!(later.step, 1);
+    let after = SearchRequest {
+        search_after: Some(later.cursor()),
         ..request(10)
     };
-    let out = views.search_relaxed(&red, &next, &relax, &exec()).unwrap();
-    // L0 alone after the cursor: red's other hit.
-    assert_eq!(synonyms.calls(), 1);
-    assert_eq!(out.hits.len(), 1);
-    assert_eq!(out.hits[0].step, 0);
+    // A plain search returns L0's hits only, all ranking before the cursor.
+    let plain =
+        SearchPlan::with_terms(&red, c.schema(), &c.search_statistics(&memtable), &views).unwrap();
+    assert!(matches!(
+        views.search_with(&plain, &after, &exec()),
+        Err(RequestError::CursorStep {
+            step: 1,
+            last: 1,
+            ..
+        })
+    ));
+    // A step-0 cursor pages a plain search as before.
+    let l0 = SearchRequest {
+        search_after: Some(out.hits[0].cursor()),
+        ..request(10)
+    };
+    assert_eq!(
+        views.search_with(&plain, &l0, &exec()).unwrap().hits.len(),
+        1
+    );
+    // A cursor whose step is after its last was not made by a cascade.
+    let mut broken = later.cursor();
+    broken.relaxed = Some(StepCursor { step: 2, last: 1 });
+    let broken = SearchRequest {
+        search_after: Some(broken),
+        ..request(10)
+    };
+    assert!(matches!(
+        views.search_relaxed(&red, &broken, &relax, &exec()),
+        Err(super::RelaxedSearchError::Request(
+            RequestError::CursorStep {
+                step: 2,
+                last: 1,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn rank_scores_never_increase_down_a_page_by_score() {
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
+    let drop = Stub::new(vec![step(term(body, "shoes"), "drop_terms:50%")]);
+    let relax = plan(
+        &min(10),
+        &[
+            (RelaxLevel::Synonyms, &synonyms),
+            (RelaxLevel::DropTerms, &drop),
+        ],
+    );
+    let out = views
+        .search_relaxed(&term(body, "red"), &request(10), &relax, &exec())
+        .unwrap();
+    assert_eq!(out.hits.len(), 5);
+    for pair in out.hits.windows(2) {
+        assert!(pair[0].step <= pair[1].step);
+        assert!(pair[0].rank_score >= pair[1].rank_score, "{pair:?}");
+    }
+    for hit in &out.hits {
+        assert_eq!(
+            hit.rank_score,
+            crate::relax::rank_score(hit.step, hit.hit.score)
+        );
+    }
+}
+
+mod random {
+    //! Random corpora and fixed stub steps (ROADMAP 8.1.3): invariants 3, 4 and 6 against an oracle built from plain
+    //! searches of each step's query alone.
+
+    use std::collections::BTreeSet;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::db::CollectionViews;
+    use crate::query::BoolQuery;
+    use crate::search::{Order, Sort, SortKey};
+
+    const WORDS: [&str; 5] = ["w0", "w1", "w2", "w3", "w4"];
+
+    #[derive(Debug, Clone)]
+    struct Case {
+        /// Each document's words and `n`.
+        docs: Vec<(Vec<usize>, i64)>,
+        /// Commit after these document indexes.
+        commits: Vec<usize>,
+        min_results: u32,
+        fill: bool,
+        k: usize,
+        by_n: bool,
+    }
+
+    fn case() -> impl Strategy<Value = Case> {
+        (
+            prop::collection::vec(
+                (prop::collection::vec(0..WORDS.len(), 1..5), -3i64..3),
+                1..30,
+            ),
+            prop::collection::vec(0usize..30, 0..3),
+            1u32..40,
+            any::<bool>(),
+            1usize..6,
+            any::<bool>(),
+        )
+            .prop_map(|(docs, commits, min_results, fill, k, by_n)| Case {
+                docs,
+                commits,
+                min_results,
+                fill,
+                k,
+                by_n,
+            })
+    }
+
+    fn build(case: &Case) -> (Database<SimFile>, FieldId, FieldId) {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .field("n", FieldKind::I64 { stored: false })
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let n = schema.field("n").unwrap().id();
+        let mut db =
+            Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(schema).unwrap();
+        for (i, (words, value)) in case.docs.iter().enumerate() {
+            let text: Vec<&str> = words.iter().map(|&w| WORDS[w]).collect();
+            let doc = Document::new(format!("d{i}"))
+                .with(body, Value::String(text.join(" ")))
+                .with(n, Value::I64(*value));
+            db.put("c", &doc, Durability::Buffered).unwrap();
+            if case.commits.contains(&i) {
+                db.commit().unwrap();
+            }
+        }
+        (db, body, n)
+    }
+
+    /// L0 `w0 AND w1`, then `w0 OR w1` (synonyms), then `w2` and `w3` (two `drop_terms` steps), nothing at prefix, and
+    /// every document (fuzzy, scoring 0: ties by location).
+    fn steps(body: FieldId) -> (Query, Vec<(RelaxLevel, Vec<Step>)>) {
+        let t = |w: &str| term(body, w);
+        let l0 = Query::Bool(BoolQuery {
+            must: vec![t("w0"), t("w1")],
+            ..BoolQuery::default()
+        });
+        let or = Query::Bool(BoolQuery {
+            should: vec![t("w0"), t("w1")],
+            ..BoolQuery::default()
+        });
+        let levels = vec![
+            (RelaxLevel::Synonyms, vec![step(or, "synonyms")]),
+            (
+                RelaxLevel::DropTerms,
+                vec![
+                    step(t("w2"), "drop_terms:75%"),
+                    step(t("w3"), "drop_terms:50%"),
+                ],
+            ),
+            (RelaxLevel::Prefix, Vec::new()),
+            (RelaxLevel::Fuzzy, vec![step(Query::MatchAll, "fuzzy")]),
+        ];
+        (l0, levels)
+    }
+
+    type Row = (String, usize, u64);
+
+    /// The ranking the cascade must give: each step's plain hits, by the sort, without the documents of earlier
+    /// steps, through the step where the cumulative count first reaches `min_results` (every step with `fill` and a
+    /// window past the corpus).
+    fn oracle(
+        views: &CollectionViews<'_>,
+        c: &crate::db::CollectionSnapshot,
+        memtable: &crate::memtable::MemtableView,
+        queries: &[Query],
+        sort: &Sort,
+        case: &Case,
+    ) -> Vec<Row> {
+        let mut seen = BTreeSet::new();
+        let mut out = Vec::new();
+        for (i, q) in queries.iter().enumerate() {
+            let plan = SearchPlan::with_terms(q, c.schema(), &c.search_statistics(memtable), views)
+                .unwrap();
+            let all = SearchRequest {
+                sort: sort.clone(),
+                ..request(1000)
+            };
+            for hit in views.search_with(&plan, &all, &exec()).unwrap().hits {
+                let id = hit.document.id().to_owned();
+                if seen.insert(id.clone()) {
+                    out.push((id, i, hit.score.to_bits()));
+                }
+            }
+            if !case.fill && out.len() >= usize::try_from(case.min_results).unwrap() {
+                break;
+            }
+        }
+        out
+    }
+
+    fn rows(hits: &[crate::db::RelaxedHit]) -> Vec<Row> {
+        strip(hits)
+    }
+
+    fn check(case: &Case) -> Result<(), TestCaseError> {
+        let (db, body, n) = build(case);
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let (l0, levels) = steps(body);
+        let options = RelaxOptions {
+            min_results: Some(case.min_results),
+            fill: Some(case.fill),
+            ..RelaxOptions::default()
+        };
+        let stubs: Vec<(RelaxLevel, Arc<Stub>)> = levels
+            .iter()
+            .map(|(level, steps)| (*level, Stub::new(steps.clone())))
+            .collect();
+        let refs: Vec<(RelaxLevel, &Arc<Stub>)> = stubs.iter().map(|(l, s)| (*l, s)).collect();
+        let relax = plan(&options, &refs);
+        let sort = if case.by_n {
+            Sort::new([SortKey::field(n, Order::Asc)], c.schema()).unwrap()
+        } else {
+            Sort::score()
+        };
+        let mut queries = vec![l0.clone()];
+        queries.extend(
+            levels
+                .iter()
+                .flat_map(|(_, s)| s.iter().map(|s| s.query.clone())),
+        );
+        let want = oracle(&views, c, &memtable, &queries, &sort, case);
+
+        let base = SearchRequest {
+            sort: sort.clone(),
+            ..request(1000)
+        };
+        let full = views.search_relaxed(&l0, &base, &relax, &exec()).unwrap();
+        prop_assert_eq!(rows(&full.hits), want.clone());
+        // Step order, and each document once.
+        prop_assert!(full.hits.windows(2).all(|w| w[0].step <= w[1].step));
+        if !case.by_n {
+            prop_assert!(
+                full.hits
+                    .windows(2)
+                    .all(|w| w[0].rank_score >= w[1].rank_score)
+            );
+        }
+        // Every pruning strategy and thread layout gives the same hits, bit for bit.
+        for pruning in [
+            Pruning::Exhaustive,
+            Pruning::MaxScore,
+            Pruning::BlockMaxWand,
+        ] {
+            for threads in [Threads::Current, Threads::Global] {
+                let e = Execution::new(pruning).threads(threads);
+                let got = views.search_relaxed(&l0, &base, &relax, &e).unwrap();
+                prop_assert_eq!(rows(&got.hits), want.clone(), "{:?}", pruning);
+            }
+        }
+        // Pages by offset and by cursor are slices of the ranking.
+        let page = SearchRequest {
+            sort: sort.clone(),
+            ..request(case.k)
+        };
+        for offset in [0, 1, case.k, 2 * case.k + 1] {
+            let at = SearchRequest {
+                offset,
+                ..page.clone()
+            };
+            let got = views.search_relaxed(&l0, &at, &relax, &exec()).unwrap();
+            let end = (offset + case.k).min(want.len());
+            prop_assert_eq!(rows(&got.hits), want[offset.min(end)..end].to_vec());
+        }
+        let paged = by_cursor(&views, &l0, &page, &relax);
+        prop_assert_eq!(rows(&paged), want);
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(if cfg!(feature = "slow") { 512 } else { 48 }))]
+
+        #[test]
+        fn the_cascade_ranks_pages_and_prunes_as_one_ranking(case in case()) {
+            check(&case)?;
+        }
+    }
 }

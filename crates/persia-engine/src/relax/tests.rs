@@ -1,4 +1,4 @@
-#![allow(clippy::unwrap_used, clippy::indexing_slicing)] // Tests: inputs are fixed.
+#![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::float_cmp)] // Tests: inputs are fixed; rank scores are exact.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -308,4 +308,79 @@ fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() 
         ]
     );
     assert_eq!(plan.planned()[2].transform.steps(&input), [step]);
+}
+
+/// Any non-negative `f64` but NaN: every finite score, `+0`, subnormals, `f64::MAX` and `+∞`, uniformly by bits so
+/// each binade is as likely as any other.
+fn any_score() -> impl proptest::strategy::Strategy<Value = f64> {
+    use proptest::prelude::*;
+    prop_oneof![
+        (0u64..=f64::INFINITY.to_bits()).prop_map(f64::from_bits),
+        Just(0.0),
+        Just(f64::MIN_POSITIVE),
+        Just(f64::from_bits(1)),
+        Just(f64::MAX),
+        Just(f64::INFINITY),
+        // Where rounding saturates: `1 + g` reaches 2 from about 2^52.4, `g` itself reaches 1 at 2^54.
+        Just(6_004_799_503_160_661.0),
+        Just(18_014_398_509_481_984.0),
+    ]
+}
+
+proptest::proptest! {
+    /// SPEC §7.6: no hit of a step has a rank score below any hit of a later step, at any two scores.
+    #[test]
+    fn a_stricter_step_never_ranks_below_a_looser_one(
+        a in any_score(),
+        b in any_score(),
+        i in 0usize..1030,
+        gap in 1usize..8,
+    ) {
+        let j = i + gap;
+        proptest::prop_assert!(rank_score(i, a) >= rank_score(j, b), "{} {} {} {}", i, a, j, b);
+    }
+
+    /// Within a step, a higher score never has a lower rank score, and the rank score lies in the step's band.
+    #[test]
+    fn the_rank_score_is_monotonic_within_its_step_band(
+        a in any_score(),
+        b in any_score(),
+        i in 0usize..1030,
+    ) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        proptest::prop_assert!(rank_score(i, lo) <= rank_score(i, hi));
+        let r = rank_score(i, a);
+        if i < 1022 {
+            let band = 0.5f64.powi(i32::try_from(i + 1).unwrap());
+            proptest::prop_assert!(band <= r && r <= 2.0 * band, "{} {} {}", i, a, r);
+        } else {
+            proptest::prop_assert_eq!(r, 0.0);
+        }
+    }
+}
+
+#[test]
+fn rank_scores_at_the_edges() {
+    // The bands: [1/2, 1] for L0, [1/4, 1/2] for step 1, meeting at their ends.
+    assert_eq!(rank_score(0, 0.0), 0.5);
+    assert_eq!(rank_score(0, f64::INFINITY), 1.0);
+    assert_eq!(rank_score(1, f64::MAX), 0.5);
+    assert_eq!(rank_score(1, 0.0), 0.25);
+    // Adjacent small scores stay apart; adjacent huge ones round together, as the doc says.
+    assert!(rank_score(0, 1.0) < rank_score(0, 1.0f64.next_up().next_up().next_up()));
+    assert_eq!(rank_score(0, 1e300), rank_score(0, 1e300f64.next_up()));
+    // Where that starts: the step's top rank score from about 2^52.4 (`1 + g` rounds to 2; `g` reaches 1 only at
+    // 2^54), its bottom one up to 2^−53 (`1 + g` rounds to 1). So a step's lowest and the next step's highest tie.
+    let top = 6_004_799_503_160_661.0_f64;
+    assert_eq!(rank_score(0, top), 1.0);
+    assert!(rank_score(0, top.next_down()) < 1.0);
+    assert_eq!(rank_score(0, 2f64.powi(-53)), 0.5);
+    assert!(rank_score(0, 2f64.powi(-53).next_up()) > 0.5);
+    assert_eq!(rank_score(0, 2f64.powi(-53)), rank_score(1, top));
+    // The last normal band, then 0.
+    assert_eq!(rank_score(1021, 0.0), f64::MIN_POSITIVE);
+    assert_eq!(rank_score(1022, f64::MAX), 0.0);
+    assert_eq!(rank_score(usize::MAX, 1.0), 0.0);
+    // A NaN, which no score is, ranks as 0.
+    assert_eq!(rank_score(0, f64::NAN), 0.5);
 }

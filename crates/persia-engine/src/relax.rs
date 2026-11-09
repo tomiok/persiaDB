@@ -332,6 +332,47 @@ impl RelaxPlan {
     }
 }
 
+/// A hit's *rank score* (SPEC §7.6, ROADMAP 8.1.3): one number that orders hits as the cascade does, for clients that
+/// sort or display by one. `2^−(step+1) · (1 + g(score))`, where `g(s) = 1 − 1/(1 + s)`, rounded at each operation.
+///
+/// Each operation is monotonic in its argument (`1 + s` and `1 + g` non-decreasing, `1/x` and `1 − y`
+/// non-increasing) and the power of two is exact, so for every score `s ≥ 0`, `+∞` included:
+/// - `g(s)` is in `[0, 1]` (`1/(1 + s)` is in `(0, 1]`, and rounds `1 − y` up to at most 1), so step `i`'s rank
+///   scores lie in `[2^−(i+1), 2^−i]`: none is below a later step's, whose band ends where this one starts;
+/// - within a step, a higher score never has a lower rank score.
+///
+/// So down a relaxed page whose request sorts by score descending (the cascade's order: step ascending, then score
+/// descending), the rank scores never increase. They can tie where scores differ, as rounding merges them: from
+/// about `2^52.4` every score gives the step's top rank score (`1 + g` rounds to 2; `g` itself reaches 1 at `2^54`),
+/// and up to `2^−53` its bottom one. So a step's lowest rank score can equal the next step's highest, and ordering
+/// by the rank score alone cannot tell those hits' steps apart: the hit's step can. From step 1022 on, where
+/// `2^−(step+1)` is no longer a normal number, it is 0. The hit's score itself is its step's.
+///
+/// ```
+/// use persia_engine::relax::rank_score;
+///
+/// assert_eq!(rank_score(0, 0.0), 0.5);
+/// assert_eq!(rank_score(0, f64::MAX), 1.0);
+/// // A stricter step's worst hit is never below a looser step's best.
+/// assert!(rank_score(0, 0.0) >= rank_score(1, f64::MAX));
+/// assert!(rank_score(1, 2.0) > rank_score(1, 1.0));
+/// ```
+pub fn rank_score(step: usize, score: f64) -> f64 {
+    // `max` maps a NaN, which no score is, to 0 as well.
+    let s = score.max(0.0);
+    let g = 1.0 - 1.0 / (1.0 + s);
+    band(step) * (1.0 + g)
+}
+
+/// `2^−(step+1)` exactly, for the steps where it is a normal `f64`; 0 after them.
+fn band(step: usize) -> f64 {
+    u64::try_from(step)
+        .ok()
+        .and_then(|s| s.checked_add(1))
+        .filter(|&e| e <= 1022)
+        .map_or(0.0, |e| f64::from_bits((1023 - e) << 52))
+}
+
 fn check(
     option: &'static str,
     value: u32,

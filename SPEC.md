@@ -1414,7 +1414,8 @@ only hits that rank after the cursor count, `offset` included. A cursor whose va
 number and type is an error. The cursor also records the snapshot it came from (the commit `seq`), the collection,
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
-key or pass one over. The same snapshot and the same memtable view page exactly.
+key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
+also records its hit's step and its cascade's last step (§7.6).
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the
@@ -1462,7 +1463,8 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |
 
 Rules:
-- Results from a stricter level always rank above results from a looser level (score offset per level).
+- Results from a stricter level always rank above results from a looser level: the level (its step) leads the rank
+  key, before the sort (ROADMAP 8.1.3, below).
 - The response MUST state what happened:
 ```jsonc
 "relaxation": { "level": "fuzzy", "applied": ["drop_terms:75%","fuzzy"],
@@ -1489,9 +1491,37 @@ the ones still missing, and the cascade stops once the hits found reach `min_res
 page; with `fill`, a deeper page may relax further. A query whose L0 has `min_results` hits (with `fill`, also
 `offset + limit`) runs one search of its query, as without relaxation, collecting `min_results` hits when that is
 more than `offset + limit`. The page is the steps' hits in step order, each step's by the request's sort, from
-`offset`. Facets count the matches of every step run (§7.5). Until ROADMAP 8.1.3, a request with a `search_after`
-cursor runs L0 alone, and each hit keeps its step's own score with no score offset, so scores are not comparable
-across steps. Until ROADMAP 8.1.4, `budget_ms` is not applied: the cascade runs every step it needs.
+`offset`. Facets count the matches of every step run (§7.5). Until ROADMAP 8.1.4, `budget_ms` is not applied: the
+cascade runs every step it needs.
+
+Ranking across levels (ROADMAP 8.1.3, ADR-0037): hits compare by their step first (ascending), then by the request's
+sort and location (§7.4), so every hit of a stricter step ranks above every hit of a looser one, at any score. This
+is the "score offset per level": no offset added to an `f64` score can give it for every score. Scores range over
+all values `≥ 0`, `+∞` included (a `constant_score` may be any finite one, and `boost`s and sums over large ones
+can overflow), and a strictly increasing map of that range
+into a part of it below another copy of it would need twice as many floating-point values as the range holds. An
+added offset large enough to separate two levels also rounds away the low bits of their scores, which ties or
+reorders hits within a level. So each hit keeps its step's own score, and also reports its level, its step and a
+*rank score* for clients that order by one number: `2^−(step+1) · (1 + g(score))`, where `g(s) = 1 − 1/(1 + s)` is
+evaluated in that order, rounded at each operation. Every operation is monotonic and the power of two is exact, so
+step `i`'s rank scores lie in `[2^−(i+1), 2^−i]` and never decrease with the score within it, and no hit of a step
+has one below any hit of a later step (`+∞` gives the step's top). The rank score therefore does not increase down
+a page whose request sorts by score descending (step ascending, then score descending). It ties there where the
+scores round alike, and where two steps' bands meet: a step's lowest (scores up to about `2^−53`) equals the next
+step's highest (scores from about `2^52.4`), so only the hit's step tells such hits apart. From step 1022 on it is
+0. Within a step, pruning
+(§7.3) and column-sort skipping (§7.4) are those of the step's own search, with its earlier steps excluded.
+Thresholds are not shared across steps: a looser hit ranks below a stricter one whatever it scores.
+
+Paging (ROADMAP 8.1.3): `offset` counts the hits from the top across steps. A hit's cursor also records its step
+and the cascade's last step on its page. A search after it builds the steps through that last one (the same
+queries: the same snapshot and query build them alike), skips the steps before the cursor's (still excluded, and
+still searched when the request counts facets, §7.5), and searches the cursor's step after the cursor and the later
+steps from their top while the page has room. So every page reports the same `level` and `applied`. With `fill` it
+builds past the last step while the page has room. The pages of one query on one snapshot, by `offset` or by
+cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cursor without a step (from a search
+that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is after its last is an error,
+and so is a plain search given a cursor from a step after L0: every hit it returns ranks before the cursor.
 
 ### 7.7 Highlighting / explain
 `explain: true` returns, with each hit of the page, how its score adds up: a tree like the query's with only the

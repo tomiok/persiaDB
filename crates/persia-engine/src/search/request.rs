@@ -68,6 +68,18 @@ pub enum RequestError {
         /// Collection being searched.
         collection: String,
     },
+    /// A cursor from a relaxation step this search cannot page after (SPEC §7.6, ROADMAP 8.1.3): a step after L0
+    /// given to a search that does not relax (every hit it returns ranks before it), or a step after the last step
+    /// of its own cascade.
+    #[error("a cursor from relaxation step {step}, its cascade's last step {last}: {reason}")]
+    CursorStep {
+        /// The cursor's step.
+        step: usize,
+        /// The last step of its cascade.
+        last: usize,
+        /// Why.
+        reason: &'static str,
+    },
     /// Two values of types the sort key did not produce were compared (SPEC §7.4). [`super::Sort::check`] rejects
     /// such a cursor. They are not a tie: that would skip or repeat a hit.
     #[error("sort values of a type the key did not produce")]

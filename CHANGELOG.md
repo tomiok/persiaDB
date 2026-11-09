@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Changed
+- `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for a cursor of a search that did not
+  relax).
 - `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
   `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
   the matches scoring below the worst kept hit (ties are still compared on the later keys), and rejects such a match
@@ -122,14 +124,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine`: relaxed hits rank by step, then by the sort, and page across steps (ROADMAP 8.1.3; SPEC §7.4,
+  §7.6; ADR-0037). Every hit of a stricter step ranks above every hit of a looser one, whatever their scores; each
+  keeps its step's own score. `RelaxedHit::rank_score` (`relax::rank_score`) gives one number that never increases
+  down a page sorted by score. `Cursor::relaxed` (`StepCursor`: the hit's step, the cascade's last step), set by
+  `RelaxedHit::cursor`, lets `search_relaxed` page after any hit; offset and cursor pages are slices of one ranking.
+  A plain search given a cursor from a later step, or a cursor whose step is after its last, is
+  `RequestError::CursorStep`.
 - `persia-engine`: the relaxation cascade (ROADMAP 8.1.2; SPEC §7.6; ADR-0037). `CollectionViews::search_relaxed`
   plans and searches a query, then each step of a `RelaxPlan` in turn while the hits found from the top are fewer
   than `min_results` (with `fill`, until the page is full). Each step excludes the earlier steps' matches, so a
   document appears once, at its first step and that step's score. It returns `RelaxedResults`: each `RelaxedHit` with
   its step and level, the facets over every step run, and a `Relaxation` (`level`, `applied`). When L0 already has
   `min_results` hits (with `fill`, a full page as well) it costs what planning and `search_with` cost, with a window
-  of `min_results` when that is larger than the page's (`search_relaxed/*`). A cursor runs L0 alone until ROADMAP
-  8.1.3, hits keep their step's own score until 8.1.3, and `budget_ms` is applied from 8.1.4.
+  of `min_results` when that is larger than the page's (`search_relaxed/*`). `budget_ms` is applied from ROADMAP
+  8.1.4.
 - `persia-engine`: the relaxation cascade's plan (ROADMAP 8.1.1; SPEC §7.6). `persia_engine::relax::RelaxPlan` lists
   the levels a search may run, L0 (`exact`) first, each with the transform that builds its queries (its steps). It is
   built from the collection's `relaxation` settings and a query's `RelaxOptions`, which override each setting they
