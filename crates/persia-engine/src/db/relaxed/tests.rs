@@ -1195,7 +1195,7 @@ mod budget {
         assert!(out.relaxation.truncated);
         let counted: u64 = out.facets[0].values.iter().map(|v| v.count).sum();
         assert_eq!(counted, 2, "only red's documents: hat's step was dropped");
-        // Its last hit's cursor records the last step completed, L0; a page after it with time to spare resumes.
+        // Its last hit's cursor records the last step completed, L0; a page after it stays at L0, with time to spare too.
         let cursor = out.hits.last().unwrap().cursor();
         assert_eq!(cursor.relaxed, None);
         let next = SearchRequest {
