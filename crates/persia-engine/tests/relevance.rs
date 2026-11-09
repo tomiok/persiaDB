@@ -156,9 +156,12 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
             // leaves it there and ranks it the same: the gate does not move with relaxation (ROADMAP 8.1.2).
             let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
             let relaxed = views
-                .search_relaxed(&text.query, &request, &relax, &Execution::default())
+                .search_relaxed(&text, &request, &relax, &Execution::default())
                 .unwrap();
             assert_eq!(relaxed.relaxation.level, RelaxLevel::Exact, "{q:?} relaxed");
+            // The response states the user text, and at L0 the text of the clauses that compiled (SPEC §7.6).
+            assert_eq!(relaxed.relaxation.original.as_deref(), Some(q));
+            assert_eq!(relaxed.relaxation.effective, Some(text.effective()));
             let relaxed: Vec<&str> = relaxed.hits.iter().map(|h| h.hit.document.id()).collect();
             assert_eq!(relaxed, ranked, "{q:?}");
             let judged = j["grades"]

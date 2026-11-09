@@ -1,6 +1,6 @@
-//! Fuzz the user text compiler (ROADMAP 7.1.2.2; SPEC §7.1.1): any text compiles without panicking, and the query
-//! validates against the schema and the limits it was compiled with. The first byte picks small limits, so cutting
-//! at each limit is reached too.
+//! Fuzz the user text compiler (ROADMAP 7.1.2.2; SPEC §7.1.1): any text compiles without panicking, the query
+//! validates against the schema and the limits it was compiled with, and each clause's span indexes the text read
+//! (ROADMAP 8.1.7). The first byte picks small limits, so cutting at each limit is reached too.
 #![no_main]
 
 use std::sync::LazyLock;
@@ -59,4 +59,19 @@ fuzz_target!(|data: &[u8]| {
     };
     let compiled = compiler.compile(&text, &DefaultFields::all(schema), &limits);
     assert_eq!(compiled.query.validate(schema, &limits), Ok(()), "{text:?}");
+    // ROADMAP 8.1.7: each clause's span indexes the text read, a prefix of the text, in order, on character boundaries.
+    assert!(text.starts_with(compiled.text.as_str()), "{text:?}");
+    let mut end = 0;
+    for clause in &compiled.clauses {
+        let span = clause.span.clone();
+        assert!(
+            end <= span.start && span.start < span.end,
+            "{text:?}: {span:?}"
+        );
+        assert!(
+            compiled.text.get(span.clone()).is_some(),
+            "{text:?}: {span:?}"
+        );
+        end = span.end;
+    }
 });

@@ -81,7 +81,9 @@ use obsolete::Pin;
 pub use obsolete::{ObsoleteKind, ObsoleteObject};
 pub use policy::{CommitPolicy, CommitReason, MemtableState};
 pub use read_only::ReadOnlyDatabase;
-pub use relaxed::{Correction, Relaxation, RelaxedHit, RelaxedResults, RelaxedSearchError};
+pub use relaxed::{
+    Correction, Relaxation, RelaxedHit, RelaxedQuery, RelaxedResults, RelaxedSearchError,
+};
 pub use search::{
     Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults, StepCursor,
 };

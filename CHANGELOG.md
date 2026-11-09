@@ -16,6 +16,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   matches nothing. It changes what matches, not the score. Without `must` it prunes as a plain disjunction does
   under every strategy (`search_top10_pruning/or4_msm2`, `or4_msm3`, `or50_msm2`); beside `must` it is one clause
   of the conjunction.
+- `persia-engine` (breaking): `Compiled` records where its query came from (ROADMAP 8.1.7; SPEC §7.1.1, §7.6): `text`,
+  the user text read, and `clauses`, one `CompiledClause` per clause that compiled, with its byte span in that text,
+  whether it excludes, and its parts (`Compiled::parts`); `Compiled::effective` joins the clauses' text. It is
+  `#[non_exhaustive]` now, so a pattern names its fields with `..`. `CollectionViews::search_relaxed` takes a `Query`
+  or a `Compiled` (`RelaxedQuery`): for a compiled one the response's `Relaxation::original` is the text read and
+  `effective` the last step's text (at L0, the clauses that compiled); a programmatic query has neither.
 - `persia-engine` (breaking): `Cursor` has a new field, `relaxed` (`None` for step 0 of a cascade that stopped at L0, as
   every cursor of a search that did not relax), and `SearchHit` a private one with the same value, so it can
   no longer be built outside the crate.

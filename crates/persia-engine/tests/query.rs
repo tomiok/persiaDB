@@ -2,7 +2,13 @@
 //! ROADMAP 7.1).
 
 // Helpers outside #[test] functions are test code too.
-#![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
 
 use std::fmt::Write as _;
 use std::ops::Bound;
@@ -100,7 +106,9 @@ fn show(schema: &CollectionSchema, q: &Query) -> String {
 
 fn compile_with(text: &str, fields: &DefaultFields, limits: &QueryLimits) -> (String, bool) {
     let schema = schema();
-    let Compiled { query, truncated } = compiler(&schema).compile(text, fields, limits);
+    let Compiled {
+        query, truncated, ..
+    } = compiler(&schema).compile(text, fields, limits);
     // Whatever the text, the query is valid.
     query.validate(&schema, limits).unwrap();
     (show(&schema, &query), truncated)
@@ -1273,6 +1281,155 @@ proptest! {
             );
         }
     }
+}
+
+/// The seeds of the `query_text` fuzz target (`fuzz/corpus/query_text`), without the knob byte that picks limits.
+fn fuzz_seeds() -> [String; 2] {
+    let seed = |bytes: &[u8]| String::from_utf8_lossy(bytes.get(1..).unwrap_or(&[])).into_owned();
+    [
+        seed(include_bytes!("../../../fuzz/corpus/query_text/syntax")),
+        seed(include_bytes!("../../../fuzz/corpus/query_text/limits")),
+    ]
+}
+
+/// The fuzz target's shapes: a seed with user text spliced in at a character boundary, or bytes read as the target
+/// reads them (lossy UTF-8).
+fn fuzz_text() -> impl Strategy<Value = String> {
+    let spliced =
+        (0_usize..2, any::<prop::sample::Index>(), user_text()).prop_map(|(seed, at, piece)| {
+            let seed = &fuzz_seeds()[seed];
+            let bounds: Vec<usize> = (0..=seed.len())
+                .filter(|&i| seed.is_char_boundary(i))
+                .collect();
+            let at = bounds[at.index(bounds.len())];
+            format!("{}{piece}{}", &seed[..at], &seed[at..])
+        });
+    let bytes = prop::collection::vec(any::<u8>(), 0..64)
+        .prop_map(|b| String::from_utf8_lossy(&b).into_owned());
+    prop_oneof![spliced, bytes]
+}
+
+proptest! {
+    /// ROADMAP 8.1.7: each compiled clause's span indexes the user text by byte, on character boundaries, in text
+    /// order and without overlap, from its first character to its last; its text compiled alone gives the same
+    /// parts; the parts are the query; and the clauses' text (`effective`) compiles to the same query.
+    #[test]
+    fn compiled_clauses_index_the_user_text(
+        text in prop_oneof![user_text(), any::<String>(), fuzz_text()],
+        max_terms in 1_usize..20,
+        max_clauses in 1_usize..20,
+        max_depth in 1_usize..6,
+        max_text_len in 0_usize..300,
+        all_fields in any::<bool>(),
+    ) {
+        let schema = schema();
+        let compiler = compiler(&schema);
+        let limits = QueryLimits { max_terms, max_clauses, max_depth, max_text_len, ..QueryLimits::default() };
+        let fields = if all_fields {
+            DefaultFields::all(&schema)
+        } else {
+            DefaultFields::parse(&schema, &["body^2"]).unwrap()
+        };
+        let compiled = compiler.compile(&text, &fields, &limits);
+        prop_assert_eq!(compiled.text.as_str(), text_within_limit(&text, max_text_len, &schema));
+        let mut end = 0;
+        let (mut must, mut must_not) = (Vec::new(), Vec::new());
+        for clause in &compiled.clauses {
+            let span = clause.span.clone();
+            prop_assert!(end <= span.start && span.start < span.end && span.end <= compiled.text.len(), "{span:?}");
+            prop_assert!(text.is_char_boundary(span.start) && text.is_char_boundary(span.end));
+            end = span.end;
+            let source = &text[span];
+            prop_assert_eq!(compiled.source(clause), source);
+            prop_assert!(!source.starts_with(char::is_whitespace) && !source.ends_with(char::is_whitespace));
+            prop_assert!(!clause.parts.is_empty());
+            let alone = compiler.compile(source, &fields, &QueryLimits::default());
+            prop_assert_eq!(alone.clauses.len(), 1, "{:?}", source);
+            prop_assert_eq!(alone.clauses[0].negated, clause.negated);
+            prop_assert_eq!(alone.parts(&alone.clauses[0]), compiled.parts(clause), "{:?}", source);
+            if clause.negated { &mut must_not } else { &mut must }.extend_from_slice(compiled.parts(clause));
+        }
+        let rebuilt = match (must.len(), must_not.len()) {
+            (0, 0) => Query::MatchAll,
+            (1, 0) => must[0].clone(),
+            _ => Query::Bool(BoolQuery { must, must_not, ..BoolQuery::default() }),
+        };
+        prop_assert_eq!(&rebuilt, &compiled.query);
+        let effective = compiler.compile(&compiled.effective(), &fields, &QueryLimits::default());
+        prop_assert_eq!(&effective.query, &compiled.query, "{:?}", compiled.effective());
+        prop_assert_eq!(effective.clauses.len(), compiled.clauses.len());
+    }
+}
+
+#[test]
+fn compiled_clauses_by_hand() {
+    let schema = schema();
+    let compiled = compiler(&schema).compile(
+        "  red\t-brand:nike  \"running shoes\" the ñandú",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let spans: Vec<_> = compiled
+        .clauses
+        .iter()
+        .map(|c| (c.span.clone(), c.negated, c.parts.clone()))
+        .collect();
+    // `the` is a stopword of `body` and kept by `title`'s standard analyzer, so it compiles; parts count per list.
+    assert_eq!(
+        spans,
+        [
+            (2..5, false, 0..1),
+            (6..17, true, 0..1),
+            (19..34, false, 1..2),
+            (35..38, false, 2..3),
+            (39..46, false, 3..4)
+        ]
+    );
+    assert_eq!(
+        compiled.effective(),
+        "red -brand:nike \"running shoes\" the ñandú"
+    );
+    // One required clause is the query itself, and its parts are all of it.
+    let one = compiler(&schema).compile(
+        " body:\"a b\" ",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    assert_eq!(one.clauses.len(), 1);
+    assert_eq!(one.clauses[0].span, 1..11);
+    assert_eq!(one.parts(&one.clauses[0]), std::slice::from_ref(&one.query));
+    // Text that compiles to nothing has no clause, and its effective text is empty.
+    let none = compiler(&schema).compile(
+        "the - \"",
+        &DefaultFields::parse(&schema, &["body"]).unwrap(),
+        &QueryLimits::default(),
+    );
+    assert_eq!(none.query, Query::MatchAll);
+    assert_eq!(none.clauses, []);
+    assert_eq!(none.effective(), "");
+    // Past `max_text_len` the text is the prefix read, and a clause the limits cut is not one.
+    let limits = QueryLimits {
+        max_text_len: 9,
+        ..QueryLimits::default()
+    };
+    let cut = compiler(&schema).compile("red shoes boots", &DefaultFields::all(&schema), &limits);
+    assert_eq!(
+        (cut.text.as_str(), cut.effective().as_str(), cut.truncated),
+        ("red shoes", "red shoes", true)
+    );
+    let limits = QueryLimits {
+        max_clauses: 2,
+        ..QueryLimits::default()
+    };
+    let cut = compiler(&schema).compile(
+        "red shoes",
+        &DefaultFields::parse(&schema, &["body"]).unwrap(),
+        &limits,
+    );
+    assert_eq!(
+        (cut.text.as_str(), cut.effective().as_str(), cut.truncated),
+        ("red shoes", "red", true)
+    );
 }
 
 /// The required and excluded clauses of a compiled query, in text order; a root that is not a plain Bool is one.

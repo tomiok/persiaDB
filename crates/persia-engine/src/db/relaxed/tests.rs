@@ -106,6 +106,7 @@ fn step(query: Query, applied: &str) -> Step {
     Step {
         query,
         applied: applied.into(),
+        effective: None,
     }
 }
 
@@ -1311,7 +1312,7 @@ fn the_response_states_what_the_cascade_did() {
     assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
     assert!(r.relaxed());
     assert!(!r.truncated);
-    // Filled by ROADMAP 8.1.7 (text) and 8.2.4.3 (corrections).
+    // A programmatic query has no text (ROADMAP 8.1.7); corrections wait on ROADMAP 8.2.4.3.
     assert_eq!(r.original, None);
     assert_eq!(r.effective, None);
     assert_eq!(r.corrected, []);
@@ -1423,4 +1424,81 @@ fn cursors_from_other_searches_page_as_their_step_says() {
             RequestError::CursorStep { step: 1, .. }
         ))
     ));
+}
+
+/// ROADMAP 8.1.7: a query compiled from user text states that text (`original`) and the text of its last step
+/// (`effective`); its levels build from that compilation. A programmatic query states neither.
+#[test]
+fn a_compiled_query_states_its_text_and_its_levels_read_it() {
+    use std::sync::Mutex;
+
+    use persia_analysis::AnalyzerRegistry;
+
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+
+    /// Builds `steps` and records the text of the compilation it was given.
+    #[derive(Debug)]
+    struct Reads {
+        steps: Vec<Step>,
+        seen: Mutex<Vec<Option<String>>>,
+    }
+    impl LevelTransform for Reads {
+        fn steps(&self, input: &LevelInput<'_>) -> Vec<Step> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(input.compiled.map(|c| c.text.clone()));
+            self.steps.clone()
+        }
+    }
+
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    let fields = DefaultFields::all(c.schema());
+    let compile = |text: &str| compiler.compile(text, &fields, &QueryLimits::default());
+
+    let shoes = Step {
+        effective: Some("shoes".into()),
+        ..step(term(body, "shoes"), "drop_terms:50%")
+    };
+    let reads = Arc::new(Reads {
+        steps: vec![step(term(body, "purple"), "drop_terms:75%"), shoes],
+        seen: Mutex::new(Vec::new()),
+    });
+    let relax = plan(&min(1), &[]).with_level(RelaxLevel::DropTerms, Arc::clone(&reads) as _);
+
+    // L0 has no hit: the last step built states its own text.
+    let purple = compile("  purple \t shoes ");
+    let out = views
+        .search_relaxed(&purple, &request(10), &relax, &exec())
+        .unwrap();
+    let r = &out.relaxation;
+    assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    assert_eq!(r.original.as_deref(), Some("  purple \t shoes "));
+    assert_eq!(r.effective.as_deref(), Some("shoes"));
+    assert_eq!(*reads.seen.lock().unwrap(), [Some(purple.text.clone())]);
+
+    // L0 has hits: `effective` is the clauses that compiled, one space apart.
+    let red = compile("red   shoes");
+    let out = views
+        .search_relaxed(&red, &request(10), &relax, &exec())
+        .unwrap();
+    assert!(!out.relaxation.relaxed());
+    assert_eq!(out.relaxation.original.as_deref(), Some("red   shoes"));
+    assert_eq!(out.relaxation.effective.as_deref(), Some("red shoes"));
+
+    // The same query built in code has no text, and its levels get none.
+    let out = views
+        .search_relaxed(&purple.query, &request(10), &relax, &exec())
+        .unwrap();
+    assert_eq!(out.relaxation.applied.len(), 2);
+    assert_eq!(
+        (out.relaxation.original, out.relaxation.effective),
+        (None, None)
+    );
+    assert_eq!(reads.seen.lock().unwrap().last(), Some(&None));
 }
