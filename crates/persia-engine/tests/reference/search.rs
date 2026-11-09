@@ -16,10 +16,13 @@ pub enum Query {
         terms: Vec<(String, u32)>,
         weight: f64,
     },
+    /// SPEC §7.1: every `must`, no `must_not`, and at least `minimum_should_match` `should` clauses (0: one when
+    /// there is no `must` and some `should`, the reference having no filters).
     Bool {
         must: Vec<Query>,
         should: Vec<Query>,
         must_not: Vec<Query>,
+        minimum_should_match: usize,
     },
     Boost(Box<Query>, f64),
     Constant(Box<Query>, f64),
@@ -81,6 +84,7 @@ impl Corpus {
                 must,
                 should,
                 must_not,
+                minimum_should_match,
             } => {
                 if must_not.iter().any(|c| self.eval(c, doc).is_some()) {
                     return None;
@@ -90,14 +94,18 @@ impl Corpus {
                     let (s, scale) = self.eval(c, doc)?;
                     sum = (sum.0 + s, sum.1 + scale);
                 }
-                let mut any = false;
+                let mut matched = 0;
                 for c in should {
                     if let Some((s, scale)) = self.eval(c, doc) {
-                        any = true;
+                        matched += 1;
                         sum = (sum.0 + s, sum.1 + scale);
                     }
                 }
-                (any || !must.is_empty() || should.is_empty()).then_some(sum)
+                let at_least = match *minimum_should_match {
+                    0 if must.is_empty() && !should.is_empty() => 1,
+                    m => m,
+                };
+                (matched >= at_least).then_some(sum)
             }
             Query::Boost(inner, boost) => self
                 .eval(inner, doc)

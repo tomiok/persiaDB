@@ -163,6 +163,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
             must,
             should,
             must_not,
+            minimum_should_match,
         } => {
             let all = |qs: &[RefQuery]| qs.iter().map(|q| engine_query(q, fields)).collect();
             Query::Bool(BoolQuery {
@@ -170,6 +171,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
                 should: all(should),
                 must_not: all(must_not),
                 filter: Vec::new(),
+                minimum_should_match: u32::try_from(*minimum_should_match).unwrap(),
             })
         }
         RefQuery::Boost(inner, boost) => Query::Boost(BoostQuery {
@@ -271,10 +273,22 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
                 prop::collection::vec(inner.clone(), 0..3),
                 prop::collection::vec(inner.clone(), 0..2),
             )
-                .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not }),
+                .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not, minimum_should_match: 0 }),
+            // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must`.
+            2 => (
+                prop::collection::vec(inner.clone(), 0..2),
+                prop::collection::vec(inner.clone(), 1..5),
+                prop::collection::vec(inner.clone(), 0..2),
+                1..6_usize,
+            )
+                .prop_map(|(must, should, must_not, minimum_should_match)| RefQuery::Bool { must, should, must_not, minimum_should_match }),
             // Wide: a disjunction past its few-clause scan, onto its heap (ROADMAP 7.4.7).
             1 => prop::collection::vec(leaf(params), 9..14)
-                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new() }),
+                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match: 0 }),
+            // Wide with `minimum_should_match`: the heap skipping documents on too few clauses.
+            1 => (prop::collection::vec(leaf(params), 9..14), 2..5_usize).prop_map(|(should, minimum_should_match)| {
+                RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match }
+            }),
             1 => (inner.clone(), 0.5..4.0_f64).prop_map(|(q, b)| RefQuery::Boost(Box::new(q), b)),
             1 => (inner, 0.0..5.0_f64).prop_map(|(q, s)| RefQuery::Constant(Box::new(q), s)),
         ]

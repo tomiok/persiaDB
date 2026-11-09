@@ -184,6 +184,8 @@ enum Explainer<'a, V: SearchView> {
         /// time a hit reaches the `bool`, from `checker`.
         check: Option<Check<V::Keys<'a>>>,
         checker: Option<&'a V>,
+        /// As [`Node::Bool`]'s.
+        minimum_should_match: usize,
     },
     Scaled(Box<Explainer<'a, V>>, Scale),
     All,
@@ -218,6 +220,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 filter,
                 split,
                 slot,
+                minimum_should_match,
             } => {
                 let has_column = *split < filter.len();
                 // As the search read them: a kept selection of every filter, or of the postings ones beside a check
@@ -235,6 +238,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                     selected,
                     check: None,
                     checker,
+                    minimum_should_match: *minimum_should_match,
                 }
             }
             Node::Scaled(inner, scale) => {
@@ -274,6 +278,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 selected,
                 check,
                 checker,
+                minimum_should_match,
             } => {
                 if let Some(v) = checker.take() {
                     *check = Some(Check::new(filter.get(*split..).unwrap_or_default(), v)?);
@@ -282,6 +287,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                     must,
                     should,
                     must_not,
+                    *minimum_should_match,
                     Filters {
                         filter,
                         split: *split,
@@ -395,6 +401,7 @@ fn boolean<V: SearchView, K: KeyReader>(
     must: &mut [Explainer<'_, V>],
     should: &mut [Explainer<'_, V>],
     must_not: &mut [Explainer<'_, V>],
+    minimum_should_match: usize,
     filters: Filters<'_, K>,
     view: &V,
     docid: u32,
@@ -445,8 +452,12 @@ fn boolean<V: SearchView, K: KeyReader>(
             shoulds.push(e);
         }
     }
-    // Some `should` is required when there is neither `must` nor `filter`.
-    if must.is_empty() && filter.is_empty() && !should.is_empty() && shoulds.is_empty() {
+    // `minimum_should_match` of the `should` clauses, or one when there is neither `must` nor `filter`.
+    let at_least = match minimum_should_match {
+        0 if must.is_empty() && filter.is_empty() && !should.is_empty() => 1,
+        m => m,
+    };
+    if shoulds.len() < at_least {
         return Ok(None);
     }
     if musts.is_empty() && shoulds.is_empty() {

@@ -255,6 +255,7 @@ fn bools_list_what_matched() {
             field: f.tag,
             value: FilterValue::Keyword("x".into()),
         }],
+        ..BoolQuery::default()
     });
     let hits = explained(c, &memtable, &query);
     // `b` holds `red` but its tag is `y`; `c` lacks `red` in its body.

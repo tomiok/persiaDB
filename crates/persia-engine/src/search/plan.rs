@@ -61,6 +61,8 @@ pub(super) enum Node {
         /// Unique in the plan: where a search keeps what its filters select ([`Selections`]); unused by a `bool`
         /// without filters (an expansion's).
         slot: usize,
+        /// The fewest `should` clauses a match holds (SPEC §7.1); 0 for the default rule.
+        minimum_should_match: usize,
     },
     Scaled(Box<Node>, Scale),
     All,
@@ -451,6 +453,7 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         split,
         // After the clauses: a `bool`'s slot follows its nested ones' (post-order).
         slot: p.slot(),
+        minimum_should_match: usize::try_from(q.minimum_should_match).unwrap_or(usize::MAX),
     })
 }
 
@@ -603,6 +606,7 @@ fn plan_expansion<S: StatisticsProvider + ?Sized>(
             filter: Vec::new(),
             split: 0,
             slot: p.slot(),
+            minimum_should_match: 0,
         },
     })
 }
@@ -644,6 +648,7 @@ fn build<'a, V: SearchView>(
             filter,
             split,
             slot,
+            minimum_should_match,
         } => build_bool(
             Clauses {
                 must,
@@ -652,6 +657,7 @@ fn build<'a, V: SearchView>(
                 filter,
                 split: *split,
                 slot: *slot,
+                minimum_should_match: *minimum_should_match,
             },
             view,
             pruning,
@@ -739,10 +745,13 @@ struct Clauses<'a> {
     filter: &'a [Filter],
     split: usize,
     slot: usize,
+    minimum_should_match: usize,
 }
 
-/// A `bool` (SPEC §7.1): every `must` and `filter`, at least one `should` when there is neither, no `must_not`; an
-/// empty one matches every document. Filters select before anything is scored (SPEC §7.3) and score 0, so a
+/// A `bool` (SPEC §7.1): every `must` and `filter`, at least `minimum_should_match` `should` clauses (0: one when
+/// there is neither `must` nor `filter`), no `must_not`; an empty one matches every document. Required `should`
+/// clauses are one disjunction of at least that many ([`at_least_of`]), alone or as the last clause of the `must`
+/// conjunction. Filters select before anything is scored (SPEC §7.3) and score 0, so a
 /// threshold on the `bool` reaches its one `must` clause, the `should` clauses when there is no `must` (their score
 /// is the whole score), and otherwise the conjunction of its `must` clauses and the `should` clauses beside them,
 /// which check their clauses' bounds against it (ROADMAP 7.4.8).
@@ -763,9 +772,15 @@ fn build_bool<'a, V: SearchView>(
         filter,
         split,
         slot,
+        minimum_should_match,
     } = clauses;
     let all = |nodes: &'a [Node], pruning| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
         nodes.iter().map(|n| build(n, view, pruning, ctx)).collect()
+    };
+    let filters = Filters {
+        filter,
+        split,
+        slot,
     };
     // The score is the `should` clauses' when they are required, or the one `must` clause's without `should`.
     // No `must`: a filter adds 0, so the threshold reaches `should` whether or not a filter is present.
@@ -777,33 +792,52 @@ fn build_bool<'a, V: SearchView>(
         (1, true) => (pruning, Pruning::Exhaustive),
         _ => (Pruning::Exhaustive, Pruning::Exhaustive),
     };
-    let optional = disjunction(all(should, should_pruning)?, should_pruning);
-    let (required, optional): (BoxedMatcher<'a>, _) = if !must.is_empty() {
-        let required = conjunction(all(must, must_pruning)?, pruning);
-        let filters = Filters {
-            filter,
-            split,
-            slot,
-        };
-        (filtered(required, filters, view, ctx)?, optional)
-    } else if !filter.is_empty() {
-        let docs = select(filter, view)?;
-        keep(ctx, slot, &docs, false);
-        let required: BoxedMatcher<'a> = if docs.is_empty() {
-            Box::new(Empty)
-        } else {
-            Box::new(FilterDocs::new(docs))
-        };
-        (required, optional)
-    } else if should.is_empty() {
-        (Box::new(AllDocs::new(view)), None)
-    } else {
-        // Some `should` is required: none that can match in this view means no document.
-        (optional.unwrap_or_else(|| Box::new(Empty)), None)
+    // How many `should` clauses a match needs (SPEC §7.1): `minimum_should_match`, else one when nothing else is
+    // required, else none (they are optional).
+    let at_least = match minimum_should_match {
+        0 if must.is_empty() && filter.is_empty() && !should.is_empty() => 1,
+        m => m,
     };
-    let scored = match optional {
-        Some(optional) => Box::new(Optional::new(required, optional, pruning)),
-        None => required,
+    let scored: BoxedMatcher<'a> = if at_least > 0 {
+        // Required `should` clauses: fewer than `at_least` that can match in this view means no document.
+        let Some(some) = at_least_of(all(should, should_pruning)?, at_least, should_pruning) else {
+            return Ok(Box::new(Empty));
+        };
+        let required = if must.is_empty() {
+            some
+        } else {
+            // The `must` clauses, then the `should` ones as one more clause: summed in query order, as
+            // `Optional` adds the two sides, so the score is the same bits.
+            let mut clauses = all(must, must_pruning)?;
+            clauses.push(some);
+            conjunction(clauses, pruning)
+        };
+        filtered(required, filters, view, ctx)?
+    } else {
+        let optional = disjunction(all(should, should_pruning)?, should_pruning);
+        let required: BoxedMatcher<'a> = if !must.is_empty() {
+            filtered(
+                conjunction(all(must, must_pruning)?, pruning),
+                filters,
+                view,
+                ctx,
+            )?
+        } else if !filter.is_empty() {
+            let docs = select(filter, view)?;
+            keep(ctx, slot, &docs, false);
+            if docs.is_empty() {
+                Box::new(Empty)
+            } else {
+                Box::new(FilterDocs::new(docs))
+            }
+        } else {
+            // No `should` either (`at_least` would be 1): every document.
+            Box::new(AllDocs::new(view))
+        };
+        match optional {
+            Some(optional) => Box::new(Optional::new(required, optional, pruning)),
+            None => required,
+        }
     };
     let excluded = disjunction(all(must_not, Pruning::Exhaustive)?, Pruning::Exhaustive);
     Ok(match excluded {
@@ -914,6 +948,31 @@ fn disjunction(mut clauses: Vec<BoxedMatcher<'_>>, pruning: Pruning) -> Option<B
             Pruning::BlockMaxWand => Box::new(BlockMaxWand::new(clauses)),
         }),
     }
+}
+
+/// The documents at least `at_least` (≥ 1) of the clauses match, pruning with `pruning`, scored as their OR;
+/// `None` when fewer clauses than that can match in the view. All of them required is their AND: the same
+/// documents and, the AND summing in query order as the OR does, the same score bits.
+fn at_least_of(
+    mut clauses: Vec<BoxedMatcher<'_>>,
+    at_least: usize,
+    pruning: Pruning,
+) -> Option<BoxedMatcher<'_>> {
+    clauses.retain(|c| c.cost() > 0);
+    if clauses.len() < at_least {
+        return None;
+    }
+    if at_least <= 1 {
+        return disjunction(clauses, pruning);
+    }
+    if clauses.len() == at_least {
+        return Some(Box::new(Conjunction::new(clauses, pruning)));
+    }
+    Some(match pruning {
+        Pruning::Exhaustive => Box::new(Disjunction::at_least(clauses, at_least)),
+        Pruning::MaxScore => Box::new(MaxScore::at_least(clauses, at_least)),
+        Pruning::BlockMaxWand => Box::new(BlockMaxWand::at_least(clauses, at_least)),
+    })
 }
 
 /// Checks what would otherwise silently change what a phrase matches (SPEC §7.1): its field indexes positions,

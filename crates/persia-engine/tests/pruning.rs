@@ -165,8 +165,11 @@ enum Shape {
     OrNot(Vec<Shape>, Box<Shape>),
     And(Vec<Shape>),
     AndOr(Box<Shape>, Vec<Shape>),
-    /// Any `bool` (ROADMAP 7.4.8): `must`, `should`, `must_not`, and a filter on a tag.
-    Bool(Vec<Shape>, Vec<Shape>, Vec<Shape>, Option<u8>),
+    /// Any `bool` (ROADMAP 7.4.8): `must`, `should`, `must_not`, a filter on a tag, and `minimum_should_match`
+    /// (ROADMAP 8.1.6).
+    Bool(Vec<Shape>, Vec<Shape>, Vec<Shape>, Option<u8>, u32),
+    /// At least `m` of the `should` clauses (ROADMAP 8.1.6, L2 `drop_terms`), alone.
+    AtLeast(Vec<Shape>, u32),
     Boost(Box<Shape>, f64),
     Constant(Box<Shape>, f64),
 }
@@ -232,7 +235,12 @@ impl Shape {
                 should: all(should),
                 ..BoolQuery::default()
             }),
-            Self::Bool(must, should, must_not, tag) => Query::Bool(BoolQuery {
+            Self::AtLeast(s, m) => Query::Bool(BoolQuery {
+                should: all(s),
+                minimum_should_match: *m,
+                ..BoolQuery::default()
+            }),
+            Self::Bool(must, should, must_not, tag, m) => Query::Bool(BoolQuery {
                 must: all(must),
                 should: all(should),
                 must_not: all(must_not),
@@ -243,6 +251,7 @@ impl Shape {
                         value: FilterValue::Keyword(TAGS[usize::from(*t) % TAGS.len()].to_owned()),
                     })
                     .collect(),
+                minimum_should_match: *m,
             }),
             Self::Boost(s, b) => Query::Boost(BoostQuery {
                 query: Box::new(s.query(f)),
@@ -277,15 +286,21 @@ fn shape() -> impl Strategy<Value = Shape> {
             1 => prop::collection::vec(word().prop_map(Shape::Term), 9..50).prop_map(Shape::Or),
             2 => (clauses.clone(), inner.clone()).prop_map(|(s, n)| Shape::OrNot(s, Box::new(n))),
             1 => prop::collection::vec(inner.clone(), 1..3).prop_map(Shape::And),
-            1 => (inner.clone(), clauses).prop_map(|(m, s)| Shape::AndOr(Box::new(m), s)),
-            // Several `must`, `should` beside them, exclusions and a filter (ROADMAP 7.4.8).
+            1 => (inner.clone(), clauses.clone()).prop_map(|(m, s)| Shape::AndOr(Box::new(m), s)),
+            // Several `must`, `should` beside them, exclusions, a filter (ROADMAP 7.4.8), and a
+            // `minimum_should_match` of 0 (the default rule) through one past the `should` clauses (ROADMAP 8.1.6).
             3 => (
                 prop::collection::vec(inner.clone(), 0..4),
                 prop::collection::vec(inner.clone(), 0..4),
                 prop::collection::vec(inner.clone(), 0..2),
                 prop::option::of(0..3_u8),
+                0..6_u32,
             )
-                .prop_map(|(m, s, n, t)| Shape::Bool(m, s, n, t)),
+                .prop_map(|(m, s, n, t, msm)| Shape::Bool(m, s, n, t, msm)),
+            // `minimum_should_match` over a disjunction, narrow and wide (past the scan, onto the heap).
+            2 => (clauses.clone(), 2..5_u32).prop_map(|(s, m)| Shape::AtLeast(s, m)),
+            1 => (prop::collection::vec(word().prop_map(Shape::Term), 9..30), 2..6_u32)
+                .prop_map(|(s, m)| Shape::AtLeast(s, m)),
             2 => (inner.clone(), prop_oneof![Just(0.5), Just(0.01), 0.01..20.0_f64]).prop_map(|(s, b)| Shape::Boost(Box::new(s), b)),
             1 => (inner, prop_oneof![Just(0.0), Just(-0.0), 0.0..5.0_f64]).prop_map(|(s, c)| Shape::Constant(Box::new(s), c)),
         ]
@@ -592,6 +607,7 @@ fn conjunctions_and_optional_clauses_prune() {
         vec![Shape::Term(30), Shape::Term(35)],
         vec![],
         None,
+        0,
     );
     for pruning in PRUNED {
         let (count, all) = pruned(&rare, pruning);

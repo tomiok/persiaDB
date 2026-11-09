@@ -112,10 +112,28 @@ pub struct FuzzyQuery {
     pub max_expansions: u32,
 }
 
-/// [`Query::Bool`]. A document matches when it matches every `must` and `filter` clause and no `must_not` clause,
-/// and at least one `should` clause when there is no `must` or `filter` clause and some `should`. So a query of
-/// `must_not` clauses alone matches every other document, and an empty one matches every document. `must` and
-/// `should` clauses score; `filter` and `must_not` clauses do not.
+/// [`Query::Bool`]. A document matches when it matches every `must` and `filter` clause, no `must_not` clause, and
+/// at least [`Self::minimum_should_match`] `should` clauses. With that 0 (the default), it must match at least one
+/// `should` clause only when there is no `must` or `filter` clause and some `should`. So a query of `must_not`
+/// clauses alone matches every other document, and an empty one matches every document. `must` and `should`
+/// clauses score; `filter` and `must_not` clauses do not.
+///
+/// ```
+/// use persia_engine::query::{BoolQuery, Query, QueryLimits, TermQuery};
+/// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+///
+/// let schema = SchemaBuilder::new("c").field("body", FieldKind::Text(TextOptions::default())).build()?;
+/// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+/// let term = |t: &str| Query::Term(TermQuery { field: body, term: t.into() });
+/// // Two of the three words, whichever they are (SPEC §7.1, L2 `drop_terms`).
+/// let two_of_three = Query::Bool(BoolQuery {
+///     should: vec![term("red"), term("running"), term("shoes")],
+///     minimum_should_match: 2,
+///     ..BoolQuery::default()
+/// });
+/// assert_eq!(two_of_three.validate(&schema, &QueryLimits::default()), Ok(()));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct BoolQuery {
     /// Clauses every match satisfies; their scores add up.
@@ -126,6 +144,10 @@ pub struct BoolQuery {
     pub must_not: Vec<Query>,
     /// Filters every match satisfies, without scoring (SPEC §7.1.2).
     pub filter: Vec<Filter>,
+    /// The fewest `should` clauses a match satisfies, a count, beside every `must` and `filter` clause (SPEC
+    /// §7.1). 0, the default, is the rule of the type's docs: one when there is neither `must` nor `filter`, else
+    /// none. More than there are `should` clauses matches nothing. It changes what matches, not the score.
+    pub minimum_should_match: u32,
 }
 
 /// [`Query::Boost`].

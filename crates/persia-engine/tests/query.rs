@@ -534,6 +534,7 @@ fn hand_built_queries_validate() {
             boost: 1000.0,
         })],
         filter: vec![Filter::Exists { field: price }],
+        minimum_should_match: 0,
     });
     valid.validate(&schema, &limits).unwrap();
     assert_eq!(Query::MatchAll.validate(&schema, &limits), Ok(()));

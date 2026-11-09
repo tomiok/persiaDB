@@ -30,11 +30,20 @@ pub(super) struct BlockMaxWand<M> {
     blocks: Vec<Option<(u32, Option<ScoreBound>)>>,
     pos: Pos,
     score: f64,
+    /// The fewest clauses a document it returns holds (`minimum_should_match`, SPEC §7.1): 1 for a plain OR.
+    at_least: usize,
 }
 
 impl<M: Matcher> BlockMaxWand<M> {
     pub(super) fn new(clauses: Vec<M>) -> Self {
+        Self::at_least(clauses, 1)
+    }
+
+    /// The documents at least `at_least` (≥ 1) of the clauses match, scored as their OR. The pivot is at least the
+    /// `at_least`-th clause in document order: a document before that one's holds fewer clauses.
+    pub(super) fn at_least(clauses: Vec<M>, at_least: usize) -> Self {
         Self {
+            at_least: at_least.max(1),
             bounds: clauses.iter().map(Matcher::max_score).collect(),
             order: Vec::with_capacity(clauses.len()),
             started: false,
@@ -145,14 +154,26 @@ impl<M: Matcher> BlockMaxWand<M> {
             let Some(&(first, _)) = self.order.first() else {
                 return Ok(None);
             };
+            // A document holds only the clauses on it or before it in `order`: none before the `at_least`-th
+            // clause's holds enough. Fewer clauses left than that: no later document does.
+            let fewest = self.at_least.saturating_sub(1);
             let Some(min) = self.min else {
-                return Ok(Some(first));
+                let Some(&(pivot, _)) = self.order.get(fewest) else {
+                    return Ok(None);
+                };
+                if first == pivot {
+                    // `order[..at_least]` all on `first`.
+                    return Ok(Some(first));
+                }
+                self.catch_up(pivot)?;
+                continue;
             };
             let Some(p) = self.pivot(min) else {
                 // Every clause together cannot beat `min`: no later document can.
                 return Ok(None);
             };
-            let Some(&(pivot, _)) = self.order.get(p) else {
+            // Past the pivot the bound only grows (each part is non-negative), so it still beats `min` there.
+            let Some(&(pivot, _)) = self.order.get(p.max(fewest)) else {
                 return Ok(None);
             };
             // The clauses that can match a document from `pivot` until the next clause's document.

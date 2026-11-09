@@ -255,15 +255,23 @@ pub(super) struct Disjunction<M> {
     queue: BinaryHeap<Reverse<(u32, usize)>>,
     /// The clauses on the current document, in query order.
     current: Vec<usize>,
+    /// The fewest clauses a document it returns holds (`minimum_should_match`, SPEC §7.1): 1 for a plain OR.
+    at_least: usize,
     pos: Pos,
 }
 
 impl<M: Matcher> Disjunction<M> {
     pub(super) fn new(clauses: Vec<M>) -> Self {
+        Self::at_least(clauses, 1)
+    }
+
+    /// The documents at least `at_least` of the clauses match, scored as their OR.
+    pub(super) fn at_least(clauses: Vec<M>, at_least: usize) -> Self {
         Self {
             queue: BinaryHeap::with_capacity(clauses.len()),
             current: Vec::with_capacity(clauses.len()),
             clauses,
+            at_least,
             pos: Pos::Unstarted,
         }
     }
@@ -365,10 +373,21 @@ impl<M: Matcher> Matcher for Disjunction<M> {
             Pos::At(_) => true,
         };
         self.pos = Pos::Done;
-        let doc = if self.clauses.len() <= SCAN_MAX {
-            self.scan(target, started)?
-        } else {
-            self.dequeue(target, started)?
+        let (mut target, mut started) = (target, started);
+        let doc = loop {
+            let doc = if self.clauses.len() <= SCAN_MAX {
+                self.scan(target, started)?
+            } else {
+                self.dequeue(target, started)?
+            };
+            match doc {
+                // Too few clauses on it: the next document, every clause now started.
+                Some(d) if self.current.len() < self.at_least => match d.checked_add(1) {
+                    Some(after) => (target, started) = (after, true),
+                    None => break None,
+                },
+                doc => break doc,
+            }
         };
         self.pos = Pos::of(doc);
         Ok(doc)

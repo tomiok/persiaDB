@@ -125,6 +125,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `RequestError::CursorView`.
 
 ### Added
+- `persia-engine` (breaking for struct literals without `..BoolQuery::default()`): `BoolQuery::minimum_should_match`,
+  the fewest `should` clauses a match holds (ROADMAP 8.1.6; SPEC §7.1, §7.3), for L2 `drop_terms`. A count, 0 by
+  default (the rule so far: one `should` only when there is neither `must` nor `filter`). With a count of 1 or more
+  the `should` clauses are required beside `must` and filters too. A count above the number of `should` clauses
+  matches nothing. It changes what matches, not the score, and prunes as a plain disjunction does under every
+  strategy (`search_top10_pruning/or4_msm2`, `or4_msm3`, `or50_msm2`).
 - `persia-engine`: the relaxation response metadata (ROADMAP 8.1.5; SPEC §7.6). `db::Relaxation` states `level`,
   `applied`, `original`, `effective`, `corrected` (`db::Correction`) and `truncated`, with `Relaxation::relaxed()`;
   each `RelaxedHit` states its `level`, `step` and `rank_score`. `original` and `effective` are `None` until ROADMAP

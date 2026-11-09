@@ -1164,7 +1164,13 @@ them. `combined` is one query word over several `text` fields, each with its own
 scored as one BM25F term (§7.2). A `bool` matches a document that matches every `must` and `filter` clause, no
 `must_not` clause, and at least one `should` clause when it has no `must` or `filter` clause but some `should`; so an
 empty `bool` matches every document, and one with only `must_not` clauses matches every other document. `must` and `should`
-score; `filter` and `must_not` do not. A hand-built query is validated against the schema and the limits (§7.1.3):
+score; `filter` and `must_not` do not. A `bool`'s `minimum_should_match` is a count `m` of its `should` clauses
+(ROADMAP 8.1.6, for L2 `drop_terms`, §7.6). Its default is 0, which keeps the rule above. With `m ≥ 1`, a document
+matches only when it also matches at least `m` `should` clauses, beside every `must` and `filter` clause and with or
+without them: beside `must` or a filter, `should` clauses then stop being optional. An `m` above the number of
+`should` clauses matches nothing, as does any `m ≥ 1` with none. `m` changes which documents match, never a score:
+a match still scores its `must` clauses plus the `should` clauses it matches. The AST holds a count, not a
+percentage. L2's percentages (§7.6) are turned into counts by the level that builds the query. A hand-built query is validated against the schema and the limits (§7.1.3):
 `term`, `prefix`, `fuzzy` take `text` or `keyword` fields, `combined` distinct `text` fields, `phrase` a `text` field
 with `positions` and terms in non-decreasing relative positions; terms are at most 32 KiB (§5.3.1), prefixes not
 empty; `fuzzy` distance is 1 or 2; `prefix` and `fuzzy` expand to at most `max_expansions` terms (≥ 1; 50 when the
@@ -1335,6 +1341,15 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   Clauses under `constant_score` are walked exhaustively. A disjunction prunes with block-max WAND by default;
   `MaxScore` (whole-list bounds only) is the other strategy, and where a clause has no block bounds (a phrase)
   block-max WAND uses its whole-list bound.
+  A `minimum_should_match` `m ≥ 1` (§7.1) makes the `should` clauses one required disjunction of at least `m` of
+  them, pruned as any disjunction. It takes the threshold on the whole score when the `bool` has no `must` (a filter
+  scores 0). Beside `must` it is one more clause of the `must` conjunction, after them in query order, so the
+  conjunction takes the threshold (block-max AND) and the score is the same sum. Under block-max WAND its pivot is
+  also at least its `m`-th clause in document order (a document before that one's holds fewer clauses), and
+  `MaxScore` stops looking a document's clauses up once those found and those left cannot reach `m`. Exhaustively,
+  a document on fewer than `m` clauses is passed over. When `m` is the number of clauses that can match in the
+  view, it is their conjunction, summed in query order as the disjunction sums them. A bound stays the disjunction's:
+  `m` only removes matches, so it lowers no score.
   A bound is only as good as the block it describes: scoring a document whose frequency is above its block's `max_tf`
   (checked when the block decodes) or whose norm is below its block's `min_norm` (checked when it is scored) is
   corruption: a search that scores such a document fails instead of ranking it above a bound another document was
@@ -1450,7 +1465,7 @@ A hit returns its location, score, sort values (§7.4: its cursor) and document:
 one (§9.1), and its stored fields (§6.4.2) after the projection. The projection is every stored and extra field
 (default), none, or a list of names: a field of the schema with `stored: true`, or in a collection that is not
 `strict` an extra field; another name is an error. A document lacking a projected field returns without it.
-
+| L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term, each percentage `p` of the `n` terms the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one is not built again). Stopwords/low-IDF terms dropped first |
 ### 7.6 Zero-results avoidance (default on)
 If the number of hits `< relax.min_results` (default **1**), the engine runs the **relaxation cascade**,
 stopping at the first level that satisfies `min_results` (or continuing to fill `limit` if `relax.fill = true`):
