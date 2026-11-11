@@ -138,7 +138,7 @@ impl DefaultFields {
 /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
 /// let compiled = compiler.compile("red  the -\"running shoes\"", &DefaultFields::all(&schema), &QueryLimits::default());
 /// // `the` is a stopword: it compiles to nothing, so it is not a clause.
-/// let clauses: Vec<&str> = compiled.clauses.iter().map(|c| compiled.source(c)).collect();
+/// let clauses: Vec<&str> = (0..compiled.clauses.len()).filter_map(|i| compiled.source(i)).collect();
 /// assert_eq!(clauses, ["red", "-\"running shoes\""]);
 /// assert_eq!(compiled.clauses[1].span, 9..25);
 /// assert!(compiled.clauses[1].negated);
@@ -176,29 +176,32 @@ pub struct CompiledClause {
 }
 
 impl Compiled {
-    /// `clause`'s text, as the user wrote it: [`CompiledClause::span`] of [`Self::text`]. Empty for a clause of
-    /// another compilation whose span this text lacks.
-    pub fn source(&self, clause: &CompiledClause) -> &str {
-        self.text.get(clause.span.clone()).unwrap_or("")
+    /// The text of clause `index` of [`Self::clauses`], as the user wrote it: its [`CompiledClause::span`] of
+    /// [`Self::text`]. `None` past the last clause. It takes an index, not a [`CompiledClause`], so a clause of
+    /// another compilation cannot be read against this text.
+    pub fn source(&self, index: usize) -> Option<&str> {
+        self.text.get(self.clauses.get(index)?.span.clone())
     }
 
     /// The text of the query as compiled (SPEC §7.6 `effective` at L0): its clauses' text, separated by one space.
     /// What was left out (stopwords, text past a limit) is not in it, so recompiling it gives the same query.
     pub fn effective(&self) -> String {
         let mut effective = String::new();
-        for clause in &self.clauses {
+        for index in 0..self.clauses.len() {
             if !effective.is_empty() {
                 effective.push(' ');
             }
-            effective.push_str(self.source(clause));
+            effective.push_str(self.source(index).unwrap_or(""));
         }
         effective
     }
 
-    /// The queries `clause` compiled to: entries of the root `bool`'s `must` (or `must_not`), or the whole query
-    /// when it is that one clause's one part (a single required part is the query itself). Empty for a clause of
-    /// another compilation.
-    pub fn parts(&self, clause: &CompiledClause) -> &[Query] {
+    /// The queries clause `index` of [`Self::clauses`] compiled to: entries of the root `bool`'s `must` (or
+    /// `must_not`), or the whole query when it is that one clause's one part (a single required part is the query
+    /// itself). `None` past the last clause. Like [`Self::source`], it takes an index so that it reads only this
+    /// compilation's clauses.
+    pub fn parts(&self, index: usize) -> Option<&[Query]> {
+        let clause = self.clauses.get(index)?;
         match &self.query {
             Query::Bool(root) if !self.collapsed() => {
                 let list = if clause.negated {
@@ -206,10 +209,10 @@ impl Compiled {
                 } else {
                     &root.must
                 };
-                list.get(clause.parts.clone()).unwrap_or(&[])
+                list.get(clause.parts.clone())
             }
-            query if clause.parts == (0..1) && !clause.negated => std::slice::from_ref(query),
-            _ => &[],
+            query if clause.parts == (0..1) && !clause.negated => Some(std::slice::from_ref(query)),
+            _ => None,
         }
     }
 
@@ -308,7 +311,12 @@ impl QueryCompiler {
         // The root Bool; a query that holds one clause is that clause, so this only over-counts clauses.
         let mut clauses: Vec<CompiledClause> = Vec::new();
         if usage.add(limits, 1, 0, 0).is_err() {
-            return finish(BoolQuery::default(), !text.trim().is_empty(), text, clauses);
+            return finish(
+                BoolQuery::default(),
+                truncated || !text.trim().is_empty(),
+                text,
+                clauses,
+            );
         }
         for (clause, span) in clause_spans(text, &self.schema) {
             let parts = self.clause(clause, fields, &mut tokens);

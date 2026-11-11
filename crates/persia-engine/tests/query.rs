@@ -376,6 +376,16 @@ fn user_text_is_cut_to_the_limits() {
         (compiled.query, compiled.truncated),
         (Query::MatchAll, true)
     );
+    // Text the text limit already cut to nothing stays truncated when the root does not fit either.
+    let none = QueryLimits {
+        max_text_len: 0,
+        ..l
+    };
+    let compiled = compiler(&schema).compile("red", &fields, &none);
+    assert_eq!(
+        (compiled.query, compiled.text.as_str(), compiled.truncated),
+        (Query::MatchAll, "", true)
+    );
 }
 
 #[test]
@@ -1334,20 +1344,20 @@ proptest! {
         prop_assert_eq!(compiled.text.as_str(), text_within_limit(&text, max_text_len, &schema));
         let mut end = 0;
         let (mut must, mut must_not) = (Vec::new(), Vec::new());
-        for clause in &compiled.clauses {
+        for (i, clause) in compiled.clauses.iter().enumerate() {
             let span = clause.span.clone();
             prop_assert!(end <= span.start && span.start < span.end && span.end <= compiled.text.len(), "{span:?}");
             prop_assert!(text.is_char_boundary(span.start) && text.is_char_boundary(span.end));
             end = span.end;
             let source = &text[span];
-            prop_assert_eq!(compiled.source(clause), source);
+            prop_assert_eq!(compiled.source(i), Some(source));
             prop_assert!(!source.starts_with(char::is_whitespace) && !source.ends_with(char::is_whitespace));
             prop_assert!(!clause.parts.is_empty());
             let alone = compiler.compile(source, &fields, &QueryLimits::default());
             prop_assert_eq!(alone.clauses.len(), 1, "{:?}", source);
             prop_assert_eq!(alone.clauses[0].negated, clause.negated);
-            prop_assert_eq!(alone.parts(&alone.clauses[0]), compiled.parts(clause), "{:?}", source);
-            if clause.negated { &mut must_not } else { &mut must }.extend_from_slice(compiled.parts(clause));
+            prop_assert_eq!(alone.parts(0), compiled.parts(i), "{:?}", source);
+            if clause.negated { &mut must_not } else { &mut must }.extend_from_slice(compiled.parts(i).unwrap_or(&[]));
         }
         let rebuilt = match (must.len(), must_not.len()) {
             (0, 0) => Query::MatchAll,
@@ -1397,7 +1407,8 @@ fn compiled_clauses_by_hand() {
     );
     assert_eq!(one.clauses.len(), 1);
     assert_eq!(one.clauses[0].span, 1..11);
-    assert_eq!(one.parts(&one.clauses[0]), std::slice::from_ref(&one.query));
+    assert_eq!(one.parts(0), Some(std::slice::from_ref(&one.query)));
+    assert_eq!((one.source(1), one.parts(1)), (None, None));
     // Text that compiles to nothing has no clause, and its effective text is empty.
     let none = compiler(&schema).compile(
         "the - \"",

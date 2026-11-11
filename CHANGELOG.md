@@ -18,7 +18,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   of the conjunction.
 - `persia-engine` (breaking): `Compiled` records where its query came from (ROADMAP 8.1.7; SPEC §7.1.1, §7.6): `text`,
   the user text read, and `clauses`, one `CompiledClause` per clause that compiled, with its byte span in that text,
-  whether it excludes, and its parts (`Compiled::parts`); `Compiled::effective` joins the clauses' text. It is
+  whether it excludes, and its parts. `Compiled::source` and `Compiled::parts` read a clause by its index in
+  `clauses`. `Compiled::effective` joins the clauses' text. It is
   `#[non_exhaustive]` now, so a pattern names its fields with `..`. `CollectionViews::search_relaxed` takes a `Query`
   or a `Compiled` (`RelaxedQuery`): for a compiled one the response's `Relaxation::original` is the text read and
   `effective` the last step's text (at L0, the clauses that compiled); a programmatic query has neither.
@@ -108,6 +109,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
+- `persia-engine`: `QueryCompiler::compile` reports `Compiled::truncated` for text that `max_text_len` cut to nothing
+  when the limits do not admit the root query either. Before, the flag was dropped and the cut text looked complete.
 - `persia-storage`: a `LocalStorage::put` or `put_if_absent` that failed and could not remove its temporary file left
   it locked for a moment when another thread spawned a child meanwhile, so the next `sweep_temporaries` reported the
   stale file in use and kept it. A failed write now unlocks the temporary file it leaves before closing it (ROADMAP

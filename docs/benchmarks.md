@@ -259,9 +259,9 @@ gains most where its own bound cannot beat the threshold: then only documents ho
 against `or50_msm2`). A count of 3 makes it cheaper (`or4_msm3`), because fewer documents can reach the pivot. A
 count only drops documents, so the exhaustive walk gets cheaper as the count rises: it scores fewer documents and
 skips from a document on too few clauses to the first one that could hold enough. An A/B against `main` in the same
-session (`--save-baseline main` from a worktree), over the `term`, `and`, `or`, `or_rare` and `or50` rows of both
-groups, moved every row by −3 % to +3.5 %, with mixed signs and `and` (whose code did not change) moving as much:
-noise, not a regression of the plain disjunctions.
+session (`--save-baseline main` from a worktree), over the `term`, `and`, `or` and `or50` rows of `search_top10` and
+the same rows plus `or_rare` of `search_top10_pruning`, moved every row by −3 % to +3.5 %, with mixed signs and `and`
+(whose code did not change) moving as much: noise, not a regression of the plain disjunctions.
 
 | query | `Exhaustive` | `MaxScore` | `BlockMaxWand` |
 |---|--:|--:|--:|
