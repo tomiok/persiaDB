@@ -2,6 +2,7 @@
 //! `field:` scoping. Never fails: syntax that does not parse is read as plain words.
 
 use std::collections::BTreeMap;
+use std::ops::Range;
 use std::sync::Arc;
 
 use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
@@ -124,13 +125,102 @@ impl DefaultFields {
     }
 }
 
-/// The result of [`QueryCompiler::compile`].
+/// The result of [`QueryCompiler::compile`]: the query, and where in the user text each of its clauses came from
+/// (ROADMAP 8.1.7), for the relaxation response's `original` and `effective` (SPEC §7.6).
+///
+/// ```
+/// use persia_analysis::AnalyzerRegistry;
+/// use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
+/// use persia_engine::schema::{AnalyzerRef, FieldKind, SchemaBuilder, TextOptions};
+///
+/// let en = TextOptions { analyzer: AnalyzerRef::builtin("en").ok_or("no en")?, ..TextOptions::default() };
+/// let schema = SchemaBuilder::new("c").field("title", FieldKind::Text(en)).build()?;
+/// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
+/// let compiled = compiler.compile("red  the -\"running shoes\"", &DefaultFields::all(&schema), &QueryLimits::default());
+/// // `the` is a stopword: it compiles to nothing, so it is not a clause.
+/// let clauses: Vec<&str> = (0..compiled.clauses.len()).filter_map(|i| compiled.source(i)).collect();
+/// assert_eq!(clauses, ["red", "-\"running shoes\""]);
+/// assert_eq!(compiled.clauses[1].span, 9..25);
+/// assert!(compiled.clauses[1].negated);
+/// assert_eq!(compiled.effective(), "red -\"running shoes\"");
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Compiled {
     /// The query.
     pub query: Query,
     /// Whether part of the text was left out to stay within the [`QueryLimits`].
     pub truncated: bool,
+    /// The user text as read: all of it, or the prefix [`QueryLimits::max_text_len`] keeps
+    /// ([`text_within_limit`]). The response's `original` (SPEC §7.6).
+    pub text: String,
+    /// The clauses that compiled to part of [`Self::query`], in text order. A clause that analyzes to no token, or
+    /// that the limits left out, is not one.
+    pub clauses: Vec<CompiledClause>,
+}
+
+/// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct CompiledClause {
+    /// Its bytes in [`Compiled::text`], and so in the user text, of which that is a prefix: from its `-` or
+    /// `field:` to its last character (a phrase's closing quote), without the whitespace around it. Always on
+    /// character boundaries.
+    pub span: Range<usize>,
+    /// Whether it excludes (`-`): its parts are the root's `must_not`, otherwise its `must`.
+    pub negated: bool,
+    /// Its parts, as indexes into the root's `must` (or `must_not` when [`Self::negated`]); [`Compiled::parts`]
+    /// reads them. A word that splits into several spans has several parts; an excluded clause has one.
+    pub parts: Range<usize>,
+}
+
+impl Compiled {
+    /// The text of clause `index` of [`Self::clauses`], as the user wrote it: its [`CompiledClause::span`] of
+    /// [`Self::text`]. `None` past the last clause. It takes an index, not a [`CompiledClause`], so a clause of
+    /// another compilation cannot be read against this text.
+    pub fn source(&self, index: usize) -> Option<&str> {
+        self.text.get(self.clauses.get(index)?.span.clone())
+    }
+
+    /// The text of the query as compiled (SPEC §7.6 `effective` at L0): its clauses' text, separated by one space.
+    /// What was left out (stopwords, text past a limit) is not in it, so recompiling it gives the same query.
+    pub fn effective(&self) -> String {
+        let mut effective = String::new();
+        for index in 0..self.clauses.len() {
+            if !effective.is_empty() {
+                effective.push(' ');
+            }
+            effective.push_str(self.source(index).unwrap_or(""));
+        }
+        effective
+    }
+
+    /// The queries clause `index` of [`Self::clauses`] compiled to: entries of the root `bool`'s `must` (or
+    /// `must_not`), or the whole query when it is that one clause's one part (a single required part is the query
+    /// itself). `None` past the last clause. Like [`Self::source`], it takes an index so that it reads only this
+    /// compilation's clauses.
+    pub fn parts(&self, index: usize) -> Option<&[Query]> {
+        let clause = self.clauses.get(index)?;
+        match &self.query {
+            Query::Bool(root) if !self.collapsed() => {
+                let list = if clause.negated {
+                    &root.must_not
+                } else {
+                    &root.must
+                };
+                list.get(clause.parts.clone())
+            }
+            query if clause.parts == (0..1) && !clause.negated => Some(std::slice::from_ref(query)),
+            _ => None,
+        }
+    }
+
+    /// Whether the root is the one required part, not a `bool` over the parts.
+    fn collapsed(&self) -> bool {
+        let required: usize = self.clauses.iter().map(|c| c.parts.len()).sum();
+        required == 1 && self.clauses.iter().all(|c| !c.negated)
+    }
 }
 
 /// Compiles user text into queries over one collection (SPEC §7.1.1). Holds the analyzer of every `text` field.
@@ -219,13 +309,16 @@ impl QueryCompiler {
         // clause puts it under a bool, one level deeper, so it has to be checked again.
         let mut shallow = false;
         // The root Bool; a query that holds one clause is that clause, so this only over-counts clauses.
+        let mut clauses: Vec<CompiledClause> = Vec::new();
         if usage.add(limits, 1, 0, 0).is_err() {
-            return Compiled {
-                query: Query::MatchAll,
-                truncated: !text.trim().is_empty(),
-            };
+            return finish(
+                BoolQuery::default(),
+                truncated || !text.trim().is_empty(),
+                text,
+                clauses,
+            );
         }
-        for clause in lex(text, &self.schema) {
+        for (clause, span) in clause_spans(text, &self.schema) {
             let parts = self.clause(clause, fields, &mut tokens);
             let part = match (clause.negated, parts.len()) {
                 (_, 0) => continue,
@@ -275,6 +368,11 @@ impl QueryCompiler {
                         {
                             shallow = true;
                             usage = retry;
+                            clauses.push(CompiledClause {
+                                span,
+                                negated: false,
+                                parts: 0..part.len(),
+                            });
                             query.must.extend(part);
                             continue;
                         }
@@ -284,18 +382,19 @@ impl QueryCompiler {
                 }
                 usage = trial;
             }
-            if clause.negated {
-                query.must_not.extend(part);
+            let list = if clause.negated {
+                &mut query.must_not
             } else {
-                query.must.extend(part);
-            }
+                &mut query.must
+            };
+            clauses.push(CompiledClause {
+                span,
+                negated: clause.negated,
+                parts: list.len()..list.len().saturating_add(part.len()),
+            });
+            list.extend(part);
         }
-        let query = match (query.must.len(), query.must_not.len()) {
-            (0, 0) => Query::MatchAll,
-            (1, 0) => query.must.pop().unwrap_or(Query::MatchAll),
-            _ => Query::Bool(query),
-        };
-        Compiled { query, truncated }
+        finish(query, truncated, text, clauses)
     }
 
     /// The queries a clause requires (all of them), or none when it analyzes to no token.
@@ -404,6 +503,27 @@ impl QueryCompiler {
     fn analyzer(&self, id: FieldId) -> Option<&Analyzer> {
         let index = usize::try_from(id.get()).ok()?;
         self.analyzers.get(index)?.as_deref()
+    }
+}
+
+/// The compilation of `text` whose clauses built `root`: no clause is [`Query::MatchAll`], and a single required
+/// part is the query itself (SPEC §7.1.1).
+fn finish(
+    mut root: BoolQuery,
+    truncated: bool,
+    text: &str,
+    clauses: Vec<CompiledClause>,
+) -> Compiled {
+    let query = match (root.must.len(), root.must_not.len()) {
+        (0, 0) => Query::MatchAll,
+        (1, 0) => root.must.pop().unwrap_or(Query::MatchAll),
+        _ => Query::Bool(root),
+    };
+    Compiled {
+        query,
+        truncated,
+        text: text.to_owned(),
+        clauses,
     }
 }
 
@@ -535,20 +655,20 @@ fn cut<'t>(text: &'t str, max: usize, schema: &CollectionSchema) -> (&'t str, bo
         .is_some_and(|c| !c.is_whitespace());
     let spans = clause_spans(prefix, schema);
     let mut keep = 0;
-    for (clause, clause_end) in &spans {
+    for (clause, span) in &spans {
         // A closed phrase ends on its quote. A word that runs to the cap and into the next character was split.
-        let split_word = continues && *clause_end == end && !clause.phrase;
+        let split_word = continues && span.end == end && !clause.phrase;
         if split_word {
             break;
         }
-        keep = *clause_end;
+        keep = span.end;
     }
     // A `"` opened inside the cap and never closed there: the closing quote was cut off (or the quoted text
     // runs past the cap). Drop from that clause, same as dropping the split word it contains.
     if let Some(open) = unclosed_quote(prefix, schema) {
         keep = spans
             .iter()
-            .map(|(_, clause_end)| *clause_end)
+            .map(|(_, span)| span.end)
             .filter(|clause_end| *clause_end <= open)
             .max()
             .unwrap_or(0);
@@ -568,20 +688,14 @@ pub fn text_within_limit<'a>(
     cut(text, max_text_len, schema).0
 }
 
-/// Splits user text into clauses: `[-][field:](word | "phrase")`, separated by whitespace.
-fn lex<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<Clause<'t>> {
-    clause_spans(text, schema)
-        .into_iter()
-        .map(|(clause, _)| clause)
-        .collect()
-}
-
-/// `(clause, exclusive end byte)` in `text`. The end is the first byte after the clause, not counting the
-/// whitespace that follows it.
-fn clause_spans<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<(Clause<'t>, usize)> {
+/// Splits user text into clauses: `[-][field:](word | "phrase")`, separated by whitespace. Each comes with its bytes
+/// in `text`: from its first byte (a `-`, a field name or its body) to the first byte after it, not counting the
+/// whitespace around it. Both ends are character boundaries, as whitespace and the ASCII `"` are whole characters.
+fn clause_spans<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<(Clause<'t>, Range<usize>)> {
     let mut clauses = Vec::new();
     let mut rest = text.trim_start();
     while !rest.is_empty() {
+        let start = suffix_offset(text, rest);
         let (negated, field, body) = clause_head(rest, schema);
         if let Some(inner) = body.strip_prefix('"')
             && let Some((phrase, after)) = inner.split_once('"')
@@ -593,7 +707,7 @@ fn clause_spans<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<(Clause<'t>
                     phrase: true,
                     text: phrase,
                 },
-                suffix_offset(text, after),
+                start..suffix_offset(text, after),
             ));
             rest = after.trim_start();
             continue;
@@ -607,7 +721,7 @@ fn clause_spans<'t>(text: &'t str, schema: &CollectionSchema) -> Vec<(Clause<'t>
                 phrase: false,
                 text: word,
             },
-            suffix_offset(text, after),
+            start..suffix_offset(text, after),
         ));
         rest = after.trim_start();
     }

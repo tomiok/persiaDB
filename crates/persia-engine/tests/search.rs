@@ -248,12 +248,16 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
             )
                 .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not, minimum_should_match: 0 }),
             // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must`.
+            // The count is drawn once the clauses are, so every value from 1 to one past them comes up.
             2 => (
                 prop::collection::vec(inner.clone(), 0..2),
                 prop::collection::vec(inner.clone(), 1..5),
                 prop::collection::vec(inner.clone(), 0..2),
-                1..6_usize,
             )
+                .prop_flat_map(|(must, should, must_not)| {
+                    let most = should.len() + 1;
+                    (Just(must), Just(should), Just(must_not), 1..=most)
+                })
                 .prop_map(|(must, should, must_not, minimum_should_match)| RefQuery::Bool { must, should, must_not, minimum_should_match }),
             // Wide, as a relaxation expansion (ROADMAP 7.4.7): a disjunction past its few-clause scan.
             1 => prop::collection::vec(leaf(params), 9..24)

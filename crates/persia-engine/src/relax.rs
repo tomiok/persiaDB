@@ -42,7 +42,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::query::Query;
+use crate::query::{Compiled, Query};
 use crate::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
@@ -146,12 +146,14 @@ pub enum RelaxError {
     },
 }
 
-/// What a level's transform builds from: the query as compiled. The levels of ROADMAP 8.2 add what they need (the
-/// schema, statistics, the steps built before).
-#[derive(Debug)]
+/// What a level's transform builds from: the query as compiled, and the user text it was compiled from. The levels of
+/// ROADMAP 8.2 add what they need (the schema, statistics, the steps built before).
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct LevelInput<'a> {
     /// L0's query, as compiled.
     pub(crate) original: &'a Query,
+    /// Its compilation from user text, with each clause's span (ROADMAP 8.1.7): `None` for a programmatic query.
+    pub(crate) compiled: Option<&'a Compiled>,
 }
 
 /// One query a level runs (ROADMAP 8.1.2): a level may run several, strictest first (L2's `minimum_should_match`
@@ -162,6 +164,9 @@ pub(crate) struct Step {
     pub(crate) query: Query,
     /// What the step applied, as the response's `applied` lists it (SPEC §7.6): `"drop_terms:75%"`, `"fuzzy"`.
     pub(crate) applied: String,
+    /// The step's query as user text (SPEC §7.6 `effective`): `None` when the query was not compiled from text, which
+    /// a level then has none to render.
+    pub(crate) effective: Option<String>,
 }
 
 /// Builds a level's steps (SPEC §7.6). Called only once the cascade reaches the level; no step skips the level.
@@ -179,6 +184,7 @@ impl LevelTransform for Exact {
         vec![Step {
             query: input.original.clone(),
             applied: String::new(),
+            effective: input.compiled.map(Compiled::effective),
         }]
     }
 }

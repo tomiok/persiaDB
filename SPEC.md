@@ -1239,6 +1239,14 @@ limit of §7.1.3 is left out too, and the response reports it as `query_truncate
 `truncated`, §7.6); the compiled query always satisfies the limits. The clause count includes a root `bool` even when
 the query is a single clause.
 
+Sources (ROADMAP 8.1.7): the compiled query keeps the text read (the capped prefix; §7.6's `original`) and, for each
+clause that compiled to part of it, in text order, its byte span in that text and its parts. A span runs from the
+clause's first character (its `-`, field name or body) to its last (a phrase's closing quote), without the whitespace
+around it; spans are on character boundaries and do not overlap. Each clause's parts are its entries of the root
+`must` (or `must_not` for `-`); a single required part is the query itself. A clause left out (no token, past a
+limit) has none. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+same query.
+
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
 
@@ -1494,9 +1502,11 @@ Rules:
   query order, and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
-  8.1.5) defines every field. `original` and `effective` stay empty until
-  each compiled clause records its source span (ROADMAP 8.1.7), and `corrected` until the fuzzy level synthesizes
-  the corrected query (ROADMAP 8.2.4.3).
+  8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
+  the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
+  (ROADMAP 8.1.7). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
+  query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy).
+  `corrected` stays empty until the fuzzy level synthesizes the corrected query (ROADMAP 8.2.4.3).
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).

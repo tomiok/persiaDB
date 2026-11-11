@@ -22,8 +22,8 @@ use std::time::Instant;
 use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
-use crate::query::{BoolQuery, Query};
-use crate::relax::{LevelInput, RelaxLevel, RelaxPlan, rank_score};
+use crate::query::{BoolQuery, Compiled, Query};
+use crate::relax::{LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
 use crate::schema::CollectionSchema;
 use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
 use crate::stats::SearchStatistics;
@@ -99,11 +99,13 @@ pub struct Relaxation {
     /// What each step after L0 applied, in the order they were built (`"applied"`): `"drop_terms:75%"`, `"fuzzy"`.
     /// Empty when nothing was relaxed.
     pub applied: Vec<String>,
-    /// The user text the query was compiled from (`"original"`). `None` until ROADMAP 8.1.7 records each compiled
-    /// clause's source span and text in [`crate::query::Compiled`].
+    /// The user text the query was compiled from (`"original"`), as read: [`Compiled::text`]. `None` when the query
+    /// was not compiled from `q` (a programmatic query): it has no user text, and the AST has no faithful `q` form
+    /// (combined weights, boost, prefix, fuzzy).
     pub original: Option<String>,
-    /// The text of the last step's query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. `None`
-    /// until ROADMAP 8.1.7 (spans), which it is rendered from.
+    /// The text of the last step's query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. Rendered
+    /// from its clauses' source text ([`crate::query::CompiledClause::span`]), so at L0 it is [`Compiled::effective`]:
+    /// the clauses that compiled, without stopwords or text past a limit. `None` when [`Self::original`] is.
     pub effective: Option<String>,
     /// The terms the fuzzy level replaced, in query order (`"corrected"`). Empty until ROADMAP 8.2.4.3 synthesizes
     /// the corrected query ("did you mean").
@@ -114,14 +116,20 @@ pub struct Relaxation {
 }
 
 impl Relaxation {
-    /// What a cascade that built steps through `level`, applying `applied`, did. The text and corrections wait on
-    /// ROADMAP 8.1.7 and 8.2.4.3.
-    fn of(level: RelaxLevel, applied: Vec<String>, truncated: bool) -> Self {
+    /// What a cascade that built steps through `level`, applying `applied`, did, for a query compiled from
+    /// `original` whose last step reads `effective`. The corrections wait on ROADMAP 8.2.4.3.
+    fn of(
+        level: RelaxLevel,
+        applied: Vec<String>,
+        text: (Option<String>, Option<String>),
+        truncated: bool,
+    ) -> Self {
+        let (original, effective) = text;
         Self {
             level,
             applied,
-            original: None,
-            effective: None,
+            original,
+            effective,
             corrected: Vec::new(),
             truncated,
         }
@@ -140,6 +148,32 @@ pub struct Correction {
     pub original: String,
     /// What the response searched instead: `"zapatillas"`.
     pub corrected: String,
+}
+
+/// The query a relaxed search starts from ([`CollectionViews::search_relaxed`]): a [`Query`] built in code, or one
+/// [`Compiled`] from user text, whose text the response states (`original`, `effective`, SPEC §7.6).
+#[derive(Debug, Clone, Copy)]
+pub struct RelaxedQuery<'a> {
+    query: &'a Query,
+    compiled: Option<&'a Compiled>,
+}
+
+impl<'a> From<&'a Query> for RelaxedQuery<'a> {
+    fn from(query: &'a Query) -> Self {
+        Self {
+            query,
+            compiled: None,
+        }
+    }
+}
+
+impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
+    fn from(compiled: &'a Compiled) -> Self {
+        Self {
+            query: &compiled.query,
+            compiled: Some(compiled),
+        }
+    }
 }
 
 /// What a relaxed search returns.
@@ -249,10 +283,14 @@ impl CollectionViews<'_> {
     /// is full or the last step is passed (with `fill`, until the page is full). A cursor without a step
     /// ([`SearchHit::cursor`]) is step 0 of a cascade that stopped at L0.
     ///
+    /// `query` is a [`Query`] or a [`Compiled`] one ([`RelaxedQuery`]); only a compiled query has the user text the
+    /// response's [`Relaxation::original`] and [`Relaxation::effective`] state.
+    ///
     /// ```
+    /// use persia_analysis::AnalyzerRegistry;
     /// use persia_engine::db::{Database, DatabaseOptions, Execution, SearchRequest};
     /// use persia_engine::document::{Document, Value};
-    /// use persia_engine::query::{Query, TermQuery};
+    /// use persia_engine::query::{DefaultFields, Query, QueryCompiler, QueryLimits, TermQuery};
     /// use persia_engine::relax::{RelaxOptions, RelaxPlan};
     /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
     /// use persia_engine::wal::Durability;
@@ -281,6 +319,13 @@ impl CollectionViews<'_> {
     /// let ids: Vec<&str> = first.hits.iter().chain(&second.hits).map(|h| h.hit.document.id()).collect();
     /// assert_eq!(ids.len(), 2);
     /// assert_ne!(ids[0], ids[1]);
+    ///
+    /// // Compiled from user text, the response states that text, and the text of the query it searched.
+    /// let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())?;
+    /// let compiled = compiler.compile("red   shoes", &DefaultFields::all(c.schema()), &QueryLimits::default());
+    /// let out = views.search_relaxed(&compiled, &SearchRequest::default(), &relax, &exec)?;
+    /// assert_eq!(out.relaxation.original.as_deref(), Some("red   shoes"));
+    /// assert_eq!(out.relaxation.effective.as_deref(), Some("red shoes"));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     ///
@@ -288,13 +333,14 @@ impl CollectionViews<'_> {
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax;
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned.
-    pub fn search_relaxed(
+    pub fn search_relaxed<'q>(
         &self,
-        query: &Query,
+        query: impl Into<RelaxedQuery<'q>>,
         request: &SearchRequest,
         relax: &RelaxPlan,
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
+        let RelaxedQuery { query, compiled } = query.into();
         let window = self.check_request(request)?;
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
@@ -307,6 +353,8 @@ impl CollectionViews<'_> {
         let mut ran: Vec<Ran> = Vec::new();
         let mut earlier: Vec<Cow<'_, Query>> = Vec::new();
         let mut applied = Vec::new();
+        // The text of the last step built (SPEC §7.6 `effective`).
+        let mut effective: Option<String> = None;
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
         let mut budget: Option<Instant> = None;
@@ -321,19 +369,12 @@ impl CollectionViews<'_> {
                 truncated = true;
                 break;
             }
-            // L0 searches the query itself, not a copy.
-            let steps: Vec<(Cow<'_, Query>, String)> = if ran.is_empty() {
-                vec![(Cow::Borrowed(query), String::new())]
-            } else {
-                let input = LevelInput { original: query };
-                planned
-                    .transform
-                    .steps(&input)
-                    .into_iter()
-                    .map(|s| (Cow::Owned(s.query), s.applied))
-                    .collect()
+            let input = LevelInput {
+                original: query,
+                compiled,
             };
-            for (step, label) in steps {
+            let steps = level_steps(planned, ran.is_empty(), input);
+            for (step, label, text) in steps {
                 let i = ran.len();
                 if !builds(i, found) {
                     break 'levels;
@@ -375,6 +416,7 @@ impl CollectionViews<'_> {
                     searched,
                 });
                 earlier.push(step);
+                effective = text;
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
@@ -387,7 +429,13 @@ impl CollectionViews<'_> {
         Ok(RelaxedResults {
             hits,
             facets,
-            relaxation: Relaxation::of(level, applied, truncated),
+            relaxation: Relaxation::of(
+                level,
+                applied,
+                // A query without user text has no text form, whatever a level states.
+                (compiled.map(|c| c.text.clone()), compiled.and(effective)),
+                truncated,
+            ),
         })
     }
 
@@ -492,6 +540,28 @@ impl CollectionViews<'_> {
         }
         Ok((hits, facets.into_iter().map(FacetCounter::finish).collect()))
     }
+}
+
+/// The steps `planned` builds for `input`: its query, what it applied and its text. L0 (`first`) searches the query
+/// itself, not a copy.
+fn level_steps<'a>(
+    planned: &PlannedLevel,
+    first: bool,
+    input: LevelInput<'a>,
+) -> Vec<(Cow<'a, Query>, String, Option<String>)> {
+    if first {
+        return vec![(
+            Cow::Borrowed(input.original),
+            String::new(),
+            input.compiled.map(Compiled::effective),
+        )];
+    }
+    planned
+        .transform
+        .steps(&input)
+        .into_iter()
+        .map(|s| (Cow::Owned(s.query), s.applied, s.effective))
+        .collect()
 }
 
 /// Whether `e` is a deadline that passed, while planning or searching.

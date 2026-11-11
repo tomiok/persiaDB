@@ -244,7 +244,10 @@ fn input_query() -> (CollectionSchema, Query) {
 #[test]
 fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
     let (_, query) = input_query();
-    let input = LevelInput { original: &query };
+    let input = LevelInput {
+        original: &query,
+        compiled: None,
+    };
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::default()).unwrap();
     let steps: Vec<Vec<Step>> = plan
         .planned()
@@ -255,11 +258,41 @@ fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
         steps[0],
         [Step {
             query: query.clone(),
-            applied: String::new()
+            applied: String::new(),
+            effective: None
         }]
     );
     // L1 to L5 wait on ROADMAP 8.2: no step, so the cascade skips them.
     assert!(steps[1..].iter().all(Vec::is_empty));
+}
+
+#[test]
+fn l0_states_the_text_of_the_clauses_that_compiled() {
+    use persia_analysis::AnalyzerRegistry;
+
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+
+    let (schema, _) = input_query();
+    let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+    let red = compiler.compile(
+        " red\t shoes ",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let input = LevelInput {
+        original: &red.query,
+        compiled: Some(&red),
+    };
+    let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::disabled()).unwrap();
+    let steps = plan.planned()[0].transform.steps(&input);
+    assert_eq!(
+        steps,
+        [Step {
+            query: red.query.clone(),
+            applied: String::new(),
+            effective: Some("red shoes".into()),
+        }]
+    );
 }
 
 #[derive(Debug)]
@@ -274,10 +307,14 @@ impl LevelTransform for Fixed {
 #[test]
 fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() {
     let (_, query) = input_query();
-    let input = LevelInput { original: &query };
+    let input = LevelInput {
+        original: &query,
+        compiled: None,
+    };
     let step = Step {
         query: Query::MatchAll,
         applied: "prefix".into(),
+        effective: None,
     };
     let none = RelaxOptions {
         levels: Some(Levels::Custom(vec![Level::Synonyms, Level::Fuzzy])),
