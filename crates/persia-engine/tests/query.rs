@@ -1570,3 +1570,52 @@ fn filter_numbers_follow_the_document_forms() {
         );
     }
 }
+
+/// SPEC §7.6, ROADMAP 8.2.2.1: a clause is a stopword when its word, lowercased, is in the stopword list of the
+/// language of a field it searches, even where another field's analyzer keeps it.
+#[test]
+fn compiled_clauses_flag_stopwords_of_the_fields_they_search() {
+    let schema = schema();
+    let flags = |text: &str, fields: &DefaultFields| {
+        let compiled = compiler(&schema).compile(text, fields, &QueryLimits::default());
+        (0..compiled.clauses.len())
+            .map(|i| {
+                (
+                    compiled.source(i).unwrap().to_owned(),
+                    compiled.clauses[i].stopword,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, bool)]| -> Vec<(String, bool)> {
+        pairs.iter().map(|&(s, f)| (s.to_owned(), f)).collect()
+    };
+    let all = DefaultFields::all(&schema);
+    // `body` is `en`: `the` and `The` are its stopwords, which `title` (standard, no language) keeps.
+    assert_eq!(
+        flags("The red -the \"the\" shoes", &all),
+        owned(&[
+            ("The", true),
+            ("red", false),
+            ("-the", true),
+            ("\"the\"", true),
+            ("shoes", false)
+        ])
+    );
+    // `title` alone has no language, and `title:` scopes the clause to it: nothing is a stopword.
+    let title = DefaultFields::parse(&schema, &["title"]).unwrap();
+    assert_eq!(
+        flags("the red", &title),
+        owned(&[("the", false), ("red", false)])
+    );
+    assert_eq!(
+        flags("title:the red", &all),
+        owned(&[("title:the", false), ("red", false)])
+    );
+    // A keyword field has no analyzer; a phrase of several words is not one stopword; other languages' lists do not
+    // apply (`con` is Spanish).
+    assert_eq!(
+        flags("brand:the \"the end\" con", &all),
+        owned(&[("brand:the", false), ("\"the end\"", false), ("con", false)])
+    );
+}

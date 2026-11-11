@@ -5,7 +5,10 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
+use persia_analysis::{
+    Analyzer, AnalyzerRegistry, ENGLISH_STOPWORDS, FRENCH_STOPWORDS, GERMAN_STOPWORDS,
+    ITALIAN_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, TokenStream,
+};
 
 use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaHash};
 use crate::segment::MAX_TERM_LEN;
@@ -176,6 +179,11 @@ pub struct CompiledClause {
     /// Its parts, as indexes into the root's `must` (or `must_not` when [`Self::negated`]); [`Compiled::parts`]
     /// reads them. A word that splits into several spans has several parts; an excluded clause has one.
     pub parts: Range<usize>,
+    /// Whether its word is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): lowercased, it
+    /// is in the stopword list of the language of one of those fields' analyzers (`en`, `es`, `pt`, `fr`, `de`, `it`;
+    /// other analyzers have no language). A field whose analyzer removes the word leaves it out of the clause's
+    /// parts, but not out of this check: `the` over a `standard` title and an `en` body is a stopword.
+    pub stopword: bool,
 }
 
 impl Compiled {
@@ -233,6 +241,8 @@ pub struct QueryCompiler {
     schema: CollectionSchema,
     /// By field id; `None` for fields that are not `text`.
     analyzers: Vec<Option<Arc<Analyzer>>>,
+    /// By field id: the stopword list of the field analyzer's language, empty without one.
+    stopwords: Vec<&'static [&'static str]>,
 }
 
 impl std::fmt::Debug for QueryCompiler {
@@ -272,9 +282,29 @@ impl QueryCompiler {
                 _ => Ok(None),
             })
             .collect::<Result<_, _>>()?;
+        let stopwords = schema
+            .fields()
+            .iter()
+            .map(|field| match field.kind() {
+                FieldKind::Text(options) => language_stopwords(options.analyzer.name()),
+                _ => &[],
+            })
+            .collect();
         Ok(Self {
             schema: schema.clone(),
             analyzers,
+            stopwords,
+        })
+    }
+
+    /// Whether `word` is a stopword of one of `fields` ([`CompiledClause::stopword`]).
+    fn is_stopword(&self, word: &str, mut fields: impl Iterator<Item = FieldId>) -> bool {
+        let lower = word.to_lowercase();
+        fields.any(|id| {
+            usize::try_from(id.get())
+                .ok()
+                .and_then(|i| self.stopwords.get(i))
+                .is_some_and(|list| list.contains(&lower.as_str()))
         })
     }
 
@@ -334,6 +364,10 @@ impl QueryCompiler {
                     ..BoolQuery::default()
                 })],
             };
+            let stopword = match clause.field {
+                Some(id) => self.is_stopword(clause.text, std::iter::once(id)),
+                None => self.is_stopword(clause.text, fields.fields().iter().map(|&(id, _)| id)),
+            };
             if shallow {
                 // Promote the depth-1 clause under a root bool and count `part` beside it.
                 let mut trial = Usage::default();
@@ -378,6 +412,7 @@ impl QueryCompiler {
                                 span,
                                 negated: false,
                                 parts: 0..part.len(),
+                                stopword,
                             });
                             query.must.extend(part);
                             continue;
@@ -397,6 +432,7 @@ impl QueryCompiler {
                 span,
                 negated: clause.negated,
                 parts: list.len()..list.len().saturating_add(part.len()),
+                stopword,
             });
             list.extend(part);
         }
@@ -635,6 +671,20 @@ fn one_of(mut alternatives: Vec<Query>) -> Option<Query> {
             should: alternatives,
             ..BoolQuery::default()
         })),
+    }
+}
+
+/// The stopword list of built-in analyzer `name`'s language (SPEC §6.3.3), empty for an analyzer without one: only the
+/// language analyzers name a language, and no other analyzer may take their names (SPEC §6.3).
+fn language_stopwords(name: &str) -> &'static [&'static str] {
+    match name {
+        "en" => ENGLISH_STOPWORDS,
+        "es" => SPANISH_STOPWORDS,
+        "pt" => PORTUGUESE_STOPWORDS,
+        "fr" => FRENCH_STOPWORDS,
+        "de" => GERMAN_STOPWORDS,
+        "it" => ITALIAN_STOPWORDS,
+        _ => &[],
     }
 }
 

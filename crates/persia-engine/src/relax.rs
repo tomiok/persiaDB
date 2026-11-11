@@ -45,6 +45,8 @@ use std::time::Duration;
 use crate::query::{Compiled, Query, QueryLimits};
 use crate::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
 
+mod drop_terms;
+
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
