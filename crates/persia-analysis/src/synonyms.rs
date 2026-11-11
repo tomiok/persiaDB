@@ -51,6 +51,8 @@ pub struct SynonymMap {
     groups: Vec<Vec<usize>>,
     /// Per term, the trie node that ends it.
     node_of_term: Vec<usize>,
+    /// Per term, where it was first given: its group and its index among that group's terms as given.
+    source_of_term: Vec<(usize, usize)>,
     /// A trie over terms keyed by token text and position gap to the previous token; node 0 is the root.
     trie: Vec<Node>,
 }
@@ -90,8 +92,8 @@ impl SynonymMap {
         };
         for (group_id, group) in groups.into_iter().enumerate() {
             let mut members = Vec::new();
-            for term in group {
-                let Some(term_id) = map.insert(term.into()) else {
+            for (index, term) in group.into_iter().enumerate() {
+                let Some(term_id) = map.insert(term.into(), (group_id, index)) else {
                     continue;
                 };
                 // Group ids only grow, so each list stays ascending, and its last entry tells whether this group
@@ -163,8 +165,9 @@ impl SynonymMap {
         }
     }
 
-    /// Inserts a term into the trie and returns its id, or `None` for a term without tokens.
-    fn insert(&mut self, term: Vec<Token>) -> Option<usize> {
+    /// Inserts a term first given at `source` (group, index) into the trie and returns its id, or `None` for a term
+    /// without tokens. A term already inserted keeps its first source.
+    fn insert(&mut self, term: Vec<Token>, source: (usize, usize)) -> Option<usize> {
         let mut node = 0;
         for (gap, text) in gap_keys(&term)? {
             let next = self.trie.len();
@@ -191,6 +194,7 @@ impl SynonymMap {
         self.terms.push(term);
         self.groups_of_term.push(Vec::new());
         self.node_of_term.push(node);
+        self.source_of_term.push(source);
         Some(next_term)
     }
 
@@ -249,17 +253,43 @@ impl SynonymMap {
     /// matched term, each once, and at most `limit` of them (SPEC §7.6 L1 caps them at
     /// [`DEFAULT_SYNONYM_EXPANSIONS`] by default). Each is given as analyzed (its spans index the term's own text).
     pub fn alternatives(&self, matched: &SynonymMatch, limit: usize) -> Vec<&[Token]> {
+        self.alternative_ids(matched, limit)
+            .into_iter()
+            .filter_map(|term| self.terms.get(term).map(Vec::as_slice))
+            .collect()
+    }
+
+    /// Where each of [`Self::alternatives`] was given, in the same order: the index of its group and its index among
+    /// that group's terms, as passed to [`Self::new`] or [`Self::analyzed`]. Terms equal after analysis are one term,
+    /// reported at the first place it was given. A caller holding the raw groups (a collection's `synonyms`) reads
+    /// the alternatives as written there, to analyze them again for other fields.
+    ///
+    /// ```
+    /// use persia_analysis::{SynonymMap, Token};
+    ///
+    /// let token = |text: &str| Token { text: text.into(), start: 0, end: text.len(), position: 0 };
+    /// let map = SynonymMap::new([vec![vec![token("tv")], vec![token("telly")]], vec![vec![token("tv")], vec![token("box")]]]);
+    /// let matches = map.find(&[token("tv")]);
+    /// assert_eq!(map.alternative_sources(&matches[0], 50), [(0, 1), (1, 1)]);
+    /// ```
+    pub fn alternative_sources(&self, matched: &SynonymMatch, limit: usize) -> Vec<(usize, usize)> {
+        self.alternative_ids(matched, limit)
+            .into_iter()
+            .filter_map(|term| self.source_of_term.get(term).copied())
+            .collect()
+    }
+
+    /// The ids of the terms a match expands to, as [`Self::alternatives`] orders and caps them.
+    fn alternative_ids(&self, matched: &SynonymMatch, limit: usize) -> Vec<usize> {
         let mut seen = HashSet::from([matched.term]);
         let mut alternatives = Vec::new();
         for &group in self.groups_of_term.get(matched.term).into_iter().flatten() {
             for &term in self.groups.get(group).into_iter().flatten() {
-                if seen.insert(term)
-                    && let Some(tokens) = self.terms.get(term)
-                {
+                if seen.insert(term) && term < self.terms.len() {
                     if alternatives.len() >= limit {
                         return alternatives;
                     }
-                    alternatives.push(tokens.as_slice());
+                    alternatives.push(term);
                 }
             }
         }

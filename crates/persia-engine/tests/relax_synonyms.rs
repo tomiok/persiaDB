@@ -1,0 +1,419 @@
+//! L1 `synonyms` through a database (SPEC §6.3.2, §7.6, ROADMAP 8.2.1): the compiler finds the runs of required words
+//! that are a term of the collection's synonym groups, and the cascade's L1 step ORs each with its alternatives.
+//!
+//! Invariants:
+//! 1. Each default field scans its own analysis of the query's required words. A match is the longest term at a token
+//!    whose texts and position gaps are equal (a stopword gap lines up). It counts only over whole clauses, and never
+//!    spans an excluded clause, a phrase or a `field:` clause.
+//! 2. An alternative is the other term compiled as a quoted phrase over the default fields would be. Alternatives come
+//!    in group order, then term order, each once, none equal to the run's own query, at most 50 per run, and at most
+//!    `max_terms` in all.
+//! 3. L1 is one step, `synonyms`. It requires each run or one of its alternatives, keeps L0's excluded clauses
+//!    excluded, and states L0's text as its `effective`. A programmatic query, or one without a match, skips the
+//!    level.
+
+#![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs)] // Tests: inputs are fixed.
+
+use std::sync::Arc;
+
+use persia_analysis::AnalyzerRegistry;
+use persia_engine::db::{
+    Database, DatabaseOptions, Execution, ManualClock, RelaxedResults, SearchRequest, Threads,
+};
+use persia_engine::document::{Document, Value};
+use persia_engine::query::{
+    BoolQuery, Compiled, DefaultFields, PhraseQuery, Query, QueryCompiler, QueryLimits, TermQuery,
+};
+use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
+use persia_engine::schema::{
+    AnalyzerRef, CollectionSchema, FieldKind, RelaxationConfig, SchemaBuilder, TextOptions,
+};
+use persia_engine::search::Pruning;
+use persia_engine::wal::Durability;
+use persia_storage::container::sim::SimFile;
+
+fn groups(groups: &[&[&str]]) -> Vec<Vec<String>> {
+    groups
+        .iter()
+        .map(|g| g.iter().map(|&t| t.to_owned()).collect())
+        .collect()
+}
+
+/// `title` (standard, with positions) and `body` (en, without), with `synonyms`.
+fn schema(synonyms: &[&[&str]]) -> CollectionSchema {
+    SchemaBuilder::new("c")
+        .field(
+            "title",
+            FieldKind::Text(TextOptions {
+                positions: true,
+                ..TextOptions::default()
+            }),
+        )
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .synonyms(groups(synonyms))
+        .build()
+        .unwrap()
+}
+
+const SYNONYMS: &[&[&str]] = &[
+    &["tv", "television set"],
+    &["sneakers", "running shoes", "trainers"],
+    &["nyc", "new york"],
+    &["statue of liberty", "lady liberty"],
+];
+
+fn compile_in(schema: &CollectionSchema, text: &str, limits: &QueryLimits) -> Compiled {
+    QueryCompiler::new(schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(text, &DefaultFields::all(schema), limits)
+}
+
+fn compile(text: &str) -> Compiled {
+    compile_in(&schema(SYNONYMS), text, &QueryLimits::default())
+}
+
+/// Each run's clauses as text, and how many alternatives it has.
+fn runs(compiled: &Compiled) -> Vec<(String, usize)> {
+    compiled
+        .synonyms
+        .iter()
+        .map(|s| {
+            let text: Vec<&str> = s
+                .clauses
+                .clone()
+                .map(|i| compiled.source(i).unwrap())
+                .collect();
+            (text.join(" "), s.alternatives.len())
+        })
+        .collect()
+}
+
+fn term(field: &str, text: &str) -> Query {
+    Query::Term(TermQuery {
+        field: schema(SYNONYMS).field(field).unwrap().id(),
+        term: text.into(),
+    })
+}
+
+#[test]
+fn a_run_of_whole_clauses_matches_in_each_field_with_its_stopword_gaps() {
+    // One word and two words: `tv`, and `new york` over two clauses.
+    assert_eq!(runs(&compile("cheap tv")), [("tv".into(), 1)]);
+    assert_eq!(runs(&compile("new york pizza")), [("new york".into(), 1)]);
+    assert_eq!(
+        runs(&compile("sneakers and running shoes")),
+        [("sneakers".into(), 2), ("running shoes".into(), 2)]
+    );
+    // `of` is a stopword of `body` (en), whose term `statu liberti` has a gap of 2 there; `title` keeps `of`. Both
+    // match the three clauses, and share the one alternative.
+    assert_eq!(
+        runs(&compile("statue of liberty")),
+        [("statue of liberty".into(), 1)]
+    );
+    // In `body` alone, the gap must line up: `statue liberty` has none, so neither spelling matches the other.
+    let body_only = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .synonyms(groups(&[&["statue liberty", "monument"]]))
+        .build()
+        .unwrap();
+    let limits = QueryLimits::default();
+    assert_eq!(
+        runs(&compile_in(&body_only, "statue of liberty", &limits)),
+        []
+    );
+    assert_eq!(
+        runs(&compile_in(&body_only, "statue liberty", &limits)),
+        [("statue liberty".into(), 1)]
+    );
+    // A dropped stopword clause (`the`, no field keeps it) leaves the gap too.
+    let body_only = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .synonyms(groups(&[&["statue of liberty", "monument"]]))
+        .build()
+        .unwrap();
+    let compiled = compile_in(&body_only, "statue of liberty", &limits);
+    assert_eq!(compiled.clauses.len(), 2);
+    assert_eq!(compiled.synonyms[0].clauses, 0..2);
+}
+
+#[test]
+fn excluded_phrase_and_field_clauses_are_not_expanded_and_end_a_run() {
+    assert_eq!(runs(&compile("cheap -tv")), []);
+    assert_eq!(runs(&compile("\"cheap tv\"")), []);
+    assert_eq!(runs(&compile("title:tv")), []);
+    // `york` alone is no term, and `new "york"` is a word and a phrase.
+    assert_eq!(runs(&compile("new -x york")), []);
+    assert_eq!(runs(&compile("new \"york\"")), []);
+    // A run restarts after them.
+    assert_eq!(runs(&compile("-x tv")), [("tv".into(), 1)]);
+}
+
+#[test]
+fn a_match_inside_a_word_does_not_count() {
+    let schema = schema(&[&["mail", "post"], &["e-mail", "email"]]);
+    let limits = QueryLimits::default();
+    // `e-mail` is two tokens of one clause: `e mail` is the term, `mail` alone is part of the clause.
+    assert_eq!(
+        runs(&compile_in(&schema, "e-mail", &limits)),
+        [("e-mail".into(), 1)]
+    );
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .synonyms(groups(&[&["mail", "post"]]))
+        .build()
+        .unwrap();
+    assert_eq!(runs(&compile_in(&schema, "e-mail", &limits)), []);
+    assert_eq!(
+        runs(&compile_in(&schema, "mail", &limits)),
+        [("mail".into(), 1)]
+    );
+}
+
+#[test]
+fn an_alternative_is_compiled_as_a_quoted_phrase() {
+    // `title` has positions, `body` not: a phrase in `title`, both terms required in `body`, either field.
+    let compiled = compile("tv");
+    let [alternative] = compiled.synonyms[0].alternatives.as_slice() else {
+        panic!("{:?}", compiled.synonyms);
+    };
+    let Query::Bool(BoolQuery { should, .. }) = alternative else {
+        panic!("{alternative:?}");
+    };
+    // Default fields in schema order: `body`, then `title`.
+    assert!(matches!(&should[1], Query::Phrase(PhraseQuery { terms, .. }) if terms.len() == 2));
+    assert_eq!(
+        should[0],
+        Query::Bool(BoolQuery {
+            must: vec![term("body", "televis"), term("body", "set")],
+            ..BoolQuery::default()
+        })
+    );
+    // A one-word alternative is a word over the fields: `nyc` for `new york`.
+    let compiled = compile("new york");
+    assert!(matches!(
+        compiled.synonyms[0].alternatives[0],
+        Query::Combined(_)
+    ));
+}
+
+#[test]
+fn alternatives_come_in_group_then_term_order_each_once_capped_at_50() {
+    let words: Vec<String> = (0..60).map(|i| format!("w{i}")).collect();
+    let mut first: Vec<&str> = vec!["x"];
+    first.extend(words[..30].iter().map(String::as_str));
+    // The second group repeats `w0` (once only), spells `x` as `X` (its own query: not an alternative), and goes on.
+    let mut second: Vec<&str> = vec!["X", "x", "w0"];
+    second.extend(words[30..].iter().map(String::as_str));
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .synonyms(groups(&[&first, &second]))
+        .build()
+        .unwrap();
+    let compiled = compile_in(&schema, "x", &QueryLimits::default());
+    let alternatives: Vec<Query> = compiled.synonyms[0].alternatives.clone();
+    let expected: Vec<Query> = words[..50]
+        .iter()
+        .map(|w| {
+            Query::Combined(persia_engine::query::CombinedQuery {
+                fields: vec![persia_engine::query::WeightedTerm {
+                    field: schema.field("title").unwrap().id(),
+                    term: w.clone(),
+                    weight: 1.0,
+                }],
+            })
+        })
+        .collect();
+    assert_eq!(alternatives, expected);
+}
+
+#[test]
+fn alternatives_are_held_to_max_terms_in_all_the_longest_lists_cut_first() {
+    let a: Vec<String> = (0..10).map(|i| format!("a{i}")).collect();
+    let b: Vec<String> = (0..3).map(|i| format!("b{i}")).collect();
+    let mut first: Vec<&str> = vec!["x"];
+    first.extend(a.iter().map(String::as_str));
+    let mut second: Vec<&str> = vec!["y"];
+    second.extend(b.iter().map(String::as_str));
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .synonyms(groups(&[&first, &second]))
+        .build()
+        .unwrap();
+    let counts = |max_terms| {
+        let limits = QueryLimits {
+            max_terms,
+            ..QueryLimits::default()
+        };
+        runs(&compile_in(&schema, "x y", &limits))
+            .into_iter()
+            .map(|(_, n)| n)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(counts(1024), [10, 3]);
+    // 8: both lists at 3 is 6, and the 2 left go to the list that was cut.
+    assert_eq!(counts(8), [5, 3]);
+    assert_eq!(counts(5), [3, 2]);
+    // At the floor, one each. Below it L0 itself keeps fewer clauses (`x` alone), each with its run.
+    assert_eq!(counts(2), [1, 1]);
+    assert_eq!(counts(1), [1]);
+}
+
+#[test]
+fn a_collection_without_synonyms_scans_nothing() {
+    let compiled = compile_in(&schema(&[]), "cheap tv", &QueryLimits::default());
+    assert_eq!(compiled.synonyms, []);
+}
+
+// The cascade.
+
+fn database() -> Database<SimFile> {
+    let schema = schema(SYNONYMS);
+    let title = schema.field("title").unwrap().id();
+    let body = schema.field("body").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [5; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    let docs = [
+        ("a", "cheap television set", ""),
+        ("b", "cheap set of television", ""),
+        ("c", "running shoes sale", ""),
+        ("d", "trainers for kids", ""),
+        ("e", "", "a trip to new york"),
+        ("f", "lady liberty tour", ""),
+        ("g", "tv stand", ""),
+        ("h", "cheap sneakers", ""),
+    ];
+    for (i, (id, t, b)) in docs.into_iter().enumerate() {
+        let doc = Document::new(id)
+            .with(title, Value::String(t.into()))
+            .with(body, Value::String(b.into()));
+        db.put("c", &doc, Durability::Buffered).unwrap();
+        if i == 3 {
+            db.commit().unwrap();
+        }
+    }
+    db
+}
+
+fn exec() -> Execution {
+    Execution::new(Pruning::default())
+        .threads(Threads::Current)
+        .budget_clock(Arc::new(ManualClock::new(0)))
+}
+
+fn plan(min_results: u32) -> RelaxPlan {
+    let options = RelaxOptions {
+        min_results: Some(min_results),
+        ..RelaxOptions::default()
+    };
+    RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap()
+}
+
+fn search<'q>(
+    db: &Database<SimFile>,
+    query: impl Into<persia_engine::db::RelaxedQuery<'q>>,
+    relax: &RelaxPlan,
+) -> RelaxedResults {
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 100,
+        ..SearchRequest::default()
+    };
+    views
+        .search_relaxed(query, &request, relax, &exec())
+        .unwrap()
+}
+
+fn by_step(out: &RelaxedResults) -> Vec<(usize, &str)> {
+    out.hits
+        .iter()
+        .map(|h| (h.step, h.hit.document.id()))
+        .collect()
+}
+
+#[test]
+fn l1_ors_each_run_with_its_alternatives_in_one_step() {
+    let db = database();
+    // No document holds `cheap` and `tv`; `a` holds the phrase `television set`, `b` both words apart.
+    let compiled = compile("cheap tv");
+    let out = search(&db, &compiled, &plan(1));
+    let r = &out.relaxation;
+    assert_eq!(r.level, RelaxLevel::Synonyms);
+    assert_eq!(r.applied, ["synonyms"]);
+    assert_eq!(r.effective.as_deref(), Some("cheap tv"));
+    assert_eq!(by_step(&out), [(1, "a")]);
+
+    // Two runs, one of two words, in one step: L0 finds `c`; L1 adds the documents of the alternatives.
+    let compiled = compile("running shoes");
+    let out = search(&db, &compiled, &plan(3));
+    assert_eq!(out.relaxation.applied[0], "synonyms");
+    let hits = by_step(&out);
+    assert_eq!(hits[0], (0, "c"));
+    let l1: Vec<&str> = hits.iter().filter(|h| h.0 == 1).map(|h| h.1).collect();
+    assert_eq!(l1.len(), 2, "{hits:?}");
+    assert!(l1.contains(&"d") && l1.contains(&"h"), "{hits:?}");
+
+    // Over both fields, with the stopword gap: `statue of liberty` finds `lady liberty`.
+    let compiled = compile("statue of liberty");
+    let out = search(&db, &compiled, &plan(1));
+    assert_eq!(by_step(&out), [(1, "f")]);
+    // `new york` and `nyc`, the alternative a word over both fields.
+    let compiled = compile("nyc");
+    let out = search(&db, &compiled, &plan(1));
+    assert_eq!(by_step(&out), [(1, "e")]);
+}
+
+#[test]
+fn excluded_clauses_stay_excluded_and_l2_follows() {
+    let db = database();
+    // `-stand` excludes `g` from every step; L2 then drops a term of `cheap tv` (any one of them).
+    let compiled = compile("cheap tv -stand");
+    let out = search(&db, &compiled, &plan(100));
+    let r = &out.relaxation;
+    assert_eq!(r.applied, ["synonyms", "drop_terms:75%"]);
+    assert_eq!(by_step(&out)[0], (1, "a"));
+    assert!(out.hits.iter().all(|h| h.hit.document.id() != "g"));
+    assert!(
+        out.hits
+            .iter()
+            .any(|h| h.step == 2 && h.hit.document.id() == "b")
+    );
+}
+
+#[test]
+fn a_query_without_a_match_or_text_skips_the_level() {
+    let db = database();
+    let compiled = compile("cheap stand");
+    let out = search(&db, &compiled, &plan(1));
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%"]);
+    // A programmatic query has no text to scan.
+    let query = term("title", "tv");
+    let out = search(&db, &query, &plan(100));
+    assert!(
+        out.relaxation
+            .applied
+            .iter()
+            .all(|a| !a.starts_with("synonyms"))
+    );
+    assert_eq!(by_step(&out), [(0, "g")]);
+}

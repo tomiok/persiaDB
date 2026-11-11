@@ -158,3 +158,29 @@ fn alternatives_are_capped_in_group_then_term_order() {
     assert_eq!(texts(1000), words);
     assert_eq!(texts(0), Vec::<String>::new());
 }
+
+#[test]
+fn alternative_sources_name_where_each_alternative_was_first_given() {
+    // "TV" and "tv" are one term after lowercasing, first given at (0, 0); "telly" is (0, 2), and the second group's
+    // "box" is (1, 1). The empty "!!!" takes an index but no term.
+    let map = map(&[&["TV", "!!!", "telly", "tv"], &["tv", "box"]]);
+    let tokens = analyze("tv");
+    let matches = map.find(&tokens);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        map.alternative_sources(&matches[0], DEFAULT_SYNONYM_EXPANSIONS),
+        [(0, 2), (1, 1)]
+    );
+    assert_eq!(map.alternative_sources(&matches[0], 1), [(0, 2)]);
+    // Same order and cap as the alternatives themselves.
+    let texts: Vec<&str> = map
+        .alternatives(&matches[0], DEFAULT_SYNONYM_EXPANSIONS)
+        .iter()
+        .map(|t| t[0].text.as_str())
+        .collect();
+    assert_eq!(texts, ["telly", "box"]);
+    // Matching "telly" reports the term "TV"/"tv" at its first place.
+    let tokens = analyze("telly");
+    let matches = map.find(&tokens);
+    assert_eq!(map.alternative_sources(&matches[0], 50), [(0, 0)]);
+}

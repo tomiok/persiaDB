@@ -42,7 +42,9 @@ pub use ast::{
     BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, FuzzyQuery, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, TermQuery, WeightedTerm,
 };
-pub use compile::{Compiled, CompiledClause, DefaultFields, QueryCompiler, text_within_limit};
+pub use compile::{
+    Compiled, CompiledClause, CompiledSynonym, DefaultFields, QueryCompiler, text_within_limit,
+};
 pub use filter::{Filter, FilterValue, MAX_FILTER_JSON_LEN};
 pub(crate) use fit::{Fit, StepLimits};
 pub use limits::{DEFAULT_MAX_EXPANSIONS, QueryLimits};

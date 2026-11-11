@@ -544,12 +544,12 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [x] 8.1.10 Make SPEC §7.6's response example agree with the cascade: `applied` lists every step built in order, and whether L4 `fuzzy` builds on the full query or on the last `drop_terms` step (the example's `effective` keeps both words) is for 8.2 to decide; settle it with the first of 8.2.2 or 8.2.4 (found in the 8.1 review)
 - [ ] 8.1.11 Cursor pages with facets search every step before the cursor's again only to count it, spending the budget (SPEC §7.6, a page may be truncated before any hit): carry the counts with the cursor, or count once per snapshot and query, and bench a deep facet page (found in the 8.1 review)
 - [ ] 8.1.12 Scores can overflow to `+∞` (`constant_score` near `f64::MAX` under a `boost`, or a `bool` summing large ones; SPEC §7.2 allows each): decide whether to clamp to `f64::MAX`, reject the query, or keep `+∞`, and how JSON responses (§12), which have no `Infinity`, carry it. The cascade and `rank_score` already order `+∞` correctly (found in the 8.1.3 review)
-- [ ] 8.1.13 Synonym expansions within `QueryLimits` (SPEC §7.1.3): the cascade's fitting (`query::StepLimits`, ROADMAP 8.1.8) cuts only `prefix` and `fuzzy` `max_expansions`, so an L1 step over `max_terms` or `max_clauses` is skipped whole. 8.2.1 must mark its synonym alternatives as cuttable (least important first) so the fitting drops some instead (found in 8.1.8)
+- [~] 8.1.13 Synonym expansions within `QueryLimits` (SPEC §7.1.3): the cascade's fitting (`query::StepLimits`, ROADMAP 8.1.8) cuts only `prefix` and `fuzzy` `max_expansions`, so an L1 step over `max_terms` or `max_clauses` is skipped whole. 8.2.1 must mark its synonym alternatives as cuttable (least important first) so the fitting drops some instead (found in 8.1.8)
 - [ ] 8.1.14 Each 8.2 level renders its steps' `effective` text from the compiled clauses' spans (`relax::Step::effective`, ROADMAP 8.1.7): a level that leaves it `None` makes the response's `effective` absent for a compiled query (found in the 8.1 batch review). L2 renders it (8.2.2.2)
 - [ ] 8.1.15 Filters in the reference model (`tests/reference/search.rs`), so `minimum_should_match` beside a `filter` (and every filter path) is tested differentially, not only by hand and pruned-against-exhaustive (found in the 8.1 batch review)
 
 ## 8.2 Levels
-- [ ] 8.2.1 L1 synonyms: expand terms with synonym groups
+- [~] 8.2.1 L1 synonyms: expand terms with synonym groups
 - 8.2.2 L2 drop_terms
   - [x] 8.2.2.1 Term importance ordering (IDF + position + stopword flag)
   - [x] 8.2.2.2 `minimum_should_match` ladder 100/75/50/1

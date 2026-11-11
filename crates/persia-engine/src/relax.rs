@@ -6,8 +6,8 @@
 //! `relax: false` ([`RelaxOptions::disabled`]) leaving L0 alone.
 //!
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
-//! nothing more. L0 and L2 `drop_terms` (ROADMAP 8.2.2) build queries so far: the others (L1 `synonyms`, L3 `prefix` to
-//! L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
+//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1) and L2 `drop_terms` (ROADMAP 8.2.2) build queries so far: the others
+//! (L3 `prefix` to L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
@@ -48,6 +48,7 @@ use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 
 mod drop_terms;
+mod synonyms;
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -239,7 +240,7 @@ impl LevelTransform for Pending {
 fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
     match level {
         RelaxLevel::Exact => Arc::new(Exact),
-        RelaxLevel::Synonyms => Arc::new(Pending { leaf: "8.2.1" }),
+        RelaxLevel::Synonyms => Arc::new(synonyms::Synonyms),
         RelaxLevel::DropTerms => Arc::new(drop_terms::DropTerms),
         RelaxLevel::Prefix => Arc::new(Pending { leaf: "8.2.3" }),
         RelaxLevel::Fuzzy => Arc::new(Pending { leaf: "8.2.4" }),

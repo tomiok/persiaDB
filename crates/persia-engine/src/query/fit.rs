@@ -129,7 +129,7 @@ fn caps_of<'q>(query: &'q mut Query, caps: &mut Vec<&'q mut u32>) {
 /// frequent term, SPEC §7.1): every cap becomes `min(cap, level)` for the highest level that fits, and the room left
 /// below the next level goes, one each, to the caps that level cut, in query order. `false` when even 1 each is too
 /// many.
-fn share(caps: &mut [&mut u32], room: usize) -> bool {
+pub(super) fn share(caps: &mut [&mut u32], room: usize) -> bool {
     let sum = |level: u32| -> usize {
         caps.iter()
             .map(|c| usize::try_from((**c).min(level)).unwrap_or(usize::MAX))
