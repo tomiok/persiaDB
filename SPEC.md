@@ -1269,9 +1269,17 @@ another type, an unknown field, an unknown operator or bound, and filter JSON lo
 
 #### 7.1.3 Limits
 Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
-user text is cut (§7.1.1). Holding the queries the relaxation cascade builds (§7.6) to these same limits is pending
-(M8, ROADMAP 8.1.8): a level will cut its expansions (synonyms, prefixes, fuzzy terms; the least important first) to
-fit what the query leaves of each limit, and report it in `applied`. Defaults, configurable per engine:
+user text is cut (§7.1.1). The relaxation cascade (§7.6) holds each step after L0 to the same limits as the query
+it runs, `bool { must: [step], must_not: [earlier steps searched] }`, so the earlier steps it excludes count in full
+(ROADMAP 8.1.8). The limits are the ones the search sets, else those a compiled query was compiled with, else the
+defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
+its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
+first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
+`applied` lists it as `"<applied>:cut"`. Those under a `must_not` of the step count but are not cut: fewer would
+exclude less, so the step would match more than its level built. A step that fits no cut (over terms, clauses or depth, or with fewer expansions left than it has
+such queries) is *skipped*: it is not searched, `applied` lists it as `"<applied>:skipped"`, later steps do not
+exclude its matches, and the cascade goes on to the next step, checked the same way. A step that is invalid for
+another reason is an error. Synonym expansions are not cut yet (ROADMAP 8.1.13). Defaults, configurable per engine:
 
 | Limit | Default | Counts |
 |---|---|---|
@@ -1496,8 +1504,9 @@ Rules:
                 "original": "zapatilas rojs", "effective": "zapatillas rojas",
                 "corrected": {"zapatilas":"zapatillas","rojs":"rojas"}, "truncated": false }
 ```
-  `level` is the level of the last step the cascade built (`exact` when L0 had enough or no later level built a
-  step), `applied` what each step after L0 applied in build order (empty when nothing was relaxed), `original` the
+  `level` is the level of the last step the cascade built and did not skip (`exact` when L0 had enough or no later
+  level built a step that fits the limits; a cursor's page builds the steps before its own without searching them), `applied` what each step after L0 applied in build order (empty when no level built a
+  step; a step cut or skipped to fit §7.1.3's limits is listed with `:cut` or `:skipped`), `original` the
   user text, `effective` the text of the last step's query, `corrected` each term the fuzzy level replaced, in
   query order, and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more

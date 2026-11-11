@@ -33,6 +33,7 @@
 mod ast;
 mod compile;
 mod filter;
+mod fit;
 mod limits;
 
 use crate::schema::{FieldId, FieldType};
@@ -43,6 +44,7 @@ pub use ast::{
 };
 pub use compile::{Compiled, CompiledClause, DefaultFields, QueryCompiler, text_within_limit};
 pub use filter::{Filter, FilterValue, MAX_FILTER_JSON_LEN};
+pub(crate) use fit::{Fit, StepLimits};
 pub use limits::{DEFAULT_MAX_EXPANSIONS, QueryLimits};
 
 /// Why a query, a filter or the options of a compilation are invalid. User text itself never fails to compile.

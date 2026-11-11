@@ -158,6 +158,9 @@ pub struct Compiled {
     /// The clauses that compiled to part of [`Self::query`], in text order. A clause that analyzes to no token, or
     /// that the limits left out, is not one.
     pub clauses: Vec<CompiledClause>,
+    /// The limits it was compiled with: a relaxed search holds its steps to them unless its plan sets others
+    /// ([`crate::relax::RelaxPlan::with_limits`], SPEC §7.1.3).
+    pub limits: QueryLimits,
 }
 
 /// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
@@ -211,7 +214,9 @@ impl Compiled {
                 };
                 list.get(clause.parts.clone())
             }
-            query if clause.parts == (0..1) && !clause.negated => Some(std::slice::from_ref(query)),
+            query if self.collapsed() && clause.parts == (0..1) && !clause.negated => {
+                Some(std::slice::from_ref(query))
+            }
             _ => None,
         }
     }
@@ -315,6 +320,7 @@ impl QueryCompiler {
                 BoolQuery::default(),
                 truncated || !text.trim().is_empty(),
                 text,
+                limits,
                 clauses,
             );
         }
@@ -394,7 +400,7 @@ impl QueryCompiler {
             });
             list.extend(part);
         }
-        finish(query, truncated, text, clauses)
+        finish(query, truncated, text, limits, clauses)
     }
 
     /// The queries a clause requires (all of them), or none when it analyzes to no token.
@@ -512,6 +518,7 @@ fn finish(
     mut root: BoolQuery,
     truncated: bool,
     text: &str,
+    limits: &QueryLimits,
     clauses: Vec<CompiledClause>,
 ) -> Compiled {
     let query = match (root.must.len(), root.must_not.len()) {
@@ -524,6 +531,7 @@ fn finish(
         truncated,
         text: text.to_owned(),
         clauses,
+        limits: *limits,
     }
 }
 

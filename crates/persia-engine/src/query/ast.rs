@@ -145,8 +145,9 @@ pub struct BoolQuery {
     /// Filters every match satisfies, without scoring (SPEC §7.1.2).
     pub filter: Vec<Filter>,
     /// The fewest `should` clauses a match satisfies, a count, beside every `must` and `filter` clause (SPEC
-    /// §7.1). 0, the default, is the rule of the type's docs: one when there is neither `must` nor `filter`, else
-    /// none. More than there are `should` clauses matches nothing. It changes what matches, not the score.
+    /// §7.1). 0, the default, is the rule of the type's docs: one when there is neither `must` nor `filter` but some
+    /// `should`, else none (so an empty `bool` matches every document). Above 0, more than there are `should`
+    /// clauses matches nothing. It changes what matches, not the score.
     pub minimum_should_match: u32,
 }
 
