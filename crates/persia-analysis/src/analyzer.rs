@@ -1,4 +1,4 @@
-//! Analyzers: char filters â tokenizer â token filters (SPEC Â§6.3).
+//! Analyzers: char filters → tokenizer → token filters (SPEC §6.3).
 
 use std::borrow::Cow;
 use std::fmt;
@@ -7,12 +7,12 @@ use crate::char_filter::{CharFilter, CharFilterOutput, OffsetMap};
 use crate::token::{Token, TokenFilter, Tokenizer};
 use crate::token_stream::TokenStream;
 
-/// A text analysis pipeline: char filters, then a tokenizer, then token filters (SPEC Â§6.3).
+/// A text analysis pipeline: char filters, then a tokenizer, then token filters (SPEC §6.3).
 ///
 /// Built with [`Analyzer::builder`]; the built-in analyzers come from [`builtin_analyzer`](crate::builtin_analyzer)
 /// or an [`AnalyzerRegistry`](crate::AnalyzerRegistry). Indexing uses [`analyze`](Self::analyze); queries and
 /// synonym terms use [`analyze_query`](Self::analyze_query), which leaves out the filters that stack tokens
-/// (SPEC Â§6.3.4).
+/// (SPEC §6.3.4).
 ///
 /// ```
 /// use persia_analysis::{TokenStream, Analyzer, LowercaseFilter, StandardTokenizer};
@@ -43,20 +43,20 @@ impl Analyzer {
 
     /// Replaces the contents of `out` with the index-time tokens of `text`: every filter applies.
     ///
-    /// Token spans are byte offsets of `text`, also when char filters changed it (SPEC Â§6.3.1).
+    /// Token spans are byte offsets of `text`, also when char filters changed it (SPEC §6.3.1).
     pub fn analyze(&self, text: &str, out: &mut TokenStream) {
         self.run(text, out, |_| true);
     }
 
     /// Replaces the contents of `out` with the query-time tokens of `text`: the filters that stack tokens
     /// ([`TokenFilter::stacks_tokens`]) are left out, so a query term matches the stacked index terms as is
-    /// (SPEC Â§6.3.4). The same as [`analyze`](Self::analyze) for an analyzer without such filters.
+    /// (SPEC §6.3.4). The same as [`analyze`](Self::analyze) for an analyzer without such filters.
     pub fn analyze_query(&self, text: &str, out: &mut TokenStream) {
         self.run(text, out, |filter| !filter.stacks_tokens());
     }
 
     /// As [`analyze_query`](Self::analyze_query), and whether a filter that removes stopwords
-    /// ([`TokenFilter::removes_stopwords`]) removed a token: `the` in an `en` field, not `â`, in which the tokenizer
+    /// ([`TokenFilter::removes_stopwords`]) removed a token: `the` in an `en` field, not `—`, in which the tokenizer
     /// finds no word.
     ///
     /// ```
@@ -114,7 +114,7 @@ impl Analyzer {
 }
 
 /// Maps the spans of `tokens`, offsets of the last char filter's output, back to the original value of `len` bytes
-/// through `maps`, the last filter's map first (SPEC Â§6.3.1).
+/// through `maps`, the last filter's map first (SPEC §6.3.1).
 fn map_spans(maps: &[OffsetMap], len: usize, tokens: &mut [Token]) {
     for token in tokens {
         let start = maps.iter().rev().fold(token.start, |o, map| map.start(o));
