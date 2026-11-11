@@ -95,21 +95,23 @@ the v1 performance work early (M15).
 
 In the tree today: the query AST and compiler, the filter DSL, query limits, collection statistics,
 the BM25F scorer (ROADMAP 7.1–7.3), and matching with score top-k over one view, including block-max
-WAND (ROADMAP 7.4.1–7.4.4). Filter evaluation, facets, sort, parallel segment search, and explain are in the tree too (ROADMAP 7.4.5, 7.5, 7.6, 7.7), through `CollectionViews::search`.
-[Typo-tolerant search](/guide/typo-tolerant-search/) is that split. The relaxation milestone below has not been started.
+WAND (ROADMAP 7.4.1–7.4.4). %%MATCHING_CELL%%
+[Faceted search](/guide/faceted-search/) is that request.
+[Typo-tolerant search](/guide/typo-tolerant-search/) is the split between a ranked search and a typo.
+%%RELAXATION_NOW%%
 
 ## M8 — Zero-results avoidance
 
-Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level score offsets, the
+Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level rank order, the
 time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
 dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
-gate on the zero-result rate. The embedded `v0.1` release depends on this milestone (M10 depends on M8).
+gate on the zero-result rate. %%RELAXATION_NOW%% The embedded `v0.1` release depends on this milestone (M10 depends on M8).
 
 ## M9 — Blob store
 
 Depends on M1 and M2. An ADR for upload staging first (SPEC §18.8), then hashing and chunking,
 the local pack file, the remote key layout, ordering a blob write before the document commit, and
-garbage collection that never deletes a blob a live snapshot still references.
+garbage collection that never deletes a blob a live snapshot still references. %%BLOB_NOW%%
 
 ## M10 — Embedded API
 

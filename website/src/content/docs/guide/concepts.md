@@ -30,7 +30,7 @@ Names below are the ones used in code and in the SPEC. The short definitions are
 | **Frame** | One checksummed record in the local container (SPEC §4.4): WAL chunk, segment, manifest, padding, or tombstone sidecar. |
 | **Blob** | An opaque client file, addressed by the SHA-256 of its bytes and stored in chunks (SPEC §9, ADR-0002). |
 | **Shard** | An independent database that owns one hash range of document ids (SPEC §11). |
-| **Relaxation** | A controlled loosening of a query so the default experience is not an empty page (SPEC §7.6). The cascade is not implemented. See [Typo-tolerant search](/guide/typo-tolerant-search/). |
+| **Relaxation** | A controlled loosening of a query so the default experience is not an empty page (SPEC §7.6). %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/). |
 
 A few more words that show up in the roadmap and in contributor docs
 ([`docs/architecture.md`](https://github.com/tomiok/persiaDB/blob/main/docs/architecture.md)):
@@ -43,5 +43,4 @@ A few more words that show up in the roadmap and in contributor docs
 | **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback). |
 
 Internal document ids are segment-local. Deletions never rewrite a segment: they live in a tombstone
-sidecar referenced by the manifest (SPEC §8.3). The exact sidecar bytes are still an ADR (ROADMAP 6.4.2,
-SPEC §18.3).
+sidecar referenced by the manifest (SPEC §8.3). The sidecar format is library code (ROADMAP 6.4.2).

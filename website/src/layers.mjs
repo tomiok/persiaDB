@@ -355,6 +355,13 @@ export function writePathAccents() {
  * @param {Progress} [progress]
  */
 export function queryPathCaption(progress = loadProgress()) {
+	const live = loadProgress();
+	const same = ['M4', 'M7', 'M8'].every((id) => {
+		const ms = milestone(progress, id);
+		const liveMs = milestone(live, id);
+		return ms.state === liveMs.state && ms.done === liveMs.done && ms.leaves === liveMs.leaves;
+	});
+	if (same) return loadStatus().queryPathNow;
 	const m4 = milestone(progress, 'M4');
 	const m7 = milestone(progress, 'M7');
 	const m8 = milestone(progress, 'M8');

@@ -64,7 +64,7 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(view.engineStatus, 'in progress');
 	assert.equal(view.diagram.includes('WAL and query'), true);
 	assert.equal(view.diagram.includes('M5 in progress'), false);
-	assert.equal(view.blobStatus, 'not started');
+	assert.equal(view.blobStatus, 'in progress');
 	assert.equal(view.apiStatus, 'stub · no methods yet');
 	assert.equal(view.serverStatus, 'planned');
 	assert.equal(view.diagram.includes('stub · M4'), false);
@@ -100,7 +100,8 @@ test('figure captions follow the same snapshot', () => {
 	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
 	assert.match(queryPathCaption(parsed), /The query milestone is in progress \(M7/);
-	assert.match(queryPathCaption(parsed), /Zero-results relaxation is not started \(M8\)/);
+	assert.match(queryPathCaption(parsed), /only the exact level builds a query/);
+	assert.equal(queryPathCaption(parsed).includes('not started (M8)'), false);
 	assert.match(storageDiagramCaption(parsed), /Block framing is done \(M1,/);
 	assert.match(storageDiagramCaption(parsed), /S3, GCS, and Azure are not started \(M12\)/);
 	const llms = llmsStatusParagraph();

@@ -27,7 +27,7 @@ head:
             "name": "Does Persia DB do typo-tolerant search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "No. The relaxation cascade has not been started (milestone M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (CollectionViews::search). There is no search call on the database handle."
+              "text": "No. A typo in user text stays a required term. %%RELAXATION_CELL%% The query AST can represent a fuzzy clause, and Query::validate accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (CollectionViews::search). There is no search call on the database handle."
             }
           },
           {
@@ -35,7 +35,7 @@ head:
             "name": "What is query relaxation?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Query relaxation is the cascade in SPEC section 7.6. If a query has fewer hits than min_results (default 1), the engine is specified to walk exact match, synonyms, dropped terms, prefix, fuzzy edit distance, then a fallback, and to stop at the first level with enough hits. The response names the level. That cascade is not implemented. RelaxationConfig stores the collection defaults."
+              "text": "Query relaxation is the cascade in SPEC section 7.6. If a query has fewer hits than min_results (default 1), the engine is specified to walk exact match, synonyms, dropped terms, prefix, fuzzy edit distance, then a fallback, and to stop at the first level with enough hits. The response names the level. %%RELAXATION_NOW%% RelaxationConfig stores the collection defaults."
             }
           },
           {
@@ -43,7 +43,7 @@ head:
             "name": "Are filters relaxed when a search has zero results?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Not by default. SPEC section 7.6 keeps filters strict unless relax.filters is last_resort. The filter DSL parses and validates (term, terms, range, exists, and, or, not). Evaluating a filter against documents is ROADMAP 7.4.5 and has not been started. Filter clauses do not add to the BM25F score."
+              "text": "Not by default. SPEC section 7.6 keeps filters strict unless relax.filters is last_resort. The filter DSL parses and validates (term, terms, range, exists, and, or, not). Evaluating a filter against documents is library code (ROADMAP 7.4.5). Filter clauses do not add to the BM25F score. The last_resort opt-in does not run, because levels after exact build no query."
             }
           },
           {
@@ -51,7 +51,7 @@ head:
             "name": "Is BM25F scoring implemented?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The formula is. TermScorer scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. It does not walk postings or return a ranked hit list. This project does not publish search benchmarks."
+              "text": "The formula is. TermScorer scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. CollectionViews::search walks postings and returns a ranked page. This project does not publish search benchmarks."
             }
           },
           {
@@ -90,7 +90,7 @@ Filters stay as the caller wrote them. A brand or a price range is not dropped t
 
 [Meilisearch](https://www.meilisearch.com/docs) is a released server whose typo tolerance is on by default. Persia DB's planned default is this cascade, in a library, with the response naming the step. The mechanisms differ. That comparison, which is not a benchmark, is [Persia DB vs SQLite FTS5, Tantivy, and Meilisearch](/guide/comparison/).
 
-The cascade has not been started. Milestone M8 (zero-results avoidance) is blocked on the query milestone and has no leaves done. ROADMAP 8.1 through 8.4 — the orchestrator, the levels, the response metadata, and the zero-result regression gate — are unchecked. `RelaxationConfig` in `persia-engine` stores the collection defaults from SPEC §6.2.3 (`enabled`, `min_results`, `levels`, `fallback`, `fill`, `filters`, `budget_ms`). Schema JSON parses them. Nothing walks the levels at search time.
+%%RELAXATION_NOW%% `RelaxationConfig` in `persia-engine` stores the collection defaults from SPEC §6.2.3 (`enabled`, `min_results`, `levels`, `fallback`, `fill`, `filters`, `budget_ms`). Schema JSON parses them. `CollectionViews::search_relaxed` walks the plan. Only the exact level builds a query, so a typo still returns no hits. The zero-result regression gate (ROADMAP 8.4) is not written. Facets, sort, and paging on the exact query are [Faceted search](/guide/faceted-search/).
 
 ## The relaxation cascade
 
@@ -98,18 +98,18 @@ Each level is specified in SPEC §7.6. The names are the ones the response and t
 
 | Level | Name | What it changes | In the tree |
 |---|---|---|---|
-| L0 | `exact` | Every analyzed term is required. | The user-text compiler builds this shape (ROADMAP 7.1). Nothing matches it against postings. |
-| L1 | `synonyms` | A term expands through the collection's synonym groups. Within a group the terms are alternatives. Expansions per matched term are capped (default 50). | `SynonymMap` in `persia-analysis` looks up analyzed tokens (ROADMAP 4.2.5). The search level that would call it (ROADMAP 8.2.1) is not written. |
-| L2 | `drop_terms` | The share of terms that must match steps from 100% to 75%, to 50%, then to one term. Low-IDF terms go first. | Not started (ROADMAP 8.2.2). |
-| L3 | `prefix` | The last term, and other terms of length at least 3, expand through an FST prefix scan. Expansions are capped (default 50). | The AST has a `Prefix` node. No scan runs (ROADMAP 8.2.3). |
-| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more, via a Levenshtein automaton intersected with the term dictionary. Corrected terms are reported. | The AST has a `Fuzzy` node with distance 1 or 2. No automaton runs (ROADMAP 8.2.4). |
-| L5 | `fallback` | Top documents by static rank, or by recency when the collection has no static rank. `none` allows an empty page. | Not started (ROADMAP 8.2.5). |
+| L0 | `exact` | Every analyzed term is required. | The user-text compiler builds this shape (ROADMAP 7.1), and matching runs it. This is the only level whose transform builds a query. |
+| L1 | `synonyms` | A term expands through the collection's synonym groups. Within a group the terms are alternatives. Expansions per matched term are capped (default 50). | `SynonymMap` in `persia-analysis` looks up analyzed tokens (ROADMAP 4.2.5). The cascade level (ROADMAP 8.2.1) does not build a query. |
+| L2 | `drop_terms` | The share of terms that must match steps from 100% to 75%, to 50%, then to one term. Low-IDF terms go first. | The cascade level is not written (ROADMAP 8.2.2). |
+| L3 | `prefix` | The last term, and other terms of length at least 3, expand through an FST prefix scan. Expansions are capped (default 50). | An explicit prefix clause expands over collection terms (ROADMAP 7.4.12). The cascade does not build that step (ROADMAP 8.2.3). |
+| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more, via a Levenshtein automaton intersected with the term dictionary. Corrected terms are reported. | An explicit fuzzy clause expands the same way (ROADMAP 7.4.12). The cascade step, the automaton, and corrected terms are not written (ROADMAP 8.2.4). |
+| L5 | `fallback` | Top documents by static rank, or by recency when the collection has no static rank. `none` allows an empty page. | The cascade level is not written (ROADMAP 8.2.5). |
 
-Other rules from the same section, all still design:
+Other rules from the same section:
 
-- A time budget, `budget_ms`, defaults to 50 ms. Past it, the best results so far come back with `truncated: true`. That flag is distinct from `query_truncated`, which means the compiler cut the user's text to fit the query limits (SPEC §7.1.1).
+- A time budget, `budget_ms`, defaults to 50 ms. It starts after the exact level, so that level is never cut by it. Past it, the best completed steps come back with `truncated: true` (ROADMAP 8.1.4). A request deadline is separate and applies to every step, including exact. [Faceted search](/guide/faceted-search/) is that deadline. `truncated` is distinct from `query_truncated`, which means the compiler cut the user's text to fit the query limits (SPEC §7.1.1).
 - Holding the queries a level builds to those same limits is pending (ROADMAP 8.1.8, SPEC §7.1.3). A level is specified to drop the least important expansions first and to name that cut in `applied`.
-- The response object below is the shape in SPEC §7.6. No function returns it.
+- The response object below is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value with those fields. `corrected` stays empty until the fuzzy level synthesizes a correction (ROADMAP 8.2.4.3), and the example's fuzzy text is not produced today.
 
 ```json
 {
@@ -125,17 +125,17 @@ The same table, and the schema JSON that carries `relaxation`, is the [feature r
 
 ## Compiling a query
 
-Before any relaxation, user text becomes a query (SPEC §7.1, §7.1.1). That compiler is in the tree (ROADMAP 7.1). It does not search.
+Before any relaxation, user text becomes a query (SPEC §7.1, §7.1.1). That compiler is in the tree (ROADMAP 7.1). It compiles text. `CollectionViews::search` is what returns hits.
 
 `QueryCompiler::compile` never fails on user text. Syntax that does not parse is read as plain text. Clauses are split on whitespace and all required (default AND). A clause is an optional `-`, an optional `field:`, and a word or a `"phrase"`. `-` excludes the documents the clause would match. `field:` limits it to that `text` or `keyword` field. A `"` without a closing quote is an ordinary character. Text past `max_text_len` (default 8 KiB) is left out on a clause boundary, so a cut word does not become a required term that matches nothing. With no clause left, the query is `match_all`.
 
 Words are analyzed with each field's query-time analyzer. Fields that agree on token spans become one `combined` clause per span: one query word, several fields, scored as one BM25F term. A phrase on a field with positions stays a phrase. On a field without positions it becomes a boolean that requires each token.
 
-Filters are a separate JSON object (SPEC §7.1.2): `term`, `terms`, `range`, `exists`, `and`, `or`, and `not`. They are written by programs, so a bad filter is an error. User text is not. `Filter::from_json` parses and validates them against the schema. Nothing yet evaluates a filter against a segment (ROADMAP 7.4.5).
+Filters are a separate JSON object (SPEC §7.1.2): `term`, `terms`, `range`, `exists`, `and`, `or`, and `not`. They are written by programs, so a bad filter is an error. User text is not. `Filter::from_json` parses and validates them against the schema. Evaluating a filter against a segment or the memtable is library code (ROADMAP 7.4.5). [Faceted search](/guide/faceted-search/) is that path.
 
 Limits (SPEC §7.1.3), implemented as `QueryLimits`, reject a hand-built query or a filter that exceeds them. Defaults: 1024 leaf terms, 1024 clauses, 1024 expansions summed across prefix and fuzzy clauses, depth 32, and 8 KiB of `q`. The prefix and fuzzy clauses the engine itself would build use a per-clause cap of 50 (`DEFAULT_MAX_EXPANSIONS`).
 
-This is library code in `persia-engine`. It compiles text. It does not open a database and it does not return hits:
+This is library code in `persia-engine`. It compiles text. Opening a database and returning hits are `Database` and `CollectionViews::search`, not this compiler:
 
 ```rust
 use persia_analysis::AnalyzerRegistry;
@@ -181,9 +181,9 @@ idf(t) = ln(1 + (N − df + 0.5) / (df + 0.5))
 
 The same function, given a block's maximum term frequency and minimum norm, is an upper bound used by MaxScore and block-max WAND (SPEC §7.3, ROADMAP 7.3.3 and 7.4.4) to skip documents that cannot reach the top k.
 
-`persia-engine/tests/reference` evaluates the formula on the quantized field lengths. The scorer must match it within `1e-9 · idf·(k1+1)` (SPEC §7.2, ROADMAP 7.3.4). A differential suite over random corpora and full queries is ROADMAP 7.8.1 and is not written. [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency figures and labels them as targets, not promises. This project does not publish search benchmarks.
+`persia-engine/tests/reference` evaluates the formula on the quantized field lengths. The scorer must match it within `1e-9 · idf·(k1+1)` (SPEC §7.2, ROADMAP 7.3.4). A differential suite over random corpora and full queries compares ranked order to that reference (ROADMAP 7.8.1). An nDCG gate in CI is still open (ROADMAP 7.8.4). [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency figures and labels them as targets, not promises. This project does not publish search benchmarks.
 
-What scoring does not do: walk postings, apply tombstones, collect a top-k, facet, or sort. A score for one document you already hold is not a search result.
+`TermScorer` scores one query word. Walking postings, applying tombstones, collecting a top-k, filtering, faceting, and sorting are the search path. %%MATCHING_CELL%%
 
 ## What runs today
 
@@ -220,19 +220,19 @@ let relaxation = &results.relaxation;
 
 ### Does Persia DB do typo-tolerant search today?
 
-No. The relaxation cascade has not been started (M8). A typo in user text stays a required term. The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (CollectionViews::search). There is no search call on the database handle.
+No. A typo in user text stays a required term. %%RELAXATION_CELL%% The query AST can represent a fuzzy clause, and `Query::validate` accepts an edit distance of 1 or 2, and an explicit fuzzy or prefix clause expands over the collection terms as library code (ROADMAP 7.4.12). The compiler does not turn a typo into one. A ranked search over a collection snapshot is library code (`CollectionViews::search`). There is no search call on the database handle.
 
 ### What is query relaxation?
 
-The cascade in SPEC §7.6. If a query has fewer hits than `min_results` (default 1), the engine is specified to walk exact match, synonyms, dropped terms, prefix, fuzzy edit distance, then a fallback, and to stop at the first level with enough hits. The response names the level. That cascade is not implemented. `RelaxationConfig` stores the collection defaults.
+The cascade in SPEC §7.6. If a query has fewer hits than `min_results` (default 1), the engine is specified to walk exact match, synonyms, dropped terms, prefix, fuzzy edit distance, then a fallback, and to stop at the first level with enough hits. The response names the level. %%RELAXATION_NOW%% `RelaxationConfig` stores the collection defaults.
 
 ### Are filters relaxed when a search has zero results?
 
-Not by default. SPEC §7.6 keeps filters strict unless `relax.filters` is `"last_resort"`. The filter DSL parses and validates (`term`, `terms`, `range`, `exists`, `and`, `or`, `not`). Evaluating a filter against documents is ROADMAP 7.4.5 and has not been started. Filter clauses do not add to the BM25F score.
+Not by default. SPEC §7.6 keeps filters strict unless `relax.filters` is `"last_resort"`. The filter DSL parses and validates (`term`, `terms`, `range`, `exists`, `and`, `or`, `not`). Evaluating a filter against documents is library code (ROADMAP 7.4.5). Filter clauses do not add to the BM25F score. The `last_resort` opt-in does not run, because levels after exact build no query.
 
 ### Is BM25F scoring implemented?
 
-The formula is. `TermScorer` scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. It does not walk postings or return a ranked hit list. This project does not publish search benchmarks.
+The formula is. `TermScorer` scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. `CollectionViews::search` walks postings and returns a ranked page. This project does not publish search benchmarks.
 
 ### Can I call Db::open and search for a fuzzy query?
 
@@ -240,6 +240,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. `Da
 
 ## Read next
 
+- [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server.
 - [Comparison](/guide/comparison/) — next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [Feature reference](/guide/features/) — the cascade table, the schema sketch, and the status of each capability.

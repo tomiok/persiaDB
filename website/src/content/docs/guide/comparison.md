@@ -46,8 +46,9 @@ Specified, and searchable only as engine library code today:
   %%MATCHING_CELL%% There is no `search` call on a database handle (M10).
   Analysis libraries are in the tree. The project does not wrap Tantivy, Lucene, or SQLite
   ([ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md)).
+  Filters, facets, sort, and paging are [Faceted search](/guide/faceted-search/).
 - A query with too few hits is relaxed step by step, and the response says what changed (SPEC §7.6).
-  That cascade is not implemented. See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Features](/features/).
+  %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Features](/features/).
 - Segments are immutable. A local commit and an object-storage commit publish the same segment bytes.
   Query nodes are stateless. See [How it works](/architecture/) and [File format and storage](/guide/file-format/).
 - A local database is two files: `<name>.persia` and `<name>.persia.blobs` (SPEC §4, §9).
@@ -66,7 +67,7 @@ There is no search server to deploy. The rest of the application's rows can live
 FTS5 is not an object-storage index, and it is not a Rust API.
 The Persia DB design aims at the same "open a file" step, then specifies a search database
 rather than a SQL engine: no SQL, immutable segments, and a planned path that stores those
-segment bytes in object storage. That search path is not implemented.
+segment bytes in object storage. Object storage for those bytes is not implemented (M12).
 
 ## Tantivy
 
@@ -93,8 +94,9 @@ are part of that server. Data lives in the server's directory, not in a file the
 The shared idea is a search API that tolerates a small mistake in the query, and an implementation in Rust.
 The mechanisms differ. Meilisearch's default is typo tolerance on the terms it searches.
 Persia DB's planned default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
-with the response naming the step (SPEC §7.6). That cascade is not implemented.
+with the response naming the step (SPEC §7.6). %%RELAXATION_CELL%%
 [Typo-tolerant search](/guide/typo-tolerant-search/) is the longer account of that design, and of the compiler and scorer that do exist.
+[Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option
 ([Server, cloud, and Kubernetes](/guide/server/), M11).
@@ -121,6 +123,7 @@ For a search feature in production today, use one of the established tools. Pers
 ## Read next
 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, fuzzy matching, BM25F, and filters, marked designed or implemented.
+- [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.

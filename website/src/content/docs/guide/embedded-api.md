@@ -30,7 +30,7 @@ products.commit()?;
 let results = products.search("runing")?;
 ```
 
-That `search` call is illustrative. Fuzzy matching is one level of the planned relaxation cascade, which is not implemented. %%QUERY_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/).
+That `search` call is illustrative. Fuzzy matching is one level of the relaxation cascade. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Faceted search](/guide/faceted-search/).
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 

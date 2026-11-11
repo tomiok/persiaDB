@@ -66,7 +66,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.engineShort, /tombstone sidecars/);
 	assert.match(status.engineShort, /segment merging/);
 	assert.match(status.engineShort, /filter DSL/);
-	assert.match(status.engineShort, /Relaxation has not been started \(M8\)/);
+	assert.match(status.engineShort, /Relaxation is in progress \(M8, \d+\/\d+\): only the exact level builds a query/);
+	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
+	assert.equal(status.libraryNow.includes('exports no API'), false);
+	assert.match(status.relaxationNow, /Levels after exact do not build a query/);
+	assert.match(status.blobNow, /The pack file, remote blobs, document integration, and garbage collection are not written/);
+	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
 	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
 	assert.match(status.engineNow, /Public modules: .*wal/);
 	assert.equal(status.engineModules.split(', ').includes('query'), true);
@@ -92,10 +97,16 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /a search that matches nothing returns no hits/);
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
-	assert.match(status.tokens['%%MATCHING_CELL%%'], /matching, sorts, pages, and facets/);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /^Not started \(M8\)\. On by default in the design\.$/);
+	assert.match(
+		status.tokens['%%MATCHING_CELL%%'],
+		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
+	);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /only the exact level builds a query, so a typo still returns no hits/);
+	assert.match(status.tokens['%%RELAXATION_NOW%%'], /search_relaxed/);
+	assert.match(status.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
+	assert.match(status.tokens['%%STATE_M8%%'], /^In progress \(M8, \d+\/\d+\)\.$/);
 	assert.match(status.tokens['%%OPEN_CELL%%'], /Database opens a file and CollectionViews::search searches it/);
-	assert.match(status.tokens['%%STATE_M9%%'], /^Not started \(M9; its dependencies are done\)\.$/);
+	assert.match(status.tokens['%%STATE_M9%%'], /^In progress \(M9, \d+\/\d+\)\.$/);
 	assert.match(status.tokens['%%STATE_M1%%'], /^Done \(M1, \d+\/\d+\)\.$/);
 	assert.equal(status.pillarEngine.includes('Scoring and query execution do not.'), false);
 	assert.equal(status.pillarCorrectness.includes('no document write path'), false);
@@ -203,6 +214,7 @@ test('public modules follow lib.rs order', () => {
 		'memtable',
 		'merge',
 		'query',
+		'relax',
 		'schema',
 		'score',
 		'search',
@@ -256,6 +268,25 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 		'A score is not a hit list',
 		'They do not run a search',
 		'Facets are not implemented',
+		'The blob store has not been started',
+		'persia-blob exports no API',
+		'The cascade does not run',
+		'The cascade has not been started',
+		'Evaluating a filter against documents is ROADMAP 7.4.5 and has not been started',
+		'Searching segments, merging hits, and the cascade are not',
+		'Searching segments and the relaxation cascade are not',
+		'No API yet (M9)',
+		'Nothing in the repository computes this',
+		'returned by nothing today',
+		'it has no cancel flag',
+		'Query execution that would search through it is not written',
+		'Not started (M8)',
+		'Module docs only.',
+		'The relaxation milestone below has not been started',
+		'Nothing yet evaluates a filter',
+		'No scan runs',
+		'No automaton runs',
+		'Nothing matches it against postings',
 		'A search that returns hits is still not there',
 		'Not started: filter bitmaps',
 		'and the cascade do not',
@@ -317,11 +348,39 @@ function currentInput(leaves) {
 		hasQuery: true,
 		hasSearch: false,
 		hasCollectionSearch: true,
+		hasRelaxSearch: true,
+		hasDeadline: true,
+		hasExplain: true,
 		analyzers: ['de', 'en'],
 		published: false,
 		version: '0.0.0',
 	};
 }
+
+test('an unstarted relaxation milestone stays unclaimed', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	for (const id of ['8.1.1', '8.1.2', '8.1.3', '8.1.4', '8.1.5', '8.2.1', '8.2.2.1', '8.2.3', '8.2.4.1', '8.2.5']) {
+		live.set(id, false);
+	}
+	const input = currentInput(live);
+	input.hasRelaxSearch = false;
+	const progressCopy = structuredClone(input.progress);
+	const m8 = progressCopy.milestones.find((ms) => ms.id === 'M8');
+	if (!m8) throw new Error('missing M8');
+	m8.state = 'blocked';
+	m8.done = 0;
+	input.progress = progressCopy;
+	const next = buildStatus(input);
+	assert.match(next.tokens['%%RELAXATION_CELL%%'], /^Not started \(M8\)\. On by default in the design\.$/);
+	assert.match(next.engineShort, /Relaxation has not been started \(M8\)/);
+});
+
+test('relaxation marked done without search_relaxed is rejected', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	const input = currentInput(live);
+	input.hasRelaxSearch = false;
+	assert.throws(() => buildStatus(input), /marks relaxation done but the matching code is not in the tree/);
+});
 
 test('implHasMethod looks inside the impl block only', () => {
 	const plain = "impl CollectionViews<'_> {\n    /// { braces in docs }\n    pub fn search(&self) {}\n}\n";

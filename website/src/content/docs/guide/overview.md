@@ -33,6 +33,7 @@ A longer definition of the embedded library — in your process, one file, no se
 Where the design sits next to SQLite FTS5, Tantivy, and Meilisearch is
 [Comparison](/guide/comparison/). That page is not a benchmark. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
 How a typo is supposed to avoid an empty page is [Typo-tolerant search](/guide/typo-tolerant-search/).
+Filters, facets, sort, and paging are [Faceted search](/guide/faceted-search/).
 Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 
 A local database is two files (SPEC §4, §9):
@@ -79,8 +80,9 @@ Five properties the design does not trade away:
 2. **Own engine.** Index format, analysis, BM25F scoring, and query execution live in this repository,
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
-   response says exactly what changed (SPEC §7.6). The cascade is not started (M8). The query compiler
-   and the BM25F scorer are library code. See [Typo-tolerant search](/guide/typo-tolerant-search/) and
+   response says exactly what changed (SPEC §7.6). %%RELAXATION_CELL%% The query compiler
+   and the BM25F scorer are library code. See [Typo-tolerant search](/guide/typo-tolerant-search/),
+   [Faceted search](/guide/faceted-search/), and
    [Feature reference](/guide/features/).
 4. **Cloud-native.** Segments are immutable. A local commit and an object-storage commit publish the
    same segment bytes. Query nodes are stateless. Planned: M12, M13.

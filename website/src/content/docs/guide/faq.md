@@ -39,7 +39,7 @@ head:
             "name": "How is Persia DB different from SQLite FTS5, Tantivy, and Meilisearch?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is a placeholder binary that exits with not implemented (M11).\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle and the relaxation cascade are not. That split is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/."
+              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is a placeholder binary that exits with not implemented (M11).\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% Facets, sort, and paging are explained at https://tomiok.github.io/persiaDB/guide/faceted-search/. The cascade is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/."
             }
           },
           {
@@ -48,6 +48,14 @@ head:
             "acceptedAnswer": {
               "@type": "Answer",
               "text": "The design is an embedded library: in your process, open a file, with no daemon and no config file for the library (SPEC §14). An optional gRPC and HTTP server is planned (milestone M11) and is not implemented. See Server, cloud, and Kubernetes. The longer explanation of that shape is https://tomiok.github.io/persiaDB/guide/embedded-search/.\n\nWhat you can build against today is still a library, not that server. persia-format encodes and decodes on-disk bytes. persia-storage opens a single-file container and implements memory and local-file object stores. The persia command lists and removes temporary and quarantine files next to a container or a local store (persia container files, persia container sweep, persia store files, persia store sweep). It can also inspect and dump one segment file (persia inspect segment, persia dump segment, and --verify on inspect). It does not import documents or search. There is no Db::open."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Do filters, facets, sort, and paging exist?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "%%MATCHING_CELL%% There is no search method on the database handle. The longer page is https://tomiok.github.io/persiaDB/guide/faceted-search/. Typo tolerance is separate. %%RELAXATION_CELL%%"
             }
           },
           {
@@ -63,7 +71,7 @@ head:
             "name": "What file format does Persia DB use?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "A local database is specified as two files (SPEC §4 and §9). The file name.persia is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file name.persia.blobs is a planned content-addressed pack for client bytes such as PDF or images. BlobId and BlobRef exist as types in persia-format. The blob store is milestone M9 and has not been started. persia-blob exports no API.\n\nImplemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in persia-format. Opening, appending, committing, recovering, and compacting a container file are implemented in persia-storage. %%ENGINE_SHORT%% S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on File format and storage."
+              "text": "A local database is specified as two files (SPEC §4 and §9). The file name.persia is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file name.persia.blobs is a planned content-addressed pack for client bytes such as PDF or images. BlobId and BlobRef exist as types in persia-format. %%BLOB_NOW%%\n\nImplemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in persia-format. Opening, appending, committing, recovering, and compacting a container file are implemented in persia-storage. %%ENGINE_SHORT%% S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on File format and storage."
             }
           },
           {
@@ -132,7 +140,11 @@ Tantivy is a Rust full-text search library. Its index is a directory of segment 
 
 Meilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: `persia-server` is a placeholder binary that exits with "not implemented (M11)".
 
-The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle and the relaxation cascade are not. That split is [Typo-tolerant search](/guide/typo-tolerant-search/).
+The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% Facets, sort, and paging are [Faceted search](/guide/faceted-search/). The cascade is [Typo-tolerant search](/guide/typo-tolerant-search/).
+
+## Do filters, facets, sort, and paging exist?
+
+%%MATCHING_CELL%% There is no `search` method on the database handle (M10). The longer page is [Faceted search](/guide/faceted-search/). Typo tolerance is separate: %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Is Persia DB embedded or a server?
 
@@ -148,7 +160,7 @@ Embedded Go and TypeScript bindings are a design only ([ADR-0018](https://github
 
 ## What file format does Persia DB use?
 
-A local database is specified as two files (SPEC §4 and §9). The file `name.persia` is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file `name.persia.blobs` is a planned content-addressed pack for client bytes such as PDF or images. `BlobId` and `BlobRef` exist as types in `persia-format`. The blob store is milestone M9 and has not been started. `persia-blob` exports no API.
+A local database is specified as two files (SPEC §4 and §9). The file `name.persia` is the container: a 12 KiB prefix (a 4 KiB header and two 4 KiB superblock slots) and then append-only frames. Integers are little-endian. Headers and frames use CRC32C. The file `name.persia.blobs` is a planned content-addressed pack for client bytes such as PDF or images. `BlobId` and `BlobRef` exist as types in `persia-format`. %%BLOB_NOW%%
 
 Implemented today: the container header, superblock, frames (including the streaming encoder), checksums, integer codecs, zstd block compression, and block framing, in `persia-format`. Opening, appending, committing, recovering, and compacting a container file are implemented in `persia-storage`. %%ENGINE_SHORT%% S3, GCS, and Azure Blob backends are milestone M12 and are not written. Format version 1.0 is a draft until the v1.0 release (SPEC §15). Details are on [File format and storage](/guide/file-format/).
 

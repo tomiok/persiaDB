@@ -49,7 +49,8 @@ static rank (for example `log1p` of a sales field). Collection statistics (`N`, 
 average field length) are summed across live segments. Scores must match the reference model
 within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
 for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
-(ROADMAP 7.4.1–7.4.4), and so is a collection search (`CollectionViews::search`). A search call on the database handle is not (M10). The longer account of typos, relaxation, and this scorer is
+(ROADMAP 7.4.1–7.4.4), and so is a collection search (`CollectionViews::search`). A search call on the database handle is not (M10). Filters, facets, sort, cursor pages, deadlines, and explain are
+[Faceted search](/guide/faceted-search/). The longer account of typos, relaxation, and this scorer is
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 Over one view — a segment, or the memtable — `SearchPlan` collects the top k by score, then docid,
@@ -94,8 +95,8 @@ The response says what happened. This JSON is the shape in SPEC §7.6. It is ill
 
 Quality of this cascade is a product feature of the same milestone (ROADMAP M8): a synthetic typo
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
-planned as ROADMAP 8.4.4 (`docs/relaxation.md`). What is implemented today, and what is still only
-the design, is [Typo-tolerant search](/guide/typo-tolerant-search/).
+planned as ROADMAP 8.4.4 (`docs/relaxation.md`). %%RELAXATION_NOW%% The longer page is
+[Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ## Schema, documents, and analysis
 
@@ -133,7 +134,7 @@ lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, `pt`, `f
 (stopwords, a Snowball-style stemmer, accent folding). Positions, used for phrases, are opt-in per field
 (SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
 
-Those pipelines live in `persia-analysis` (M4). Nothing here searches.
+Those pipelines live in `persia-analysis` (M4). That crate analyzes text. Ranked search runs in `persia-engine`.
 
 ## Durability
 
@@ -172,6 +173,6 @@ committed (SPEC §9.5). A crash in between leaves an orphan, which is harmless. 
 keeps anything a live manifest still references, and deletes orphans older than a grace period
 (default 24 hours). `verify` must fail if a referenced blob is missing.
 
-How chunks are staged before the hash is known is an open question (SPEC §18.8) and has to be
-decided before the pack-file work (ROADMAP 9.1.0). The `BlobId` and `BlobRef` value types
+%%BLOB_NOW%% The `BlobId` and `BlobRef` value types
 exist in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
+Upload staging is an ADR (ROADMAP 9.1.0). The pack file is not written.

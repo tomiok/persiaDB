@@ -78,16 +78,17 @@ transactions are out of scope (SPEC §1.2). A put is specified to be visible to 
 database before commit (SPEC §8.2). Commit is the durable manifest. A second writer fails immediately
 (SPEC §8.4).
 
-Search is BM25F (SPEC §7.2). A query that does not match is relaxed — synonyms, dropped terms, prefix,
-edit distance, then a fallback — and the response says what changed (SPEC §7.6). That cascade is M8.
+Search is BM25F (SPEC §7.2). A query that does not match is specified to relax — synonyms, dropped terms, prefix,
+edit distance, then a fallback — and the response says what changed (SPEC §7.6). %%RELAXATION_CELL%%
 M10 depends on M8, so the first core release that the bindings can wrap already includes it. The
 bindings do not implement it themselves. Empty hits are still a successful response when relaxation is
-off or the budget runs out.
+off or the budget runs out. Facets, sort, and cursors on the engine are [Faceted search](/guide/faceted-search/).
 
 Go methods take `context.Context` and return `error` values with `errors.Is` sentinels. TypeScript
 methods return promises and throw `PersiaError` with a `code`; `get` of a missing id returns `null`.
-Neither context nor `AbortSignal` can cancel a call that has already entered the engine. The engine is
-synchronous, and it has no cancel flag. The query budget is `relax.budget_ms` on the query.
+The engine search accepts a deadline and a cancellation token (`Execution`). These planned bindings do not
+wire `context.Context` or `AbortSignal` to that token. The cascade budget is `relax.budget_ms` on the query,
+separate from the search deadline. [Faceted search](/guide/faceted-search/) is that split.
 
 Pagination is a page per call (`limit` / `offset`, or a `search_after` cursor, SPEC §7.4). There is no
 iterator that borrows the index across the language boundary.

@@ -92,6 +92,19 @@ const GROUPS = {
 /** Section 6.6. Not part of the write-path claim until every leaf is checked. */
 const OPEN_LEAVES = ['6.6.1', '6.6.2', '6.6.3', '6.6.4', '6.6.5'];
 
+/** Orchestrator, rank order, budget, and response metadata. Not the L1–L5 transforms. */
+const RELAX_FRAMEWORK = ['8.1.1', '8.1.2', '8.1.3', '8.1.4', '8.1.5'];
+
+/** One leaf from each cascade level after exact. Unchecked means that level builds no query. */
+const RELAX_LEVELS = ['8.2.1', '8.2.2.1', '8.2.3', '8.2.4.1', '8.2.5'];
+
+const FILTER_LEAVES = ['7.4.5'];
+const DEADLINE_LEAVES = ['7.6.2', '7.6.3'];
+const EXPLAIN_LEAVES = ['7.7.1', '7.7.2', '7.7.3'];
+
+/** Pack file. Hashing and chunking can exist before this leaf. */
+const PACK_LEAVES = ['9.2.1'];
+
 const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commit'];
 
 /**
@@ -110,6 +123,9 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasQuery
  * @property {boolean} hasSearch A search on the database handle (persia::Db or Database), the SPEC call.
  * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
+ * @property {boolean} hasRelaxSearch CollectionViews::search_relaxed, the cascade orchestrator.
+ * @property {boolean} hasDeadline Execution::deadline, a search deadline.
+ * @property {boolean} hasExplain SearchRequest.explain and the Explanation tree.
  * @property {string[]} analyzers
  * @property {boolean} published
  * @property {string} version
@@ -133,6 +149,9 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {string} pillarCloud
  * @property {boolean} walReady
  * @property {string} writePathLead
+ * @property {string} queryPathNow
+ * @property {string} relaxationNow
+ * @property {string} blobNow
  * @property {Record<string, string>} tokens
  */
 
@@ -302,6 +321,96 @@ function groupState(leaves, ids) {
 
 /**
  * @param {StatusInput} ctx
+ * @param {string[]} ids
+ * @param {boolean} code
+ * @param {string} label
+ * @returns {'done' | 'partial' | 'todo'}
+ */
+function requireDone(ctx, ids, code, label) {
+	const state = groupState(ctx.leaves, ids);
+	if (state === 'done' && !code) {
+		throw new Error(`ROADMAP.md marks ${label} done but the matching code is not in the tree`);
+	}
+	return state;
+}
+
+/**
+ * Plan and orchestrator versus the levels that would actually loosen a query.
+ * Only the exact level builds a query until the L1–L5 leaves are checked.
+ * @param {StatusInput} ctx
+ * @param {Milestone} m8
+ */
+function relaxationFacts(ctx, m8) {
+	const count = `${m8.done}/${m8.leaves}`;
+	const framework = requireDone(ctx, RELAX_FRAMEWORK, ctx.hasRelaxSearch, 'relaxation');
+	const levels = groupState(ctx.leaves, RELAX_LEVELS);
+	const exactOnly = framework === 'done' && levels === 'todo' && ctx.hasRelaxSearch;
+	const levelsDone = m8.state === 'done' && levels === 'done' && ctx.hasRelaxSearch;
+	/** @type {string} */
+	let cell;
+	/** @type {string} */
+	let now;
+	/** @type {string} */
+	let gap;
+	if (levelsDone) {
+		cell = `Done (${m8.id}, ${count}).`;
+		now = `Relaxation is done (${m8.id}, ${count}).`;
+		gap = '';
+	} else if (exactOnly) {
+		cell = `In progress (${m8.id}, ${count}). The orchestrator runs, and only the exact level builds a query, so a typo still returns no hits.`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code. Levels after exact do not build a query, so a search that matches nothing still returns no hits. Synonyms, dropped terms, prefix and fuzzy as cascade steps, the fallback, and corrected terms are not written.`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query.`;
+	} else if (m8.done === 0 && m8.state !== 'in progress' && framework === 'todo') {
+		cell = `Not started (${m8.id}). On by default in the design.`;
+		now = `Relaxation has not been started (${m8.id}). On by default in the design.`;
+		gap = `Relaxation has not been started (${m8.id}).`;
+	} else {
+		cell = `In progress (${m8.id}, ${count}). On by default in the design. Not every cascade level builds a query.`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). Not every cascade level builds a query, so a typo is not a result.`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}).`;
+	}
+	const lead = levelsDone
+		? ''
+		: exactOnly
+			? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
+			: `Relaxation is ${isState(m8)}, so a search that matches nothing returns no hits.`;
+	return {
+		cell: seal(cell),
+		now: seal(now),
+		gap: gap ? seal(gap) : '',
+		lead: lead ? seal(lead) : '',
+	};
+}
+
+/**
+ * @param {StatusInput} ctx
+ * @param {Milestone} m9
+ */
+function blobFacts(ctx, m9) {
+	const count = `${m9.done}/${m9.leaves}`;
+	if (!ctx.blobExports) {
+		const bare = `persia-blob exports no API (${countState(m9)}).`;
+		return { cell: seal(bare), now: seal(bare) };
+	}
+	if (m9.state === 'done') {
+		const bare = `The blob store is done (${m9.id}, ${count}).`;
+		return { cell: seal(bare), now: seal(bare) };
+	}
+	const pack = groupState(ctx.leaves, PACK_LEAVES);
+	if (pack === 'todo') {
+		return {
+			cell: seal(`In progress (${m9.id}, ${count}): hashing, chunking, and manifests. The pack file is not written.`),
+			now: seal(
+				`The blob store is in progress (${m9.id}, ${count}). persia-blob exports content hashing, chunking, and blob manifests. The pack file, remote blobs, document integration, and garbage collection are not written.`,
+			),
+		};
+	}
+	const now = `The blob store is in progress (${m9.id}, ${count}). persia-blob exports an API. Not every blob leaf is done.`;
+	return { cell: seal(`In progress (${m9.id}, ${count}).`), now: seal(now) };
+}
+
+/**
+ * @param {StatusInput} ctx
  * @param {keyof typeof GROUPS} id
  */
 function groupPhrase(ctx, id) {
@@ -363,6 +472,8 @@ export function buildStatus(ctx) {
 	const m10 = milestone(ctx.progress, 'M10');
 	const m12 = milestone(ctx.progress, 'M12');
 	const m13 = milestone(ctx.progress, 'M13');
+	const relax = relaxationFacts(ctx, m8);
+	const blob = blobFacts(ctx, m9);
 
 	const memtable = groupPhrase(ctx, 'memtable');
 	const wal = groupPhrase(ctx, 'wal');
@@ -423,13 +534,7 @@ export function buildStatus(ctx) {
 			querySentence = `The query engine is ${isState(m7)}.`;
 		}
 	}
-	if (m8.state !== 'done') {
-		gaps.push(
-			m8.done === 0 && m8.state !== 'in progress'
-				? `Relaxation has not been started (${m8.id}).`
-				: `Relaxation is ${isState(m8)}.`,
-		);
-	}
+	if (relax.gap) gaps.push(relax.gap);
 	if (searchGap) gaps.push(searchGap);
 
 	const engineShort = seal(
@@ -443,15 +548,13 @@ export function buildStatus(ctx) {
 		m12.state === 'done'
 			? 'S3, GCS, and Azure are implemented.'
 			: `${startedPhrase(m12, 'S3, GCS, and Azure', true)}.`;
-	const blob = ctx.blobExports
-		? `persia-blob exports an API (${countState(m9)}).`
-		: `persia-blob exports no API (${countState(m9)}).`;
+	const blobSentence = blob.now;
 	const persia = ctx.persiaExports
 		? 'The persia crate exports a public API.'
 		: 'The public persia crate exports no Db and no Collection.';
 	const unpublished = ctx.published ? '' : ` The crates are unpublished (publish = false, version ${ctx.version}).`;
 	const libraryNow = seal(
-		`persia-format implements the on-disk codecs (${countState(m1)}). persia-storage implements the Storage trait, memory and local-file backends, and the single-file container (${countState(m2)}). ${cloud} ${engineShort} persia-analysis implements tokenizers and the built-in analyzers ${englishList(ctx.analyzers)} (${countState(m4)}). It does not search. ${blob} ${persia}${unpublished}`,
+		`persia-format implements the on-disk codecs (${countState(m1)}). persia-storage implements the Storage trait, memory and local-file backends, and the single-file container (${countState(m2)}). ${cloud} ${engineShort} persia-analysis implements tokenizers and the built-in analyzers ${englishList(ctx.analyzers)} (${countState(m4)}). It does not search. ${blobSentence} ${persia}${unpublished}`,
 	);
 
 	const replayReady =
@@ -593,13 +696,15 @@ export function buildStatus(ctx) {
 				? 'Local write path, partly in the tree'
 				: 'Planned local write path';
 
-	const relaxationState =
-		m8.state === 'done'
-			? `Done (${m8.id}, ${m8.done}/${m8.leaves}).`
-			: m8.done === 0 && m8.state !== 'in progress'
-				? `Not started (${m8.id}).`
-				: `In progress (${m8.id}, ${m8.done}/${m8.leaves}).`;
-	const relaxationBuilt = m8.state === 'done';
+	const deadlineState = requireDone(ctx, DEADLINE_LEAVES, ctx.hasDeadline, 'deadlines');
+	const explainState = requireDone(ctx, EXPLAIN_LEAVES, ctx.hasExplain, 'explain');
+	const filtersDone = groupState(ctx.leaves, FILTER_LEAVES) === 'done' && ctx.modules.includes('search');
+	/** @type {string[]} */
+	const requestBits = [];
+	if (filtersDone) requestBits.push('filters');
+	requestBits.push('sorts', 'cursor pages', 'facets');
+	if (deadlineState === 'done') requestBits.push('deadlines');
+	if (explainState === 'done') requestBits.push('explain');
 	const featuresLead = seal(
 		`${
 			searches
@@ -609,7 +714,7 @@ export function buildStatus(ctx) {
 				: bm25 && queryModel
 					? 'The query compiler, the filter DSL, and BM25F scoring exist as library code. Nothing runs a search.'
 					: 'Nothing runs a search.'
-		} ${ctx.persiaExports ? '' : 'There is no Db to open yet (M10).'} ${relaxationBuilt ? '' : `Relaxation is ${isState(m8)}, so a search that matches nothing returns no hits.`} The write path is ${isState(m6)}.`,
+		} ${ctx.persiaExports ? '' : 'There is no Db to open yet (M10).'} ${relax.lead} The write path is ${isState(m6)}.`,
 	);
 	const queryCell = seal(
 		collectionSearch
@@ -620,13 +725,14 @@ export function buildStatus(ctx) {
 	);
 	const matchingCell = seal(
 		collectionSearch
-			? `Library code (${countState(m7)}): matching, sorts, pages, and facets.`
+			? `Library code (${countState(m7)}): ${englishList(requestBits)}, through CollectionViews::search.`
 			: matching
-				? `Matching over one view is library code (${countState(m7)}). Sorts and facets are not done.`
+				? `Matching over one view is library code (${countState(m7)}). Sorts, cursor pages, and facets are not done.`
 				: `${capitalize(isState(m7))}.`,
 	);
-	const relaxationCell = seal(
-		relaxationBuilt ? relaxationState : `${relaxationState} On by default in the design.`,
+	const relaxationCell = relax.cell;
+	const queryPathNow = seal(
+		`Text analysis is ${isState(m4)}. The query milestone is ${isState(m7)}. ${matchingCell} ${relax.gap}`,
 	);
 	const openCell = seal(
 		ctx.persiaExports
@@ -647,6 +753,10 @@ export function buildStatus(ctx) {
 		'%%QUERY_CELL%%': queryCell,
 		'%%MATCHING_CELL%%': matchingCell,
 		'%%RELAXATION_CELL%%': relaxationCell,
+		'%%RELAXATION_NOW%%': relax.now,
+		'%%BLOB_CELL%%': blob.cell,
+		'%%BLOB_NOW%%': blob.now,
+		'%%QUERY_PATH_NOW%%': queryPathNow,
 		'%%OPEN_CELL%%': openCell,
 		'%%ENGINE_SHORT%%': engineShort,
 		'%%ENGINE_NOW%%': engineNow,
@@ -681,6 +791,9 @@ export function buildStatus(ctx) {
 		pillarCloud,
 		walReady,
 		writePathLead,
+		queryPathNow,
+		relaxationNow: relax.now,
+		blobNow: blob.now,
 		tokens,
 	};
 }
@@ -692,6 +805,10 @@ function readInput() {
 	const engineLib = read('crates/persia-engine/src/lib.rs');
 	const dbRs = read('crates/persia-engine/src/db.rs');
 	const snapshotRs = read('crates/persia-engine/src/db/snapshot.rs');
+	const relaxedRs = read('crates/persia-engine/src/db/relaxed.rs');
+	const execRs = read('crates/persia-engine/src/db/exec.rs');
+	const searchRs = read('crates/persia-engine/src/db/search.rs');
+	const explainRs = read('crates/persia-engine/src/search/explain.rs');
 	const persiaLib = read('crates/persia/src/lib.rs');
 	const blobLib = read('crates/persia-blob/src/lib.rs');
 	const modules = publicModules(engineLib).filter((name) => name.length > 0);
@@ -716,6 +833,9 @@ function readInput() {
 		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>
 			implHasMethod(read(rel), 'CollectionViews', 'search'),
 		),
+		hasRelaxSearch: implHasMethod(relaxedRs, 'CollectionViews', 'search_relaxed'),
+		hasDeadline: implHasMethod(execRs, 'Execution', 'deadline'),
+		hasExplain: /pub explain: bool/.test(searchRs) && /pub enum Explanation\b/.test(explainRs),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),
 		published: pkg.published,
 		version: pkg.version,

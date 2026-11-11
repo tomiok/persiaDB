@@ -105,11 +105,11 @@ Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetim
 
 `put` is an upsert by id. `delete` writes a tombstone. `commit` publishes a manifest. A `put` is specified to be visible to a later search on that database before commit (read-your-writes, SPEC §8.2–§8.4). One writer; a second writer fails immediately. Handles are specified as `Send` and `Sync`.
 
-Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2).
+Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% The longer page for facets, sort, cursors, deadlines, and explain is [Faceted search](/guide/faceted-search/).
 
 ### Relaxation
 
-%%RELAXATION_CELL%% The collection search is library code; this cascade is not, so a search that matches nothing returns no hits. If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6). The longer page is [Typo-tolerant search](/guide/typo-tolerant-search/).
+%%RELAXATION_NOW%% If a query has fewer than `min_results` hits (default 1), the engine is specified to walk a cascade and stop at the first level that has enough hits (SPEC §7.6). The longer page is [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 | Level | Name | What changes |
 |---|---|---|
@@ -122,7 +122,7 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 
 Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
 
-The response is specified to carry what happened. This object is from SPEC §7.6. No function returns it today:
+The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The fuzzy `corrected` map in the example is not produced, because levels after exact build no query:
 
 ```json
 {
@@ -152,7 +152,7 @@ You don't, yet, through `persia::Db::open`. Those calls are the illustrative blo
 
 ### How do I read which relaxation was applied?
 
-On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. Nothing in the repository computes this. See [Typo-tolerant search](/guide/typo-tolerant-search/).
+On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. %%RELAXATION_NOW%% See [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 ### Is the on-disk format stable?
 
@@ -164,7 +164,7 @@ Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Ku
 
 ### Why is a query supposed to avoid empty results?
 
-That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% The collection search it would wrap is library code. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two.
+That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% The collection search it wraps is library code. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two. [Faceted search](/guide/faceted-search/) is the request that search runs.
 
 ### Where is the source of truth?
 
