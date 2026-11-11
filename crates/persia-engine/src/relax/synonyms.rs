@@ -6,7 +6,7 @@
 //! to scan, and builds none.
 
 use super::{LevelInput, LevelTransform, Step};
-use crate::query::{BoolQuery, Compiled, Query};
+use crate::query::{BoolQuery, Compiled, Filter, Query};
 use crate::segment::ReadError;
 
 /// A required clause of L1's step: L0's own, or a run of clauses that one of its alternatives may stand for.
@@ -19,11 +19,12 @@ enum Unit {
     },
 }
 
-/// L1's step before it is held to the limits: its required clauses, and L0's excluded ones beside them.
+/// L1's step before it is held to the limits: its required clauses, and L0's excluded clauses and filters beside them.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Expansion {
     units: Vec<Unit>,
     must_not: Vec<Query>,
+    filter: Vec<Filter>,
 }
 
 impl Expansion {
@@ -33,13 +34,11 @@ impl Expansion {
         if compiled.synonyms.is_empty() {
             return None;
         }
-        let must_not: Vec<Query> = match &compiled.query {
+        let (must_not, filter): (Vec<Query>, Vec<Filter>) = match &compiled.query {
             Query::Bool(root) => {
-                // The compiler builds no `should` or filter at the root: a root changed since is not its clauses'.
-                if !root.should.is_empty()
-                    || !root.filter.is_empty()
-                    || root.minimum_should_match != 0
-                {
+                // The compiler builds no `should` at the root: a root changed since is not its clauses'. A filter
+                // joined to it (SPEC §7.1: a request's `filter` is the root's) is kept, as L2 keeps it.
+                if !root.should.is_empty() || root.minimum_should_match != 0 {
                     return None;
                 }
                 let mut must_not = Vec::new();
@@ -48,9 +47,9 @@ impl Expansion {
                         must_not.extend_from_slice(compiled.parts(index)?);
                     }
                 }
-                must_not
+                (must_not, root.filter.clone())
             }
-            _ => Vec::new(),
+            _ => (Vec::new(), Vec::new()),
         };
         let mut synonyms = compiled.synonyms.iter().peekable();
         let mut units = Vec::new();
@@ -91,7 +90,11 @@ impl Expansion {
         if synonyms.next().is_some() {
             return None;
         }
-        Some(Self { units, must_not })
+        Some(Self {
+            units,
+            must_not,
+            filter,
+        })
     }
 
     /// How many alternatives each run has, in text order: what [`Self::query`]'s `keep` counts.
@@ -106,7 +109,7 @@ impl Expansion {
     }
 
     /// The step's query with run `i` or one of its first `keep[i]` alternatives (all of them past the end of `keep`):
-    /// a `bool` requiring each unit, with L0's excluded clauses, or the one unit alone.
+    /// a `bool` requiring each unit, with L0's excluded clauses and filters, or the one unit alone.
     pub(crate) fn query(&self, keep: &[usize]) -> Query {
         let mut run = 0;
         let mut must: Vec<Query> = self
@@ -130,12 +133,13 @@ impl Expansion {
                 }
             })
             .collect();
-        if must.len() == 1 && self.must_not.is_empty() {
+        if must.len() == 1 && self.must_not.is_empty() && self.filter.is_empty() {
             return must.pop().unwrap_or(Query::MatchAll);
         }
         Query::Bool(BoolQuery {
             must,
             must_not: self.must_not.clone(),
+            filter: self.filter.clone(),
             ..BoolQuery::default()
         })
     }

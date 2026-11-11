@@ -36,7 +36,7 @@ mod token;
 mod token_stream;
 mod whitespace;
 
-pub use analyzer::{Analyzer, AnalyzerBuilder};
+pub use analyzer::{Analyzer, AnalyzerBuilder, QueryAnalysis};
 pub use apostrophe::ApostropheFilter;
 pub use char_filter::{CharFilter, CharFilterOutput};
 pub use elision::{ElisionFilter, FRENCH_ELISIONS, ITALIAN_ELISIONS};

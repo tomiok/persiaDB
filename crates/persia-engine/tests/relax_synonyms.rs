@@ -268,12 +268,40 @@ fn alternatives_are_held_to_max_terms_in_all_the_longest_lists_cut_first() {
             .collect::<Vec<_>>()
     };
     assert_eq!(counts(1024), [10, 3]);
-    // 8: both lists at 3 is 6, and the 2 left go to the list that was cut.
-    assert_eq!(counts(8), [5, 3]);
-    assert_eq!(counts(5), [3, 2]);
-    // At the floor, one each. Below it L0 itself keeps fewer clauses (`x` alone), each with its run.
-    assert_eq!(counts(2), [1, 1]);
-    assert_eq!(counts(1), [1]);
+    // L0 is 2 terms, which L1's step holds twice: at 12, 8 are left. Both lists at 3 is 6, and the 2 left go to the
+    // list that was cut.
+    assert_eq!(counts(12), [5, 3]);
+    assert_eq!(counts(9), [3, 2]);
+    // At the floor, one each; below it, none: the step could never fit, so nothing is compiled.
+    assert_eq!(counts(6), [1, 1]);
+    assert_eq!(counts(5), Vec::<usize>::new());
+}
+
+#[test]
+fn hostile_text_compiles_no_more_alternatives_than_the_step_could_hold() {
+    // 2 000 words that each match a term of 50 alternatives: within the default limits L0 keeps 1023 of them, so L1's
+    // step could hold none, and the compilation holds none.
+    let mut group: Vec<String> = vec!["a".into()];
+    group.extend((0..50).map(|i| format!("b{i} c{i}")));
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .synonyms(vec![group])
+        .build()
+        .unwrap();
+    let text = "a ".repeat(2000);
+    let compiled = compile_in(&schema, &text, &QueryLimits::default());
+    assert!(compiled.truncated);
+    assert_eq!(compiled.synonyms, []);
+    // With room for some: 100 words leave 1024 − 200 terms, over 100 runs, 8 each.
+    let compiled = compile_in(&schema, &"a ".repeat(100), &QueryLimits::default());
+    let counts: Vec<usize> = compiled
+        .synonyms
+        .iter()
+        .map(|s| s.alternatives.len())
+        .collect();
+    assert_eq!(counts.len(), 100);
+    assert_eq!(counts.iter().sum::<usize>(), 824);
+    assert!(counts.iter().all(|&n| n == 8 || n == 9), "{counts:?}");
 }
 
 #[test]
@@ -450,4 +478,161 @@ fn over_the_limits_l1_keeps_each_runs_first_alternatives_or_is_skipped() {
     let mut ids: Vec<&str> = by_step(&out).into_iter().map(|(_, id)| id).collect();
     ids.sort_unstable();
     assert_eq!(ids, ["d", "h"]);
+}
+
+#[test]
+fn alternatives_keep_their_place_in_the_group_they_expand_from() {
+    // `zz` was first given in group 0, but `tv` expands from group 1, where `telly` comes first.
+    let schema = schema(&[&["q", "zz"], &["tv", "telly", "zz"]]);
+    let order = |max_terms| {
+        let limits = QueryLimits {
+            max_terms,
+            ..QueryLimits::default()
+        };
+        compile_in(&schema, "tv", &limits).synonyms[0]
+            .alternatives
+            .iter()
+            .map(|a| format!("{a:?}"))
+            .collect::<Vec<_>>()
+    };
+    let both = order(1024);
+    assert_eq!(both.len(), 2);
+    assert!(
+        both[0].contains("telly") && both[1].contains("zz"),
+        "{both:?}"
+    );
+    // L0's 2 terms twice, and room for one: `telly` is kept.
+    let one = order(5);
+    assert_eq!(one.len(), 1);
+    assert!(one[0].contains("telly"), "{one:?}");
+}
+
+#[test]
+fn a_term_ending_inside_a_word_does_not_hide_a_shorter_one() {
+    // `tv e` would end inside `e-mail`; `tv` alone ends with a word, and matches.
+    let schema = schema(&[&["tv", "telly"], &["tv e", "x"]]);
+    let limits = QueryLimits::default();
+    assert_eq!(
+        runs(&compile_in(&schema, "tv e-mail", &limits)),
+        [("tv".into(), 1)]
+    );
+    // Nor one starting inside a word: `mail tv` starts in `e-mail`.
+    let schema = self::schema(&[&["tv", "telly"], &["mail tv", "x"]]);
+    assert_eq!(
+        runs(&compile_in(&schema, "e-mail tv", &limits)),
+        [("tv".into(), 1)]
+    );
+}
+
+/// `body` (en) alone, with `synonyms`.
+fn english(synonyms: &[&[&str]]) -> CollectionSchema {
+    SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .synonyms(groups(synonyms))
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn every_removed_token_keeps_its_position() {
+    let limits = QueryLimits::default();
+    // `the` at the end of `tv-the` is removed, and still takes a position: `tv show` has no gap there.
+    let schema = english(&[&["tv show", "series"]]);
+    assert_eq!(runs(&compile_in(&schema, "tv-the show", &limits)), []);
+    assert_eq!(runs(&compile_in(&schema, "tv the show", &limits)), []);
+    assert_eq!(
+        runs(&compile_in(&schema, "tv show", &limits)),
+        [("tv show".into(), 1)]
+    );
+    // A dropped clause of two stopwords is a gap of two.
+    let schema = english(&[&["statue of-the liberty", "monument"]]);
+    for text in ["statue of-the liberty", "statue of the liberty"] {
+        assert_eq!(
+            runs(&compile_in(&schema, text, &limits)).len(),
+            1,
+            "{text:?}"
+        );
+    }
+    assert_eq!(runs(&compile_in(&schema, "statue of liberty", &limits)), []);
+}
+
+#[test]
+fn fields_that_match_the_same_clauses_share_alternatives_and_an_overlap_is_dropped() {
+    let limits = QueryLimits::default();
+    // `body` (en) stems `shoes` to `shoe`, so it expands `shoe` from both groups; `title` (standard) from the first
+    // only. The run gets both, in group order.
+    let schema = schema(&[&["shoe", "boot"], &["shoes", "sneaker"]]);
+    let compiled = compile_in(&schema, "shoe", &limits);
+    let alternatives: Vec<String> = compiled.synonyms[0]
+        .alternatives
+        .iter()
+        .map(|a| format!("{a:?}"))
+        .collect();
+    assert_eq!(alternatives.len(), 2);
+    assert!(
+        alternatives[0].contains("boot") && alternatives[1].contains("sneaker"),
+        "{alternatives:?}"
+    );
+    // `body` (en, the first default field) matches `runs shoes` over `running shoes` (both stem to `run shoe`);
+    // `title` (standard) matches `shoes store` over the last two words, which overlaps: it is dropped.
+    let schema = self::schema(&[&["runs shoes", "sneakers"], &["shoes store", "shop"]]);
+    assert_eq!(
+        runs(&compile_in(&schema, "running shoes store", &limits)),
+        [("running shoes".into(), 1)]
+    );
+}
+
+#[test]
+fn pages_after_a_cursor_continue_l1_whether_it_was_cut_or_not() {
+    let db = database();
+    // L0 finds nothing; L1 is 10 terms of its own beside L0's 4. Cut to 12, `sneakers` keeps `running shoes`, which
+    // `c` holds beside `sale`.
+    let compiled = compile("sale sneakers");
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    for (max_terms, applied) in [(1024, "synonyms"), (12, "synonyms:cut")] {
+        let relax = plan(10).with_limits(QueryLimits {
+            max_terms,
+            ..QueryLimits::default()
+        });
+        let all = SearchRequest {
+            limit: 100,
+            ..SearchRequest::default()
+        };
+        let whole = views
+            .search_relaxed(&compiled, &all, &relax, &exec())
+            .unwrap();
+        assert_eq!(whole.relaxation.applied[0], applied);
+        let mut paged = Vec::new();
+        let mut after = None;
+        loop {
+            let page = SearchRequest {
+                limit: 1,
+                search_after: after.take(),
+                ..SearchRequest::default()
+            };
+            let out = views
+                .search_relaxed(&compiled, &page, &relax, &exec())
+                .unwrap();
+            assert_eq!(out.relaxation.applied, whole.relaxation.applied);
+            let Some(hit) = out.hits.last() else { break };
+            paged.push((hit.step, hit.hit.document.id().to_owned()));
+            after = Some(hit.cursor());
+        }
+        let whole: Vec<(usize, String)> = whole
+            .hits
+            .iter()
+            .map(|h| (h.step, h.hit.document.id().to_owned()))
+            .collect();
+        assert_ne!(whole.len(), 0);
+        assert_eq!(paged, whole, "max_terms {max_terms}");
+    }
 }

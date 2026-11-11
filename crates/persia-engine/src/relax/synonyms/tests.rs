@@ -208,15 +208,66 @@ mod properties {
                 step.query.validate(&schema, &QueryLimits::UNLIMITED).unwrap();
                 prop_assert_eq!(step.effective, Some(compiled.effective()));
                 let expansion = Expansion::of(&compiled).unwrap();
-                // Each run's own query leads its `should`, the rest of L0's required parts are as they were.
+                // L0's required parts, in text order, each with its clause: the units consume them all, in order, a
+                // run as the one part or all of its clauses' parts required.
+                let mut required = Vec::new();
+                for (index, clause) in compiled.clauses.iter().enumerate() {
+                    if !clause.negated {
+                        for part in compiled.parts(index).unwrap() {
+                            required.push((index, part.clone()));
+                        }
+                    }
+                }
+                let mut required = required.into_iter().peekable();
                 let mut run = compiled.synonyms.iter();
                 for unit in &expansion.units {
-                    if let Unit::Expanded { alternatives, .. } = unit {
-                        prop_assert_eq!(Some(alternatives), run.next().map(|r| &r.alternatives));
+                    match unit {
+                        Unit::Plain(q) => {
+                            prop_assert_eq!(Some(q.clone()), required.next().map(|(_, p)| p));
+                        }
+                        Unit::Expanded { original, alternatives } => {
+                            let run = run.next().unwrap();
+                            prop_assert_eq!(alternatives, &run.alternatives);
+                            let mut parts = Vec::new();
+                            while let Some((_, part)) = required.next_if(|(c, _)| run.clauses.contains(c)) {
+                                parts.push(part);
+                            }
+                            let expected = match parts.len() {
+                                1 => parts.pop().unwrap(),
+                                _ => Query::Bool(BoolQuery { must: parts, ..BoolQuery::default() }),
+                            };
+                            prop_assert_eq!(original, &expected);
+                        }
                     }
                 }
                 prop_assert!(run.next().is_none());
+                prop_assert!(required.next().is_none());
             }
         }
     }
+}
+
+#[test]
+fn a_filter_joined_to_the_root_stays_on_the_step() {
+    // SPEC §7.1: a request's `filter` is the compiled query's root `bool`'s; L1 keeps it, as L2 does.
+    let mut compiled = compile("cheap tv");
+    let filter = Filter::Term {
+        field: crate::schema::FieldId::new(0),
+        value: crate::query::FilterValue::Bool(true),
+    };
+    let Query::Bool(root) = &mut compiled.query else {
+        panic!()
+    };
+    root.filter.push(filter.clone());
+    let [step] = steps(&compiled).try_into().unwrap();
+    let Query::Bool(b) = &step.query else {
+        panic!()
+    };
+    assert_eq!(b.filter, std::slice::from_ref(&filter));
+    // Cut or not, every query of the step keeps it.
+    let expansion = step.alternatives.unwrap();
+    let Query::Bool(cut) = expansion.query(&[0]) else {
+        panic!()
+    };
+    assert_eq!(cut.filter, [filter]);
 }

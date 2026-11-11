@@ -356,6 +356,38 @@ mod tests {
         // Exclusions over the limits leave room for nothing.
         let full = StepLimits::new(&schema, limits(2, 0), &terms(body, 3)).unwrap();
         assert_eq!(full.cut_alternatives(&[1], |keep| runs(body, keep)), None);
+        // Alternatives of different sizes: run 0's second is 5 terms, the others 1. At 8 terms one each fits (4), not
+        // two each (10); run 0's second does not fit then, run 1's does. The ones kept are each run's first.
+        let sized = |keep: &[usize]| {
+            let sizes = [[1, 5], [1, 1]];
+            Query::Bool(BoolQuery {
+                must: (0..2)
+                    .map(|run| {
+                        let mut should = vec![Query::Term(TermQuery {
+                            field: body,
+                            term: format!("run{run}"),
+                        })];
+                        for (alt, &size) in sizes[run].iter().enumerate().take(keep[run]) {
+                            should.push(any((0..size)
+                                .map(|t| {
+                                    Query::Term(TermQuery {
+                                        field: body,
+                                        term: format!("r{run}a{alt}t{t}"),
+                                    })
+                                })
+                                .collect()));
+                        }
+                        any(should)
+                    })
+                    .collect(),
+                ..BoolQuery::default()
+            })
+        };
+        let fitting = StepLimits::new(&schema, limits(8, 0), &Query::MatchAll).unwrap();
+        assert_eq!(
+            fitting.cut_alternatives(&[2, 2], sized),
+            Some(sized(&[1, 2]))
+        );
         // Also when what overflowed does not add up (depth): L0 nests 4 deep under the root, the step 3.
         let deep = QueryLimits {
             max_depth: 4,

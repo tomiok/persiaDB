@@ -201,7 +201,9 @@ pub(crate) struct Step {
     /// a level then has none to render.
     pub(crate) effective: Option<String>,
     /// The synonym alternatives the step may drop to fit the limits (SPEC §7.1.3, ROADMAP 8.1.13): L1 builds its
-    /// query from them, and the cascade rebuilds it with fewer when it does not fit. `None` for any other level.
+    /// query from them, and the cascade rebuilds it with fewer when it does not fit. `None` for any other level. The
+    /// rebuilt query keeps its `prefix` and `fuzzy` caps: a step with both is cut in one or the other, not both (no
+    /// level builds such a step: compiled text has no `prefix` or `fuzzy`).
     pub(crate) alternatives: Option<Expansion>,
 }
 

@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 
-use persia_analysis::{Analyzer, AnalyzerRegistry, SynonymMap, TokenStream};
+use persia_analysis::{Analyzer, AnalyzerRegistry, QueryAnalysis, SynonymMap, TokenStream};
 
 use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaHash};
 use crate::segment::MAX_TERM_LEN;
@@ -272,7 +272,9 @@ struct Clause<'t> {
 }
 
 impl QueryCompiler {
-    /// A compiler for `schema`, analyzing `text` fields with the analyzers `registry` has for them.
+    /// A compiler for `schema`, analyzing `text` fields with the analyzers `registry` has for them. Build one per
+    /// schema and reuse it: the first compilation that searches a field by default analyzes the collection's synonym
+    /// groups for it (SPEC §6.3.2), up to 1 MiB of terms, and later ones reuse them.
     ///
     /// # Errors
     /// [`QueryError::UnknownAnalyzer`] if `registry` lacks the analyzer (name and version) of a `text` field.
@@ -430,7 +432,7 @@ impl QueryCompiler {
             scan.clause(eligible, clauses.len().saturating_sub(1), captured);
             list.extend(part);
         }
-        let synonyms = scan.finish(&query, &clauses, limits);
+        let synonyms = scan.finish(&query, &clauses, limits, usage.terms);
         finish(query, truncated, text, limits, clauses, synonyms)
     }
 
@@ -467,17 +469,17 @@ impl QueryCompiler {
         let mut stopword = false;
         let mut per_field: Vec<FieldTokens> = Vec::with_capacity(fields.fields().len());
         for &(id, weight) in fields.fields() {
-            let Some((tokens, removed)) = self.analyzed(id, clause.text, tokens) else {
+            let Some((tokens, analysis)) = self.analyzed(id, clause.text, tokens) else {
                 if capture {
-                    captured.push(&[], false);
+                    captured.push(&[], 0);
                 }
                 continue;
             };
             if capture {
-                captured.push(&tokens, removed);
+                captured.push(&tokens, analysis.positions);
             }
             if tokens.is_empty() {
-                stopword |= removed;
+                stopword |= analysis.stopword;
                 continue;
             }
             per_field.push(FieldTokens { id, weight, tokens });
@@ -542,15 +544,15 @@ impl QueryCompiler {
         })
     }
 
-    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and whether the
-    /// field's stopword filter removed one; `None` if it is not a `text` field.
+    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and what else
+    /// the analysis reports (a stopword removed, the positions taken); `None` if it is not a `text` field.
     fn analyzed(
         &self,
         id: FieldId,
         text: &str,
         tokens: &mut TokenStream,
-    ) -> Option<(Vec<QueryToken>, bool)> {
-        let stopword = self.analyzer(id)?.analyze_query_stopwords(text, tokens);
+    ) -> Option<(Vec<QueryToken>, QueryAnalysis)> {
+        let analysis = self.analyzer(id)?.analyze_query_counted(text, tokens);
         Some((
             tokens
                 .iter()
@@ -561,7 +563,7 @@ impl QueryCompiler {
                     term: t.text.clone(),
                 })
                 .collect(),
-            stopword,
+            analysis,
         ))
     }
 
