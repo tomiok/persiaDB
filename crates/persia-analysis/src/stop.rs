@@ -151,4 +151,8 @@ impl TokenFilter for StopwordFilter {
     fn apply(&self, tokens: &mut TokenStream) {
         tokens.retain(|token| !token.text.is_empty() && !self.is_stopword(&token.text));
     }
+
+    fn removes_stopwords(&self) -> bool {
+        true
+    }
 }

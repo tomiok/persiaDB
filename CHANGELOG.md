@@ -13,11 +13,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   find fewer than `min_results` hits relaxes to `minimum_should_match` steps: 75% of the terms, 50%, then 1
   (`max(1, ⌊p · n / 100⌋)`; a count that repeats the previous one, L0's first, is not built). Any of that many terms
   match, and excluded clauses and filters stay as they are. `Relaxation::applied` lists `drop_terms:75%`,
-  `drop_terms:50%` and `drop_terms:1`, with `:cut` or `:skipped` when a step is held to the limits. `effective` is the
-  text of the terms the step keeps, most important first: a stopword before any other term, then a lower IDF, then a
-  later position. A query of one term skips the level. Benchmarks `search_relaxed/l2` and `l2_every_step`.
-- `persia-engine`: `CompiledClause::stopword` is set when a default field whose analyzer has a language (`en`, `es`,
-  `pt`, `fr`, `de`, `it`) analyzes the clause to no token (SPEC §7.1.1).
+  `drop_terms:50%` and `drop_terms:1`, with `:cut` or `:skipped` when a step is held to the limits. Which terms a step
+  reports keeping is decided by importance, least important dropped first: a stopword, then a lower IDF, then a later
+  position. `effective` renders the kept terms and every excluded clause in the order the user wrote them. A query of
+  one term skips the level. Benchmarks `search_relaxed/l2` and `l2_every_step`.
+- `persia-engine`: `CompiledClause::stopword` is set when a default field analyzes the clause to no token because its
+  analyzer's stopword filter removed one (SPEC §7.1.1), as the `en`, `es`, `pt`, `fr`, `de` and `it` analyzers do.
+- `persia-analysis`: `Analyzer::analyze_query_stopwords` analyzes as `analyze_query` and reports whether a stopword
+  filter removed a token. `TokenFilter::removes_stopwords` (default `false`, `true` for `StopwordFilter`) marks such
+  a filter.
 
 ### Changed
 - `persia-engine`: `CollectionViews::search_relaxed` can fail with `RelaxedSearchError::Plan` when a level cannot read

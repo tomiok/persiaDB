@@ -1246,11 +1246,11 @@ around it; spans are on character boundaries and do not overlap. Each clause's p
 `must` (or `must_not` for `-`); a single required part is the query itself. A clause left out (no token, past a
 limit) has none. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
-that a default field whose analyzer has a language (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) analyzes to no
-token, as that language's stopword filter removes it after normalizing it (`The`, `the,`, `ｔｈｅ`). Another default
-field may keep it, so it stays a clause: `the` over a `standard` title and an `en` body is a stopword. A `field:`
-clause is never one (its field would leave nothing to compile), nor is any clause of a query whose default fields have
-no language.
+that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
+(`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
+`ｔｈｅ`). Text in which a field's tokenizer finds no word (`—`) is not a stopword, whatever the field. Another default
+field may keep a stopword, so it stays a clause: `the` over a `standard` title and an `en` body is a stopword. A
+`field:` clause is never one (its field would leave nothing to compile).
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1536,11 +1536,11 @@ skipped and not listed in `applied`. Every level builds its steps from L0's quer
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
 words; ROADMAP 8.1.10). So far L0 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
 
-L2 `drop_terms` (ROADMAP 8.2.2). Its *terms* are the query's required clauses: of a query compiled from `q`, each
+L2 `drop_terms` (ROADMAP 8.2.2, ADR-0038). Its *terms* are the query's required clauses: of a query compiled from `q`, each
 clause of §7.1.1 that is not excluded (`-`), whatever its parts (a phrase, a word split in two, a word over several
 fields is one term); of a programmatic query, the `must` clauses of a root `bool` that has no `should` clauses and a
 `minimum_should_match` of 0. Any other query, and one of fewer than 2 terms, skips the level (ROADMAP 8.2.2.3): no
-count is below L0's, and the one term dropped would match every document. The step of count `k` is a `bool` whose
+count is below L0's, and dropping the one term would match every document the excluded clauses and filters leave. The step of count `k` is a `bool` whose
 `should` clauses are the terms (a clause of several parts as a `bool` requiring them), with `minimum_should_match` `k`,
 and L0's root `must_not` and `filter` clauses, so excluded clauses stay excluded and filters are not relaxed. Its
 `applied` is `drop_terms:75%`, `drop_terms:50%` or `drop_terms:1`, for the rung that first gave its count (2 terms:
@@ -1553,7 +1553,8 @@ the sum of its terms', a `bool`'s the sum of its `must` clauses' and the largest
 documents match: it orders the `should` clauses, most important first, and decides the step's `effective`, the text
 of its `k` most important terms and every excluded clause, in text order, one space apart. That text names the terms
 the step keeps; it is not a query that compiles to the step's (which matches any `k` of them). A programmatic
-query's step has no `effective`. Building the steps reads each term's `df` once; the request's deadline and
+query's step has no `effective`. Building the steps reads the `df`s each term's IDF needs (one per field of a `combined`,
+one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query

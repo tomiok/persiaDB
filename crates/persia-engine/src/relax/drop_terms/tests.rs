@@ -43,6 +43,8 @@ fn stats() -> Stats {
         ((0, "shoes"), 10),
         ((1, "shoes"), 30),
         ((0, "nike"), 2),
+        // Only a filter holds it: an IDF that counted filters would change.
+        ((2, "acme"), 1),
     ]))
 }
 
@@ -136,6 +138,10 @@ fn query_idf_is_the_idf_bm25f_scores_with() {
         must: vec![term(0, "red"), term(0, "shoes")],
         should: vec![term(0, "red"), term(0, "nike")],
         must_not: vec![term(0, "absent")],
+        filter: vec![Filter::Term {
+            field: FieldId::new(2),
+            value: crate::query::FilterValue::Keyword("acme".into()),
+        }],
         ..BoolQuery::default()
     });
     assert_eq!(

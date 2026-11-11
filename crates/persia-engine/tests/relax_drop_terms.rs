@@ -88,15 +88,22 @@ fn plan(min_results: u32) -> RelaxPlan {
     RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap()
 }
 
-/// Each hit's id and step, by step then id (a step's order is its scores').
+/// Each hit's step and id, in the page's order, which is checked first: by step, then by score descending within a
+/// step (SPEC §7.6).
 fn by_step(out: &RelaxedResults) -> Vec<(usize, &str)> {
-    let mut hits: Vec<(usize, &str)> = out
-        .hits
+    for w in out.hits.windows(2) {
+        let (a, b) = (&w[0], &w[1]);
+        assert!(
+            a.step < b.step || (a.step == b.step && a.hit.score >= b.hit.score),
+            "{:?} before {:?}",
+            (a.step, a.hit.document.id(), a.hit.score),
+            (b.step, b.hit.document.id(), b.hit.score)
+        );
+    }
+    out.hits
         .iter()
         .map(|h| (h.step, h.hit.document.id()))
-        .collect();
-    hits.sort_unstable();
-    hits
+        .collect()
 }
 
 fn search(
@@ -147,9 +154,11 @@ fn the_ladder_requires_fewer_terms_step_by_step_and_states_the_text_it_keeps() {
     let r = &out.relaxation;
     assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
     assert_eq!(r.effective.as_deref(), Some("purple"));
+    // Within the 50% step, by score: `red` (in two titles) is rarer than `shoes` (three titles and a body), and a
+    // shorter title weighs a term more (`shoes box` over `blue running shoes`).
     assert_eq!(
         by_step(&out),
-        [(1, "a"), (2, "b"), (2, "c"), (2, "e"), (2, "f")]
+        [(1, "a"), (2, "b"), (2, "f"), (2, "e"), (2, "c")]
     );
     // A stricter step ranks above a looser one, whatever their scores.
     assert!(out.hits.windows(2).all(|w| w[0].step <= w[1].step));
@@ -171,7 +180,8 @@ fn excluded_clauses_stay_excluded_and_in_the_text() {
     let r = &out.relaxation;
     assert_eq!(r.applied, ["drop_terms:75%"]);
     assert_eq!(r.effective.as_deref(), Some("purple -blue"));
-    assert_eq!(by_step(&out), [(1, "a"), (1, "e"), (1, "f")]);
+    // By score: the two-token title, the body, then the three-token title.
+    assert_eq!(by_step(&out), [(1, "f"), (1, "e"), (1, "a")]);
 }
 
 #[test]

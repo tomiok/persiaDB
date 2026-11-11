@@ -1650,3 +1650,35 @@ fn a_field_without_a_language_flags_no_stopword() {
         .collect();
     assert_eq!(flags, [("—", false), ("red", false)]);
 }
+
+/// SPEC §7.1.1: a language field that finds no word in a clause does not make it a stopword. Only its stopword filter
+/// does. `—` over an `en` and a `whitespace` field is kept by `whitespace` and is no stopword; `the` is one.
+#[test]
+fn a_language_field_without_a_word_flags_no_stopword() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field(
+            "raw",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let compiled = compiler(&schema).compile(
+        "— the red",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let flags: Vec<(&str, bool)> = (0..compiled.clauses.len())
+        .map(|i| (compiled.source(i).unwrap(), compiled.clauses[i].stopword))
+        .collect();
+    assert_eq!(flags, [("—", false), ("the", true), ("red", false)]);
+}

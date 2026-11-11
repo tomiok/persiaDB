@@ -799,18 +799,48 @@ fn check(
                         );
                     }
                 }
+                // Within a step, as in a plain search: score descending, ties by segment order (memtable last), then
+                // docid (SPEC §7.3).
+                for pair in hits.windows(2) {
+                    let (a, b) = (&pair[0].hit, &pair[1].hit);
+                    prop_assert!(
+                        a.score > b.score
+                            || (a.score == b.score && order(a.location) < order(b.location)),
+                        "step {}: {:?} before {:?}",
+                        i,
+                        (a.location, a.score),
+                        (b.location, b.score)
+                    );
+                }
             }
+            let whole: Vec<SearchHit> = relaxed.hits.iter().map(|h| h.hit.clone()).collect();
             if built.len() == 1 {
                 // L0 alone ranks as a plain search.
-                let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
-                prop_assert_eq!(bits(&hits), bits(&full));
-                let page = SearchRequest {
+                prop_assert_eq!(bits(&whole), bits(&full));
+            }
+            // At every step: a page of `k` is the first `k` of the whole ranking, and the page after its last cursor
+            // the next `k` (SPEC §7.6: the pages of one query are slices of one ranking).
+            let page = SearchRequest {
+                limit: case.k,
+                ..SearchRequest::default()
+            };
+            let first = views.search_relaxed(&query, &page, &relax, &exec).unwrap();
+            let first_hits: Vec<SearchHit> = first.hits.iter().map(|h| h.hit.clone()).collect();
+            prop_assert_eq!(
+                &bits(&first_hits)[..],
+                &bits(&whole)[..case.k.min(whole.len())]
+            );
+            if let Some(last) = first.hits.last() {
+                let next = SearchRequest {
                     limit: case.k,
+                    search_after: Some(last.cursor()),
                     ..SearchRequest::default()
                 };
-                let relaxed = views.search_relaxed(&query, &page, &relax, &exec).unwrap();
-                let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
-                prop_assert_eq!(&bits(&hits)[..], &bits(&full)[..case.k.min(full.len())]);
+                let second = views.search_relaxed(&query, &next, &relax, &exec).unwrap();
+                prop_assert_eq!(&second.relaxation.applied, &first.relaxation.applied);
+                let hits: Vec<SearchHit> = second.hits.into_iter().map(|h| h.hit).collect();
+                let end = (first_hits.len() + case.k).min(whole.len());
+                prop_assert_eq!(bits(&hits), bits(&whole[first_hits.len()..end]));
             }
         }
     }

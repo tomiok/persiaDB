@@ -176,9 +176,10 @@ pub struct CompiledClause {
     /// Its parts, as indexes into the root's `must` (or `must_not` when [`Self::negated`]); [`Compiled::parts`]
     /// reads them. A word that splits into several spans has several parts; an excluded clause has one.
     pub parts: Range<usize>,
-    /// Whether it is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): a default field whose
-    /// analyzer has a language (`en`, `es`, `pt`, `fr`, `de`, `it`; other analyzers have none) analyzes it to no
-    /// token, as that language's stopword filter removes its words after normalizing them (`The`, `the,`, `ｔｈｅ`).
+    /// Whether it is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): a default field analyzes
+    /// it to no token because its analyzer's stopword filter removed one (the language analyzers `en`, `es`, `pt`,
+    /// `fr`, `de`, `it` have one, after normalizing: `The`, `the,`, `ｔｈｅ`). Text the tokenizer finds no word in
+    /// (`—`) is not one, whatever the field.
     /// Another field keeps it in the clause's parts: `the` over a `standard` title and an `en` body is a stopword. A
     /// `field:` clause is never one: the field it names would leave nothing to compile.
     pub stopword: bool,
@@ -239,8 +240,6 @@ pub struct QueryCompiler {
     schema: CollectionSchema,
     /// By field id; `None` for fields that are not `text`.
     analyzers: Vec<Option<Arc<Analyzer>>>,
-    /// By field id: whether the field's analyzer has a language, whose stopwords it removes.
-    languages: Vec<bool>,
 }
 
 impl std::fmt::Debug for QueryCompiler {
@@ -280,18 +279,9 @@ impl QueryCompiler {
                 _ => Ok(None),
             })
             .collect::<Result<_, _>>()?;
-        let languages = schema
-            .fields()
-            .iter()
-            .map(|field| match field.kind() {
-                FieldKind::Text(options) => has_language(options.analyzer.name()),
-                _ => false,
-            })
-            .collect();
         Ok(Self {
             schema: schema.clone(),
             analyzers,
-            languages,
         })
     }
 
@@ -439,9 +429,9 @@ impl QueryCompiler {
             .fields()
             .iter()
             .filter_map(|&(id, weight)| {
-                let tokens = self.analyzed(id, clause.text, tokens)?;
+                let (tokens, removed) = self.analyzed(id, clause.text, tokens)?;
                 if tokens.is_empty() {
-                    stopword |= self.has_language(id);
+                    stopword |= removed;
                     return None;
                 }
                 Some(FieldTokens { id, weight, tokens })
@@ -457,14 +447,6 @@ impl QueryCompiler {
         (one_of(should).into_iter().collect(), stopword)
     }
 
-    /// Whether text field `id`'s analyzer has a language.
-    fn has_language(&self, id: FieldId) -> bool {
-        usize::try_from(id.get())
-            .ok()
-            .and_then(|i| self.languages.get(i))
-            .is_some_and(|&language| language)
-    }
-
     /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms ([`Self::text_query`]).
     /// `None` for no term.
     fn field_clause(&self, id: FieldId, text: &str, tokens: &mut TokenStream) -> Option<Query> {
@@ -476,7 +458,7 @@ impl QueryCompiler {
                 })
             }),
             FieldKind::Text(_) => {
-                let analyzed = self.analyzed(id, text, tokens)?;
+                let (analyzed, _) = self.analyzed(id, text, tokens)?;
                 self.text_query(id, analyzed)
             }
             _ => None,
@@ -515,16 +497,16 @@ impl QueryCompiler {
         })
     }
 
-    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order; `None` if
-    /// it is not a `text` field.
+    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and whether the
+    /// field's stopword filter removed one; `None` if it is not a `text` field.
     fn analyzed(
         &self,
         id: FieldId,
         text: &str,
         tokens: &mut TokenStream,
-    ) -> Option<Vec<QueryToken>> {
-        self.analyzer(id)?.analyze_query(text, tokens);
-        Some(
+    ) -> Option<(Vec<QueryToken>, bool)> {
+        let stopword = self.analyzer(id)?.analyze_query_stopwords(text, tokens);
+        Some((
             tokens
                 .iter()
                 .filter(|t| fits(&t.text))
@@ -534,7 +516,8 @@ impl QueryCompiler {
                     term: t.text.clone(),
                 })
                 .collect(),
-        )
+            stopword,
+        ))
     }
 
     fn analyzer(&self, id: FieldId) -> Option<&Analyzer> {
@@ -667,12 +650,6 @@ fn one_of(mut alternatives: Vec<Query>) -> Option<Query> {
             ..BoolQuery::default()
         })),
     }
-}
-
-/// Whether built-in analyzer `name` has a language (SPEC §6.3.3), whose stopwords every version of it removes: only the
-/// language analyzers name one, and no other analyzer may take their names (SPEC §6.3).
-fn has_language(name: &str) -> bool {
-    matches!(name, "en" | "es" | "pt" | "fr" | "de" | "it")
 }
 
 /// Whether a term may be in a term dictionary (SPEC §5.3.1).
