@@ -86,7 +86,9 @@ use crate::view::SearchView;
 /// `bool` without `must` (a filter scores 0, so with filters too), the `must` clause of a `bool` with one and no
 /// `should` (filters or not), and what `must_not` or `boost` wraps. A conjunction of several `must` clauses, and
 /// `should` clauses beside `must`, check their clauses' bounds against the threshold and skip what cannot beat it
-/// (ROADMAP 7.4.8); their clauses get no threshold.
+/// (ROADMAP 7.4.8); their clauses get no threshold. A `minimum_should_match` without `must` prunes as its
+/// disjunction does; beside `must`, its `should` clauses join the conjunction as one clause
+/// and, like the others, get no threshold (ROADMAP 8.1.6, SPEC §7.3).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Pruning {

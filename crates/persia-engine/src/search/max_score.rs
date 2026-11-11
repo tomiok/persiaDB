@@ -33,10 +33,18 @@ pub(super) struct MaxScore<M> {
     parts: Vec<Part>,
     pos: Pos,
     score: f64,
+    /// The fewest clauses a document it returns holds (`minimum_should_match`, SPEC §7.1): 1 for a plain OR.
+    at_least: usize,
 }
 
 impl<M: Matcher> MaxScore<M> {
     pub(super) fn new(clauses: Vec<M>) -> Self {
+        Self::at_least(clauses, 1)
+    }
+
+    /// The documents at least `at_least` of the clauses match, scored as their OR. A document is scored only while
+    /// the clauses found on it and those not looked up yet can still reach `at_least`.
+    pub(super) fn at_least(clauses: Vec<M>, at_least: usize) -> Self {
         let bounds: Vec<f64> = clauses.iter().map(Matcher::max_score).collect();
         let mut by_bound: Vec<usize> = (0..clauses.len()).collect();
         // Stable: equal bounds keep query order, so the walk is deterministic.
@@ -53,6 +61,7 @@ impl<M: Matcher> MaxScore<M> {
             min: None,
             pos: Pos::Unstarted,
             score: 0.0,
+            at_least,
         }
     }
 
@@ -94,11 +103,16 @@ impl<M: Matcher> MaxScore<M> {
     }
 
     /// Scores `doc` if its bound beats the threshold all along; `None` once it cannot.
+    /// Fewer than `at_least` clauses on `doc` is `None` too.
     fn evaluate(&mut self, doc: u32) -> Result<Option<f64>, ReadError> {
+        let mut hits = 0usize;
         for (n, &i) in self.by_bound.iter().enumerate() {
             let essential = n >= self.essential;
             let part = match self.clauses.get_mut(i) {
-                Some(c) if essential && c.doc() == Some(doc) => Part::Hit(c.score()?),
+                Some(c) if essential && c.doc() == Some(doc) => {
+                    hits += 1;
+                    Part::Hit(c.score()?)
+                }
                 Some(_) if !essential => Part::Unknown,
                 _ => Part::Miss,
             };
@@ -108,6 +122,10 @@ impl<M: Matcher> MaxScore<M> {
         }
         // The non-essential clauses, largest bound first: each lookup can only lower the bound.
         for n in (0..self.essential).rev() {
+            // `n + 1` clauses are left to look up, this one included.
+            if hits.saturating_add(n + 1) < self.at_least {
+                return Ok(None);
+            }
             if let Some(min) = self.min
                 && self.part_bound() <= min
             {
@@ -120,11 +138,15 @@ impl<M: Matcher> MaxScore<M> {
             if let Some(c) = self.clauses.get_mut(i)
                 && c.advance(doc)? == Some(doc)
             {
+                hits += 1;
                 part = Part::Hit(c.score()?);
             }
             if let Some(slot) = self.parts.get_mut(i) {
                 *slot = part;
             }
+        }
+        if hits < self.at_least {
+            return Ok(None);
         }
         // As the plain disjunction sums: the matching clauses' scores in query order.
         let mut sum = 0.0;

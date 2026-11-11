@@ -105,6 +105,13 @@ fn segment() -> (Arc<CollectionSchema>, Arc<Segment>, [FieldId; 4]) {
     (Arc::new(schema), segment, [body, price, tag, at])
 }
 
+/// The pruning strategies `search_top10_pruning` runs side by side.
+const STRATEGIES: [(&str, Pruning); 3] = [
+    ("exhaustive", Pruning::Exhaustive),
+    ("max_score", Pruning::MaxScore),
+    ("block_max_wand", Pruning::BlockMaxWand),
+];
+
 fn bench(c: &mut Criterion) {
     let (schema, segment, fields) = segment();
     let [body, ..] = fields;
@@ -169,7 +176,12 @@ fn bench(c: &mut Criterion) {
         ..BoolQuery::default()
     });
     let [and_common, must_should, must_should_rare] = conjunctions(&term);
+    let [or4, or4_msm2, or4_msm3, or50_msm2] = at_least(&term);
     let pruned = [
+        ("or4", &or4),
+        ("or4_msm2", &or4_msm2),
+        ("or4_msm3", &or4_msm3),
+        ("or50_msm2", &or50_msm2),
         ("term", &queries[0].1),
         ("or", &queries[2].1),
         ("or_rare", &or_rare),
@@ -179,15 +191,10 @@ fn bench(c: &mut Criterion) {
         ("must_should", &must_should),
         ("must_should_rare", &must_should_rare),
     ];
-    let strategies = [
-        ("exhaustive", Pruning::Exhaustive),
-        ("max_score", Pruning::MaxScore),
-        ("block_max_wand", Pruning::BlockMaxWand),
-    ];
     let mut group = c.benchmark_group("search_top10_pruning");
     for (name, query) in pruned {
         let plan = SearchPlan::new(query, &schema, &stats).unwrap();
-        for (strategy, pruning) in strategies {
+        for (strategy, pruning) in STRATEGIES {
             group.bench_function(format!("{name}/{strategy}"), |b| {
                 b.iter(|| black_box(plan.top_k_with(&view, 10, pruning).unwrap()));
             });
@@ -209,6 +216,21 @@ fn bench(c: &mut Criterion) {
         &view,
         fields,
     );
+}
+
+/// L2 `drop_terms` (ROADMAP 8.1.6): four words, common to rare, any of them, then at least 2 and 3 of them; and
+/// `or50` with at least 2.
+fn at_least(term: &impl Fn(&str) -> Query) -> [Query; 4] {
+    let of = |should: Vec<Query>, minimum_should_match| {
+        Query::Bool(BoolQuery {
+            should,
+            minimum_should_match,
+            ..BoolQuery::default()
+        })
+    };
+    let four = || ["w3", "w20", "w60", "w120"].map(term).to_vec();
+    let fifty = (0..50).map(|i| term(&format!("w{}", i * 4))).collect();
+    [of(four(), 0), of(four(), 2), of(four(), 3), of(fifty, 2)]
 }
 
 /// Conjunctions and `should` beside `must` (ROADMAP 7.4.8): two common words; a common `must` beside rarer

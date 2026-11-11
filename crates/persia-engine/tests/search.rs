@@ -28,8 +28,8 @@ use persia_analysis::AnalyzerRegistry;
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::Memtable;
 use persia_engine::query::{
-    BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, PhraseQuery, PhraseTerm, Query,
-    QueryLimits, TermQuery, WeightedTerm,
+    BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, Filter, PhraseQuery, PhraseTerm,
+    Query, QueryLimits, TermQuery, WeightedTerm,
 };
 use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
@@ -145,6 +145,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 3]) -> Query {
             must,
             should,
             must_not,
+            minimum_should_match,
         } => {
             let all = |qs: &[RefQuery]| qs.iter().map(|q| engine_query(q, fields)).collect();
             Query::Bool(BoolQuery {
@@ -152,6 +153,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 3]) -> Query {
                 should: all(should),
                 must_not: all(must_not),
                 filter: Vec::new(),
+                minimum_should_match: u32::try_from(*minimum_should_match).unwrap(),
             })
         }
         RefQuery::Boost(inner, boost) => Query::Boost(BoostQuery {
@@ -244,10 +246,22 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
                 prop::collection::vec(inner.clone(), 0..3),
                 prop::collection::vec(inner.clone(), 0..2),
             )
-                .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not }),
+                .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not, minimum_should_match: 0 }),
+            // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must`.
+            2 => (
+                prop::collection::vec(inner.clone(), 0..2),
+                prop::collection::vec(inner.clone(), 1..5),
+                prop::collection::vec(inner.clone(), 0..2),
+                1..6_usize,
+            )
+                .prop_map(|(must, should, must_not, minimum_should_match)| RefQuery::Bool { must, should, must_not, minimum_should_match }),
             // Wide, as a relaxation expansion (ROADMAP 7.4.7): a disjunction past its few-clause scan.
             1 => prop::collection::vec(leaf(params), 9..24)
-                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new() }),
+                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match: 0 }),
+            // Wide with `minimum_should_match`: the heap skipping documents on too few clauses.
+            1 => (prop::collection::vec(leaf(params), 9..14), 2..5_usize).prop_map(|(should, minimum_should_match)| {
+                RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match }
+            }),
             1 => (inner.clone(), 0.5..4.0_f64).prop_map(|(q, b)| RefQuery::Boost(Box::new(q), b)),
             1 => (inner, prop_oneof![Just(0.0), 0.0..5.0_f64])
                 .prop_map(|(q, s)| RefQuery::Constant(Box::new(q), s)),
@@ -637,6 +651,7 @@ fn bool_edges_by_hand() {
             should,
             must_not,
             filter: Vec::new(),
+            minimum_should_match: 0,
         })
     };
     assert_eq!(f.docids(&b(vec![], vec![], vec![])), [0, 1, 2, 3]);
@@ -670,6 +685,63 @@ fn bool_edges_by_hand() {
     assert_eq!(hits[0].docid, 2);
 }
 
+/// `minimum_should_match` (SPEC §7.1, ROADMAP 8.1.6): a count of `should` clauses, beside `must` and filters too.
+#[test]
+fn minimum_should_match_by_hand() {
+    let f = fixture(&["ant", "bee", "ant bee", "cat", "ant bee cat"]);
+    let b = |must, should, minimum_should_match| {
+        Query::Bool(BoolQuery {
+            must,
+            should,
+            minimum_should_match,
+            ..BoolQuery::default()
+        })
+    };
+    let words = || vec![f.term("ant"), f.term("bee"), f.term("cat")];
+    assert_eq!(f.docids(&b(vec![], words(), 1)), [0, 1, 2, 3, 4]);
+    assert_eq!(f.docids(&b(vec![], words(), 2)), [2, 4]);
+    // Every clause: their AND.
+    assert_eq!(f.docids(&b(vec![], words(), 3)), [4]);
+    // More than there are clauses, or than can match in the view: nothing.
+    assert_eq!(f.docids(&b(vec![], words(), 4)), NONE);
+    assert_eq!(
+        f.docids(&b(vec![], vec![f.term("ant"), f.term("elk")], 2)),
+        NONE
+    );
+    // Beside `must`, a count above 0 makes the `should` clauses required.
+    assert_eq!(f.docids(&b(vec![f.term("ant")], words(), 0)), [0, 2, 4]);
+    assert_eq!(f.docids(&b(vec![f.term("ant")], words(), 2)), [2, 4]);
+    assert_eq!(
+        f.docids(&b(vec![f.term("ant")], vec![f.term("cat")], 1)),
+        [4]
+    );
+    // Beside a filter too, which alone would leave them optional.
+    let filtered = |minimum_should_match| {
+        Query::Bool(BoolQuery {
+            should: vec![f.term("bee"), f.term("cat")],
+            filter: vec![Filter::Exists { field: f.body() }],
+            minimum_should_match,
+            ..BoolQuery::default()
+        })
+    };
+    assert_eq!(f.docids(&filtered(0)), [0, 1, 2, 3, 4]);
+    assert_eq!(f.docids(&filtered(2)), [4]);
+    // Without `should` clauses, any count above 0 matches nothing.
+    assert_eq!(f.docids(&b(vec![f.term("ant")], vec![], 1)), NONE);
+    // The count changes what matches, not the score: the clauses a match holds add up as without it.
+    let view = SegmentView::new(&f.segment, None);
+    let scores = |q: &Query| {
+        let plan = SearchPlan::new(q, &f.schema, &f.stats).unwrap();
+        let hits = plan.top_k(&view, 10).unwrap();
+        hits.iter()
+            .map(|h| (h.docid, h.score.to_bits()))
+            .collect::<BTreeMap<_, _>>()
+    };
+    let mut any = scores(&b(vec![], words(), 1));
+    any.retain(|d, _| [2, 4].contains(d));
+    assert_eq!(scores(&b(vec![], words(), 2)), any);
+}
+
 #[test]
 fn expansions_need_terms_and_filters_run() {
     let f = fixture(&["ant"]);
@@ -683,7 +755,7 @@ fn expansions_need_terms_and_filters_run() {
         Err(SearchError::NeedsTerms { what: "prefix" })
     ));
     let filtered = Query::Bool(BoolQuery {
-        filter: vec![persia_engine::query::Filter::And(Vec::new())],
+        filter: vec![Filter::And(Vec::new())],
         ..BoolQuery::default()
     });
     // Filters run since ROADMAP 7.4.5: an empty `and` selects every document, scoring 0.

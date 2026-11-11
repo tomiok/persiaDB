@@ -537,7 +537,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [x] 8.1.3 Ordering across levels: the level leads the rank key (every stricter hit above every looser one at any score; an `f64` score offset cannot give that for every score, ADR-0037), a monotone rank score per hit, and paging (offset, cursor) across levels
 - [x] 8.1.4 Budget (`budget_ms`) and `truncated` flag
 - [x] 8.1.5 Response metadata struct (`level`, `applied`, `original`, `effective`, `corrected`)
-- [ ] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
+- [~] 8.1.6 `minimum_should_match` on `BoolQuery` (SPEC §7.1) for L2 `drop_terms` (found in the 7.1 review)
 - [ ] 8.1.7 Source span and original text of each compiled clause in `Compiled`, for `original`/`effective`/`corrected` and the L3/L4 length rules (found in the 7.1 review)
 - [ ] 8.1.8 Relaxed queries within `QueryLimits`: cut expansions to the remaining budget, report it in `applied` (SPEC §7.1.3, found in the 7.1 review). Count the earlier steps a step excludes too (its `must_not`, ADR-0037 item 2), whose expansions planning repeats (found in the 8.1 review)
 - [ ] 8.1.9 Facets under relaxation: specify in SPEC §7.5 which matches a facet counts when the cascade runs (§7.6: the strict query, the level returned, or the union `fill` collects) and implement it with M8 (found in the 7.5 review). 8.1.2 counts the union of the steps built as an interim rule (ADR-0037 item 4); with `fill` a deeper page may count more steps
