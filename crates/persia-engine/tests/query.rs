@@ -1570,3 +1570,115 @@ fn filter_numbers_follow_the_document_forms() {
         );
     }
 }
+
+/// SPEC §7.6, ROADMAP 8.2.2.1: a clause is a stopword when its word, lowercased, is in the stopword list of the
+/// language of a field it searches, even where another field's analyzer keeps it.
+#[test]
+fn compiled_clauses_flag_stopwords_of_the_fields_they_search() {
+    let schema = schema();
+    let flags = |text: &str, fields: &DefaultFields| {
+        let compiled = compiler(&schema).compile(text, fields, &QueryLimits::default());
+        (0..compiled.clauses.len())
+            .map(|i| {
+                (
+                    compiled.source(i).unwrap().to_owned(),
+                    compiled.clauses[i].stopword,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let owned = |pairs: &[(&str, bool)]| -> Vec<(String, bool)> {
+        pairs.iter().map(|&(s, f)| (s.to_owned(), f)).collect()
+    };
+    let all = DefaultFields::all(&schema);
+    // `body` is `en`: `the` and `The` are its stopwords, which `title` (standard, no language) keeps.
+    assert_eq!(
+        flags("The red -the \"the\" shoes", &all),
+        owned(&[
+            ("The", true),
+            ("red", false),
+            ("-the", true),
+            ("\"the\"", true),
+            ("shoes", false)
+        ])
+    );
+    // `title` alone has no language, and `title:` scopes the clause to it: nothing is a stopword.
+    let title = DefaultFields::parse(&schema, &["title"]).unwrap();
+    assert_eq!(
+        flags("the red", &title),
+        owned(&[("the", false), ("red", false)])
+    );
+    assert_eq!(
+        flags("title:the red", &all),
+        owned(&[("title:the", false), ("red", false)])
+    );
+    // The analyzer normalizes before it removes a stopword: punctuation, compatibility forms and case do not hide one.
+    assert_eq!(
+        flags("the, ｔｈｅ THE.", &all),
+        owned(&[("the,", true), ("ｔｈｅ", true), ("THE.", true)])
+    );
+    // A keyword field has no analyzer; a phrase of several words is not one stopword; other languages' lists do not
+    // apply (`con` is Spanish).
+    assert_eq!(
+        flags("brand:the \"the end\" con", &all),
+        owned(&[("brand:the", false), ("\"the end\"", false), ("con", false)])
+    );
+}
+
+/// SPEC §7.1.1: only a field with a language makes a clause a stopword. A `standard` field also analyzes `—` to no
+/// token, but `—` is not a stopword: a `whitespace` field keeps it, and neither field has a language.
+#[test]
+fn a_field_without_a_language_flags_no_stopword() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "raw",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let compiled = compiler(&schema).compile(
+        "— red",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let flags: Vec<(&str, bool)> = (0..compiled.clauses.len())
+        .map(|i| (compiled.source(i).unwrap(), compiled.clauses[i].stopword))
+        .collect();
+    assert_eq!(flags, [("—", false), ("red", false)]);
+}
+
+/// SPEC §7.1.1: a language field that finds no word in a clause does not make it a stopword. Only its stopword filter
+/// does. `—` over an `en` and a `whitespace` field is kept by `whitespace` and is no stopword; `the` is one.
+#[test]
+fn a_language_field_without_a_word_flags_no_stopword() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field(
+            "raw",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .build()
+        .unwrap();
+    let compiled = compiler(&schema).compile(
+        "— the red",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let flags: Vec<(&str, bool)> = (0..compiled.clauses.len())
+        .map(|i| (compiled.source(i).unwrap(), compiled.clauses[i].stopword))
+        .collect();
+    assert_eq!(flags, [("—", false), ("the", true), ("red", false)]);
+}

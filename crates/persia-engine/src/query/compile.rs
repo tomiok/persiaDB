@@ -176,6 +176,13 @@ pub struct CompiledClause {
     /// Its parts, as indexes into the root's `must` (or `must_not` when [`Self::negated`]); [`Compiled::parts`]
     /// reads them. A word that splits into several spans has several parts; an excluded clause has one.
     pub parts: Range<usize>,
+    /// Whether it is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): a default field analyzes
+    /// it to no token because its analyzer's stopword filter removed one (the language analyzers `en`, `es`, `pt`,
+    /// `fr`, `de`, `it` have one, after normalizing: `The`, `the,`, `ｔｈｅ`). Text the tokenizer finds no word in
+    /// (`—`) is not one, whatever the field.
+    /// Another field keeps it in the clause's parts: `the` over a `standard` title and an `en` body is a stopword. A
+    /// `field:` clause is never one: the field it names would leave nothing to compile.
+    pub stopword: bool,
 }
 
 impl Compiled {
@@ -325,7 +332,7 @@ impl QueryCompiler {
             );
         }
         for (clause, span) in clause_spans(text, &self.schema) {
-            let parts = self.clause(clause, fields, &mut tokens);
+            let (parts, stopword) = self.clause(clause, fields, &mut tokens);
             let part = match (clause.negated, parts.len()) {
                 (_, 0) => continue,
                 (false, _) | (true, 1) => parts,
@@ -378,6 +385,7 @@ impl QueryCompiler {
                                 span,
                                 negated: false,
                                 parts: 0..part.len(),
+                                stopword,
                             });
                             query.must.extend(part);
                             continue;
@@ -397,41 +405,46 @@ impl QueryCompiler {
                 span,
                 negated: clause.negated,
                 parts: list.len()..list.len().saturating_add(part.len()),
+                stopword,
             });
             list.extend(part);
         }
         finish(query, truncated, text, limits, clauses)
     }
 
-    /// The queries a clause requires (all of them), or none when it analyzes to no token.
+    /// The queries a clause requires (all of them), or none when it analyzes to no token, and whether it is a stopword
+    /// ([`CompiledClause::stopword`]).
     fn clause(
         &self,
         clause: Clause<'_>,
         fields: &DefaultFields,
         tokens: &mut TokenStream,
-    ) -> Vec<Query> {
+    ) -> (Vec<Query>, bool) {
         if let Some(field) = clause.field {
-            return self
-                .field_clause(field, clause.text, tokens)
-                .into_iter()
-                .collect();
+            let parts = self.field_clause(field, clause.text, tokens);
+            return (parts.into_iter().collect(), false);
         }
+        let mut stopword = false;
         let per_field: Vec<FieldTokens> = fields
             .fields()
             .iter()
             .filter_map(|&(id, weight)| {
-                let tokens = self.analyzed(id, clause.text, tokens)?;
-                (!tokens.is_empty()).then_some(FieldTokens { id, weight, tokens })
+                let (tokens, removed) = self.analyzed(id, clause.text, tokens)?;
+                if tokens.is_empty() {
+                    stopword |= removed;
+                    return None;
+                }
+                Some(FieldTokens { id, weight, tokens })
             })
             .collect();
         if !clause.phrase || per_field.iter().all(|f| f.tokens.len() <= 1) {
-            return word(per_field);
+            return (word(per_field), stopword);
         }
         let should: Vec<Query> = per_field
             .into_iter()
             .filter_map(|f| self.text_query(f.id, f.tokens))
             .collect();
-        one_of(should).into_iter().collect()
+        (one_of(should).into_iter().collect(), stopword)
     }
 
     /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms ([`Self::text_query`]).
@@ -445,7 +458,7 @@ impl QueryCompiler {
                 })
             }),
             FieldKind::Text(_) => {
-                let analyzed = self.analyzed(id, text, tokens)?;
+                let (analyzed, _) = self.analyzed(id, text, tokens)?;
                 self.text_query(id, analyzed)
             }
             _ => None,
@@ -484,16 +497,16 @@ impl QueryCompiler {
         })
     }
 
-    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order; `None` if
-    /// it is not a `text` field.
+    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and whether the
+    /// field's stopword filter removed one; `None` if it is not a `text` field.
     fn analyzed(
         &self,
         id: FieldId,
         text: &str,
         tokens: &mut TokenStream,
-    ) -> Option<Vec<QueryToken>> {
-        self.analyzer(id)?.analyze_query(text, tokens);
-        Some(
+    ) -> Option<(Vec<QueryToken>, bool)> {
+        let stopword = self.analyzer(id)?.analyze_query_stopwords(text, tokens);
+        Some((
             tokens
                 .iter()
                 .filter(|t| fits(&t.text))
@@ -503,7 +516,8 @@ impl QueryCompiler {
                     term: t.text.clone(),
                 })
                 .collect(),
-        )
+            stopword,
+        ))
     }
 
     fn analyzer(&self, id: FieldId) -> Option<&Analyzer> {

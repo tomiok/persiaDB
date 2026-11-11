@@ -59,3 +59,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted |
 | [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted |
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
+| [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |

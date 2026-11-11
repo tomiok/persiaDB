@@ -109,7 +109,8 @@ pub struct Relaxation {
     /// The text of the last step's query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. Rendered
     /// from its clauses' source text ([`crate::query::CompiledClause::span`]), so at L0 it is [`Compiled::effective`]:
     /// the clauses that compiled, without stopwords or text past a limit. `None` when [`Self::original`] is, and when the
-    /// last step's level renders no text for its query (no level after L0 builds one yet; ROADMAP 8.2 renders it).
+    /// last step's level renders no text for its query. At L2 `drop_terms` it is the clauses the step keeps: its count of
+    /// the most important terms and every excluded clause, in text order (`"purple -blue"`).
     pub effective: Option<String>,
     /// The terms the fuzzy level replaced, in query order (`"corrected"`). Empty until ROADMAP 8.2.4.3 synthesizes
     /// the corrected query ("did you mean").
@@ -436,7 +437,8 @@ impl CollectionViews<'_> {
     /// # Errors
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax;
-    /// [`RelaxedSearchError::Plan`] when a step cannot be planned.
+    /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
+    /// from (L2 reads its terms' `df`).
     pub fn search_relaxed<'q>(
         &self,
         query: impl Into<RelaxedQuery<'q>>,
@@ -475,11 +477,8 @@ impl CollectionViews<'_> {
                 truncated = true;
                 break;
             }
-            let input = LevelInput {
-                original: query,
-                compiled,
-            };
-            let steps = level_steps(planned, built.ran.is_empty(), input);
+            let input = LevelInput::new(query, compiled, &stats);
+            let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
             for (step, label, text) in steps {
                 let i = built.ran.len();
                 if !builds(i, found) {
@@ -662,26 +661,36 @@ impl CollectionViews<'_> {
     }
 }
 
+/// A step as a level built it: its query, what it applied and its text.
+type BuiltStep<'a> = (Cow<'a, Query>, String, Option<String>);
+
 /// The steps `planned` builds for `input`: its query, what it applied and its text. L0 (`first`) searches the query
 /// itself, not a copy.
+///
+/// # Errors
+/// A statistic the level cannot read (L2 reads its terms' `df`); [`SearchError::Interrupted`] once the request's deadline
+/// has passed or it was cancelled.
 fn level_steps<'a>(
     planned: &PlannedLevel,
     first: bool,
     input: LevelInput<'a>,
-) -> Vec<(Cow<'a, Query>, String, Option<String>)> {
+    exec: &Execution,
+) -> Result<Vec<BuiltStep<'a>>, SearchError> {
     if first {
-        return vec![(
+        return Ok(vec![(
             Cow::Borrowed(input.original),
             String::new(),
             input.compiled.map(Compiled::effective),
-        )];
+        )]);
     }
-    planned
+    // A level may read statistics (L2 its terms' `df`): the request's deadline and cancellation stop it first (SPEC §7.3).
+    exec.interrupt().map_err(SearchError::Interrupted)?;
+    Ok(planned
         .transform
-        .steps(&input)
+        .steps(&input)?
         .into_iter()
         .map(|s| (Cow::Owned(s.query), s.applied, s.effective))
-        .collect()
+        .collect())
 }
 
 /// `step` held to the limits beside the steps it excludes (SPEC §7.1.3): as built, with its expansions cut (`label`

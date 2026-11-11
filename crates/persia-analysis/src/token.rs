@@ -62,4 +62,12 @@ pub trait TokenFilter: Send + Sync {
     fn stacks_tokens(&self) -> bool {
         false
     }
+
+    /// Whether the filter removes stopwords ([`StopwordFilter`](crate::StopwordFilter)): what it removes is a word the
+    /// field drops on purpose, unlike text the tokenizer finds no word in ([`Analyzer::analyze_query_stopwords`]).
+    ///
+    /// [`Analyzer::analyze_query_stopwords`]: crate::Analyzer::analyze_query_stopwords
+    fn removes_stopwords(&self) -> bool {
+        false
+    }
 }

@@ -1245,7 +1245,12 @@ clause's first character (its `-`, field name or body) to its last (a phrase's c
 around it; spans are on character boundaries and do not overlap. Each clause's parts are its entries of the root
 `must` (or `must_not` for `-`); a single required part is the query itself. A clause left out (no token, past a
 limit) has none. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
-same query.
+same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
+that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
+(`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
+`ｔｈｅ`). Text in which a field's tokenizer finds no word (`—`) is not a stopword, whatever the field. Another default
+field may keep a stopword, so it stays a clause: `the` over a `standard` title and an `en` body is a stopword. A
+`field:` clause is never one (its field would leave nothing to compile).
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1490,7 +1495,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 |---|---|---|
 | L0 | `exact` | All query terms required (AND), analyzed |
 | L1 | `synonyms` | Expand terms with collection synonyms (OR within group; cap expansions per matched term, default 50; §6.3.2) |
-| L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over terms ordered by ascending IDF-importance: 100% → 75% → 50% → 1 term, each percentage `p` of the `n` terms the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one is not built again). Stopwords/low-IDF terms dropped first |
+| L2 | `drop_terms` | `minimum_should_match` (§7.1) steps over the `n` terms: 100% → 75% → 50% → 1 term, each percentage `p` the count `max(1, ⌊p · n / 100⌋)` (rounded down, as Elasticsearch does; a step whose count repeats the previous one, L0's `n` first, is not built, so 100% never is). Any `count` of the terms match; stopwords and low-IDF terms are the ones a step reports dropped first (below) |
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST (cap expansions, default 50); corrected terms reported |
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |
@@ -1513,7 +1518,7 @@ Rules:
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
   the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
-  (ROADMAP 8.1.7). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
+  (ROADMAP 8.1.7), at L2 the clauses its step keeps (ROADMAP 8.2.2.2, below). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
   query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy).
   `corrected` stays empty until the fuzzy level synthesizes the corrected query (ROADMAP 8.2.4.3).
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
@@ -1527,7 +1532,30 @@ setting and held to the same rule (one out of range is an error, also when the q
 collection's settings stand for the keys it leaves out. `relax: false` is `enabled: false`: L0 only. A level builds
 its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
-skipped and not listed in `applied`. Until ROADMAP 8.2 only L0 builds a query.
+skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
+L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
+words; ROADMAP 8.1.10). So far L0 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
+
+L2 `drop_terms` (ROADMAP 8.2.2, ADR-0038). Its *terms* are the query's required clauses: of a query compiled from `q`, each
+clause of §7.1.1 that is not excluded (`-`), whatever its parts (a phrase, a word split in two, a word over several
+fields is one term); of a programmatic query, the `must` clauses of a root `bool` that has no `should` clauses and a
+`minimum_should_match` of 0. Any other query, and one of fewer than 2 terms, skips the level (ROADMAP 8.2.2.3): no
+count is below L0's, and dropping the one term would match every document the excluded clauses and filters leave. The step of count `k` is a `bool` whose
+`should` clauses are the terms (a clause of several parts as a `bool` requiring them), with `minimum_should_match` `k`,
+and L0's root `must_not` and `filter` clauses, so excluded clauses stay excluded and filters are not relaxed. Its
+`applied` is `drop_terms:75%`, `drop_terms:50%` or `drop_terms:1`, for the rung that first gave its count (2 terms:
+one step, `drop_terms:75%`, of count 1). The terms are ordered by *importance* (ROADMAP 8.2.2.1), compared
+lexicographically with no weight to tune: a stopword (§7.1.1) is less important than any other term, then a lower
+IDF, then a later position in the query (a user's last word tends to qualify the first ones). A term's IDF is about
+as BM25F scores it (§7.2), over the search's statistics: a `term`'s, a `combined`'s of its largest `df`, a `phrase`'s
+the sum of its terms', a `bool`'s the sum of its `must` clauses' and the largest of its `should` clauses', `boost` and
+`constant_score` their query's, and 0 for `prefix`, `fuzzy` and `match_all`. Importance does not change which
+documents match: it orders the `should` clauses, most important first, and decides the step's `effective`, the text
+of its `k` most important terms and every excluded clause, in text order, one space apart. That text names the terms
+the step keeps; it is not a query that compiles to the step's (which matches any `k` of them). A programmatic
+query's step has no `effective`. Building the steps reads the `df`s each term's IDF needs (one per field of a `combined`,
+one per term of a `phrase`); the request's deadline and
+cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. Hits

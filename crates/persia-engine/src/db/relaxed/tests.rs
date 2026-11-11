@@ -17,6 +17,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 
 use persia_storage::container::sim::SimFile;
 
@@ -29,7 +30,10 @@ use crate::relax::{LevelInput, LevelTransform, RelaxLevel, RelaxOptions, RelaxPl
 use crate::schema::{
     FieldId, FieldKind, KeywordOptions, Levels, RelaxationConfig, SchemaBuilder, TextOptions,
 };
-use crate::search::{FacetRequest, Projection, Pruning, RequestError, SearchPlan};
+use crate::search::{
+    FacetRequest, Interrupt, Projection, Pruning, RequestError, SearchError, SearchPlan,
+};
+use crate::segment::ReadError;
 use crate::wal::Durability;
 
 /// Builds fixed steps and counts its calls.
@@ -53,9 +57,9 @@ impl Stub {
 }
 
 impl LevelTransform for Stub {
-    fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
+    fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.steps.clone()
+        Ok(self.steps.clone())
     }
 }
 
@@ -473,13 +477,14 @@ fn explained_hits_add_up_to_their_scores_at_every_step() {
 }
 
 #[test]
-fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_now() {
+fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_one_term() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
-    // Every level of the collection's defaults, none of which builds a step before ROADMAP 8.2.
+    // Every level of the collection's defaults, none of which builds a step for one term: L2 skips it (ROADMAP
+    // 8.2.2.3), and the others wait on ROADMAP 8.2.
     let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
     assert!(relax.relaxes());
     let out = views
@@ -1058,10 +1063,10 @@ mod budget {
     }
 
     impl LevelTransform for Slow {
-        fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.clock.advance(self.by);
-            self.steps.clone()
+            Ok(self.steps.clone())
         }
     }
 
@@ -1443,12 +1448,12 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
         seen: Mutex<Vec<Option<String>>>,
     }
     impl LevelTransform for Reads {
-        fn steps(&self, input: &LevelInput<'_>) -> Vec<Step> {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
             self.seen
                 .lock()
                 .unwrap()
                 .push(input.compiled.map(|c| c.text.clone()));
-            self.steps.clone()
+            Ok(self.steps.clone())
         }
     }
 
@@ -1855,4 +1860,75 @@ mod limits {
             Some("red shoes hat blue")
         );
     }
+}
+
+/// A level that cannot read a statistic fails the search (ROADMAP 8.2.2.2: L2 reads its terms' `df`), as a step that
+/// cannot be planned does.
+#[test]
+fn a_level_that_cannot_read_its_statistics_fails_the_search() {
+    #[derive(Debug)]
+    struct Unreadable;
+    impl LevelTransform for Unreadable {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            Err(ReadError::UnknownField {
+                field: FieldId::new(99),
+            })
+        }
+    }
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let relax = plan(&min(1), &[]).with_level(RelaxLevel::DropTerms, Arc::new(Unreadable));
+    let out = views.search_relaxed(&term(body, "purple"), &request(10), &relax, &exec());
+    assert!(
+        matches!(
+            out,
+            Err(super::RelaxedSearchError::Plan(SearchError::Read(
+                ReadError::UnknownField { .. }
+            )))
+        ),
+        "{out:?}"
+    );
+    // A query with enough hits at L0 never builds the level.
+    let out = views.search_relaxed(&term(body, "red"), &request(10), &relax, &exec());
+    assert_eq!(out.unwrap().hits.len(), 2);
+}
+
+/// The request's deadline stops a level before it builds its steps (SPEC §7.3, §7.6), as an error: unlike the budget,
+/// a deadline is not a truncated response.
+#[test]
+fn a_deadline_passed_while_a_level_builds_stops_the_next_one_before_it_reads() {
+    /// Builds no step, and takes 10 ms of the deadline's clock to do so.
+    #[derive(Debug)]
+    struct Slow(Arc<ManualClock>);
+    impl LevelTransform for Slow {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            self.0.advance(Duration::from_millis(10));
+            Ok(Vec::new())
+        }
+    }
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let clock = Arc::new(ManualClock::new(0));
+    let drop_terms = Stub::new(vec![step(term(body, "hat"), "drop_terms:75%")]);
+    let relax = plan(&min(1), &[(RelaxLevel::DropTerms, &drop_terms)])
+        .with_level(RelaxLevel::Synonyms, Arc::new(Slow(Arc::clone(&clock))));
+    let at = crate::db::Clock::now(&*clock) + Duration::from_millis(5);
+    let exec = exec().deadline(Arc::clone(&clock) as _, at);
+    let out = views.search_relaxed(&term(body, "purple"), &request(10), &relax, &exec);
+    assert!(
+        matches!(
+            out,
+            Err(super::RelaxedSearchError::Plan(SearchError::Interrupted(
+                Interrupt::DeadlineExceeded
+            )))
+        ),
+        "{out:?}"
+    );
+    assert_eq!(drop_terms.calls(), 0);
 }

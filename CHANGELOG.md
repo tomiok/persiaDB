@@ -8,7 +8,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+- `persia-engine`: L2 `drop_terms` (ROADMAP 8.2.2; SPEC §7.6, ADR-0038). A query whose terms (its required clauses)
+  find fewer than `min_results` hits relaxes to `minimum_should_match` steps: 75% of the terms, 50%, then 1
+  (`max(1, ⌊p · n / 100⌋)`; a count that repeats the previous one, L0's first, is not built). Any of that many terms
+  match, and excluded clauses and filters stay as they are. `Relaxation::applied` lists `drop_terms:75%`,
+  `drop_terms:50%` and `drop_terms:1`, with `:cut` or `:skipped` when a step is held to the limits. Which terms a step
+  reports keeping is decided by importance, least important dropped first: a stopword, then a lower IDF, then a later
+  position. `effective` renders the kept terms and every excluded clause in the order the user wrote them. A query of
+  one term skips the level. Benchmarks `search_relaxed/l2` and `l2_every_step`.
+- `persia-engine`: `CompiledClause::stopword` is set when a default field analyzes the clause to no token because its
+  analyzer's stopword filter removed one (SPEC §7.1.1), as the `en`, `es`, `pt`, `fr`, `de` and `it` analyzers do.
+- `persia-analysis`: `Analyzer::analyze_query_stopwords` analyzes as `analyze_query` and reports whether a stopword
+  filter removed a token. `TokenFilter::removes_stopwords` (default `false`, `true` for `StopwordFilter`) marks such
+  a filter.
+
 ### Changed
+- `persia-engine`: `CollectionViews::search_relaxed` can fail with `RelaxedSearchError::Plan` when a level cannot read
+  the statistics it builds from, or when the request's deadline passes before a level builds its steps.
 - `persia-engine` (breaking for struct literals without `..BoolQuery::default()`): `BoolQuery::minimum_should_match`,
   the fewest `should` clauses a match holds (ROADMAP 8.1.6; SPEC §7.1, §7.3), for L2 `drop_terms`. A count, 0 by
   default (the rule so far: one `should` only when there is neither `must` nor `filter`). With a count of 1 or more

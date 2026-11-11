@@ -242,17 +242,18 @@ fn input_query() -> (CollectionSchema, Query) {
 }
 
 #[test]
-fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
+fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
     let (_, query) = input_query();
     let input = LevelInput {
         original: &query,
         compiled: None,
+        stats: &NoStats,
     };
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::default()).unwrap();
     let steps: Vec<Vec<Step>> = plan
         .planned()
         .iter()
-        .map(|l| l.transform.steps(&input))
+        .map(|l| l.transform.steps(&input).unwrap())
         .collect();
     assert_eq!(
         steps[0],
@@ -262,7 +263,8 @@ fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
             effective: None
         }]
     );
-    // L1 to L5 wait on ROADMAP 8.2: no step, so the cascade skips them.
+    // L2 skips a single term (ROADMAP 8.2.2.3), and L1 and L3 to L5 wait on ROADMAP 8.2: no step, so the cascade
+    // skips them.
     assert!(steps[1..].iter().all(Vec::is_empty));
 }
 
@@ -282,9 +284,10 @@ fn l0_states_the_text_of_the_clauses_that_compiled() {
     let input = LevelInput {
         original: &red.query,
         compiled: Some(&red),
+        stats: &NoStats,
     };
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::disabled()).unwrap();
-    let steps = plan.planned()[0].transform.steps(&input);
+    let steps = plan.planned()[0].transform.steps(&input).unwrap();
     assert_eq!(
         steps,
         [Step {
@@ -299,8 +302,8 @@ fn l0_states_the_text_of_the_clauses_that_compiled() {
 struct Fixed(Vec<Step>);
 
 impl LevelTransform for Fixed {
-    fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
-        self.0.clone()
+    fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+        Ok(self.0.clone())
     }
 }
 
@@ -310,6 +313,7 @@ fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() 
     let input = LevelInput {
         original: &query,
         compiled: None,
+        stats: &NoStats,
     };
     let step = Step {
         query: Query::MatchAll,
@@ -334,7 +338,7 @@ fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() 
             RelaxLevel::Fuzzy
         ]
     );
-    assert_eq!(plan.planned()[2].transform.steps(&input), [step]);
+    assert_eq!(plan.planned()[2].transform.steps(&input).unwrap(), [step]);
 }
 
 /// Any non-negative `f64` but NaN: every finite score, `+0`, subnormals, `f64::MAX` and `+∞`, uniformly by bits so
@@ -410,4 +414,19 @@ fn rank_scores_at_the_edges() {
     assert_eq!(rank_score(usize::MAX, 1.0), 0.0);
     // A NaN, which no score is, ranks as 0.
     assert_eq!(rank_score(0, f64::NAN), 0.5);
+}
+
+/// No documents: every `df` is 0.
+pub(super) struct NoStats;
+
+impl StatisticsProvider for NoStats {
+    fn doc_count(&self) -> u64 {
+        0
+    }
+    fn field(&self, _: crate::schema::FieldId) -> crate::stats::FieldTotals {
+        crate::stats::FieldTotals::default()
+    }
+    fn df(&self, _: crate::schema::FieldId, _: &[u8]) -> Result<u64, ReadError> {
+        Ok(0)
+    }
 }
