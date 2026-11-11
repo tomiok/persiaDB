@@ -111,6 +111,7 @@ fn step(query: Query, applied: &str) -> Step {
         query,
         applied: applied.into(),
         effective: None,
+        alternatives: None,
     }
 }
 

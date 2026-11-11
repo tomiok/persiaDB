@@ -417,3 +417,37 @@ fn a_query_without_a_match_or_text_skips_the_level() {
     );
     assert_eq!(by_step(&out), [(0, "g")]);
 }
+
+#[test]
+fn over_the_limits_l1_keeps_each_runs_first_alternatives_or_is_skipped() {
+    let db = database();
+    // `kids sneakers`: L0 is 4 terms (a word over 2 fields is 2). L1 is 10 of its own (`kids` 2, `sneakers` 2, the
+    // phrase `running shoes` 4, `trainers` 2) beside L0's 4, which it excludes: 14.
+    let compiled = compile("kids sneakers");
+    let limited = |max_terms| {
+        plan(1).with_limits(QueryLimits {
+            max_terms,
+            ..QueryLimits::default()
+        })
+    };
+    let out = search(&db, &compiled, &limited(14));
+    assert_eq!(out.relaxation.applied, ["synonyms"]);
+    assert_eq!(by_step(&out), [(1, "d")]);
+    // At 13, `sneakers` keeps its first alternative only, `running shoes`, which no document with `kids` holds. L2's
+    // step (its own 4, L0's 4, L1's 8) does not fit either.
+    let out = search(&db, &compiled, &limited(13));
+    let r = &out.relaxation;
+    assert_eq!(r.applied, ["synonyms:cut", "drop_terms:75%:skipped"]);
+    assert_eq!(r.level, RelaxLevel::Synonyms);
+    assert_eq!(r.effective.as_deref(), Some("kids sneakers"));
+    assert_eq!(by_step(&out), []);
+    // At 11, not even one alternative fits: L1 is skipped, so L2 does not exclude it, and fits.
+    let out = search(&db, &compiled, &limited(11));
+    assert_eq!(
+        out.relaxation.applied,
+        ["synonyms:skipped", "drop_terms:75%"]
+    );
+    let mut ids: Vec<&str> = by_step(&out).into_iter().map(|(_, id)| id).collect();
+    ids.sort_unstable();
+    assert_eq!(ids, ["d", "h"]);
+}

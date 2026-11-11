@@ -94,6 +94,17 @@ impl Expansion {
         Some(Self { units, must_not })
     }
 
+    /// How many alternatives each run has, in text order: what [`Self::query`]'s `keep` counts.
+    pub(crate) fn counts(&self) -> Vec<usize> {
+        self.units
+            .iter()
+            .filter_map(|u| match u {
+                Unit::Plain(_) => None,
+                Unit::Expanded { alternatives, .. } => Some(alternatives.len()),
+            })
+            .collect()
+    }
+
     /// The step's query with run `i` or one of its first `keep[i]` alternatives (all of them past the end of `keep`):
     /// a `bool` requiring each unit, with L0's excluded clauses, or the one unit alone.
     pub(crate) fn query(&self, keep: &[usize]) -> Query {
@@ -132,7 +143,8 @@ impl Expansion {
 
 /// L1 `synonyms` (SPEC §7.6, ROADMAP 8.2.1): one step, L0's query with every run of words that is a synonym term
 /// required as `should: [the run, alternatives...]` (any of them, the matches summed by BM25F). L0's excluded clauses
-/// stay excluded and are not expanded. Its `effective` text is L0's: every clause is kept.
+/// stay excluded and are not expanded. Its `effective` text is L0's: every clause is kept. Over the limits, the cascade
+/// drops alternatives, each run keeping the first in its order ([`Expansion::query`], ROADMAP 8.1.13).
 #[derive(Debug)]
 pub(crate) struct Synonyms;
 
@@ -148,6 +160,7 @@ impl LevelTransform for Synonyms {
             query: expansion.query(&[]),
             applied: "synonyms".to_owned(),
             effective: Some(compiled.effective()),
+            alternatives: Some(expansion),
         }])
     }
 }

@@ -50,6 +50,8 @@ use crate::stats::StatisticsProvider;
 mod drop_terms;
 mod synonyms;
 
+pub(crate) use synonyms::Expansion;
+
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
@@ -198,6 +200,9 @@ pub(crate) struct Step {
     /// The step's query as user text (SPEC §7.6 `effective`): `None` when the query was not compiled from text, which
     /// a level then has none to render.
     pub(crate) effective: Option<String>,
+    /// The synonym alternatives the step may drop to fit the limits (SPEC §7.1.3, ROADMAP 8.1.13): L1 builds its
+    /// query from them, and the cascade rebuilds it with fewer when it does not fit. `None` for any other level.
+    pub(crate) alternatives: Option<Expansion>,
 }
 
 /// Builds a level's steps (SPEC §7.6). Called only once the cascade reaches the level; no step skips the level.
@@ -219,6 +224,7 @@ impl LevelTransform for Exact {
             query: input.original.clone(),
             applied: String::new(),
             effective: input.compiled.map(Compiled::effective),
+            alternatives: None,
         }])
     }
 }

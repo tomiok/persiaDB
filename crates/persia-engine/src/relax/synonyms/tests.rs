@@ -78,6 +78,20 @@ fn each_run_is_required_as_itself_or_an_alternative_beside_l0s_other_clauses() {
     // The excluded clause stays excluded, and is not expanded.
     assert_eq!(b.must_not, root.must_not);
     assert!(b.should.is_empty() && b.filter.is_empty() && b.minimum_should_match == 0);
+    // What the cascade may cut: each run's alternatives, kept from the first.
+    let expansion = step.alternatives.unwrap();
+    assert_eq!(expansion.counts(), [1, 2]);
+    let Query::Bool(cut) = expansion.query(&[1, 1]) else {
+        panic!()
+    };
+    assert_eq!(
+        cut.must[2],
+        Query::Bool(BoolQuery {
+            should: should(&b.must[2])[..2].to_vec(),
+            ..BoolQuery::default()
+        })
+    );
+    assert_eq!(expansion.query(&[1, 2]), step.query);
 }
 
 #[test]

@@ -100,6 +100,52 @@ impl<'a> StepLimits<'a> {
         })
     }
 
+    /// A step that keeps fewer synonym alternatives to fit (SPEC §7.1.3, ROADMAP 8.1.13): `counts` are how many
+    /// alternatives each run has, and `build` the step's query keeping the first `keep[i]` of run `i`'s. Each run
+    /// keeps the most it can in that order (least important last), the longest lists cut first, none below 1, as
+    /// [`share`] cuts expansions: every list is cut to the highest level that fits, then, in run order, a list that
+    /// level cut takes one more where it still fits. `None` when one each does not fit, or there is no run.
+    ///
+    /// Each check is of a whole query, so this costs about `log2(longest list) + runs` checks.
+    pub(crate) fn cut_alternatives(
+        &self,
+        counts: &[usize],
+        build: impl Fn(&[usize]) -> Query,
+    ) -> Option<Query> {
+        if self.full || counts.is_empty() {
+            return None;
+        }
+        let at = |level: usize| -> Vec<usize> { counts.iter().map(|&n| n.min(level)).collect() };
+        let fits = |keep: &[usize]| self.check(&build(keep)).is_ok();
+        if !fits(&at(1)) {
+            return None;
+        }
+        // Fewer alternatives never use more of a limit, so whether a level fits is monotonic.
+        let (mut low, mut high) = (1, counts.iter().copied().max().unwrap_or(1));
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            if fits(&at(mid)) {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        let mut keep = at(low);
+        for (i, &n) in counts.iter().enumerate() {
+            if n > low
+                && let Some(kept) = keep.get_mut(i)
+            {
+                *kept += 1;
+                if !fits(&keep)
+                    && let Some(kept) = keep.get_mut(i)
+                {
+                    *kept -= 1;
+                }
+            }
+        }
+        Some(build(&keep))
+    }
+
     fn check(&self, query: &Query) -> Result<(), QueryError> {
         let mut usage = self.excluded;
         query.check(self.schema, &self.limits, &mut usage, 2)
@@ -257,6 +303,72 @@ mod tests {
             Ok(Fit::Cut(prefix(body, 1)))
         );
         assert_eq!(fitting.fit(&step), Ok(Fit::Skipped));
+    }
+
+    /// An L1-shaped step: per run, `should: [the run, keep[i] alternatives]`, each a term.
+    fn runs(field: FieldId, keep: &[usize]) -> Query {
+        Query::Bool(BoolQuery {
+            must: keep
+                .iter()
+                .map(|&k| {
+                    let run =
+                        std::iter::once("run".to_owned()).chain((0..k).map(|i| format!("t{i}")));
+                    any(run
+                        .map(|term| Query::Term(TermQuery { field, term }))
+                        .collect())
+                })
+                .collect(),
+            ..BoolQuery::default()
+        })
+    }
+
+    #[test]
+    fn synonym_alternatives_are_cut_the_longest_lists_first_keeping_their_first() {
+        let (schema, body) = schema();
+        // L0 is `match_all`, no term; the step has a term per run and one per alternative kept.
+        let cut = |max_terms: usize, counts: &[usize]| {
+            let fitting = StepLimits::new(&schema, limits(max_terms, 0), &Query::MatchAll).unwrap();
+            fitting
+                .cut_alternatives(counts, |keep| runs(body, keep))
+                .map(|q| match q {
+                    // Alternatives kept per run: its `should` less the run itself.
+                    Query::Bool(b) => b
+                        .must
+                        .iter()
+                        .map(|r| match r {
+                            Query::Bool(r) => r.should.len() - 1,
+                            _ => usize::MAX,
+                        })
+                        .collect::<Vec<_>>(),
+                    _ => Vec::new(),
+                })
+        };
+        // 10 terms: 2 for the runs, 8 alternatives: the longer list to 5, the shorter kept whole.
+        assert_eq!(cut(10, &[10, 3]), Some(vec![5, 3]));
+        assert_eq!(cut(8, &[10, 3]), Some(vec![3, 3]));
+        // 13 terms: 3 runs, 10 alternatives: every list at 3 is 9, and the one left goes to the first list cut.
+        assert_eq!(cut(13, &[10, 10, 3]), Some(vec![4, 3, 3]));
+        assert_eq!(cut(13, &[3, 10, 10]), Some(vec![3, 4, 3]));
+        // The floor is one each: below it, the step is skipped.
+        assert_eq!(cut(4, &[10, 10]), Some(vec![1, 1]));
+        assert_eq!(cut(3, &[10, 10]), None);
+        assert_eq!(cut(100, &[]), None);
+        // Exclusions over the limits leave room for nothing.
+        let full = StepLimits::new(&schema, limits(2, 0), &terms(body, 3)).unwrap();
+        assert_eq!(full.cut_alternatives(&[1], |keep| runs(body, keep)), None);
+        // Also when what overflowed does not add up (depth): L0 nests 4 deep under the root, the step 3.
+        let deep = QueryLimits {
+            max_depth: 4,
+            ..QueryLimits::default()
+        };
+        let nested = any(vec![any(vec![terms(body, 1)])]);
+        let full = StepLimits::new(&schema, deep, &nested).unwrap();
+        assert_eq!(full.cut_alternatives(&[1], |keep| runs(body, keep)), None);
+        let room = StepLimits::new(&schema, deep, &Query::MatchAll).unwrap();
+        assert!(
+            room.cut_alternatives(&[1], |keep| runs(body, keep))
+                .is_some()
+        );
     }
 
     #[test]
