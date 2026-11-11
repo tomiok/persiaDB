@@ -30,6 +30,7 @@ use crate::schema::{
     FieldId, FieldKind, KeywordOptions, Levels, RelaxationConfig, SchemaBuilder, TextOptions,
 };
 use crate::search::{FacetRequest, Projection, Pruning, RequestError, SearchPlan};
+use crate::segment::ReadError;
 use crate::wal::Durability;
 
 /// Builds fixed steps and counts its calls.
@@ -53,9 +54,9 @@ impl Stub {
 }
 
 impl LevelTransform for Stub {
-    fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
+    fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        self.steps.clone()
+        Ok(self.steps.clone())
     }
 }
 
@@ -473,13 +474,14 @@ fn explained_hits_add_up_to_their_scores_at_every_step() {
 }
 
 #[test]
-fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_now() {
+fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_one_term() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
-    // Every level of the collection's defaults, none of which builds a step before ROADMAP 8.2.
+    // Every level of the collection's defaults, none of which builds a step for one term: L2 skips it (ROADMAP
+    // 8.2.2.3), and the others wait on ROADMAP 8.2.
     let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
     assert!(relax.relaxes());
     let out = views
@@ -1058,10 +1060,10 @@ mod budget {
     }
 
     impl LevelTransform for Slow {
-        fn steps(&self, _input: &LevelInput<'_>) -> Vec<Step> {
+        fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
             self.calls.fetch_add(1, Ordering::Relaxed);
             self.clock.advance(self.by);
-            self.steps.clone()
+            Ok(self.steps.clone())
         }
     }
 
@@ -1443,12 +1445,12 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
         seen: Mutex<Vec<Option<String>>>,
     }
     impl LevelTransform for Reads {
-        fn steps(&self, input: &LevelInput<'_>) -> Vec<Step> {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
             self.seen
                 .lock()
                 .unwrap()
                 .push(input.compiled.map(|c| c.text.clone()));
-            self.steps.clone()
+            Ok(self.steps.clone())
         }
     }
 

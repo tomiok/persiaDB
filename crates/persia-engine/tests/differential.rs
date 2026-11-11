@@ -15,8 +15,10 @@
 //!    counts, and the contributions sum to its `tf~` (SPEC §7.7). Explaining every docid of a view in one pass
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
-//! 5. Relaxed with the collection's levels, none of which builds a step before ROADMAP 8.2, a search returns what
-//!    L0 alone returns, for a `min_results` the hits reach and one above the page (SPEC §7.6, ROADMAP 8.1.2).
+//! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
+//!    8.1.2, 8.2.2): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses, each
+//!    step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as a plain
+//!    search, when it has `min_results` hits.
 
 #![allow(
     clippy::unwrap_used,
@@ -274,6 +276,9 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
                 prop::collection::vec(inner.clone(), 0..2),
             )
                 .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not, minimum_should_match: 0 }),
+            // Several required clauses and no `should`: what L2 `drop_terms` relaxes (ROADMAP 8.2.2).
+            2 => (prop::collection::vec(inner.clone(), 2..6), prop::collection::vec(inner.clone(), 0..2))
+                .prop_map(|(must, must_not)| RefQuery::Bool { must, should: Vec::new(), must_not, minimum_should_match: 0 }),
             // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must`.
             // The count is drawn once the clauses are, so every value from 1 to one past them comes up.
             2 => (
@@ -704,8 +709,11 @@ fn check(
             }
         }
 
-        // Invariant 5: relaxed with the collection's levels, none of which builds a step yet (ROADMAP 8.2), a search
-        // is L0's, whether it has `min_results` hits or not; a `min_results` above the page counts from the top.
+        // Invariant 5: relaxed with the collection's levels, of which L2 `drop_terms` builds steps (ROADMAP 8.2.2), a
+        // search returns each step's matches the earlier steps lack, step by step, scored and ranked as the reference
+        // scores that step's query; L0 alone when it has `min_results` hits, and every step for a `min_results` above
+        // them all.
+        let steps = reference_steps(q, filter.is_some());
         for min_results in [1, 10_000] {
             let relax = RelaxPlan::new(
                 schema.relaxation(),
@@ -715,20 +723,95 @@ fn check(
                 },
             )
             .unwrap();
-            let exec = Execution::default().threads(Threads::Current);
+            let exec = Execution::default()
+                .threads(Threads::Current)
+                .budget_clock(Arc::new(ManualClock::new(0)));
             let relaxed = views
                 .search_relaxed(&query, &request, &relax, &exec)
                 .unwrap();
-            let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
-            prop_assert_eq!(bits(&hits), bits(&full));
-            prop_assert_eq!(relaxed.relaxation.level, RelaxLevel::Exact);
-            let page = SearchRequest {
-                limit: case.k,
-                ..SearchRequest::default()
+            // The reference cascade: each step's matches the earlier ones lack, until `min_results` are found.
+            let mut taken: Vec<&String> = Vec::new();
+            let mut built = Vec::new();
+            for (i, (step, _)) in steps.iter().enumerate() {
+                if i > 0 && taken.len() >= min_results as usize {
+                    break;
+                }
+                let matches: BTreeMap<&String, (f64, f64)> = if i == 0 {
+                    want.clone()
+                } else {
+                    live.iter()
+                        .filter(|(id, _)| !taken.contains(id))
+                        .filter_map(|(id, v)| corpus.eval(step, &v.doc).map(|s| (id, s)))
+                        .collect()
+                };
+                taken.extend(matches.keys().copied());
+                built.push(matches);
+            }
+            let applied: Vec<&str> = steps[1..built.len()]
+                .iter()
+                .map(|(_, l)| l.as_str())
+                .collect();
+            prop_assert_eq!(&relaxed.relaxation.applied, &applied, "{:?}", query);
+            let level = if built.len() > 1 {
+                RelaxLevel::DropTerms
+            } else {
+                RelaxLevel::Exact
             };
-            let relaxed = views.search_relaxed(&query, &page, &relax, &exec).unwrap();
-            let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
-            prop_assert_eq!(&bits(&hits)[..], &bits(&full)[..case.k.min(full.len())]);
+            prop_assert_eq!(relaxed.relaxation.level, level);
+            // Step order first, each step's hits its reference matches, within the tolerance, in the reference order.
+            prop_assert!(relaxed.hits.windows(2).all(|w| w[0].step <= w[1].step));
+            for (i, matches) in built.iter().enumerate() {
+                let hits: Vec<_> = relaxed.hits.iter().filter(|h| h.step == i).collect();
+                let ids: Vec<&str> = {
+                    let mut ids: Vec<&str> = hits.iter().map(|h| h.hit.document.id()).collect();
+                    ids.sort_unstable();
+                    ids
+                };
+                prop_assert_eq!(
+                    ids,
+                    matches.keys().map(|s| s.as_str()).collect::<Vec<_>>(),
+                    "step {} of {:?}",
+                    i,
+                    query
+                );
+                let reference: Vec<(f64, f64)> = hits
+                    .iter()
+                    .map(|h| matches[&h.hit.document.id().to_owned()])
+                    .collect();
+                for (h, (score, scale)) in hits.iter().zip(&reference) {
+                    prop_assert!(
+                        (h.hit.score - score).abs() <= EPSILON * scale.max(1.0),
+                        "step {}: {} vs reference {} for {:?}",
+                        i,
+                        h.hit.score,
+                        score,
+                        query
+                    );
+                }
+                for (a, (above, above_scale)) in reference.iter().enumerate() {
+                    for (below, below_scale) in reference.iter().skip(a + 1) {
+                        let tolerance = 2.0 * EPSILON * above_scale.max(*below_scale).max(1.0);
+                        prop_assert!(
+                            *above >= below - tolerance,
+                            "step {} out of order for {:?}",
+                            i,
+                            query
+                        );
+                    }
+                }
+            }
+            if built.len() == 1 {
+                // L0 alone ranks as a plain search.
+                let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
+                prop_assert_eq!(bits(&hits), bits(&full));
+                let page = SearchRequest {
+                    limit: case.k,
+                    ..SearchRequest::default()
+                };
+                let relaxed = views.search_relaxed(&query, &page, &relax, &exec).unwrap();
+                let hits: Vec<SearchHit> = relaxed.hits.into_iter().map(|h| h.hit).collect();
+                prop_assert_eq!(&bits(&hits)[..], &bits(&full)[..case.k.min(full.len())]);
+            }
         }
     }
     Ok(())
@@ -933,4 +1016,44 @@ proptest! {
         let (lo, hi) = (a.min(b), a.max(b));
         prop_assert!(quantized(lo) <= quantized(hi), "{} scores longer than {}", lo, hi);
     }
+}
+
+/// The steps of the collection's cascade for reference query `q` (SPEC §7.6), with what each applied: L0, then L2
+/// `drop_terms` over the `must` clauses of a root `bool` without `should` (and of a query without a filter, which
+/// wraps it): `minimum_should_match` of them at 75% and 50% of the `n` terms (`max(1, ⌊p · n / 100⌋)`) and at 1, each
+/// count once and below L0's `n`, with the root's `must_not`. Written from the SPEC, not from the engine's ladder.
+fn reference_steps(q: &RefQuery, filtered: bool) -> Vec<(RefQuery, String)> {
+    let mut steps = vec![(q.clone(), String::new())];
+    let RefQuery::Bool {
+        must,
+        should,
+        must_not,
+        minimum_should_match: 0,
+    } = q
+    else {
+        return steps;
+    };
+    if filtered || !should.is_empty() {
+        return steps;
+    }
+    let n = must.len();
+    let mut previous = n;
+    for (label, count) in [
+        ("75%", (n * 75 / 100).max(1)),
+        ("50%", (n * 50 / 100).max(1)),
+        ("1", 1),
+    ] {
+        if count == previous || n < 2 {
+            continue;
+        }
+        previous = count;
+        let step = RefQuery::Bool {
+            must: Vec::new(),
+            should: must.clone(),
+            must_not: must_not.clone(),
+            minimum_should_match: count,
+        };
+        steps.push((step, format!("drop_terms:{label}")));
+    }
+    steps
 }

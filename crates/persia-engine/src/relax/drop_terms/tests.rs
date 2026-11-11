@@ -1,4 +1,9 @@
-#![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::float_cmp)] // Tests: inputs are fixed; IDFs are exact.
+#![allow(
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::float_cmp,
+    clippy::panic
+)] // Tests: inputs are fixed; IDFs are exact.
 
 use std::collections::BTreeMap;
 
@@ -176,4 +181,258 @@ fn query_idf_reports_a_df_it_cannot_read() {
         ..BoolQuery::default()
     });
     assert!(query_idf(&nested, &Broken).is_err());
+}
+
+#[test]
+fn the_ladder_counts_each_percentage_once_below_l0() {
+    // SPEC §7.6: `max(1, ⌊p · n / 100⌋)` for 75% and 50%, then 1; a count that repeats the previous (L0's `n` first) is
+    // not built.
+    assert_eq!(ladder(0), []);
+    assert_eq!(ladder(1), []);
+    assert_eq!(ladder(2), [("75%", 1)]);
+    assert_eq!(ladder(3), [("75%", 2), ("50%", 1)]);
+    assert_eq!(ladder(4), [("75%", 3), ("50%", 2), ("1", 1)]);
+    assert_eq!(ladder(5), [("75%", 3), ("50%", 2), ("1", 1)]);
+    assert_eq!(ladder(8), [("75%", 6), ("50%", 4), ("1", 1)]);
+    for n in 0..200 {
+        let steps = ladder(n);
+        let counts: Vec<usize> = steps.iter().map(|&(_, c)| c).collect();
+        assert!(counts.windows(2).all(|w| w[0] > w[1]), "{n}: {counts:?}");
+        assert!(counts.iter().all(|&c| 1 <= c && c < n), "{n}: {counts:?}");
+        assert_eq!(counts.last().copied(), (n >= 2).then_some(1), "{n}");
+        assert_eq!(
+            counts.first().copied(),
+            (n >= 2).then(|| (n * 3 / 4).max(1)),
+            "{n}"
+        );
+    }
+}
+
+mod steps {
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::*;
+    use crate::query::{DefaultFields, Filter, FilterValue, QueryCompiler, QueryLimits};
+    use crate::relax::tests::NoStats;
+    use crate::schema::{
+        AnalyzerRef, CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    };
+
+    /// `title` (standard), `body` (en) and `brand` (keyword).
+    fn schema() -> CollectionSchema {
+        SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .field(
+                "body",
+                FieldKind::Text(TextOptions {
+                    analyzer: AnalyzerRef::builtin("en").unwrap(),
+                    ..TextOptions::default()
+                }),
+            )
+            .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+            .build()
+            .unwrap()
+    }
+
+    fn title() -> FieldId {
+        schema().field("title").unwrap().id()
+    }
+
+    fn compile(text: &str) -> Compiled {
+        let schema = schema();
+        let fields = DefaultFields::parse(&schema, &["title"]).unwrap();
+        QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
+            .unwrap()
+            .compile(text, &fields, &QueryLimits::default())
+    }
+
+    fn steps(compiled: &Compiled, stats: &dyn StatisticsProvider) -> Vec<Step> {
+        let input = LevelInput {
+            original: &compiled.query,
+            compiled: Some(compiled),
+            stats,
+        };
+        DropTerms.steps(&input).unwrap()
+    }
+
+    fn combined(term: &str) -> Query {
+        Query::Combined(CombinedQuery {
+            fields: vec![WeightedTerm {
+                field: title(),
+                term: term.into(),
+                weight: 1.0,
+            }],
+        })
+    }
+
+    fn bool_of(query: &Query) -> &BoolQuery {
+        match query {
+            Query::Bool(b) => b,
+            q => panic!("not a bool: {q:?}"),
+        }
+    }
+
+    fn labels(steps: &[Step]) -> Vec<(&str, u32, Option<&str>)> {
+        steps
+            .iter()
+            .map(|s| match &s.query {
+                Query::Bool(b) => (
+                    s.applied.as_str(),
+                    b.minimum_should_match,
+                    s.effective.as_deref(),
+                ),
+                q => panic!("not a bool: {q:?}"),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn each_step_requires_its_count_of_the_terms_most_important_first() {
+        // `shoes` is the most common, `red` next, `purple` in no document (the rarest).
+        let stats = Stats(BTreeMap::from([
+            ((title().get(), "red"), 20),
+            ((title().get(), "shoes"), 60),
+        ]));
+        let compiled = compile("red purple shoes -blue");
+        let steps = steps(&compiled, &stats);
+        assert_eq!(
+            labels(&steps),
+            [
+                ("drop_terms:75%", 2, Some("red purple -blue")),
+                ("drop_terms:50%", 1, Some("purple -blue")),
+            ]
+        );
+        for step in &steps {
+            let b = bool_of(&step.query);
+            // Any `count` of the terms, most important first; the excluded clause stays excluded.
+            assert_eq!(
+                b.should,
+                [combined("purple"), combined("red"), combined("shoes")]
+            );
+            assert_eq!(b.must, []);
+            assert_eq!(b.must_not, [combined("blue")]);
+            assert_eq!(b.filter, []);
+        }
+    }
+
+    #[test]
+    fn a_stopword_drops_before_a_rarer_term_and_ties_drop_the_later_term() {
+        // `the` is a stopword of `body` (en), so of a field it searches; in no title, it is the rarest.
+        let schema = schema();
+        let all = DefaultFields::all(&schema);
+        let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
+            .unwrap()
+            .compile("the red hat", &all, &QueryLimits::default());
+        assert!(compiled.clauses[0].stopword);
+        let stats = Stats(BTreeMap::from([
+            ((title().get(), "red"), 20),
+            ((title().get(), "hat"), 20),
+        ]));
+        // `red` and `hat` are as rare: the later, `hat`, drops first.
+        assert_eq!(
+            labels(&steps(&compiled, &stats)),
+            [
+                ("drop_terms:75%", 2, Some("red hat")),
+                ("drop_terms:50%", 1, Some("red")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_multi_part_clause_is_one_term_and_the_root_keeps_its_filters() {
+        // `e-mail` is one clause of two parts: one term, kept whole.
+        let compiled = compile("e-mail red");
+        assert_eq!(compiled.clauses[0].parts, 0..2);
+        let stats = Stats(BTreeMap::from([((title().get(), "red"), 99)]));
+        let steps = steps(&compiled, &stats);
+        assert_eq!(labels(&steps), [("drop_terms:75%", 1, Some("e-mail"))]);
+        let b = bool_of(&steps[0].query);
+        assert_eq!(
+            b.should,
+            [
+                Query::Bool(BoolQuery {
+                    must: vec![combined("e"), combined("mail")],
+                    ..BoolQuery::default()
+                }),
+                combined("red"),
+            ]
+        );
+        // A programmatic root `bool` keeps its `must_not` and `filter` clauses beside the terms, and states no text.
+        let filter = Filter::Term {
+            field: schema().field("brand").unwrap().id(),
+            value: FilterValue::Keyword("acme".into()),
+        };
+        let query = Query::Bool(BoolQuery {
+            must: vec![combined("red"), combined("hat"), combined("shoes")],
+            must_not: vec![combined("blue")],
+            filter: vec![filter.clone()],
+            ..BoolQuery::default()
+        });
+        let input = LevelInput {
+            original: &query,
+            compiled: None,
+            stats: &NoStats,
+        };
+        let steps = DropTerms.steps(&input).unwrap();
+        // Every IDF ties: the later terms drop first.
+        assert_eq!(
+            labels(&steps),
+            [("drop_terms:75%", 2, None), ("drop_terms:50%", 1, None)]
+        );
+        let b = bool_of(&steps[1].query);
+        assert_eq!(
+            b.should,
+            [combined("red"), combined("hat"), combined("shoes")]
+        );
+        assert_eq!(
+            (&b.must_not[..], &b.filter[..]),
+            (&[combined("blue")][..], &[filter][..])
+        );
+    }
+
+    #[test]
+    fn a_programmatic_bool_with_should_clauses_is_not_relaxed() {
+        for query in [
+            Query::Bool(BoolQuery {
+                must: vec![combined("red"), combined("hat")],
+                should: vec![combined("shoes")],
+                ..BoolQuery::default()
+            }),
+            Query::Bool(BoolQuery {
+                should: vec![combined("red"), combined("hat"), combined("shoes")],
+                minimum_should_match: 3,
+                ..BoolQuery::default()
+            }),
+        ] {
+            let input = LevelInput {
+                original: &query,
+                compiled: None,
+                stats: &NoStats,
+            };
+            assert_eq!(DropTerms.steps(&input).unwrap(), [], "{query:?}");
+        }
+    }
+
+    #[test]
+    fn a_df_it_cannot_read_is_an_error() {
+        struct Broken;
+        impl StatisticsProvider for Broken {
+            fn doc_count(&self) -> u64 {
+                1
+            }
+            fn field(&self, _: FieldId) -> FieldTotals {
+                FieldTotals::default()
+            }
+            fn df(&self, field: FieldId, _: &[u8]) -> Result<u64, ReadError> {
+                Err(ReadError::UnknownField { field })
+            }
+        }
+        let compiled = compile("red hat");
+        let input = LevelInput {
+            original: &compiled.query,
+            compiled: Some(&compiled),
+            stats: &Broken,
+        };
+        assert!(DropTerms.steps(&input).is_err());
+    }
 }

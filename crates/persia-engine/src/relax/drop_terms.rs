@@ -3,14 +3,11 @@
 //! A *term* of L2 is a required clause of the query: of a compiled query, a clause of its text that is not excluded
 //! (`-`), whatever its parts (a phrase, a word split in two, a word over several fields); of a programmatic one, a
 //! `must` clause of its root `bool`. Terms are dropped least important first ([`Importance`], ROADMAP 8.2.2.1).
-#![expect(
-    dead_code,
-    reason = "the ladder that orders its terms by importance is ROADMAP 8.2.2.2"
-)]
 
 use std::cmp::Ordering;
 
-use crate::query::{BoolQuery, Query};
+use super::{LevelInput, LevelTransform, Step};
+use crate::query::{BoolQuery, Compiled, Filter, Query};
 use crate::score::idf;
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
@@ -97,6 +94,203 @@ fn bool_idf(query: &BoolQuery, stats: &dyn StatisticsProvider) -> Result<f64, Re
         best = best.max(query_idf(q, stats)?);
     }
     Ok(sum + best)
+}
+
+/// L2's percentages of the `n` terms (SPEC §7.6), after the 100% that is L0 itself (every term required), and the
+/// last step's one term.
+const LADDER: [(&str, Rung); 3] = [
+    ("75%", Rung::Percent(75)),
+    ("50%", Rung::Percent(50)),
+    ("1", Rung::One),
+];
+
+#[derive(Debug, Clone, Copy)]
+enum Rung {
+    Percent(usize),
+    One,
+}
+
+/// The ladder of `n` terms: each step's label and its count, `max(1, ⌊p · n / 100⌋)` of the terms (rounded down, as
+/// Elasticsearch does). A count that repeats the previous step's is not built again, and L0 is the step before the
+/// first, at `n`: 100% is L0's query, which every later step excludes, so it would match nothing.
+pub(crate) fn ladder(n: usize) -> Vec<(&'static str, usize)> {
+    let mut previous = n;
+    let mut steps = Vec::new();
+    for (label, rung) in LADDER {
+        let count = match rung {
+            Rung::Percent(p) => (n.saturating_mul(p) / 100).max(1),
+            Rung::One => 1,
+        };
+        if count < previous {
+            steps.push((label, count));
+            previous = count;
+        }
+    }
+    steps
+}
+
+/// A term of L2: its query, the clause of the user text it compiled from (`None` for a programmatic query), and
+/// whether that clause is a stopword.
+#[derive(Debug, Clone)]
+struct Term {
+    query: Query,
+    clause: Option<usize>,
+    stopword: bool,
+}
+
+/// L0's query as L2 reads it: its terms, and the `must_not` and `filter` clauses beside them, which every step keeps.
+#[derive(Debug)]
+struct Root<'a> {
+    terms: Vec<Term>,
+    must_not: &'a [Query],
+    filter: &'a [Filter],
+}
+
+impl<'a> Root<'a> {
+    /// The terms of `input`'s query. `None` when L2 has no terms to drop in it: a programmatic `bool` with `should`
+    /// clauses or a `minimum_should_match` already (its `must` are not all of what it requires), or a compilation
+    /// whose clauses do not index its query.
+    fn of(input: &LevelInput<'a>) -> Option<Self> {
+        let (must_not, filter): (&[Query], &[Filter]) = match input.original {
+            Query::Bool(root) => (&root.must_not, &root.filter),
+            _ => (&[], &[]),
+        };
+        let terms = match input.compiled {
+            Some(compiled) => Self::compiled(compiled)?,
+            None => match input.original {
+                Query::Bool(root) if root.should.is_empty() && root.minimum_should_match == 0 => {
+                    root.must
+                        .iter()
+                        .map(|q| Term {
+                            query: q.clone(),
+                            clause: None,
+                            stopword: false,
+                        })
+                        .collect()
+                }
+                Query::Bool(_) => return None,
+                Query::MatchAll => Vec::new(),
+                query => vec![Term {
+                    query: query.clone(),
+                    clause: None,
+                    stopword: false,
+                }],
+            },
+        };
+        Some(Self {
+            terms,
+            must_not,
+            filter,
+        })
+    }
+
+    /// The required clauses of `compiled`, each one term of its parts.
+    fn compiled(compiled: &Compiled) -> Option<Vec<Term>> {
+        let mut terms = Vec::new();
+        for (index, clause) in compiled.clauses.iter().enumerate() {
+            if clause.negated {
+                continue;
+            }
+            let query = match compiled.parts(index)? {
+                [one] => one.clone(),
+                parts => Query::Bool(BoolQuery {
+                    must: parts.to_vec(),
+                    ..BoolQuery::default()
+                }),
+            };
+            terms.push(Term {
+                query,
+                clause: Some(index),
+                stopword: clause.stopword,
+            });
+        }
+        Some(terms)
+    }
+}
+
+/// L2 `drop_terms` (SPEC §7.6, ROADMAP 8.2.2.2): the `minimum_should_match` ladder over L0's terms.
+///
+/// Each step requires `count` of the `n` terms ([`ladder`]), any of them: its query is a `bool` whose `should` are
+/// the terms, most important first ([`Importance`]), with that `minimum_should_match`, and L0's `must_not` and
+/// `filter` clauses. Scores are BM25F's over the terms a document matches, so the rarer terms it holds rank it. The
+/// step's `effective` text is the clauses it keeps: the `count` most important terms and every excluded clause, in
+/// text order. The terms dropped first are the least important, though a hit may hold any `count` of them.
+#[derive(Debug)]
+pub(crate) struct DropTerms;
+
+impl LevelTransform for DropTerms {
+    fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+        let Some(Root {
+            terms,
+            must_not,
+            filter,
+        }) = Root::of(input)
+        else {
+            return Ok(Vec::new());
+        };
+        let rungs = ladder(terms.len());
+        if rungs.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut importance = Vec::with_capacity(terms.len());
+        for (position, term) in terms.iter().enumerate() {
+            importance.push(Importance {
+                stopword: term.stopword,
+                idf: query_idf(&term.query, input.stats)?,
+                position,
+            });
+        }
+        // Most important first.
+        let mut kept = drop_order(&importance);
+        kept.reverse();
+        let should: Vec<Query> = kept
+            .iter()
+            .filter_map(|&i| terms.get(i).map(|t| t.query.clone()))
+            .collect();
+        let mut steps = Vec::with_capacity(rungs.len());
+        for (label, count) in rungs {
+            let Ok(minimum_should_match) = u32::try_from(count) else {
+                continue;
+            };
+            let query = Query::Bool(BoolQuery {
+                should: should.clone(),
+                must_not: must_not.to_vec(),
+                filter: filter.to_vec(),
+                minimum_should_match,
+                ..BoolQuery::default()
+            });
+            let effective = input.compiled.map(|compiled| {
+                let keeps: Vec<usize> = kept
+                    .iter()
+                    .take(count)
+                    .filter_map(|&i| terms.get(i).and_then(|t| t.clause))
+                    .collect();
+                effective(compiled, &keeps)
+            });
+            steps.push(Step {
+                query,
+                applied: format!("drop_terms:{label}"),
+                effective,
+            });
+        }
+        Ok(steps)
+    }
+}
+
+/// The text of the clauses of `compiled` a step keeps (SPEC §7.6 `effective`): those in `kept` and every excluded one,
+/// in text order, one space apart, as [`Compiled::effective`] renders all of them.
+fn effective(compiled: &Compiled, kept: &[usize]) -> String {
+    let mut text = String::new();
+    for (index, clause) in compiled.clauses.iter().enumerate() {
+        if !clause.negated && !kept.contains(&index) {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        text.push_str(compiled.source(index).unwrap_or(""));
+    }
+    text
 }
 
 #[cfg(test)]
