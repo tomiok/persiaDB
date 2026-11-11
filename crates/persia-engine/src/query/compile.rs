@@ -5,10 +5,7 @@ use std::collections::BTreeMap;
 use std::ops::Range;
 use std::sync::Arc;
 
-use persia_analysis::{
-    Analyzer, AnalyzerRegistry, ENGLISH_STOPWORDS, FRENCH_STOPWORDS, GERMAN_STOPWORDS,
-    ITALIAN_STOPWORDS, PORTUGUESE_STOPWORDS, SPANISH_STOPWORDS, TokenStream,
-};
+use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
 
 use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaHash};
 use crate::segment::MAX_TERM_LEN;
@@ -179,10 +176,11 @@ pub struct CompiledClause {
     /// Its parts, as indexes into the root's `must` (or `must_not` when [`Self::negated`]); [`Compiled::parts`]
     /// reads them. A word that splits into several spans has several parts; an excluded clause has one.
     pub parts: Range<usize>,
-    /// Whether its word is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): lowercased, it
-    /// is in the stopword list of the language of one of those fields' analyzers (`en`, `es`, `pt`, `fr`, `de`, `it`;
-    /// other analyzers have no language). A field whose analyzer removes the word leaves it out of the clause's
-    /// parts, but not out of this check: `the` over a `standard` title and an `en` body is a stopword.
+    /// Whether it is a stopword of a field it searches (SPEC §7.6, L2 drops such terms first): a default field whose
+    /// analyzer has a language (`en`, `es`, `pt`, `fr`, `de`, `it`; other analyzers have none) analyzes it to no
+    /// token, as that language's stopword filter removes its words after normalizing them (`The`, `the,`, `ｔｈｅ`).
+    /// Another field keeps it in the clause's parts: `the` over a `standard` title and an `en` body is a stopword. A
+    /// `field:` clause is never one: the field it names would leave nothing to compile.
     pub stopword: bool,
 }
 
@@ -241,8 +239,8 @@ pub struct QueryCompiler {
     schema: CollectionSchema,
     /// By field id; `None` for fields that are not `text`.
     analyzers: Vec<Option<Arc<Analyzer>>>,
-    /// By field id: the stopword list of the field analyzer's language, empty without one.
-    stopwords: Vec<&'static [&'static str]>,
+    /// By field id: whether the field's analyzer has a language, whose stopwords it removes.
+    languages: Vec<bool>,
 }
 
 impl std::fmt::Debug for QueryCompiler {
@@ -282,29 +280,18 @@ impl QueryCompiler {
                 _ => Ok(None),
             })
             .collect::<Result<_, _>>()?;
-        let stopwords = schema
+        let languages = schema
             .fields()
             .iter()
             .map(|field| match field.kind() {
-                FieldKind::Text(options) => language_stopwords(options.analyzer.name()),
-                _ => &[],
+                FieldKind::Text(options) => has_language(options.analyzer.name()),
+                _ => false,
             })
             .collect();
         Ok(Self {
             schema: schema.clone(),
             analyzers,
-            stopwords,
-        })
-    }
-
-    /// Whether `word` is a stopword of one of `fields` ([`CompiledClause::stopword`]).
-    fn is_stopword(&self, word: &str, mut fields: impl Iterator<Item = FieldId>) -> bool {
-        let lower = word.to_lowercase();
-        fields.any(|id| {
-            usize::try_from(id.get())
-                .ok()
-                .and_then(|i| self.stopwords.get(i))
-                .is_some_and(|list| list.contains(&lower.as_str()))
+            languages,
         })
     }
 
@@ -355,7 +342,7 @@ impl QueryCompiler {
             );
         }
         for (clause, span) in clause_spans(text, &self.schema) {
-            let parts = self.clause(clause, fields, &mut tokens);
+            let (parts, stopword) = self.clause(clause, fields, &mut tokens);
             let part = match (clause.negated, parts.len()) {
                 (_, 0) => continue,
                 (false, _) | (true, 1) => parts,
@@ -363,10 +350,6 @@ impl QueryCompiler {
                     must: parts,
                     ..BoolQuery::default()
                 })],
-            };
-            let stopword = match clause.field {
-                Some(id) => self.is_stopword(clause.text, std::iter::once(id)),
-                None => self.is_stopword(clause.text, fields.fields().iter().map(|&(id, _)| id)),
             };
             if shallow {
                 // Promote the depth-1 clause under a root bool and count `part` beside it.
@@ -439,35 +422,47 @@ impl QueryCompiler {
         finish(query, truncated, text, limits, clauses)
     }
 
-    /// The queries a clause requires (all of them), or none when it analyzes to no token.
+    /// The queries a clause requires (all of them), or none when it analyzes to no token, and whether it is a stopword
+    /// ([`CompiledClause::stopword`]).
     fn clause(
         &self,
         clause: Clause<'_>,
         fields: &DefaultFields,
         tokens: &mut TokenStream,
-    ) -> Vec<Query> {
+    ) -> (Vec<Query>, bool) {
         if let Some(field) = clause.field {
-            return self
-                .field_clause(field, clause.text, tokens)
-                .into_iter()
-                .collect();
+            let parts = self.field_clause(field, clause.text, tokens);
+            return (parts.into_iter().collect(), false);
         }
+        let mut stopword = false;
         let per_field: Vec<FieldTokens> = fields
             .fields()
             .iter()
             .filter_map(|&(id, weight)| {
                 let tokens = self.analyzed(id, clause.text, tokens)?;
-                (!tokens.is_empty()).then_some(FieldTokens { id, weight, tokens })
+                if tokens.is_empty() {
+                    stopword |= self.has_language(id);
+                    return None;
+                }
+                Some(FieldTokens { id, weight, tokens })
             })
             .collect();
         if !clause.phrase || per_field.iter().all(|f| f.tokens.len() <= 1) {
-            return word(per_field);
+            return (word(per_field), stopword);
         }
         let should: Vec<Query> = per_field
             .into_iter()
             .filter_map(|f| self.text_query(f.id, f.tokens))
             .collect();
-        one_of(should).into_iter().collect()
+        (one_of(should).into_iter().collect(), stopword)
+    }
+
+    /// Whether text field `id`'s analyzer has a language.
+    fn has_language(&self, id: FieldId) -> bool {
+        usize::try_from(id.get())
+            .ok()
+            .and_then(|i| self.languages.get(i))
+            .is_some_and(|&language| language)
     }
 
     /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms ([`Self::text_query`]).
@@ -674,18 +669,10 @@ fn one_of(mut alternatives: Vec<Query>) -> Option<Query> {
     }
 }
 
-/// The stopword list of built-in analyzer `name`'s language (SPEC §6.3.3), empty for an analyzer without one: only the
-/// language analyzers name a language, and no other analyzer may take their names (SPEC §6.3).
-fn language_stopwords(name: &str) -> &'static [&'static str] {
-    match name {
-        "en" => ENGLISH_STOPWORDS,
-        "es" => SPANISH_STOPWORDS,
-        "pt" => PORTUGUESE_STOPWORDS,
-        "fr" => FRENCH_STOPWORDS,
-        "de" => GERMAN_STOPWORDS,
-        "it" => ITALIAN_STOPWORDS,
-        _ => &[],
-    }
+/// Whether built-in analyzer `name` has a language (SPEC §6.3.3), whose stopwords every version of it removes: only the
+/// language analyzers name one, and no other analyzer may take their names (SPEC §6.3).
+fn has_language(name: &str) -> bool {
+    matches!(name, "en" | "es" | "pt" | "fr" | "de" | "it")
 }
 
 /// Whether a term may be in a term dictionary (SPEC §5.3.1).

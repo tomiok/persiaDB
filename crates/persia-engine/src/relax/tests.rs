@@ -242,7 +242,7 @@ fn input_query() -> (CollectionSchema, Query) {
 }
 
 #[test]
-fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_yet() {
+fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
     let (_, query) = input_query();
     let input = LevelInput {
         original: &query,

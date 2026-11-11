@@ -1612,10 +1612,41 @@ fn compiled_clauses_flag_stopwords_of_the_fields_they_search() {
         flags("title:the red", &all),
         owned(&[("title:the", false), ("red", false)])
     );
+    // The analyzer normalizes before it removes a stopword: punctuation, compatibility forms and case do not hide one.
+    assert_eq!(
+        flags("the, ｔｈｅ THE.", &all),
+        owned(&[("the,", true), ("ｔｈｅ", true), ("THE.", true)])
+    );
     // A keyword field has no analyzer; a phrase of several words is not one stopword; other languages' lists do not
     // apply (`con` is Spanish).
     assert_eq!(
         flags("brand:the \"the end\" con", &all),
         owned(&[("brand:the", false), ("\"the end\"", false), ("con", false)])
     );
+}
+
+/// SPEC §7.1.1: only a field with a language makes a clause a stopword. A `standard` field also analyzes `—` to no
+/// token, but `—` is not a stopword: a `whitespace` field keeps it, and neither field has a language.
+#[test]
+fn a_field_without_a_language_flags_no_stopword() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "raw",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("whitespace").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let compiled = compiler(&schema).compile(
+        "— red",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let flags: Vec<(&str, bool)> = (0..compiled.clauses.len())
+        .map(|i| (compiled.source(i).unwrap(), compiled.clauses[i].stopword))
+        .collect();
+    assert_eq!(flags, [("—", false), ("red", false)]);
 }

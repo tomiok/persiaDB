@@ -92,7 +92,7 @@ proptest! {
         prop_assert_eq!(sorted, (0..terms.len()).collect::<Vec<_>>());
         for w in order.windows(2) {
             let (a, b) = (terms[w[0]], terms[w[1]]);
-            prop_assert_eq!(a.cmp(&b), Ordering::Less, "{:?} before {:?}", a, b);
+            prop_assert_eq!(a.compare(&b), Ordering::Less, "{:?} before {:?}", a, b);
             prop_assert!(a.stopword || !b.stopword, "a stopword after a term that is not one");
             if a.stopword == b.stopword {
                 prop_assert!(a.idf < b.idf || (a.idf == b.idf && a.position > b.position));
@@ -549,4 +549,144 @@ mod single_term {
             assert_eq!(steps(&query, None), (Vec::new(), 0), "{query:?}");
         }
     }
+}
+
+/// Over random user text: every step of L2 is valid, requires a decreasing count of all the required clauses, keeps
+/// L0's excluded clauses, and renders as text whose clauses are L0's, in order, `count` of them required.
+mod random_text {
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::*;
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+    use crate::schema::{AnalyzerRef, FieldKind, SchemaBuilder, TextOptions};
+
+    fn clause() -> impl Strategy<Value = String> {
+        let word = prop::sample::select(vec![
+            "red", "the", "shoes", "e-mail", "hat", "and", "blue", "running",
+        ]);
+        (
+            any::<bool>(),
+            prop::option::of(prop::sample::select(vec!["title:", "body:"])),
+            prop::collection::vec(word, 1..3),
+        )
+            .prop_map(|(negated, field, words)| {
+                let body = if words.len() > 1 {
+                    format!("\"{}\"", words.join(" "))
+                } else {
+                    words.concat()
+                };
+                format!(
+                    "{}{}{body}",
+                    if negated { "-" } else { "" },
+                    field.unwrap_or("")
+                )
+            })
+    }
+
+    proptest! {
+        #[test]
+        fn every_step_relaxes_l0_and_renders_its_clauses(
+            clauses in prop::collection::vec(clause(), 0..8),
+            dfs in prop::collection::vec(0_u64..100, 8),
+        ) {
+            let schema = SchemaBuilder::new("c")
+                .field("title", FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() }))
+                .field("body", FieldKind::Text(TextOptions {
+                    analyzer: AnalyzerRef::builtin("en").unwrap(),
+                    ..TextOptions::default()
+                }))
+                .build()
+                .unwrap();
+            let query_compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+            let fields = DefaultFields::all(&schema);
+            let compile = |text: &str| query_compiler.compile(text, &fields, &QueryLimits::default());
+            let text = clauses.join(" ");
+            let compiled = compile(&text);
+            // Each word's `df` drawn per word, the same in every field.
+            let words = ["red", "the", "shoes", "e", "mail", "hat", "and", "blue", "running", "shoe", "run"];
+            let stats = Stats(
+                words.iter().zip(dfs.iter().cycle()).flat_map(|(w, df)| {
+                    schema.fields().iter().map(move |f| ((f.id().get(), *w), *df))
+                }).collect(),
+            );
+            let input = LevelInput { original: &compiled.query, compiled: Some(&compiled), stats: &stats };
+            let steps = DropTerms.steps(&input).unwrap();
+            let required = compiled.clauses.iter().filter(|c| !c.negated).count();
+            let negated = compiled.clauses.len() - required;
+            prop_assert_eq!(steps.len(), ladder(required).len());
+            let l0_must_not = match &compiled.query {
+                Query::Bool(b) => b.must_not.clone(),
+                _ => Vec::new(),
+            };
+            let sources: Vec<&str> = (0..compiled.clauses.len()).filter_map(|i| compiled.source(i)).collect();
+            let mut previous = required;
+            for step in &steps {
+                step.query.validate(&schema, &QueryLimits::UNLIMITED).unwrap();
+                let Query::Bool(b) = &step.query else {
+                    panic!("not a bool: {:?}", step.query)
+                };
+                let count = b.minimum_should_match as usize;
+                prop_assert!(1 <= count && count < previous, "{} after {}", count, previous);
+                previous = count;
+                prop_assert_eq!(b.should.len(), required);
+                prop_assert_eq!(&b.must_not, &l0_must_not);
+                prop_assert!(b.must.is_empty() && b.filter.is_empty());
+                // The text recompiles to `count` required clauses and every excluded one, each one of L0's, in order.
+                let effective = step.effective.as_deref().unwrap();
+                let again = compile(effective);
+                prop_assert_eq!(again.clauses.iter().filter(|c| !c.negated).count(), count, "{:?}", effective);
+                prop_assert_eq!(again.clauses.iter().filter(|c| c.negated).count(), negated);
+                let mut rest = sources.iter();
+                for i in 0..again.clauses.len() {
+                    let source = again.source(i).unwrap();
+                    prop_assert!(rest.any(|s| *s == source), "{:?} not in order in {:?}", source, text);
+                }
+            }
+        }
+    }
+}
+
+/// A compiled query whose root has `should` clauses (added since it compiled: the compiler builds none) is not relaxed:
+/// L2 would drop requirements it does not know.
+#[test]
+fn a_compiled_root_changed_to_hold_should_clauses_is_not_relaxed() {
+    use persia_analysis::AnalyzerRegistry;
+
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+    use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
+
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let mut compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "red hat",
+            &DefaultFields::all(&schema),
+            &QueryLimits::default(),
+        );
+    let input = |compiled: &Compiled| {
+        DropTerms
+            .steps(&LevelInput {
+                original: &compiled.query,
+                compiled: Some(compiled),
+                stats: &crate::relax::tests::NoStats,
+            })
+            .unwrap()
+            .len()
+    };
+    assert_eq!(input(&compiled), 1);
+    let root = |compiled: &mut Compiled| match &mut compiled.query {
+        Query::Bool(root) => std::mem::take(root),
+        q => panic!("two clauses compile to a bool: {q:?}"),
+    };
+    let mut changed = root(&mut compiled);
+    changed.should.push(term(0, "shoes"));
+    compiled.query = Query::Bool(changed.clone());
+    assert_eq!(input(&compiled), 0);
+    changed.should.clear();
+    changed.minimum_should_match = 1;
+    compiled.query = Query::Bool(changed);
+    assert_eq!(input(&compiled), 0);
 }

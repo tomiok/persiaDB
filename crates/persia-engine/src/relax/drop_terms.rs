@@ -17,12 +17,12 @@ use crate::stats::StatisticsProvider;
 /// Importance compares lexicographically, with no weights to tune: a stopword is less important than any other term,
 /// then a lower IDF is less important, then a later position in the query (what a user types last tends to qualify
 /// what came first: `red running shoes` keeps `shoes` over `red` when they are as rare).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) struct Importance {
     /// Whether the term is a stopword of a field it searches ([`crate::query::CompiledClause::stopword`]). A
     /// programmatic query's terms are not: it has no text to read the word from.
     pub(crate) stopword: bool,
-    /// The term's IDF as BM25F scores it ([`query_idf`]).
+    /// The term's IDF, about as BM25F scores it ([`query_idf`]).
     pub(crate) idf: f64,
     /// Its position among the query's terms, from 0.
     pub(crate) position: usize,
@@ -31,7 +31,7 @@ pub(crate) struct Importance {
 impl Importance {
     /// `Less` when `self` is less important than `other`: a stopword before any other term, then the lower IDF,
     /// then the later position. Positions are distinct among a query's terms, so no two of them tie.
-    pub(crate) fn cmp(&self, other: &Self) -> Ordering {
+    pub(crate) fn compare(&self, other: &Self) -> Ordering {
         other
             .stopword
             .cmp(&self.stopword)
@@ -44,16 +44,16 @@ impl Importance {
 pub(crate) fn drop_order(terms: &[Importance]) -> Vec<usize> {
     let mut order: Vec<usize> = (0..terms.len()).collect();
     order.sort_by(|&a, &b| match (terms.get(a), terms.get(b)) {
-        (Some(a), Some(b)) => a.cmp(b),
+        (Some(a), Some(b)) => a.compare(b),
         _ => Ordering::Equal,
     });
     order
 }
 
-/// The IDF of `query` as BM25F scores it (SPEC §7.2), over `stats`: a `term`'s own; a `combined` query's from the
+/// The IDF of `query` about as BM25F scores it (SPEC §7.2), over `stats`: a `term`'s own; a `combined` query's from the
 /// largest `df` of its terms, as its score takes it; a `phrase`'s the sum of its terms'. A `bool` sums its `must`
 /// clauses' (all of them score) and adds the largest of its `should` clauses' (the query compiler's alternatives over
-/// fields, of which one matches); `filter` and `must_not` clauses do not score. `boost` and `constant_score` are their
+/// fields, of which usually one matches; BM25F sums every one a document matches); `filter` and `must_not` clauses do not score. `boost` and `constant_score` are their
 /// query's. `prefix`, `fuzzy` and `match_all` have no `df` of their own until planned, so they are 0: the least
 /// important of a programmatic query's terms.
 ///
@@ -188,6 +188,12 @@ impl<'a> Root<'a> {
     /// `None` for any other programmatic query, which L2 does not relax.
     fn count(input: &LevelInput<'_>) -> Option<usize> {
         match (input.compiled, input.original) {
+            // The compiler builds no `should` at the root: a root changed since has requirements L2 would drop.
+            (Some(_), Query::Bool(root))
+                if !root.should.is_empty() || root.minimum_should_match != 0 =>
+            {
+                None
+            }
             (Some(compiled), _) => Some(compiled.clauses.iter().filter(|c| !c.negated).count()),
             (None, Query::Bool(root))
                 if root.should.is_empty() && root.minimum_should_match == 0 =>
@@ -273,11 +279,16 @@ impl LevelTransform for DropTerms {
                 ..BoolQuery::default()
             });
             let effective = input.compiled.map(|compiled| {
-                let keeps: Vec<usize> = kept
+                let mut keeps = vec![false; compiled.clauses.len()];
+                for clause in kept
                     .iter()
                     .take(count)
-                    .filter_map(|&i| terms.get(i).and_then(|t| t.clause))
-                    .collect();
+                    .filter_map(|&i| terms.get(i)?.clause)
+                {
+                    if let Some(keep) = keeps.get_mut(clause) {
+                        *keep = true;
+                    }
+                }
                 effective(compiled, &keeps)
             });
             steps.push(Step {
@@ -290,12 +301,12 @@ impl LevelTransform for DropTerms {
     }
 }
 
-/// The text of the clauses of `compiled` a step keeps (SPEC §7.6 `effective`): those in `kept` and every excluded one,
-/// in text order, one space apart, as [`Compiled::effective`] renders all of them.
-fn effective(compiled: &Compiled, kept: &[usize]) -> String {
+/// The text of the clauses of `compiled` a step keeps (SPEC §7.6 `effective`): those `kept` marks (by clause index) and
+/// every excluded one, in text order, one space apart, as [`Compiled::effective`] renders all of them.
+fn effective(compiled: &Compiled, kept: &[bool]) -> String {
     let mut text = String::new();
     for (index, clause) in compiled.clauses.iter().enumerate() {
-        if !clause.negated && !kept.contains(&index) {
+        if !clause.negated && !kept.get(index).copied().unwrap_or(false) {
             continue;
         }
         if !text.is_empty() {

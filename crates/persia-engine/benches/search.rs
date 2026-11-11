@@ -24,9 +24,10 @@ use persia_engine::query::{
     BoolQuery, DefaultFields, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, QueryCompiler, QueryLimits, TermQuery,
 };
-use persia_engine::relax::{RelaxOptions, RelaxPlan};
+use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    CollectionSchema, FieldId, FieldKind, KeywordOptions, RelaxationConfig, SchemaBuilder,
+    TextOptions,
 };
 use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
@@ -772,6 +773,11 @@ fn collection_expansions(c: &mut Criterion) {
 /// on the calling thread, planned and searched each iteration, as `plain` (`SearchPlan::with_terms`, then
 /// `search_with`), through `search_relaxed` with the collection's levels, and with `relax: false`. The three should
 /// cost the same: the cascade builds no later level when L0 has enough hits.
+///
+/// `l2` and `l2_every_step` (ROADMAP 8.2.2) relax a five-word query no document holds whole (`zz` is in none) to L2
+/// `drop_terms`: the importance `df` reads, then the `minimum_should_match` steps, each excluding L0 and the steps
+/// before it. `l2` stops at the first step with a hit; `l2_every_step` (a `min_results` above every match) runs them
+/// all.
 fn relaxed(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();
@@ -803,6 +809,31 @@ fn relaxed(c: &mut Criterion) {
                         .search_relaxed(&query, &request, relax, &exec)
                         .unwrap(),
                 )
+            });
+        });
+    }
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let missing = compiler.compile(
+        "w3 w40 w7 w120 zz",
+        &DefaultFields::all(schema),
+        &QueryLimits::default(),
+    );
+    let every = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    for (name, relax) in [("l2", &relax), ("l2_every_step", &every)] {
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views
+                    .search_relaxed(&missing, &request, relax, &exec)
+                    .unwrap();
+                assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
+                black_box(out)
             });
         });
     }

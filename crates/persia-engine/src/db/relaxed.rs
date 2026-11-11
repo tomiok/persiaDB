@@ -437,7 +437,8 @@ impl CollectionViews<'_> {
     /// # Errors
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax;
-    /// [`RelaxedSearchError::Plan`] when a step cannot be planned.
+    /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
+    /// from (L2 reads its terms' `df`).
     pub fn search_relaxed<'q>(
         &self,
         query: impl Into<RelaxedQuery<'q>>,
@@ -477,7 +478,7 @@ impl CollectionViews<'_> {
                 break;
             }
             let input = LevelInput::new(query, compiled, &stats);
-            let steps = level_steps(planned, built.ran.is_empty(), input)?;
+            let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
             for (step, label, text) in steps {
                 let i = built.ran.len();
                 if !builds(i, found) {
@@ -667,11 +668,13 @@ type BuiltStep<'a> = (Cow<'a, Query>, String, Option<String>);
 /// itself, not a copy.
 ///
 /// # Errors
-/// A statistic the level cannot read (L2 reads its terms' `df`).
+/// A statistic the level cannot read (L2 reads its terms' `df`); [`SearchError::Interrupted`] once the request's deadline
+/// has passed or it was cancelled.
 fn level_steps<'a>(
     planned: &PlannedLevel,
     first: bool,
     input: LevelInput<'a>,
+    exec: &Execution,
 ) -> Result<Vec<BuiltStep<'a>>, SearchError> {
     if first {
         return Ok(vec![(
@@ -680,6 +683,8 @@ fn level_steps<'a>(
             input.compiled.map(Compiled::effective),
         )]);
     }
+    // A level may read statistics (L2 its terms' `df`): the request's deadline and cancellation stop it first (SPEC §7.3).
+    exec.interrupt().map_err(SearchError::Interrupted)?;
     Ok(planned
         .transform
         .steps(&input)?

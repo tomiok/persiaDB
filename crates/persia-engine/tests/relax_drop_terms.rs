@@ -18,15 +18,19 @@ use persia_engine::db::{
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::query::{
-    BoolQuery, DefaultFields, PrefixQuery, Query, QueryCompiler, QueryLimits, TermQuery,
+    BoolQuery, DefaultFields, Filter, FilterValue, PrefixQuery, Query, QueryCompiler, QueryLimits,
+    TermQuery,
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
-use persia_engine::schema::{AnalyzerRef, FieldKind, RelaxationConfig, SchemaBuilder, TextOptions};
+use persia_engine::schema::{
+    AnalyzerRef, FieldKind, KeywordOptions, RelaxationConfig, SchemaBuilder, TextOptions,
+};
 use persia_engine::search::Pruning;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
 
-/// `title` (standard) and `body` (en), over a segment and the memtable.
+/// `title` (standard), `body` (en) and `brand` (keyword: `acme` for `a`, `c`, `e`, `other` for the rest), over a segment
+/// and the memtable.
 fn database() -> Database<SimFile> {
     let schema = SchemaBuilder::new("c")
         .field("title", FieldKind::Text(TextOptions::default()))
@@ -37,8 +41,10 @@ fn database() -> Database<SimFile> {
                 ..TextOptions::default()
             }),
         )
+        .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .build()
         .unwrap();
+    let brand = schema.field("brand").unwrap().id();
     let title = schema.field("title").unwrap().id();
     let body = schema.field("body").unwrap().id();
     let mut db = Database::create_on(SimFile::new(), [3; 16], DatabaseOptions::default()).unwrap();
@@ -54,7 +60,11 @@ fn database() -> Database<SimFile> {
     for (i, (id, t, b)) in docs.into_iter().enumerate() {
         let doc = Document::new(id)
             .with(title, Value::String(t.into()))
-            .with(body, Value::String(b.into()));
+            .with(body, Value::String(b.into()))
+            .with(
+                brand,
+                Value::String(if i % 2 == 0 { "acme" } else { "other" }.into()),
+            );
         db.put("c", &doc, Durability::Buffered).unwrap();
         if i == 2 {
             db.commit().unwrap();
@@ -276,4 +286,37 @@ fn a_query_of_one_term_skips_the_level() {
     // `-red` matches every other document at L0, and only those.
     let out = search(&db, "-red", 10_000, None);
     assert_eq!(by_step(&out), [(0, "c"), (0, "d"), (0, "e"), (0, "f")]);
+}
+
+/// SPEC §7.6: filters are never relaxed. Every step keeps L0's filter, so no hit of any step is outside it.
+#[test]
+fn filters_are_never_relaxed() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let title = c.schema().field("title").unwrap().id();
+    let brand = c.schema().field("brand").unwrap().id();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: title,
+            term: t.into(),
+        })
+    };
+    let acme = Filter::Term {
+        field: brand,
+        value: FilterValue::Keyword("acme".into()),
+    };
+    let query = Query::Bool(BoolQuery {
+        must: vec![term("purple"), term("red"), term("shoes")],
+        filter: vec![acme],
+        ..BoolQuery::default()
+    });
+    let out = views
+        .search_relaxed(&query, &SearchRequest::default(), &plan(10_000), &exec())
+        .unwrap();
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    // Unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step: they are `other`.
+    assert_eq!(by_step(&out), [(1, "a"), (2, "c")]);
 }
