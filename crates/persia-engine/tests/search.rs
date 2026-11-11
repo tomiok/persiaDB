@@ -35,7 +35,7 @@ use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use persia_engine::search::{Hit, Matcher, Pruning, SearchError, SearchPlan, TopK};
-use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
+use persia_engine::segment::{ReadError, Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
 use persia_engine::stats::{SearchStatistics, SegmentStatistics};
 use persia_engine::view::{SearchView, SegmentView};
 use persia_format::ByteSource;
@@ -61,6 +61,11 @@ const NONE: [u32; 0] = [];
 type Params = [(f64, f64, f64); 2];
 
 fn schema(p: &Params) -> CollectionSchema {
+    builder(p).build().unwrap()
+}
+
+/// The fields of [`schema`], to build it or a wider one.
+fn builder(p: &Params) -> SchemaBuilder {
     // The whitespace analyzer gives the words as they are, at positions 0, 1, 2...: the reference's tokens.
     let ws = AnalyzerRef::new("whitespace", 1).unwrap();
     let text = |(boost, k1, b)| {
@@ -77,8 +82,6 @@ fn schema(p: &Params) -> CollectionSchema {
         .field("title", text(p[0]))
         .field("body", text(p[1]))
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
-        .build()
-        .unwrap()
 }
 
 fn ids(schema: &CollectionSchema) -> [FieldId; 3] {
@@ -744,6 +747,48 @@ fn minimum_should_match_by_hand() {
     let mut any = scores(&b(vec![], words(), 1));
     any.retain(|d, _| [2, 4].contains(d));
     assert_eq!(scores(&b(vec![], words(), 2)), any);
+}
+
+/// A view of another schema is an error even when too few `should` clauses can match in it: every clause is
+/// built, so the count does not decide whether a `must` or `must_not` clause is checked against the view.
+#[test]
+fn minimum_should_match_builds_every_clause() {
+    let f = fixture(&["ant", "bee"]);
+    let p = [(1.0, 1.2, 0.75), (1.0, 1.2, 0.75)];
+    let wider = builder(&p)
+        .field("zz", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    let extra = Query::Term(TermQuery {
+        field: wider.field("zz").unwrap().id(),
+        term: "x".into(),
+    });
+    // The plan's statistics come from a segment of the wider schema; the view searched is of the narrow one.
+    let docs = [(
+        "d0".to_owned(),
+        vec![Vec::new(), vec!["ant".to_owned()], Vec::new()],
+    )];
+    let stats = SegmentStatistics::new(
+        &Arc::new(wider.clone()),
+        &[Arc::new(segment(&wider, 2, &docs))],
+    );
+    let view = SegmentView::new(&f.segment, None);
+    // `elk` is in no document, so fewer than 2 `should` clauses can match here.
+    let should = || vec![f.term("ant"), f.term("elk")];
+    for (must, must_not) in [(vec![extra.clone()], vec![]), (vec![], vec![extra.clone()])] {
+        let q = Query::Bool(BoolQuery {
+            must,
+            should: should(),
+            must_not,
+            minimum_should_match: 2,
+            ..BoolQuery::default()
+        });
+        let plan = SearchPlan::new(&q, &wider, &stats).unwrap();
+        assert!(
+            matches!(plan.top_k(&view, 10), Err(ReadError::UnknownField { .. })),
+            "{q:?}"
+        );
+    }
 }
 
 #[test]

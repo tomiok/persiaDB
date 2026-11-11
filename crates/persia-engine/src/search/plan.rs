@@ -743,9 +743,9 @@ struct Clauses<'a> {
 }
 
 /// A `bool` (SPEC §7.1): every `must` and `filter`, at least `minimum_should_match` `should` clauses (0: one when
-/// there is neither `must` nor `filter`), no `must_not`; an empty one matches every document. Required `should`
-/// clauses are one disjunction of at least that many ([`at_least_of`]), alone or as the last clause of the `must`
-/// conjunction. Filters select before anything is scored (SPEC §7.3) and score 0, so a
+/// there is neither `must` nor `filter` but some `should`), no `must_not`; an empty one matches every document.
+/// Required `should` clauses are one disjunction of at least that many ([`at_least_of`]), alone or as the last
+/// clause of the `must` conjunction. Filters select before anything is scored (SPEC §7.3) and score 0, so a
 /// threshold on the `bool` reaches its one `must` clause, the `should` clauses when there is no `must` (their score
 /// is the whole score), and otherwise the conjunction of its `must` clauses and the `should` clauses beside them,
 /// which check their clauses' bounds against it (ROADMAP 7.4.8).
@@ -793,8 +793,11 @@ fn build_bool<'a, V: SearchView>(
         m => m,
     };
     let scored: BoxedMatcher<'a> = if at_least > 0 {
-        // Required `should` clauses: fewer than `at_least` that can match in this view means no document.
+        // Required `should` clauses: fewer than `at_least` that can match in this view means no document. The
+        // other clauses are built anyway, so that a view they do not fit is the error it is for any count.
         let Some(some) = at_least_of(all(should, should_pruning)?, at_least, should_pruning) else {
+            all(must, must_pruning)?;
+            all(must_not, Pruning::Exhaustive)?;
             return Ok(Box::new(Empty));
         };
         let required = if must.is_empty() {

@@ -79,7 +79,7 @@ cascade return?
    that ranking. The response is the completed steps' hits with `truncated: true`, `level` and `applied` describe
    those steps, and cursors record the last completed step. A deadline error inside a step counts as the budget only
    when the request's own execution is not interrupted. Latency is therefore at most L0's plus about `budget_ms`
-. **The response states the user text** (ROADMAP 8.1.7). `search_relaxed` takes a `Query` or a `Compiled` one. A
+9. **The response states the user text** (ROADMAP 8.1.7). `search_relaxed` takes a `Query` or a `Compiled` one. A
    compiled query records the text read and each clause's byte span in it, so `original` is that text and `effective`
    the last step's text, rendered from the spans: at L0, the clauses that compiled. A programmatic query has neither:
    it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy), so rendering
