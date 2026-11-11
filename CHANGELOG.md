@@ -9,6 +9,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: L1 `synonyms` (ROADMAP 8.2.1; SPEC §6.3.2, §7.6, ADR-0039). The query compiler finds the runs of
+  required words that are a term of the collection's `synonyms` groups, in each default field's analysis, and records
+  them in `Compiled::synonyms` (`CompiledSynonym`: the clauses and their alternatives). A run covers whole words only;
+  excluded clauses, phrases and `field:` clauses are not expanded. Each alternative is the other term searched as a
+  quoted phrase. Alternatives come in group order, then term order, at most 50 per run, and only as many in all as
+  the step could hold. A query with fewer than `min_results` hits then relaxes to one step, `synonyms`, which matches
+  each run or any of its alternatives, keeps excluded clauses and filters, and reports L0's text as `effective`.
+  Programmatic queries skip the level. Benchmarks `search_relaxed/l1` and `compile/plain`, `compile/synonyms`.
+- `persia-engine`: an L1 step over `QueryLimits` keeps fewer alternatives instead of being skipped (ROADMAP 8.1.13;
+  SPEC §7.1.3). Each run keeps its first, the longest lists cut first and none below 1. `Relaxation::applied` lists
+  it as `synonyms:cut`, or `synonyms:skipped` when one each does not fit.
+- `persia-analysis`: `SynonymMap::alternative_sources` names where each alternative was given (its group, and its
+  index there). `SynonymMap::find_between` finds matches that start and end only on given boundaries.
+  `Analyzer::analyze_query_counted` returns a `QueryAnalysis`: whether a stopword was removed, and how many positions
+  the text took.
 - `persia-engine`: L2 `drop_terms` (ROADMAP 8.2.2; SPEC §7.6, ADR-0038). A query whose terms (its required clauses)
   find fewer than `min_results` hits relaxes to `minimum_should_match` steps: 75% of the terms, 50%, then 1
   (`max(1, ⌊p · n / 100⌋)`; a count that repeats the previous one, L0's first, is not built). Any of that many terms

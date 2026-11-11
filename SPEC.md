@@ -1032,7 +1032,21 @@ those analyzers' versions.
   longest term starting at each token matches when its texts are equal and its position gaps equal (a stopword gap
   must line up), the matched tokens are skipped, and the match reports, in group order, then term order, the other
   terms of every group containing it, each once, up to a cap (default 50, §7.6 L1). Matches never overlap; the query
-  compiler ORs the match with its alternatives.
+  compiler ORs the match with its alternatives. A term is reported at its place in the group it expands from, so a
+  term given in several groups comes where that group lists it.
+
+  The query compiler (§7.1.1, ROADMAP 8.2.1, ADR-0039) scans each default field's analysis of the query: the
+  tokens of its required words (not `-`, not a phrase, not `field:`, any of which ends the scan's run), each word
+  analyzed alone but numbered after the words before it by the positions they took (a removed token keeps its
+  position, so the run reads as one analysis of its words). A match starts at a word's first token and ends with a
+  word's last, so it stands for whole clauses: the longest term from each such start that ends on such an end. Fields
+  that match the same clauses share their alternatives, in the order above. A match of another field that overlaps
+  them is dropped, the earlier default field winning. Each alternative is the term as written, compiled over the
+  default fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in
+  one without, one word when it is one token), each once, and none that compiles to the run's own query. The
+  compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n` alternatives in all, `n` its query's terms,
+  each run's share as §7.1.3 shares expansions and none when that is less than one per run: L1's step holds the
+  query's terms twice (§7.6), and at least one per alternative, so it could hold no more.
 
 `nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
 bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay
@@ -1284,7 +1298,12 @@ first and none below 1, to sum to exactly the expansions left (each query keeps 
 exclude less, so the step would match more than its level built. A step that fits no cut (over terms, clauses or depth, or with fewer expansions left than it has
 such queries) is *skipped*: it is not searched, `applied` lists it as `"<applied>:skipped"`, later steps do not
 exclude its matches, and the cascade goes on to the next step, checked the same way. A step that is invalid for
-another reason is an error. Synonym expansions are not cut yet (ROADMAP 8.1.13). Defaults, configurable per engine:
+another reason is an error. An L1 `synonyms` step (§7.6) that does not fit has its synonym alternatives cut
+(ROADMAP 8.1.13): each run keeps its first alternatives in their order (§6.3.2), every list is lowered to the highest
+count that fits, the longest first and none below 1, and then, in text order, a list that count cut takes one more where
+the step still fits. It is listed as `synonyms:cut`, and as `synonyms:skipped` when one alternative each does not fit.
+The compilation already holds no more alternatives than its own limits allow the step (§6.3.2); a search held to
+larger limits than the compilation's sees only those, and does not list the step as cut. Defaults, configurable per engine:
 
 | Limit | Default | Counts |
 |---|---|---|
@@ -1518,7 +1537,8 @@ Rules:
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
   the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
-  (ROADMAP 8.1.7), at L2 the clauses its step keeps (ROADMAP 8.2.2.2, below). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
+  (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
+  (ROADMAP 8.2.2.2, below). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
   query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy).
   `corrected` stays empty until the fuzzy level synthesizes the corrected query (ROADMAP 8.2.4.3).
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
@@ -1534,7 +1554,15 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
+words; ROADMAP 8.1.10). So far L0, L1 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
+
+L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
+compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
+alternatives...] }` (the run's clauses alone, or all of them required), so a document matches with the run or any
+alternative, and BM25F sums those it holds. L0's other required clauses, its excluded clauses (not expanded: more
+alternatives would exclude more) and its filters stay as they are. Its `effective` is L0's: every clause is kept. A
+query without such a run, or not compiled from `q`, skips the level: a programmatic query has no text to scan. The step
+reads no statistics. Within §7.1.3's limits it keeps fewer alternatives (`synonyms:cut`), or is skipped.
 
 L2 `drop_terms` (ROADMAP 8.2.2, ADR-0038). Its *terms* are the query's required clauses: of a query compiled from `q`, each
 clause of §7.1.1 that is not excluded (`-`), whatever its parts (a phrase, a word split in two, a word over several
