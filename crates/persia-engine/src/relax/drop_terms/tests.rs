@@ -436,3 +436,117 @@ mod steps {
         assert!(DropTerms.steps(&input).is_err());
     }
 }
+
+/// ROADMAP 8.2.2.3: a query of one term, or none, builds no L2 step and reads no statistic.
+mod single_term {
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+
+    use persia_analysis::AnalyzerRegistry;
+
+    use super::*;
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+    use crate::schema::{AnalyzerRef, FieldKind, SchemaBuilder, TextOptions};
+
+    /// Counts its `df` reads; every term is in half the documents.
+    #[derive(Default)]
+    struct Counting(AtomicUsize);
+
+    impl StatisticsProvider for Counting {
+        fn doc_count(&self) -> u64 {
+            10
+        }
+        fn field(&self, _: FieldId) -> FieldTotals {
+            FieldTotals::default()
+        }
+        fn df(&self, _: FieldId, _: &[u8]) -> Result<u64, ReadError> {
+            self.0.fetch_add(1, AtomicOrdering::Relaxed);
+            Ok(5)
+        }
+    }
+
+    fn steps(query: &Query, compiled: Option<&Compiled>) -> (Vec<Step>, usize) {
+        let stats = Counting::default();
+        let input = LevelInput {
+            original: query,
+            compiled,
+            stats: &stats,
+        };
+        let steps = DropTerms.steps(&input).unwrap();
+        (steps, stats.0.load(AtomicOrdering::Relaxed))
+    }
+
+    #[test]
+    fn one_required_clause_whatever_its_parts_skips_the_level() {
+        // `title` (standard, positions) and `body` (en): a word over both fields is one term.
+        let schema = SchemaBuilder::new("c")
+            .field(
+                "title",
+                FieldKind::Text(TextOptions {
+                    positions: true,
+                    ..TextOptions::default()
+                }),
+            )
+            .field(
+                "body",
+                FieldKind::Text(TextOptions {
+                    analyzer: AnalyzerRef::builtin("en").unwrap(),
+                    ..TextOptions::default()
+                }),
+            )
+            .build()
+            .unwrap();
+        let query_compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let fields = DefaultFields::all(&schema);
+        for text in [
+            "shoes",
+            "\"red running shoes\"",
+            "e-mail",
+            "title:red",
+            "shoes -red -\"blue hat\"",
+            "the",
+            "-red",
+            "",
+        ] {
+            let compiled = query_compiler.compile(text, &fields, &QueryLimits::default());
+            let required = compiled.clauses.iter().filter(|c| !c.negated).count();
+            assert!(required <= 1, "{text:?}");
+            assert_eq!(
+                steps(&compiled.query, Some(&compiled)),
+                (Vec::new(), 0),
+                "{text:?}"
+            );
+        }
+        // Two required clauses relax, whatever else is excluded; their `df` is read once each.
+        let compiled = query_compiler.compile("shoes red -blue", &fields, &QueryLimits::default());
+        let (built, reads) = steps(&compiled.query, Some(&compiled));
+        assert_eq!(built.len(), 1);
+        assert_eq!(reads, 4, "two words over two fields");
+    }
+
+    #[test]
+    fn a_programmatic_query_of_one_term_skips_the_level() {
+        let red = term(0, "red");
+        for query in [
+            red.clone(),
+            Query::MatchAll,
+            Query::Boost(BoostQuery {
+                query: Box::new(Query::Bool(BoolQuery {
+                    must: vec![red.clone(), term(0, "hat")],
+                    ..BoolQuery::default()
+                })),
+                boost: 2.0,
+            }),
+            Query::Bool(BoolQuery {
+                must: vec![red.clone()],
+                must_not: vec![term(0, "blue")],
+                ..BoolQuery::default()
+            }),
+            Query::Bool(BoolQuery {
+                must_not: vec![red.clone()],
+                ..BoolQuery::default()
+            }),
+        ] {
+            assert_eq!(steps(&query, None), (Vec::new(), 0), "{query:?}");
+        }
+    }
+}

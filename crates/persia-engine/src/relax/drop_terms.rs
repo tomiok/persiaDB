@@ -96,6 +96,11 @@ fn bool_idf(query: &BoolQuery, stats: &dyn StatisticsProvider) -> Result<f64, Re
     Ok(sum + best)
 }
 
+/// The fewest terms L2 relaxes (SPEC §7.6, ROADMAP 8.2.2.3). A query of one term (one required clause, whatever its
+/// parts: a phrase, a word split in two, a word over several fields, beside any excluded clauses) skips the level, and
+/// so does one of none: no count below L0's is at least 1, and dropping the one term would match every document.
+const MIN_TERMS: usize = 2;
+
 /// L2's percentages of the `n` terms (SPEC §7.6), after the 100% that is L0 itself (every term required), and the
 /// last step's one term.
 const LADDER: [(&str, Rung); 3] = [
@@ -147,41 +152,51 @@ struct Root<'a> {
 }
 
 impl<'a> Root<'a> {
-    /// The terms of `input`'s query. `None` when L2 has no terms to drop in it: a programmatic `bool` with `should`
-    /// clauses or a `minimum_should_match` already (its `must` are not all of what it requires), or a compilation
-    /// whose clauses do not index its query.
+    /// The terms of `input`'s query. `None` when L2 has no terms to drop in it: fewer than [`MIN_TERMS`], a
+    /// programmatic `bool` with `should` clauses or a `minimum_should_match` already (its `must` are not all of what
+    /// it requires), or a compilation whose clauses do not index its query.
     fn of(input: &LevelInput<'a>) -> Option<Self> {
         let (must_not, filter): (&[Query], &[Filter]) = match input.original {
             Query::Bool(root) => (&root.must_not, &root.filter),
             _ => (&[], &[]),
         };
-        let terms = match input.compiled {
-            Some(compiled) => Self::compiled(compiled)?,
-            None => match input.original {
-                Query::Bool(root) if root.should.is_empty() && root.minimum_should_match == 0 => {
-                    root.must
-                        .iter()
-                        .map(|q| Term {
-                            query: q.clone(),
-                            clause: None,
-                            stopword: false,
-                        })
-                        .collect()
-                }
-                Query::Bool(_) => return None,
-                Query::MatchAll => Vec::new(),
-                query => vec![Term {
-                    query: query.clone(),
+        // Counted before a term is copied or its `df` read: a single term skips the level at no cost.
+        if Self::count(input)? < MIN_TERMS {
+            return None;
+        }
+        let terms = match (input.compiled, input.original) {
+            (Some(compiled), _) => Self::compiled(compiled)?,
+            (None, Query::Bool(root)) => root
+                .must
+                .iter()
+                .map(|q| Term {
+                    query: q.clone(),
                     clause: None,
                     stopword: false,
-                }],
-            },
+                })
+                .collect(),
+            (None, _) => return None,
         };
         Some(Self {
             terms,
             must_not,
             filter,
         })
+    }
+
+    /// How many terms `input`'s query has: its required clauses, or a programmatic root `bool`'s `must` clauses.
+    /// `None` for any other programmatic query, which L2 does not relax.
+    fn count(input: &LevelInput<'_>) -> Option<usize> {
+        match (input.compiled, input.original) {
+            (Some(compiled), _) => Some(compiled.clauses.iter().filter(|c| !c.negated).count()),
+            (None, Query::Bool(root))
+                if root.should.is_empty() && root.minimum_should_match == 0 =>
+            {
+                Some(root.must.len())
+            }
+            // Another programmatic query is one term (`match_all` none), or a `bool` L2 does not relax.
+            (None, _) => None,
+        }
     }
 
     /// The required clauses of `compiled`, each one term of its parts.
@@ -228,10 +243,8 @@ impl LevelTransform for DropTerms {
         else {
             return Ok(Vec::new());
         };
+        // At least `MIN_TERMS`, so the ladder has a step.
         let rungs = ladder(terms.len());
-        if rungs.is_empty() {
-            return Ok(Vec::new());
-        }
         let mut importance = Vec::with_capacity(terms.len());
         for (position, term) in terms.iter().enumerate() {
             importance.push(Importance {

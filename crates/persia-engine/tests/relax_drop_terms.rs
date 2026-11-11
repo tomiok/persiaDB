@@ -255,3 +255,25 @@ fn a_programmatic_query_relaxes_its_must_clauses_without_text() {
         ["drop_terms:75%:cut", "drop_terms:50%:skipped"]
     );
 }
+
+#[test]
+fn a_query_of_one_term_skips_the_level() {
+    let db = database();
+    // No hit at L0, and nothing to drop: L2 builds no step, so `applied` does not list it and the search stays at L0.
+    for text in [
+        "purple",
+        "purple -shoes",
+        "\"purple running\"",
+        "e-mail",
+        "-red",
+    ] {
+        let out = search(&db, text, 10_000, None);
+        let r = &out.relaxation;
+        assert_eq!(r.level, RelaxLevel::Exact, "{text:?}");
+        assert_eq!(r.applied, Vec::<String>::new(), "{text:?}");
+        assert!(!r.relaxed(), "{text:?}");
+    }
+    // `-red` matches every other document at L0, and only those.
+    let out = search(&db, "-red", 10_000, None);
+    assert_eq!(by_step(&out), [(0, "c"), (0, "d"), (0, "e"), (0, "f")]);
+}
