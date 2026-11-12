@@ -6,8 +6,8 @@
 //! `relax: false` ([`RelaxOptions::disabled`]) leaving L0 alone.
 //!
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
-//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1) and L2 `drop_terms` (ROADMAP 8.2.2) build queries so far: the others
-//! (L3 `prefix` to L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
+//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2) and L3 `prefix` (ROADMAP 8.2.3) build
+//! queries so far: the others (L4 `fuzzy` and L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
@@ -43,11 +43,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::query::{Compiled, Query, QueryLimits};
-use crate::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
+use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, Levels, RelaxationConfig};
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 
 mod drop_terms;
+mod prefix;
 mod synonyms;
 
 pub(crate) use synonyms::Expansion;
@@ -164,6 +165,9 @@ pub(crate) struct LevelInput<'a> {
     pub(crate) compiled: Option<&'a Compiled>,
     /// The statistics the search scores with (SPEC §7.2): L2 ranks its terms by their IDF.
     pub(crate) stats: &'a dyn StatisticsProvider,
+    /// Whether L3 may prefix-expand a term of a field (SPEC §7.6): a `text` field whose analyzer does not stack
+    /// tokens (SPEC §6.3.1). None by default ([`Self::new`]); the search sets it ([`Self::expanding`]).
+    pub(crate) expands: &'a dyn Fn(FieldId) -> bool,
 }
 
 impl<'a> LevelInput<'a> {
@@ -176,8 +180,18 @@ impl<'a> LevelInput<'a> {
             original,
             compiled,
             stats,
+            expands: &no_field,
         }
     }
+
+    /// This input with L3 expanding the terms of the fields `expands` accepts.
+    pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> bool) -> Self {
+        Self { expands, ..self }
+    }
+}
+
+fn no_field(_: FieldId) -> bool {
+    false
 }
 
 impl fmt::Debug for LevelInput<'_> {
@@ -259,7 +273,7 @@ fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
         RelaxLevel::Exact => Arc::new(Exact),
         RelaxLevel::Synonyms => Arc::new(synonyms::Synonyms),
         RelaxLevel::DropTerms => Arc::new(drop_terms::DropTerms),
-        RelaxLevel::Prefix => Arc::new(Pending { leaf: "8.2.3" }),
+        RelaxLevel::Prefix => Arc::new(prefix::Prefix),
         RelaxLevel::Fuzzy => Arc::new(Pending { leaf: "8.2.4" }),
         RelaxLevel::Fallback => Arc::new(Pending { leaf: "8.2.5" }),
     }

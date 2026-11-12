@@ -477,6 +477,24 @@ alone, which adds the `relax` module and changes no search code, measured 502 µ
 `search_top10/term` 463, 448 µs vs 452, 450 µs, and `search_request/score_facet` 847, 854 µs vs 839, 889 µs. The
 default build's gap is codegen-unit layout from new code in the crate, not the cascade's work.
 
+The relaxed levels (ROADMAP 8.2.1–8.2.3), same collection and thread. `l1` is `w3 nosuch` relaxed to L1 `synonyms`;
+`l2` is `w3 w40 w7 w120 zz` relaxed to L2's first step with a hit, and `l2_every_step` the same with a `min_results`
+above every match, so it runs the whole ladder; `l3` is `w3 w` with L3 `prefix` alone, its one-letter last word
+expanded over every term (ROADMAP 8.1.20). Command: `cargo bench -p persia-engine --bench search -- search_relaxed`.
+2026-11-12, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Main is c8d6496, built in a worktree with its own target directory.
+
+| Recorded | build | `l1` | `l2` | `l2_every_step` | `l3` |
+|---|---|--:|--:|--:|--:|
+| main (c8d6496) | default | 879 µs | 1.38–1.41 ms | 12.84–13.28 ms | — |
+| ROADMAP 8.2.2.4–8.2.3 | default | 902 µs | 1.45–1.48 ms | 11.52–11.83 ms | 23.0 ms |
+| main (c8d6496) | 1 codegen unit | 883 µs | 1.48 ms | 12.67 ms | — |
+| ROADMAP 8.2.2.4–8.2.3 | 1 codegen unit | 926 µs | 1.43 ms | 11.47 ms | 22.2 ms |
+
+`l2_every_step` gains about 10% with ROADMAP 8.2.2.4: its last steps exclude L0 and one L2 step instead of every
+earlier one, so they plan fewer excluded queries. `l1` and `l2` move by about 5% in opposite directions between the
+two builds, and `l2` stays slower in the default build with the nested rule turned off (`nested()` false), so those
+moves are layout, not work. The steps they run are the same.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

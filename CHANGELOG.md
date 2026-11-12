@@ -17,6 +17,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
 
 ### Added
+- `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
+  to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
+  characters (of the analyzed term), becomes a `prefix` of 50 expansions, kept by collection `df`. Excluded clauses,
+  phrases, `field:` clauses, filters and the terms of a field whose analyzer stacks tokens (`edge_ngram`) stay
+  exact. A programmatic query expands the `term` and `combined` leaves of its root `bool`'s `must` clauses, the
+  last one holding the last term. `effective` is L0's text. Over `QueryLimits` it is listed as `prefix:cut` or
+  `prefix:skipped`. A one-term programmatic query now relaxes to L3 by default. Benchmark `search_relaxed/l3`.
+- `persia-engine`: `CompiledClause::kind` (`ClauseKind`: `Word`, `Phrase`, `Field`) states each clause's form in the
+  user text (SPEC §7.1.1).
 - `persia-engine`: `Compiled::with_filter` joins a request's filter to a compiled query as its root `bool`'s filter
   clauses (ROADMAP 8.1.17; SPEC §7.1, §7.1.1). A query that is its one required part is wrapped,
   `bool { must: [query], filter }`. `Compiled::root` returns the `bool` around the clauses. `Compiled::parts` now

@@ -187,6 +187,19 @@ impl MemtableView {
 
     /// Whether `other` sees what this view sees: a view of the same memtable at the same cutoff, so its counts are
     /// this view's.
+    /// Whether `field` is a `text` field whose analyzer stacks tokens (`edge_ngram`, SPEC §6.3.1): its index already
+    /// holds each word's prefixes, so the relaxation cascade's L3 does not expand its terms (SPEC §7.6). The memtable
+    /// holds the analyzer every `text` field indexes with.
+    pub(crate) fn stacks_tokens(&self, field: FieldId) -> bool {
+        let inner = read(&self.shared);
+        usize::try_from(field.get())
+            .ok()
+            .and_then(|i| inner.fields.get(i))
+            .is_some_and(
+                |f| matches!(f, MemField::Text { analyzer, .. } if analyzer.stacks_tokens()),
+            )
+    }
+
     pub(crate) fn is_same_view(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.shared, &other.shared)
             && self.version == other.version

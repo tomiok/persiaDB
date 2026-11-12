@@ -24,7 +24,7 @@ use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, S
 use super::views::CollectionViews;
 use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
 use crate::relax::{Expansion, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
-use crate::schema::CollectionSchema;
+use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
 use crate::stats::SearchStatistics;
 
@@ -489,6 +489,7 @@ impl CollectionViews<'_> {
             .copied()
             .or_else(|| compiled.map(|c| c.limits))
             .unwrap_or_default();
+        let expands = |field: FieldId| self.expands(field);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
@@ -504,7 +505,7 @@ impl CollectionViews<'_> {
                 truncated = true;
                 break;
             }
-            let input = LevelInput::new(query, compiled, &stats);
+            let input = LevelInput::new(query, compiled, &stats).expanding(&expands);
             let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
             built.begin_level();
             let nested = planned.transform.nested() && relax.excludes_latest_only();
@@ -582,6 +583,16 @@ impl CollectionViews<'_> {
                 truncated,
             ),
         })
+    }
+
+    /// Whether L3 may prefix-expand a term of `field` (SPEC §7.6, §6.3.1): a `text` field whose analyzer, as the memtable
+    /// indexes with it, does not stack tokens.
+    fn expands(&self, field: FieldId) -> bool {
+        self.collection()
+            .schema()
+            .field_by_id(field)
+            .is_some_and(|f| matches!(f.kind(), FieldKind::Text(_)))
+            && !self.memtable().stacks_tokens(field)
     }
 
     /// [`Self::search_step`], within the budget's `end` once there is one. `None` when the budget passed while the

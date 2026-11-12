@@ -23,7 +23,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    AnalyzerRef, FieldKind, KeywordOptions, RelaxationConfig, SchemaBuilder, TextOptions,
+    AnalyzerRef, Fallback, FieldKind, KeywordOptions, Level, Levels, RelaxationConfig,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::Pruning;
 use persia_engine::wal::Durability;
@@ -79,10 +80,13 @@ fn exec() -> Execution {
         .budget_clock(Arc::new(ManualClock::new(0)))
 }
 
-/// The collection's levels (the defaults, as `database` builds it), relaxing until `min_results` hits.
+/// L0 and L2 alone, relaxing until `min_results` hits: the levels after it (L3 `prefix`, ROADMAP 8.2.3) would add steps
+/// to every query that L2 leaves short. L1 builds none here: the collection has no synonyms.
 fn plan(min_results: u32) -> RelaxPlan {
     let options = RelaxOptions {
         min_results: Some(min_results),
+        levels: Some(Levels::Custom(vec![Level::DropTerms])),
+        fallback: Some(Fallback::None),
         ..RelaxOptions::default()
     };
     RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap()

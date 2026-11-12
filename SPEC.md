@@ -1089,7 +1089,8 @@ tokens** (`edge_ngram`; `TokenFilter::stacks_tokens`): an index-time prefix such
 `lapt` as is, and a query or synonym term expanded into prefixes could never line up with an analyzed query. Every
 other filter applies at both times, in the same order, so terms meet in the same form. Without `preserve_original`, a query
 word longer than `max` analyzes to the whole word, which was never indexed, and no level of the cascade (§7.6)
-shortens it: L3 expands it as a prefix (`laptop*`), which no prefix of at most `max` characters matches. A field
+shortens it: L3 leaves a stacking field's terms exact (§7.6), and a prefix `laptop*` would match no prefix of at
+most `max` characters anyway. A field
 that expects longer query words sets `preserve_original` or a larger `max`. No built-in analyzer stacks
 tokens, so for them query-time and index-time analysis are the same.
 
@@ -1271,7 +1272,8 @@ that a default field analyzes to no token because its analyzer's stopword filter
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
 `ｔｈｅ`). Text in which a field's tokenizer finds no word (`—`) is not a stopword, whatever the field. Another default
 field may keep a stopword, so it stays a clause: `the` over a `standard` title and an `en` body is a stopword. A
-`field:` clause is never one (its field would leave nothing to compile).
+`field:` clause is never one (its field would leave nothing to compile). Each clause states its form too (ROADMAP 8.2.3,
+for §7.6's L3): a word, a `"phrase"` (also one of a single token, which compiles as a word), or a `field:` clause.
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1563,7 +1565,7 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0, L1 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
+words; ROADMAP 8.1.10). So far L0 to L3 build queries; the other levels build none yet (ROADMAP 8.2).
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1593,6 +1595,28 @@ the step keeps; it is not a query that compiles to the step's (which matches any
 query's step has no `effective`. Building the steps reads the `df`s each term's IDF needs (one per field of a `combined`,
 one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
+
+L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query: each *term* it expands
+becomes a `prefix` of that term with `max_expansions` 50, which planning expands over the views' terms and keeps by
+collection `df` (§7.1). A term is a field's analyzed term of a word: of a query compiled from `q`, one per field of a
+word clause's parts (each `combined`, and each field of a word the fields split apart); of a programmatic query, each
+`term` and `combined` field of a root `bool`'s `must` clauses (under `bool` and `boost`), or of a `term` or
+`combined` alone. A term is expanded when its field is a `text` field whose analyzer does not stack tokens, and it is
+the *last term* or has at least 3 characters (Unicode scalar values of the analyzed term: `running` under `en` is
+`run`, 3). The last term is the last part of the last required clause when that clause is a word (of a word the
+fields split apart, each field's last token), and the last `must` clause of a programmatic root `bool`: it is
+expanded whatever its length, as the word a user may still be typing. Excluded clauses, phrases (even of one token)
+and `field:` clauses are not expanded, since they ask for their text exactly. Neither are a field's terms when its
+analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
+documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
+`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`, under a `boost`
+of the field's weight unless it is 1. So a document matches the word when an exact field holds the term or an
+expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
+L0's other required clauses, its excluded clauses and its filters stay as they are, and a programmatic root `bool`
+with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
+level. Its `effective` is L0's text, as every clause is kept. The step reads no statistics; held to §7.1.3's limits,
+its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
+its own for it to stand for (nested levels, in the cascade below).
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A

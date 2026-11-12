@@ -197,6 +197,31 @@ pub struct CompiledClause {
     /// Another field keeps it in the clause's parts: `the` over a `standard` title and an `en` body is a stopword. A
     /// `field:` clause is never one: the field it names would leave nothing to compile.
     pub stopword: bool,
+    /// Its form in the user text (SPEC §7.1.1): a word, a `"phrase"`, or either after `field:`. The relaxation
+    /// cascade's L3 `prefix` expands only words (SPEC §7.6): a phrase and a `field:` clause ask for that text exactly.
+    pub kind: ClauseKind,
+}
+
+/// The form of a clause of the user text (SPEC §7.1.1), whether excluded (`-`) or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ClauseKind {
+    /// A word, over the default fields.
+    Word,
+    /// A `"phrase"` over the default fields, even one of a single token (compiled as a word).
+    Phrase,
+    /// A word or phrase after `field:`, in that field only.
+    Field,
+}
+
+impl ClauseKind {
+    fn of(clause: &Clause<'_>) -> Self {
+        match (clause.field, clause.phrase) {
+            (Some(_), _) => Self::Field,
+            (None, true) => Self::Phrase,
+            (None, false) => Self::Word,
+        }
+    }
 }
 
 impl Compiled {
@@ -418,6 +443,7 @@ impl QueryCompiler {
         for (clause, span) in clause_spans(text, &self.schema) {
             let eligible =
                 scan.scans() && !clause.negated && clause.field.is_none() && !clause.phrase;
+            let kind = ClauseKind::of(&clause);
             let (parts, stopword, captured) = self.clause(clause, fields, &mut tokens, eligible);
             let part = match (clause.negated, parts.len()) {
                 (_, 0) => {
@@ -462,6 +488,7 @@ impl QueryCompiler {
                                 negated: false,
                                 parts: 0..part.len(),
                                 stopword,
+                                kind,
                             });
                             scan.clause(eligible, clauses.len().saturating_sub(1), captured);
                             query.must.extend(part);
@@ -483,6 +510,7 @@ impl QueryCompiler {
                 negated: clause.negated,
                 parts: list.len()..list.len().saturating_add(part.len()),
                 stopword,
+                kind,
             });
             scan.clause(eligible, clauses.len().saturating_sub(1), captured);
             list.extend(part);

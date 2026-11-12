@@ -478,22 +478,22 @@ fn explained_hits_add_up_to_their_scores_at_every_step() {
 }
 
 #[test]
-fn levels_without_a_step_are_skipped_and_the_default_plan_stops_at_l0_for_one_term() {
+fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_alone() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
-    // Every level of the collection's defaults, none of which builds a step for one term: L2 skips it (ROADMAP
-    // 8.2.2.3), and the others wait on ROADMAP 8.2.
+    // Every level of the collection's defaults. For one programmatic term L1 builds no step (no text) and L2 skips it
+    // (ROADMAP 8.2.2.3); L3 expands it (ROADMAP 8.2.3), to no term here, and the others wait on ROADMAP 8.2.
     let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
     assert!(relax.relaxes());
     let out = views
         .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec())
         .unwrap();
     assert_eq!(out.hits.len(), 0);
-    assert_eq!(out.relaxation.level, RelaxLevel::Exact);
-    assert_eq!(out.relaxation.applied.len(), 0);
+    assert_eq!(out.relaxation.level, RelaxLevel::Prefix);
+    assert_eq!(out.relaxation.applied, ["prefix"]);
 }
 
 #[test]
@@ -2147,4 +2147,58 @@ mod nested {
             check(&case)?;
         }
     }
+}
+
+/// SPEC §6.3.1, §7.6 L3 (ROADMAP 8.2.3): a field whose analyzer stacks tokens (`edge_ngram`) already holds each word's
+/// prefixes, so L3 leaves its terms exact. No schema names such an analyzer yet (built-in ones only, none stacking),
+/// so the collection's memtable is given one.
+#[test]
+fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
+    use std::num::NonZeroUsize;
+
+    use persia_analysis::{Analyzer, AnalyzerRegistry, EdgeNgramFilter, StandardTokenizer};
+
+    use crate::memtable::MemField;
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "shoesx",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        );
+    let options = RelaxOptions {
+        levels: Some(Levels::Custom(vec![crate::schema::Level::Prefix])),
+        ..min(1)
+    };
+    let relax = RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap();
+    let applied = || {
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        views
+            .search_relaxed(&compiled, &request(10), &relax, &exec())
+            .unwrap()
+            .relaxation
+            .applied
+    };
+    // `body` is `standard`: `shoesx` is expanded, to no term.
+    assert_eq!(applied(), ["prefix"]);
+    let n = |n| NonZeroUsize::new(n).unwrap();
+    let grams = Analyzer::builder(StandardTokenizer)
+        .filter(EdgeNgramFilter::new(n(2), n(4)).unwrap())
+        .build();
+    {
+        let mut inner = c.memtable.shared().write().unwrap();
+        let field = usize::try_from(body.get()).unwrap();
+        let MemField::Text { analyzer, .. } = &mut inner.fields[field] else {
+            panic!("body is text")
+        };
+        *analyzer = Arc::new(grams);
+    }
+    // Stacking now: no field to expand, no step.
+    assert_eq!(applied(), Vec::<String>::new());
 }

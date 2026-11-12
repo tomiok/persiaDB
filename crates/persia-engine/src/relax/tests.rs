@@ -244,11 +244,7 @@ fn input_query() -> (CollectionSchema, Query) {
 #[test]
 fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
     let (_, query) = input_query();
-    let input = LevelInput {
-        original: &query,
-        compiled: None,
-        stats: &NoStats,
-    };
+    let input = LevelInput::new(&query, None, &NoStats);
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::default()).unwrap();
     let steps: Vec<Vec<Step>> = plan
         .planned()
@@ -282,11 +278,7 @@ fn l0_states_the_text_of_the_clauses_that_compiled() {
         &DefaultFields::all(&schema),
         &QueryLimits::default(),
     );
-    let input = LevelInput {
-        original: &red.query,
-        compiled: Some(&red),
-        stats: &NoStats,
-    };
+    let input = LevelInput::new(&red.query, Some(&red), &NoStats);
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::disabled()).unwrap();
     let steps = plan.planned()[0].transform.steps(&input).unwrap();
     assert_eq!(
@@ -312,11 +304,7 @@ impl LevelTransform for Fixed {
 #[test]
 fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() {
     let (_, query) = input_query();
-    let input = LevelInput {
-        original: &query,
-        compiled: None,
-        stats: &NoStats,
-    };
+    let input = LevelInput::new(&query, None, &NoStats);
     let step = Step {
         query: Query::MatchAll,
         applied: "prefix".into(),
@@ -426,10 +414,10 @@ impl StatisticsProvider for NoStats {
     fn doc_count(&self) -> u64 {
         0
     }
-    fn field(&self, _: crate::schema::FieldId) -> crate::stats::FieldTotals {
+    fn field(&self, _: FieldId) -> crate::stats::FieldTotals {
         crate::stats::FieldTotals::default()
     }
-    fn df(&self, _: crate::schema::FieldId, _: &[u8]) -> Result<u64, ReadError> {
+    fn df(&self, _: FieldId, _: &[u8]) -> Result<u64, ReadError> {
         Ok(0)
     }
 }

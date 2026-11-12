@@ -26,8 +26,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, FieldId, FieldKind, KeywordOptions, RelaxationConfig, SchemaBuilder,
-    TextOptions,
+    CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels, RelaxationConfig,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
@@ -791,7 +791,7 @@ fn collection_expansions(c: &mut Criterion) {
 /// `l2` and `l2_every_step` (ROADMAP 8.2.2) relax a five-word query no document holds whole (`zz` is in none) to L2
 /// `drop_terms`: the importance `df` reads, then the `minimum_should_match` steps, each excluding L0 and the steps
 /// before it. `l2` stops at the first step with a hit; `l2_every_step` (a `min_results` above every match) runs them
-/// all.
+/// all. `l3` (ROADMAP 8.2.3) runs L0 and L3 alone on a two-word query whose last word starts every term.
 fn relaxed(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();
@@ -868,10 +868,35 @@ fn relaxed(c: &mut Criterion) {
             black_box(out)
         });
     });
+    // L3 (ROADMAP 8.2.3) alone: `w` is no term, but every term starts with it. L0 (`w3` and `w`) has no hit, so the
+    // step requires `w3` exactly (2 characters, not last) and one of the 50 most frequent terms starting `w`.
+    let prefix_only = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            levels: Some(Levels::Custom(vec![Level::Prefix])),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let typing = compiler.compile("w3 w", &DefaultFields::all(schema), &QueryLimits::default());
+    group.bench_function("l3", |b| {
+        b.iter(|| {
+            let out = views
+                .search_relaxed(&typing, &request, &prefix_only, &exec)
+                .unwrap();
+            assert_eq!(out.relaxation.level, RelaxLevel::Prefix);
+            black_box(out)
+        });
+    });
     group.finish();
+}
 
-    // Compiling user text (SPEC §7.1.1) without synonyms, and with the groups above, which the compiler scans for
-    // (SPEC §6.3.2): a match compiles its alternatives. The maps are built once, by the first compilation.
+/// Compiling user text (SPEC §7.1.1) without synonyms, and with the groups of [`synonym_compiler`], which the compiler
+/// scans for (SPEC §6.3.2): a match compiles its alternatives. The maps are built once, by the first compilation.
+fn compile(c: &mut Criterion) {
+    let schema = &bench_schema(false, Vec::new());
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let synonyms = synonym_compiler(schema);
     let mut group = c.benchmark_group("compile");
     let fields = DefaultFields::all(schema);
     let text = "w3 w40 w7 w120 nosuch";
@@ -912,6 +937,7 @@ criterion_group!(
     parallel,
     suite,
     collection_expansions,
-    relaxed
+    relaxed,
+    compile
 );
 criterion_main!(benches);
