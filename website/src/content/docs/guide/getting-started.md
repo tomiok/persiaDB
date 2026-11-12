@@ -79,7 +79,8 @@ let products = db.create_collection(schema)?;
 products.put(doc)?;
 products.commit()?;
 
-// A typo still returns hits. The response says what changed (SPEC §7.6).
+// The design names the relaxation on the response (SPEC §7.6).
+// The engine does not rewrite this typo. See Typo-tolerant search.
 let results = products.search("runing")?;
 let relaxation = &results.relaxation;
 ```
@@ -122,7 +123,7 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 
 Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
 
-The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The fuzzy `corrected` map in the example is not produced, because levels after exact build no query:
+The response is specified to carry what happened. This object is the shape in SPEC §7.6, including a fuzzy correction. `CollectionViews::search_relaxed` returns a `Relaxation` value. `corrected` stays empty (ROADMAP 8.2.4.3). L0 and L2 `drop_terms` build queries; synonyms, prefix, fuzzy, and the fallback do not. [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
 
 ```json
 {

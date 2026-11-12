@@ -105,7 +105,7 @@ WAND (ROADMAP 7.4.1–7.4.4). %%MATCHING_CELL%%
 Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level rank order, the
 time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
 dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
-gate on the zero-result rate. %%RELAXATION_NOW%% The embedded `v0.1` release depends on this milestone (M10 depends on M8).
+gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [Typo-tolerant search](/guide/typo-tolerant-search/). The embedded `v0.1` release depends on this milestone (M10 depends on M8).
 
 ## M9 — Blob store
 

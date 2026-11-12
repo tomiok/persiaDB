@@ -25,12 +25,12 @@ let products = db.create_collection(schema)?;
 products.put(doc)?;
 products.commit()?;
 
-// No exact match for the typo? The query is relaxed (here: fuzzy, SPEC §7.6),
-// and the response says what changed: "runing" -> "running".
+// ILLUSTRATIVE. SPEC §7.6's fuzzy step would rewrite a typo.
+// That step does not build a query. There is no persia::Db::search.
 let results = products.search("runing")?;
 ```
 
-That `search` call is illustrative. Fuzzy matching is one level of the relaxation cascade. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Faceted search](/guide/faceted-search/).
+That `search` call is illustrative. Fuzzy matching is L4 of the relaxation cascade, and it does not build a query. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Faceted search](/guide/faceted-search/).
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 

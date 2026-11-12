@@ -66,10 +66,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.engineShort, /tombstone sidecars/);
 	assert.match(status.engineShort, /segment merging/);
 	assert.match(status.engineShort, /filter DSL/);
-	assert.match(status.engineShort, /Relaxation is in progress \(M8, \d+\/\d+\): only the exact level builds a query/);
+	assert.match(status.engineShort, /Relaxation is in progress \(M8, \d+\/\d+\): L2 drop_terms builds a query/);
 	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
 	assert.equal(status.libraryNow.includes('exports no API'), false);
-	assert.match(status.relaxationNow, /Levels after exact do not build a query/);
+	assert.match(status.relaxationNow, /L2 drop_terms/);
+	assert.match(status.relaxationNow, /A typo is not corrected/);
+	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
 	assert.match(status.blobNow, /The pack file, remote blobs, document integration, and garbage collection are not written/);
 	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
 	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
@@ -95,13 +97,14 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.pillarEngine, /BM25F scoring and a collection search are in the tree/);
 	assert.match(status.pillarEngine, /no search call on the database handle/);
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
-	assert.match(status.tokens['%%FEATURES_LEAD%%'], /a search that matches nothing returns no hits/);
+	assert.match(status.tokens['%%FEATURES_LEAD%%'], /L2 drop_terms can match fewer terms, and a typo is not corrected/);
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
 		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
 	);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /only the exact level builds a query, so a typo still returns no hits/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /L0 exact and L2 drop_terms build queries/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /A typo is not corrected/);
 	assert.match(status.tokens['%%RELAXATION_NOW%%'], /search_relaxed/);
 	assert.match(status.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
 	assert.match(status.tokens['%%STATE_M8%%'], /^In progress \(M8, \d+\/\d+\)\.$/);
@@ -349,6 +352,7 @@ function currentInput(leaves) {
 		hasSearch: false,
 		hasCollectionSearch: true,
 		hasRelaxSearch: true,
+		hasDropTerms: true,
 		hasDeadline: true,
 		hasExplain: true,
 		analyzers: ['de', 'en'],
@@ -359,7 +363,7 @@ function currentInput(leaves) {
 
 test('an unstarted relaxation milestone stays unclaimed', () => {
 	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
-	for (const id of ['8.1.1', '8.1.2', '8.1.3', '8.1.4', '8.1.5', '8.2.1', '8.2.2.1', '8.2.3', '8.2.4.1', '8.2.5']) {
+	for (const id of ['8.1.1', '8.1.2', '8.1.3', '8.1.4', '8.1.5', '8.2.1', '8.2.2.1', '8.2.2.2', '8.2.2.3', '8.2.3', '8.2.4.1', '8.2.5']) {
 		live.set(id, false);
 	}
 	const input = currentInput(live);
@@ -373,6 +377,13 @@ test('an unstarted relaxation milestone stays unclaimed', () => {
 	const next = buildStatus(input);
 	assert.match(next.tokens['%%RELAXATION_CELL%%'], /^Not started \(M8\)\. On by default in the design\.$/);
 	assert.match(next.engineShort, /Relaxation has not been started \(M8\)/);
+});
+
+test('drop_terms marked done without its transform is rejected', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	const input = currentInput(live);
+	input.hasDropTerms = false;
+	assert.throws(() => buildStatus(input), /marks drop_terms done but the matching code is not in the tree/);
 });
 
 test('relaxation marked done without search_relaxed is rejected', () => {

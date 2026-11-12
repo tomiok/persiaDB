@@ -93,9 +93,9 @@ are part of that server. Data lives in the server's directory, not in a file the
 
 The shared idea is a search API that tolerates a small mistake in the query, and an implementation in Rust.
 The mechanisms differ. Meilisearch's default is typo tolerance on the terms it searches.
-Persia DB's planned default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
+Persia DB's specified default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
 with the response naming the step (SPEC §7.6). %%RELAXATION_CELL%%
-[Typo-tolerant search](/guide/typo-tolerant-search/) is the longer account of that design, and of the compiler and scorer that do exist.
+[Typo-tolerant search](/guide/typo-tolerant-search/) is which of those levels run, and how a multi-term query drops terms.
 [Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option
@@ -122,7 +122,7 @@ For a search feature in production today, use one of the established tools. Pers
 
 ## Read next
 
-- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, fuzzy matching, BM25F, and filters, marked designed or implemented.
+- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, zero results, `minimum_should_match`, and fuzzy matching that is still designed.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.

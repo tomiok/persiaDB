@@ -95,8 +95,22 @@ const OPEN_LEAVES = ['6.6.1', '6.6.2', '6.6.3', '6.6.4', '6.6.5'];
 /** Orchestrator, rank order, budget, and response metadata. Not the L1–L5 transforms. */
 const RELAX_FRAMEWORK = ['8.1.1', '8.1.2', '8.1.3', '8.1.4', '8.1.5'];
 
-/** One leaf from each cascade level after exact. Unchecked means that level builds no query. */
+/** One leaf from each cascade level after exact. Unchecked means that level is not claimed. */
 const RELAX_LEVELS = ['8.2.1', '8.2.2.1', '8.2.3', '8.2.4.1', '8.2.5'];
+
+/**
+ * L2 drop_terms builds a query only once importance, the ladder, and the single-term skip are checked.
+ * 8.2.2.1 alone is the ordering, not the step.
+ */
+const RELAX_DROP = ['8.2.2.1', '8.2.2.2', '8.2.2.3'];
+
+/** Representative leaf for each level that is still a pending transform beside drop_terms. */
+const RELAX_STILL = [
+	['8.2.1', 'synonyms'],
+	['8.2.3', 'prefix'],
+	['8.2.4.1', 'fuzzy'],
+	['8.2.5', 'the fallback'],
+];
 
 const FILTER_LEAVES = ['7.4.5'];
 const DEADLINE_LEAVES = ['7.6.2', '7.6.3'];
@@ -124,6 +138,7 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasSearch A search on the database handle (persia::Db or Database), the SPEC call.
  * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
  * @property {boolean} hasRelaxSearch CollectionViews::search_relaxed, the cascade orchestrator.
+ * @property {boolean} hasDropTerms L2 wired to its transform (not the pending stub).
  * @property {boolean} hasDeadline Execution::deadline, a search deadline.
  * @property {boolean} hasExplain SearchRequest.explain and the Explanation tree.
  * @property {string[]} analyzers
@@ -335,17 +350,33 @@ function requireDone(ctx, ids, code, label) {
 }
 
 /**
- * Plan and orchestrator versus the levels that would actually loosen a query.
- * Only the exact level builds a query until the L1–L5 leaves are checked.
+ * @param {string[]} items
+ * @returns {string}
+ */
+function areNotBuilt(items) {
+	const verb = items.length === 1 ? 'is not built' : 'are not built';
+	return `${englishList(items)} ${verb}`;
+}
+
+/**
+ * Plan and orchestrator versus the levels that loosen a query.
+ * L0 always runs. L2 drop_terms builds a query once its three leaves are checked and the transform is wired.
+ * Synonyms, prefix, fuzzy, and the fallback stay unclaimed until their representative leaf is checked.
  * @param {StatusInput} ctx
  * @param {Milestone} m8
  */
 function relaxationFacts(ctx, m8) {
 	const count = `${m8.done}/${m8.leaves}`;
 	const framework = requireDone(ctx, RELAX_FRAMEWORK, ctx.hasRelaxSearch, 'relaxation');
+	const drop = requireDone(ctx, RELAX_DROP, ctx.hasDropTerms, 'drop_terms');
 	const levels = groupState(ctx.leaves, RELAX_LEVELS);
-	const exactOnly = framework === 'done' && levels === 'todo' && ctx.hasRelaxSearch;
+	const exactOnly = framework === 'done' && levels === 'todo' && drop === 'todo' && ctx.hasRelaxSearch;
 	const levelsDone = m8.state === 'done' && levels === 'done' && ctx.hasRelaxSearch;
+	const dropBuilds = framework === 'done' && drop === 'done' && ctx.hasDropTerms && levels !== 'done';
+	const unstarted = m8.done === 0 && m8.state !== 'in progress' && framework === 'todo' && drop === 'todo' && levels === 'todo';
+	/** @type {string[]} */
+	const missing = RELAX_STILL.filter(([id]) => groupState(ctx.leaves, [id]) !== 'done').map(([, name]) => name);
+	const typoOpen = missing.includes('fuzzy');
 	/** @type {string} */
 	let cell;
 	/** @type {string} */
@@ -356,24 +387,40 @@ function relaxationFacts(ctx, m8) {
 		cell = `Done (${m8.id}, ${count}).`;
 		now = `Relaxation is done (${m8.id}, ${count}).`;
 		gap = '';
+	} else if (framework === 'done' && levels === 'done' && ctx.hasRelaxSearch) {
+		cell = `In progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}): every cascade level builds a query.`;
+	} else if (dropBuilds && missing.length > 0) {
+		const still = areNotBuilt(missing);
+		const typo = typoOpen ? ' A typo is not corrected.' : '';
+		const oneTerm = typoOpen && missing.includes('the fallback') ? ' A one-term typo still returns no hits.' : '';
+		const corrected = groupState(ctx.leaves, ['8.2.4.3']) !== 'done' ? ' Corrected terms stay empty.' : '';
+		cell = `In progress (${m8.id}, ${count}). L0 exact and L2 drop_terms build queries. ${capitalize(still)}.${typo}`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code, and so are BoolQuery minimum_should_match and L2 drop_terms: terms drop least important first (a stopword, then a lower IDF, then a later position), the ladder is 75%, 50%, then one term, and a query of one term skips the level. ${capitalize(still)}.${corrected}${typo} A query of two or more terms can match fewer of them.${oneTerm}`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}): L2 drop_terms builds a query, and ${still}.`;
 	} else if (exactOnly) {
 		cell = `In progress (${m8.id}, ${count}). The orchestrator runs, and only the exact level builds a query, so a typo still returns no hits.`;
 		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code. Levels after exact do not build a query, so a search that matches nothing still returns no hits. Synonyms, dropped terms, prefix and fuzzy as cascade steps, the fallback, and corrected terms are not written.`;
 		gap = `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query.`;
-	} else if (m8.done === 0 && m8.state !== 'in progress' && framework === 'todo') {
+	} else if (unstarted) {
 		cell = `Not started (${m8.id}). On by default in the design.`;
 		now = `Relaxation has not been started (${m8.id}). On by default in the design.`;
 		gap = `Relaxation has not been started (${m8.id}).`;
 	} else {
 		cell = `In progress (${m8.id}, ${count}). On by default in the design. Not every cascade level builds a query.`;
-		now = `Relaxation is in progress (${m8.id}, ${count}). Not every cascade level builds a query, so a typo is not a result.`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). Not every cascade level builds a query.`;
 		gap = `Relaxation is in progress (${m8.id}, ${count}).`;
 	}
 	const lead = levelsDone
 		? ''
-		: exactOnly
-			? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
-			: `Relaxation is ${isState(m8)}, so a search that matches nothing returns no hits.`;
+		: dropBuilds && missing.length > 0
+			? `Relaxation is in progress (${m8.id}, ${count}): L2 drop_terms can match fewer terms${typoOpen ? ', and a typo is not corrected' : ''}.`
+			: exactOnly
+				? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
+				: unstarted
+					? `Relaxation has not been started (${m8.id}).`
+					: `Relaxation is ${isState(m8)}. Not every cascade level builds a query.`;
 	return {
 		cell: seal(cell),
 		now: seal(now),
@@ -806,6 +853,7 @@ function readInput() {
 	const dbRs = read('crates/persia-engine/src/db.rs');
 	const snapshotRs = read('crates/persia-engine/src/db/snapshot.rs');
 	const relaxedRs = read('crates/persia-engine/src/db/relaxed.rs');
+	const relaxRs = read('crates/persia-engine/src/relax.rs');
 	const execRs = read('crates/persia-engine/src/db/exec.rs');
 	const searchRs = read('crates/persia-engine/src/db/search.rs');
 	const explainRs = read('crates/persia-engine/src/search/explain.rs');
@@ -834,6 +882,7 @@ function readInput() {
 			implHasMethod(read(rel), 'CollectionViews', 'search'),
 		),
 		hasRelaxSearch: implHasMethod(relaxedRs, 'CollectionViews', 'search_relaxed'),
+		hasDropTerms: /RelaxLevel::DropTerms => Arc::new\(drop_terms::DropTerms\)/.test(relaxRs),
 		hasDeadline: implHasMethod(execRs, 'Execution', 'deadline'),
 		hasExplain: /pub explain: bool/.test(searchRs) && /pub enum Explanation\b/.test(explainRs),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),

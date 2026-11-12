@@ -76,12 +76,14 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 |---|---|---|
 | L0 | `exact` | Every analyzed term is required. |
 | L1 | `synonyms` | Terms expand through the collection's synonym groups. |
-| L2 | `drop_terms` | Required-term ratio steps from 100% to 75%, 50%, then one term. Low-value terms go first. |
+| L2 | `drop_terms` | Required-term ratio steps from 100% to 75%, 50%, then one term. Least important terms are reported dropped first. |
 | L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). |
 | L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: top documents by static rank or recency, or nothing. |
 
-The response says what happened. This JSON is the shape in SPEC §7.6. It is illustrative:
+L0 and L2 `drop_terms` are the levels whose transforms build a query. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the orchestrator, [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the ladder, and [how terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the importance order.
+
+The response says what happened. This JSON is the shape in SPEC §7.6, including a fuzzy correction the engine does not produce. `Relaxation.corrected` stays empty (ROADMAP 8.2.4.3):
 
 ```json
 "relaxation": {
