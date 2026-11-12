@@ -1045,8 +1045,11 @@ those analyzers' versions.
   default fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in
   one without, one word when it is one token), each once, and none that compiles to the run's own query. The
   compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n` alternatives in all, `n` its query's terms,
-  each run's share as §7.1.3 shares expansions and none when that is less than one per run: L1's step holds the
-  query's terms twice (§7.6), and at least one per alternative, so it could hold no more.
+  each run's share as §7.1.3 shares expansions, and one each when that is less than one per run: L1's step holds the
+  query's terms twice (§7.6), and at least one per alternative, so it could hold no more. This bounds what is
+  compiled; it does not make the step fit, since an alternative of several words or over several fields takes more
+  terms. The cascade still holds the step to the limits (§7.1.3). A run whose share left out an alternative that the
+  50-cap keeps is marked `CompiledSynonym::cut`.
 
 `nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
 bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay
@@ -1302,8 +1305,9 @@ another reason is an error. An L1 `synonyms` step (§7.6) that does not fit has 
 (ROADMAP 8.1.13): each run keeps its first alternatives in their order (§6.3.2), every list is lowered to the highest
 count that fits, the longest first and none below 1, and then, in text order, a list that count cut takes one more where
 the step still fits. It is listed as `synonyms:cut`, and as `synonyms:skipped` when one alternative each does not fit.
-The compilation already holds no more alternatives than its own limits allow the step (§6.3.2); a search held to
-larger limits than the compilation's sees only those, and does not list the step as cut. Defaults, configurable per engine:
+The compilation already holds no more alternatives than its own limits could allow the step (§6.3.2). A step whose
+compilation left some out is listed as `synonyms:cut` even when it fits as it is, also at larger limits than the
+compilation's, which see only those. Defaults, configurable per engine:
 
 | Limit | Default | Counts |
 |---|---|---|

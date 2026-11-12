@@ -118,12 +118,10 @@ impl Analyzer {
             }
         }
         self.tokenizer.tokenize(&filtered, out);
-        // Before the filters remove any: a removed token keeps its position (SPEC §6.3.1).
-        let positions = out
-            .iter()
-            .map(|t| t.position.saturating_add(1))
-            .max()
-            .unwrap_or(0);
+        // Before the filters remove any: a removed token keeps its position (SPEC §6.3.1). A tokenizer appends its
+        // tokens in order, numbered from 0 (`Tokenizer::tokenize`), so the last holds the highest position, and
+        // indexing, which ignores the count, pays no pass over the tokens for it.
+        let positions = out.last().map_or(0, |t| t.position.saturating_add(1));
         if !maps.is_empty() {
             map_spans(&maps, text.len(), out);
         }
@@ -149,9 +147,9 @@ pub struct QueryAnalysis {
     /// Whether a filter that removes stopwords ([`TokenFilter::removes_stopwords`]) removed a token.
     pub stopword: bool,
     /// How many positions the text took: one past the tokenizer's last position, 0 when it found no token. Tokens the
-    /// filters removed count, as they leave gaps (SPEC §6.3.1). So a caller that analyzes words one at a time, starting
-    /// each at the sum of the ones before, numbers their tokens as one analysis of the words, one space apart, would
-    /// under a tokenizer that splits at whitespace.
+    /// filters removed count, as they leave gaps (SPEC §6.3.1). A caller can analyze words one at a time and start each
+    /// at the sum of the ones before. Under a tokenizer that splits at whitespace, its tokens are then numbered as one
+    /// analysis of the words, one space apart, would number them.
     pub positions: u32,
 }
 

@@ -228,6 +228,8 @@ fn alternatives_come_in_group_then_term_order_each_once_capped_at_50() {
         .build()
         .unwrap();
     let compiled = compile_in(&schema, "x", &QueryLimits::default());
+    // The 50-cap is the level's own bound, not a cut to fit the limits.
+    assert!(!compiled.synonyms[0].cut);
     let alternatives: Vec<Query> = compiled.synonyms[0].alternatives.clone();
     let expected: Vec<Query> = words[..50]
         .iter()
@@ -262,25 +264,26 @@ fn alternatives_are_held_to_max_terms_in_all_the_longest_lists_cut_first() {
             max_terms,
             ..QueryLimits::default()
         };
-        runs(&compile_in(&schema, "x y", &limits))
-            .into_iter()
-            .map(|(_, n)| n)
+        compile_in(&schema, "x y", &limits)
+            .synonyms
+            .iter()
+            .map(|s| (s.alternatives.len(), s.cut))
             .collect::<Vec<_>>()
     };
-    assert_eq!(counts(1024), [10, 3]);
+    assert_eq!(counts(1024), [(10, false), (3, false)]);
     // L0 is 2 terms, which L1's step holds twice: at 12, 8 are left. Both lists at 3 is 6, and the 2 left go to the
     // list that was cut.
-    assert_eq!(counts(12), [5, 3]);
-    assert_eq!(counts(9), [3, 2]);
-    // At the floor, one each; below it, none: the step could never fit, so nothing is compiled.
-    assert_eq!(counts(6), [1, 1]);
-    assert_eq!(counts(5), Vec::<usize>::new());
+    assert_eq!(counts(12), [(5, true), (3, false)]);
+    assert_eq!(counts(9), [(3, true), (2, true)]);
+    // At the floor, one each. Below it, the step could never fit: one each is kept, for the cascade to list it skipped.
+    assert_eq!(counts(6), [(1, true), (1, true)]);
+    assert_eq!(counts(5), [(1, true), (1, true)]);
 }
 
 #[test]
 fn hostile_text_compiles_no_more_alternatives_than_the_step_could_hold() {
     // 2 000 words that each match a term of 50 alternatives: within the default limits L0 keeps 1023 of them, so L1's
-    // step could hold none, and the compilation holds none.
+    // step could hold none, and the compilation holds one per run, for the cascade to list the step skipped.
     let mut group: Vec<String> = vec!["a".into()];
     group.extend((0..50).map(|i| format!("b{i} c{i}")));
     let schema = SchemaBuilder::new("c")
@@ -291,7 +294,13 @@ fn hostile_text_compiles_no_more_alternatives_than_the_step_could_hold() {
     let text = "a ".repeat(2000);
     let compiled = compile_in(&schema, &text, &QueryLimits::default());
     assert!(compiled.truncated);
-    assert_eq!(compiled.synonyms, []);
+    assert_eq!(compiled.synonyms.len(), 1023);
+    assert!(
+        compiled
+            .synonyms
+            .iter()
+            .all(|s| s.alternatives.len() == 1 && s.cut)
+    );
     // With room for some: 100 words leave 1024 − 200 terms, over 100 runs, 8 each.
     let compiled = compile_in(&schema, &"a ".repeat(100), &QueryLimits::default());
     let counts: Vec<usize> = compiled
@@ -391,7 +400,8 @@ fn l1_ors_each_run_with_its_alternatives_in_one_step() {
     assert_eq!(r.effective.as_deref(), Some("cheap tv"));
     assert_eq!(by_step(&out), [(1, "a")]);
 
-    // Two runs, one of two words, in one step: L0 finds `c`; L1 adds the documents of the alternatives.
+    // One run of two words, with two alternatives (`sneakers`, `trainers`): L0 finds `c`; L1 adds the documents of
+    // the alternatives.
     let compiled = compile("running shoes");
     let out = search(&db, &compiled, &plan(3));
     assert_eq!(out.relaxation.applied[0], "synonyms");
@@ -478,6 +488,50 @@ fn over_the_limits_l1_keeps_each_runs_first_alternatives_or_is_skipped() {
     let mut ids: Vec<&str> = by_step(&out).into_iter().map(|(_, id)| id).collect();
     ids.sort_unstable();
     assert_eq!(ids, ["d", "h"]);
+}
+
+#[test]
+fn alternatives_the_compilation_left_out_list_the_step_as_cut_even_when_it_fits() {
+    // One default field, words of one term: `tv` is 1 term, and each alternative 1. At 4, the compilation keeps 2 of
+    // the 3 (its own 1 and L0's 1 beside them), and the step fits exactly: still cut, `box` was left out.
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .synonyms(groups(&[&["tv", "telly", "set", "box"]]))
+        .build()
+        .unwrap();
+    let title = schema.field("title").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [6; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema.clone()).unwrap();
+    for (id, t) in [("a", "telly show"), ("b", "box office")] {
+        let doc = Document::new(id).with(title, Value::String(t.into()));
+        db.put("c", &doc, Durability::Buffered).unwrap();
+    }
+    let run = |max_terms| {
+        let limits = QueryLimits {
+            max_terms,
+            ..QueryLimits::default()
+        };
+        let compiled = compile_in(&schema, "tv", &limits);
+        let out = search(&db, &compiled, &plan(1).with_limits(limits));
+        let ids: Vec<String> = by_step(&out)
+            .into_iter()
+            .map(|(_, id)| id.to_owned())
+            .collect();
+        (out.relaxation.applied, ids)
+    };
+    assert_eq!(
+        run(5),
+        (
+            vec!["synonyms".to_owned()],
+            vec!["a".to_owned(), "b".to_owned()]
+        )
+    );
+    assert_eq!(
+        run(4),
+        (vec!["synonyms:cut".to_owned()], vec!["a".to_owned()])
+    );
+    // At 2 the step holds L0 twice and no alternative: one is kept, and the step is skipped.
+    assert_eq!(run(2).0, ["synonyms:skipped"]);
 }
 
 #[test]

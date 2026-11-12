@@ -19,7 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   Programmatic queries skip the level. Benchmarks `search_relaxed/l1` and `compile/plain`, `compile/synonyms`.
 - `persia-engine`: an L1 step over `QueryLimits` keeps fewer alternatives instead of being skipped (ROADMAP 8.1.13;
   SPEC §7.1.3). Each run keeps its first, the longest lists cut first and none below 1. `Relaxation::applied` lists
-  it as `synonyms:cut`, or `synonyms:skipped` when one each does not fit.
+  it as `synonyms:cut`, or `synonyms:skipped` when one each does not fit. A step is also `synonyms:cut` when the
+  compilation already left alternatives out (`CompiledSynonym::cut`), even if what is left fits.
 - `persia-analysis`: `SynonymMap::alternative_sources` names where each alternative was given (its group, and its
   index there). `SynonymMap::find_between` finds matches that start and end only on given boundaries.
   `Analyzer::analyze_query_counted` returns a `QueryAnalysis`: whether a stopword was removed, and how many positions

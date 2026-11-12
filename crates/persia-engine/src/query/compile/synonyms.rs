@@ -47,6 +47,9 @@ pub struct CompiledSynonym {
     /// over the fields when it is one token). In group order, then term order, each once, without one that compiles
     /// to the run's own query, and at most [`DEFAULT_SYNONYM_EXPANSIONS`] of them. Never empty.
     pub alternatives: Vec<Query>,
+    /// Whether the compilation's bound on what L1's step could hold (SPEC §6.3.2) left out some of them: the cascade
+    /// then lists the step as cut (`synonyms:cut`, §7.1.3), whether or not it cuts more.
+    pub cut: bool,
 }
 
 /// A clause's tokens in each default field, in the order of [`DefaultFields::fields`]: each token's term and position
@@ -241,7 +244,8 @@ impl<'c> Scan<'c> {
         let mut caps: Vec<&mut u32> = counts.iter_mut().collect();
         let spare = limits.max_terms.saturating_sub(terms.saturating_mul(2));
         if !share(&mut caps, spare) {
-            return Vec::new();
+            // The step cannot hold one alternative each: keep one, so the cascade lists it skipped (§7.1.3).
+            counts.fill(1);
         }
         accepted
             .into_iter()
@@ -249,28 +253,33 @@ impl<'c> Scan<'c> {
             .filter_map(|((range, sources), count)| {
                 let original = original(root, clauses, &range)?;
                 let limit = usize::try_from(count).unwrap_or(usize::MAX);
-                let alternatives = self.alternatives(&original, &sources, limit);
+                let (alternatives, cut) = self.alternatives(&original, &sources, limit);
                 (!alternatives.is_empty()).then_some(CompiledSynonym {
                     clauses: range,
                     alternatives,
+                    cut,
                 })
             })
             .collect()
     }
 
     /// The raw terms at `sources` (group, index) compiled as quoted phrases over the default fields, in source order,
-    /// each once and none equal to `original`, at most `limit`.
+    /// each once and none equal to `original`, at most `limit`; and whether `limit` left one out that the
+    /// 50-cap would have kept.
     fn alternatives(
         &self,
         original: &Query,
         sources: &BTreeSet<(usize, usize)>,
         limit: usize,
-    ) -> Vec<Query> {
+    ) -> (Vec<Query>, bool) {
         let groups = self.compiler.schema.synonyms();
         let mut tokens = TokenStream::new();
         let mut alternatives: Vec<Query> = Vec::new();
+        // Below the cap, one more source is compiled to tell a cut from duplicates that compile away.
+        let probe = limit < DEFAULT_SYNONYM_EXPANSIONS;
         for &(group, index) in sources {
-            if alternatives.len() >= limit {
+            let full = alternatives.len() >= limit;
+            if full && !probe {
                 break;
             }
             let Some(text) = groups.get(group).and_then(|g| g.get(index)) else {
@@ -294,10 +303,13 @@ impl<'c> Scan<'c> {
                 }),
             };
             if query != *original && !alternatives.contains(&query) {
+                if full {
+                    return (alternatives, true);
+                }
                 alternatives.push(query);
             }
         }
-        alternatives
+        (alternatives, false)
     }
 }
 
@@ -351,10 +363,62 @@ mod tests {
         let fields = DefaultFields::all(&schema);
         let scan = Scan::new(&compiler, &fields);
         let sources = BTreeSet::from([(0, 1), (0, 2)]);
-        let telly = scan.alternatives(&Query::MatchAll, &sources, 50);
+        let (telly, cut) = scan.alternatives(&Query::MatchAll, &sources, 50);
         // `Telly` compiles as `telly` does: once.
-        assert_eq!(telly.len(), 1);
-        assert_eq!(scan.alternatives(&telly[0], &sources, 50), []);
+        assert_eq!((telly.len(), cut), (1, false));
+        assert_eq!(scan.alternatives(&telly[0], &sources, 50), (vec![], false));
+        // Held to one, the duplicate left out is no cut.
+        assert_eq!(
+            scan.alternatives(&Query::MatchAll, &sources, 1),
+            (telly, false)
+        );
+    }
+
+    #[test]
+    fn a_limit_below_the_cap_that_leaves_one_out_is_a_cut() {
+        let schema = SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .synonyms(vec![vec![
+                "tv".into(),
+                "telly".into(),
+                "Telly".into(),
+                "box".into(),
+            ]])
+            .build()
+            .unwrap();
+        let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let fields = DefaultFields::all(&schema);
+        let scan = Scan::new(&compiler, &fields);
+        let sources = BTreeSet::from([(0, 1), (0, 2), (0, 3)]);
+        let count = |limit| {
+            let (alternatives, cut) = scan.alternatives(&Query::MatchAll, &sources, limit);
+            (alternatives.len(), cut)
+        };
+        assert_eq!(count(1), (1, true));
+        assert_eq!(count(2), (2, false));
+        assert_eq!(count(50), (2, false));
+    }
+
+    #[test]
+    fn the_50_cap_over_sources_two_fields_joined_is_no_cut() {
+        // Fields that match the same clauses join their sources, which may pass the 50-cap.
+        let mut group: Vec<String> = vec!["tv".into()];
+        group.extend((0..59).map(|i| format!("w{i}")));
+        let schema = SchemaBuilder::new("c")
+            .field("title", FieldKind::Text(TextOptions::default()))
+            .synonyms(vec![group])
+            .build()
+            .unwrap();
+        let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin()).unwrap();
+        let fields = DefaultFields::all(&schema);
+        let scan = Scan::new(&compiler, &fields);
+        let sources: BTreeSet<(usize, usize)> = (1..60).map(|i| (0, i)).collect();
+        let count = |limit| {
+            let (alternatives, cut) = scan.alternatives(&Query::MatchAll, &sources, limit);
+            (alternatives.len(), cut)
+        };
+        assert_eq!(count(DEFAULT_SYNONYM_EXPANSIONS), (50, false));
+        assert_eq!(count(49), (49, true));
     }
 
     #[test]

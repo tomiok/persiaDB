@@ -25,6 +25,8 @@ pub(crate) struct Expansion {
     units: Vec<Unit>,
     must_not: Vec<Query>,
     filter: Vec<Filter>,
+    /// Whether the compilation already left out some alternatives ([`crate::query::CompiledSynonym::cut`]).
+    cut: bool,
 }
 
 impl Expansion {
@@ -94,7 +96,13 @@ impl Expansion {
             units,
             must_not,
             filter,
+            cut: compiled.synonyms.iter().any(|s| s.cut),
         })
+    }
+
+    /// Whether the compilation already left out some alternatives: the step is cut even when it fits as it is.
+    pub(crate) fn cut(&self) -> bool {
+        self.cut
     }
 
     /// How many alternatives each run has, in text order: what [`Self::query`]'s `keep` counts.

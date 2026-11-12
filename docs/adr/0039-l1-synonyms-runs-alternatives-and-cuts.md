@@ -54,8 +54,12 @@ The user decided items 1, 2 and 6 (2026-11-11). The others follow from §6.3.2 a
    analyzed by each field as typed text would be.
 8. **Bounded at compile time.** L1's step holds L0's terms twice: its own clauses, plus L0, which it excludes. It
    also holds at least one term per alternative. So the compilation keeps at most `max_terms − 2 · n` alternatives
-   in all, `n` being L0's terms, shared as in item 6, and none when that is below one per run. It compiles only those.
-   A text of a thousand matching words therefore costs no more than its L0 does.
+   in all, `n` being L0's terms, shared as in item 6, and one each when that is below one per run, so the cascade
+   lists the step skipped. It compiles only those, plus one more source per cut run, to tell a cut from duplicates.
+   A text of a thousand matching words therefore costs about as much again as its L0 does. This bounds the work. It
+   does not make the step fit, because an alternative of several words or over several fields takes more terms. The
+   cascade still holds the step to the limits (item 6). A run whose share left out an alternative is marked
+   `CompiledSynonym::cut`, and its step is listed `synonyms:cut` even when it then fits as it is.
 9. **The step.** The step keeps L0's other required clauses, its excluded clauses and its filters. Its `effective` is
    L0's text (ROADMAP 8.1.14), because every clause is kept. A programmatic query builds no step: it has no text to
    scan, and its terms are already analyzed.
@@ -80,8 +84,9 @@ The user decided items 1, 2 and 6 (2026-11-11). The others follow from §6.3.2 a
   alternatives (bench `compile/synonyms`). Most of that is analyzing the alternatives again, and it is paid when L0
   already has hits. ROADMAP 8.1.16 builds them lazily or caches them.
 - The compile-time bound uses the compilation's limits. A search held to larger limits than the compilation's
-  (`RelaxPlan::with_limits`) sees only the alternatives compiled, and does not list the step as cut. At equal limits
-  a compile-time cut implies a cascade cut.
+  (`RelaxPlan::with_limits`) sees only the alternatives compiled. The cascade may then find the step fits as it is,
+  at equal limits too (one default field, one-word alternatives). So the cut is carried on the compiled run
+  (`CompiledSynonym::cut`), and the step is listed `synonyms:cut` either way.
 - Fitting a cut checks the whole step for each count it tries (about `log2(longest list) + runs` checks).
   Computing it from each alternative's usage would cost one check. Runs are bounded by item 8.
 - A clause that one field analyzes to nothing, for a reason other than a stopword (`!!!` under `standard`), adds no

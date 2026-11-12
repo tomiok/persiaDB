@@ -696,7 +696,7 @@ fn level_steps<'a>(
 }
 
 /// `step` held to the limits beside the steps it excludes (SPEC §7.1.3): as built, with its expansions cut or fewer of
-/// its synonym `alternatives` (`label` gets [`Relaxation::CUT`]), or `None` when no cut fits (`label` gets
+/// its synonym `alternatives`, or with alternatives the compilation already left out (`label` gets [`Relaxation::CUT`]), or `None` when no cut fits (`label` gets
 /// [`Relaxation::SKIPPED`]).
 ///
 /// # Errors
@@ -708,6 +708,10 @@ fn held<'a>(
     alternatives: Option<&Expansion>,
 ) -> Result<(Option<Cow<'a, Query>>, String), SearchError> {
     Ok(match fitting.fit(&step)? {
+        // The compilation left out alternatives that larger limits would hold (SPEC §6.3.2).
+        Fit::Fits if alternatives.is_some_and(Expansion::cut) => {
+            (Some(step), label + Relaxation::CUT)
+        }
         Fit::Fits => (Some(step), label),
         Fit::Cut(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
         Fit::Skipped => match alternatives

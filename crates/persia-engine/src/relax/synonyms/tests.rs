@@ -8,6 +8,10 @@ use crate::schema::{FieldKind, SchemaBuilder, TextOptions};
 use crate::stats::StatisticsProvider;
 
 fn compile(text: &str) -> Compiled {
+    compile_with(text, &QueryLimits::default())
+}
+
+fn compile_with(text: &str, limits: &QueryLimits) -> Compiled {
     let schema = SchemaBuilder::new("c")
         .field("title", FieldKind::Text(TextOptions::default()))
         .synonyms(vec![
@@ -18,7 +22,7 @@ fn compile(text: &str) -> Compiled {
         .unwrap();
     QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
         .unwrap()
-        .compile(text, &DefaultFields::all(&schema), &QueryLimits::default())
+        .compile(text, &DefaultFields::all(&schema), limits)
 }
 
 /// A provider no L1 step reads: the level reads no statistics.
@@ -237,6 +241,7 @@ mod properties {
                                 _ => Query::Bool(BoolQuery { must: parts, ..BoolQuery::default() }),
                             };
                             prop_assert_eq!(original, &expected);
+                            prop_assert!(!alternatives.contains(original), "{:?}", alternatives);
                         }
                     }
                 }
@@ -270,4 +275,22 @@ fn a_filter_joined_to_the_root_stays_on_the_step() {
         panic!()
     };
     assert_eq!(cut.filter, [filter]);
+}
+
+#[test]
+fn the_expansion_is_cut_when_the_compilation_cut_any_run() {
+    // `tv nyc` is 2 terms. At 6, 2 alternatives are left for 2 runs: `tv` keeps 1 of its 2, `nyc` its 1.
+    let limits = |max_terms| QueryLimits {
+        max_terms,
+        ..QueryLimits::default()
+    };
+    let compiled = compile_with("tv nyc", &limits(6));
+    let cuts: Vec<bool> = compiled.synonyms.iter().map(|s| s.cut).collect();
+    assert_eq!(cuts, [true, false]);
+    assert!(Expansion::of(&compiled).unwrap().cut());
+    assert!(
+        !Expansion::of(&compile_with("tv nyc", &limits(1024)))
+            .unwrap()
+            .cut()
+    );
 }
