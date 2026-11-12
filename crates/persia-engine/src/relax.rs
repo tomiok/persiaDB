@@ -214,6 +214,15 @@ pub(crate) trait LevelTransform: Send + Sync + fmt::Debug {
     /// # Errors
     /// A statistic that cannot be read ([`StatisticsProvider::df`]).
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError>;
+
+    /// Whether the level's steps are *nested* (SPEC §7.6, ROADMAP 8.2.2.4): each, as built, matches every document
+    /// the level's earlier steps match, with the same `must_not` and `filter`. Excluding the latest one then excludes
+    /// them all, so the cascade excludes only that one of the level's steps from the next. A step cut to fit the limits
+    /// (SPEC §7.1.3) matches less than it was built to: the cascade keeps excluding the earlier steps beside it.
+    /// `false` unless a level proves it: L2's ladder is nested, L1's steps are not.
+    fn nested(&self) -> bool {
+        false
+    }
 }
 
 /// L0: the query as compiled.
@@ -272,6 +281,9 @@ pub struct RelaxPlan {
     filters: FilterRelaxation,
     budget: Duration,
     limits: Option<QueryLimits>,
+    /// Every step excludes every earlier step, nested or not: the rule before ROADMAP 8.2.2.4, which tests compare to.
+    /// Only tests set it.
+    exclude_every_step: bool,
 }
 
 impl RelaxPlan {
@@ -324,6 +336,7 @@ impl RelaxPlan {
             filters: options.filters.unwrap_or(collection.filters),
             budget: Duration::from_millis(u64::from(budget_ms)),
             limits: None,
+            exclude_every_step: false,
         })
     }
 
@@ -376,6 +389,19 @@ impl RelaxPlan {
 
     pub(crate) fn planned(&self) -> &[PlannedLevel] {
         &self.levels
+    }
+
+    /// Whether a step of a nested level ([`LevelTransform::nested`]) may stand for the level's earlier steps in the
+    /// later steps' exclusions (ROADMAP 8.2.2.4). Always, outside tests.
+    pub(crate) fn excludes_latest_only(&self) -> bool {
+        !self.exclude_every_step
+    }
+
+    /// This plan with every step excluding every earlier one, nested or not: the rule ROADMAP 8.2.2.4 replaced.
+    #[cfg(test)]
+    pub(crate) fn excluding_every_step(mut self) -> Self {
+        self.exclude_every_step = true;
+        self
     }
 
     /// This plan with `level`'s transform replaced, or added in cascade order when the plan lacks the level.

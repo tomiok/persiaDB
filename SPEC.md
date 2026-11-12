@@ -1292,8 +1292,9 @@ another type, an unknown field, an unknown operator or bound, and filter JSON lo
 #### 7.1.3 Limits
 Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
 user text is cut (§7.1.1). The relaxation cascade (§7.6) holds each step after L0 to the same limits as the query
-it runs, `bool { must: [step], must_not: [earlier steps searched] }`, so the earlier steps it excludes count in full
-(ROADMAP 8.1.8). The limits are the ones the search sets, else those a compiled query was compiled with, else the
+it runs, `bool { must: [step], must_not: [the earlier steps it excludes] }`, so the steps it excludes count in full
+(ROADMAP 8.1.8). Those are the earlier steps searched, except the steps of a nested level that a later step of the
+level stands for (§7.6, ROADMAP 8.2.2.4): an L2 step counts L0, L1's step and the latest L2 step searched, not every one. The limits are the ones the search sets, else those a compiled query was compiled with, else the
 defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
 its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
 first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
@@ -1590,7 +1591,15 @@ one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
-excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. Hits
+excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A
+level whose steps are *nested*, each matching every document the level's earlier steps match, with the same
+`must_not` and `filter` (L2's ladder: `minimum_should_match` lowered over the same terms), needs only its latest
+step searched excluded, which excludes the earlier ones with it (ROADMAP 8.2.2.4). A step then excludes the steps
+searched in earlier levels, L0 included, and of its own level the latest one searched. A step cut to fit the limits
+(§7.1.3) matches less than it was built to, so it does not stand for the level's earlier steps, which stay excluded
+beside it. The next step not cut stands for them all again, as a cut step matches only documents its uncut query
+matches. L1's steps are not nested, and every one stays excluded. The hits are those of excluding every earlier step;
+a long query keeps more of its L2 steps within `max_terms`, and planning re-plans fewer excluded steps. Hits
 count from the top: the cascade needs `max(offset + limit, min_results)` of them, each step collects (pruned, §7.3)
 the ones still missing, and the cascade stops once the hits found reach `min_results` (with `fill`, also
 `offset + limit`) or the steps run out. Without `fill`, whether a query relaxes therefore does not depend on the

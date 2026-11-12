@@ -226,8 +226,11 @@ struct Ran {
 /// The steps the cascade built so far, and what each excludes from the next.
 struct Built<'q, 's> {
     ran: Vec<Ran>,
-    /// The queries of the steps built and not skipped: every later step excludes them.
+    /// The queries of the steps built and not skipped that every later step excludes: each such step, except a step of
+    /// a nested level that a later step of its level stands for (ROADMAP 8.2.2.4).
     earlier: Vec<Cow<'q, Query>>,
+    /// Where the current level's steps start in `earlier`.
+    level_start: usize,
     applied: Vec<String>,
     /// The text of the last step searched (SPEC §7.6 `effective`).
     effective: Option<String>,
@@ -243,6 +246,7 @@ impl<'q, 's> Built<'q, 's> {
         Self {
             ran: Vec::new(),
             earlier: Vec::new(),
+            level_start: 0,
             applied: Vec::new(),
             effective: None,
             schema,
@@ -262,15 +266,24 @@ impl<'q, 's> Built<'q, 's> {
         step: Cow<'q, Query>,
         label: String,
         alternatives: Option<&Expansion>,
-    ) -> Result<(Option<Cow<'q, Query>>, String), SearchError> {
+    ) -> Result<Held<'q>, SearchError> {
         if self.ran.is_empty() {
-            return Ok((Some(step), label));
+            return Ok(Held {
+                step: Some(step),
+                label,
+                cut: false,
+            });
         }
         let fitting = match &mut self.fitting {
             Some(fitting) => fitting,
             slot @ None => slot.insert(StepLimits::new(self.schema, self.limits, query)?),
         };
         held(fitting, step, label, alternatives)
+    }
+
+    /// The steps pushed from now on are the next level's.
+    fn begin_level(&mut self) {
+        self.level_start = self.earlier.len();
     }
 
     /// A step of `level` that does not fit: listed, not searched, excluded from none.
@@ -284,6 +297,8 @@ impl<'q, 's> Built<'q, 's> {
     }
 
     /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it): excluded from every later one.
+    /// One that `stands_for_level` (a nested level's step as built, ROADMAP 8.2.2.4) matches every document its level's
+    /// earlier steps match, so it replaces them in what the later steps exclude.
     fn push(
         &mut self,
         level: RelaxLevel,
@@ -291,19 +306,30 @@ impl<'q, 's> Built<'q, 's> {
         label: String,
         text: Option<String>,
         searched: Option<(SearchPlan, Collected)>,
+        stands_for_level: bool,
     ) {
-        if !self.ran.is_empty() {
+        let first = self.ran.is_empty();
+        if !first {
             self.applied.push(label);
-            if let Some(fitting) = &mut self.fitting {
-                fitting.exclude(&step);
-            }
         }
         self.ran.push(Ran {
             level,
             searched,
             skipped: false,
         });
+        let replaced = stands_for_level && self.earlier.len() > self.level_start;
+        if replaced {
+            self.earlier.truncate(self.level_start);
+        }
         self.earlier.push(step);
+        // L0 is counted when the fitting is built, at the first step after it.
+        if let Some(fitting) = self.fitting.as_mut().filter(|_| !first) {
+            if replaced {
+                fitting.recount(self.earlier.iter().map(AsRef::as_ref));
+            } else if let Some(step) = self.earlier.last() {
+                fitting.exclude(step);
+            }
+        }
         self.effective = text;
     }
 }
@@ -480,6 +506,8 @@ impl CollectionViews<'_> {
             }
             let input = LevelInput::new(query, compiled, &stats);
             let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
+            built.begin_level();
+            let nested = planned.transform.nested() && relax.excludes_latest_only();
             for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
                 if !builds(i, found) {
@@ -489,7 +517,8 @@ impl CollectionViews<'_> {
                     truncated = true;
                     break 'levels;
                 }
-                let (step, label) = built.fit(query, step, label, alternatives.as_ref())?;
+                let Held { step, label, cut } =
+                    built.fit(query, step, label, alternatives.as_ref())?;
                 let Some(step) = step else {
                     built.skip(planned.level, label);
                     continue;
@@ -519,7 +548,9 @@ impl CollectionViews<'_> {
                 } else {
                     None
                 };
-                built.push(planned.level, step, label, text, searched);
+                // A cut step matches less than its level built (SPEC §7.1.3): it stands for no earlier step, which an
+                // uncut later one does again (a cut step's matches are its uncut ones', which the later step holds).
+                built.push(planned.level, step, label, text, searched, nested && !cut);
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
@@ -706,21 +737,33 @@ fn held<'a>(
     step: Cow<'a, Query>,
     label: String,
     alternatives: Option<&Expansion>,
-) -> Result<(Option<Cow<'a, Query>>, String), SearchError> {
-    Ok(match fitting.fit(&step)? {
-        // The compilation left out alternatives that larger limits would hold (SPEC §6.3.2).
+) -> Result<Held<'a>, SearchError> {
+    let (step, label, cut) = match fitting.fit(&step)? {
+        // The compilation left out alternatives that larger limits would hold (SPEC §6.3.2); the step is as built.
         Fit::Fits if alternatives.is_some_and(Expansion::cut) => {
-            (Some(step), label + Relaxation::CUT)
+            (Some(step), label + Relaxation::CUT, false)
         }
-        Fit::Fits => (Some(step), label),
-        Fit::Cut(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
+        Fit::Fits => (Some(step), label, false),
+        Fit::Cut(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT, true),
         Fit::Skipped => match alternatives
             .and_then(|a| fitting.cut_alternatives(&a.counts(), |keep| a.query(keep)))
         {
-            Some(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
-            None => (None, label + Relaxation::SKIPPED),
+            Some(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT, true),
+            None => (None, label + Relaxation::SKIPPED, false),
         },
-    })
+    };
+    Ok(Held { step, label, cut })
+}
+
+/// A step held to the limits ([`held`]).
+struct Held<'a> {
+    /// The query to search: as built, or cut. `None` when it is skipped.
+    step: Option<Cow<'a, Query>>,
+    /// What it applied, with [`Relaxation::CUT`] or [`Relaxation::SKIPPED`] when the limits cut or skipped it.
+    label: String,
+    /// Whether `step` matches less than the level built (fewer expansions or alternatives): a nested level's step
+    /// then stands for none of its level's earlier steps (ROADMAP 8.2.2.4).
+    cut: bool,
 }
 
 /// Whether `e` is a deadline that passed, while planning or searching.

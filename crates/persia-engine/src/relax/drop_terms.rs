@@ -300,6 +300,12 @@ impl LevelTransform for DropTerms {
         }
         Ok(steps)
     }
+
+    /// The ladder is nested (ROADMAP 8.2.2.4): every step has the same `should` clauses, `must_not` and `filter`, and a
+    /// lower `minimum_should_match` than the one before, so a document that matches `k` of the terms matches `k − 1`.
+    fn nested(&self) -> bool {
+        true
+    }
 }
 
 /// The text of the clauses of `compiled` a step keeps (SPEC §7.6 `effective`): those `kept` marks (by clause index) and

@@ -1933,3 +1933,218 @@ fn a_deadline_passed_while_a_level_builds_stops_the_next_one_before_it_reads() {
     );
     assert_eq!(drop_terms.calls(), 0);
 }
+
+mod nested {
+    //! A nested level excludes only its latest searched step (ROADMAP 8.2.2.4): L2's ladder, after a stub L1 step that no L2
+    //! step holds, over random corpora and programmatic queries, with prefixes the limits may cut.
+    //!
+    //! Invariants:
+    //! 1. Within limits nothing reaches, the cascade gives the same hits, steps, scores (bit for bit) and relaxation
+    //!    as one where every step excludes every earlier step: excluding the latest of a nested level excludes them all.
+    //! 2. Under tight limits, where steps are cut or skipped, no document is a hit of two steps: a cut step does not
+    //!    stand for its level's earlier steps.
+    //! 3. A step of a nested level never excludes more than the old rule did, so it is skipped no more often.
+
+    use std::collections::BTreeSet;
+    use std::ops::Bound;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::query::{BoolQuery, Filter, FilterValue, PrefixQuery, QueryLimits};
+
+    const WORDS: [&str; 6] = ["a0", "a1", "a2", "b0", "b1", "b2"];
+
+    #[derive(Debug, Clone)]
+    enum Clause {
+        Word(usize),
+        /// `a` or `b`, with this `max_expansions`.
+        Prefix(bool, u32),
+    }
+
+    #[derive(Debug, Clone)]
+    struct Case {
+        docs: Vec<(Vec<usize>, i64)>,
+        commits: Vec<usize>,
+        must: Vec<Clause>,
+        must_not: Option<usize>,
+        /// An L1 step searching this word: not nested, and not inside any L2 step, so it stays excluded from them.
+        l1: Option<usize>,
+        filter: bool,
+        min_results: u32,
+        fill: bool,
+        /// `max_expansions` and `max_terms` of the tight limits.
+        tight: (usize, usize),
+    }
+
+    fn clause() -> impl Strategy<Value = Clause> {
+        prop_oneof![
+            (0..WORDS.len()).prop_map(Clause::Word),
+            (any::<bool>(), 1u32..4).prop_map(|(a, n)| Clause::Prefix(a, n)),
+        ]
+    }
+
+    fn case() -> impl Strategy<Value = Case> {
+        (
+            prop::collection::vec(
+                (prop::collection::vec(0..WORDS.len(), 1..5), -2i64..3),
+                1..30,
+            ),
+            prop::collection::vec(0usize..30, 0..3),
+            prop::collection::vec(clause(), 2..7),
+            prop::option::of(0..WORDS.len()),
+            prop::option::of(0..WORDS.len()),
+            any::<bool>(),
+            1u32..40,
+            any::<bool>(),
+            (1usize..16, 8usize..40),
+        )
+            .prop_map(
+                |(docs, commits, must, must_not, l1, filter, min_results, fill, tight)| Case {
+                    docs,
+                    commits,
+                    must,
+                    must_not,
+                    l1,
+                    filter,
+                    min_results,
+                    fill,
+                    tight,
+                },
+            )
+    }
+
+    fn build(case: &Case) -> (Database<SimFile>, FieldId, FieldId) {
+        let schema = SchemaBuilder::new("c")
+            .field("body", FieldKind::Text(TextOptions::default()))
+            .field("n", FieldKind::I64 { stored: false })
+            .build()
+            .unwrap();
+        let body = schema.field("body").unwrap().id();
+        let n = schema.field("n").unwrap().id();
+        let mut db =
+            Database::create_on(SimFile::new(), [7; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(schema).unwrap();
+        for (i, (words, value)) in case.docs.iter().enumerate() {
+            let text: Vec<&str> = words.iter().map(|&w| WORDS[w]).collect();
+            let doc = Document::new(format!("d{i}"))
+                .with(body, Value::String(text.join(" ")))
+                .with(n, Value::I64(*value));
+            db.put("c", &doc, Durability::Buffered).unwrap();
+            if case.commits.contains(&i) {
+                db.commit().unwrap();
+            }
+        }
+        (db, body, n)
+    }
+
+    /// L0: the case's `must` clauses, its excluded word and its filter (`n ≥ 0`).
+    fn query(case: &Case, body: FieldId, n: FieldId) -> Query {
+        let must = case
+            .must
+            .iter()
+            .map(|c| match *c {
+                Clause::Word(w) => term(body, WORDS[w]),
+                Clause::Prefix(a, max_expansions) => Query::Prefix(PrefixQuery {
+                    field: body,
+                    prefix: if a { "a" } else { "b" }.into(),
+                    max_expansions,
+                }),
+            })
+            .collect();
+        Query::Bool(BoolQuery {
+            must,
+            must_not: case
+                .must_not
+                .map(|w| term(body, WORDS[w]))
+                .into_iter()
+                .collect(),
+            filter: if case.filter {
+                vec![Filter::Range {
+                    field: n,
+                    lower: Bound::Included(FilterValue::I64(0)),
+                    upper: Bound::Unbounded,
+                }]
+            } else {
+                Vec::new()
+            },
+            ..BoolQuery::default()
+        })
+    }
+
+    /// The collection's levels, each step held to `limits`: L2 the real one, L1 the case's stub step (a programmatic query
+    /// builds none of its own).
+    fn plans(case: &Case, body: FieldId, limits: QueryLimits) -> (RelaxPlan, RelaxPlan) {
+        let options = RelaxOptions {
+            min_results: Some(case.min_results),
+            fill: Some(case.fill),
+            ..RelaxOptions::default()
+        };
+        let mut latest = RelaxPlan::new(&RelaxationConfig::default(), &options)
+            .unwrap()
+            .with_limits(limits);
+        if let Some(w) = case.l1 {
+            let stub = Stub::new(vec![step(term(body, WORDS[w]), "synonyms")]);
+            latest = latest.with_level(RelaxLevel::Synonyms, stub);
+        }
+        let every = latest.clone().excluding_every_step();
+        (latest, every)
+    }
+
+    fn check(case: &Case) -> Result<(), TestCaseError> {
+        let (db, body, n) = build(case);
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let l0 = query(case, body, n);
+        let all = request(1000);
+
+        // 1. Within limits nothing reaches, the same cascade.
+        let (latest, every) = plans(case, body, QueryLimits::default());
+        let got = views.search_relaxed(&l0, &all, &latest, &exec()).unwrap();
+        let want = views.search_relaxed(&l0, &all, &every, &exec()).unwrap();
+        prop_assert_eq!(strip(&got.hits), strip(&want.hits));
+        prop_assert_eq!(&got.relaxation, &want.relaxation);
+
+        // 2. and 3. Under tight limits, each document once, and no step skipped that the old rule searched.
+        let (max_expansions, max_terms) = case.tight;
+        let tight = QueryLimits {
+            max_terms,
+            max_expansions,
+            ..QueryLimits::default()
+        };
+        let (latest, every) = plans(case, body, tight);
+        let got = views.search_relaxed(&l0, &all, &latest, &exec()).unwrap();
+        let mut seen = BTreeSet::new();
+        for hit in &got.hits {
+            prop_assert!(
+                seen.insert(hit.hit.document.id()),
+                "{} twice: {:?}",
+                hit.hit.document.id(),
+                got.relaxation.applied
+            );
+        }
+        let old = views.search_relaxed(&l0, &all, &every, &exec()).unwrap();
+        if got.relaxation.applied.len() == old.relaxation.applied.len() {
+            for (new, was) in got.relaxation.applied.iter().zip(&old.relaxation.applied) {
+                prop_assert!(
+                    !new.ends_with(":skipped") || was.ends_with(":skipped"),
+                    "{:?} against {:?}",
+                    got.relaxation.applied,
+                    old.relaxation.applied
+                );
+            }
+        }
+        Ok(())
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(if cfg!(feature = "slow") { 1024 } else { 128 }))]
+
+        #[test]
+        fn excluding_the_latest_nested_step_excludes_them_all(case in case()) {
+            check(&case)?;
+        }
+    }
+}

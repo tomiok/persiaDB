@@ -58,9 +58,9 @@ ROADMAP 8.1.10 also left open whether later levels (L4 `fuzzy`) build on the ful
 
 - `effective` can name a term no hit holds. For example, a term in no document (`df` 0, often a typo) has the highest
   IDF, so it is kept unless it is a stopword (the flag is compared first). ROADMAP 8.2.2.5 decides whether that should change. L4's corrections are the other answer.
-- Each step excludes L0 and every earlier step (ADR-0037 item 2). L2's steps are nested (each matches everything
-  the one before matches), so with three L2 steps a long query reaches `max_terms` sooner (about 4·n terms by the
-  last step), and planning grows with it. ROADMAP 8.2.2.4 excludes only a nested level's last step. Bench
-  `search_relaxed/l2` and `search_relaxed/l2_every_step` measure this cost.
+- L2's steps are nested (each matches everything the one before matches), so a step excludes L0, L1's step and only
+  the latest L2 step searched (ROADMAP 8.2.2.4, ADR-0037 item 2), about 3·n terms whatever its rung. Excluding every
+  earlier step took (j + 2)·n at step j, so a long query lost its last steps to `max_terms` and re-planned every
+  excluded step. Bench `search_relaxed/l2` and `search_relaxed/l2_every_step` measure the cost.
 - Level transforms read the search's statistics and may fail. The deadline is checked before a level builds its
   steps.

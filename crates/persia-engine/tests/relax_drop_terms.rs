@@ -219,6 +219,52 @@ fn steps_that_do_not_fit_the_limits_are_listed_and_not_searched() {
     assert_eq!(out.hits, []);
 }
 
+/// ROADMAP 8.2.2.4: the ladder is nested, so a step excludes L0 and only the latest L2 step before it, not every one.
+/// Step `j` of `n` terms then counts about 3·n terms whatever `j`, where excluding every earlier step took (j + 2)·n.
+#[test]
+fn a_step_excludes_only_the_latest_step_of_the_ladder_so_long_queries_keep_their_steps() {
+    let db = database();
+    // Four words over `title` and `body`: 8 leaf terms a query. Each step counts L0's 8, the latest step's 8 and its
+    // own 8: 24. Excluding every earlier step, the `1` step would count 32 and be skipped.
+    let tight = QueryLimits {
+        max_terms: 24,
+        ..QueryLimits::default()
+    };
+    let out = search(&db, "purple red shoes box", 10_000, Some(tight));
+    let r = &out.relaxation;
+    assert_eq!(r.level, RelaxLevel::DropTerms);
+    assert_eq!(
+        r.applied,
+        ["drop_terms:75%", "drop_terms:50%", "drop_terms:1"]
+    );
+    // Each document is a hit of the first step it matches, once: `f` (`shoes box`) holds two of the four terms,
+    // `a` (`red running shoes`) two as well; the `1` step adds the documents holding one.
+    let hits = by_step(&out);
+    let mut ids: Vec<&str> = hits.iter().map(|h| h.1).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), hits.len(), "{hits:?}");
+    assert_eq!(
+        hits.iter().filter(|h| h.0 == 3).count(),
+        3,
+        "the `1` step holds `b`, `c` and `e`: {hits:?}"
+    );
+    // One term fewer: neither later step fits beside L0 and the 75% step, the latest searched.
+    let tighter = QueryLimits {
+        max_terms: 23,
+        ..QueryLimits::default()
+    };
+    let out = search(&db, "purple red shoes box", 10_000, Some(tighter));
+    assert_eq!(
+        out.relaxation.applied,
+        [
+            "drop_terms:75%",
+            "drop_terms:50%:skipped",
+            "drop_terms:1:skipped"
+        ]
+    );
+}
+
 #[test]
 fn a_programmatic_query_relaxes_its_must_clauses_without_text() {
     let db = database();

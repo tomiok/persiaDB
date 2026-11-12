@@ -8,6 +8,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+- `persia-engine`: a step of the relaxation cascade excludes only the latest step searched of a nested level
+  (ROADMAP 8.2.2.4; SPEC §7.1.3, §7.6, ADR-0037 item 2), with every step of the other levels. L2's ladder is nested:
+  each step matches what the one before matched. The hits are unchanged. An L2 step now counts L0, L1's step and one
+  L2 step against `QueryLimits`, about 3·n terms instead of (j + 2)·n at step j, so a long query no longer loses its
+  last steps to `max_terms`. A step cut to fit the limits does not replace the steps before it. Benchmark
+  `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
+
 ### Added
 - `persia-engine`: L1 `synonyms` (ROADMAP 8.2.1; SPEC §6.3.2, §7.6, ADR-0039). The query compiler finds the runs of
   required words that are a term of the collection's `synonyms` groups, in each default field's analysis, and records
