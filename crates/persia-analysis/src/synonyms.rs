@@ -47,8 +47,9 @@ pub struct SynonymMap {
     terms: Vec<Vec<Token>>,
     /// Per term, the groups containing it, ascending.
     groups_of_term: Vec<Vec<usize>>,
-    /// Per group, its distinct terms in the order given.
-    groups: Vec<Vec<usize>>,
+    /// Per group, its distinct terms in the order given, each with its index among the group's terms as given (the
+    /// first, when several analyze to it).
+    groups: Vec<Vec<(usize, usize)>>,
     /// Per term, the trie node that ends it.
     node_of_term: Vec<usize>,
     /// A trie over terms keyed by token text and position gap to the previous token; node 0 is the root.
@@ -90,7 +91,7 @@ impl SynonymMap {
         };
         for (group_id, group) in groups.into_iter().enumerate() {
             let mut members = Vec::new();
-            for term in group {
+            for (index, term) in group.into_iter().enumerate() {
                 let Some(term_id) = map.insert(term.into()) else {
                     continue;
                 };
@@ -100,7 +101,7 @@ impl SynonymMap {
                     && groups.last() != Some(&group_id)
                 {
                     groups.push(group_id);
-                    members.push(term_id);
+                    members.push((term_id, index));
                 }
             }
             map.groups.push(members);
@@ -197,10 +198,44 @@ impl SynonymMap {
     /// Finds the synonym terms in `tokens`, an analyzed query: scanning left to right, the longest term starting at
     /// each token matches and its tokens are skipped, so matches are in order and never overlap.
     pub fn find(&self, tokens: &[Token]) -> Vec<SynonymMatch> {
+        self.find_between(tokens, |_| true)
+    }
+
+    /// As [`Self::find`], with matches only from and to a boundary: a match starts at token `i` and ends before token
+    /// `j` only when `boundary(i)` and `boundary(j)` hold (`j` may be `tokens.len()`). The longest such term at each
+    /// boundary matches, so a longer term that ends elsewhere does not hide a shorter one that ends on one. A caller
+    /// whose tokens come from several words passes the indexes where a word starts, so a match never covers part of a
+    /// word.
+    ///
+    /// ```
+    /// use persia_analysis::{SynonymMap, Token};
+    ///
+    /// let token = |text: &str, position| Token { text: text.into(), start: 0, end: 0, position };
+    /// let map = SynonymMap::new([
+    ///     vec![vec![token("tv", 0)], vec![token("telly", 0)]],
+    ///     vec![vec![token("tv", 0), token("e", 1)], vec![token("x", 0)]],
+    /// ]);
+    /// // `tv`, then `e-mail` as two tokens of one word: `tv e` would end inside it.
+    /// let query = [token("tv", 0), token("e", 1), token("mail", 2)];
+    /// assert_eq!(map.find(&query)[0].tokens(), 0..2);
+    /// let words = map.find_between(&query, |i| i != 2);
+    /// assert_eq!(words.len(), 1);
+    /// assert_eq!(words[0].tokens(), 0..1);
+    /// ```
+    pub fn find_between(
+        &self,
+        tokens: &[Token],
+        boundary: impl Fn(usize) -> bool,
+    ) -> Vec<SynonymMatch> {
         let mut matches = Vec::new();
         let mut start = 0;
         while start < tokens.len() {
-            match self.longest_at(tokens, start) {
+            let found = if boundary(start) {
+                self.longest_at(tokens, start, &boundary)
+            } else {
+                None
+            };
+            match found {
                 Some((end, term)) => {
                     matches.push(SynonymMatch {
                         tokens: start..end,
@@ -214,8 +249,14 @@ impl SynonymMap {
         matches
     }
 
-    /// The longest term starting at `tokens[start]`: one past its last token, and its id.
-    fn longest_at(&self, tokens: &[Token], start: usize) -> Option<(usize, usize)> {
+    /// The longest term starting at `tokens[start]` and ending before a `boundary`: one past its last token, and its
+    /// id.
+    fn longest_at(
+        &self,
+        tokens: &[Token],
+        start: usize,
+        boundary: &impl Fn(usize) -> bool,
+    ) -> Option<(usize, usize)> {
         let mut node = self.trie.first()?;
         let mut longest = None;
         let mut previous = tokens.get(start)?.position;
@@ -238,8 +279,11 @@ impl SynonymMap {
                 break;
             };
             node = self.trie.get(child)?;
-            if let Some(term) = node.term {
-                longest = Some((end.checked_add(1)?, term));
+            let after = end.checked_add(1)?;
+            if let Some(term) = node.term
+                && boundary(after)
+            {
+                longest = Some((after, term));
             }
         }
         longest
@@ -249,17 +293,53 @@ impl SynonymMap {
     /// matched term, each once, and at most `limit` of them (SPEC §7.6 L1 caps them at
     /// [`DEFAULT_SYNONYM_EXPANSIONS`] by default). Each is given as analyzed (its spans index the term's own text).
     pub fn alternatives(&self, matched: &SynonymMatch, limit: usize) -> Vec<&[Token]> {
+        self.alternative_ids(matched, limit)
+            .into_iter()
+            .filter_map(|(term, _)| self.terms.get(term).map(Vec::as_slice))
+            .collect()
+    }
+
+    /// Where each of [`Self::alternatives`] was given, in the same order: the index of the group it expands from and its
+    /// index among that group's terms, as passed to [`Self::new`] or [`Self::analyzed`] (of the first, when several
+    /// analyze to it). The pairs therefore ascend: sorting them gives the alternatives' order. A caller holding the raw
+    /// groups (a collection's `synonyms`) reads the alternatives as written there, to analyze them again for other
+    /// fields.
+    ///
+    /// ```
+    /// use persia_analysis::{SynonymMap, Token};
+    ///
+    /// let token = |text: &str| Token { text: text.into(), start: 0, end: text.len(), position: 0 };
+    /// let map = SynonymMap::new([
+    ///     vec![vec![token("q")], vec![token("box")]],
+    ///     vec![vec![token("tv")], vec![token("telly")], vec![token("box")]],
+    /// ]);
+    /// let matches = map.find(&[token("tv")]);
+    /// // `box` was first given in group 0, but expands from group 1, after `telly`.
+    /// assert_eq!(map.alternative_sources(&matches[0], 50), [(1, 1), (1, 2)]);
+    /// ```
+    pub fn alternative_sources(&self, matched: &SynonymMatch, limit: usize) -> Vec<(usize, usize)> {
+        self.alternative_ids(matched, limit)
+            .into_iter()
+            .map(|(_, source)| source)
+            .collect()
+    }
+
+    /// The ids of the terms a match expands to, as [`Self::alternatives`] orders and caps them, each with its source
+    /// ([`Self::alternative_sources`]).
+    fn alternative_ids(
+        &self,
+        matched: &SynonymMatch,
+        limit: usize,
+    ) -> Vec<(usize, (usize, usize))> {
         let mut seen = HashSet::from([matched.term]);
         let mut alternatives = Vec::new();
         for &group in self.groups_of_term.get(matched.term).into_iter().flatten() {
-            for &term in self.groups.get(group).into_iter().flatten() {
-                if seen.insert(term)
-                    && let Some(tokens) = self.terms.get(term)
-                {
+            for &(term, index) in self.groups.get(group).into_iter().flatten() {
+                if seen.insert(term) && term < self.terms.len() {
                     if alternatives.len() >= limit {
                         return alternatives;
                     }
-                    alternatives.push(tokens.as_slice());
+                    alternatives.push((term, (group, index)));
                 }
             }
         }

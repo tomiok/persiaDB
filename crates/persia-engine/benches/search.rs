@@ -454,7 +454,15 @@ fn filter_sweep(
 /// A collection of the same documents, committed in `segments` segments, for whole requests (ROADMAP 7.5): its
 /// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`) and `at`.
 fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4]) {
-    let schema = SchemaBuilder::new("bench")
+    let schema = bench_schema(positions, Vec::new());
+    let id = |name| schema.field(name).unwrap().id();
+    let (body, price, tag, at) = (id("body"), id("price"), id("tag"), id("at"));
+    collection_of(schema, segments, [body, price, tag, at])
+}
+
+/// The bench collection's schema, with `synonyms` (which a schema change may change freely, SPEC §6.2.4).
+fn bench_schema(positions: bool, synonyms: Vec<Vec<String>>) -> CollectionSchema {
+    SchemaBuilder::new("bench")
         .field(
             "body",
             FieldKind::Text(TextOptions {
@@ -471,10 +479,16 @@ fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4
                 ..KeywordOptions::default()
             }),
         )
+        .synonyms(synonyms)
         .build()
-        .unwrap();
-    let id = |name| schema.field(name).unwrap().id();
-    let (body, price, tag, at) = (id("body"), id("price"), id("tag"), id("at"));
+        .unwrap()
+}
+
+fn collection_of(
+    schema: CollectionSchema,
+    segments: u64,
+    [body, price, tag, at]: [FieldId; 4],
+) -> (Database<SimFile>, [FieldId; 4]) {
     let options = DatabaseOptions {
         clock: Arc::new(ManualClock::new(1_700_000_000_000_000)) as _,
         segment_ids: SegmentIds::seeded(1),
@@ -837,7 +851,51 @@ fn relaxed(c: &mut Criterion) {
             });
         });
     }
+    // L1 (ROADMAP 8.2.1): `nosuch` is in no document, its synonyms `w40` and `w120` are; `w3` has 50 alternatives
+    // in none, among 2 000 other groups.
+    let synonyms = synonym_compiler(schema);
+    let text = synonyms.compile(
+        "w3 nosuch",
+        &DefaultFields::all(schema),
+        &QueryLimits::default(),
+    );
+    group.bench_function("l1", |b| {
+        b.iter(|| {
+            let out = views
+                .search_relaxed(&text, &request, &relax, &exec)
+                .unwrap();
+            assert_eq!(out.relaxation.level, RelaxLevel::Synonyms);
+            black_box(out)
+        });
+    });
     group.finish();
+
+    // Compiling user text (SPEC §7.1.1) without synonyms, and with the groups above, which the compiler scans for
+    // (SPEC §6.3.2): a match compiles its alternatives. The maps are built once, by the first compilation.
+    let mut group = c.benchmark_group("compile");
+    let fields = DefaultFields::all(schema);
+    let text = "w3 w40 w7 w120 nosuch";
+    for (name, compiler) in [("plain", &compiler), ("synonyms", &synonyms)] {
+        group.bench_function(name, |b| {
+            b.iter(|| black_box(compiler.compile(text, &fields, &QueryLimits::default())));
+        });
+    }
+    group.finish();
+}
+
+/// A compiler for `schema` with 2 002 synonym groups: `nosuch` (in no document) with `w40` and `w120`, `w3` with 50
+/// words in none, and 2 000 pairs of words in none.
+fn synonym_compiler(schema: &CollectionSchema) -> QueryCompiler {
+    let mut groups = vec![
+        vec!["nosuch".to_owned(), "w40".to_owned(), "w120".to_owned()],
+        std::iter::once("w3".to_owned())
+            .chain((0..50).map(|i| format!("a{i}")))
+            .collect(),
+    ];
+    groups.extend((0..2000).map(|i| vec![format!("s{i}"), format!("t{i}")]));
+    let with_synonyms = bench_schema(false, groups);
+    assert_eq!(with_synonyms.hash(), schema.hash());
+    QueryCompiler::new(&with_synonyms, &AnalyzerRegistry::builtin()).unwrap()
 }
 
 /// `text` compiled as user text over the default fields (`body`), as a request's `q` is.

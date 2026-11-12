@@ -70,6 +70,25 @@ impl Analyzer {
     /// # Ok::<(), &str>(())
     /// ```
     pub fn analyze_query_stopwords(&self, text: &str, out: &mut TokenStream) -> bool {
+        self.analyze_query_counted(text, out).stopword
+    }
+
+    /// As [`analyze_query`](Self::analyze_query), and what else the query compiler reads of it ([`QueryAnalysis`]):
+    /// whether a stopword was removed, and how many positions the text took.
+    ///
+    /// ```
+    /// use persia_analysis::{builtin_analyzer, TokenStream};
+    ///
+    /// let en = builtin_analyzer("en", 1).ok_or("no en@1")?;
+    /// let mut tokens = TokenStream::new();
+    /// // `of` and `the` are removed, and still take their positions.
+    /// let analysis = en.analyze_query_counted("statue-of-the", &mut tokens);
+    /// assert!(analysis.stopword);
+    /// assert_eq!((tokens.len(), analysis.positions), (1, 3));
+    /// assert_eq!(en.analyze_query_counted("—", &mut tokens).positions, 0);
+    /// # Ok::<(), &str>(())
+    /// ```
+    pub fn analyze_query_counted(&self, text: &str, out: &mut TokenStream) -> QueryAnalysis {
         self.run(text, out, |filter| !filter.stacks_tokens())
     }
 
@@ -78,13 +97,14 @@ impl Analyzer {
         self.filters.iter().any(|filter| filter.stacks_tokens())
     }
 
-    /// Runs the chain, and returns whether a filter that removes stopwords removed a token.
+    /// Runs the chain, and returns whether a filter that removes stopwords removed a token and how many positions the
+    /// tokenizer gave.
     fn run(
         &self,
         text: &str,
         out: &mut TokenStream,
         applies: impl Fn(&dyn TokenFilter) -> bool,
-    ) -> bool {
+    ) -> QueryAnalysis {
         out.clear();
         let mut filtered = Cow::Borrowed(text);
         // One map per char filter that changed the text, in chain order.
@@ -98,6 +118,10 @@ impl Analyzer {
             }
         }
         self.tokenizer.tokenize(&filtered, out);
+        // Before the filters remove any: a removed token keeps its position (SPEC §6.3.1). A tokenizer appends its
+        // tokens in order, numbered from 0 (`Tokenizer::tokenize`), so the last holds the highest position, and
+        // indexing, which ignores the count, pays no pass over the tokens for it.
+        let positions = out.last().map_or(0, |t| t.position.saturating_add(1));
         if !maps.is_empty() {
             map_spans(&maps, text.len(), out);
         }
@@ -109,8 +133,24 @@ impl Analyzer {
                 removed |= filter.removes_stopwords() && out.len() < before;
             }
         }
-        removed
+        QueryAnalysis {
+            stopword: removed,
+            positions,
+        }
     }
+}
+
+/// What [`Analyzer::analyze_query_counted`] reports besides the tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub struct QueryAnalysis {
+    /// Whether a filter that removes stopwords ([`TokenFilter::removes_stopwords`]) removed a token.
+    pub stopword: bool,
+    /// How many positions the text took: one past the tokenizer's last position, 0 when it found no token. Tokens the
+    /// filters removed count, as they leave gaps (SPEC §6.3.1). A caller can analyze words one at a time and start each
+    /// at the sum of the ones before. Under a tokenizer that splits at whitespace, its tokens are then numbered as one
+    /// analysis of the words, one space apart, would number them.
+    pub positions: u32,
 }
 
 /// Maps the spans of `tokens`, offsets of the last char filter's output, back to the original value of `len` bytes

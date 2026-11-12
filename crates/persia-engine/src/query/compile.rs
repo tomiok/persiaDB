@@ -3,9 +3,9 @@
 
 use std::collections::BTreeMap;
 use std::ops::Range;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use persia_analysis::{Analyzer, AnalyzerRegistry, TokenStream};
+use persia_analysis::{Analyzer, AnalyzerRegistry, QueryAnalysis, SynonymMap, TokenStream};
 
 use crate::schema::{CollectionSchema, FieldId, FieldKind, SchemaHash};
 use crate::segment::MAX_TERM_LEN;
@@ -16,6 +16,11 @@ use super::ast::{
     boost_in_range, searchable,
 };
 use super::limits::{QueryLimits, Usage};
+
+mod synonyms;
+
+pub use synonyms::CompiledSynonym;
+use synonyms::{Captured, Scan};
 
 /// The `text` fields plain words and phrases search, with their BM25F weights (the `fields` of SPEC §7.1).
 ///
@@ -161,6 +166,10 @@ pub struct Compiled {
     /// The limits it was compiled with: a relaxed search holds its steps to them unless its plan sets others
     /// ([`crate::relax::RelaxPlan::with_limits`], SPEC §7.1.3).
     pub limits: QueryLimits,
+    /// The runs of required words that are a term of the collection's synonym groups, in text order, each with what it
+    /// expands to (SPEC §6.3.2, §7.6 L1). L0 does not search them: the relaxation cascade's L1 `synonyms` ORs each run
+    /// with its alternatives. Empty when the collection has no synonyms or no run matches.
+    pub synonyms: Vec<CompiledSynonym>,
 }
 
 /// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
@@ -240,6 +249,9 @@ pub struct QueryCompiler {
     schema: CollectionSchema,
     /// By field id; `None` for fields that are not `text`.
     analyzers: Vec<Option<Arc<Analyzer>>>,
+    /// By field id: the collection's synonym groups analyzed by the field's query-time analysis (SPEC §6.3.2), built
+    /// the first time a query searches the field by default. Unused for fields that are not `text`.
+    synonyms: Vec<OnceLock<SynonymMap>>,
 }
 
 impl std::fmt::Debug for QueryCompiler {
@@ -260,7 +272,9 @@ struct Clause<'t> {
 }
 
 impl QueryCompiler {
-    /// A compiler for `schema`, analyzing `text` fields with the analyzers `registry` has for them.
+    /// A compiler for `schema`, analyzing `text` fields with the analyzers `registry` has for them. Build one per
+    /// schema and reuse it: the first compilation that searches a field by default analyzes the collection's synonym
+    /// groups for it (SPEC §6.3.2), up to 1 MiB of terms, and later ones reuse them.
     ///
     /// # Errors
     /// [`QueryError::UnknownAnalyzer`] if `registry` lacks the analyzer (name and version) of a `text` field.
@@ -278,11 +292,23 @@ impl QueryCompiler {
                     }),
                 _ => Ok(None),
             })
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             schema: schema.clone(),
+            synonyms: analyzers.iter().map(|_| OnceLock::new()).collect(),
             analyzers,
         })
+    }
+
+    /// The synonym groups of the schema as `text` field `id` analyzes them at query time; `None` for another field.
+    fn synonym_map(&self, id: FieldId) -> Option<&SynonymMap> {
+        let analyzer = self.analyzer(id)?;
+        let index = usize::try_from(id.get()).ok()?;
+        Some(
+            self.synonyms
+                .get(index)?
+                .get_or_init(|| SynonymMap::analyzed(self.schema.synonyms(), analyzer)),
+        )
     }
 
     /// Compiles `text` (SPEC §7.1.1). Clauses are separated by whitespace and all required (default AND):
@@ -329,12 +355,20 @@ impl QueryCompiler {
                 text,
                 limits,
                 clauses,
+                Vec::new(),
             );
         }
+        // The runs of required words L1 scans for synonyms (SPEC §6.3.2), when the collection has any.
+        let mut scan = Scan::new(self, fields);
         for (clause, span) in clause_spans(text, &self.schema) {
-            let (parts, stopword) = self.clause(clause, fields, &mut tokens);
+            let eligible =
+                scan.scans() && !clause.negated && clause.field.is_none() && !clause.phrase;
+            let (parts, stopword, captured) = self.clause(clause, fields, &mut tokens, eligible);
             let part = match (clause.negated, parts.len()) {
-                (_, 0) => continue,
+                (_, 0) => {
+                    scan.dropped(eligible, &captured);
+                    continue;
+                }
                 (false, _) | (true, 1) => parts,
                 (true, _) => vec![Query::Bool(BoolQuery {
                     must: parts,
@@ -342,25 +376,12 @@ impl QueryCompiler {
                 })],
             };
             if shallow {
-                // Promote the depth-1 clause under a root bool and count `part` beside it.
-                let mut trial = Usage::default();
-                let promoted = trial.add(limits, 1, 0, 0).is_ok()
-                    && query
-                        .must
-                        .iter()
-                        .chain(&query.must_not)
-                        .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2))
-                        .is_ok()
-                    && part
-                        .iter()
-                        .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2))
-                        .is_ok();
-                if !promoted {
+                let Some(promoted) = self.promote(&query, &part, limits) else {
                     truncated = true;
                     break;
-                }
+                };
                 shallow = false;
-                usage = trial;
+                usage = promoted;
             } else {
                 let mut trial = usage;
                 let fits = part
@@ -387,6 +408,7 @@ impl QueryCompiler {
                                 parts: 0..part.len(),
                                 stopword,
                             });
+                            scan.clause(eligible, clauses.len().saturating_sub(1), captured);
                             query.must.extend(part);
                             continue;
                         }
@@ -407,44 +429,69 @@ impl QueryCompiler {
                 parts: list.len()..list.len().saturating_add(part.len()),
                 stopword,
             });
+            scan.clause(eligible, clauses.len().saturating_sub(1), captured);
             list.extend(part);
         }
-        finish(query, truncated, text, limits, clauses)
+        let synonyms = scan.finish(&query, &clauses, limits, usage.terms);
+        finish(query, truncated, text, limits, clauses, synonyms)
     }
 
-    /// The queries a clause requires (all of them), or none when it analyzes to no token, and whether it is a stopword
-    /// ([`CompiledClause::stopword`]).
+    /// The usage of `query`'s one clause, checked at depth 1 as the whole query, promoted under a root bool with `part`
+    /// beside it, or `None` when they do not fit `limits` together.
+    fn promote(&self, query: &BoolQuery, part: &[Query], limits: &QueryLimits) -> Option<Usage> {
+        let mut trial = Usage::default();
+        trial.add(limits, 1, 0, 0).ok()?;
+        query
+            .must
+            .iter()
+            .chain(&query.must_not)
+            .chain(part)
+            .try_for_each(|q| q.check(&self.schema, limits, &mut trial, 2))
+            .ok()?;
+        Some(trial)
+    }
+
+    /// The queries a clause requires (all of them), or none when it analyzes to no token, whether it is a stopword
+    /// ([`CompiledClause::stopword`]), and, when `capture` is set, each default field's tokens of it for the synonym
+    /// scan (SPEC §6.3.2).
     fn clause(
         &self,
         clause: Clause<'_>,
         fields: &DefaultFields,
         tokens: &mut TokenStream,
-    ) -> (Vec<Query>, bool) {
+        capture: bool,
+    ) -> (Vec<Query>, bool, Captured) {
+        let mut captured = Captured::default();
         if let Some(field) = clause.field {
             let parts = self.field_clause(field, clause.text, tokens);
-            return (parts.into_iter().collect(), false);
+            return (parts.into_iter().collect(), false, captured);
         }
         let mut stopword = false;
-        let per_field: Vec<FieldTokens> = fields
-            .fields()
-            .iter()
-            .filter_map(|&(id, weight)| {
-                let (tokens, removed) = self.analyzed(id, clause.text, tokens)?;
-                if tokens.is_empty() {
-                    stopword |= removed;
-                    return None;
+        let mut per_field: Vec<FieldTokens> = Vec::with_capacity(fields.fields().len());
+        for &(id, weight) in fields.fields() {
+            let Some((tokens, analysis)) = self.analyzed(id, clause.text, tokens) else {
+                if capture {
+                    captured.push(&[], 0);
                 }
-                Some(FieldTokens { id, weight, tokens })
-            })
-            .collect();
+                continue;
+            };
+            if capture {
+                captured.push(&tokens, analysis.positions);
+            }
+            if tokens.is_empty() {
+                stopword |= analysis.stopword;
+                continue;
+            }
+            per_field.push(FieldTokens { id, weight, tokens });
+        }
         if !clause.phrase || per_field.iter().all(|f| f.tokens.len() <= 1) {
-            return (word(per_field), stopword);
+            return (word(per_field), stopword, captured);
         }
         let should: Vec<Query> = per_field
             .into_iter()
             .filter_map(|f| self.text_query(f.id, f.tokens))
             .collect();
-        (one_of(should).into_iter().collect(), stopword)
+        (one_of(should).into_iter().collect(), stopword, captured)
     }
 
     /// `text` in one field: a `keyword` field's term as is, or a `text` field's terms ([`Self::text_query`]).
@@ -497,15 +544,15 @@ impl QueryCompiler {
         })
     }
 
-    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and whether the
-    /// field's stopword filter removed one; `None` if it is not a `text` field.
+    /// The query-time tokens of `text` in `text` field `id` that may be in the index, in text order, and what else
+    /// the analysis reports (a stopword removed, the positions taken); `None` if it is not a `text` field.
     fn analyzed(
         &self,
         id: FieldId,
         text: &str,
         tokens: &mut TokenStream,
-    ) -> Option<(Vec<QueryToken>, bool)> {
-        let stopword = self.analyzer(id)?.analyze_query_stopwords(text, tokens);
+    ) -> Option<(Vec<QueryToken>, QueryAnalysis)> {
+        let analysis = self.analyzer(id)?.analyze_query_counted(text, tokens);
         Some((
             tokens
                 .iter()
@@ -516,7 +563,7 @@ impl QueryCompiler {
                     term: t.text.clone(),
                 })
                 .collect(),
-            stopword,
+            analysis,
         ))
     }
 
@@ -534,6 +581,7 @@ fn finish(
     text: &str,
     limits: &QueryLimits,
     clauses: Vec<CompiledClause>,
+    synonyms: Vec<CompiledSynonym>,
 ) -> Compiled {
     let query = match (root.must.len(), root.must_not.len()) {
         (0, 0) => Query::MatchAll,
@@ -546,6 +594,7 @@ fn finish(
         text: text.to_owned(),
         clauses,
         limits: *limits,
+        synonyms,
     }
 }
 

@@ -23,7 +23,7 @@ use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
 use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
-use crate::relax::{LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
+use crate::relax::{Expansion, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
 use crate::schema::CollectionSchema;
 use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
 use crate::stats::SearchStatistics;
@@ -261,6 +261,7 @@ impl<'q, 's> Built<'q, 's> {
         query: &Query,
         step: Cow<'q, Query>,
         label: String,
+        alternatives: Option<&Expansion>,
     ) -> Result<(Option<Cow<'q, Query>>, String), SearchError> {
         if self.ran.is_empty() {
             return Ok((Some(step), label));
@@ -269,7 +270,7 @@ impl<'q, 's> Built<'q, 's> {
             Some(fitting) => fitting,
             slot @ None => slot.insert(StepLimits::new(self.schema, self.limits, query)?),
         };
-        held(fitting, step, label)
+        held(fitting, step, label, alternatives)
     }
 
     /// A step of `level` that does not fit: listed, not searched, excluded from none.
@@ -479,7 +480,7 @@ impl CollectionViews<'_> {
             }
             let input = LevelInput::new(query, compiled, &stats);
             let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
-            for (step, label, text) in steps {
+            for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
                 if !builds(i, found) {
                     break 'levels;
@@ -488,7 +489,7 @@ impl CollectionViews<'_> {
                     truncated = true;
                     break 'levels;
                 }
-                let (step, label) = built.fit(query, step, label)?;
+                let (step, label) = built.fit(query, step, label, alternatives.as_ref())?;
                 let Some(step) = step else {
                     built.skip(planned.level, label);
                     continue;
@@ -661,8 +662,8 @@ impl CollectionViews<'_> {
     }
 }
 
-/// A step as a level built it: its query, what it applied and its text.
-type BuiltStep<'a> = (Cow<'a, Query>, String, Option<String>);
+/// A step as a level built it: its query, what it applied, its text, and the synonym alternatives it may drop to fit.
+type BuiltStep<'a> = (Cow<'a, Query>, String, Option<String>, Option<Expansion>);
 
 /// The steps `planned` builds for `input`: its query, what it applied and its text. L0 (`first`) searches the query
 /// itself, not a copy.
@@ -681,6 +682,7 @@ fn level_steps<'a>(
             Cow::Borrowed(input.original),
             String::new(),
             input.compiled.map(Compiled::effective),
+            None,
         )]);
     }
     // A level may read statistics (L2 its terms' `df`): the request's deadline and cancellation stop it first (SPEC §7.3).
@@ -689,12 +691,13 @@ fn level_steps<'a>(
         .transform
         .steps(&input)?
         .into_iter()
-        .map(|s| (Cow::Owned(s.query), s.applied, s.effective))
+        .map(|s| (Cow::Owned(s.query), s.applied, s.effective, s.alternatives))
         .collect())
 }
 
-/// `step` held to the limits beside the steps it excludes (SPEC §7.1.3): as built, with its expansions cut (`label`
-/// gets [`Relaxation::CUT`]), or `None` when no cut fits (`label` gets [`Relaxation::SKIPPED`]).
+/// `step` held to the limits beside the steps it excludes (SPEC §7.1.3): as built, with its expansions cut or fewer of
+/// its synonym `alternatives`, or with alternatives the compilation already left out (`label` gets [`Relaxation::CUT`]), or `None` when no cut fits (`label` gets
+/// [`Relaxation::SKIPPED`]).
 ///
 /// # Errors
 /// [`SearchError::Query`] for a step that is invalid for a reason other than a limit.
@@ -702,11 +705,21 @@ fn held<'a>(
     fitting: &StepLimits<'_>,
     step: Cow<'a, Query>,
     label: String,
+    alternatives: Option<&Expansion>,
 ) -> Result<(Option<Cow<'a, Query>>, String), SearchError> {
     Ok(match fitting.fit(&step)? {
+        // The compilation left out alternatives that larger limits would hold (SPEC §6.3.2).
+        Fit::Fits if alternatives.is_some_and(Expansion::cut) => {
+            (Some(step), label + Relaxation::CUT)
+        }
         Fit::Fits => (Some(step), label),
         Fit::Cut(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
-        Fit::Skipped => (None, label + Relaxation::SKIPPED),
+        Fit::Skipped => match alternatives
+            .and_then(|a| fitting.cut_alternatives(&a.counts(), |keep| a.query(keep)))
+        {
+            Some(cut) => (Some(Cow::Owned(cut)), label + Relaxation::CUT),
+            None => (None, label + Relaxation::SKIPPED),
+        },
     })
 }
 

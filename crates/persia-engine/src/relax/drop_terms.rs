@@ -295,6 +295,7 @@ impl LevelTransform for DropTerms {
                 query,
                 applied: format!("drop_terms:{label}"),
                 effective,
+                alternatives: None,
             });
         }
         Ok(steps)

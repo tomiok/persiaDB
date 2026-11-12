@@ -1,6 +1,7 @@
 //! Fuzz the user text compiler (ROADMAP 7.1.2.2; SPEC §7.1.1): any text compiles without panicking, the query
 //! validates against the schema and the limits it was compiled with, and each clause's span indexes the text read
-//! (ROADMAP 8.1.7). The first byte picks small limits, so cutting at each limit is reached too.
+//! (ROADMAP 8.1.7), and the synonym runs it finds (ROADMAP 8.2.1, SPEC §6.3.2) are ordered, of required clauses, and
+//! bounded. The first byte picks small limits, so cutting at each limit is reached too.
 #![no_main]
 
 use std::sync::LazyLock;
@@ -32,6 +33,18 @@ static SETUP: LazyLock<(CollectionSchema, QueryCompiler)> = LazyLock::new(|| {
         )
         .field("brand", FieldKind::Keyword(KeywordOptions::default()))
         .field("price", FieldKind::F64 { stored: true })
+        // Short and common words, several tokens, stopwords and accents, so fuzzed text matches them often.
+        .synonyms(
+            [
+                &["a", "b", "c d"][..],
+                &["a b", "e-mail", "la casa"],
+                &["the a", "año", "x y z"],
+                &["b", "a"],
+            ]
+            .iter()
+            .map(|g| g.iter().map(|&t| t.to_owned()).collect())
+            .collect(),
+        )
         .build()
         .expect("a valid schema");
     let compiler =
@@ -74,4 +87,29 @@ fuzz_target!(|data: &[u8]| {
         );
         end = span.end;
     }
+    // ROADMAP 8.2.1: runs of required clauses, in order and apart, each with 1 to 50 valid alternatives, `max_terms` in all.
+    let mut end = 0;
+    let mut total = 0usize;
+    for run in &compiled.synonyms {
+        let clauses = compiled.clauses.get(run.clauses.clone());
+        assert!(
+            end <= run.clauses.start && run.clauses.start < run.clauses.end,
+            "{text:?}"
+        );
+        assert!(
+            clauses.is_some_and(|c| c.iter().all(|c| !c.negated)),
+            "{text:?}"
+        );
+        assert!((1..=50).contains(&run.alternatives.len()), "{text:?}");
+        for alternative in &run.alternatives {
+            assert_eq!(
+                alternative.validate(schema, &QueryLimits::default()),
+                Ok(()),
+                "{text:?}"
+            );
+        }
+        end = run.clauses.end;
+        total += run.alternatives.len();
+    }
+    assert!(total <= limits.max_terms, "{text:?}");
 });

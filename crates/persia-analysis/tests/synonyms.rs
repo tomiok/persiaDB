@@ -158,3 +158,59 @@ fn alternatives_are_capped_in_group_then_term_order() {
     assert_eq!(texts(1000), words);
     assert_eq!(texts(0), Vec::<String>::new());
 }
+
+#[test]
+fn alternative_sources_name_where_each_alternative_was_first_given() {
+    // "TV" and "tv" are one term after lowercasing, first given at (0, 0); "telly" is (0, 2), and the second group's
+    // "box" is (1, 1). The empty "!!!" takes an index but no term.
+    let map = map(&[&["TV", "!!!", "telly", "tv"], &["tv", "box"]]);
+    let tokens = analyze("tv");
+    let matches = map.find(&tokens);
+    assert_eq!(matches.len(), 1);
+    assert_eq!(
+        map.alternative_sources(&matches[0], DEFAULT_SYNONYM_EXPANSIONS),
+        [(0, 2), (1, 1)]
+    );
+    assert_eq!(map.alternative_sources(&matches[0], 1), [(0, 2)]);
+    // Same order and cap as the alternatives themselves.
+    let texts: Vec<&str> = map
+        .alternatives(&matches[0], DEFAULT_SYNONYM_EXPANSIONS)
+        .iter()
+        .map(|t| t[0].text.as_str())
+        .collect();
+    assert_eq!(texts, ["telly", "box"]);
+    // Matching "telly" reports the term "TV"/"tv" at its first place.
+    let tokens = analyze("telly");
+    let matches = map.find(&tokens);
+    assert_eq!(map.alternative_sources(&matches[0], 50), [(0, 0)]);
+}
+
+#[test]
+fn a_source_is_the_place_in_the_group_expanded_from() {
+    // `zz` was first given in group 0; `tv` expands from group 1, where it is after `telly`.
+    let map = map(&[&["q", "zz"], &["tv", "telly", "zz"]]);
+    let tokens = analyze("tv");
+    let matches = map.find(&tokens);
+    assert_eq!(map.alternative_sources(&matches[0], 50), [(1, 1), (1, 2)]);
+}
+
+#[test]
+fn find_between_starts_and_ends_matches_on_boundaries_only() {
+    let map = map(&[&["p", "x"], &["p q", "y"], &["q r", "z"]]);
+    let tokens = analyze("p q r");
+    let spans = |boundary: &dyn Fn(usize) -> bool| -> Vec<(usize, usize)> {
+        map.find_between(&tokens, boundary)
+            .iter()
+            .map(|m| (m.tokens().start, m.tokens().end))
+            .collect()
+    };
+    // Everywhere, as `find`: `p q` is the longest at 0, then `r` alone is no term.
+    assert_eq!(spans(&|_| true), [(0, 2)]);
+    assert_eq!(map.find(&tokens).len(), 1);
+    // Without a boundary at 2, `p q` cannot end there: the shorter `p` matches, and then `q r` from 1.
+    assert_eq!(spans(&|i| i != 2), [(0, 1), (1, 3)]);
+    // Without one at 1, `p q` still matches: it starts at 0 and ends at 2.
+    assert_eq!(spans(&|i| i != 1), [(0, 2)]);
+    // Without one at 0, the scan starts at 1: `q r`.
+    assert_eq!(spans(&|i| i != 0), [(1, 3)]);
+}

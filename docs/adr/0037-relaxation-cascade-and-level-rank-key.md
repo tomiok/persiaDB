@@ -93,7 +93,7 @@ cascade return?
     `"<applied>:skipped"`, and not excluded from later steps, which are checked the same way. Skipping keeps the
     cascade going (pillar 3), and not excluding it is what not having searched it means: its matches can still be a
     later step's. The decisions depend only on the steps and the limits, so a cursor's page skips the same steps.
-    Synonym expansions are not cuttable yet (ROADMAP 8.1.13).
+    Synonym alternatives are cut too since ROADMAP 8.1.13 (ADR-0039 item 6).
 
 ## Consequences
 

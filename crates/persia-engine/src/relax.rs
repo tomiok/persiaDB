@@ -6,8 +6,8 @@
 //! `relax: false` ([`RelaxOptions::disabled`]) leaving L0 alone.
 //!
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
-//! nothing more. L0 and L2 `drop_terms` (ROADMAP 8.2.2) build queries so far: the others (L1 `synonyms`, L3 `prefix` to
-//! L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
+//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1) and L2 `drop_terms` (ROADMAP 8.2.2) build queries so far: the others
+//! (L3 `prefix` to L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
@@ -48,6 +48,9 @@ use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 
 mod drop_terms;
+mod synonyms;
+
+pub(crate) use synonyms::Expansion;
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -197,6 +200,11 @@ pub(crate) struct Step {
     /// The step's query as user text (SPEC §7.6 `effective`): `None` when the query was not compiled from text, which
     /// a level then has none to render.
     pub(crate) effective: Option<String>,
+    /// The synonym alternatives the step may drop to fit the limits (SPEC §7.1.3, ROADMAP 8.1.13): L1 builds its
+    /// query from them, and the cascade rebuilds it with fewer when it does not fit. `None` for any other level. The
+    /// rebuilt query keeps its `prefix` and `fuzzy` caps: a step with both is cut in one or the other, not both (no
+    /// level builds such a step: compiled text has no `prefix` or `fuzzy`).
+    pub(crate) alternatives: Option<Expansion>,
 }
 
 /// Builds a level's steps (SPEC §7.6). Called only once the cascade reaches the level; no step skips the level.
@@ -218,6 +226,7 @@ impl LevelTransform for Exact {
             query: input.original.clone(),
             applied: String::new(),
             effective: input.compiled.map(Compiled::effective),
+            alternatives: None,
         }])
     }
 }
@@ -239,7 +248,7 @@ impl LevelTransform for Pending {
 fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
     match level {
         RelaxLevel::Exact => Arc::new(Exact),
-        RelaxLevel::Synonyms => Arc::new(Pending { leaf: "8.2.1" }),
+        RelaxLevel::Synonyms => Arc::new(synonyms::Synonyms),
         RelaxLevel::DropTerms => Arc::new(drop_terms::DropTerms),
         RelaxLevel::Prefix => Arc::new(Pending { leaf: "8.2.3" }),
         RelaxLevel::Fuzzy => Arc::new(Pending { leaf: "8.2.4" }),
