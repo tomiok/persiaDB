@@ -376,3 +376,37 @@ fn filters_are_never_relaxed() {
     // Unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step: they are `other`.
     assert_eq!(by_step(&out), [(1, "a"), (2, "c")]);
 }
+
+/// ROADMAP 8.1.17: a request's filter joined to a compiled query with `Compiled::with_filter` (SPEC §7.1) is on every
+/// step, as on a programmatic query's, and the steps still read the clauses' text.
+#[test]
+fn a_filter_joined_to_a_compiled_query_is_never_relaxed() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let brand = c.schema().field("brand").unwrap().id();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let query_compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    let acme = Filter::Term {
+        field: brand,
+        value: FilterValue::Keyword("acme".into()),
+    };
+    let compiled = query_compiler
+        .compile(
+            "purple red shoes",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        )
+        .with_filter([acme]);
+    let out = views
+        .search_relaxed(&compiled, &SearchRequest::default(), &plan(10_000), &exec())
+        .unwrap();
+    let r = &out.relaxation;
+    assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    assert_eq!(r.effective.as_deref(), Some("purple"));
+    // `acme` is `a`, `c` and `e`: unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step.
+    let ids: Vec<&str> = by_step(&out).into_iter().map(|h| h.1).collect();
+    assert!(ids.iter().all(|id| ["a", "c", "e"].contains(id)), "{ids:?}");
+    assert!(ids.contains(&"a"), "{ids:?}");
+}

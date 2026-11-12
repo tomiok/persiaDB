@@ -1261,7 +1261,11 @@ clause that compiled to part of it, in text order, its byte span in that text an
 clause's first character (its `-`, field name or body) to its last (a phrase's closing quote), without the whitespace
 around it; spans are on character boundaries and do not overlap. Each clause's parts are its entries of the root
 `must` (or `must_not` for `-`); a single required part is the query itself. A clause left out (no token, past a
-limit) has none. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+limit) has none. A request's `filter` joins the compiled query as the filter clauses of its root `bool` (§7.1,
+ROADMAP 8.1.17): added to the root's when the query is a `bool` around the clauses, else the query is wrapped,
+`bool { must: [query], filter }`. A single part that is a `bool` itself (a phrase in a field without positions, a
+word the fields split apart) is wrapped too: a filter beside its `should` clauses would make them optional. The
+clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
 that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,

@@ -92,5 +92,7 @@ The user decided items 1, 2 and 6 (2026-11-11). The others follow from §6.3.2 a
 - A clause that one field analyzes to nothing, for a reason other than a stopword (`!!!` under `standard`), adds no
   position there. Another field's match over it replaces that clause's requirement in every field. This is
   consistent with analyzing the run as one text.
-- A collapsed compiled query (one clause, one part) with a filter joined at the root is ambiguous: `Compiled::parts`
-  reads the whole root as the clause. ROADMAP 8.1.17 settles how a request's filter joins a compiled query.
+- A request's filter joins a compiled query at its root `bool` (ROADMAP 8.1.17, `Compiled::with_filter`): a query that is
+  its one part is wrapped. `Compiled` keeps that part apart, so `Compiled::parts` never reads the wrapper or its
+  filter as the clause, and the levels read the root through `Compiled::root`. A one-part query that is a `bool` of
+  its own (a word the fields split apart) is no longer mistaken for a changed root, which made L1 skip it.

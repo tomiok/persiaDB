@@ -1443,6 +1443,65 @@ fn compiled_clauses_by_hand() {
     );
 }
 
+/// ROADMAP 8.1.17, SPEC §7.1: a request's `filter` is the root `bool`'s filter clauses. A compilation of one required
+/// part is that part, so joining a filter wraps it, `bool { must: [part], filter }`, and the clause's parts are still
+/// the part alone, not the root with its filter.
+#[test]
+fn a_filter_joined_to_a_one_part_compilation_leaves_the_clause_its_part() {
+    let schema = schema();
+    let brand = schema.field("brand").unwrap().id();
+    let nike = Filter::Term {
+        field: brand,
+        value: FilterValue::Keyword("nike".into()),
+    };
+    // A word over the default fields (one `combined`) and a phrase in one field.
+    for text in ["shoes", "body:\"a b\""] {
+        let mut compiled =
+            compiler(&schema).compile(text, &DefaultFields::all(&schema), &QueryLimits::default());
+        let part = compiled.query.clone();
+        assert_eq!(
+            compiled.parts(0),
+            Some(std::slice::from_ref(&part)),
+            "{text}"
+        );
+        // By hand, as SPEC §7.1 describes it.
+        compiled.query = Query::Bool(BoolQuery {
+            must: vec![part.clone()],
+            filter: vec![nike.clone()],
+            ..BoolQuery::default()
+        });
+        assert_eq!(
+            compiled.parts(0),
+            Some(std::slice::from_ref(&part)),
+            "{text}"
+        );
+        // Through the API, the same.
+        let joined = compiled.clone();
+        compiled.query = part.clone();
+        let joined_by_api = compiled.with_filter([nike.clone()]);
+        assert_eq!(joined_by_api, joined, "{text}");
+        assert_eq!(
+            joined_by_api.root().unwrap().filter,
+            std::slice::from_ref(&nike)
+        );
+    }
+    // Two parts (`e-mail` splits in two): the root is already a `bool`, which takes the filter as it is.
+    let compiled = compiler(&schema).compile(
+        "e-mail",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let parts = compiled.parts(0).unwrap().to_vec();
+    assert_eq!(parts.len(), 2);
+    let joined = compiled.with_filter([nike.clone()]);
+    assert_eq!(joined.parts(0), Some(parts.as_slice()));
+    let root = joined.root().unwrap();
+    assert_eq!(
+        (root.must.as_slice(), root.filter.as_slice()),
+        (parts.as_slice(), [nike].as_slice())
+    );
+}
+
 /// The required and excluded clauses of a compiled query, in text order; a root that is not a plain Bool is one.
 fn clauses(q: &Query) -> (Vec<Query>, Vec<Query>) {
     match q {
@@ -1486,6 +1545,22 @@ fn fields_that_split_a_word_differently_do_not_constrain_each_other() {
     );
     // A field without tokens for the word does not count.
     assert_eq!(compile("!!"), "(sku:!!^1)");
+    // A one-part query that is a `bool` of `should` clauses is not a root around its clause (ROADMAP 8.1.17): a filter
+    // wraps it, as one joined to its `should` clauses would make them optional.
+    let one = compiler(&schema).compile("e-mail", &DefaultFields::all(&schema), &limits);
+    let part = one.query.clone();
+    assert!(matches!(&part, Query::Bool(b) if !b.should.is_empty()));
+    assert_eq!(one.root(), None);
+    let any = Filter::Exists {
+        field: schema.field("sku").unwrap().id(),
+    };
+    let joined = one.with_filter([any.clone()]);
+    let root = joined.root().unwrap();
+    assert_eq!(
+        (root.must.as_slice(), root.filter.as_slice()),
+        (std::slice::from_ref(&part), std::slice::from_ref(&any))
+    );
+    assert_eq!(joined.parts(0), Some(std::slice::from_ref(&part)));
 }
 
 #[test]

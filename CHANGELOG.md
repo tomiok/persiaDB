@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
 
 ### Added
+- `persia-engine`: `Compiled::with_filter` joins a request's filter to a compiled query as its root `bool`'s filter
+  clauses (ROADMAP 8.1.17; SPEC §7.1, §7.1.1). A query that is its one required part is wrapped,
+  `bool { must: [query], filter }`. `Compiled::root` returns the `bool` around the clauses. `Compiled::parts` now
+  returns a one-part compilation's own part even after a filter wrapped it, by hand or through `with_filter`. Before,
+  it returned the whole root, filter included, and L1 and L2 read that as the clause.
 - `persia-engine`: L1 `synonyms` (ROADMAP 8.2.1; SPEC §6.3.2, §7.6, ADR-0039). The query compiler finds the runs of
   required words that are a term of the collection's `synonyms` groups, in each default field's analysis, and records
   them in `Compiled::synonyms` (`CompiledSynonym`: the clauses and their alternatives). A run covers whole words only;
