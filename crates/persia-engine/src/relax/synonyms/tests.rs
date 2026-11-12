@@ -328,3 +328,20 @@ fn the_expansion_is_cut_when_the_compilation_cut_any_run() {
             .cut()
     );
 }
+
+#[test]
+fn an_exclusion_added_to_the_root_stays_on_the_step() {
+    // As at L2: the root's `must_not` is kept whole, an exclusion a caller added beside the excluded clauses too.
+    let mut compiled = compile("cheap tv -used");
+    let added = Query::MatchAll;
+    let Query::Bool(root) = &mut compiled.query else {
+        panic!()
+    };
+    root.must_not.push(added.clone());
+    let want = root.must_not.clone();
+    let [step] = steps(&compiled).try_into().unwrap();
+    let Query::Bool(b) = &step.query else {
+        panic!()
+    };
+    assert_eq!(b.must_not, want);
+}

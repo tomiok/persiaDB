@@ -165,9 +165,11 @@ pub(crate) struct LevelInput<'a> {
     pub(crate) compiled: Option<&'a Compiled>,
     /// The statistics the search scores with (SPEC §7.2): L2 ranks its terms by their IDF.
     pub(crate) stats: &'a dyn StatisticsProvider,
-    /// Whether L3 may prefix-expand a term of a field (SPEC §7.6): a `text` field whose analyzer does not stack
-    /// tokens (SPEC §6.3.1). None by default ([`Self::new`]); the search sets it ([`Self::expanding`]).
-    pub(crate) expands: &'a dyn Fn(FieldId) -> bool,
+    /// The schema `boost` of a field whose terms L3 may prefix-expand (SPEC §7.6), `None` for any other: a `text` field
+    /// whose analyzer does not stack tokens (SPEC §6.3.1). None by default ([`Self::new`]); the search sets it
+    /// ([`Self::expanding`]). A `prefix` scores with that boost as its field weight (SPEC §7.2), so L3 scales by a
+    /// `fields` weight relative to it.
+    pub(crate) expands: &'a dyn Fn(FieldId) -> Option<f64>,
 }
 
 impl<'a> LevelInput<'a> {
@@ -185,13 +187,13 @@ impl<'a> LevelInput<'a> {
     }
 
     /// This input with L3 expanding the terms of the fields `expands` accepts.
-    pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> bool) -> Self {
+    pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> Option<f64>) -> Self {
         Self { expands, ..self }
     }
 }
 
-fn no_field(_: FieldId) -> bool {
-    false
+fn no_field(_: FieldId) -> Option<f64> {
+    None
 }
 
 impl fmt::Debug for LevelInput<'_> {
@@ -233,7 +235,10 @@ pub(crate) trait LevelTransform: Send + Sync + fmt::Debug {
     /// the level's earlier steps match, with the same `must_not` and `filter`. Excluding the latest one then excludes
     /// them all, so the cascade excludes only that one of the level's steps from the next. A step cut to fit the limits
     /// (SPEC §7.1.3) matches less than it was built to: the cascade keeps excluding the earlier steps beside it.
-    /// `false` unless a level proves it: L2's ladder is nested, L1's steps are not.
+    /// `false` unless a level proves it: L2's ladder is nested, L1's steps are not. Excluding fewer steps never makes
+    /// the cascade skip one the full exclusions would search when, as at L2, every step of the level built uncut
+    /// counts alike against the limits (its rungs differ only in `minimum_should_match`). A nested level whose steps
+    /// grow needs its own argument.
     fn nested(&self) -> bool {
         false
     }

@@ -1266,7 +1266,9 @@ limit) has none. A request's `filter` joins the compiled query as the filter cla
 ROADMAP 8.1.17): added to the root's when the query is a `bool` around the clauses, else the query is wrapped,
 `bool { must: [query], filter }`. A single part that is a `bool` itself (a phrase in a field without positions, a
 word the fields split apart) is wrapped too: a filter beside its `should` clauses would make them optional. The
-clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter. A
+one-part query replaced by one that is neither that part nor a `bool` requiring it (without `should` clauses) no
+longer has its clauses' parts, so the cascade builds no step from them. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
 that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
@@ -1300,7 +1302,8 @@ Queries and filters are bounded; a hand-built query or a filter over a bound is 
 user text is cut (§7.1.1). The relaxation cascade (§7.6) holds each step after L0 to the same limits as the query
 it runs, `bool { must: [step], must_not: [the earlier steps it excludes] }`, so the steps it excludes count in full
 (ROADMAP 8.1.8). Those are the earlier steps searched, except the steps of a nested level that a later step of the
-level stands for (§7.6, ROADMAP 8.2.2.4): an L2 step counts L0, L1's step and the latest L2 step searched, not every one. The limits are the ones the search sets, else those a compiled query was compiled with, else the
+level stands for (§7.6, ROADMAP 8.2.2.4): an L2 step counts L0, L1's step and the latest L2 step built and not cut (with
+any cut ones after it), not every one. The limits are the ones the search sets, else those a compiled query was compiled with, else the
 defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
 its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
 first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
@@ -1601,7 +1604,8 @@ becomes a `prefix` of that term with `max_expansions` 50, which planning expands
 collection `df` (§7.1). A term is a field's analyzed term of a word: of a query compiled from `q`, one per field of a
 word clause's parts (each `combined`, and each field of a word the fields split apart); of a programmatic query, each
 `term` and `combined` field of a root `bool`'s `must` clauses (under `bool` and `boost`), or of a `term` or
-`combined` alone. A term is expanded when its field is a `text` field whose analyzer does not stack tokens, and it is
+`combined` alone. Within a nested `bool`, its last `must` clause holds the last term of the clause that holds it, and
+so does each of its `should` clauses (each one field's reading of the same word, as the compiler builds them). A term is expanded when its field is a `text` field whose analyzer does not stack tokens, and it is
 the *last term* or has at least 3 characters (Unicode scalar values of the analyzed term: `running` under `en` is
 `run`, 3). The last term is the last part of the last required clause when that clause is a word (of a word the
 fields split apart, each field's last token), and the last `must` clause of a programmatic root `bool`: it is
@@ -1609,10 +1613,11 @@ expanded whatever its length, as the word a user may still be typing. Excluded c
 and `field:` clauses are not expanded, since they ask for their text exactly. Neither are a field's terms when its
 analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
-`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`, under a `boost`
-of the field's weight unless it is 1. So a document matches the word when an exact field holds the term or an
+`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`. A `prefix`
+scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
+when the word's `fields` weight differs from that boost, by their ratio (at most 1000). So a document matches the word when an exact field holds the term or an
 expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
-L0's other required clauses, its excluded clauses and its filters stay as they are, and a programmatic root `bool`
+L0's other required clauses stay as they are, and so do its root's `must_not` (its excluded clauses) and `filter`, and a programmatic root `bool`
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
 level. Its `effective` is L0's text, as every clause is kept. The step reads no statistics; held to §7.1.3's limits,
 its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of

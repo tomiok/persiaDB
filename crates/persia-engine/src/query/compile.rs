@@ -131,6 +131,14 @@ impl DefaultFields {
     }
 }
 
+/// How a one-part compilation's query holds its part ([`Compiled::parts`]).
+enum OnePart<'a> {
+    /// The query is the part.
+    Itself,
+    /// The query is this `bool`, requiring the part.
+    Wrapped(&'a BoolQuery),
+}
+
 /// The result of [`QueryCompiler::compile`]: the query, and where in the user text each of its clauses came from
 /// (ROADMAP 8.1.7), for the relaxation response's `original` and `effective` (SPEC §7.6).
 ///
@@ -247,11 +255,14 @@ impl Compiled {
 
     /// The queries clause `index` of [`Self::clauses`] compiled to: entries of the root `bool`'s `must` (or
     /// `must_not`), or, for a compilation of one required part, that part (SPEC §7.1.1: a single required part is the
-    /// query itself, until a filter joins it, ROADMAP 8.1.17). `None` past the last clause. Like [`Self::source`], it
-    /// takes an index so that it reads only this compilation's clauses.
+    /// query itself, until a filter joins it, ROADMAP 8.1.17). `None` past the last clause, and for a one-part
+    /// compilation whose [`Self::query`] was replaced by one that is neither the part nor a `bool` requiring it (its
+    /// clauses no longer describe it). Like [`Self::source`], it takes an index so that it reads only this compilation's
+    /// clauses.
     pub fn parts(&self, index: usize) -> Option<&[Query]> {
         let clause = self.clauses.get(index)?;
         if let Some(part) = &self.part {
+            self.one_part()?;
             return (clause.parts == (0..1) && !clause.negated).then(|| std::slice::from_ref(part));
         }
         let root = self.root()?;
@@ -265,13 +276,35 @@ impl Compiled {
 
     /// The `bool` at the root of [`Self::query`] around the clauses' parts: its `must` and `must_not` hold them, and its
     /// `filter` a request's filter (SPEC §7.1, [`Self::with_filter`]). `None` when the query is not a `bool` around
-    /// them: no clause compiled (`match_all`), or the query is the one required part, joined to nothing.
+    /// them: no clause compiled (`match_all`), the query is the one required part, joined to nothing, or it was
+    /// replaced by one that does not hold that part.
     pub fn root(&self) -> Option<&BoolQuery> {
-        match (&self.query, &self.part) {
-            // A one-part compilation's own query may be a `bool` (a phrase in a field without positions, a word the
-            // fields split apart): it is the root only once something wrapped it.
-            (Query::Bool(_), Some(part)) if *part == self.query => None,
-            (Query::Bool(root), _) => Some(root),
+        match (&self.part, &self.query) {
+            (Some(_), _) => match self.one_part()? {
+                OnePart::Itself => None,
+                OnePart::Wrapped(root) => Some(root),
+            },
+            (None, Query::Bool(root)) => Some(root),
+            (None, _) => None,
+        }
+    }
+
+    /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the one `must` clause of a `bool` without
+    /// `should` clauses (a request's filter, or an exclusion a caller added, beside it). `None` for anything else, and
+    /// for a compilation of other than one part.
+    fn one_part(&self) -> Option<OnePart<'_>> {
+        let part = self.part.as_ref()?;
+        if *part == self.query {
+            return Some(OnePart::Itself);
+        }
+        match &self.query {
+            Query::Bool(root)
+                if root.should.is_empty()
+                    && root.minimum_should_match == 0
+                    && root.must.as_slice() == std::slice::from_ref(part) =>
+            {
+                Some(OnePart::Wrapped(root))
+            }
             _ => None,
         }
     }

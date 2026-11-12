@@ -1943,7 +1943,8 @@ mod nested {
     //!    as one where every step excludes every earlier step: excluding the latest of a nested level excludes them all.
     //! 2. Under tight limits, where steps are cut or skipped, no document is a hit of two steps: a cut step does not
     //!    stand for its level's earlier steps.
-    //! 3. A step of a nested level never excludes more than the old rule did, so it is skipped no more often.
+    //! 3. A step of a nested level never excludes more than the old rule did, so it is cut or skipped no more often.
+    //! 4. Pages by cursor under tight limits are slices of the one ranking, and state the same cascade without `fill`.
 
     use std::collections::BTreeSet;
     use std::ops::Bound;
@@ -2126,14 +2127,37 @@ mod nested {
             );
         }
         let old = views.search_relaxed(&l0, &all, &every, &exec()).unwrap();
-        if got.relaxation.applied.len() == old.relaxation.applied.len() {
-            for (new, was) in got.relaxation.applied.iter().zip(&old.relaxation.applied) {
-                prop_assert!(
-                    !new.ends_with(":skipped") || was.ends_with(":skipped"),
-                    "{:?} against {:?}",
-                    got.relaxation.applied,
-                    old.relaxation.applied
-                );
+        // Both build the same steps in order, until one has its hits: per step, the old rule's exclusions hold the new
+        // rule's, so a step it cuts or skips was cut or skipped by the old rule too.
+        for (new, was) in got.relaxation.applied.iter().zip(&old.relaxation.applied) {
+            let held = |label: &str| label.ends_with(":skipped") || label.ends_with(":cut");
+            prop_assert!(
+                !new.ends_with(":skipped") || was.ends_with(":skipped"),
+                "{:?} against {:?}",
+                got.relaxation.applied,
+                old.relaxation.applied
+            );
+            prop_assert!(
+                !new.ends_with(":cut") || held(was),
+                "{:?} against {:?}",
+                got.relaxation.applied,
+                old.relaxation.applied
+            );
+        }
+        // A page after a cursor builds the same steps again without searching those before it: the pages by cursor are
+        // the one ranking, and, without `fill`, each states the same cascade.
+        let page = request(3);
+        let paged = by_cursor(&views, &l0, &page, &latest);
+        prop_assert_eq!(strip(&paged), strip(&got.hits));
+        if !case.fill {
+            let first = views.search_relaxed(&l0, &page, &latest, &exec()).unwrap();
+            if let Some(last) = first.hits.last() {
+                let next = SearchRequest {
+                    search_after: Some(last.cursor()),
+                    ..page
+                };
+                let next = views.search_relaxed(&l0, &next, &latest, &exec()).unwrap();
+                prop_assert_eq!(&next.relaxation, &first.relaxation);
             }
         }
         Ok(())

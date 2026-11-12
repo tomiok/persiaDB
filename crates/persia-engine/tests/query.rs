@@ -1757,3 +1757,37 @@ fn a_language_field_without_a_word_flags_no_stopword() {
         .collect();
     assert_eq!(flags, [("—", false), ("the", true), ("red", false)]);
 }
+
+/// ROADMAP 8.1.17: a one-part compilation keeps its part apart from `query`. Replaced by hand with a query that neither
+/// is that part nor a `bool` requiring it, the clauses no longer describe `query`, so `parts` and `root` say nothing
+/// (and the relaxation levels, which read them, build no step from text L0 does not search).
+#[test]
+fn a_replaced_one_part_query_has_no_parts() {
+    let schema = schema();
+    let mut compiled = compiler(&schema).compile(
+        "shoes",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    let part = compiled.query.clone();
+    compiled.query = Query::Term(TermQuery {
+        field: schema.field("brand").unwrap().id(),
+        term: "nike".into(),
+    });
+    assert_eq!((compiled.parts(0), compiled.root()), (None, None));
+    // Wrapped with an exclusion beside it, the part is still the clause's, and the wrapper the root.
+    compiled.query = Query::Bool(BoolQuery {
+        must: vec![part.clone()],
+        must_not: vec![Query::MatchAll],
+        ..BoolQuery::default()
+    });
+    assert_eq!(compiled.parts(0), Some(std::slice::from_ref(&part)));
+    assert_eq!(compiled.root().unwrap().must_not, [Query::MatchAll]);
+    // A `bool` that also has `should` clauses is not the clause's.
+    compiled.query = Query::Bool(BoolQuery {
+        must: vec![part.clone()],
+        should: vec![Query::MatchAll],
+        ..BoolQuery::default()
+    });
+    assert_eq!(compiled.parts(0), None);
+}

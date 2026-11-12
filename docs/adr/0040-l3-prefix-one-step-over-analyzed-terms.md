@@ -45,14 +45,19 @@ L3 only has to build the `prefix` queries. Several things were still open:
    exactly. `CompiledClause::kind` (`ClauseKind`: word, phrase, field) records the form, as the parts alone do not
    tell a quoted word from a bare one.
 7. **A `combined` becomes a `bool` of `should`s.** The AST has no multi-field prefix. The fields kept exact stay one
-   `combined`, and each expanded field gets its own `prefix`, boosted by the field's weight. A document matches when
-   any field matches. Each expanded field scores its prefix with the largest kept `df` (§7.1), so BM25F's field
+   `combined`, and each expanded field gets its own `prefix`. A `prefix` already scores with its field's schema
+   `boost` as the field weight (SPEC §7.2), as a `term` does, so the step adds a `boost` only when the word's
+   `fields` weight differs from it: their ratio, capped at a boost's 1000. (Boosting by the weight itself, as first
+   built, counted the schema boost twice; the batch review found it.) A `fields` weight then scales the field's
+   score instead of entering its saturation as `w_f`. A document matches when any field matches. Each expanded field scores its prefix with the largest kept `df` (§7.1), so BM25F's field
    combination is lost for the expanded fields: their scores add up instead of sharing one saturation.
 8. **Programmatic queries relax too** (chosen with the user). The `term` and `combined` leaves of a root `bool`'s
    `must` clauses (through nested `bool`s and `boost`s) are expanded, the last `must` clause holding the last term. A
    `term` or `combined` alone is its own last term. Only `text` fields expand (a `keyword` value is an identifier).
-   Its `must_not`, `filter` and phrases stay as they are. A root with `should` clauses or a `minimum_should_match` is
-   not relaxed, as at L2.
+   Within a nested `bool`, its last `must` clause holds the last term, and so does each `should` clause (each is one
+   field's reading of the same word, as the compiler builds them). Its `must_not`, `filter` and phrases stay as
+   they are. A root with `should` clauses or a `minimum_should_match` is not relaxed, as at L2. For a compiled
+   query too, the root's whole `must_not` stays, as at L2 (L1 now reads it the same way).
 9. **`effective` is L0's text**: every clause is kept, as at L1. The step reads no statistics.
 
 ## Consequences
@@ -75,3 +80,6 @@ L3 only has to build the `prefix` queries. Several things were still open:
 - **Skip programmatic queries**, as L1 does: they then had no typo-free completion. Not chosen (item 8).
 - **Keep the exact term beside the prefix** (`bool { should: [term, prefix] }`), so the step would contain L0: that
   scores a document holding the exact term twice, and L0's hits are excluded from the step anyway.
+- **A field weight on `prefix`** (the `w_f` a `combined` carries), so a `fields` override would enter saturation as at
+  L0: an AST change for one level. The ratio boost (item 7) keeps the AST, and equals L0's weighting for the default
+  fields, whose weights are the schema boosts.

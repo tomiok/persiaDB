@@ -585,14 +585,13 @@ impl CollectionViews<'_> {
         })
     }
 
-    /// Whether L3 may prefix-expand a term of `field` (SPEC §7.6, §6.3.1): a `text` field whose analyzer, as the memtable
-    /// indexes with it, does not stack tokens.
-    fn expands(&self, field: FieldId) -> bool {
-        self.collection()
-            .schema()
-            .field_by_id(field)
-            .is_some_and(|f| matches!(f.kind(), FieldKind::Text(_)))
-            && !self.memtable().stacks_tokens(field)
+    /// The schema `boost` of `field` when L3 may prefix-expand its terms (SPEC §7.6, §6.3.1): a `text` field whose analyzer,
+    /// as the memtable indexes with it, does not stack tokens. `None` for any other field.
+    fn expands(&self, field: FieldId) -> Option<f64> {
+        match self.collection().schema().field_by_id(field)?.kind() {
+            FieldKind::Text(o) if !self.memtable().stacks_tokens(field) => Some(o.boost),
+            _ => None,
+        }
     }
 
     /// [`Self::search_step`], within the budget's `end` once there is one. `None` when the budget passed while the

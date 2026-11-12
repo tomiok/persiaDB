@@ -38,19 +38,14 @@ impl Expansion {
         }
         // The root around the clauses (ROADMAP 8.1.17): none for a query that is its one part, which a filter has not
         // joined.
-        let filter: Vec<Filter> = match compiled.root() {
+        let (must_not, filter): (Vec<Query>, Vec<Filter>) = match compiled.root() {
             // The compiler builds no `should` at the root: a root changed since is not its clauses'. A filter joined to
-            // it (SPEC §7.1: a request's `filter` is the root's) is kept, as L2 keeps it.
+            // it (SPEC §7.1: a request's `filter` is the root's) is kept, and so is every `must_not` (the excluded
+            // clauses, and any a caller added), as L2 keeps them.
             Some(root) if !root.should.is_empty() || root.minimum_should_match != 0 => return None,
-            Some(root) => root.filter.clone(),
-            None => Vec::new(),
+            Some(root) => (root.must_not.clone(), root.filter.clone()),
+            None => (Vec::new(), Vec::new()),
         };
-        let mut must_not = Vec::new();
-        for (index, clause) in compiled.clauses.iter().enumerate() {
-            if clause.negated {
-                must_not.extend_from_slice(compiled.parts(index)?);
-            }
-        }
         let mut synonyms = compiled.synonyms.iter().peekable();
         let mut units = Vec::new();
         let mut index = 0;

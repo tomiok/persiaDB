@@ -22,7 +22,7 @@ use persia_engine::db::{
     Database, DatabaseOptions, Execution, ManualClock, RelaxedResults, SearchRequest, Threads,
 };
 use persia_engine::document::{Document, Value};
-use persia_engine::query::{DefaultFields, QueryCompiler, QueryLimits};
+use persia_engine::query::{DefaultFields, Query, QueryCompiler, QueryLimits, TermQuery};
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
     Fallback, FieldKind, Level, Levels, RelaxationConfig, SchemaBuilder, TextOptions,
@@ -218,5 +218,89 @@ proptest! {
         got.sort();
         want.sort();
         prop_assert_eq!(got, want);
+    }
+}
+
+/// SPEC §7.2, §7.6 L3: a completion in a boosted field scores as a `term` of that field would (a `prefix` scores with
+/// the schema boost as its field weight), and a `fields` weight other than that boost scales it by their ratio.
+#[test]
+fn a_completion_scores_as_a_term_of_its_field() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "title",
+            FieldKind::Text(TextOptions {
+                boost: 3.0,
+                ..TextOptions::default()
+            }),
+        )
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let title = schema.field("title").unwrap().id();
+    let body = schema.field("body").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [5; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    for (id, t, b) in [
+        ("t", "shoes", "red"),
+        ("b", "red", "shoes"),
+        ("x", "hat", "hat"),
+    ] {
+        let doc = Document::new(id)
+            .with(title, Value::String(t.into()))
+            .with(body, Value::String(b.into()));
+        db.put("c", &doc, Durability::Buffered).unwrap();
+    }
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let score_of = |out: &RelaxedResults, id: &str| {
+        out.hits
+            .iter()
+            .find(|h| h.hit.document.id() == id)
+            .map(|h| (h.step, h.hit.score))
+            .unwrap()
+    };
+    let term = |field| {
+        Query::Term(TermQuery {
+            field,
+            term: "shoes".into(),
+        })
+    };
+    let plain = |q: &Query| {
+        views
+            .search_relaxed(
+                q,
+                &request,
+                &RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::disabled()).unwrap(),
+                &exec(),
+            )
+            .unwrap()
+    };
+    let in_title = score_of(&plain(&term(title)), "t").1;
+    let in_body = score_of(&plain(&term(body)), "b").1;
+    let query_compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    for (fields, scale) in [(vec!["title", "body"], 1.0), (vec!["title^6", "body"], 2.0)] {
+        let fields = DefaultFields::parse(c.schema(), &fields).unwrap();
+        let compiled = query_compiler.compile("sho", &fields, &QueryLimits::default());
+        let out = views
+            .search_relaxed(&compiled, &request, &plan(), &exec())
+            .unwrap();
+        let (step, t) = score_of(&out, "t");
+        let (_, b) = score_of(&out, "b");
+        assert_eq!(step, 1);
+        assert!(
+            (t - scale * in_title).abs() <= 1e-9 * in_title,
+            "{t} against {scale} × {in_title}"
+        );
+        assert!(
+            (b - in_body).abs() <= 1e-9 * in_body,
+            "{b} against {in_body}"
+        );
     }
 }

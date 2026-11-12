@@ -21,6 +21,9 @@ use crate::segment::ReadError;
 /// length: it is the word a user may still be typing.
 pub(crate) const MIN_LEN: usize = 3;
 
+/// The largest `boost` a query holds (SPEC §7.1: `0 < w ≤ 1000`).
+const MAX_BOOST: f64 = 1000.0;
+
 /// L3 `prefix` (SPEC §7.6, ROADMAP 8.2.3, ADR-0040).
 ///
 /// A term is a field's analyzed term of a word: one per field of a `combined` (a word over the default fields), or a
@@ -30,7 +33,8 @@ pub(crate) const MIN_LEN: usize = 3;
 /// `must` clause of a programmatic root `bool` (a programmatic `term` or `combined` alone is its own last term).
 ///
 /// Expanded, a `combined` becomes a `bool` of `should` clauses: the fields it keeps exact, as one `combined`, and a
-/// `prefix` per expanded field, boosted by the field's weight. So a document matches the word when it holds the term
+/// `prefix` per expanded field. A `prefix` scores with its field's schema `boost` as the field weight (SPEC §7.2), as a
+/// `term` does, so it is boosted only by the ratio of a `fields` weight to that boost, when they differ. So a document matches the word when it holds the term
 /// in an exact field or a term starting with it in an expanded one, and each expanded field scores its own prefix
 /// (SPEC §7.1: the kept terms share the largest `df`). A step that expands nothing is not built.
 #[derive(Debug)]
@@ -56,21 +60,20 @@ impl LevelTransform for Prefix {
 
 /// The step of a compiled query: its words expanded, its other required clauses, excluded clauses and filters as they
 /// are. `None` when nothing is expanded, or the query is not the one its clauses describe.
-fn of_compiled(compiled: &Compiled, expands: &dyn Fn(FieldId) -> bool) -> Option<Query> {
-    let filter: Vec<Filter> = match compiled.root() {
+fn of_compiled(compiled: &Compiled, expands: &dyn Fn(FieldId) -> Option<f64>) -> Option<Query> {
+    // The root's `must_not` and `filter` stay as they are, as at L2: a clause a caller excluded by hand too.
+    let (must_not, filter): (Vec<Query>, Vec<Filter>) = match compiled.root() {
         // The compiler builds no `should` at the root: a root changed since is not its clauses'.
         Some(root) if !root.should.is_empty() || root.minimum_should_match != 0 => return None,
-        Some(root) => root.filter.clone(),
-        None => Vec::new(),
+        Some(root) => (root.must_not.clone(), root.filter.clone()),
+        None => (Vec::new(), Vec::new()),
     };
     let last = compiled.clauses.iter().rposition(|c| !c.negated);
     let mut must = Vec::new();
-    let mut must_not = Vec::new();
     let mut expanded = false;
     for (index, clause) in compiled.clauses.iter().enumerate() {
         let parts = compiled.parts(index)?;
         if clause.negated {
-            must_not.extend_from_slice(parts);
             continue;
         }
         for (i, part) in parts.iter().enumerate() {
@@ -108,7 +111,7 @@ fn of_compiled(compiled: &Compiled, expands: &dyn Fn(FieldId) -> bool) -> Option
 /// term the last term), or a `term`, `combined` or `boost` alone. Its `must_not` and `filter` stay as they are. `None`
 /// when nothing is expanded, or for a root `bool` with `should` clauses or a `minimum_should_match` (its `must` are not
 /// all it requires, as L2 reads it).
-fn of_query(query: &Query, expands: &dyn Fn(FieldId) -> bool) -> Option<Query> {
+fn of_query(query: &Query, expands: &dyn Fn(FieldId) -> Option<f64>) -> Option<Query> {
     match query {
         Query::Bool(root) if root.should.is_empty() && root.minimum_should_match == 0 => {
             let mut root = root.clone();
@@ -120,7 +123,7 @@ fn of_query(query: &Query, expands: &dyn Fn(FieldId) -> bool) -> Option<Query> {
 }
 
 /// Expands each of `must` in place, the last one `last` when the list is; whether any changed.
-fn expand_must(must: &mut [Query], last: bool, expands: &dyn Fn(FieldId) -> bool) -> bool {
+fn expand_must(must: &mut [Query], last: bool, expands: &dyn Fn(FieldId) -> Option<f64>) -> bool {
     let n = must.len();
     let mut changed = false;
     for (i, clause) in must.iter_mut().enumerate() {
@@ -136,9 +139,9 @@ fn expand_must(must: &mut [Query], last: bool, expands: &dyn Fn(FieldId) -> bool
 /// `must` clause inherits it, and each `should` clause does (each is one field's reading of the same word).
 /// `must_not` and `filter` clauses, phrases, `prefix`, `fuzzy`, `match_all` and `constant_score` are not expanded: what
 /// they match is not a word's terms.
-fn expand(query: &Query, last: bool, expands: &dyn Fn(FieldId) -> bool) -> Option<Query> {
+fn expand(query: &Query, last: bool, expands: &dyn Fn(FieldId) -> Option<f64>) -> Option<Query> {
     let wanted = |field: FieldId, term: &str| {
-        expands(field) && (last || term.chars().count() >= MIN_LEN) && !term.is_empty()
+        expands(field).is_some() && (last || term.chars().count() >= MIN_LEN) && !term.is_empty()
     };
     match query {
         Query::Term(t) if wanted(t.field, &t.term) => Some(prefix(t.field, &t.term)),
@@ -156,14 +159,16 @@ fn expand(query: &Query, last: bool, expands: &dyn Fn(FieldId) -> bool) -> Optio
             }
             should.extend(open.into_iter().map(|f| {
                 let q = prefix(f.field, &f.term);
-                // A weight of 1 is no boost; `combined` weights are in `0 < w ≤ 1000`, as a boost's (SPEC §7.1).
-                #[allow(clippy::float_cmp)]
-                if f.weight == 1.0 {
+                // A `prefix` scores with the schema boost as its field weight (SPEC §7.2), as a `term` does: a `fields`
+                // weight other than it scales the prefix by their ratio, within a boost's range (SPEC §7.1).
+                let schema = expands(f.field).unwrap_or(f.weight);
+                let ratio = (f.weight / schema).min(MAX_BOOST);
+                if ratio.to_bits() == 1.0_f64.to_bits() || ratio.is_nan() || ratio <= 0.0 {
                     q
                 } else {
                     Query::Boost(BoostQuery {
                         query: Box::new(q),
-                        boost: f.weight,
+                        boost: ratio,
                     })
                 }
             }));

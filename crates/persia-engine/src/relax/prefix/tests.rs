@@ -72,20 +72,18 @@ impl StatisticsProvider for NoStats {
     }
 }
 
-/// `text` fields: the ones the search lets L3 expand when no analyzer stacks tokens.
-fn text_fields(schema: &CollectionSchema) -> impl Fn(FieldId) -> bool + '_ {
-    |f| {
-        matches!(
-            schema.field_by_id(f).map(crate::schema::Field::kind),
-            Some(FieldKind::Text(_))
-        )
+/// `text` fields and their schema boost: the ones the search lets L3 expand when no analyzer stacks tokens.
+fn text_fields(schema: &CollectionSchema) -> impl Fn(FieldId) -> Option<f64> + '_ {
+    |f| match schema.field_by_id(f).map(crate::schema::Field::kind) {
+        Some(FieldKind::Text(o)) => Some(o.boost),
+        _ => None,
     }
 }
 
 fn step_of(
     query: &Query,
     compiled: Option<&Compiled>,
-    expands: &dyn Fn(FieldId) -> bool,
+    expands: &dyn Fn(FieldId) -> Option<f64>,
 ) -> Option<Step> {
     let input = LevelInput::new(query, compiled, &NoStats).expanding(expands);
     let mut steps = Prefix.steps(&input).unwrap();
@@ -113,12 +111,13 @@ fn boosted(query: Query, boost: f64) -> Query {
     })
 }
 
-/// A word over `title` and `body`, both expanded: the `title` prefix at its weight 2.
+/// A word over `title` and `body`, both expanded. A `prefix` scores with its field's schema boost (`title`: 2), so
+/// the default fields' weights, which are those boosts, add none.
 fn both(schema: &CollectionSchema, title: &str, body: &str) -> Query {
     Query::Bool(BoolQuery {
         should: vec![
             prefix_of(id(schema, "body"), body),
-            boosted(prefix_of(id(schema, "title"), title), 2.0),
+            prefix_of(id(schema, "title"), title),
         ],
         ..BoolQuery::default()
     })
@@ -171,10 +170,7 @@ fn the_length_is_the_analyzed_terms_in_characters() {
     assert_eq!(
         parts[1],
         Query::Bool(BoolQuery {
-            should: vec![
-                exact_body,
-                boosted(prefix_of(id(&schema, "title"), "going"), 2.0)
-            ],
+            should: vec![exact_body, prefix_of(id(&schema, "title"), "going")],
             ..BoolQuery::default()
         })
     );
@@ -206,7 +202,7 @@ fn fields_it_may_not_expand_stay_exact() {
     let title = id(&schema, "title");
     let compiled = compile(&schema, "red shoes");
     // As for a field whose analyzer stacks tokens: `title` stays exact, `body` is expanded.
-    let not_title = |f: FieldId| f != title && text_fields(&schema)(f);
+    let not_title = |f: FieldId| text_fields(&schema)(f).filter(|_| f != title);
     let s = step_of(&compiled.query, Some(&compiled), &not_title).unwrap();
     let exact = |t: &str| {
         Query::Combined(CombinedQuery {
@@ -225,7 +221,7 @@ fn fields_it_may_not_expand_stay_exact() {
     };
     assert_eq!(must(&s.query), [open("red", "red"), open("shoe", "shoes")]);
     // No field it may expand: no step.
-    assert_eq!(step_of(&compiled.query, Some(&compiled), &|_| false), None);
+    assert_eq!(step_of(&compiled.query, Some(&compiled), &|_| None), None);
 }
 
 #[test]
@@ -345,4 +341,59 @@ fn of_a_word_the_fields_split_apart_each_fields_last_token_is_last() {
             ..BoolQuery::default()
         })
     );
+}
+
+#[test]
+fn a_fields_weight_scales_a_prefix_by_its_ratio_to_the_schema_boost() {
+    // A `prefix` scores with the schema boost as its field weight (SPEC §7.2): `title^5` over `title`'s boost 2 is a
+    // ratio of 2.5, and `body` keeps its boost, so no boost. Ratios cap at a boost's 1000 (`title^1000` over 0.5).
+    let schema = schema();
+    let fields = DefaultFields::parse(&schema, &["title^5", "body"]).unwrap();
+    let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile("sho", &fields, &QueryLimits::default());
+    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    assert_eq!(
+        s.query,
+        Query::Bool(BoolQuery {
+            // In the order `fields` gives them.
+            should: vec![
+                boosted(prefix_of(id(&schema, "title"), "sho"), 2.5),
+                prefix_of(id(&schema, "body"), "sho"),
+            ],
+            ..BoolQuery::default()
+        })
+    );
+    let half = |f: FieldId| text_fields(&schema)(f).map(|_| 0.5);
+    let fields = DefaultFields::parse(&schema, &["title^1000"]).unwrap();
+    let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile("sho", &fields, &QueryLimits::default());
+    let s = step_of(&compiled.query, Some(&compiled), &half).unwrap();
+    assert_eq!(
+        s.query,
+        boosted(prefix_of(id(&schema, "title"), "sho"), 1000.0)
+    );
+    // A boost in range is a valid query.
+    s.query.validate(&schema, &QueryLimits::default()).unwrap();
+}
+
+#[test]
+fn an_exclusion_added_to_the_root_stays_excluded() {
+    // As at L2: the root's `must_not` is kept whole, an exclusion a caller added beside the excluded clauses too.
+    let schema = schema();
+    let added = Query::Term(TermQuery {
+        field: id(&schema, "brand"),
+        term: "acme".into(),
+    });
+    let mut compiled = compile(&schema, "red sho -blue");
+    let Query::Bool(root) = &mut compiled.query else {
+        panic!()
+    };
+    root.must_not.push(added.clone());
+    let want = root.must_not.clone();
+    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let Query::Bool(b) = &s.query else { panic!() };
+    assert_eq!(b.must_not, want);
+    assert_eq!(b.must_not.last(), Some(&added));
 }
