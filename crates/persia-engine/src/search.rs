@@ -300,7 +300,9 @@ pub trait Matcher {
 
     /// From now on, [`Self::next`] and [`Self::advance`] may skip documents that score at most `score`: they cannot
     /// enter a top-k whose worst hit scores `score`, because each hit it keeps has a lower docid and wins the tie
-    /// (ROADMAP 7.4.4). A threshold at or below the one in force, or NaN, is ignored. By default nothing is skipped.
+    /// (ROADMAP 7.4.4). A sort led by the score with further keys, where a tie may still win on a later key, passes
+    /// the next float below its threshold (`top_sorted`, ROADMAP 7.4.11). A threshold at or below the one in force,
+    /// or NaN, is ignored. By default nothing is skipped.
     fn set_min_competitive(&mut self, _score: f64) {}
 
     /// The positions of the current document in `field`, when this is a word holding it there (a `bool`'s proximity

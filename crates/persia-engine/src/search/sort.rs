@@ -492,7 +492,10 @@ pub(crate) fn top_sorted<V: SearchView>(
     Ok(hits)
 }
 
-/// Looks at `watch`, applying the threshold it gives, strictly ([`top_sorted`]), when the collector prunes.
+/// Looks at `watch`, applying the threshold it gives, strictly ([`top_sorted`]), when the collector prunes. A later
+/// view's watch may give a threshold already strict (the next float below an earlier view's); taking it down again
+/// only lets through a match scoring exactly that float, which the heap then compares, so this rule need not know
+/// what the watch did.
 fn look(
     watch: &mut impl Watch,
     matcher: &mut (impl Matcher + ?Sized),
