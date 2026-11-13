@@ -175,6 +175,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Fixed
+- `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected
+  document or record, or a flush that fails without poisoning) and whose sync of the documents before it then fails too
+  reports the first failure with the sync failure added (`DatabaseError::ThenFailed`, its `source` and
+  `DatabaseError::primary`). Before, the sync error replaced it, so the cause was lost (the database was still
+  poisoned).
 - `persia-engine`: `QueryCompiler::compile` reports `Compiled::truncated` for text that `max_text_len` cut to nothing
   when the limits do not admit the root query either. Before, the flag was dropped and the cut text looked complete.
 - `persia-storage`: a `LocalStorage::put` or `put_if_absent` that failed and could not remove its temporary file left

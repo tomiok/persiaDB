@@ -1819,7 +1819,9 @@ sees the collection as it was before the batch, and the batch becomes visible on
 rejected keeps the ones before it, made durable at the batch's level and then visible. A flush commit inside
 a batch (the size threshold) syncs the WAL first and publishes the prefix it flushed, durable. A sync that
 fails poisons the database before any reader saw the part of the batch that is not durable; a reopen decides
-what survived. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
+what survived. When a batch ends early (a rejected document) and the sync of the ones before it then fails too, the
+error is the first failure, with the sync failure added to it, never replacing it; the database is poisoned as
+for any failed sync. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
 `put_batch` or `delete` to it, rather than take writes no reader would see, and at the next commit, tick, schema
 change or drop, before it flushes anything, since the held documents may not be durable.
 
