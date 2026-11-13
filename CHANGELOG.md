@@ -66,6 +66,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- Docs (planned, ROADMAP 10.1.9 and 10.2.6; `persia` does not export `Db` yet): SPEC §8.1, §13.1, and §14
+  now say `Db::open(path)` creates the container and any missing parent directories.
+  `OpenOptions::create_if_missing(false)` requires the file to exist. Read-only opens an existing file and
+  creates nothing. Read-only wins when creation is also requested, including the default: that combination
+  is not an error, and a missing path fails. An existing container is never replaced; a read-write open's
+  recovery may still truncate an uncommitted tail (SPEC §4.5.1). The same rule is the Go, TypeScript, and
+  C open. `PERSIA_LIB` is a runtime variable of the Go embedded SDK only, not a server knob. Callers of
+  `Db` never call `tick()` or `merge_step()`: the facade runs commits and merges on background threads,
+  and `close` joins them.
+- Docs: SPEC §7.6 now matches the engine's L3 clamp. The prefix's boost is the fields-weight / schema-boost
+  ratio, clamped to `[f64::from_bits(1), 1000]`. A fields weight far above the schema boost gives that
+  prefix a boost of 1000. A ratio of 0 would be an invalid boost.
+- Docs (planned, ROADMAP 16.2.6; no Go module yet): ADR-0018 keeps cgo and the static `libpersia.a` as the
+  default Go build and specifies an optional `persia_purego` tag. On Unix it `dlopen`s the shared library
+  with `CGO_ENABLED=0`. On Windows it uses `LoadLibrary` and `GetProcAddress`, because `purego.Dlopen` is
+  not built for Windows. The C ABI stays purego-friendly (opaque handles, pointer and length, no
+  struct-by-value, no callbacks). wazero stays rejected.
 - `persia-blob` (breaking): `ChunkSize::new` (and `TryFrom<u32>`) rejects a chunk size below `ChunkSize::MIN`,
   64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2; ADR-0041). The floor bounds a
   blob manifest at 4 bytes per 64 KiB of blob: a chunk size of 1 let a 4 GiB blob need a 16 GiB manifest. It is a

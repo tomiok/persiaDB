@@ -34,7 +34,13 @@ That `search` call is illustrative. Fuzzy matching is L4 of the relaxation casca
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 
-- `Db::open` on a path or URL, `OpenOptions`, and `close`.
+- `Db::open` on a path or URL, `OpenOptions`, and `close`. `Db::open(path)` creates the container and any
+  missing parent directories (SPEC §8.1). `OpenOptions::create_if_missing(false)` requires the file to exist.
+  `OpenOptions::read_only(true)` opens an existing file and creates nothing. Read-only wins when creation
+  is also requested, including the default: that combination is not an error, nothing is created, and a
+  missing path fails. Go, TypeScript, and the C ABI use that same rule (SPEC §13.1).
+- Callers never call `tick()` or `merge_step()`. Commits and merges run on background threads, and `close`
+  joins them (SPEC §8.2, ROADMAP 10.2.6, complementing 10.2.3).
 - Create, open, and drop a collection, and read its schema back.
 - `put`, `put_batch`, `delete`, `get`, `commit`, and `search`.
 - Documents as a dynamic map, or as a `serde` struct (`put_struct`).

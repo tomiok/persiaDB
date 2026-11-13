@@ -1,6 +1,6 @@
 # ADR-0041: A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB`
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-13
 - Related: SPEC §9.1, §9.1.1, §9.2, §9.4; ROADMAP 9.4.2, 9.4.4; amends ADR-0035 (Consequences)
 
@@ -31,13 +31,15 @@ gets a floor or the manifest a size cap.
 - No blob this database writes needs a manifest above 4 bytes per 64 KiB of blob.
 - A manifest from another writer may still be up to 16 GiB. Decoding allocates at most its length, and a remote
   reader may check its length against `76 + 4·n` before it fetches it (SPEC §9.1.1).
-- Small blobs are unaffected: a blob smaller than its chunk size is one chunk.
+- A non-empty blob smaller than the chunk size it is written with is still one chunk. An empty blob has
+  no chunks (`crates/persia-blob/src/chunker.rs`). The floor applies to the requested `chunk_size`, not to the blob's length: a
+  request below 64 KiB is rejected even when the blob itself is smaller than 64 KiB, including an empty one.
 - A breaking change of `persia-blob` (unreleased): `ChunkSize::new` rejects `1..64 KiB`, which it used to accept.
 
 ## Alternatives considered
 
 - **A manifest size cap in the encoding** (a reader rejects a manifest above N bytes): a format rule, so a format
-  change to move it, and a blob over the cap is not storable at any chunk size. Rejected.
+  change to move it. The cap limits the encoded chunk list, not blob bytes. Rejected.
 - **A floor in the encoding** (a reader rejects `chunk_size` below 64 KiB): turns stored values invalid and the golden
   files with them, for no reader-side gain over the writer's floor. Rejected.
 - **The floor in the codec primitives too**: would forbid them the stored sizes they must read. Rejected.
