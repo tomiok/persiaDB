@@ -385,6 +385,60 @@ fn the_bonus_sits_between_must_and_should() {
     assert_eq!(hits[0].score.to_bits(), score.to_bits());
 }
 
+/// Invariant 1 with `minimum_should_match` beside `must` (found in the batch review): the required `should` side is
+/// added after the bonus, `((Σ must) + bonus) + Σ matching should`, as the explanation sums it, bit for bit, with or
+/// without pruning. A flat `must + should` sum with the bonus last would round differently.
+#[test]
+fn the_bonus_sits_between_must_and_required_should() {
+    // Bodies of many lengths and distances, so scores vary enough that summing in another order rounds differently
+    // for some of them.
+    let bodies: Vec<String> = (0..40)
+        .map(|i| {
+            let gap = "x ".repeat(i % 4);
+            let tail = "y ".repeat(i % 7);
+            let extra = if i % 2 == 0 { "hat" } else { "coat hat" };
+            format!("red {gap}shoes {tail}{extra}")
+        })
+        .chain(["red shoes".to_owned()])
+        .collect();
+    let docs: Vec<(&str, &str, &str)> = bodies.iter().map(|b| (b.as_str(), "", "")).collect();
+    let f = fixture(&docs);
+    let q = Query::Bool(BoolQuery {
+        must: vec![term(f.body, "red"), term(f.body, "shoes")],
+        should: vec![term(f.body, "hat"), term(f.body, "coat")],
+        minimum_should_match: 1,
+        ..BoolQuery::default()
+    });
+    let plan = f.plan(&q);
+    let hits = f.top(&plan);
+    // `red shoes` alone holds no `should` clause: not a match.
+    let mut docids: Vec<u32> = hits.iter().map(|h| h.docid).collect();
+    docids.sort_unstable();
+    assert_eq!(docids, (0..40).collect::<Vec<u32>>());
+    for hit in &hits {
+        let e = f.explain(&plan, hit.docid);
+        let Explanation::Bool {
+            score,
+            must,
+            proximity: Some(p),
+            should,
+        } = &e
+        else {
+            panic!("{e:?}")
+        };
+        let required = must.iter().fold(0.0, |s, m| s + m.score()) + p.score;
+        let optional = should.iter().fold(0.0, |s, m| s + m.score());
+        assert_eq!(score.to_bits(), (required + optional).to_bits(), "{e:?}");
+        assert_eq!(hit.score.to_bits(), score.to_bits(), "{}", hit.docid);
+    }
+    // The bonus applies: without it the scores differ.
+    let off = f.top(&plan.clone().without_proximity());
+    assert_ne!(
+        off.iter().map(|h| h.score.to_bits()).collect::<Vec<_>>(),
+        hits.iter().map(|h| h.score.to_bits()).collect::<Vec<_>>()
+    );
+}
+
 /// Invariant 2 (found in the 7.3.5 review): a `prefix` that keeps one term, or a `fuzzy` whose only term is the
 /// exact one, plans to a word but is not one: no pair, whatever else the collection holds.
 #[test]

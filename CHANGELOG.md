@@ -20,7 +20,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   is a new provided method. A `search_after` cursor records whether its plan scored proximity, and a page under the
   other setting is `RequestError::CursorProximity`.
 - `persia-engine` (breaking): `Explanation::Bool` has a `proximity` field, the bonus and its pairs (`None` while
-  proximity is off).
+  proximity is off), and `db::Cursor` a `proximity` field (whether its plan scored the bonus).
 - `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
   to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
   characters (of the analyzed term), becomes a `prefix` of 50 expansions, kept by collection `df`. Excluded clauses,

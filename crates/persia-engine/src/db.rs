@@ -285,7 +285,8 @@ pub enum DatabaseError {
 
 impl DatabaseError {
     /// The error an operation reports first: itself, or for [`Self::ThenFailed`] the first failure, not the one of
-    /// the step that followed it.
+    /// the step that followed it. A `ThenFailed` from a failed sync has also poisoned the database: a caller that
+    /// branches on the primary error alone gets [`DatabaseError::Poisoned`] from its next write.
     ///
     /// ```
     /// use persia_engine::db::DatabaseError;

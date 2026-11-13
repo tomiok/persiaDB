@@ -443,11 +443,11 @@ Until `backup` copies both files consistently (ROADMAP 10.1.8), a manual copy is
   the writer open: it is the state a crash would leave, and an open recovers it as it recovers a crash (§4.5.1, §8.6).
 - **With the writer open,** copy the **container first, then the pack**, each read once from its start to its end,
   and let no blob GC rewrite the pack (§9.5) and no compaction rewrite the container (§4.6) until both copies end.
-  A blob is durable in the pack before any container commit or WAL record that references it (§9.5), and outside a
-  GC rewrite the pack only grows, so a pack copied after the container holds every blob the container copy
-  references. The other order is not safe: a pack copied first misses the blobs bound, then referenced by a commit,
-  while it was being copied. A file copied while it is appended to may end in a torn tail, which the copy's first
-  open truncates (§4.4).
+  The pack's index covering a blob is written (and synced) before any container byte that references the blob (a
+  WAL record or a commit, §9.5), and outside a GC rewrite the pack only grows, so a pack copied after the container
+  holds every blob the container copy references; any answer to §18.9 must keep that order. The other order is not
+  safe: a pack copied first misses the blobs bound, then referenced by a commit, while it was being copied. A file
+  copied while it is appended to may end in a torn tail, which the copy's first open truncates (§4.4).
 
 A restore puts both files back side by side under one `<name>`.
 
@@ -1387,9 +1387,8 @@ with each word's `idf` as above (a `combined`'s from its largest `df`); a pair w
 term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a single term. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
 pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
 included), nor a field without positions; a single word is no `bool` (§7.1.1). The bonus is **off by default**: a plan
-adds it only when asked (`SearchPlan::with_proximity`). It costs +22 % pruned and +75 % exhaustive on AND queries
-(`search_top10/and`, docs/benchmarks.md) and does not move nDCG@10 (§16.1), so it stays opt-in until judged queries
-it can decide show a gain (ROADMAP 15.1.6). A request cannot ask for it yet (`"proximity"`, ROADMAP 10.1.7), and a
+adds it only when asked (`SearchPlan::with_proximity`). Its measured cost on AND queries buys no nDCG@10 gain yet
+(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request cannot ask for it yet (`"proximity"`, ROADMAP 10.1.7), and a
 relaxed search (§7.6) plans every step without it. Without it the bonus is 0 and not added. With
 `B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
@@ -2248,12 +2247,14 @@ chunk but the last is full, and an empty blob has no chunks. The boundaries depe
 never on how the bytes were delivered. The SHA-256 is computed over the bytes in order while they are chunked.
 
 **Limits** (ROADMAP 9.4.4). A writer (`put_blob`, through `ChunkSize::new`) uses a `chunk_size` of **64 KiB to
-64 MiB**, default 4 MiB; below 64 KiB is a caller's error (`ChunkSizeBelowMin`), not corruption. The floor bounds the blob
-manifest (§9.1.1) at `76 + 4·ceil(size / 64 KiB)` bytes, 4 bytes per 64 KiB of blob: 256 KiB for a 4 GiB blob, where a
+64 MiB**, default 4 MiB; below 64 KiB is a caller's error (`ChunkSizeBelowMin`), not corruption. `put_blob` rejects
+a chunk size below the floor however it was built, a resumed upload's token included (§9.4), since
+`ChunkSize::from_encoding` (a reader's) admits one. The floor bounds a blob manifest this writer writes (§9.1.1) at `76 + 4·ceil(size / 64 KiB)` bytes, 4 bytes per 64 KiB of blob: 256 KiB for a 4 GiB blob, where a
 `chunk_size` of 1 would need 16 GiB. A blob holds at most `u32::MAX` chunks, so at most `u32::MAX · chunk_size`
 bytes (about 256 TiB at the floor, 16 PiB at the default). The floor is a writer's rule, not the encodings': a reader
 accepts the encodings' `1..=64 MiB` (§9.1, §9.1.1), so no stored `BlobRef` or manifest becomes invalid and the floor
-can move without a format change. A remote reader may check a manifest's length against `76 + 4·n` before it fetches
+can move without a format change. A manifest written by another writer may still be larger (up to 16 GiB), and decoding
+it allocates at most its length; a remote reader may check a manifest's length against `76 + 4·n` before it fetches
 it (§9.1.1).
 
 **Staging and binding** (ADR-0034). An upload draws a 128-bit `upload_id` at random, like a `segment_id` (§8.7: a
@@ -2736,7 +2737,8 @@ Comparison against other engines is reported with methodology, never cherry-pick
    crash between the two syncs may orphan the blob but never leaves a reference without it; (b) what a document logged
    `Buffered` or `Async` with a blob promises when the pack sync fails afterwards (today a failed sync poisons the
    writer, §4.5); (c) whether the pack's directory sync can share the container's when both files are created
-   together. A crash test (ROADMAP 9.5.4) covers each answer.
+   together. Any answer keeps the pack's index covering a blob written before any container byte that references
+   it, which a live copy relies on (§4.8). A crash test (ROADMAP 9.5.4) covers each answer.
 10. **Pack rewrite (GC) under readers, Windows included** (ROADMAP 9.5.2). Proposed: the same reader-safe replace
     as the container's compaction (§4.6), never a rewrite in place. The writer copies the live blobs into
     `<name>.persia.blobs.compact.<nonce>.<n>` beside the pack, syncs it, renames it over the pack, then syncs the

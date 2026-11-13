@@ -627,6 +627,12 @@ impl CollectionViews<'_> {
     ) -> Result<(SearchPlan, Collected), RelaxedSearchError> {
         let terms = exec.terms(self);
         let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
+        // `check_request` was given `false` for every step: a step planned with the bonus would record another
+        // setting in its cursors than the one their next page is checked against.
+        debug_assert!(
+            !plan.proximity(),
+            "a relaxation step planned with proximity"
+        );
         let collected = self.collect(&plan, part, exec)?;
         Ok((plan, collected))
     }
