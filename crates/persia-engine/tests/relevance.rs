@@ -21,6 +21,9 @@
 //!    trading places change nothing, and pass).
 //! 4. Every judged query has hits at L0, so a search through the collection's relaxation cascade (SPEC §7.6, ROADMAP
 //!    8.1.2) stays at L0 and ranks as without it: relaxation does not move the gate.
+//! 5. The gate measures the default plan, which leaves the proximity bonus out (SPEC §7.2, ADR-0036): the relaxed
+//!    search plans with the default too (SPEC §7.4). Whether the bonus turns on by default is ROADMAP 15.1.6, with
+//!    judged queries it can reorder and a baseline recorded with it on and off.
 //!
 //! nDCG@10 is `DCG@10 / IDCG@10`, with `DCG@10 = Σ_{i=1..10} (2^grade_i − 1) / log2(i + 1)` over the hits in rank
 //! order, and `IDCG@10` the same over the judgments sorted by grade.
@@ -147,6 +150,8 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
             let q = j["q"].as_str().unwrap();
             let text = compiler.compile(q, &fields, &QueryLimits::default());
             let plan = SearchPlan::with_terms(&text.query, c.schema(), &stats, &views).unwrap();
+            // The gate measures the default plan: no proximity bonus (SPEC §7.2, ADR-0036; invariant 5).
+            assert!(!plan.proximity(), "{q:?} planned with proximity");
             let hits = views
                 .search(&plan, &request, Pruning::default())
                 .unwrap()
