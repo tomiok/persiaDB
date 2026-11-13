@@ -49,7 +49,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::{Explanation, Pruning, SearchPlan};
 use persia_engine::view::SearchView;
@@ -709,16 +710,17 @@ fn check(
             }
         }
 
-        // Invariant 5: relaxed with the collection's levels, of which L2 `drop_terms` builds steps (ROADMAP 8.2.2), a
-        // search returns each step's matches the earlier steps lack, step by step, scored and ranked as the reference
-        // scores that step's query; L0 alone when it has `min_results` hits, and every step for a `min_results` above
-        // them all.
+        // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
+        // would also build a step for one programmatic term: ROADMAP 8.1.19), a search returns each step's matches the
+        // earlier steps lack, step by step, scored and ranked as the reference scores that step's query; L0 alone when it
+        // has `min_results` hits, and every step for a `min_results` above them all.
         let steps = reference_steps(q, filter.is_some());
         for min_results in [1, 10_000] {
             let relax = RelaxPlan::new(
                 schema.relaxation(),
                 &RelaxOptions {
                     min_results: Some(min_results),
+                    levels: Some(Levels::Custom(vec![Level::DropTerms])),
                     ..RelaxOptions::default()
                 },
             )

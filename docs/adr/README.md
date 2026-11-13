@@ -61,3 +61,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
 | [0039](./0039-l1-synonyms-runs-alternatives-and-cuts.md) | L1 `synonyms`: runs of whole clauses, phrase alternatives, one step, and cuts in group order | proposed |
+| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | proposed |

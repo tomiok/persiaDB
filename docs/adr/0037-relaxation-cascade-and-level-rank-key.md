@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-11-08
-- Related: SPEC §6.2.3, §7.3, §7.4, §7.5, §7.6; ROADMAP 8.1.1–8.1.8, 8.1.9, 8.1.13, 8.3.2, 8.3.4
+- Related: SPEC §6.2.3, §7.1.3, §7.3, §7.4, §7.5, §7.6; ROADMAP 8.1.1–8.1.8, 8.1.9, 8.1.13, 8.2.2.4, 8.3.2, 8.3.4
 
 ## Context
 
@@ -28,6 +28,13 @@ cascade return?
    that matches it, once, at that step's score, bit for bit. Exclusion goes by match, not by the hits collected, so
    it holds for documents outside the window and for steps a cursor skips. It costs one extra walk of the earlier
    queries' postings in each later step, which is cheap next to what a relaxed query already pays.
+   Since ROADMAP 8.2.2.4, a level whose steps are *nested* (each, as built, matches every document the level's
+   earlier steps match, with the same `must_not` and `filter`: L2's ladder) has only its latest searched step
+   excluded. Excluding it excludes the earlier ones with it, so the hits are the same. A step cut to fit the limits
+   (item 10) matches less than it was built to: it stands for none of its level's earlier steps, which stay
+   excluded beside it, and the next uncut step stands for them all again (a cut step matches a subset of what its
+   uncut query matches, and the next uncut step matches all of that, so all of the cut step's matches). Steps of other levels, L0 included, stay excluded, and so does every step of a
+   level not proved nested (L1). A property test checks the same hits, scores and response as excluding every step.
 3. **Hits count from the top.** The cascade needs `need = max(offset + limit, min_results)` hits from the top. Step
    `i` collects `need − found` hits (pruned as any search, SPEC §7.3) and stops the cascade once `found ≥ min_results`
    (with `fill`, also `found ≥ need`). Without `fill`, the decision to relax therefore does not depend on the page:
@@ -99,9 +106,9 @@ cascade return?
 
 - Every later level only builds queries; ranking, paging, counting and facets come from the orchestrator.
 - A relaxed step re-plans the earlier steps' queries inside its `must_not`. Expansions (`prefix`, `fuzzy`) expand
-  again over the same views, to the same terms. Step `i` copies the queries of the `i` steps before it into its
-  `must_not`, quadratic in steps, which are few (L2's ladder is the longest level). L0 is searched as given, never
-  copied.
+  again over the same views, to the same terms. Step `i` copies the queries of the steps it excludes into its
+  `must_not`: every earlier one but a nested level's superseded steps (item 2), so an L2 step copies L0, L1's step
+  and the level's latest earlier step built and not cut, with any cut ones after it: none at its first rung. L0 is searched as given, never copied.
 - Scores down a relaxed page are not monotonic across steps. Clients that need one descending number use the rank
   score.
 - A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not

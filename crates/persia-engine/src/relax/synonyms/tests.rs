@@ -127,6 +127,14 @@ fn no_run_no_text_or_a_changed_query_builds_no_step() {
         change(b);
         assert!(steps(&changed).is_empty(), "{:?}", changed.query);
     }
+    // A root that lost the excluded clause: the step would drop the exclusion its `effective` (`-used`) still states.
+    let mut changed = compile("cheap tv -used");
+    assert_eq!(steps(&changed).len(), 1);
+    let Query::Bool(b) = &mut changed.query else {
+        panic!()
+    };
+    b.must_not.clear();
+    assert!(steps(&changed).is_empty(), "{:?}", changed.query);
     // Runs out of order, past the clauses, empty, or over an excluded clause.
     let compiled = compile("tv -box new york");
     for change in [
@@ -278,6 +286,40 @@ fn a_filter_joined_to_the_root_stays_on_the_step() {
 }
 
 #[test]
+fn a_filter_joined_to_a_one_part_query_is_not_read_as_its_clause() {
+    // ROADMAP 8.1.17: `tv` compiles to its one part. Joined to a filter, by hand or with `with_filter`, the run is that
+    // part, and the filter is the step's root's, once.
+    let compiled = compile("tv");
+    let part = compiled.query.clone();
+    let filter = Filter::Term {
+        field: crate::schema::FieldId::new(0),
+        value: crate::query::FilterValue::Bool(true),
+    };
+    let mut by_hand = compiled.clone();
+    by_hand.query = Query::Bool(BoolQuery {
+        must: vec![part.clone()],
+        filter: vec![filter.clone()],
+        ..BoolQuery::default()
+    });
+    for joined in [by_hand, compiled.with_filter([filter.clone()])] {
+        let [step] = steps(&joined).try_into().unwrap();
+        let Query::Bool(b) = &step.query else {
+            panic!()
+        };
+        assert_eq!(b.filter, std::slice::from_ref(&filter));
+        let [Query::Bool(run)] = b.must.as_slice() else {
+            panic!("{b:?}")
+        };
+        assert_eq!(run.should.first(), Some(&part), "{run:?}");
+        assert!(
+            run.should
+                .iter()
+                .all(|q| !matches!(q, Query::Bool(r) if !r.filter.is_empty()))
+        );
+    }
+}
+
+#[test]
 fn the_expansion_is_cut_when_the_compilation_cut_any_run() {
     // `tv nyc` is 2 terms. At 6, 2 alternatives are left for 2 runs: `tv` keeps 1 of its 2, `nyc` its 1.
     let limits = |max_terms| QueryLimits {
@@ -293,4 +335,21 @@ fn the_expansion_is_cut_when_the_compilation_cut_any_run() {
             .unwrap()
             .cut()
     );
+}
+
+#[test]
+fn an_exclusion_added_to_the_root_stays_on_the_step() {
+    // As at L2: the root's `must_not` is kept whole, an exclusion a caller added beside the excluded clauses too.
+    let mut compiled = compile("cheap tv -used");
+    let added = Query::MatchAll;
+    let Query::Bool(root) = &mut compiled.query else {
+        panic!()
+    };
+    root.must_not.push(added.clone());
+    let want = root.must_not.clone();
+    let [step] = steps(&compiled).try_into().unwrap();
+    let Query::Bool(b) = &step.query else {
+        panic!()
+    };
+    assert_eq!(b.must_not, want);
 }

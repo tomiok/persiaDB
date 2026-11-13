@@ -36,22 +36,15 @@ impl Expansion {
         if compiled.synonyms.is_empty() {
             return None;
         }
-        let (must_not, filter): (Vec<Query>, Vec<Filter>) = match &compiled.query {
-            Query::Bool(root) => {
-                // The compiler builds no `should` at the root: a root changed since is not its clauses'. A filter
-                // joined to it (SPEC §7.1: a request's `filter` is the root's) is kept, as L2 keeps it.
-                if !root.should.is_empty() || root.minimum_should_match != 0 {
-                    return None;
-                }
-                let mut must_not = Vec::new();
-                for (index, clause) in compiled.clauses.iter().enumerate() {
-                    if clause.negated {
-                        must_not.extend_from_slice(compiled.parts(index)?);
-                    }
-                }
-                (must_not, root.filter.clone())
-            }
-            _ => (Vec::new(), Vec::new()),
+        // The root around the clauses (ROADMAP 8.1.17): none for a query that is its one part, which a filter has not
+        // joined.
+        let (must_not, filter): (Vec<Query>, Vec<Filter>) = match compiled.root() {
+            // The compiler builds no `should` at the root: a root changed since is not its clauses'. A filter joined to
+            // it (SPEC §7.1: a request's `filter` is the root's) is kept, and so is every `must_not` (the excluded
+            // clauses, and any a caller added), as L2 keeps them.
+            Some(root) if !root.should.is_empty() || root.minimum_should_match != 0 => return None,
+            Some(root) => (root.must_not.clone(), root.filter.clone()),
+            None => (Vec::new(), Vec::new()),
         };
         let mut synonyms = compiled.synonyms.iter().peekable();
         let mut units = Vec::new();
@@ -83,8 +76,11 @@ impl Expansion {
                 index = synonym.clauses.end;
                 continue;
             }
+            // An excluded clause's parts are read too: a root whose `must_not` no longer holds them is not the one
+            // the clauses describe, and the step would drop an exclusion its `effective` still states.
+            let parts = compiled.parts(index)?;
             if !clause.negated {
-                units.extend(compiled.parts(index)?.iter().cloned().map(Unit::Plain));
+                units.extend(parts.iter().cloned().map(Unit::Plain));
             }
             index += 1;
         }

@@ -43,7 +43,8 @@ pub use ast::{
     PrefixQuery, Query, TermQuery, WeightedTerm,
 };
 pub use compile::{
-    Compiled, CompiledClause, CompiledSynonym, DefaultFields, QueryCompiler, text_within_limit,
+    ClauseKind, Compiled, CompiledClause, CompiledSynonym, DefaultFields, QueryCompiler,
+    text_within_limit,
 };
 pub use filter::{Filter, FilterValue, MAX_FILTER_JSON_LEN};
 pub(crate) use fit::{Fit, StepLimits};

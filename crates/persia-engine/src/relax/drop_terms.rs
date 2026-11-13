@@ -156,10 +156,15 @@ impl<'a> Root<'a> {
     /// programmatic `bool` with `should` clauses or a `minimum_should_match` already (its `must` are not all of what
     /// it requires), or a compilation whose clauses do not index its query.
     fn of(input: &LevelInput<'a>) -> Option<Self> {
-        let (must_not, filter): (&[Query], &[Filter]) = match input.original {
-            Query::Bool(root) => (&root.must_not, &root.filter),
-            _ => (&[], &[]),
+        // A compiled query's root around its clauses (ROADMAP 8.1.17): its own query when that is its one part, which is
+        // one term and skips the level.
+        let root = match (input.compiled, input.original) {
+            (Some(compiled), _) => compiled.root(),
+            (None, Query::Bool(root)) => Some(root),
+            (None, _) => None,
         };
+        let (must_not, filter): (&[Query], &[Filter]) =
+            root.map_or((&[], &[]), |root| (&root.must_not, &root.filter));
         // Counted before a term is copied or its `df` read: a single term skips the level at no cost.
         if Self::count(input)? < MIN_TERMS {
             return None;
@@ -189,8 +194,10 @@ impl<'a> Root<'a> {
     fn count(input: &LevelInput<'_>) -> Option<usize> {
         match (input.compiled, input.original) {
             // The compiler builds no `should` at the root: a root changed since has requirements L2 would drop.
-            (Some(_), Query::Bool(root))
-                if !root.should.is_empty() || root.minimum_should_match != 0 =>
+            (Some(compiled), _)
+                if compiled
+                    .root()
+                    .is_some_and(|r| !r.should.is_empty() || r.minimum_should_match != 0) =>
             {
                 None
             }
@@ -209,10 +216,13 @@ impl<'a> Root<'a> {
     fn compiled(compiled: &Compiled) -> Option<Vec<Term>> {
         let mut terms = Vec::new();
         for (index, clause) in compiled.clauses.iter().enumerate() {
+            // An excluded clause's parts are read too: a root whose `must_not` no longer holds them is not the one the
+            // clauses describe, and the steps would drop an exclusion their `effective` still states.
+            let parts = compiled.parts(index)?;
             if clause.negated {
                 continue;
             }
-            let query = match compiled.parts(index)? {
+            let query = match parts {
                 [one] => one.clone(),
                 parts => Query::Bool(BoolQuery {
                     must: parts.to_vec(),
@@ -299,6 +309,12 @@ impl LevelTransform for DropTerms {
             });
         }
         Ok(steps)
+    }
+
+    /// The ladder is nested (ROADMAP 8.2.2.4): every step has the same `should` clauses, `must_not` and `filter`, and a
+    /// lower `minimum_should_match` than the one before, so a document that matches `k` of the terms matches `k − 1`.
+    fn nested(&self) -> bool {
+        true
     }
 }
 

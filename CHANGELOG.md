@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
+  to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
+  characters (of the analyzed term), becomes a `prefix` of 50 expansions, kept by collection `df`. Excluded clauses,
+  phrases, `field:` clauses, filters and the terms of a field whose analyzer stacks tokens (`edge_ngram`) stay
+  exact. A programmatic query expands the `term` and `combined` leaves of its root `bool`'s `must` clauses, the
+  last one holding the last term. `effective` is L0's text. Over `QueryLimits` it is listed as `prefix:cut` or
+  `prefix:skipped`. A one-term programmatic query now relaxes to L3 by default. Benchmark `search_relaxed/l3`.
+- `persia-engine`: `CompiledClause::kind` (`ClauseKind`: `Word`, `Phrase`, `Field`) states each clause's form in the
+  user text (SPEC §7.1.1).
+- `persia-engine`: `Compiled::with_filter` joins a request's filter to a compiled query as its root `bool`'s filter
+  clauses (ROADMAP 8.1.17; SPEC §7.1, §7.1.1). A query that is its one required part is wrapped,
+  `bool { must: [query], filter }`. `Compiled::root` returns the `bool` around the clauses. `Compiled::parts` now
+  returns a one-part compilation's own part even after a filter wrapped it, by hand or through `with_filter`. Before,
+  it returned the whole root, filter included, and L1 and L2 read that as the clause.
 - `persia-engine`: L1 `synonyms` (ROADMAP 8.2.1; SPEC §6.3.2, §7.6, ADR-0039). The query compiler finds the runs of
   required words that are a term of the collection's `synonyms` groups, in each default field's analysis, and records
   them in `Compiled::synonyms` (`CompiledSynonym`: the clauses and their alternatives). A run covers whole words only;
@@ -40,6 +54,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine`: a step of the relaxation cascade excludes only the latest step built and not cut of a nested level
+  (ROADMAP 8.2.2.4; SPEC §7.1.3, §7.6, ADR-0037 item 2), with every step of the other levels. L2's ladder is nested:
+  each step matches what the one before matched. The hits are unchanged. An L2 step now counts L0, L1's step and one
+  L2 step against `QueryLimits`, about 3·n terms instead of (j + 2)·n at step j, so a long query no longer loses its
+  last steps to `max_terms`. A step cut to fit the limits does not replace the steps before it. Benchmark
+  `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
 - `persia-engine`: `CollectionViews::search_relaxed` can fail with `RelaxedSearchError::Plan` when a level cannot read
   the statistics it builds from, or when the request's deadline passes before a level builds its steps.
 - `persia-engine` (breaking for struct literals without `..BoolQuery::default()`): `BoolQuery::minimum_should_match`,

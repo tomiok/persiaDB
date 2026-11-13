@@ -46,9 +46,19 @@ impl<'a> StepLimits<'a> {
             excluded: Usage::default(),
             full: false,
         };
-        this.full = this.excluded.add(&limits, 1, 0, 0).is_err();
-        this.exclude(first);
+        this.recount([first]);
         Ok(this)
+    }
+
+    /// Counts the root `bool` and `excluded` as what every later step excludes, instead of what was counted so far: a
+    /// step of a nested level stands for the earlier steps of its level (ROADMAP 8.2.2.4), which no step excludes
+    /// any more. Each was valid when it was first counted.
+    pub(crate) fn recount<'q>(&mut self, excluded: impl IntoIterator<Item = &'q Query>) {
+        self.excluded = Usage::default();
+        self.full = self.excluded.add(&self.limits, 1, 0, 0).is_err();
+        for query in excluded {
+            self.exclude(query);
+        }
     }
 
     /// Counts `query`, searched by a step, as excluded from every later step.

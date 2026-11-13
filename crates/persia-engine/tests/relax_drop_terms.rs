@@ -23,7 +23,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    AnalyzerRef, FieldKind, KeywordOptions, RelaxationConfig, SchemaBuilder, TextOptions,
+    AnalyzerRef, Fallback, FieldKind, KeywordOptions, Level, Levels, RelaxationConfig,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::Pruning;
 use persia_engine::wal::Durability;
@@ -79,10 +80,13 @@ fn exec() -> Execution {
         .budget_clock(Arc::new(ManualClock::new(0)))
 }
 
-/// The collection's levels (the defaults, as `database` builds it), relaxing until `min_results` hits.
+/// L0 and L2 alone, relaxing until `min_results` hits: the levels after it (L3 `prefix`, ROADMAP 8.2.3) would add steps
+/// to every query that L2 leaves short. L1 builds none here: the collection has no synonyms.
 fn plan(min_results: u32) -> RelaxPlan {
     let options = RelaxOptions {
         min_results: Some(min_results),
+        levels: Some(Levels::Custom(vec![Level::DropTerms])),
+        fallback: Some(Fallback::None),
         ..RelaxOptions::default()
     };
     RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap()
@@ -219,6 +223,52 @@ fn steps_that_do_not_fit_the_limits_are_listed_and_not_searched() {
     assert_eq!(out.hits, []);
 }
 
+/// ROADMAP 8.2.2.4: the ladder is nested, so a step excludes L0 and only the latest L2 step before it, not every one.
+/// Step `j` of `n` terms then counts about 3·n terms whatever `j`, where excluding every earlier step took (j + 2)·n.
+#[test]
+fn a_step_excludes_only_the_latest_step_of_the_ladder_so_long_queries_keep_their_steps() {
+    let db = database();
+    // Four words over `title` and `body`: 8 leaf terms a query. Each step counts L0's 8, the latest step's 8 and its
+    // own 8: 24. Excluding every earlier step, the `1` step would count 32 and be skipped.
+    let tight = QueryLimits {
+        max_terms: 24,
+        ..QueryLimits::default()
+    };
+    let out = search(&db, "purple red shoes box", 10_000, Some(tight));
+    let r = &out.relaxation;
+    assert_eq!(r.level, RelaxLevel::DropTerms);
+    assert_eq!(
+        r.applied,
+        ["drop_terms:75%", "drop_terms:50%", "drop_terms:1"]
+    );
+    // Each document is a hit of the first step it matches, once: `f` (`shoes box`) holds two of the four terms,
+    // `a` (`red running shoes`) two as well; the `1` step adds the documents holding one.
+    let hits = by_step(&out);
+    let mut ids: Vec<&str> = hits.iter().map(|h| h.1).collect();
+    ids.sort_unstable();
+    ids.dedup();
+    assert_eq!(ids.len(), hits.len(), "{hits:?}");
+    assert_eq!(
+        hits.iter().filter(|h| h.0 == 3).count(),
+        3,
+        "the `1` step holds `b`, `c` and `e`: {hits:?}"
+    );
+    // One term fewer: neither later step fits beside L0 and the 75% step, the latest searched.
+    let tighter = QueryLimits {
+        max_terms: 23,
+        ..QueryLimits::default()
+    };
+    let out = search(&db, "purple red shoes box", 10_000, Some(tighter));
+    assert_eq!(
+        out.relaxation.applied,
+        [
+            "drop_terms:75%",
+            "drop_terms:50%:skipped",
+            "drop_terms:1:skipped"
+        ]
+    );
+}
+
 #[test]
 fn a_programmatic_query_relaxes_its_must_clauses_without_text() {
     let db = database();
@@ -329,4 +379,38 @@ fn filters_are_never_relaxed() {
     assert_eq!(out.relaxation.applied, ["drop_terms:75%", "drop_terms:50%"]);
     // Unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step: they are `other`.
     assert_eq!(by_step(&out), [(1, "a"), (2, "c")]);
+}
+
+/// ROADMAP 8.1.17: a request's filter joined to a compiled query with `Compiled::with_filter` (SPEC §7.1) is on every
+/// step, as on a programmatic query's, and the steps still read the clauses' text.
+#[test]
+fn a_filter_joined_to_a_compiled_query_is_never_relaxed() {
+    let db = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let brand = c.schema().field("brand").unwrap().id();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let query_compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    let acme = Filter::Term {
+        field: brand,
+        value: FilterValue::Keyword("acme".into()),
+    };
+    let compiled = query_compiler
+        .compile(
+            "purple red shoes",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        )
+        .with_filter([acme]);
+    let out = views
+        .search_relaxed(&compiled, &SearchRequest::default(), &plan(10_000), &exec())
+        .unwrap();
+    let r = &out.relaxation;
+    assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
+    assert_eq!(r.effective.as_deref(), Some("purple"));
+    // `acme` is `a`, `c` and `e`: unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step.
+    let ids: Vec<&str> = by_step(&out).into_iter().map(|h| h.1).collect();
+    assert!(ids.iter().all(|id| ["a", "c", "e"].contains(id)), "{ids:?}");
+    assert!(ids.contains(&"a"), "{ids:?}");
 }

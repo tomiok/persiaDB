@@ -15,6 +15,7 @@ use super::ast::{
     BoolQuery, CombinedQuery, PhraseQuery, PhraseTerm, Query, TermQuery, WeightedTerm,
     boost_in_range, searchable,
 };
+use super::filter::Filter;
 use super::limits::{QueryLimits, Usage};
 
 mod synonyms;
@@ -130,6 +131,14 @@ impl DefaultFields {
     }
 }
 
+/// How a one-part compilation's query holds its part ([`Compiled::parts`]).
+enum OnePart<'a> {
+    /// The query is the part.
+    Itself,
+    /// The query is this `bool`, requiring the part.
+    Wrapped(&'a BoolQuery),
+}
+
 /// The result of [`QueryCompiler::compile`]: the query, and where in the user text each of its clauses came from
 /// (ROADMAP 8.1.7), for the relaxation response's `original` and `effective` (SPEC §7.6).
 ///
@@ -170,6 +179,10 @@ pub struct Compiled {
     /// expands to (SPEC §6.3.2, §7.6 L1). L0 does not search them: the relaxation cascade's L1 `synonyms` ORs each run
     /// with its alternatives. Empty when the collection has no synonyms or no run matches.
     pub synonyms: Vec<CompiledSynonym>,
+    /// The one required part a compilation of one is (SPEC §7.1.1: that part is the query), kept apart from
+    /// [`Self::query`] so that joining a filter to the query (ROADMAP 8.1.17, [`Self::with_filter`]) leaves the clause its
+    /// part. `None` for any other compilation, whose parts are entries of the root `bool`.
+    part: Option<Query>,
 }
 
 /// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
@@ -192,6 +205,31 @@ pub struct CompiledClause {
     /// Another field keeps it in the clause's parts: `the` over a `standard` title and an `en` body is a stopword. A
     /// `field:` clause is never one: the field it names would leave nothing to compile.
     pub stopword: bool,
+    /// Its form in the user text (SPEC §7.1.1): a word, a `"phrase"`, or either after `field:`. The relaxation
+    /// cascade's L3 `prefix` expands only words (SPEC §7.6): a phrase and a `field:` clause ask for that text exactly.
+    pub kind: ClauseKind,
+}
+
+/// The form of a clause of the user text (SPEC §7.1.1), whether excluded (`-`) or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ClauseKind {
+    /// A word, over the default fields.
+    Word,
+    /// A `"phrase"` over the default fields, even one of a single token (compiled as a word).
+    Phrase,
+    /// A word or phrase after `field:`, in that field only.
+    Field,
+}
+
+impl ClauseKind {
+    fn of(clause: &Clause<'_>) -> Self {
+        match (clause.field, clause.phrase) {
+            (Some(_), _) => Self::Field,
+            (None, true) => Self::Phrase,
+            (None, false) => Self::Word,
+        }
+    }
 }
 
 impl Compiled {
@@ -216,31 +254,109 @@ impl Compiled {
     }
 
     /// The queries clause `index` of [`Self::clauses`] compiled to: entries of the root `bool`'s `must` (or
-    /// `must_not`), or the whole query when it is that one clause's one part (a single required part is the query
-    /// itself). `None` past the last clause. Like [`Self::source`], it takes an index so that it reads only this
-    /// compilation's clauses.
+    /// `must_not`), or, for a compilation of one required part, that part (SPEC §7.1.1: a single required part is the
+    /// query itself, until a filter joins it, ROADMAP 8.1.17). `None` past the last clause, and for a one-part
+    /// compilation whose [`Self::query`] was replaced by one that is neither the part nor a `bool` requiring it (its
+    /// clauses no longer describe it). Like [`Self::source`], it takes an index so that it reads only this compilation's
+    /// clauses.
     pub fn parts(&self, index: usize) -> Option<&[Query]> {
         let clause = self.clauses.get(index)?;
+        if let Some(part) = &self.part {
+            self.one_part()?;
+            return (clause.parts == (0..1) && !clause.negated).then(|| std::slice::from_ref(part));
+        }
+        let root = self.root()?;
+        let list = if clause.negated {
+            &root.must_not
+        } else {
+            &root.must
+        };
+        list.get(clause.parts.clone())
+    }
+
+    /// The `bool` at the root of [`Self::query`] around the clauses' parts: its `must` and `must_not` hold them, and its
+    /// `filter` a request's filter (SPEC §7.1, [`Self::with_filter`]). `None` when the query is not a `bool` around
+    /// them: no clause compiled (`match_all`), the query is the one required part, joined to nothing, or it was
+    /// replaced by one that does not hold that part.
+    pub fn root(&self) -> Option<&BoolQuery> {
+        match (&self.part, &self.query) {
+            (Some(_), _) => match self.one_part()? {
+                OnePart::Itself => None,
+                OnePart::Wrapped(root) => Some(root),
+            },
+            (None, Query::Bool(root)) => Some(root),
+            (None, _) => None,
+        }
+    }
+
+    /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the one `must` clause of a `bool` without
+    /// `should` clauses (a request's filter, or an exclusion a caller added, beside it). `None` for anything else, and
+    /// for a compilation of other than one part.
+    fn one_part(&self) -> Option<OnePart<'_>> {
+        let part = self.part.as_ref()?;
+        if *part == self.query {
+            return Some(OnePart::Itself);
+        }
         match &self.query {
-            Query::Bool(root) if !self.collapsed() => {
-                let list = if clause.negated {
-                    &root.must_not
-                } else {
-                    &root.must
-                };
-                list.get(clause.parts.clone())
-            }
-            query if self.collapsed() && clause.parts == (0..1) && !clause.negated => {
-                Some(std::slice::from_ref(query))
+            Query::Bool(root)
+                if root.should.is_empty()
+                    && root.minimum_should_match == 0
+                    && root.must.as_slice() == std::slice::from_ref(part) =>
+            {
+                Some(OnePart::Wrapped(root))
             }
             _ => None,
         }
     }
 
-    /// Whether the root is the one required part, not a `bool` over the parts.
-    fn collapsed(&self) -> bool {
-        let required: usize = self.clauses.iter().map(|c| c.parts.len()).sum();
-        required == 1 && self.clauses.iter().all(|c| !c.negated)
+    /// This compilation with `filter` joined as the filter clauses of its root `bool` (SPEC §7.1, §7.1.2; ROADMAP
+    /// 8.1.17), as a request's `filter` joins `q`: added to the root's filters, or, when the query is not a `bool`
+    /// around the clauses ([`Self::root`]), the query wrapped as `bool { must: [query], filter }`. A one-part query
+    /// that is itself a `bool` is wrapped too: a filter beside its `should` clauses would make them optional. The
+    /// clauses keep their parts ([`Self::parts`]), so the relaxation levels read them as before. No filter, no change.
+    /// The joined query is not checked against [`Self::limits`]: the filter adds its nodes and terms, and a level of
+    /// depth (`bool` around the clauses, or the wrap), so it may exceed limits the compiled query was within, as any
+    /// filter joined to a root does. A request holds the joined query to its own limits (SPEC §7.1.3:
+    /// [`Query::validate`]).
+    ///
+    /// ```
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::query::{DefaultFields, Filter, FilterValue, Query, QueryCompiler, QueryLimits};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    ///
+    /// let schema = SchemaBuilder::new("c")
+    ///     .field("title", FieldKind::Text(TextOptions::default()))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .build()?;
+    /// let brand = schema.field("brand").ok_or("no field")?.id();
+    /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// let compiled = compiler.compile("shoes", &DefaultFields::all(&schema), &QueryLimits::default());
+    /// let shoes = compiled.query.clone();
+    /// let nike = Filter::Term { field: brand, value: FilterValue::Keyword("nike".into()) };
+    /// let filtered = compiled.with_filter([nike.clone()]);
+    /// let root = filtered.root().ok_or("no root")?;
+    /// assert_eq!((root.must.as_slice(), root.filter.as_slice()), (std::slice::from_ref(&shoes), std::slice::from_ref(&nike)));
+    /// // The clause is still its one part, without the filter.
+    /// assert_eq!(filtered.parts(0), Some(std::slice::from_ref(&shoes)));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_filter(mut self, filter: impl IntoIterator<Item = Filter>) -> Self {
+        let mut filter = filter.into_iter().peekable();
+        if filter.peek().is_none() {
+            return self;
+        }
+        if self.root().is_none() {
+            let query = std::mem::replace(&mut self.query, Query::MatchAll);
+            self.query = Query::Bool(BoolQuery {
+                must: vec![query],
+                ..BoolQuery::default()
+            });
+        }
+        if let Query::Bool(root) = &mut self.query {
+            root.filter.extend(filter);
+        }
+        self
     }
 }
 
@@ -363,6 +479,7 @@ impl QueryCompiler {
         for (clause, span) in clause_spans(text, &self.schema) {
             let eligible =
                 scan.scans() && !clause.negated && clause.field.is_none() && !clause.phrase;
+            let kind = ClauseKind::of(&clause);
             let (parts, stopword, captured) = self.clause(clause, fields, &mut tokens, eligible);
             let part = match (clause.negated, parts.len()) {
                 (_, 0) => {
@@ -407,6 +524,7 @@ impl QueryCompiler {
                                 negated: false,
                                 parts: 0..part.len(),
                                 stopword,
+                                kind,
                             });
                             scan.clause(eligible, clauses.len().saturating_sub(1), captured);
                             query.must.extend(part);
@@ -428,6 +546,7 @@ impl QueryCompiler {
                 negated: clause.negated,
                 parts: list.len()..list.len().saturating_add(part.len()),
                 stopword,
+                kind,
             });
             scan.clause(eligible, clauses.len().saturating_sub(1), captured);
             list.extend(part);
@@ -588,7 +707,10 @@ fn finish(
         (1, 0) => root.must.pop().unwrap_or(Query::MatchAll),
         _ => Query::Bool(root),
     };
+    let one = clauses.iter().map(|c| c.parts.len()).sum::<usize>() == 1
+        && clauses.iter().all(|c| !c.negated);
     Compiled {
+        part: one.then(|| query.clone()),
         query,
         truncated,
         text: text.to_owned(),

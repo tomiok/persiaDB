@@ -1089,7 +1089,8 @@ tokens** (`edge_ngram`; `TokenFilter::stacks_tokens`): an index-time prefix such
 `lapt` as is, and a query or synonym term expanded into prefixes could never line up with an analyzed query. Every
 other filter applies at both times, in the same order, so terms meet in the same form. Without `preserve_original`, a query
 word longer than `max` analyzes to the whole word, which was never indexed, and no level of the cascade (§7.6)
-shortens it: L3 expands it as a prefix (`laptop*`), which no prefix of at most `max` characters matches. A field
+shortens it: L3 leaves a stacking field's terms exact (§7.6), and a prefix `laptop*` would match no prefix of at
+most `max` characters anyway. A field
 that expects longer query words sets `preserve_original` or a larger `max`. No built-in analyzer stacks
 tokens, so for them query-time and index-time analysis are the same.
 
@@ -1261,13 +1262,20 @@ clause that compiled to part of it, in text order, its byte span in that text an
 clause's first character (its `-`, field name or body) to its last (a phrase's closing quote), without the whitespace
 around it; spans are on character boundaries and do not overlap. Each clause's parts are its entries of the root
 `must` (or `must_not` for `-`); a single required part is the query itself. A clause left out (no token, past a
-limit) has none. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+limit) has none. A request's `filter` joins the compiled query as the filter clauses of its root `bool` (§7.1,
+ROADMAP 8.1.17): added to the root's when the query is a `bool` around the clauses, else the query is wrapped,
+`bool { must: [query], filter }`. A single part that is a `bool` itself (a phrase in a field without positions, a
+word the fields split apart) is wrapped too: a filter beside its `should` clauses would make them optional. The
+clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter. A
+one-part query replaced by one that is neither that part nor a `bool` requiring it (without `should` clauses) no
+longer has its clauses' parts, so the cascade builds no step from them. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
 that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
 `ｔｈｅ`). Text in which a field's tokenizer finds no word (`—`) is not a stopword, whatever the field. Another default
 field may keep a stopword, so it stays a clause: `the` over a `standard` title and an `en` body is a stopword. A
-`field:` clause is never one (its field would leave nothing to compile).
+`field:` clause is never one (its field would leave nothing to compile). Each clause states its form too (ROADMAP 8.2.3,
+for §7.6's L3): a word, a `"phrase"` (also one of a single token, which compiles as a word), or a `field:` clause.
 
 #### 7.1.2 Filters
 `filter` is one JSON object with exactly one key, the operator; keys are never duplicated (strict JSON, as §6.2.1):
@@ -1292,8 +1300,10 @@ another type, an unknown field, an unknown operator or bound, and filter JSON lo
 #### 7.1.3 Limits
 Queries and filters are bounded; a hand-built query or a filter over a bound is rejected with an error naming it, and
 user text is cut (§7.1.1). The relaxation cascade (§7.6) holds each step after L0 to the same limits as the query
-it runs, `bool { must: [step], must_not: [earlier steps searched] }`, so the earlier steps it excludes count in full
-(ROADMAP 8.1.8). The limits are the ones the search sets, else those a compiled query was compiled with, else the
+it runs, `bool { must: [step], must_not: [the earlier steps it excludes] }`, so the steps it excludes count in full
+(ROADMAP 8.1.8). Those are the earlier steps searched, except the steps of a nested level that a later step of the
+level stands for (§7.6, ROADMAP 8.2.2.4): an L2 step counts L0, L1's step and the latest L2 step built and not cut (with
+any cut ones after it), not every one. The limits are the ones the search sets, else those a compiled query was compiled with, else the
 defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
 its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
 first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
@@ -1558,7 +1568,7 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0, L1 and L2 build queries; the other levels build none yet (ROADMAP 8.2).
+words; ROADMAP 8.1.10). So far L0 to L3 build queries; the other levels build none yet (ROADMAP 8.2).
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1589,8 +1599,41 @@ query's step has no `effective`. Building the steps reads the `df`s each term's 
 one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
+L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query: each *term* it expands
+becomes a `prefix` of that term with `max_expansions` 50, which planning expands over the views' terms and keeps by
+collection `df` (§7.1). A term is a field's analyzed term of a word: of a query compiled from `q`, one per field of a
+word clause's parts (each `combined`, and each field of a word the fields split apart); of a programmatic query, each
+`term` and `combined` field of a root `bool`'s `must` clauses (under `bool` and `boost`), or of a `term` or
+`combined` alone. Within a nested `bool`, its last `must` clause holds the last term of the clause that holds it, and
+so does each of its `should` clauses (each one field's reading of the same word, as the compiler builds them). A term is expanded when its field is a `text` field whose analyzer does not stack tokens, and it is
+the *last term* or has at least 3 characters (Unicode scalar values of the analyzed term: `running` under `en` is
+`run`, 3). The last term is the last part of the last required clause when that clause is a word (of a word the
+fields split apart, each field's last token), and the last `must` clause of a programmatic root `bool`: it is
+expanded whatever its length, as the word a user may still be typing. Excluded clauses, phrases (even of one token)
+and `field:` clauses are not expanded, since they ask for their text exactly. Neither are a field's terms when its
+analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
+documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
+`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`. A `prefix`
+scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
+when the word's `fields` weight differs from that boost, by their ratio (within a `boost`'s range, §7.1). So a document matches the word when an exact field holds the term or an
+expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
+L0's other required clauses stay as they are, and so do its root's `must_not` (its excluded clauses) and `filter`, and a programmatic root `bool`
+with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
+level. Its `effective` is L0's text, as every clause is kept. Building the step reads no statistics (planning reads the `df`s that keep the
+expansions, §7.1); held to §7.1.3's limits,
+its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
+its own for it to stand for (nested levels, in the cascade below).
+
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
-excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. Hits
+excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A
+level whose steps are *nested*, each matching every document the level's earlier steps match, with the same
+`must_not` and `filter` (L2's ladder: `minimum_should_match` lowered over the same terms), needs only its latest
+step searched excluded, which excludes the earlier ones with it (ROADMAP 8.2.2.4). A step then excludes the steps
+searched in earlier levels, L0 included, and of its own level the latest one searched. A step cut to fit the limits
+(§7.1.3) matches less than it was built to, so it does not stand for the level's earlier steps, which stay excluded
+beside it. The next step not cut stands for them all again, as a cut step matches only documents its uncut query
+matches. L1's steps are not nested, and every one stays excluded. The hits are those of excluding every earlier step;
+a long query keeps more of its L2 steps within `max_terms`, and planning re-plans fewer excluded steps. Hits
 count from the top: the cascade needs `max(offset + limit, min_results)` of them, each step collects (pruned, §7.3)
 the ones still missing, and the cascade stops once the hits found reach `min_results` (with `fill`, also
 `offset + limit`) or the steps run out. Without `fill`, whether a query relaxes therefore does not depend on the

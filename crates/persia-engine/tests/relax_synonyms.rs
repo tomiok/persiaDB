@@ -26,7 +26,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    AnalyzerRef, CollectionSchema, FieldKind, RelaxationConfig, SchemaBuilder, TextOptions,
+    AnalyzerRef, CollectionSchema, Fallback, FieldKind, Level, Levels, RelaxationConfig,
+    SchemaBuilder, TextOptions,
 };
 use persia_engine::search::Pruning;
 use persia_engine::wal::Durability;
@@ -355,9 +356,13 @@ fn exec() -> Execution {
         .budget_clock(Arc::new(ManualClock::new(0)))
 }
 
+/// L0, L1 and L2, relaxing until `min_results` hits: L3 `prefix` (ROADMAP 8.2.3) would add a step to every query they
+/// leave short.
 fn plan(min_results: u32) -> RelaxPlan {
     let options = RelaxOptions {
         min_results: Some(min_results),
+        levels: Some(Levels::Custom(vec![Level::Synonyms, Level::DropTerms])),
+        fallback: Some(Fallback::None),
         ..RelaxOptions::default()
     };
     RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap()
