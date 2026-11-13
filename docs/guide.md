@@ -2,7 +2,7 @@
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
 > until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-13 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **348 of 541 MVP leaves done (64%)**, 2 in progress. That file is regenerated from
+> in [`PROGRESS.md`](../PROGRESS.md): **350 of 541 MVP leaves done (65%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -166,8 +166,8 @@ the top-k threshold (SPEC §7.3). Block bounds may still cover deleted documents
 Also done, as library code: filters as bitmaps (ROADMAP 7.4.5), the memtable hiding older copies in every
 segment (ROADMAP 7.4.6), parallel search across segments (ROADMAP 7.6.1), sort by a column and a `search_after`
 cursor (ROADMAP 7.5, SPEC §7.4), facets (ROADMAP 7.5.3, SPEC §7.5), `explain: true` (ROADMAP 7.7.1,
-SPEC §7.7), and a term proximity bonus, off by default (ROADMAP 7.3.5, SPEC §7.2). In progress: a
-configurable tie-break (ROADMAP 7.4.11) and an nDCG@10 regression gate in CI (ROADMAP 7.8.4).
+SPEC §7.7), a term proximity bonus, off by default (ROADMAP 7.3.5, SPEC §7.2), a tie-break after the score
+that prunes too (ROADMAP 7.4.11, SPEC §7.4), and an nDCG@10 regression gate in CI (ROADMAP 7.8.4).
 Highlighting is post-v1.
 
 ### Zero-results relaxation
@@ -608,7 +608,7 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
 derives the rest, and it is the live status. The table below is the **2026-11-13** snapshot
-(348 / 541 MVP leaves, 64%; post-MVP milestones are not counted). Two leaves are marked `[~]`.
+(350 / 541 MVP leaves, 65%; post-MVP milestones are not counted). No leaf is marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**

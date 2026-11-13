@@ -19,8 +19,8 @@
 //!    8.1.2, 8.2.2): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses, each
 //!    step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as a plain
 //!    search, when it has `min_results` hits.
-//! 6. A sort led by the score with a later key on the `n` column (both orders and `missing` placements, with the
-//!    proximity bonus and without) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
+//! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
+//!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
 //!    the one after its cursor (ROADMAP 7.4.11; SPEC §7.4).
 
@@ -578,7 +578,7 @@ fn check(
     let views = c.views(memtable).unwrap();
     let stats = c.search_statistics(memtable);
     let all = live.len().max(1);
-    for (q, filter) in &case.queries {
+    for (i, (q, filter)) in case.queries.iter().enumerate() {
         let mut query = engine_query(q, &fields);
         match filter {
             Some((f, false)) => {
@@ -761,7 +761,7 @@ fn check(
             [(&plan, &full), (&off, &no_bonus)],
             &live,
             (schema, fields[3]),
-            case.k,
+            (case.k, live.len() + i),
         )?;
 
         // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
@@ -911,18 +911,26 @@ fn check(
 /// location. On the calling thread every strategy returns that order, scores bit for bit, and so do pages of `k`
 /// walked by cursor, a page boundary falling inside a tie group (the vocabulary and `n` are small, so ties are
 /// common). On the pool, where only a page smaller than the matches gives the views a threshold to share, the first
-/// page of `k` and the page after its cursor are slices of it. One sort runs with proximity, the other with the
-/// default plan (each `(plan, order)` pair).
+/// page of `k` and the page after its cursor are slices of it.
+///
+/// Each call runs two sorts, one per plan (with proximity, then the default plan without it), each costing a whole
+/// search, a cursor walk and two pages per strategy. `turn` picks which of the four order and `missing` pairs: the
+/// plan with proximity takes pair `turn % 4`, the default plan the next one, so as `turn` varies (it is the live
+/// count plus the query's index, and the check runs after every operation) each plan meets every pair.
 fn check_score_then_column(
     views: &CollectionViews<'_>,
     plans: [(&SearchPlan, &[SearchHit]); 2],
     live: &BTreeMap<String, Values>,
     (schema, n): (&CollectionSchema, FieldId),
-    k: usize,
+    (k, turn): (usize, usize),
 ) -> Result<(), TestCaseError> {
-    // Both orders and both `missing` placements in two sorts: each costs a whole search, a cursor walk and two pages
-    // per strategy.
-    let sorts = [(Order::Desc, Missing::Last), (Order::Asc, Missing::First)];
+    const PAIRS: [(Order, Missing); 4] = [
+        (Order::Desc, Missing::Last),
+        (Order::Asc, Missing::First),
+        (Order::Desc, Missing::First),
+        (Order::Asc, Missing::Last),
+    ];
+    let sorts = [PAIRS[turn % 4], PAIRS[(turn + 1) % 4]];
     for ((plan, full), (order, missing)) in plans.into_iter().zip(sorts) {
         let later = SortKey::Field {
             field: n,

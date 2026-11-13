@@ -1425,7 +1425,8 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   (query) order as the score with each clause's bound in its place (a term's or a block's `max_tf` and `min_norm`,
   §7.2), is at most the score of the `k`-th hit kept (strictly below it for a sort led by the score with further keys,
   §7.4). Floating-point addition is monotonic, so such a bound holds exactly. Hits rank by score descending, then
-  docid ascending, and a view is walked in docid order, so a document scoring at most that loses to every hit kept.
+  docid ascending, and a view is walked in docid order, so under the score alone a document scoring at most the
+  `k`-th kept hit loses to every hit kept.
   Pruned and exhaustive top-k are the same hits, scores bit for bit.
   A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must` (a filter scores 0,
   so with filters too), the `must` clause of a `bool` with one and no `should` (a filter scores 0, so with filters
@@ -1479,11 +1480,14 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   matches nothing) is a task on a thread pool (the caller's choice: the calling thread, a shared default pool, or its
   own pool). Each view keeps its own top-k; they merge in view order into the global top-k (the order below), so the
   hits, scores bit for bit, do not depend on the threads or the timing. A view that keeps `k` hits shares the worst one's score `t` with the others while they run:
-  a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
+  with the score alone, a later view may skip a document scoring at most `t` (the shared hits win its ties), an earlier view only one
   scoring below `t` (its tie would rank first). When the views that have finished are a prefix of the view order
   (always on the calling thread, where they run in order), the `k`-th best score of all their hits merged is shared
-  as well; every view still running comes after them, so it may skip a document scoring at most that. With facets every match is counted, and each view counts its own; the
-  counts are summed. When several views fail, the error returned is that of the first of them in order. Whether a
+  as well; every view still running comes after them, so it may skip a document scoring at most that. With a sort led
+  by the score with further keys (§7.4), every view skips only a document scoring below either shared threshold,
+  whichever view it came from: one tied with it may still win on a later key. With facets every match is counted,
+  and each view counts its own; the counts are summed. When several views fail, the error returned is that of the
+  first of them in order. Whether a
   view fails can depend on the timing: a pruned view does not read the blocks a threshold skips (their bounds are
   checked only by `Segment::verify`), and the threshold may come from another view. Hits returned without an error
   are the same either way.
