@@ -90,9 +90,10 @@ pub(crate) fn unlock_after<F: ContainerFile>(file: &F, error: io::Error) -> io::
     }
 }
 
-/// `error` with the failure of the step that followed it (`later`, from doing `step`) added. Both stay in the message;
-/// `error` keeps its kind and is the [`source`](std::error::Error::source), so its OS error code stays inspectable
-/// (`raw_os_error`) through the `io::Error` returned.
+/// `error` with the failure of the step that followed it (`later`, from doing `step`) added. Both stay in the message.
+/// The returned `io::Error` has `error`'s kind, but it is a wrapper: its own `raw_os_error()` is `None`. `error` is
+/// its [`source`](std::error::Error::source), so the OS error code is read by downcasting that source to `io::Error`
+/// and calling `raw_os_error()` on it.
 pub(crate) fn then_failed(
     error: io::Error,
     step: impl Into<Cow<'static, str>>,

@@ -536,6 +536,85 @@ fn a_rejected_document_shows_the_ones_before_it_durable_and_nothing_after() {
     }
 }
 
+/// Invariant 3, with a failed sync (ROADMAP 6.3.12): when a document is rejected and reaching the
+/// batch's durability for the ones before it then fails too, the rejection stays the error the caller sees, with the
+/// sync failure added (`ThenFailed`), not replaced by it. The failed sync poisons the database, and a reopen decides
+/// what survived. Each fault is the first file call after the rejection: the write of the buffered records, without
+/// effect or with, and their sync.
+#[test]
+fn a_rejection_then_a_failed_sync_reports_the_rejection_first() {
+    let batch = [doc("b0", "t"), doc("b1", "t"), bad("x"), doc("b3", "t")];
+    for k in 0..3 {
+        for fault in [SimFault::FailAt, SimFault::ApplyThenFail] {
+            let file = SimFile::new();
+            let mut db = Database::create_on(file.clone(), [29; 16], plain(manual())).unwrap();
+            db.create_collection(schema("a")).unwrap();
+            let fault = fault(file.mutations() + k);
+            let ctx = format!("{fault:?}");
+            file.set_fault(Some(fault));
+            let err = db
+                .put_batch("a", &batch, Durability::Fsync)
+                .expect_err(&ctx);
+            if !file.crashed() {
+                // The sync made fewer calls than `k`: nothing failed but the rejection.
+                assert!(
+                    matches!(err, DatabaseError::BatchRejected { index: 2, .. }),
+                    "{ctx}: {err:?}"
+                );
+                continue;
+            }
+            let DatabaseError::ThenFailed {
+                ref error,
+                step,
+                ref later,
+            } = err
+            else {
+                panic!("{ctx}: {err:?}");
+            };
+            assert!(
+                matches!(**error, DatabaseError::BatchRejected { index: 2, .. }),
+                "{ctx}: {err:?}"
+            );
+            assert!(
+                matches!(err.primary(), DatabaseError::BatchRejected { index: 2, .. }),
+                "{ctx}"
+            );
+            assert!(matches!(**later, DatabaseError::Wal(_)), "{ctx}: {later:?}");
+            // The source is the rejection, and the message holds both.
+            let source = std::error::Error::source(&err).unwrap().to_string();
+            assert_eq!(source, error.to_string(), "{ctx}");
+            let message = err.to_string();
+            assert!(
+                message.starts_with(&error.to_string())
+                    && message.contains(step)
+                    && message.ends_with(&later.to_string()),
+                "{ctx}: {message}"
+            );
+            // The sync failed: the database is poisoned, and the batch is not shown.
+            assert!(
+                matches!(
+                    db.put("a", &doc("after", "t"), Durability::Fsync),
+                    Err(DatabaseError::Poisoned)
+                ),
+                "{ctx}"
+            );
+            assert!(docs(&db.snapshot()).is_empty(), "{ctx}");
+        }
+    }
+    // A single rejected `put` reports `Memtable`, inside `ThenFailed` as well.
+    let file = SimFile::new();
+    let mut db = Database::create_on(file.clone(), [29; 16], plain(manual())).unwrap();
+    db.create_collection(schema("a")).unwrap();
+    db.put("a", &doc("b0", "t"), Durability::Buffered).unwrap();
+    file.set_fault(Some(SimFault::FailAt(file.mutations())));
+    let err = db.put("a", &bad("x"), Durability::Fsync).unwrap_err();
+    assert!(
+        matches!(&err, DatabaseError::ThenFailed { error, .. } if matches!(**error, DatabaseError::Memtable(_))),
+        "{err:?}"
+    );
+    assert!(matches!(err.primary(), DatabaseError::Memtable(_)));
+}
+
 /// Invariant 4: whichever file call of a flushing batch fails, with or without effect, a crash keeping none, all
 /// or a seeded subset of the unsynced writes reopens to the state before the batch plus a prefix of it (replay
 /// stops at the first record it cannot read, SPEC §8.6), holding everything a snapshot showed after the failure.

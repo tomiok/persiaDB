@@ -19,9 +19,9 @@
 //!
 //! let data = b"hello, chunks";
 //! let crcs = data.chunks(5).map(crc32c).collect();
-//! let m = BlobManifest::new(blob_id_of(data), 13, ChunkSize::new(5)?, UploadId::new(7), crcs)?;
+//! let m = BlobManifest::new(blob_id_of(data), 13, ChunkSize::from_encoding(5)?, UploadId::new(7), crcs)?;
 //! let bytes = m.encode();
-//! assert_eq!(bytes.len(), BlobManifest::encoded_len_for(13, ChunkSize::new(5)?)?);
+//! assert_eq!(bytes.len(), BlobManifest::encoded_len_for(13, ChunkSize::from_encoding(5)?)?);
 //! assert_eq!(BlobManifest::decode(&bytes)?, m);
 //! assert_eq!(m.chunk_range(2), Some(10..13));
 //! # Ok::<(), persia_blob::Error>(())
@@ -292,7 +292,7 @@ impl BlobManifest {
         }
         let blob_id = BlobId::from_bytes(r.read_array().map_err(eof)?);
         let size = r.read_u64().map_err(eof)?;
-        let chunk_size = ChunkSize::new(r.read_u32().map_err(eof)?)
+        let chunk_size = ChunkSize::from_encoding(r.read_u32().map_err(eof)?)
             .map_err(|_| corrupt("chunk_size outside 1..=64 MiB"))?;
         let upload_id = UploadId::new(r.read_u128().map_err(eof)?);
         let count = chunk_size

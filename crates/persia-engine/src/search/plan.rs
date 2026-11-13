@@ -25,6 +25,7 @@ use super::explain::{Explanation, explain_all};
 use super::filter::{FilterDocs, Filtered, Selections, narrow, select};
 use super::max_score::MaxScore;
 use super::phrase::{PhraseMatcher, PhrasePostings};
+use super::proximity::{LAMBDA, PairPlan, Proximity, ProximityPlan};
 use super::word::{WordField, WordMatcher};
 use super::{Hit, Matcher, Pruning, SearchError, collect};
 
@@ -36,6 +37,8 @@ pub struct SearchPlan {
     /// The share every `bool` checks its column filters per candidate at, for a benchmark ([`Self::with_check_share`]);
     /// `None`: the fitted ones ([`super::check::check_share`]).
     check_share: Option<u64>,
+    /// Whether `bool`s add their proximity bonus (SPEC §7.2): off unless [`Self::with_proximity`].
+    proximity: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +66,8 @@ pub(super) enum Node {
         slot: usize,
         /// The fewest `should` clauses a match holds (SPEC §7.1); 0 for the default rule.
         minimum_should_match: usize,
+        /// The pairs of adjacent `must` words that score a proximity bonus (SPEC §7.2, ADR-0036), if any.
+        proximity: Option<ProximityPlan>,
     },
     Scaled(Box<Node>, Scale),
     All,
@@ -89,6 +94,7 @@ impl SearchPlan {
     ) -> Result<Self, SearchError> {
         Ok(Self {
             check_share: None,
+            proximity: false,
             root: plan(
                 query,
                 schema,
@@ -152,6 +158,7 @@ impl SearchPlan {
     ) -> Result<Self, SearchError> {
         Ok(Self {
             check_share: None,
+            proximity: false,
             root: plan(
                 query,
                 schema,
@@ -174,10 +181,53 @@ impl SearchPlan {
         self
     }
 
+    /// This plan with the proximity bonus (SPEC §7.2, ADR-0036): each `bool` adds, after its `must` clauses, the
+    /// closeness of its adjacent `must` words in fields with positions. Off by default until it is evaluated on
+    /// judged queries (ROADMAP 15.1.6); a request's `"proximity"` option is ROADMAP 10.1.7.
+    ///
+    /// ```
+    /// use persia_engine::query::{BoolQuery, Query, TermQuery};
+    /// use persia_engine::schema::{FieldKind, SchemaBuilder, TextOptions};
+    /// use persia_engine::search::SearchPlan;
+    /// use persia_engine::stats::SegmentStatistics;
+    /// use std::sync::Arc;
+    ///
+    /// let text = FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() });
+    /// let schema = Arc::new(SchemaBuilder::new("c").field("body", text).build()?);
+    /// let body = schema.field("body").map(|f| f.id()).ok_or("no field")?;
+    /// let term = |t: &str| Query::Term(TermQuery { field: body, term: t.into() });
+    /// let and = Query::Bool(BoolQuery { must: vec![term("red"), term("shoes")], ..BoolQuery::default() });
+    /// let plan = SearchPlan::new(&and, &schema, &SegmentStatistics::new(&schema, &[]))?;
+    /// assert!(!plan.proximity()); // off by default
+    /// let plan = plan.with_proximity();
+    /// assert!(plan.proximity());
+    /// assert!(!plan.without_proximity().proximity());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_proximity(mut self) -> Self {
+        self.proximity = true;
+        self
+    }
+
+    /// This plan without the proximity bonus (SPEC §7.2, ADR-0036), the default: each `bool` scores its clauses'
+    /// sum alone.
+    #[must_use]
+    pub fn without_proximity(mut self) -> Self {
+        self.proximity = false;
+        self
+    }
+
+    /// Whether its `bool`s add their proximity bonus: only after [`Self::with_proximity`].
+    pub fn proximity(&self) -> bool {
+        self.proximity
+    }
+
     fn build<'k>(&self, kept: Option<&'k Selections>) -> Build<'k> {
         Build {
             kept,
             check_share: self.check_share,
+            proximity: self.proximity,
         }
     }
 
@@ -284,9 +334,11 @@ impl SearchPlan {
         view: &V,
         docid: u32,
     ) -> Result<Option<Explanation>, ReadError> {
-        Ok(explain_all(&self.root, view, &[docid], None)?
-            .pop()
-            .flatten())
+        Ok(
+            explain_all(&self.root, view, &[docid], None, self.proximity)?
+                .pop()
+                .flatten(),
+        )
     }
 
     /// As [`Self::explain`] for each of `docids`, in that order, in one pass over `view` (ROADMAP 7.7.2): the tree is
@@ -332,7 +384,7 @@ impl SearchPlan {
         view: &V,
         docids: &[u32],
     ) -> Result<Vec<Option<Explanation>>, ReadError> {
-        explain_all(&self.root, view, docids, None)
+        explain_all(&self.root, view, docids, None, self.proximity)
     }
 
     /// As [`Self::explain_all`], each `bool` starting from what [`Self::matcher_keeping`] kept over the same view
@@ -343,7 +395,7 @@ impl SearchPlan {
         docids: &[u32],
         kept: &Selections,
     ) -> Result<Vec<Option<Explanation>>, ReadError> {
-        explain_all(&self.root, view, docids, Some(kept))
+        explain_all(&self.root, view, docids, Some(kept), self.proximity)
     }
 }
 
@@ -445,8 +497,10 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         q.filter.iter().cloned().partition(|f| !checks(f, schema));
     let split = filter.len();
     filter.extend(column);
+    let must = all(&q.must)?;
     Ok(Node::Bool {
-        must: all(&q.must)?,
+        proximity: proximity_pairs(&q.must, &must, schema),
+        must,
         should: all(&q.should)?,
         must_not: all(&q.must_not)?,
         filter,
@@ -455,6 +509,61 @@ fn plan_bool<S: StatisticsProvider + ?Sized>(
         slot: p.slot(),
         minimum_should_match: usize::try_from(q.minimum_should_match).unwrap_or(usize::MAX),
     })
+}
+
+/// The pairs of adjacent `must` words of a `bool` (SPEC §7.2, ADR-0036): two `term` or `combined` clauses of `query`
+/// next to each other (planned as `must`), with the fields that have positions and hold a term of both. A pair with
+/// no such field is left out.
+fn proximity_pairs(
+    query: &[Query],
+    must: &[Node],
+    schema: &CollectionSchema,
+) -> Option<ProximityPlan> {
+    let positions = |field| {
+        matches!(
+            schema.field_by_id(field).map(Field::kind),
+            Some(FieldKind::Text(o)) if o.positions
+        )
+    };
+    let mut pairs = Vec::new();
+    for (first, w) in must.windows(2).enumerate() {
+        // A `prefix` or `fuzzy` that keeps one term plans to a word too; it does not pair (SPEC §7.2).
+        let word = |i: usize| matches!(query.get(i), Some(Query::Term(_) | Query::Combined(_)));
+        if !(word(first) && word(first.saturating_add(1))) {
+            continue;
+        }
+        let [
+            Node::Word {
+                terms: a,
+                scorer: sa,
+            },
+            Node::Word {
+                terms: b,
+                scorer: sb,
+            },
+        ] = w
+        else {
+            continue;
+        };
+        let fields: Vec<_> = a
+            .iter()
+            .filter(|&&(field, _, text)| text && positions(field))
+            .filter_map(|(field, ta, _)| {
+                b.iter()
+                    .find(|(g, _, text)| g == field && *text)
+                    .map(|(_, tb, _)| (*field, ta.clone(), tb.clone()))
+            })
+            .collect();
+        if fields.is_empty() {
+            continue;
+        }
+        pairs.push(PairPlan {
+            first,
+            weight: LAMBDA * sa.idf().min(sb.idf()),
+            fields,
+        });
+    }
+    ProximityPlan::new(pairs)
 }
 
 fn plan_prefix<S: StatisticsProvider + ?Sized>(
@@ -607,6 +716,7 @@ fn plan_expansion<S: StatisticsProvider + ?Sized>(
             split: 0,
             slot: p.slot(),
             minimum_should_match: 0,
+            proximity: None,
         },
     })
 }
@@ -643,6 +753,7 @@ fn build<'a, V: SearchView>(
             split,
             slot,
             minimum_should_match,
+            proximity,
         } => build_bool(
             Clauses {
                 must,
@@ -652,6 +763,7 @@ fn build<'a, V: SearchView>(
                 split: *split,
                 slot: *slot,
                 minimum_should_match: *minimum_should_match,
+                proximity: proximity.as_ref().filter(|_| ctx.proximity),
             },
             view,
             pruning,
@@ -728,6 +840,8 @@ struct Build<'k> {
     kept: Option<&'k Selections>,
     /// As [`SearchPlan::check_share`].
     check_share: Option<u64>,
+    /// As [`SearchPlan::proximity`].
+    proximity: bool,
 }
 
 /// The clauses of a planned `bool`.
@@ -740,6 +854,8 @@ struct Clauses<'a> {
     split: usize,
     slot: usize,
     minimum_should_match: usize,
+    /// Its proximity pairs, when the plan scores them.
+    proximity: Option<&'a ProximityPlan>,
 }
 
 /// A `bool` (SPEC §7.1): every `must` and `filter`, at least `minimum_should_match` `should` clauses (0: one when
@@ -767,6 +883,7 @@ fn build_bool<'a, V: SearchView>(
         split,
         slot,
         minimum_should_match,
+        proximity,
     } = clauses;
     let all = |nodes: &'a [Node], pruning| -> Result<Vec<BoxedMatcher<'a>>, ReadError> {
         nodes.iter().map(|n| build(n, view, pruning, ctx)).collect()
@@ -802,19 +919,24 @@ fn build_bool<'a, V: SearchView>(
         };
         let required = if must.is_empty() {
             some
+        } else if proximity.is_some() {
+            // The bonus comes after the `must` clauses and before the `should` ones (SPEC §7.2): their
+            // conjunction with it, then the `should` side as one more clause, summed as `Optional` adds them.
+            let musts = conjunction(all(must, must_pruning)?, Pruning::Exhaustive, proximity);
+            conjunction(vec![musts, some], pruning, None)
         } else {
             // The `must` clauses, then the `should` ones as one more clause: summed in query order, as
             // `Optional` adds the two sides, so the score is the same bits.
             let mut clauses = all(must, must_pruning)?;
             clauses.push(some);
-            conjunction(clauses, pruning)
+            conjunction(clauses, pruning, None)
         };
         filtered(required, filters, view, ctx)?
     } else {
         let optional = disjunction(all(should, should_pruning)?, should_pruning);
         let required: BoxedMatcher<'a> = if !must.is_empty() {
             filtered(
-                conjunction(all(must, must_pruning)?, pruning),
+                conjunction(all(must, must_pruning)?, pruning, proximity),
                 filters,
                 view,
                 ctx,
@@ -920,8 +1042,13 @@ fn keep(ctx: Build<'_>, slot: usize, docs: &RoaringBitmap, checked: bool) {
     }
 }
 
-/// AND of at least one clause; no document if a clause has none in the view.
-fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>, pruning: Pruning) -> BoxedMatcher<'_> {
+/// AND of at least one clause, with the proximity bonus of `pairs` (SPEC §7.2); no document if a clause has none in
+/// the view.
+fn conjunction<'a>(
+    mut clauses: Vec<BoxedMatcher<'a>>,
+    pruning: Pruning,
+    pairs: Option<&'a ProximityPlan>,
+) -> BoxedMatcher<'a> {
     if clauses.iter().any(|c| c.cost() == 0) {
         return Box::new(Empty);
     }
@@ -930,7 +1057,14 @@ fn conjunction(mut clauses: Vec<BoxedMatcher<'_>>, pruning: Pruning) -> BoxedMat
     {
         return only;
     }
-    Box::new(Conjunction::new(clauses, pruning))
+    match pairs {
+        Some(pairs) => Box::new(Conjunction::with_bonus(
+            clauses,
+            pruning,
+            Some(Proximity::new(pairs)),
+        )),
+        None => Box::new(Conjunction::new(clauses, pruning)),
+    }
 }
 
 /// OR of the clauses that can match, pruning with `pruning`; `None` when none can.

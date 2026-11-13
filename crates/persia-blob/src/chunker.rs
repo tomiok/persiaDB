@@ -85,7 +85,7 @@ enum State {
 /// use persia_blob::{ChunkSize, Chunker, blob_id_of};
 ///
 /// let data = b"hello, chunks";
-/// let mut chunker = Chunker::new(&data[..], ChunkSize::new(5)?);
+/// let mut chunker = Chunker::new(&data[..], ChunkSize::from_encoding(5)?);
 /// let mut lens = Vec::new();
 /// while let Some(chunk) = chunker.next_chunk()? {
 ///     lens.push(chunk.bytes().len());
@@ -342,7 +342,7 @@ mod tests {
     #[test]
     fn exact_multiple_has_no_empty_last_chunk() {
         let data = [1_u8; 12];
-        let cs = ChunkSize::new(4).unwrap();
+        let cs = ChunkSize::from_encoding(4).unwrap();
         let (chunks, blob) = collect(Chunker::new(&data[..], cs));
         assert_eq!(chunks.len(), 3);
         check(&data, cs, &chunks, blob);
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn summary_is_none_until_the_end() {
         let data = [9_u8; 10];
-        let mut chunker = Chunker::new(&data[..], ChunkSize::new(4).unwrap());
+        let mut chunker = Chunker::new(&data[..], ChunkSize::from_encoding(4).unwrap());
         assert_eq!(chunker.summary(), None);
         chunker.next_chunk().unwrap().unwrap();
         assert_eq!(chunker.bytes_read(), 4);
@@ -368,7 +368,7 @@ mod tests {
     fn large_chunks_span_many_reads() {
         // Larger than the first buffer, so the capacity grows and then resets to the full chunk size.
         let data: Vec<u8> = (0..300_000_u32).map(|i| (i % 251) as u8).collect();
-        let cs = ChunkSize::new(100_000).unwrap();
+        let cs = ChunkSize::from_encoding(100_000).unwrap();
         let reader = Pieces {
             data: &data,
             lens: vec![8191, 0, 1, 65536],
@@ -413,7 +413,7 @@ mod tests {
                 again: b"late".to_vec(),
                 ended: false,
             };
-            let mut chunker = Chunker::new(reader, ChunkSize::new(8).unwrap());
+            let mut chunker = Chunker::new(reader, ChunkSize::from_encoding(8).unwrap());
             assert_eq!(chunker.next_chunk().unwrap().unwrap().bytes(), first);
             assert_eq!(chunker.next_chunk().unwrap(), None);
             let blob = chunker.summary().unwrap();
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn reader_error_fails_the_chunker() {
-        let mut chunker = Chunker::new(Failing { ok: 6 }, ChunkSize::new(4).unwrap());
+        let mut chunker = Chunker::new(Failing { ok: 6 }, ChunkSize::from_encoding(4).unwrap());
         assert_eq!(chunker.next_chunk().unwrap().unwrap().bytes(), &[7; 4]);
         match chunker.next_chunk() {
             Err(Error::Read(e)) => assert_eq!(e.kind(), io::ErrorKind::ConnectionReset),
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn too_many_chunks() {
         let data = [0_u8; 7];
-        let cs = ChunkSize::new(2).unwrap();
+        let cs = ChunkSize::from_encoding(2).unwrap();
         let mut chunker = Chunker::with_max_chunks(&data[..], cs, 3);
         for _ in 0..3 {
             chunker.next_chunk().unwrap().unwrap();
@@ -485,15 +485,16 @@ mod tests {
                 data: &data,
                 ended: false,
             };
-            let (chunks, blob) = collect(Chunker::new(reader, ChunkSize::new(4).unwrap()));
-            check(&data, ChunkSize::new(4).unwrap(), &chunks, blob);
+            let (chunks, blob) =
+                collect(Chunker::new(reader, ChunkSize::from_encoding(4).unwrap()));
+            check(&data, ChunkSize::from_encoding(4).unwrap(), &chunks, blob);
         }
     }
 
     #[test]
     fn chunk_buffers_hold_little_spare_capacity() {
         // 5 MiB chunks grow from 64 KiB by doubling (to 8 MiB) unless shrunk; the last chunk is short.
-        let cs = ChunkSize::new(5 << 20).unwrap();
+        let cs = ChunkSize::from_encoding(5 << 20).unwrap();
         let data = vec![1_u8; (5 << 20) * 2 + 100];
         let mut chunker = Chunker::new(&data[..], cs);
         while let Some(c) = chunker.next_chunk().unwrap() {
@@ -510,7 +511,7 @@ mod tests {
     #[test]
     fn chunk_all_feeds_the_sink_in_order() {
         let data = b"abcdefghij";
-        let cs = ChunkSize::new(3).unwrap();
+        let cs = ChunkSize::from_encoding(3).unwrap();
         let mut seen = Vec::new();
         let blob = chunk_all(&data[..], cs, |c| {
             seen.push((c.index(), c.into_bytes()));
@@ -547,7 +548,7 @@ mod tests {
             pieces in proptest::collection::vec(0_usize..700, 1..6),
         ) {
             prop_assume!(pieces.iter().any(|&p| p > 0));
-            let cs = ChunkSize::new(chunk).unwrap();
+            let cs = ChunkSize::from_encoding(chunk).unwrap();
             let (whole, whole_blob) = collect(Chunker::new(&data[..], cs));
             check(&data, cs, &whole, whole_blob);
             let reader = Pieces { data: &data, lens: pieces, next: 0 };
@@ -568,7 +569,7 @@ mod tests {
         ) {
             prop_assume!(pieces.iter().any(|&p| p > 0));
             let data: Vec<u8> = (0..len).map(|i| u8::try_from(i % 251).unwrap().wrapping_mul(31).wrapping_add(seed)).collect();
-            let cs = ChunkSize::new(chunk).unwrap();
+            let cs = ChunkSize::from_encoding(chunk).unwrap();
             let (whole, whole_blob) = collect(Chunker::new(&data[..], cs));
             check(&data, cs, &whole, whole_blob);
             let reader = Pieces { data: &data, lens: pieces, next: 0 };

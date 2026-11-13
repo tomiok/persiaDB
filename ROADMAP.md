@@ -474,7 +474,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
 - [x] 7.3.3 Score upper bounds per term/block (for WAND)
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
-- [ ] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3)
+- [x] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3). Done as the pair distance of adjacent `must` words, `λ · min(idf) · 1/d²` up to 5 apart in fields with positions (ADR-0036). Off by default, opt-in with `SearchPlan::with_proximity`, until 15.1.6 evaluates it; a cursor records the setting (SPEC §7.4)
 
 ## 7.4 Matching & top-k
 - [x] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -610,7 +610,7 @@ Deps: M1, M2.
 - [ ] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
 - [ ] 9.4.2 Streaming API: `put_blob(reader)`, `get_blob_range(id, range)`
 - [ ] 9.4.3 Document `blob_ref` stored in `BlobRefs` section; included in hits
-- [ ] 9.4.4 Decide, before the blob manifest encoding is released (SPEC §15), whether `put_blob`'s chunk size has a floor or the blob manifest a size cap: `chunk_size` 1 lets a 4 GiB blob need a 16 GiB manifest (ADR-0035 Consequences)
+- [x] 9.4.4 Decide, before the blob manifest encoding is released (SPEC §15), whether `put_blob`'s chunk size has a floor or the blob manifest a size cap: `chunk_size` 1 lets a 4 GiB blob need a 16 GiB manifest (ADR-0035 Consequences)
 
 ## 9.5 Garbage collection
 - [ ] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name
@@ -618,6 +618,7 @@ Deps: M1, M2.
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
 - [ ] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
 - [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
+- [ ] 9.5.6 (v1.0) [T] No dangling blob reference (SPEC §9.5, §9.6): a document committed with a `BlobRef` that has no blob behind it (set below the public API with `Document::set_blob_ref`, or after copying only the container, §4.8) is reported by `verify` as an error naming the collection, document id and `blob_id`, in a segment and in the WAL; the public `put(doc, blob)` given a `BlobRef` its database never bound is rejected and logs nothing
 
 ---
 
@@ -631,6 +632,8 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.1.4 Typed documents via `serde` (`put_struct`) + dynamic `Document`
 - [ ] 10.1.5 Error type, `Result` aliases, stable error codes
 - [ ] 10.1.6 Async-friendly wrapper (`spawn_blocking`) as optional feature `tokio`
+- [ ] 10.1.7 The request's `"proximity"` (SPEC §7.1, §7.2): `search` plans `true` as `SearchPlan::with_proximity` (off by default since 7.3.5) and `false` as `SearchPlan::without_proximity`. The cursor already records whether its plan scored proximity and rejects the other setting (`RequestError::CursorProximity`, 7.3.5); the request maps that error. [T] A page after a cursor from a proximity-on search, asked with `"proximity": false`, is an error; with the same setting it pages exactly
+- [ ] 10.1.8 (v1.0) `Db::backup(dest)`: a consistent copy of both files (SPEC §4.8), the container's committed state and then the pack holding every blob it references, with the writer open and without blocking it for the copy (no blob GC or compaction replaces a file meanwhile); a database without a pack copies one file. [T] A backup taken during writes and a GC opens with no dangling reference (`verify` passes), at the state of one commit
 
 ## 10.2 Concurrency semantics
 - [ ] 10.2.1 `Send + Sync` handles; reader snapshots; single-writer errors
@@ -825,6 +828,7 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.1.3 End-to-end harness (embedded and server modes), latency histograms (HdrHistogram), throughput
 - [ ] 15.1.4 Comparison methodology doc + optional adapters to compare other engines (fair configs, published scripts)
 - [ ] 15.1.5 CI regression gate (> 5% slowdown fails) with stored baselines
+- [ ] 15.1.6 Judged queries proximity can decide: in the 7.8.2 corpus every multi-word query matches 1 to 3 documents under AND, and only 5 of those matches (4 queries) have their words apart, none reordered by the bonus, so the nDCG gate (7.8.4) did not move with 7.3.5. Add documents that hold a query's words both together and apart (and long bodies where they are far), judged, so the gate measures proximity; record the new baseline with the bonus on and off, and decide from it whether proximity turns on by default (off since 7.3.5, ADR-0036) (found in 7.3.5)
 
 ## 15.2 Performance work (driven by profiles)
 - [ ] 15.2.1 SIMD bit-unpacking (runtime feature detection) behind safe wrappers

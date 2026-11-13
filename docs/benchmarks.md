@@ -443,21 +443,42 @@ over a run), and criterion picks the iteration count from the elapsed time, so a
 few more documents: compare builds at equal iteration counts, which criterion prints.
 
 `search_request/score_then_newest` (ROADMAP 7.4.11): the one-segment `search_request` collection, 10 hits of `w3`
-sorted by score, then `at` descending (a tie-break by recency). Command: `cargo bench -p persia-engine --bench search
--- search_request/score`. 2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux; before is 5862e6f with the same bench
-file, from a worktree (its own target directory in the second run), alternating with the branch, twice.
+sorted by score, then `at` descending (a tie-break by recency). Term proximity (ROADMAP 7.3.5, ADR-0036): the AND
+rows, whose body has positions; `and_no_proximity` is `and` without the bonus. Command: `cargo bench -p
+persia-engine --bench search -- 'search_request/score|search_top10/and|search_top10_pruning/(and|and_common)/|search_suite/and'`.
+2026-11-07, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Before 7.4.11 is 5862e6f with the same bench file, before 7.3.5 is
+c2488c9, each from a worktree with its own target directory; the three alternating, twice (first run, second run).
 
-| Recorded | `score` | `score_then_newest` | `score_facet` |
-|---|--:|--:|--:|
-| ROADMAP 7.4.11 | 430, 428 µs | 550, 546 µs | 815, 805 µs |
-| before (5862e6f) | 442, 434 µs | 719, 693 µs | 862, 838 µs |
+| Row | before | after |
+|---|--:|--:|
+| `search_request/score` | 456, 448 µs | 451, 459 µs |
+| `search_request/score_then_newest` | 720, 728 µs | 510, 518 µs |
+| `search_request/score_facet` | 870, 881 µs | 849, 876 µs |
+| `search_top10/and` | 439, 437 µs | 528, 542 µs |
+| `search_top10/and_no_proximity` (removed: `and` without the bonus, today's `search_top10/and`) | | 448, 456 µs |
+| `search_top10_pruning/and/exhaustive` | 430, 433 µs | 748, 786 µs |
+| `search_top10_pruning/and/max_score` | 437, 432 µs | 516, 539 µs |
+| `search_top10_pruning/and/block_max_wand` | 444, 445 µs | 531, 552 µs |
+| `search_top10_pruning/and_common/block_max_wand` | 510, 520 µs | 634, 656 µs |
+| `search_suite/and` | 271, 238 µs | 389, 351 µs |
 
-Before, a sort with a key after the score visited every match and read each one's `at` key. Now it prunes like the
-score alone, strictly below the worst kept hit, and a match scoring below that is rejected before any column is
-read. Pruning alone (the branch without that early reject) measured 713 µs: one term over this corpus has few
-blocks to skip. Most of the gain is the column reads saved. Where blocks do lose (`tests/search_request.rs`,
-`a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the
-exhaustive one with a facet reads.
+These rows were measured with the bonus on by default, as 7.3.5 was first written. It is now off by default
+(ADR-0036 item 5), so `search_top10/and`, the `search_top10_pruning` rows and `search_suite/and` run without it, as in
+the before column, and `search_top10/and_proximity` (which replaced `and_no_proximity`) is `and` with it.
+
+7.4.11: before, a sort with a key after the score visited every match and read each one's `at` key. Now it prunes
+like the score alone, strictly below the worst kept hit, and a match scoring below that is rejected before any
+column is read. Pruning alone (a first version, without that early reject) measured 713 µs: one term over this corpus
+has few blocks to skip, so most of the gain is the column reads saved. Where blocks do lose (`tests/search_request.rs`,
+`a_sort_led_by_the_score_prunes_with_further_keys`), the pruned search reads less than a third of what the exhaustive
+one with a facet reads.
+
+7.3.5: the bonus reads both words' positions for each document a conjunction scores, through the words' own postings
+(`Matcher::field_positions`): +78 % exhaustively. Pruned, a candidate whose clauses plus the bonus's bound cannot beat
+the threshold is skipped before its positions are read: `search_top10/and` +22 %, `search_suite/and` +45 % (its
+before runs vary by 13 %). Two first versions measured more: their own postings per pair term (decoding every docid
+and frequency block twice) gave +106 % on `search_top10/and` and ×2 on `search_suite/and`; with the early skip, +39 %
+and ×2. `must_should` (one `must`) has no pair and is unchanged.
 
 `search_relaxed/*` (ROADMAP 8.1.2): the 4-segment collection on the calling thread, `w3 w40` as user text, 10 hits,
 planned and searched each iteration. `plain` is `SearchPlan::with_terms` then `search_with`, `l0` is
@@ -504,13 +525,17 @@ its step is the same query, and its code only reads the root through `Compiled::
 and the mean must stay within `0.0001` (one unit in the fourth decimal, the rounding a platform's `ln`/`powf` may flip)
 of it. A drop beyond that fails as a regression, and a rise fails too, so an improvement lands only with the baseline
 replaced on purpose by the table the failure prints, the PR naming the queries that moved. The tolerance is below
-half the smallest change one judged document makes moving by one rank, so the gate sees every top-10 one-rank move that changes the grade order of judged documents.
-judged documents in the top 10. It runs in `cargo test --workspace` (0.05 s; CI's `test` job, Linux and macOS). A row
+half the smallest change one judged document makes moving by one rank, so the gate sees every such move in the top 10
+(two documents of one grade trading places change nothing). It runs in `cargo test --workspace` (0.05 s; CI's `test` job, Linux and macOS). A row
 is added here when the mean moves.
 
 | Recorded | mean nDCG@10 | lowest |
 |---|--:|---|
 | 2026-11-01 (ROADMAP 7.8.2) | 0.8824 | 0.7173 `garden`, 0.7364 `bread`, 0.7453 `"cast iron" pan`, 0.7648 `tent` |
+
+The proximity bonus (ROADMAP 7.3.5, ADR-0036), turned on, left every row unchanged: under AND each multi-word query matches 1
+to 3 documents, and only 5 of those matches (4 queries) have their words apart, none reordered. ROADMAP 15.1.6
+adds judged queries the bonus can decide. The gate runs with the default plan, which leaves the bonus out.
 
 ## `persia-blob` hashing and chunking
 

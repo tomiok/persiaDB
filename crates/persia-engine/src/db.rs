@@ -264,12 +264,59 @@ pub enum DatabaseError {
     /// A merge worker thread could not be started; nothing was merged.
     #[error("starting a merge thread: {0}")]
     MergeThread(#[source] std::io::Error),
+    /// An operation failed (`error`), and so did the step that followed it to keep the database consistent
+    /// (`later`, from doing `step`): a batch that ends early still reaches its durability for the documents before
+    /// (SPEC §8.2.1). Both stay in the message; `error` is the [`source`](std::error::Error::source) and
+    /// [`Self::primary`], as `persia_storage` combines I/O errors. A failed `later` sync also poisons the database.
+    #[error("{error}; {step} then failed: {later}")]
+    ThenFailed {
+        /// The first failure, the one the operation reports.
+        #[source]
+        error: Box<DatabaseError>,
+        /// The step that followed it.
+        step: &'static str,
+        /// How that step failed.
+        later: Box<DatabaseError>,
+    },
     /// An earlier write, sync or commit failed, so what reached the disk is unknown: reopen the database.
     #[error("an earlier write failed; reopen the database to recover")]
     Poisoned,
 }
 
 impl DatabaseError {
+    /// The error an operation reports first: itself, or for [`Self::ThenFailed`] the first failure, not the one of
+    /// the step that followed it. A `ThenFailed` from a failed sync has also poisoned the database: a caller that
+    /// branches on the primary error alone gets [`DatabaseError::Poisoned`] from its next write.
+    ///
+    /// ```
+    /// use persia_engine::db::DatabaseError;
+    ///
+    /// let both = DatabaseError::ThenFailed {
+    ///     error: Box::new(DatabaseError::NoSuchCollection { name: "c".into() }),
+    ///     step: "syncing the WAL",
+    ///     later: Box::new(DatabaseError::Poisoned),
+    /// };
+    /// assert!(matches!(both.primary(), DatabaseError::NoSuchCollection { .. }));
+    /// assert!(matches!(DatabaseError::Poisoned.primary(), DatabaseError::Poisoned));
+    /// ```
+    pub fn primary(&self) -> &DatabaseError {
+        let mut error = self;
+        while let Self::ThenFailed { error: first, .. } = error {
+            error = first;
+        }
+        error
+    }
+
+    /// `error`, with the failure of the step that followed it (`later`, from doing `step`) added: it never replaces
+    /// `error` ([`Self::ThenFailed`]).
+    pub(crate) fn then_failed(error: Self, step: &'static str, later: Self) -> Self {
+        Self::ThenFailed {
+            error: Box::new(error),
+            step,
+            later: Box::new(later),
+        }
+    }
+
     /// Whether stored bytes are corrupt.
     pub fn is_corruption(&self) -> bool {
         match self {
@@ -287,6 +334,7 @@ impl DatabaseError {
             | Self::SidecarMismatch { .. }
             | Self::LiveTwice { .. }
             | Self::CorruptTail { .. } => true,
+            Self::ThenFailed { error, later, .. } => error.is_corruption() || later.is_corruption(),
             _ => false,
         }
     }
@@ -710,17 +758,27 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// # Errors
     /// [`DatabaseError::NoSuchCollection`], [`DatabaseError::Memtable`] or [`DatabaseError::Record`] for an operation
     /// that is rejected (and not logged), [`DatabaseError::Wal`] (which poisons the database), or a failed commit.
+    /// When reaching `durability` for the writes before a rejected one also fails, the rejection is
+    /// [`DatabaseError::ThenFailed`]'s [`primary`](DatabaseError::primary) and the failed sync is added to it.
     pub fn put(
         &mut self,
         collection: &str,
         doc: &Document,
         durability: Durability,
     ) -> Result<(), DatabaseError> {
-        self.put_batch(collection, std::slice::from_ref(doc), durability)
-            .map_err(|e| match e {
+        fn single(e: DatabaseError) -> DatabaseError {
+            match e {
                 DatabaseError::BatchRejected { source, .. } => DatabaseError::Memtable(source),
+                DatabaseError::ThenFailed { error, step, later } => DatabaseError::ThenFailed {
+                    error: Box::new(single(*error)),
+                    step,
+                    later,
+                },
                 other => other,
-            })
+            }
+        }
+        self.put_batch(collection, std::slice::from_ref(doc), durability)
+            .map_err(single)
     }
 
     /// [`Database::put`] of every document of `docs` in order, reaching `durability` once for all of them (one
@@ -732,7 +790,8 @@ impl<F: ContainerFile + Sync> Database<F> {
     ///
     /// # Errors
     /// As [`Database::put`]; a rejected document is [`DatabaseError::BatchRejected`], after the documents before it
-    /// are made durable (and then visible).
+    /// are made durable (and then visible). If making them durable fails too, the rejection is the
+    /// [`primary`](DatabaseError::primary) of a [`DatabaseError::ThenFailed`] that adds that failure.
     pub fn put_batch(
         &mut self,
         collection: &str,
@@ -758,7 +817,7 @@ impl<F: ContainerFile + Sync> Database<F> {
     }
 
     /// The loop of [`Database::put_batch`]. On an error it reaches `durability` for the documents before (unless the
-    /// WAL failed), so the caller may release the hold.
+    /// WAL failed), so the caller may release the hold ([`Self::ended`]).
     fn put_each(
         &mut self,
         collection: &str,
@@ -778,10 +837,7 @@ impl<F: ContainerFile + Sync> Database<F> {
                 .get(collection)
                 .map(|c| c.memtable.reader());
             if let Err(e) = self.flush_if_full(collection) {
-                if !self.poisoned {
-                    self.reach(durability)?;
-                }
-                return Err(e);
+                return Err(self.ended(durability, e));
             }
             let Self {
                 wal, collections, ..
@@ -807,18 +863,28 @@ impl<F: ContainerFile + Sync> Database<F> {
             match self.written(collection, logged.map(drop)) {
                 Ok(()) => {}
                 Err(DatabaseError::Memtable(source)) => {
-                    self.reach(durability)?;
-                    return Err(DatabaseError::BatchRejected { index, source });
+                    let rejected = DatabaseError::BatchRejected { index, source };
+                    return Err(self.ended(durability, rejected));
                 }
-                // The documents before it are durable at `durability`, unless the WAL failed (then nothing is).
-                Err(e) if !self.poisoned => {
-                    self.reach(durability)?;
-                    return Err(e);
-                }
-                Err(e) => return Err(e),
+                Err(e) => return Err(self.ended(durability, e)),
             }
         }
         Ok(())
+    }
+
+    /// `error`, the failure that ends a batch, once the documents before it reached `durability` (SPEC §8.2.1):
+    /// unless the WAL failed (the database is poisoned, and nothing is durable). A failure to reach it poisons the
+    /// database ([`Self::reach`]) and is added to `error`, never replaces it ([`DatabaseError::ThenFailed`]).
+    fn ended(&mut self, durability: Durability, error: DatabaseError) -> DatabaseError {
+        if self.poisoned {
+            return error;
+        }
+        match self.reach(durability) {
+            Ok(()) => error,
+            Err(later) => {
+                DatabaseError::then_failed(error, "reaching the batch's durability", later)
+            }
+        }
     }
 
     /// Deletes the document with id `id` from `collection` (SPEC §8.1), with `durability`. The delete hides every

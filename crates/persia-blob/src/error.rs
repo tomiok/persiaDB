@@ -15,6 +15,16 @@ pub enum Error {
     /// needs more than `u32::MAX` chunks of it.
     #[error("invalid chunking: {0}")]
     InvalidChunking(BlobRefDefect),
+    /// A writer's chunk size is below [`ChunkSize::MIN`](crate::ChunkSize::MIN) (SPEC §9.2): its blob manifest would
+    /// need 4 bytes per chunk, 16 GiB for a 4 GiB blob at 1 byte. A caller's error; stored bytes are read with the
+    /// encoding's range ([`ChunkSize::from_encoding`](crate::ChunkSize::from_encoding)).
+    #[error("chunk size {chunk_size} below the minimum {min}")]
+    ChunkSizeBelowMin {
+        /// The chunk size asked for.
+        chunk_size: u32,
+        /// [`ChunkSize::MIN`](crate::ChunkSize::MIN).
+        min: u32,
+    },
     /// Reading the blob's bytes from the caller's reader failed.
     #[error("reading the blob failed")]
     Read(#[source] std::io::Error),

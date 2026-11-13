@@ -474,7 +474,8 @@ impl CollectionViews<'_> {
         exec: &Execution,
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let RelaxedQuery { query, compiled } = query.into();
-        let window = self.check_request(request)?;
+        // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
+        let window = self.check_request(request, false)?;
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
         let start = Start::of(request.search_after.as_ref(), relax)?;
@@ -626,6 +627,12 @@ impl CollectionViews<'_> {
     ) -> Result<(SearchPlan, Collected), RelaxedSearchError> {
         let terms = exec.terms(self);
         let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
+        // `check_request` was given `false` for every step: a step planned with the bonus would record another
+        // setting in its cursors than the one their next page is checked against.
+        debug_assert!(
+            !plan.proximity(),
+            "a relaxation step planned with proximity"
+        );
         let collected = self.collect(&plan, part, exec)?;
         Ok((plan, collected))
     }
@@ -686,7 +693,13 @@ impl CollectionViews<'_> {
             } else {
                 Vec::new()
             };
-            let page = self.page_hits(&segments, page, explanations, &request.projection)?;
+            let page = self.page_hits(
+                &segments,
+                page,
+                explanations,
+                &request.projection,
+                plan.proximity(),
+            )?;
             // Step 0 of a cascade that stopped at L0 is what a cursor without a step means.
             let at = (step, last) != (0, 0);
             hits.extend(page.into_iter().map(|mut hit| {

@@ -445,6 +445,7 @@ impl Model {
             k1,
             b,
             keyword: false,
+            positions: true,
         };
         Corpus {
             fields: vec![
@@ -454,6 +455,7 @@ impl Model {
                     k1: 1.2,
                     b: 0.0,
                     keyword: true,
+                    positions: false,
                 },
             ],
             counted,
@@ -592,21 +594,25 @@ fn check(
         }
         let optional = matches!(filter, Some((_, true)));
         query.validate(schema, &QueryLimits::default()).unwrap();
-        let plan = SearchPlan::new(&query, schema, &stats).unwrap();
+        let plan = SearchPlan::new(&query, schema, &stats)
+            .unwrap()
+            .with_proximity();
 
-        // Invariant 1: the matches and their scores.
-        let want: BTreeMap<&String, (f64, f64)> = live
-            .iter()
-            .filter(|(id, v)| {
-                filter
-                    .as_ref()
-                    .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
-            })
-            .filter_map(|(id, v)| match corpus.eval(q, &v.doc) {
-                None if optional => Some((id, (0.0, 0.0))),
-                s => s.map(|s| (id, s)),
-            })
-            .collect();
+        // Invariant 1: the matches and their scores, with the proximity bonus on (SPEC §7.2; off by default).
+        let matches = |proximity: bool| -> BTreeMap<&String, (f64, f64)> {
+            live.iter()
+                .filter(|(id, v)| {
+                    filter
+                        .as_ref()
+                        .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
+                })
+                .filter_map(|(id, v)| match corpus.eval_with(q, &v.doc, proximity) {
+                    None if optional => Some((id, (0.0, 0.0))),
+                    s => s.map(|s| (id, s)),
+                })
+                .collect()
+        };
+        let want = matches(true);
         let request = SearchRequest {
             limit: all,
             explain: true,
@@ -633,6 +639,40 @@ fn check(
                 s,
                 score,
                 scale,
+                query
+            );
+        }
+
+        // Invariant 1 without the proximity bonus (SPEC §7.2): the same matches, scored as the reference does
+        // without it.
+        let off = plan.clone().without_proximity();
+        let no_bonus = views
+            .search(&off, &request, Pruning::Exhaustive)
+            .unwrap()
+            .hits;
+        let ids: BTreeMap<&str, f64> = no_bonus
+            .iter()
+            .map(|h| (h.document.id(), h.score))
+            .collect();
+        prop_assert_eq!(ids.len(), no_bonus.len(), "an id twice without proximity");
+        prop_assert_eq!(
+            ids.keys().copied().collect::<Vec<_>>(),
+            want.keys().map(|s| s.as_str()).collect::<Vec<_>>(),
+            "without proximity: {:?}",
+            query
+        );
+        for h in &no_bonus {
+            let v = &live[h.document.id()];
+            let (score, scale) = match corpus.eval_with(q, &v.doc, false) {
+                None if optional => (0.0, 0.0),
+                s => s.unwrap(),
+            };
+            prop_assert!(
+                (h.score - score).abs() <= EPSILON * scale.max(1.0),
+                "{}: {} vs reference {} without proximity for {:?}",
+                h.document.id(),
+                h.score,
+                score,
                 query
             );
         }
@@ -715,6 +755,8 @@ fn check(
         // earlier steps lack, step by step, scored and ranked as the reference scores that step's query; L0 alone when it
         // has `min_results` hits, and every step for a `min_results` above them all.
         let steps = reference_steps(q, filter.is_some());
+        // A relaxed search plans with the default: no proximity bonus (SPEC §7.4).
+        let l0 = matches(false);
         for min_results in [1, 10_000] {
             let relax = RelaxPlan::new(
                 schema.relaxation(),
@@ -739,7 +781,7 @@ fn check(
                     break;
                 }
                 let matches: BTreeMap<&String, (f64, f64)> = if i == 0 {
-                    want.clone()
+                    l0.clone()
                 } else {
                     live.iter()
                         .filter(|(id, _)| !taken.contains(id))
@@ -817,8 +859,8 @@ fn check(
             }
             let whole: Vec<SearchHit> = relaxed.hits.iter().map(|h| h.hit.clone()).collect();
             if built.len() == 1 {
-                // L0 alone ranks as a plain search.
-                prop_assert_eq!(bits(&whole), bits(&full));
+                // L0 alone ranks as a plain search under the default plan (no proximity).
+                prop_assert_eq!(bits(&whole), bits(&no_bonus));
             }
             // At every step: a page of `k` is the first `k` of the whole ranking, and the page after its last cursor
             // the next `k` (SPEC §7.6: the pages of one query are slices of one ranking).

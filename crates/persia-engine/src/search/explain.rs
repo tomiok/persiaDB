@@ -19,6 +19,7 @@ use super::check::Check;
 use super::filter::{Selections, select};
 use super::phrase::PhraseMatcher;
 use super::plan::{Node, phrase_matcher, word_matcher};
+use super::proximity::{Proximity, Words};
 use super::word::WordMatcher;
 use super::{Matcher, Pruning, sum_in_order};
 
@@ -30,13 +31,16 @@ pub enum Explanation {
     Word(WordExplanation),
     /// A `phrase`.
     Phrase(PhraseExplanation),
-    /// A `bool`: the sum of its `must` clauses, then of its matching `should` clauses, each in query order. Filters
-    /// and `must_not` clauses score nothing and are left out.
+    /// A `bool`: the sum of its `must` clauses, then its proximity bonus, then the sum of its matching `should`
+    /// clauses, each in query order. Filters and `must_not` clauses score nothing and are left out.
     Bool {
         /// The score.
         score: f64,
         /// Every `must` clause, in query order.
         must: Vec<Explanation>,
+        /// The proximity bonus of its adjacent `must` words (SPEC §7.2), when it has a pair and the plan scores
+        /// them.
+        proximity: Option<ProximityExplanation>,
         /// The `should` clauses the document matches, in query order.
         should: Vec<Explanation>,
     },
@@ -72,6 +76,34 @@ impl Explanation {
             Self::All => 0.0,
         }
     }
+}
+
+/// A `bool`'s proximity bonus (SPEC §7.2, ADR-0036): its pairs' scores summed in pair order.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct ProximityExplanation {
+    /// The bonus.
+    pub score: f64,
+    /// Each pair of adjacent `must` words, in query order.
+    pub pairs: Vec<PairExplanation>,
+}
+
+/// One pair of adjacent `must` words: `score = weight · closeness`.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct PairExplanation {
+    /// The first word's index among the `bool`'s `must` clauses; the second is the next one.
+    pub first: usize,
+    /// `λ · min(idf)` of the two words.
+    pub weight: f64,
+    /// The field the closeness came from; `None` when no field holds both within the window.
+    pub field: Option<FieldId>,
+    /// The least distance there, within the window; `None` when no field has one.
+    pub distance: Option<u32>,
+    /// `1 / distance²`, or 0.
+    pub closeness: f64,
+    /// `weight · closeness`.
+    pub score: f64,
 }
 
 /// One query word scored as a BM25F term (SPEC §7.2): `score = idf · tf~ · (k1 + 1) / (k1 + tf~)`, with `tf~` the
@@ -144,10 +176,11 @@ pub(super) fn explain_all<V: SearchView>(
     view: &V,
     docids: &[u32],
     kept: Option<&Selections>,
+    proximity: bool,
 ) -> Result<Vec<Option<Explanation>>, ReadError> {
     let mut order: Vec<usize> = (0..docids.len()).collect();
     order.sort_by_key(|&i| docids.get(i).copied());
-    let mut tree = Explainer::new(node, view, kept)?;
+    let mut tree = Explainer::new(node, view, kept, proximity)?;
     let mut out = vec![None; docids.len()];
     for i in order {
         if let (Some(&docid), Some(slot)) = (docids.get(i), out.get_mut(i)) {
@@ -186,6 +219,8 @@ enum Explainer<'a, V: SearchView> {
         checker: Option<&'a V>,
         /// As [`Node::Bool`]'s.
         minimum_should_match: usize,
+        /// Its proximity pairs over the view, when the plan scores them.
+        proximity: Option<Proximity<'a>>,
     },
     Scaled(Box<Explainer<'a, V>>, Scale),
     All,
@@ -193,9 +228,17 @@ enum Explainer<'a, V: SearchView> {
 }
 
 impl<'a, V: SearchView> Explainer<'a, V> {
-    fn new(node: &'a Node, view: &'a V, kept: Option<&Selections>) -> Result<Self, ReadError> {
+    fn new(
+        node: &'a Node,
+        view: &'a V,
+        kept: Option<&Selections>,
+        proximity: bool,
+    ) -> Result<Self, ReadError> {
         let all = |nodes: &'a [Node]| -> Result<Vec<Self>, ReadError> {
-            nodes.iter().map(|n| Self::new(n, view, kept)).collect()
+            nodes
+                .iter()
+                .map(|n| Self::new(n, view, kept, proximity))
+                .collect()
         };
         Ok(match node {
             Node::Word { terms, scorer } => Self::Word {
@@ -221,6 +264,7 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 split,
                 slot,
                 minimum_should_match,
+                proximity: pairs,
             } => {
                 let has_column = *split < filter.len();
                 // As the search read them: a kept selection of every filter, or of the postings ones beside a check
@@ -239,10 +283,14 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                     check: None,
                     checker,
                     minimum_should_match: *minimum_should_match,
+                    proximity: match pairs {
+                        Some(pairs) if proximity => Some(Proximity::new(pairs)),
+                        _ => None,
+                    },
                 }
             }
             Node::Scaled(inner, scale) => {
-                Self::Scaled(Box::new(Self::new(inner, view, kept)?), *scale)
+                Self::Scaled(Box::new(Self::new(inner, view, kept, proximity)?), *scale)
             }
             Node::All => Self::All,
             Node::Nothing => Self::Nothing,
@@ -279,21 +327,25 @@ impl<'a, V: SearchView> Explainer<'a, V> {
                 check,
                 checker,
                 minimum_should_match,
+                proximity,
             } => {
                 if let Some(v) = checker.take() {
                     *check = Some(Check::new(filter.get(*split..).unwrap_or_default(), v)?);
                 }
                 boolean(
-                    must,
-                    should,
-                    must_not,
-                    *minimum_should_match,
+                    BoolClauses {
+                        must,
+                        should,
+                        must_not,
+                        minimum_should_match: *minimum_should_match,
+                    },
                     Filters {
                         filter,
                         split: *split,
                         selected,
                         check: check.as_mut(),
                     },
+                    proximity.as_mut(),
                     view,
                     docid,
                 )?
@@ -397,15 +449,27 @@ struct Filters<'f, K> {
     check: Option<&'f mut Check<K>>,
 }
 
-fn boolean<V: SearchView, K: KeyReader>(
-    must: &mut [Explainer<'_, V>],
-    should: &mut [Explainer<'_, V>],
-    must_not: &mut [Explainer<'_, V>],
+/// A `bool`'s scored and excluded clauses, and how many `should` clauses a match needs (as [`Node::Bool`]'s).
+struct BoolClauses<'c, 'a, V: SearchView> {
+    must: &'c mut [Explainer<'a, V>],
+    should: &'c mut [Explainer<'a, V>],
+    must_not: &'c mut [Explainer<'a, V>],
     minimum_should_match: usize,
+}
+
+fn boolean<V: SearchView, K: KeyReader>(
+    clauses: BoolClauses<'_, '_, V>,
     filters: Filters<'_, K>,
+    proximity: Option<&mut Proximity<'_>>,
     view: &V,
     docid: u32,
 ) -> Result<Option<Explanation>, ReadError> {
+    let BoolClauses {
+        must,
+        should,
+        must_not,
+        minimum_should_match,
+    } = clauses;
     let Filters {
         filter,
         split,
@@ -465,8 +529,16 @@ fn boolean<V: SearchView, K: KeyReader>(
         let live = !filter.is_empty() || view.is_live(docid);
         return Ok(live.then_some(Explanation::All));
     }
-    // As the matchers add: the conjunction's sum, then the optional disjunction's when it matches.
-    let required = sum_in_order(musts.iter().map(Explanation::score));
+    // As the matchers add: the conjunction's sum and its bonus, then the optional disjunction's when it matches.
+    let mut required = sum_in_order(musts.iter().map(Explanation::score));
+    let proximity = match proximity {
+        Some(p) => {
+            let e = bonus(p, must)?;
+            required += e.score;
+            Some(e)
+        }
+        None => None,
+    };
     let optional = sum_in_order(shoulds.iter().map(Explanation::score));
     let score = match (musts.is_empty(), shoulds.is_empty()) {
         (false, false) => required + optional,
@@ -476,8 +548,51 @@ fn boolean<V: SearchView, K: KeyReader>(
     Ok(Some(Explanation::Bool {
         score,
         must: musts,
+        proximity,
         should: shoulds,
     }))
+}
+
+/// A `bool`'s `must` explainers as [`Words`], once each has reached the document: a word's matcher is on it.
+struct Musts<'m, 'a, V: SearchView>(&'m mut [Explainer<'a, V>]);
+
+impl<V: SearchView> Words for Musts<'_, '_, V> {
+    fn positions(
+        &mut self,
+        clause: usize,
+        field: FieldId,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError> {
+        if let Some(Explainer::Word {
+            matcher: Some(m), ..
+        }) = self.0.get_mut(clause)
+        {
+            out.extend_from_slice(m.field_positions(field)?);
+        }
+        Ok(())
+    }
+}
+
+/// The proximity bonus of the document `must` is on, pair by pair, summed in pair order as [`Proximity`] adds it.
+fn bonus<V: SearchView>(
+    p: &mut Proximity<'_>,
+    must: &mut [Explainer<'_, V>],
+) -> Result<ProximityExplanation, ReadError> {
+    let mut score = 0.0;
+    let mut pairs = Vec::new();
+    for (first, weight, c) in p.explain(&mut Musts(must))? {
+        let part = weight * c.closeness;
+        score += part;
+        pairs.push(PairExplanation {
+            first,
+            weight,
+            field: c.field,
+            distance: c.distance,
+            closeness: c.closeness,
+            score: part,
+        });
+    }
+    Ok(ProximityExplanation { score, pairs })
 }
 
 /// The factor of `slot` for `norm`. A word's terms and its scorer's fields are planned together, so every slot is

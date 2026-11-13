@@ -1,6 +1,6 @@
 # ADR-0035: Blob manifest encoding
 
-- Status: accepted
+- Status: accepted (amended by ADR-0041)
 - Date: 2026-11-07
 - Related: SPEC §9.1.1, §9.2, §9.3, §9.4, §15; ROADMAP 9.1.3, 9.2.1, 9.3.1, 9.3.3; ADR-0002, ADR-0024, ADR-0030, ADR-0034
 

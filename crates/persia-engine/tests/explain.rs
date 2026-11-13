@@ -266,6 +266,7 @@ fn bools_list_what_matched() {
         score: s,
         must,
         should,
+        proximity: None,
     } = e
     else {
         panic!("a bool: {e:?}")

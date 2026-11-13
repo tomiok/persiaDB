@@ -11,6 +11,8 @@ pub struct Field {
     pub k1: f64,
     pub b: f64,
     pub keyword: bool,
+    /// Whether the field records positions (a `text` field with `positions: true`): proximity reads only those.
+    pub positions: bool,
 }
 
 /// A document: its tokens (a `keyword` field: its values) per field, by field index.

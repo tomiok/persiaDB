@@ -80,7 +80,10 @@ Principles:
 
 A local database is two files:
 - `<name>.persia` — index container (header + frames).
-- `<name>.persia.blobs` — blob pack file (SPEC §9.3).
+- `<name>.persia.blobs` — blob pack file (SPEC §9.3), created by the first blob stored: a database without blobs is
+  the one `.persia` file.
+
+A copy or backup takes both files (§4.8).
 
 ### 4.1 Conventions
 - All integers little-endian. All structures 8-byte aligned, except inside a block-framed section (SPEC §5.2), whose
@@ -428,6 +431,25 @@ Either way the frame is validated on every read (§4.4). On Windows a live mappi
 so a read-write open that must truncate a torn or corrupt tail (§4.4, §8.6) fails with an I/O error and leaves the
 container unchanged until the mapping is gone; a corrupt tail's quarantine copy (§4.4) may be left behind by each
 such attempt.
+
+### 4.8 Copying and backing up a database
+A database is both of its files (§4). A copy of `<name>.persia` alone keeps every document's `BlobRef` but none of
+the bytes behind it: each reference is dangling, `get_blob` fails for it, and `verify` reports it (§9.5). A
+database that never stored a blob has no `.persia.blobs` file (§9.3), and is copied whole by copying `<name>.persia`.
+Until `backup` copies both files consistently (ROADMAP 10.1.8), a manual copy is safe in these ways:
+- **Closed.** Copy both files while no process has the database open read-write (read-only opens may stay: they
+  write nothing). This is the recommended way. `<name>.lock` (Windows, ADR-0016) holds no data and is not copied.
+- **A snapshot of the volume** (LVM, ZFS, a cloud disk snapshot) that takes both files at one instant, even with
+  the writer open: it is the state a crash would leave, and an open recovers it as it recovers a crash (§4.5.1, §8.6).
+- **With the writer open,** copy the **container first, then the pack**, each read once from its start to its end,
+  and let no blob GC rewrite the pack (§9.5) and no compaction rewrite the container (§4.6) until both copies end.
+  The pack's index covering a blob is written before any container byte that references the blob (a
+  WAL record or a commit, §9.5), and outside a GC rewrite the pack only grows, so a pack copied after the container
+  holds every blob the container copy references; any answer to §18.9 must keep that order. The other order is not
+  safe: a pack copied first misses the blobs bound, then referenced by a commit, while it was being copied. A file
+  copied while it is appended to may end in a torn tail, which the copy's first open truncates (§4.4).
+
+A restore puts both files back side by side under one `<name>`.
 
 ---
 
@@ -1345,10 +1367,33 @@ the phrase frequency, the number of distinct positions `s` such that every phras
 position relative to the first term, and `idf(t)` is the sum of its terms' `idf`s, each from that term's own `df`. So a phrase of one
 term scores as a `term` query (unless an analyzer stacks a token on itself, at one position: a start counts once),
 and a phrase matches what holds it at least once.
-A `bool` scores the sum of its `must` clauses plus the sum of its matching `should` clauses, each added in query order
+A `bool` scores the sum of its `must` clauses, then its proximity bonus (below), plus the sum of its matching `should`
+clauses, each added in query order
 (so a document's score does not depend on which segment holds it); `boost` multiplies its query's score, `constant_score` gives each match its
 score, and `match_all` scores 0. A `prefix` or `fuzzy` is that sum over the terms it kept, each with the shared `idf`
 and, for `fuzzy`, the edit-distance weight of §7.1.
+
+**Proximity** (ADR-0036). A `bool` adds a bonus for its *adjacent words*: two `must` clauses next to each other in
+query order that are both words (a `term` or a `combined`, not under `boost`). For such a pair `(i, j)` and a `text`
+field `f` with `positions` in which both words have a term (`t_{i,f}`, `t_{j,f}`), `d_f` is the least, over an
+occurrence of `t_{i,f}` at position `p` and one of `t_{j,f}` at `q` (`p ≠ q` when the two terms are the same), of
+`q − p` when `q > p` and `p − q + 1` otherwise (reversed, or stacked at one position, costs one more). The pair's
+closeness is `π = max_f π(d_f)` over the fields holding both terms in the document, with `π(d) = 1/d²` for `d ≤ 5`
+and 0 beyond (0 with no such field). Then
+```
+bonus = Σ_{adjacent pairs (i, j), query order}  (λ · min(idf_i, idf_j)) · π_{i,j}        λ = 1
+```
+with each word's `idf` as above (a `combined`'s from its largest `df`); a pair with no field where both words have a
+term is left out. A `prefix` or `fuzzy` is not a word here, even one that kept a single term. The `bool` scores `(Σ must) + bonus + (Σ matching should)`, added in that order. No other clause
+pairs: not a `phrase`, `should`, `filter` or `must_not` clauses, a word under `boost` (a `fuzzy` term's weight
+included), nor a field without positions; a single word is no `bool` (§7.1.1). The bonus is **off by default**: a plan
+adds it only when asked (`SearchPlan::with_proximity`). Its measured cost on AND queries buys no nDCG@10 gain yet
+(ADR-0036, Results; §16.1), so it stays opt-in until judged queries it can decide show a gain (ROADMAP 15.1.6). A request cannot ask for it yet (`"proximity"`, ROADMAP 10.1.7), and a
+relaxed search (§7.6) plans every step without it. Without it the bonus is 0 and not added. With
+`B = Σ_pairs (λ · min(idf_i, idf_j))`, summed in pair order, `bonus ≤ B` exactly: each product is monotonic in
+`π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
+and goes through the nDCG@10 gate (§16.1).
+
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
@@ -1388,7 +1433,11 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
   the others score there; but its `should` clauses do when its `must` clauses cannot score above 0, the whole score
   being theirs): from each target it sums its clauses' bounds in query order, as the score is, through
   the first of their ranges to end, and skips that range when the sum is at most the threshold (block-max AND; a
-  `should` side without a document there adds nothing). Where the `must` clauses' bound alone is at most the
+  `should` side without a document there adds nothing). A `bool` with a proximity bonus (§7.2) adds its `B` after its `must`
+  clauses' bounds, where its score adds the bonus, so each of these bounds still holds exactly; the `must` side's bound
+  below includes it. A document whose clauses, scored, plus `B` are at most the threshold is skipped
+  before its positions are read. Its clauses are scored for that before a filter checked per candidate or a
+  `must_not` clause rejects it, so a corrupt norm of such a document can fail the search. Where the `must` clauses' bound alone is at most the
   threshold, a document the `should` clauses miss scores at most it, so only documents holding a `should` clause
   are scored in that range, and the walk to the next one never passes the range's end (as Lucene's ReqOpt). Every document a pruned matcher returns has its exhaustive score. A
   disjunction's block bound is the block bounds of its clauses with a document there, summed in query order.
@@ -1485,7 +1534,11 @@ number and type is an error. The cursor also records the snapshot it came from (
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
-also records its hit's step and its cascade's last step (§7.6).
+also records its hit's step and its cascade's last step (§7.6). It also records whether its plan scored proximity
+(§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
+The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
+unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
+own `SearchPlan` can, and the relaxed search plans with the default (off).
 
 Without a facet, two sorts skip matches; with one, every match is visited (a facet counts them all). Pruning (§7.3)
 applies when the first key is the score descending (`"score"`, or a list led by it): then only the threshold of the
@@ -1693,7 +1746,9 @@ the frequency, the norm byte and the length it stands for (none for a `keyword` 
 `w_f / (1 − b_f + b_f · len_f(d)/avglen_f)` and the contribution `tf · factor`; the contributions summed in that
 order are `tf~`. A `phrase` gives its terms, phrase frequency, norm byte, length, factor, `tf~`, `k1` and summed `idf`.
 A `bool` lists every `must` clause and the `should` clauses that match, in query order (filters and `must_not` score
-nothing and are not listed); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
+nothing and are not listed); a `bool` with proximity pairs (§7.2) also lists, between them, its bonus and per pair the
+first word's index, `λ · min(idf)`, the field the closeness came from, `d`, `π` and their product (0 when no field
+holds both within the window); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
 `constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
 time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents
@@ -1785,7 +1840,9 @@ sees the collection as it was before the batch, and the batch becomes visible on
 rejected keeps the ones before it, made durable at the batch's level and then visible. A flush commit inside
 a batch (the size threshold) syncs the WAL first and publishes the prefix it flushed, durable. A sync that
 fails poisons the database before any reader saw the part of the batch that is not durable; a reopen decides
-what survived. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
+what survived. When a batch ends early (a rejected document) and the sync of the ones before it then fails too, the
+error is the first failure, with the sync failure added to it, never replacing it; the database is poisoned as
+for any failed sync. A memtable a batch left held (a panic unwound it) poisons the database at the next `put`,
 `put_batch` or `delete` to it, rather than take writes no reader would see, and at the next commit, tick, schema
 change or drop, before it flushes anything, since the held documents may not be durable.
 
@@ -2134,10 +2191,11 @@ if a caller supplies an expected id, a mismatch is an error. Chunks must not bec
 that documents and segments can carry them without depending on `persia-blob`.
 
 Fields: `size` is the blob length in bytes (0 is valid); `chunk_size` is the chunk length used to store it (SPEC
-§9.2), `1..=64 MiB`, and the chunk count `ceil(size / chunk_size)` fits in a `u32`; `mime` is 1..=255 bytes of
-printable ASCII (`0x20..=0x7E`), stored as given (RFC 6838 caps type and subtype at 127 characters each);
-`user_meta` is an optional map of UTF-8 strings, at most 32 entries, keys 1..=128 bytes, values 0..=1024 bytes. An
-absent `user_meta` and an empty one are the same value. Searchable metadata belongs in document fields, not here.
+§9.2), `1..=64 MiB` in the encoding (a writer uses at least 64 KiB, §9.2), and the chunk count
+`ceil(size / chunk_size)` fits in a `u32`; `mime` is 1..=255 bytes of printable ASCII (`0x20..=0x7E`), stored as
+given (RFC 6838 caps type and subtype at 127 characters each); `user_meta` is an optional map of UTF-8 strings, at
+most 32 entries, keys 1..=128 bytes, values 0..=1024 bytes. An absent `user_meta` and an empty one are the same
+value. Searchable metadata belongs in document fields, not here.
 
 Binary encoding (ADR-0011), byte-aligned and self-delimiting, embedded in structures that carry their own checksum
 (the `BlobRefs` column, DocStore, WAL records), so it has none itself:
@@ -2188,6 +2246,17 @@ Decoding allocates at most its input's length. Each value has exactly one encodi
 chunk but the last is full, and an empty blob has no chunks. The boundaries depend only on `size` and `chunk_size`,
 never on how the bytes were delivered. The SHA-256 is computed over the bytes in order while they are chunked.
 
+**Limits** (ROADMAP 9.4.4, ADR-0041). A writer (`put_blob`, through `ChunkSize::new`) uses a `chunk_size` of **64 KiB to
+64 MiB**, default 4 MiB; below 64 KiB is a caller's error (`ChunkSizeBelowMin`), not corruption. `put_blob` rejects
+a chunk size below the floor however it was built, a resumed upload's token included (§9.4), since
+`ChunkSize::from_encoding` (a reader's) admits one. The floor bounds a blob manifest this writer writes (§9.1.1) at `76 + 4·ceil(size / 64 KiB)` bytes, 4 bytes per 64 KiB of blob: 256 KiB for a 4 GiB blob, where a
+`chunk_size` of 1 would need 16 GiB. A blob holds at most `u32::MAX` chunks, so at most `u32::MAX · chunk_size`
+bytes (about 256 TiB at the floor, 16 PiB at the default). The floor is a writer's rule, not the encodings': a reader
+accepts the encodings' `1..=64 MiB` (§9.1, §9.1.1), so no stored `BlobRef` or manifest becomes invalid and the floor
+can move without a format change. A manifest written by another writer may still be larger (up to 16 GiB), and decoding
+it allocates at most its length; a remote reader may check a manifest's length against `76 + 4·n` before it fetches
+it (§9.1.1).
+
 **Staging and binding** (ADR-0034). An upload draws a 128-bit `upload_id` at random, like a `segment_id` (§8.7: a
 keyed pseudo-random function seeded from the operating system; uniqueness matters, not unpredictability, because
 integrity never depends on it), and writes its chunks under `(upload_id, chunk_idx)`, never under a `blob_id`. A
@@ -2206,6 +2275,13 @@ holding blob manifests (with the chunk frames' offsets) + superblock like SPEC �
 superblock commit that covers its `BlobIndex` frame is durable; chunk frames no committed `BlobIndex` names are staging
 or orphans. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
 size), then each chunk's length and CRC32C. GC rewrites live blobs into a new pack (like container compaction).
+
+The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
+pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
+references one is dangling, which `verify` reports, §9.5). Creating it is durable before the first blob is bound: the
+file with its header and superblock synced, then its directory synced (§4.5.2). When a blob is durable relative to
+the container commit that references it, and how a GC rewrite replaces the pack under readers (Windows included), are
+open questions (§18.9, §18.10). A copy of the database takes both files (§4.8).
 
 ### 9.4 Remote layout
 ```
@@ -2246,7 +2322,12 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   step under the pin set's lock, so a pin taken after the mark still protects it. Remotely the sweep lists
   `blobs/<xx>/` per hex prefix and `blobs/uploads/` apart (a `list` is recursive, §10.1).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
-document references. A referenced blob must never be missing; `verify` checks this.
+document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a document,
+in a live segment or in a WAL record from `wal_start` on, whose `BlobRef` names a blob the store has not bound (no
+manifest, or no pack at all), or whose manifest does not match it (`check_ref`), is an error that names the
+collection, the document id and the `blob_id`, never a warning. The engine itself does not look a `BlobRef` up when
+it logs or commits a document (it does not depend on `persia-blob`); the public API is what keeps references bound
+(§9.6).
 
 ### 9.6 API
 `put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id }) -> BlobRef`, `get_blob(id) -> Stream`,
@@ -2256,6 +2337,16 @@ document references. A referenced blob must never be missing; `verify` checks th
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
 sha-256=:<base64>:` header (RFC 9530).
 Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order.
+
+**No dangling references** (ROADMAP 9.5.6). The engine's `Document::set_blob_ref` takes any `BlobRef`, and
+`persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed
+below the public API. The public embedded API (M10, `persia`) never exposes a raw `set_blob_ref`. A document gets a
+blob only through `put(doc, blob)`, where `blob` is either bytes to store (`Blob::from_path`, `Blob::from_reader`),
+which `put` stores first (§9.5), or a `BlobRef` that this database's `put_blob` returned, which `put` checks is bound
+in this database's store (and pinned, §9.5) before it logs the document; a `BlobRef` it does not find is an error
+and logs nothing. The server and the SDKs (M11, M14) go through the same calls. A dangling reference that reaches a
+database anyway (written below the public API, or by copying only the container, §4.8) is reported by `verify`
+(§9.5), and `get_blob` fails for it.
 
 ---
 
@@ -2634,3 +2725,34 @@ Comparison against other engines is reported with methodology, never cherry-pick
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.
 7. Language analyzers scope for v1 (en, es, pt first).
 8. ~~Blob upload staging and expected id~~: resolved by ADR-0034, upload-id staging bound by a blob manifest (§9.2–§9.6).
+9. **Pack durability order** (ROADMAP 9.2.2). §9.5 fixes the order (the blob durable, then the document that
+   references it), not the calls. Proposed: `put_blob` appends the `BlobChunk` frames and the `BlobIndex` frame,
+   syncs the pack's data, then writes and syncs its superblock slot (as the container's commit, §4.5); the first
+   `put_blob` of a database also syncs the directory after creating the pack (§9.3), since a new name is durable only
+   then (§4.5.2). Only then does `put_blob` return, and only then may the WAL record or commit of a document that
+   references the blob be acknowledged. Open: (a) whether a pack slot sync per blob is required, or whether
+   `put_blob` may return at "frames written" and the next container commit, or the WAL sync of the first document
+   referencing it, syncs the pack first (one pack sync per batch instead of one per blob); that needs the
+   container's commit (§4.5 step 1) and the WAL's `Fsync` (§8.2) to sync the pack before their own sync, so that a
+   crash between the two syncs may orphan the blob but never leaves a reference without it; (b) what a document logged
+   `Buffered` or `Async` with a blob promises when the pack sync fails afterwards (today a failed sync poisons the
+   writer, §4.5); (c) whether the pack's directory sync can share the container's when both files are created
+   together. Any answer keeps the pack's index covering a blob written before any container byte that references
+   it, which a live copy relies on (§4.8). A crash test (ROADMAP 9.5.4) covers each answer.
+10. **Pack rewrite (GC) under readers, Windows included** (ROADMAP 9.5.2). Proposed: the same reader-safe replace
+    as the container's compaction (§4.6), never a rewrite in place. The writer copies the live blobs into
+    `<name>.persia.blobs.compact.<nonce>.<n>` beside the pack, syncs it, renames it over the pack, then syncs the
+    directory, so the path names a complete old or new pack at every instant and no reader sees a half-replaced
+    one. On Windows the rename over a file that readers hold open or mapped succeeds on NTFS (ADR-0016 item 2), and
+    those readers keep the old bytes; where it fails (another file system) the rewrite fails without harm, as
+    compaction does. The pack takes no lock of its own: only the container's writer, the holder of its writer lock
+    (`<name>.lock` beside the container on Windows, ADR-0016 item 3), writes or rewrites it, so the sibling lock
+    covers the pack too. Open: (a) how a reader that opened the old pack learns to reopen the new one, since Windows
+    has no file identity to compare (ADR-0016 item 5): a generation in the pack's superblock, or the container's
+    manifest recording the pack generation it references; (b) blobs bound into the new pack before its directory sync:
+    a crash that reverts the rename would lose them while the container may already reference them, so the proposal
+    is that the writer binds nothing into the new pack until that sync succeeds, and stops writing if it fails, as
+    after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) whether a
+    `get_blob` stream that started on the old pack reads on from its open handle after the rename, as segments do
+    from the old container (§4.7), or must finish first. The mark already keeps every blob a live manifest, snapshot
+    or pin references (§9.5), so a rewrite never drops a blob a reader can still name.

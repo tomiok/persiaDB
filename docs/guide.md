@@ -1,12 +1,12 @@
 # Persia DB
 
-> **Status: pre-alpha.** Nothing works end to end yet, and the on-disk format is unstable until v1.0.
-> There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-10-10 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **69 of 406 leaves done (17%)** on 2026-10-11. That file is regenerated from
+> **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
+> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-13 snapshot
+> in [`PROGRESS.md`](../PROGRESS.md): **348 of 541 MVP leaves done (64%)**, 2 in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
-It describes the product as specified, and it marks every feature **done** or **planned**.
+It describes the product as specified, and it marks every feature **done**, **in progress**, or **planned**.
 
 [`SPEC.md`](../SPEC.md) is the design contract (draft v0.1, format version 1.0, unstable).
 When this guide and the SPEC disagree, the SPEC wins and this guide is a bug.
@@ -23,6 +23,7 @@ A local database is two files (SPEC §4, §9):
 
 - `<name>.persia` — the index container (header and checksummed frames).
 - `<name>.persia.blobs` — a content-addressed pack of client files (PDF, images, video), referenced from documents.
+  It is created by the first blob stored; a copy or backup takes both files (SPEC §4.8).
 
 The engine (index format, analysis, scoring, query execution) is written in this repository.
 [ADR-0001](./adr/0001-own-engine-and-allowed-dependencies.md) records that decision and the closed list of
@@ -30,23 +31,26 @@ allowed libraries.
 
 ### What works today
 
-The workspace exists, CI runs, and `persia-format` implements the byte-level primitives that later
-layers will build on (ROADMAP M0, and most of M1):
+M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap)). What exists, by crate:
 
-- Bounds-checked little-endian readers and writers, canonical LEB128 varints, zigzag signed integers,
-  and checked offset and length types (SPEC §4.1).
-- Integer codecs used inside future segment sections: delta coding, 128-value bit-packing, postings
-  blocks, and frame-of-reference blocks for numeric columns (SPEC §5.2.1, [ADR-0004](./adr/0004-integer-block-codecs.md)).
-- CRC32C, xxh3-64/128, and a helper for CRC-protected fixed-size structures (SPEC §4.1–§4.3).
-- Block compression codecs `None` and `Zstd`, with a decompression-bomb guard on every decode
-  (SPEC §5.2, [ADR-0005](./adr/0005-block-compression-codecs.md), ROADMAP 1.4).
-- Block framing of segment sections: per-block CRC and codec, and a block table that locates every
-  block, so one block can be fetched and decoded on its own (SPEC §5.2, [ADR-0006](./adr/0006-block-framing.md), ROADMAP 1.5).
-- The container header (magic, versions, feature flags, page size) and the two superblock slots, with
-  the rules for picking the active slot (SPEC §4.2–§4.3, [ADR-0007](./adr/0007-container-header-and-superblock.md), ROADMAP 1.6).
+- `persia-format` (M1): bounds-checked encodings, varints, integer and block codecs, CRC32C and xxh3, block
+  framing, the container header and superblock, frames and the frame scanner, the memory-mapped reader, golden
+  fixtures, and `BlobId` / `BlobRef` (SPEC §4, §5.2, [ADR-0004](./adr/0004-integer-block-codecs.md)–[ADR-0007](./adr/0007-container-header-and-superblock.md)).
+- `persia-storage` (M2): the `Storage` trait, an in-memory backend with failure injection, a local
+  object-per-file backend, and the single-file container: append, the three-step commit, recovery, and
+  compaction, with crash tests (SPEC §4, §10.1).
+- `persia-analysis` (M4): tokenizers, normalization, stopwords, stemmers, synonyms, edge n-grams, and the
+  built-in analyzers (SPEC §6.3).
+- `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
+  the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
+  BM25F, top-k, filters, sort, facets, pages, and explain (M7, 49 of 51); and the relaxation cascade with
+  levels L1–L3 (M8, 17 of 42).
+- `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
+- `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
-Those pieces are library code. They do not open a database, index a document, or answer a query.
-Frames, segments, storage, the write path, and search are still ahead (see [Roadmap](#roadmap)).
+That is library code under the public facade. `persia` exports no `Db` yet (M10), and `persia-server` is a
+placeholder (M11). Fuzzy and fallback relaxation (L4, L5), the blob pack file, cloud storage, and the server
+are still ahead.
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
 
@@ -60,7 +64,7 @@ Five properties the design does not trade away:
 2. **Own engine.** Index format, analysis, BM25F scoring, and query execution live in this repository,
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
-   response says exactly what changed (SPEC §7.6). Planned: M8. See [Features](#features).
+   response says exactly what changed (SPEC §7.6). In progress: M8. See [Features](#features).
 4. **Cloud-native.** Segments are immutable. A local commit and an object-storage commit publish the
    same segment bytes. Query nodes are stateless. Planned: M12, M13.
 5. **Correctness, then speed.** Checksums, crash-safe commits, and fuzzed parsers come before
@@ -113,29 +117,29 @@ A few more words that show up in the roadmap and in contributor docs
 | **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback). |
 
 Internal document ids are segment-local. Deletions never rewrite a segment: they live in a tombstone
-sidecar referenced by the manifest (SPEC §8.3). The exact sidecar bytes are still an ADR (ROADMAP 6.4.2,
+sidecar referenced by the manifest (SPEC §8.3). The sidecar bytes are ADR-0030 (ROADMAP 6.4.2,
 SPEC §18.3).
 
 ## Features
 
-Everything in this section is **planned** unless a paragraph says a primitive is already in
-`persia-format`. You cannot call these APIs today.
+The Status column follows [`ROADMAP.md`](../ROADMAP.md). Done and in-progress work is library code in the
+crates under `persia`. The public API that wraps it is M10, so you cannot call these features through `persia` today.
 
 | Capability | Status | Defined in |
 |---|---|---|
-| Open a file and search | Planned (M10) | SPEC §8, §10.2 |
-| Full-text search, filters, facets, sort | Planned (M7) | SPEC §7 |
-| Zero-results relaxation | Planned (M8) | SPEC §7.6 |
-| Schema and documents | Planned (M3) | SPEC §6 |
-| Analyzers (`standard`, `en`, `es`, `pt`, …) | Planned (M4); milestone is ready to start | SPEC §6.3 |
-| Crash-safe commit and recovery | Planned (M2, M6) | SPEC §4.5, §8.6 |
-| Blob storage | Planned (M9) | SPEC §9 |
+| Open a file and search | Planned (M10); `persia-engine` opens, writes, and searches as library code (M6, M7) | SPEC §8, §10.2 |
+| Full-text search, filters, facets, sort | In progress (M7): done except a configurable tie-break (7.4.11) and an nDCG@10 gate (7.8.4) | SPEC §7 |
+| Zero-results relaxation | In progress (M8): the cascade and L1–L3 done; L4 fuzzy, L5 fallback, request options next | SPEC §7.6 |
+| Schema and documents | Done (M3) | SPEC §6 |
+| Analyzers (`standard`, `en`, `es`, `pt`, …) | Done (M4) | SPEC §6.3 |
+| Crash-safe commit and recovery | Done in M2; in progress in M6 (commit, WAL replay, and recovery done; 9 leaves left) | SPEC §4.5, §8.6 |
+| Blob storage | In progress (M9): hashing, chunking, blob manifest done; pack file, remote layout, GC next | SPEC §9 |
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
-| Embedded Go and TypeScript bindings | Planned (after M10). Design: ADR-0018, `docs/sdk/`. | SPEC §13.1 |
+| Embedded Go and TypeScript bindings | Planned (M16, v1.1). Design: ADR-0018, `docs/sdk/`. | SPEC §13.1 |
 | Rust and Go network SDKs | Planned (M14) | SPEC §13.2 |
-| Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1, except 1.4.4) | SPEC §4.1, §5.2 |
+| Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1) | SPEC §4.1, §5.2 |
 
 ### Search and ranking
 
@@ -149,8 +153,9 @@ Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a col
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
 within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
-for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
-(ROADMAP 7.4.1–7.4.4). A search call is not.
+for one term (ROADMAP 7.3.4), and the differential suite for random corpora and queries (ROADMAP 7.8.1).
+A ranked search over a collection snapshot (`CollectionViews::search`) is library code in `persia-engine`;
+`persia` does not expose it yet (M10).
 
 Over one view — a segment, or the memtable — the engine collects the top k by score, then docid,
 with block-max WAND by default (`MaxScore` is the other strategy). That is library code
@@ -158,10 +163,12 @@ with block-max WAND by default (`MaxScore` is the other strategy). That is libra
 the same documents, scores bit for bit. A segment view drops tombstoned documents in the postings
 iterator, before a document is scored or offered to the collector, so a deleted document cannot raise
 the top-k threshold (SPEC §7.3). Block bounds may still cover deleted documents; that only prunes less.
-Still planned: filters as bitmaps (ROADMAP 7.4.5), the memtable hiding older copies in every segment
-(ROADMAP 7.4.6), parallel search across segments (ROADMAP 7.6.1), sort by a column and a `search_after`
-cursor (ROADMAP 7.5, SPEC §7.4), facets (ROADMAP 7.5.3, SPEC §7.5), and `explain: true`
-(ROADMAP 7.7.1, SPEC §7.7). Highlighting is post-v1.
+Also done, as library code: filters as bitmaps (ROADMAP 7.4.5), the memtable hiding older copies in every
+segment (ROADMAP 7.4.6), parallel search across segments (ROADMAP 7.6.1), sort by a column and a `search_after`
+cursor (ROADMAP 7.5, SPEC §7.4), facets (ROADMAP 7.5.3, SPEC §7.5), `explain: true` (ROADMAP 7.7.1,
+SPEC §7.7), and a term proximity bonus, off by default (ROADMAP 7.3.5, SPEC §7.2). In progress: a
+configurable tie-break (ROADMAP 7.4.11) and an nDCG@10 regression gate in CI (ROADMAP 7.8.4).
+Highlighting is post-v1.
 
 ### Zero-results relaxation
 
@@ -197,6 +204,12 @@ Quality of this cascade is a product feature of the same milestone (ROADMAP M8):
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
 planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
 
+Done so far (M8, 17 of 42): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
+the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, and L3 `prefix` (ROADMAP 8.2.1–8.2.3),
+as library code in `persia-engine`. Not started: L4 `fuzzy` (8.2.4), L5 `fallback` (8.2.5),
+`last_resort` filters (8.2.6), the request options and metrics (8.3), and the quality suite (8.4).
+Until L4 exists, `corrected` is always empty.
+
 ### Schema, documents, and analysis
 
 A collection declares its schema up front (SPEC §6.2). Field types are `text`, `keyword`, `i64`,
@@ -229,9 +242,9 @@ The schema sketch in SPEC §6.2, illustrative:
 
 Analyzers are a pipeline: character filters, then a tokenizer, then token filters (SPEC §6.3).
 The built-ins are `standard` (Unicode word boundaries, NFKC, lowercase), `keyword`, `whitespace`, and
-the language analyzers `en`, `es`, and `pt` (stopwords, a Snowball-style stemmer, accent folding;
-`es` keeps `ñ`). SPEC §6.3.3 lists each one's full chain. `fr`, `de`, and `it` are planned
-(ROADMAP 4.4.10; SPEC §18.7). Positions, used for phrases, are opt-in per field (SPEC §18.4).
+the language analyzers `en`, `es`, `pt`, `fr`, `de`, and `it` (stopwords, a Snowball-style stemmer, accent
+folding; `es` keeps `ñ`). SPEC §6.3.3 lists each one's full chain; `fr`, `de`, and `it` are ROADMAP 4.4.10.
+Positions, used for phrases, are opt-in per field (SPEC §18.4).
 
 A field names its analyzer as `"es"` (the current version) or `"es@1"`; the stored schema always
 records the version, so an index keeps analyzing queries the way it was built. Re-applying a
@@ -262,31 +275,50 @@ run in the background, and publish through the same commit protocol (SPEC §8.5)
 local file is reclaimed by rewriting live data into a new file and atomically replacing the old one
 (SPEC §4.6).
 
-None of this I/O exists yet. The rules above are the contract the storage and engine milestones
-(M2, M6) have to meet, including crash injection at every step of the commit.
+This path is library code in `persia-storage` (M2, done) and `persia-engine` (M6, 49 of 58): the WAL and
+its replay, flush and commit, tombstone sidecars, tiered merges, container compaction, and open and recovery,
+with crash injection at every step of the commit (ROADMAP 2.4.3.1, 6.3.5) and a kill -9 loop (ROADMAP 6.6.4).
+The open M6 leaves are mostly performance (6.1.6, 6.3.11, 6.5.6, 6.5.7), plus refreshing a read-only
+database in place (6.6.6).
 
 ### Blobs
 
 The index stores a reference, never the file bytes (SPEC §9). A `blob_id` is the SHA-256 of the
 blob (ADR-0002). Persia hashes the bytes it receives; a caller-supplied id that does not match is
-an error. Chunks default to 4 MiB, each with a CRC32C, so uploads can resume and reads can be
-ranged. Blob bytes are stored as the client sent them (SPEC §9.2). The same content stored twice is one blob.
+an error. Chunks default to 4 MiB (64 KiB to 64 MiB), each with a CRC32C, so uploads can resume and
+reads can be ranged. Blob bytes are stored as the client sent them (SPEC §9.2). The same content
+stored twice is one blob.
+
+An upload stages its chunks under a random `upload_id`, never under a `blob_id`. The blob becomes
+addressable only when its blob manifest (the id, size, chunk size, upload id and one CRC32C per
+chunk) is durable, so no chunk is ever reachable under an id it was not verified for (SPEC §9.2,
+ADR-0034; the manifest encoding is SPEC §9.1.1, ADR-0035). The chunk size floor keeps a manifest
+at 4 bytes per 64 KiB of blob (ROADMAP 9.4.4).
 
 Write order is deliberate: the blob is durable first, then the document that references it is
 committed (SPEC §9.5). A crash in between leaves an orphan, which is harmless. Garbage collection
-keeps anything a live manifest still references, and deletes orphans older than a grace period
-(default 24 hours). `verify` must fail if a referenced blob is missing.
+keeps anything a live manifest, snapshot, WAL record or in-flight upload still references, and
+deletes orphans older than a grace period (default 24 hours). The public API attaches a blob to a
+document only through `put(doc, blob)` or a `BlobRef` that `put_blob` returned, so a reference
+always has bytes behind it; `verify` fails on a referenced blob that is missing (SPEC §9.5, §9.6).
 
-How chunks are staged before the hash is known is an open question (SPEC §18.8) and has to be
-decided before the pack-file work (ROADMAP 9.1.0). The `BlobId` and `BlobRef` value types
-exist in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
+The `.persia.blobs` file is created by the first blob stored, so a database without blobs is one
+file. A database with blobs is both files: copy them with the database closed, or with the writer
+open copy the container first and then the pack, with blob GC and compaction paused until both
+copies finish (either one rewrites a file mid-copy). Copying only the `.persia` file leaves every blob
+reference dangling (SPEC §4.8). `Db::backup` will copy both consistently (ROADMAP 10.1.8).
+
+Done so far (ROADMAP 9.1, 9.4.4): the content hasher, the fixed-size chunker and the blob manifest
+codec in `persia-blob`, and the `BlobId` and `BlobRef` value types in `persia-format` (ROADMAP
+1.10.1; their limits and binary encoding are SPEC §9.1 and ADR-0011). The local pack file (9.2),
+the remote layout (9.3), the document integration (9.4) and GC (9.5) are next. The pack's
+durability order and its rewrite under readers are open questions (SPEC §18.9, §18.10).
 
 ## Architecture
 
 The picture below is the intended layering in [SPEC §3](../SPEC.md#3-architecture-overview).
-`persia-format` is the only crate with real code,
-and it currently covers encodings, checksums, and block codecs. Frames and the superblock are still
-ROADMAP 1.6–1.7. Every other crate is a workspace stub.
+The layers from `persia-format` up to `persia-engine` and `persia-blob` have code; the table below gives
+each crate's status. `persia`, `persia-proto`, and `persia-server` are placeholders (ROADMAP 0.6.4).
 [`docs/architecture.md`](./architecture.md) is the contributor map (crate graph, write path, query
 path) and stays the place for that detail.
 
@@ -320,23 +352,23 @@ Three rules shape the rest of the design:
 
 | Crate | Role | Status |
 |---|---|---|
-| `persia-format` | Encodings, checksums, block codecs. No I/O policy. | In progress (M1) |
-| `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Planned (M2, M12) |
-| `persia-analysis` | Tokenizers, normalizers, stemmers. | Planned (M4); ready to start |
-| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Planned (M3, M5–M8) |
-| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | Planned (M9) |
+| `persia-format` | Encodings, checksums, block codecs. No I/O policy. | Done (M1) |
+| `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Done for memory and local file (M2); cloud planned (M12) |
+| `persia-analysis` | Tokenizers, normalizers, stemmers. | Done (M4) |
+| `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Done (M3, M5); in progress (M6–M8) |
+| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | In progress (M9) |
 | `persia` | The embedded API: `Db` and `Collection`. | Planned (M10) |
 | `persia-proto` | `persia.proto` and committed generated code. | Planned (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Planned (M11, M13) |
-| `persia-cli` | `persia inspect`, `dump`, `verify`, `compact`, `bench`. | Planned (M10) |
+| `persia-cli` | `persia inspect`, `dump`, `verify`, `compact`, `bench`. | `inspect`, `dump`, `verify` done (5.4.2, 5.4.3, 6.6.3); the rest planned (M10) |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
 the graph. The public facade orders blob writes before the document commit so the engine never has
 to know about blob bytes (SPEC §9.5).
 
-On a query, once the engine exists: analyze the text, search each segment and the memtable, merge
-the per-segment top-k, and if there are too few hits run the relaxation cascade. The response
-includes which level matched.
+On a query, the engine analyzes the text, searches each segment and the memtable, merges the
+per-segment top-k (M7), and if there are too few hits runs the relaxation cascade (M8, in progress).
+The response includes which level matched.
 
 ## File format and storage
 
@@ -361,9 +393,8 @@ An unknown major version or an unknown incompatible flag is a hard reject. An un
 read-only-compatible flag opens the file read-only. Every format change is a SPEC update, a version
 or flag bump, an ADR, and a golden fixture (see [Contributing](#contributing)).
 
-Header, superblock, and frame codecs are still ahead (ROADMAP 1.6 and 1.7).
-`persia-format` already has the encodings those structures will use, plus the compression codecs
-below.
+The header, superblock, and frame codecs are done in `persia-format` (ROADMAP 1.6 and 1.7; ADR-0007,
+ADR-0008, ADR-0009), as are the compression codecs below.
 
 ### Segments and blocks
 
@@ -386,15 +417,13 @@ Any other codec byte is corruption. The reader refuses a declared length above t
 before it allocates (the decompression-bomb guard, ADR-0005). Writers may store `None` when zstd
 does not shrink the block. The zstd level is a writer choice and is not stored.
 
-`compress` / `decompress` for those two codecs is done (ROADMAP 1.4.1–1.4.3). The on-disk block
-header, the block table, and random-access reads are not (ROADMAP 1.5). A few layout questions are
-explicitly still open there: where a section records its block size, how a stored document larger
-than one block is split, and what the section table's own codec field means next to the per-block
-codec (ROADMAP 1.5.5, SPEC §5.2).
+`compress` / `decompress` for those two codecs is done (ROADMAP 1.4.1–1.4.3), and so are the on-disk block
+header, the block table, and random-access reads (ROADMAP 1.5, ADR-0006), including where a section
+records its block size, how a stored document larger than one block is split, and what the section
+table's own codec field means next to the per-block codec (ROADMAP 1.5.5, SPEC §5.2).
 
-Integer codecs that will sit *inside* blocks (delta-coded doc ids, bit-packing, postings blocks,
-frame-of-reference for numbers) are implemented and tested (ROADMAP 1.2, ADR-0004). They are not
-wired into a segment writer yet (that is M5).
+Integer codecs sit *inside* blocks (delta-coded doc ids, bit-packing, postings blocks,
+frame-of-reference for numbers; ROADMAP 1.2, ADR-0004), and the segment writer uses them (M5).
 
 ### One storage interface, several backends
 
@@ -424,16 +453,17 @@ eventually consistent; lag is a metric.
 
 ## Getting started
 
-Nothing opens a database yet. `persia` exports no types, the crates are not published, and
-`persia-cli` / `persia-server` have empty `main` functions. `persia-format` is the crate with
-code: header, superblock, checksums, integer codecs, block compression, block framing, and frames
-(encode, decode, and scan; the streaming encoder, 1.7.5, is not written yet).
-A git dependency on `persia-format` does not provide `Db::open`.
+`persia` exports no types yet (M10), and the crates are not published. Under it, `persia-engine`
+creates and opens a database file, writes and commits documents through a WAL, and searches, as library
+code (M6, M7); the README quickstart shows those calls. `persia-cli` inspects and verifies files, and
+`persia-server` prints "not implemented (M11)" and exits (ROADMAP 0.6.4).
+A git dependency on `persia-engine` does not provide `Db::open`.
 
 The calls in [Embedded API](#embedded-api) (`Db::open`, `create_collection`, `put`, `commit`,
 `search`) are illustrative. They are the SPEC §6.2 / §7.6 / §8.1 shape, not functions in the tree.
 A search response is specified to include a `relaxation` object (`level`, `applied`, `original`,
-`effective`, `corrected`). No function returns it. The same walkthrough, with a FAQ, is the
+`effective`, `corrected`). `persia` does not return it yet; `persia-engine`'s relaxed search does, as
+library code (M8). The same walkthrough, with a FAQ, is the
 website page [Getting started](https://tomiok.github.io/persiaDB/guide/getting-started/).
 Agents should start from [llms.txt](https://tomiok.github.io/persiaDB/llms.txt) and the
 [For AI agents](https://tomiok.github.io/persiaDB/guide/for-agents/) page.
@@ -477,7 +507,7 @@ sizes, block size, blob chunk size, and the `relax.*` settings (SPEC §14).
 
 The `persia` command-line tool (`inspect`, `dump`, `verify`, `compact`, `stats`, JSONL import,
 a one-shot search, and a small bench) is part of the same milestone (ROADMAP 10.4). The binary in
-the tree today is a stub. The `v0.1.0-alpha` tag is specified to say, in the release itself, that
+the tree today has `inspect`, `dump`, and `verify` (ROADMAP 5.4.2, 5.4.3, 6.6.3). The `v0.1.0-alpha` tag is specified to say, in the release itself, that
 the format is still unstable (ROADMAP 10.5.2).
 
 ## Server, cloud, and Kubernetes
@@ -577,8 +607,8 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
-derives the rest, and it is the live status. The table below is the **2026-10-10** snapshot
-(51 / 400 leaves, 13%). No leaf is currently marked `[~]`.
+derives the rest, and it is the live status. The table below is the **2026-11-13** snapshot
+(348 / 541 MVP leaves, 64%; post-MVP milestones are not counted). Two leaves are marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -586,105 +616,107 @@ while a dependency is unfinished.
 
 | Milestone | Delivers | Depends on | Snapshot |
 |---|---|---|---|
-| **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | Done, 26/26 |
-| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 43/53 |
-| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/25 |
-| **M3** Schema | Collections, documents, manifests | M1 | Blocked, 0/15 |
-| **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Ready, 0/22 |
-| **M5** Segments | Segment writer and reader | M1, M3, M4 | Blocked, 0/35 |
-| **M6** Durability | WAL, commit, merge, recovery | M2, M5 | Blocked, 0/29 |
-| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Blocked, 0/29 |
-| **M8** Relaxation | The zero-results cascade | M7 | Blocked, 0/23 |
-| **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | Blocked, 0/19 |
-| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/17 |
-| **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/22 |
-| **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/28 |
+| **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | In progress, 35/36 |
+| **M1** Format primitives | Encodings, codecs, header, frames | M0 | Done, 53/53 |
+| **M2** Storage | `Storage`, memory, local file, container | M1 | Done, 48/48 |
+| **M3** Schema | Collections, documents, manifests | M1 | Done, 15/15 |
+| **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Done, 29/29 |
+| **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
+| **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
+| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | In progress, 49/51 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 17/42 |
+| **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
+| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
+| **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
+| **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/29 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/17 |
-| **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
+| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/19 |
+| **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/23 |
 
-Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan
-(1.7.1–1.7.4) are done. The next format leaves are the streaming frame encoder (1.7.5), then mmap (1.8).
-Text analysis (M4) may proceed alongside them. The generated ready-next list is in [`PROGRESS.md`](../PROGRESS.md).
+M1 to M5 are done; M0, M6, M7, M8 and M9 are in progress. The generated ready-next list is in
+[`PROGRESS.md`](../PROGRESS.md).
 
 ### M0 — Project bootstrap
 
-Done. The Cargo workspace and stub crates, the pinned toolchain, CI (fmt, clippy, tests, `cargo
-deny`, Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo
-tooling in Rust (`cargo xtask`, ADR-0003), issue templates, and the documentation scaffolding:
-this repository's rules, the ADR process, ADR-0001 and
-ADR-0002, and [`docs/architecture.md`](./architecture.md). No dependencies.
+In progress (35 of 36). Done: the Cargo workspace and stub crates, the pinned toolchain, CI (fmt, clippy,
+tests, `cargo deny`, Miri on `persia-format` and the pure parsers of `persia-engine`), the `justfile`, repo
+tooling in Rust (`cargo xtask`, ADR-0003), issue templates, the documentation scaffolding (this
+repository's rules, the ADR process, ADR-0001 and ADR-0002, and [`docs/architecture.md`](./architecture.md)),
+and the status checks of 0.6. Left: a per-test time budget in the `miri` CI job (0.6.10). No dependencies.
 
 ### M1 — Format primitives
 
-In progress (43 of 53). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
+Done (53 of 53). Depends on M0. Pure functions in `persia-format`, no I/O, which is why the
 bar for corruption handling is high: hostile bytes return an error.
 
 Done: little-endian cursors, varints, zigzag, checked offsets, delta coding, bit-packing, postings
 blocks, frame-of-reference, CRC32C, xxh3, checksummed structs, the `None` / `Zstd` codecs with the
 bomb guard and a separate out-of-memory error (1.4), block framing with a block table that opens from
-a section's tail (1.5), and the container header and double-buffered superblock with slot selection
-(1.6; ADR-0007, ADR-0008).
-
-Not started: frames and the frame scanner (1.7), the memory-map reader and its safety ADR (1.8, the
-only planned `unsafe`), golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs
-for fuzz, benchmark history, and coverage (1.11). M2 and M3 wait on this milestone.
+a section's tail (1.5), the container header and double-buffered superblock with slot selection
+(1.6; ADR-0007, ADR-0008), frames and the frame scanner (1.7), the memory-map reader and its safety ADR
+(1.8, the only `unsafe`), golden container fixtures (1.9), `BlobId` / `BlobRef` (1.10), and CI jobs
+for fuzz, benchmark history, and coverage (1.11).
 
 ### M2 — Storage abstraction and local backends
 
-Blocked on M1. The `Storage` trait and its error types, an in-memory backend, a deterministic
-failure injector for crash tests, a local object-per-file backend, and the single-file container
-adapter: create, append, the three-step commit, recovery, and compaction, each with crash tests.
-Also the first docker-compose file for later cloud emulators. After M1 this can proceed in parallel
-with schema and analysis.
+Done (48 of 48). Depends on M1. The `Storage` trait and its error types, an in-memory backend, a
+deterministic failure injector for crash tests, a local object-per-file backend, and the single-file
+container adapter: create, append, the three-step commit, recovery, and compaction, each with crash tests.
+Also the first docker-compose file for later cloud emulators.
 
 ### M3 — Schema, documents, collections
 
-Blocked on M1. Field types and collection schema (including a stable schema hash and evolution
-rules), document validation, JSON and CBOR, and the manifest model. Can proceed in parallel with
-M2. Segment writing (M5) needs this and M4.
+Done (15 of 15). Depends on M1. Field types and collection schema (including a stable schema hash and
+evolution rules), document validation, JSON and CBOR, and the manifest model.
 
 ### M4 — Text analysis
 
-Ready: its only dependency, M0, is done. Not started (0 of 22). Unicode and whitespace tokenizers,
-NFKC, lowercasing, accent folding, English, Spanish, and Portuguese stopword lists and stemmers,
-synonyms and edge n-grams for later relaxation, and the named analyzer pipelines. Fuzzing arbitrary
-UTF-8 is part of the milestone. This is the one milestone that can start before M1 finishes.
+Done (29 of 29). Depends on M0. Unicode and whitespace tokenizers, NFKC, lowercasing, accent folding,
+stopword lists and stemmers for English, Spanish, Portuguese, French, German, and Italian (4.4.10),
+synonyms and edge n-grams for relaxation, and the named analyzer pipelines. Fuzzing arbitrary UTF-8 is
+part of the milestone.
 
 ### M5 — Segment writer and reader
 
-Blocked on M1, M3, and M4. The in-memory index builder and every section writer and reader: term
-dictionary, postings, positions, norms, columns, stored documents, ids, blob references, and the
-footer. Includes `verify`, inspect and dump commands, property tests against a model, golden
-segments, and fuzz targets. This is the heart of the index format. Query (M7) can start from a
-reader; the full write path (M6) also needs storage.
+Done (48 of 48). Depends on M1, M3, and M4. The in-memory index builder and every section writer and
+reader: term dictionary, postings, positions, norms, columns, stored documents, ids, blob references, and
+the footer. Includes `verify`, inspect and dump commands, property tests against a model, golden
+segments, and fuzz targets. This is the heart of the index format.
 
 ### M6 — Write path, durability, merging
 
-Blocked on M2 and M5. The memtable, the WAL and its replay, flush and the local commit protocol,
-upserts and deletes via tombstone sidecars, tiered compaction, and open/recovery. Crash-loop tests
-(kill the process and reopen) land here. The embedded API waits on this milestone.
+In progress (49 of 58). Depends on M2 and M5. Done: the memtable, the WAL and its replay, flush and the
+local commit protocol, upserts and deletes via tombstone sidecars, tiered merges and container compaction,
+open/recovery, `persia verify`, and crash-loop tests (kill the process and reopen, 6.6.4). Next: flush
+without re-indexing (6.3.11), cheaper commit lookups by id (6.4.5, 6.4.7), a streaming merge writer and
+merge throughput (6.5.6, 6.5.7), refreshing a read-only database in place (6.6.6), and smaller items
+(6.1.6, 6.1.7, 6.6.8). The embedded API waits on this milestone.
 
 ### M7 — Query engine and ranking
 
-Blocked on M5. End-to-end tests also need M6. The query AST and a parser that does not fail on
-messy user text, collection statistics, BM25F checked against hand-computed examples and the
-reference scorer, boolean and phrase matching, top-k with block-max WAND, filters, sort,
-pagination, facets, parallel segment search, and explain. Benchmarks of this milestone may start
-the v1 performance work early (M15).
+In progress (49 of 51). Depends on M5; end-to-end tests also need M6. Done: the query AST and a parser
+that does not fail on messy user text, collection statistics, BM25F checked against hand-computed examples
+and the reference scorer, term proximity off by default (7.3.5), boolean and phrase matching, top-k with
+block-max WAND, filters, sort, pagination, facets, parallel segment search, explain, and an nDCG@10
+baseline (7.8.2). In progress: a configurable tie-break (7.4.11) and an nDCG@10 regression gate in CI
+(7.8.4). Benchmarks of this milestone may start the v1 performance work early (M15).
 
 ### M8 — Zero-results avoidance
 
-Blocked on M7. The cascade in [Features](#features): orchestration, per-level score offsets, the
-time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
-dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
-gate on the zero-result rate. The embedded `v0.1` release depends on this milestone (M10 depends on M8).
+In progress (17 of 42). Depends on M7. The cascade in [Features](#features). Done: orchestration,
+ordering across levels (ADR-0037), the time budget, the response metadata (8.1), synonyms (8.2.1,
+ADR-0039), dropping terms (8.2.2.1–8.2.2.4, ADR-0038), and prefix (8.2.3). Next: fuzzy (Levenshtein
+automaton over the term dictionary, 8.2.4), the fallback (8.2.5), request options and metrics (8.3), a
+synthetic typo suite and a regression gate on the zero-result rate (8.4), and the framework's open leaves
+(for example facets under relaxation, 8.1.9, and L1 and L3 in the differential suite, 8.1.18, 8.1.19). The embedded
+`v0.1` release depends on this milestone (M10 depends on M8).
 
 ### M9 — Blob store
 
-Blocked on M1 and M2. An ADR for upload staging first (SPEC §18.8), then hashing and chunking,
-the local pack file, the remote key layout, ordering a blob write before the document commit, and
-garbage collection that never deletes a blob a live snapshot still references.
+In progress, 5 of 22. Done: the upload staging ADR (ADR-0034, which resolved SPEC §18.8), the content hasher,
+the fixed-size chunker, the blob manifest codec (ADR-0035) and the chunk size floor (9.4.4). Next: the local pack
+file, the remote key layout, ordering a blob write before the document commit, and garbage collection that never
+deletes a blob a live snapshot still references. A `verify` test for dangling references (9.5.6) is added for v1.0.
 
 ### M10 — Embedded API
 
@@ -701,7 +733,7 @@ and the container image. See [Server, cloud, and Kubernetes](#server-cloud-and-k
 
 ### M12 — Cloud storage backends
 
-Blocked on M2, M6, M9, and M11. S3, GCS, and Azure through a shared async layer, the remote commit
+Blocked on M6, M9, and M11 (M2 is done). S3, GCS, and Azure through a shared async layer, the remote commit
 protocol, a block cache, replicated mode, and conformance tests against MinIO, fake-gcs-server,
 and Azurite. Documentation of IAM and request cost is part of the milestone.
 
@@ -727,7 +759,7 @@ and the format 1.0 freeze: open questions closed as ADRs, golden fixtures for ev
 version, a documentation site (embedded, server, cloud, Kubernetes, relaxation tuning, operations),
 and the `v1.0.0` release. This guide is source material for that later site (ROADMAP 15.5.4).
 
-M0–M15 are the MVP. Milestones M16–M31 are post-MVP (v1.1 through v3.0) and are listed in [`ROADMAP.md`](../ROADMAP.md) and on the website milestones page. The progress percentage counts M0–M15 only. In short: v1.1 is embedded SDKs, highlighting, autocomplete, and import (M16–M19), and Persia Studio (M31); v1.2 is encryption at rest and the Python SDK (M20–M21); v2.0 is multi-tenant mode, Persia Cloud, CDC connectors, and the web dashboard (M22–M25), with multi-tenant before the hosted service because that service is one file per tenant; v2.1–v2.3 are UI components, AI search, and on-device builds (M26–M28); v3.0 is geo and enterprise (M29–M30).
+M0–M15 are the MVP. Milestones M16–M34 are post-MVP (v1.1 through v3.0) and are listed in [`ROADMAP.md`](../ROADMAP.md) and on the website milestones page. The progress percentage counts M0–M15 only. In short: v1.1 is embedded SDKs, highlighting, autocomplete, and import (M16–M19), Persia Studio (M31), ranking rules (M32), and search features (M33); v1.2 is encryption at rest and the Python SDK (M20–M21), and backup, export, and query analytics (M34); v2.0 is multi-tenant mode, Persia Cloud, CDC connectors, and the web dashboard (M22–M25), with multi-tenant before the hosted service because that service is one file per tenant; v2.1–v2.3 are UI components, AI search, and on-device builds (M26–M28); v3.0 is geo and enterprise (M29–M30).
 
 ## Contributing
 

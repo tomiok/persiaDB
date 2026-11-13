@@ -52,7 +52,7 @@ fn fixture_dir() -> PathBuf {
 /// The manifest the chunker gives for `data`.
 fn manifest_of(data: &[u8], chunk_size: u32, upload_id: u128) -> BlobManifest {
     let mut crcs = Vec::new();
-    let blob = chunk_all(data, ChunkSize::new(chunk_size).unwrap(), |c| {
+    let blob = chunk_all(data, ChunkSize::from_encoding(chunk_size).unwrap(), |c| {
         crcs.push(c.crc32c());
         Ok(())
     })
@@ -144,7 +144,7 @@ proptest! {
         prop_assert_eq!(bytes.len(), m.encoded_len());
         prop_assert_eq!(
             bytes.len(),
-            BlobManifest::encoded_len_for(data.len() as u64, ChunkSize::new(chunk).unwrap()).unwrap()
+            BlobManifest::encoded_len_for(data.len() as u64, ChunkSize::from_encoding(chunk).unwrap()).unwrap()
         );
         prop_assert_eq!(BlobManifest::decode(&bytes).unwrap(), m);
     }
@@ -203,7 +203,7 @@ fn manifest() -> impl Strategy<Value = BlobManifest> {
             BlobManifest::new(
                 id,
                 size,
-                ChunkSize::new(chunk).unwrap(),
+                ChunkSize::from_encoding(chunk).unwrap(),
                 UploadId::new(upload),
                 crcs,
             )
@@ -446,7 +446,7 @@ fn the_hand_built_encoder_and_the_reference_match_the_writer() {
 
 #[test]
 fn encoded_len_for_is_76_plus_4_per_chunk_up_to_u32_max_chunks() {
-    let cs = |c| ChunkSize::new(c).unwrap();
+    let cs = |c| ChunkSize::from_encoding(c).unwrap();
     let max = cs(ChunkSize::MAX);
     for (size, chunk, n) in [
         (0, cs(1), 0_u64),
@@ -944,7 +944,7 @@ fn rules_are_checked_in_spec_order() {
 #[test]
 fn new_rejects_inconsistent_manifests() {
     let id = blob_id_of(b"persia blobs!");
-    let five = ChunkSize::new(5).unwrap();
+    let five = ChunkSize::from_encoding(5).unwrap();
     let up = UploadId::new(9);
     let invalid = |r: Result<BlobManifest, Error>, case: &str| match r {
         Err(e @ Error::InvalidManifest { .. }) => assert!(!e.is_corruption(), "{case}"),
@@ -972,10 +972,13 @@ fn new_rejects_inconsistent_manifests() {
     }
 
     // More than u32::MAX chunks, whatever the CRC list.
-    let max = ChunkSize::new(ChunkSize::MAX).unwrap();
+    let max = ChunkSize::from_encoding(ChunkSize::MAX).unwrap();
     for (size, chunk) in [
-        (u64::from(u32::MAX) + 1, ChunkSize::new(1).unwrap()),
-        (u64::MAX, ChunkSize::new(1).unwrap()),
+        (
+            u64::from(u32::MAX) + 1,
+            ChunkSize::from_encoding(1).unwrap(),
+        ),
+        (u64::MAX, ChunkSize::from_encoding(1).unwrap()),
         (max.max_blob_size() + 1, max),
         (u64::MAX, max),
     ] {
@@ -1009,7 +1012,7 @@ fn new_rejects_inconsistent_manifests() {
 fn a_header_claiming_u32_max_chunks_over_a_tiny_body_fails_fast() {
     // Every pair gives exactly u32::MAX chunks: a 16 GiB CRC list, of which at most a few KiB are present. The
     // length is checked before the list is read, so each case fails on it at once.
-    let max = ChunkSize::new(ChunkSize::MAX).unwrap();
+    let max = ChunkSize::from_encoding(ChunkSize::MAX).unwrap();
     let max_count = u64::from(u32::MAX);
     for (size, chunk_size) in [
         (max_count, 1),
@@ -1021,7 +1024,7 @@ fn a_header_claiming_u32_max_chunks_over_a_tiny_body_fails_fast() {
         (max.max_blob_size(), ChunkSize::MAX),
     ] {
         assert_eq!(
-            ChunkSize::new(chunk_size)
+            ChunkSize::from_encoding(chunk_size)
                 .unwrap()
                 .chunk_count(size)
                 .unwrap(),
@@ -1096,6 +1099,13 @@ fn is_corruption_is_true_for_corrupt_only() {
         ),
         (Error::Read(std::io::Error::other("x")), false),
         (Error::ChunkerFailed, false),
+        (
+            Error::ChunkSizeBelowMin {
+                chunk_size: 1,
+                min: ChunkSize::MIN,
+            },
+            false,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1107,7 +1117,8 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::InvalidManifest { .. }
             | Error::InvalidChunking(_)
             | Error::Read(_)
-            | Error::ChunkerFailed => {}
+            | Error::ChunkerFailed
+            | Error::ChunkSizeBelowMin { .. } => {}
         }
     }
 }

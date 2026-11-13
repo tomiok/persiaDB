@@ -52,10 +52,84 @@ pub fn phrase_freq(tokens: &[String], terms: &[(String, u32)]) -> usize {
         .count()
 }
 
+/// `λ` of the proximity bonus (SPEC §7.2, ADR-0036).
+pub const LAMBDA: f64 = 1.0;
+/// The largest distance a pair's closeness counts.
+pub const WINDOW: usize = 5;
+
+/// The least distance between an occurrence of `a` and one of `b` in `tokens`, by brute force over every pair of
+/// positions (a token's index): `q − p` when `q > p`, else `p − q + 1`; an occurrence is not paired with itself.
+pub fn least_distance(tokens: &[String], a: &str, b: &str) -> Option<usize> {
+    let at = |t: &str| -> Vec<usize> { (0..tokens.len()).filter(|&i| tokens[i] == t).collect() };
+    let (ps, qs) = (at(a), at(b));
+    let mut best: Option<usize> = None;
+    for &p in &ps {
+        for &q in &qs {
+            if a == b && p == q {
+                continue;
+            }
+            let d = if q > p { q - p } else { p - q + 1 };
+            best = Some(best.map_or(d, |x| x.min(d)));
+        }
+    }
+    best
+}
+
 impl Corpus {
-    /// `Some((score, scale))` when `doc` matches `q`; `scale` is the sum of the largest scores of the query's scored
-    /// leaves (`idf·(k1+1)`, times boosts), what the engine's rounding is relative to.
+    /// `idf` of a word (`df` the largest of its clauses').
+    fn word_idf(&self, clauses: &[Clause]) -> f64 {
+        let df = clauses
+            .iter()
+            .map(|c| self.df(c.field, &c.term))
+            .max()
+            .unwrap_or(0);
+        idf(self.n(), df)
+    }
+
+    /// The proximity bonus of `must` in `doc` and its bound (SPEC §7.2): per pair of adjacent words, with the fields
+    /// with positions where both have a clause, `λ · min(idf)` times the best field's `1 / d²` (0 beyond the
+    /// window), summed in pair order; the bound sums the weights. A pair without such a field is left out.
+    pub fn bonus(&self, must: &[Query], doc: &Doc) -> (f64, f64) {
+        let (mut bonus, mut bound) = (0.0, 0.0);
+        for w in must.windows(2) {
+            let (Query::Word(a), Query::Word(b)) = (&w[0], &w[1]) else {
+                continue;
+            };
+            let fields: Vec<(usize, &str, &str)> = a
+                .iter()
+                .filter(|c| !self.fields[c.field].keyword && self.fields[c.field].positions)
+                .filter_map(|c| {
+                    b.iter()
+                        .find(|d| d.field == c.field)
+                        .map(|d| (c.field, c.term.as_str(), d.term.as_str()))
+                })
+                .collect();
+            if fields.is_empty() {
+                continue;
+            }
+            let weight = LAMBDA * self.word_idf(a).min(self.word_idf(b));
+            let closeness = fields
+                .iter()
+                .filter_map(|&(f, ta, tb)| least_distance(&doc[f], ta, tb))
+                .filter(|&d| d <= WINDOW)
+                .map(|d| 1.0 / (d as f64 * d as f64))
+                .fold(0.0, f64::max);
+            bonus += weight * closeness;
+            bound += weight;
+        }
+        (bonus, bound)
+    }
+
+    /// `Some((score, scale))` when `doc` matches `q`, scored as a plan is by default: without the proximity bonus
+    /// (SPEC §7.2); `scale` is the sum of the largest scores of the query's scored leaves (`idf·(k1+1)`, times
+    /// boosts, and each bonus's bound when it is on), what the engine's rounding is relative to.
     pub fn eval(&self, q: &Query, doc: &Doc) -> Option<(f64, f64)> {
+        self.eval_with(q, doc, false)
+    }
+
+    /// As [`Self::eval`], with or without the proximity bonus.
+    pub fn eval_with(&self, q: &Query, doc: &Doc, proximity: bool) -> Option<(f64, f64)> {
+        let eval = |q| self.eval_with(q, doc, proximity);
         match q {
             Query::Word(clauses) => {
                 let held = clauses.iter().any(|c| doc[c.field].contains(&c.term));
@@ -86,17 +160,21 @@ impl Corpus {
                 must_not,
                 minimum_should_match,
             } => {
-                if must_not.iter().any(|c| self.eval(c, doc).is_some()) {
+                if must_not.iter().any(|c| eval(c).is_some()) {
                     return None;
                 }
                 let mut sum = (0.0, 0.0);
                 for c in must {
-                    let (s, scale) = self.eval(c, doc)?;
+                    let (s, scale) = eval(c)?;
                     sum = (sum.0 + s, sum.1 + scale);
+                }
+                if proximity {
+                    let (bonus, bound) = self.bonus(must, doc);
+                    sum = (sum.0 + bonus, sum.1 + bound);
                 }
                 let mut matched = 0;
                 for c in should {
-                    if let Some((s, scale)) = self.eval(c, doc) {
+                    if let Some((s, scale)) = eval(c) {
                         matched += 1;
                         sum = (sum.0 + s, sum.1 + scale);
                     }
@@ -107,10 +185,8 @@ impl Corpus {
                 };
                 (matched >= at_least).then_some(sum)
             }
-            Query::Boost(inner, boost) => self
-                .eval(inner, doc)
-                .map(|(s, scale)| (s * boost, scale * boost)),
-            Query::Constant(inner, score) => self.eval(inner, doc).map(|_| (*score, *score)),
+            Query::Boost(inner, boost) => eval(inner).map(|(s, scale)| (s * boost, scale * boost)),
+            Query::Constant(inner, score) => eval(inner).map(|_| (*score, *score)),
             Query::All => Some((0.0, 0.0)),
         }
     }
