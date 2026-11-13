@@ -443,7 +443,7 @@ Until `backup` copies both files consistently (ROADMAP 10.1.8), a manual copy is
   the writer open: it is the state a crash would leave, and an open recovers it as it recovers a crash (§4.5.1, §8.6).
 - **With the writer open,** copy the **container first, then the pack**, each read once from its start to its end,
   and let no blob GC rewrite the pack (§9.5) and no compaction rewrite the container (§4.6) until both copies end.
-  The pack's index covering a blob is written (and synced) before any container byte that references the blob (a
+  The pack's index covering a blob is written before any container byte that references the blob (a
   WAL record or a commit, §9.5), and outside a GC rewrite the pack only grows, so a pack copied after the container
   holds every blob the container copy references; any answer to §18.9 must keep that order. The other order is not
   safe: a pack copied first misses the blobs bound, then referenced by a commit, while it was being copied. A file
@@ -2246,7 +2246,7 @@ Decoding allocates at most its input's length. Each value has exactly one encodi
 chunk but the last is full, and an empty blob has no chunks. The boundaries depend only on `size` and `chunk_size`,
 never on how the bytes were delivered. The SHA-256 is computed over the bytes in order while they are chunked.
 
-**Limits** (ROADMAP 9.4.4). A writer (`put_blob`, through `ChunkSize::new`) uses a `chunk_size` of **64 KiB to
+**Limits** (ROADMAP 9.4.4, ADR-0041). A writer (`put_blob`, through `ChunkSize::new`) uses a `chunk_size` of **64 KiB to
 64 MiB**, default 4 MiB; below 64 KiB is a caller's error (`ChunkSizeBelowMin`), not corruption. `put_blob` rejects
 a chunk size below the floor however it was built, a resumed upload's token included (§9.4), since
 `ChunkSize::from_encoding` (a reader's) admits one. The floor bounds a blob manifest this writer writes (§9.1.1) at `76 + 4·ceil(size / 64 KiB)` bytes, 4 bytes per 64 KiB of blob: 256 KiB for a 4 GiB blob, where a

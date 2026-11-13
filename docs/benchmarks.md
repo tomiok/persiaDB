@@ -455,7 +455,7 @@ c2488c9, each from a worktree with its own target directory; the three alternati
 | `search_request/score_then_newest` | 720, 728 µs | 510, 518 µs |
 | `search_request/score_facet` | 870, 881 µs | 849, 876 µs |
 | `search_top10/and` | 439, 437 µs | 528, 542 µs |
-| `search_top10/and_no_proximity` | | 448, 456 µs |
+| `search_top10/and_no_proximity` (removed: `and` without the bonus, today's `search_top10/and`) | | 448, 456 µs |
 | `search_top10_pruning/and/exhaustive` | 430, 433 µs | 748, 786 µs |
 | `search_top10_pruning/and/max_score` | 437, 432 µs | 516, 539 µs |
 | `search_top10_pruning/and/block_max_wand` | 444, 445 µs | 531, 552 µs |
@@ -474,8 +474,8 @@ has few blocks to skip, so most of the gain is the column reads saved. Where blo
 one with a facet reads.
 
 7.3.5: the bonus reads both words' positions for each document a conjunction scores, through the words' own postings
-(`Matcher::field_positions`): +75 % exhaustively. Pruned, a candidate whose clauses plus the bonus's bound cannot beat
-the threshold is skipped before its positions are read: `search_top10/and` +22 %, `search_suite/and` +44 % (its
+(`Matcher::field_positions`): +78 % exhaustively. Pruned, a candidate whose clauses plus the bonus's bound cannot beat
+the threshold is skipped before its positions are read: `search_top10/and` +22 %, `search_suite/and` +45 % (its
 before runs vary by 13 %). Two first versions measured more: their own postings per pair term (decoding every docid
 and frequency block twice) gave +106 % on `search_top10/and` and ×2 on `search_suite/and`; with the early skip, +39 %
 and ×2. `must_should` (one `must`) has no pair and is unchanged.

@@ -1,6 +1,6 @@
 # ADR-0036: Term proximity scoring
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-07
 - Related: SPEC §7.2, §7.3, §7.7; ROADMAP 7.3.5, 7.4.4, 7.4.8, 7.8.4, 5.3.4; ROADMAP 32.5.1 (collection ranking defaults)
 
@@ -51,9 +51,9 @@ queries it applies to, and whether it is on by default.
    unchanged. Relaxation's levels (M8) build their own queries; whether they get proximity is decided there.
 
 5. **Off by default, opt-in per plan.** `SearchPlan::with_proximity` turns the bonus on and
-   `SearchPlan::without_proximity` off (the switch is the plan's, as scoring is); a plan as built has it off. The
-   first version turned it on wherever positions exist, but its measured cost (Results: +22 % pruned, +75 %
-   exhaustive on AND queries) buys no nDCG@10 gain on the judged corpus yet, which has no query the bonus reorders.
+   `SearchPlan::without_proximity` off (the switch is the plan's, as scoring is); a plan as built has it off. This
+   ADR first turned it on wherever positions exist, but the bonus as implemented (item 7, Results: +22 % pruned,
+   +78 % exhaustive on AND queries) buys no nDCG@10 gain on the judged corpus yet, which has no query the bonus reorders.
    So it stays opt-in until ROADMAP 15.1.6 adds judged queries it can decide and the default is decided from them.
    The pruning proptest, the differential suite and the benchmarks run both ways. A relaxed search plans every step
    with the default (off). A request's `"proximity"` is ROADMAP 10.1.7. A collection-level setting
@@ -131,10 +131,11 @@ queries it applies to, and whether it is on by default.
 
 ## Results (2026-11-07)
 
-- nDCG@10 (7.8.4 gate, with the bonus on): unchanged, every row and the mean (0.8824). Under AND each multi-word
+- nDCG@10 (7.8.4 gate, measured with the bonus on, when it was the default; the gate now runs the default, off):
+  with it on, unchanged, every row and the mean (0.8824). Under AND each multi-word
   query of the 7.8.2 corpus matches 1 to 3 documents and only 5 of those matches have their words apart; none
   reorders. ROADMAP 15.1.6 adds judged queries proximity can decide. The bonus does apply: the top hit of
   `running shoes` gets `1.867` (`min(idf)`, the words adjacent in the title).
 - Cost (docs/benchmarks.md, alternating with c2488c9): `search_top10/and` 438 → 535 µs pruned (+22 %), 432 → 767 µs
-  exhaustive (+75 %); `search_suite/and` 255 → 370 µs (+44 %). Two first versions cost more (item 7). Raised in both
+  exhaustive (+78 %); `search_suite/and` 255 → 370 µs (+45 %), each the mean of two runs. Two first versions cost more (item 7). Raised in both
   reviews, the maintainer's call (2026-11-13): off by default until 15.1.6 shows a gain (5).

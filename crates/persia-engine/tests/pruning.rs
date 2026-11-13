@@ -677,8 +677,9 @@ fn block_max_and_skips_blocks_that_cannot_beat_the_threshold() {
     let (count, hits) = handed(&plan, &view, 10, Pruning::MaxScore);
     assert_eq!(bits(&hits), bits(&want));
     assert_eq!(count, all);
-    // With the bonus, the bound it adds still lets either strategy skip most matches (none of them holds `a b`
-    // adjacent); that the bound is in every skip is `a_match_only_its_bonus_lifts_is_not_skipped`.
+    // With the bonus, the bound it adds still lets either strategy skip most matches. Every match holds `a b`
+    // adjacent, so each gets the full bonus: the skips come from the bound, not from documents the bonus tells apart.
+    // That the bound is in every skip is `a_match_only_its_bonus_lifts_is_not_skipped`.
     let (_, want) = handed(&with, &view, 10, Pruning::Exhaustive);
     for pruning in PRUNED {
         let (count, hits) = handed(&with, &view, 10, pruning);

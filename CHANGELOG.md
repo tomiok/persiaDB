@@ -14,7 +14,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   its `must` clauses, `Σ λ · min(idf) · 1/d²` over its adjacent `must` words (`term` or `combined`), `d` their least
   distance in a `text` field with `positions` (one more when reversed; nothing beyond 5 apart), `λ = 1`. Pruning stays
   exact: the bonus is at most `Σ λ · min(idf)`, which every bound of the `bool` adds. Turned on, it costs time on AND
-  queries over fields with positions: `search_top10/and` +22 %, `search_suite/and` +44 %, `+75 %` exhaustively
+  queries over fields with positions: `search_top10/and` +22 %, `search_suite/and` +45 %, `+78 %` exhaustively
   (docs/benchmarks.md). New in `persia_engine::search`: `ProximityExplanation`, `PairExplanation`,
   `SearchPlan::with_proximity`, `SearchPlan::without_proximity` and `SearchPlan::proximity`; `Matcher::field_positions`
   is a new provided method. A `search_after` cursor records whether its plan scored proximity, and a page under the
@@ -67,7 +67,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 - `persia-blob` (breaking): `ChunkSize::new` (and `TryFrom<u32>`) rejects a chunk size below `ChunkSize::MIN`,
-  64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2). The floor bounds a
+  64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2; ADR-0041). The floor bounds a
   blob manifest at 4 bytes per 64 KiB of blob: a chunk size of 1 let a 4 GiB blob need a 16 GiB manifest. It is a
   writer's rule: the new `ChunkSize::from_encoding` keeps the encodings' `1..=64 MiB`, and `BlobManifest::decode`
   reads with it, so no stored manifest or `BlobRef` becomes invalid. Maximum (64 MiB) and default (4 MiB) unchanged.

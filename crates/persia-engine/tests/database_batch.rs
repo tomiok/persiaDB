@@ -536,7 +536,7 @@ fn a_rejected_document_shows_the_ones_before_it_durable_and_nothing_after() {
     }
 }
 
-/// Invariant 3, with a failed sync (ROADMAP 8.2.2.4's batch review): when a document is rejected and reaching the
+/// Invariant 3, with a failed sync (ROADMAP 6.3.12): when a document is rejected and reaching the
 /// batch's durability for the ones before it then fails too, the rejection stays the error the caller sees, with the
 /// sync failure added (`ThenFailed`), not replaced by it. The failed sync poisons the database, and a reopen decides
 /// what survived. Each fault is the first file call after the rejection: the write of the buffered records, without

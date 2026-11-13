@@ -1,6 +1,6 @@
 # ADR-0035: Blob manifest encoding
 
-- Status: accepted
+- Status: accepted (amended by ADR-0041)
 - Date: 2026-11-07
 - Related: SPEC §9.1.1, §9.2, §9.3, §9.4, §15; ROADMAP 9.1.3, 9.2.1, 9.3.1, 9.3.3; ADR-0002, ADR-0024, ADR-0030, ADR-0034
 
@@ -45,10 +45,7 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
 ## Consequences
 
 - A 1 GiB blob in 4 MiB chunks has a 1 100-byte manifest; the largest one (`u32::MAX` chunks) is 16 GiB, which only a
-  pathological `chunk_size` reaches, and decoding allocates at most its input's length. Resolved by ROADMAP 9.4.4
-  (2026-11-13, SPEC §9.2): a writer's `chunk_size` is at least 64 KiB, so a manifest is at most `76 + 4·ceil(size /
-  64 KiB)` bytes (256 KiB for a 4 GiB blob). The floor is a writer's rule, not the encoding's: a reader still accepts
-  `1..=64 MiB`, so the encoding and its golden files are unchanged, and the floor can move without a format change.
+  pathological `chunk_size` reaches, and decoding allocates at most its input's length.
 - A reader cannot verify a manifest against the blob's bytes without reading them; `verify` (ROADMAP 9.5.3) re-hashes.
 - The codec lives in `persia-blob`, not `persia-format`: the engine never reads blob manifests, only `BlobRef`s.
 
