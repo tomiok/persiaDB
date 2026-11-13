@@ -4,9 +4,11 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
+use crate::schema::FieldId;
 use crate::segment::ReadError;
 use crate::view::SearchView;
 
+use super::proximity::Words;
 use super::{BoundCache, Matcher, Pos, Pruning, ScoreBound, raise, sum_in_order, union_bound};
 
 /// The documents every clause matches (AND), leapfrogging from the cheapest clause; the score is the sum of the
@@ -16,7 +18,10 @@ use super::{BoundCache, Matcher, Pos, Pruning, ScoreBound, raise, sum_in_order, 
 /// score is, and skips through the first of their ranges to end when they cannot beat it (block-max AND): a
 /// document there holds every clause, each scoring at most its bound. Its clauses get no threshold: what one may
 /// skip depends on what the others score there.
-pub(super) struct Conjunction<M> {
+///
+/// A `bool`'s proximity bonus (SPEC §7.2, ADR-0036), when given, is added after the clauses' scores, and its bound
+/// after their bounds, so every bound still holds exactly (each addend at least the score's, in the same order).
+pub(super) struct Conjunction<M, B = NoBonus> {
     /// By cost, cheapest first.
     clauses: Vec<M>,
     /// `clauses` indices in query order, for the score.
@@ -31,12 +36,73 @@ pub(super) struct Conjunction<M> {
     region: Option<ScoreBound>,
     /// Per clause (by cost), its last block bound.
     blocks: BoundCache,
+    /// The bonus added after the clauses', if any.
+    bonus: Option<B>,
+    /// The clauses' sum at the current document, when [`Matcher::advance`] already added it up.
+    summed: Option<(u32, f64)>,
+}
+
+/// A score added to a conjunction's after its clauses' (a `bool`'s proximity, SPEC §7.2), with a bound.
+pub(super) trait Bonus {
+    /// At least every [`Self::bonus`].
+    fn bound(&self) -> f64;
+
+    /// The bonus of the document every clause is on, read through `words`.
+    ///
+    /// # Errors
+    /// A corruption of the view.
+    fn bonus(&mut self, words: &mut dyn Words) -> Result<f64, ReadError>;
+}
+
+/// No bonus: a plain conjunction.
+pub(super) struct NoBonus;
+
+impl Bonus for NoBonus {
+    fn bound(&self) -> f64 {
+        0.0
+    }
+
+    fn bonus(&mut self, _: &mut dyn Words) -> Result<f64, ReadError> {
+        Ok(0.0)
+    }
+}
+
+/// A conjunction's clauses as [`Words`]: `must` clause `i` (query order) is `clauses[order[i]]`.
+struct Clauses<'c, M> {
+    clauses: &'c mut [M],
+    order: &'c [usize],
+}
+
+impl<M: Matcher> Words for Clauses<'_, M> {
+    fn positions(
+        &mut self,
+        clause: usize,
+        field: FieldId,
+        out: &mut Vec<u32>,
+    ) -> Result<(), ReadError> {
+        let Some(c) = self
+            .order
+            .get(clause)
+            .and_then(|&i| self.clauses.get_mut(i))
+        else {
+            return Ok(());
+        };
+        out.extend_from_slice(c.field_positions(field)?);
+        Ok(())
+    }
 }
 
 impl<M: Matcher> Conjunction<M> {
     /// At least one clause; with none, the conjunction matches nothing. It matches and scores the same under any
     /// `pruning`, which only says which bounds a threshold is checked against ([`bound_from`]).
     pub(super) fn new(clauses: Vec<M>, pruning: Pruning) -> Self {
+        Conjunction::with_bonus(clauses, pruning, None)
+    }
+}
+
+impl<M: Matcher, B: Bonus> Conjunction<M, B> {
+    /// As [`Conjunction::new`], adding `bonus` to each score after the clauses'.
+    pub(super) fn with_bonus(clauses: Vec<M>, pruning: Pruning, bonus: Option<B>) -> Self {
         let mut indexed: Vec<(usize, M)> = clauses.into_iter().enumerate().collect();
         // Stable: equal costs keep query order, so the walk is deterministic.
         indexed.sort_by_key(|(_, m)| m.cost());
@@ -47,11 +113,14 @@ impl<M: Matcher> Conjunction<M> {
             }
         }
         let clauses: Vec<M> = indexed.into_iter().map(|(_, m)| m).collect();
-        let max = sum_in_order(
+        let mut max = sum_in_order(
             order
                 .iter()
                 .filter_map(|&i| clauses.get(i).map(Matcher::max_score)),
         );
+        if let Some(b) = &bonus {
+            max += b.bound();
+        }
         let n = clauses.len();
         Self {
             clauses,
@@ -62,6 +131,8 @@ impl<M: Matcher> Conjunction<M> {
             min: None,
             region: None,
             blocks: BoundCache::new(n),
+            bonus,
+            summed: None,
         }
     }
 
@@ -89,6 +160,9 @@ impl<M: Matcher> Conjunction<M> {
             };
             sum += b.score;
             up_to = up_to.min(b.up_to);
+        }
+        if let Some(b) = &self.bonus {
+            sum += b.bound();
         }
         Ok(Some(ScoreBound { up_to, score: sum }))
     }
@@ -121,6 +195,32 @@ impl<M: Matcher> Conjunction<M> {
             };
             target = after;
         }
+    }
+
+    /// The first document from `target` on every clause holds and, under a threshold, whose range's bound beats it.
+    fn walk(&mut self, target: u32) -> Result<Option<u32>, ReadError> {
+        Ok(match self.min {
+            // The range last checked still beats `min` through `up_to`: the plain walk, if it stays there.
+            Some(min) => match self.region {
+                Some(r) if target <= r.up_to && r.score > min => match self.align(target)? {
+                    Some(d) if d > r.up_to => self.align_above(d, min)?,
+                    doc => doc,
+                },
+                _ => self.align_above(target, min)?,
+            },
+            None => self.align(target)?,
+        })
+    }
+
+    /// The clauses' scores at the document they are all on, summed in query order.
+    fn clause_sum(&mut self) -> Result<f64, ReadError> {
+        let mut sum = 0.0;
+        for &i in &self.order {
+            if let Some(clause) = self.clauses.get_mut(i) {
+                sum += clause.score()?;
+            }
+        }
+        Ok(sum)
     }
 
     /// The first document at or after `target` every clause holds.
@@ -167,7 +267,7 @@ impl<M: Matcher> Conjunction<M> {
     }
 }
 
-impl<M: Matcher> Matcher for Conjunction<M> {
+impl<M: Matcher, B: Bonus> Matcher for Conjunction<M, B> {
     fn cost(&self) -> u64 {
         self.clauses.first().map_or(0, Matcher::cost)
     }
@@ -191,30 +291,40 @@ impl<M: Matcher> Matcher for Conjunction<M> {
             Pos::Unstarted | Pos::At(_) => {}
         }
         self.pos = Pos::Done;
-        let doc = match self.min {
-            // The range last checked still beats `min` through `up_to`: the plain walk, if it stays there.
-            Some(min) => match self.region {
-                Some(r) if target <= r.up_to && r.score > min => match self.align(target)? {
-                    Some(d) if d > r.up_to => self.align_above(d, min)?,
-                    doc => doc,
-                },
-                _ => self.align_above(target, min)?,
-            },
-            None => self.align(target)?,
-        };
+        let mut doc = self.walk(target)?;
+        // With a bonus, a document whose clauses plus the bonus's bound cannot beat `min` scores at most it: skipped
+        // before its bonus (its positions) is read. The bound is added as the score adds the bonus, so it holds.
+        if let (Some(min), Some(bonus)) = (self.min, &self.bonus) {
+            let bound = bonus.bound();
+            while let Some(d) = doc {
+                let sum = self.clause_sum()?;
+                if sum + bound > min {
+                    self.summed = Some((d, sum));
+                    break;
+                }
+                doc = match d.checked_add(1) {
+                    Some(next) => self.walk(next)?,
+                    None => None,
+                };
+            }
+        }
         self.pos = Pos::of(doc);
         Ok(doc)
     }
 
     fn score(&mut self) -> Result<f64, ReadError> {
-        if self.pos.doc().is_none() {
+        let Some(doc) = self.pos.doc() else {
             return Ok(0.0);
-        }
-        let mut sum = 0.0;
-        for &i in &self.order {
-            if let Some(clause) = self.clauses.get_mut(i) {
-                sum += clause.score()?;
-            }
+        };
+        let mut sum = match self.summed {
+            Some((d, sum)) if d == doc => sum,
+            _ => self.clause_sum()?,
+        };
+        if let Some(b) = &mut self.bonus {
+            sum += b.bonus(&mut Clauses {
+                clauses: &mut self.clauses,
+                order: &self.order,
+            })?;
         }
         Ok(sum)
     }

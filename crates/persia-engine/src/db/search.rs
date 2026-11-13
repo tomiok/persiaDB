@@ -70,9 +70,10 @@ pub struct CursorOrigin {
 }
 
 /// Where a page starts (SPEC §7.4): a hit's sort values, location and [`CursorOrigin`], from [`SearchHit::cursor`].
-/// Exact only for that snapshot, collection and memtable view. Another one is [`RequestError::CursorView`]: locations
-/// are indices into the view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one
-/// over.
+/// Exact only for that snapshot, collection and memtable view, and under a plan with the same proximity setting
+/// ([`RequestError::CursorProximity`]). Another view is [`RequestError::CursorView`]: locations are indices into the
+/// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. Other plan and
+/// query options are not recorded (ROADMAP 10.1.7): paging is exact only when they are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// One value per sort key.
@@ -85,6 +86,10 @@ pub struct Cursor {
     /// [`super::RelaxedHit::cursor`]; `None` for a hit of a search that did not relax, which is step 0 of a cascade
     /// that stopped at L0.
     pub relaxed: Option<StepCursor>,
+    /// Whether the plan that produced the hit scored the proximity bonus (SPEC §7.2, §7.4,
+    /// [`SearchPlan::with_proximity`]). The bonus changes scores, so a page under a plan with the other setting would
+    /// repeat or pass over hits: [`RequestError::CursorProximity`].
+    pub proximity: bool,
 }
 
 /// Where in the relaxation cascade a [`Cursor`]'s hit is (SPEC §7.6, ROADMAP 8.1.3).
@@ -114,6 +119,8 @@ pub struct SearchHit {
     /// Its relaxation step and its cascade's last step (SPEC §7.6), unless step 0 of a cascade that stopped at L0.
     /// [`Self::cursor`] copies it, so the cursor of any hit pages from where the hit is.
     pub(super) relaxed: Option<StepCursor>,
+    /// Whether its plan scored the proximity bonus. [`Self::cursor`] copies it.
+    pub(super) proximity: bool,
 }
 
 impl SearchHit {
@@ -126,6 +133,7 @@ impl SearchHit {
             location: self.location,
             origin: self.origin.clone(),
             relaxed: self.relaxed,
+            proximity: self.proximity,
         }
     }
 }
@@ -191,7 +199,8 @@ impl CollectionViews<'_> {
     /// # Errors
     /// [`RequestError::Window`] when `offset + limit` is above [`MAX_WINDOW`]; [`RequestError::Cursor`] for a
     /// cursor that does not fit the sort; [`RequestError::CursorView`] for a cursor from another snapshot,
-    /// collection or memtable view; [`RequestError::CursorStep`] for a cursor from a relaxation step after L0
+    /// collection or memtable view; [`RequestError::CursorProximity`] for a cursor from a plan with the other
+    /// proximity setting; [`RequestError::CursorStep`] for a cursor from a relaxation step after L0
     /// ([`super::RelaxedHit::cursor`]); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
     /// [`RequestError::MismatchedSortValue`] if two sort values are not of the key's type;
     /// [`RequestError::HitSegment`] if a hit names a segment the views do not have (the hit is not skipped);
@@ -218,7 +227,7 @@ impl CollectionViews<'_> {
         request: &SearchRequest,
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
-        let window = self.check_request(request)?;
+        let window = self.check_request(request, plan.proximity())?;
         if let Some(StepCursor { step, last }) =
             request.search_after.as_ref().and_then(|c| c.relaxed)
             && step > 0
@@ -250,7 +259,13 @@ impl CollectionViews<'_> {
             Vec::new()
         };
         Ok(SearchResults {
-            hits: self.page_hits(&segments, page, explanations, &request.projection)?,
+            hits: self.page_hits(
+                &segments,
+                page,
+                explanations,
+                &request.projection,
+                plan.proximity(),
+            )?,
             facets: collected
                 .facets
                 .into_iter()
@@ -260,7 +275,12 @@ impl CollectionViews<'_> {
     }
 
     /// The window of `request` (`offset + limit`), once its page, cursor and facets are checked (SPEC §7.4, §7.5).
-    pub(super) fn check_request(&self, request: &SearchRequest) -> Result<usize, RequestError> {
+    /// `proximity`: whether the plan the page runs scores the proximity bonus, which the cursor must match.
+    pub(super) fn check_request(
+        &self,
+        request: &SearchRequest,
+        proximity: bool,
+    ) -> Result<usize, RequestError> {
         let window = request
             .offset
             .checked_add(request.limit)
@@ -290,6 +310,12 @@ impl CollectionViews<'_> {
                     seq: origin.seq,
                     version: origin.version,
                     collection: origin.collection,
+                });
+            }
+            if cursor.proximity != proximity {
+                return Err(RequestError::CursorProximity {
+                    cursor: cursor.proximity,
+                    plan: proximity,
                 });
             }
         }
@@ -362,6 +388,7 @@ impl CollectionViews<'_> {
         page: Vec<Ranked>,
         explanations: Vec<Option<Explanation>>,
         projection: &Projection,
+        proximity: bool,
     ) -> Result<Vec<SearchHit>, RequestError> {
         let mut explanations = explanations.into_iter();
         let origin = self.cursor_origin();
@@ -382,6 +409,7 @@ impl CollectionViews<'_> {
                 explanation: explanations.next().flatten(),
                 origin: origin.clone(),
                 relaxed: None,
+                proximity,
             });
         }
         Ok(hits)

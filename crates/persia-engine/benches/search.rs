@@ -113,6 +113,19 @@ const STRATEGIES: [(&str, Pruning); 3] = [
     ("block_max_wand", Pruning::BlockMaxWand),
 ];
 
+/// `search_top10/and_proximity`: `and` with the proximity bonus of its two words (ROADMAP 7.3.5, off by default; the
+/// body has positions), so the bonus's cost shows beside `and`.
+fn with_proximity(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    and: SearchPlan,
+    view: &SegmentView<'_>,
+) {
+    let and = and.with_proximity();
+    group.bench_function("and_proximity", |b| {
+        b.iter(|| black_box(and.top_k(view, 10).unwrap()));
+    });
+}
+
 fn bench(c: &mut Criterion) {
     let (schema, segment, fields) = segment();
     let [body, ..] = fields;
@@ -169,6 +182,8 @@ fn bench(c: &mut Criterion) {
             b.iter(|| black_box(plan.top_k(&view, 10).unwrap()));
         });
     }
+    let and = SearchPlan::new(&queries[1].1, &schema, &stats).unwrap();
+    with_proximity(&mut group, and, &view);
     group.finish();
 
     // The strategies side by side; `or_rare` is a common word beside two rare ones.

@@ -474,7 +474,7 @@ Deps: M5 (M6 for end-to-end).
 - [x] 7.3.2 Static rank contribution (`log1p`, `linear`, SPEC §6.2.3; a `saturation` function moved to 27.6.1)
 - [x] 7.3.3 Score upper bounds per term/block (for WAND)
 - [x] 7.3.4 [T] unit tests vs hand-computed examples; differential vs reference scorer within epsilon
-- [ ] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3)
+- [x] 7.3.5 (v1.0) Term proximity scoring: a bonus from the minimum span, or the pair distance, of the query terms, using positions already indexed (5.3.4). The bonus must keep pruning bounds valid (MaxScore and block-max WAND, SPEC §7.2, §7.3). Done as the pair distance of adjacent `must` words, `λ · min(idf) · 1/d²` up to 5 apart in fields with positions (ADR-0036). Off by default, opt-in with `SearchPlan::with_proximity`, until 15.1.6 evaluates it; a cursor records the setting (SPEC §7.4)
 
 ## 7.4 Matching & top-k
 - [x] 7.4.1 Single-term, AND, OR, NOT iterators with skip
@@ -631,6 +631,7 @@ Deps: M6, M7, M8, M9. First user-facing release: `v0.1`.
 - [ ] 10.1.4 Typed documents via `serde` (`put_struct`) + dynamic `Document`
 - [ ] 10.1.5 Error type, `Result` aliases, stable error codes
 - [ ] 10.1.6 Async-friendly wrapper (`spawn_blocking`) as optional feature `tokio`
+- [ ] 10.1.7 The request's `"proximity"` (SPEC §7.1, §7.2): `search` plans `true` as `SearchPlan::with_proximity` (off by default since 7.3.5) and `false` as `SearchPlan::without_proximity`. The cursor already records whether its plan scored proximity and rejects the other setting (`RequestError::CursorProximity`, 7.3.5); the request maps that error. [T] A page after a cursor from a proximity-on search, asked with `"proximity": false`, is an error; with the same setting it pages exactly
 
 ## 10.2 Concurrency semantics
 - [ ] 10.2.1 `Send + Sync` handles; reader snapshots; single-writer errors
@@ -825,6 +826,7 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.1.3 End-to-end harness (embedded and server modes), latency histograms (HdrHistogram), throughput
 - [ ] 15.1.4 Comparison methodology doc + optional adapters to compare other engines (fair configs, published scripts)
 - [ ] 15.1.5 CI regression gate (> 5% slowdown fails) with stored baselines
+- [ ] 15.1.6 Judged queries proximity can decide: in the 7.8.2 corpus every multi-word query matches 1 to 3 documents under AND, and only 5 of those matches (4 queries) have their words apart, none reordered by the bonus, so the nDCG gate (7.8.4) did not move with 7.3.5. Add documents that hold a query's words both together and apart (and long bodies where they are far), judged, so the gate measures proximity; record the new baseline with the bonus on and off, and decide from it whether proximity turns on by default (off since 7.3.5, ADR-0036) (found in 7.3.5)
 
 ## 15.2 Performance work (driven by profiles)
 - [ ] 15.2.1 SIMD bit-unpacking (runtime feature detection) behind safe wrappers

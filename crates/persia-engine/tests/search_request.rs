@@ -26,11 +26,13 @@ use std::sync::{Arc, OnceLock};
 
 use persia_engine::db::{
     CollectionSnapshot, Cursor, CursorOrigin, Database, DatabaseOptions, Execution, Located,
-    ManualClock, SearchPool, SearchRequest, SearchResults, SegmentIds, Snapshot, Threads,
+    ManualClock, RelaxedSearchError, SearchPool, SearchRequest, SearchResults, SegmentIds,
+    Snapshot, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
 use persia_engine::query::{BoolQuery, Query, TermQuery};
+use persia_engine::relax::{RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
     CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
@@ -790,6 +792,7 @@ fn bad_requests_are_errors() {
             location: Located::Memtable(0),
             origin: origin(&snapshot, &memtable),
             relaxed: None,
+            proximity: false,
         })
     };
     let wrong_count = SearchRequest {
@@ -1082,6 +1085,7 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
             location,
             origin: origin(&snapshot, &memtable),
             relaxed: None,
+            proximity: false,
         }),
         ..base.clone()
     };
@@ -1259,6 +1263,115 @@ fn a_cursor_from_another_snapshot_or_memtable_view_is_an_error() {
     ));
 }
 
+/// SPEC §7.4: a cursor records whether its plan scored the proximity bonus (§7.2, ROADMAP 7.3.5), and a page under a
+/// plan with the other setting is an error. The bonus reorders hits, so paging across the change would repeat or
+/// pass over one: here, after the adjacent `red shoes` (first with the bonus), the plan without it ranks the other
+/// match first, so that page would lose it.
+#[test]
+fn a_cursor_from_a_plan_with_the_other_proximity_setting_is_an_error() {
+    let text = FieldKind::Text(TextOptions {
+        positions: true,
+        ..TextOptions::default()
+    });
+    let schema = SchemaBuilder::new("c").field("body", text).build().unwrap();
+    let body = schema.field("body").unwrap().id();
+    let mut db = database(schema);
+    for (id, text) in [("a", "red hat blue shoes"), ("b", "blue hat red shoes")] {
+        db.put(
+            "c",
+            &Document::new(id).with(body, Value::String(text.into())),
+            Durability::Fsync,
+        )
+        .unwrap();
+    }
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let mem = c.memtable();
+    let views = c.views(&mem).unwrap();
+    let and = Query::Bool(BoolQuery {
+        must: vec![term(body, "red"), term(body, "shoes")],
+        ..BoolQuery::default()
+    });
+    let off = SearchPlan::new(&and, c.schema(), &c.search_statistics(&mem)).unwrap();
+    let on = off.clone().with_proximity();
+    let ids = |r: &SearchResults| {
+        r.hits
+            .iter()
+            .map(|h| h.document.id().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let page = SearchRequest {
+        limit: 1,
+        ..SearchRequest::default()
+    };
+    let after = |cursor: Cursor| SearchRequest {
+        search_after: Some(cursor),
+        ..page.clone()
+    };
+
+    let first_on = views.search(&on, &page, Pruning::default()).unwrap();
+    assert_eq!(ids(&first_on), ["b"]);
+    let cursor_on = first_on.hits[0].cursor();
+    assert!(cursor_on.proximity);
+    // The same plan pages exactly.
+    let rest = views
+        .search(&on, &after(cursor_on.clone()), Pruning::default())
+        .unwrap();
+    assert_eq!(ids(&rest), ["a"]);
+    // Without the bonus `a` ranks first, before the cursor: that page would pass over it.
+    assert_eq!(
+        ids(&views.search(&off, &page, Pruning::default()).unwrap()),
+        ["a"]
+    );
+    assert!(matches!(
+        views.search(&off, &after(cursor_on.clone()), Pruning::default()),
+        Err(RequestError::CursorProximity {
+            cursor: true,
+            plan: false
+        })
+    ));
+
+    // The default plan's cursor records no bonus; a plan with it rejects that cursor.
+    let first_off = views.search(&off, &page, Pruning::default()).unwrap();
+    let cursor_off = first_off.hits[0].cursor();
+    assert!(!cursor_off.proximity);
+    assert_eq!(
+        ids(&views
+            .search(&off, &after(cursor_off.clone()), Pruning::default())
+            .unwrap()),
+        ["b"]
+    );
+    assert!(matches!(
+        views.search(&on, &after(cursor_off.clone()), Pruning::default()),
+        Err(RequestError::CursorProximity {
+            cursor: false,
+            plan: true
+        })
+    ));
+
+    // A relaxed search plans without the bonus (SPEC §7.4): it pages after the default plan's cursor and rejects
+    // the other.
+    let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
+    let exec = Execution::default();
+    let relaxed = views
+        .search_relaxed(&and, &after(cursor_off), &relax, &exec)
+        .unwrap();
+    assert_eq!(
+        relaxed
+            .hits
+            .iter()
+            .map(|h| h.hit.document.id())
+            .collect::<Vec<_>>(),
+        ["b"]
+    );
+    assert!(matches!(
+        views.search_relaxed(&and, &after(cursor_on), &relax, &exec),
+        Err(RelaxedSearchError::Request(RequestError::CursorProximity {
+            cursor: true,
+            plan: false
+        }))
+    ));
+}
 #[test]
 fn a_cursor_from_another_collection_is_an_error() {
     // Same snapshot seq and memtable version: the collection name is what rejects the cursor.
@@ -1674,5 +1787,74 @@ fn a_sort_led_by_the_score_prunes_with_further_keys() {
             pruned * 3 < faceted,
             "{pruned} reads pruned, {faceted} with a facet, by {later:?}"
         );
+    }
+}
+
+/// Two segments of 1 500 documents whose last 100 are short (the best score, all tied), the others long, and `n`
+/// cycling 0..7: on the calling thread the second segment starts from the first one's threshold, and its tied
+/// documents come after its first look at it (ROADMAP 7.4.11, found in the batch review).
+fn tiered_segments() -> Database<SimFile> {
+    let f = fields();
+    let mut db = database(schema());
+    for i in 0..3_000_usize {
+        let body = if i % 1_500 >= 1_400 {
+            "common".to_owned()
+        } else {
+            format!("common {}", ["filler"; 15].join(" "))
+        };
+        let d = Document::new(format!("s{i}"))
+            .with(f.body, Value::String(body))
+            .with(f.n, Value::I64(i64::try_from(i % 7).unwrap()));
+        db.put("c", &d, Durability::Buffered).unwrap();
+        if i == 1_499 {
+            db.commit().unwrap();
+        }
+    }
+    db.commit().unwrap();
+    db
+}
+
+/// A threshold from another view applies strictly too: a later view's match tied with it on the score may win on
+/// the later key (ROADMAP 7.4.11; SPEC §7.4). Pages by cursor equal the exhaustive ones, by `n` either way.
+#[test]
+fn a_shared_threshold_skips_only_below_for_a_sort_led_by_the_score() {
+    let db = tiered_segments();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    assert_eq!(c.segments().len(), 2);
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    for later in [Order::Desc, Order::Asc] {
+        let sort = Sort::new([SortKey::score(), SortKey::field(f.n, later)], c.schema()).unwrap();
+        let request = |after: Option<Cursor>| SearchRequest {
+            sort: sort.clone(),
+            limit: 10,
+            search_after: after,
+            projection: Projection::None,
+            ..SearchRequest::default()
+        };
+        for pruning in [Pruning::MaxScore, Pruning::BlockMaxWand] {
+            let exec = Execution::new(pruning).threads(Threads::Current);
+            let all = Execution::new(Pruning::Exhaustive).threads(Threads::Current);
+            let (mut after, mut want): (Option<Cursor>, Option<Cursor>) = (None, None);
+            for page in 0..25 {
+                let got = views
+                    .search_with(&plan, &request(after.clone()), &exec)
+                    .unwrap();
+                let full = views
+                    .search_with(&plan, &request(want.clone()), &all)
+                    .unwrap();
+                assert_eq!(
+                    located(&got),
+                    located(&full),
+                    "{pruning:?} by {later:?}, page {page}"
+                );
+                after = got.hits.last().map(persia_engine::db::SearchHit::cursor);
+                want = full.hits.last().map(persia_engine::db::SearchHit::cursor);
+            }
+        }
     }
 }

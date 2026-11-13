@@ -68,6 +68,15 @@ pub enum RequestError {
         /// Collection being searched.
         collection: String,
     },
+    /// A cursor from a plan with the other proximity setting (SPEC §7.2, §7.4): the bonus changes scores, so paging
+    /// after the cursor under this plan could repeat a hit or pass one over.
+    #[error("cursor from a plan with proximity {cursor}; this search's plan has proximity {plan}")]
+    CursorProximity {
+        /// Whether the cursor's plan scored the proximity bonus.
+        cursor: bool,
+        /// Whether this search's plan does.
+        plan: bool,
+    },
     /// A cursor from a relaxation step this search cannot page after (SPEC §7.6, ROADMAP 8.1.3): a step after L0
     /// given to a search that does not relax (every hit it returns ranks before it), or a step after the last step
     /// of its own cascade.

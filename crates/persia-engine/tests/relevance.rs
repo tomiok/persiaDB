@@ -17,8 +17,8 @@
 //! 3. The tolerance absorbs only rounding: the corpus, clock and segment ids are fixed, so the ranking is the same
 //!    everywhere, and only `ln`, `log2` and `powf` may round differently by platform, which can flip a fourth
 //!    decimal on a boundary (one unit, `0.0001`). Per query, it is less than half the smallest change one judged
-//!    document makes moving by one rank, so every ranking change among judged documents in the top 10 fails the
-//!    gate.
+//!    document makes moving by one rank, so every such move in the top 10 fails the gate (two documents of one grade
+//!    trading places change nothing, and pass).
 //! 4. Every judged query has hits at L0, so a search through the collection's relaxation cascade (SPEC §7.6, ROADMAP
 //!    8.1.2) stays at L0 and ranks as without it: relaxation does not move the gate.
 //!
@@ -210,7 +210,8 @@ fn judged_queries_find_relevant_documents() {
 /// the recorded value plus a flip on a rounding boundary (see the module doc, invariant 3).
 const TOLERANCE_UNITS: i64 = 1;
 /// [`TOLERANCE_UNITS`] as an nDCG@10 difference.
-const TOLERANCE: f64 = 1e-4;
+#[allow(clippy::as_conversions)] // A small integer, exact as a float.
+const TOLERANCE: f64 = TOLERANCE_UNITS as f64 / 10_000.0;
 
 /// The `(value, label)` rows of a table, the mean last, each value in units of its fourth decimal (`0.9023` is
 /// 9023): the gate compares the recorded digits exactly, never two parsed floats.

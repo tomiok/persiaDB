@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: term proximity (ROADMAP 7.3.5; SPEC §7.2, §7.3, §7.7; ADR-0036), **off by default** until it is
+  evaluated on judged queries (ROADMAP 15.1.6). `SearchPlan::with_proximity` turns it on: a `bool` then adds, after
+  its `must` clauses, `Σ λ · min(idf) · 1/d²` over its adjacent `must` words (`term` or `combined`), `d` their least
+  distance in a `text` field with `positions` (one more when reversed; nothing beyond 5 apart), `λ = 1`. Pruning stays
+  exact: the bonus is at most `Σ λ · min(idf)`, which every bound of the `bool` adds. Turned on, it costs time on AND
+  queries over fields with positions: `search_top10/and` +22 %, `search_suite/and` +44 %, `+75 %` exhaustively
+  (docs/benchmarks.md). New in `persia_engine::search`: `ProximityExplanation`, `PairExplanation`,
+  `SearchPlan::with_proximity`, `SearchPlan::without_proximity` and `SearchPlan::proximity`; `Matcher::field_positions`
+  is a new provided method. A `search_after` cursor records whether its plan scored proximity, and a page under the
+  other setting is `RequestError::CursorProximity`.
+- `persia-engine` (breaking): `Explanation::Bool` has a `proximity` field, the bonus and its pairs (`None` while
+  proximity is off).
 - `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
   to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
   characters (of the analyzed term), becomes a `prefix` of 50 expansions, kept by collection `df`. Excluded clauses,
@@ -83,7 +95,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: a sort led by the score with further keys prunes (ROADMAP 7.4.11; SPEC §7.4). A tie-break such as
   `["score", {"field": "updated_at", "order": "desc"}]` used to visit every match; it now skips, like `"score"` alone,
   the matches scoring below the worst kept hit (ties are still compared on the later keys), and rejects such a match
-  before reading its columns. `search_request/score_then_newest` 719 → 550 µs. Results are unchanged.
+  before reading its columns. `search_request/score_then_newest` 724 → 514 µs. Results are unchanged.
 - `persia-engine`: the memtable's views share their copies of a field's column keys and `keyword` column (ROADMAP
   7.5.7; SPEC §10.6). A request takes a new memtable view, and views of the same documents now copy a column once
   between them instead of once each; the memtable keeps one copy per field (the one of the most documents) and counts
