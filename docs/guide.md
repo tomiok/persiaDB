@@ -605,8 +605,8 @@ GCP, and Azure are part of that milestone (ROADMAP 13.5).
 Two families, neither implemented (SPEC §13).
 
 **Embedded bindings** sit in-process beside the Rust `Db` API. Go calls a C ABI crate `persia-ffi` through
-cgo and a static library by default; an optional `persia_purego` build tag `dlopen`s the shared library
-with `CGO_ENABLED=0`, behind the same API. TypeScript calls it through N-API (ADR-0018,
+cgo and a static library by default; an optional `persia_purego` build tag dynamically loads the shared
+library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (ADR-0018,
 [`docs/sdk/`](./sdk/README.md)). They are blocked on the embedded API (M10). A browser/edge WASM build is
 a later package, not the first one.
 

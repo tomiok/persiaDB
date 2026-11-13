@@ -109,9 +109,10 @@ CGO_ENABLED=0 go build -tags persia_purego
 On Unix, `github.com/ebitengine/purego` `Dlopen`s the shared library when `Open` runs. On Windows amd64
 `purego.Dlopen` is not compiled, so `Open` loads `persia.dll` with `syscall.LoadLibrary` and resolves
 symbols with `syscall.GetProcAddress`, then `purego.RegisterLibFunc`. The Go API does not change.
-`go build -tags persia_purego` does not fetch that library and does not link it into the binary. The cgo
-build downloads `libpersia.a` into the build cache; this build does not download `libpersia.so`. The
-caller places the file before `Open`:
+`go build -tags persia_purego` does not fetch that library and does not link it into the binary. A cgo
+build with `PERSIA_LIB_DIR` unset downloads `libpersia.a` into the build cache; `PERSIA_LIB_DIR` is the
+source and offline path and does not fetch it. This tag does not download `libpersia.so` on either path.
+The caller places the file before `Open`:
 
 - beside the executable, named `libpersia.so` (linux), `libpersia.dylib` (darwin), or `persia.dll`
   (windows), or
@@ -129,8 +130,9 @@ static libraries; publishing them is not the same as the build downloading them.
 matrix (linux musl, windows arm64, and the rest of the "not in the first matrix" list) are unsupported
 for this tag too. wazero is not a substitute: the tag still calls the native library.
 
-The tradeoff against the default is the second file. A cgo build is one binary, and `go build` fetches
-its static library. A `persia_purego` build runs only when the caller has placed the shared library
+The tradeoff against the default is the second file. A cgo build is one binary. With `PERSIA_LIB_DIR`
+unset, `go build` fetches its static library; with `PERSIA_LIB_DIR` set, it uses the library already
+there. A `persia_purego` build runs only when the caller has placed the shared library
 beside it or named it with `PERSIA_LIB`.
 
 Supply chain (SPEC §17): checksums in the module, assets named with the version, the release workflow

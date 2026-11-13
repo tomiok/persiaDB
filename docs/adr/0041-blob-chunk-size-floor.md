@@ -32,7 +32,7 @@ gets a floor or the manifest a size cap.
 - A manifest from another writer may still be up to 16 GiB. Decoding allocates at most its length, and a remote
   reader may check its length against `76 + 4·n` before it fetches it (SPEC §9.1.1).
 - A non-empty blob smaller than the chunk size it is written with is still one chunk. An empty blob has
-  no chunks (`chunker.go`). The floor applies to the requested `chunk_size`, not to the blob's length: a
+  no chunks (`crates/persia-blob/src/chunker.rs`). The floor applies to the requested `chunk_size`, not to the blob's length: a
   request below 64 KiB is rejected even when the blob itself is smaller than 64 KiB, including an empty one.
 - A breaking change of `persia-blob` (unreleased): `ChunkSize::new` rejects `1..64 KiB`, which it used to accept.
 

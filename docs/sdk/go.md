@@ -403,8 +403,9 @@ CGO_ENABLED=0 go build -tags persia_purego
 ```
 
 `persia.Open` and the rest of this page do not change. `go build -tags persia_purego` does not fetch the
-shared library and does not link it in. The cgo build downloads `libpersia.a`; this build does not
-download `libpersia.so`. The caller places the file before `Open`: beside the executable
+shared library and does not link it in. A cgo build with `PERSIA_LIB_DIR` unset downloads `libpersia.a`;
+`PERSIA_LIB_DIR` uses a library already on disk and does not fetch it. This tag does not download
+`libpersia.so` on either path. The caller places the file before `Open`: beside the executable
 (`libpersia.so`, `libpersia.dylib`, or `persia.dll`), or `PERSIA_LIB` set to that file's path. `Open` is
 what loads it. The process starts without the library. A missing file is an error from `Open`, not a
 linker error at `go build` and not a failure before `main`. `PERSIA_LIB` is a runtime variable of this

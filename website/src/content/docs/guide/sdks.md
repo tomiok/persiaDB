@@ -40,8 +40,10 @@ The network clients are described on [Server, cloud, and Kubernetes](/guide/serv
 
 One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second search implementation.
 
-- **Go** links a static library through cgo by default. An optional `persia_purego` build tag `dlopen`s
-  the shared library with `CGO_ENABLED=0`, behind the same API. The library is `persia-ffi`, a C ABI crate
+- **Go** links a static library through cgo by default. An optional `persia_purego` build tag dynamically
+  loads the shared library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API.
+  The build does not fetch that library. The caller places it beside the binary, or sets `PERSIA_LIB` (read
+  by `Open`). That binding is `persia-ffi`, a C ABI crate
   that does not exist yet. A pure-Go engine, and a WASM engine hosted by wazero, were rejected: durability
   is fsync and a writer lock (SPEC §4.5, §8.4), and mapped reads are already part of storage (ADR-0017).
 - **TypeScript** ships first as an N-API addon (`@persiadb/node`) for Node.js, Bun, and Deno. The addon

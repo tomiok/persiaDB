@@ -283,7 +283,7 @@ v2.1, v2.2, and v2.3 are separate targets: UI components, AI search, and on-devi
 
 Rust is the native API. The facade crate is [`persia`](./crates/persia/src/lib.rs), a placeholder until M10. The libraries under it are what a Rust caller can use today, as in the [quickstart](#index-documents-and-search-them).
 
-Go and TypeScript embedded bindings are planned for **v1.1** (M16). The design is [ADR-0018](./docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](./docs/sdk/README.md), and it is not implemented. One C ABI (`persia-ffi`) wraps `persia`. Go calls it through cgo and a static library by default (`sdk/persia`); an optional `persia_purego` build tag `dlopen`s the shared library with `CGO_ENABLED=0`, behind the same API. TypeScript calls it through N-API (`@persiadb/node`) for Node.js, Bun, and Deno. Ranking, relaxation, and crash recovery stay in the Rust core.
+Go and TypeScript embedded bindings are planned for **v1.1** (M16). The design is [ADR-0018](./docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](./docs/sdk/README.md), and it is not implemented. One C ABI (`persia-ffi`) wraps `persia`. Go calls it through cgo and a static library by default (`sdk/persia`); an optional `persia_purego` build tag dynamically loads the shared library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (`@persiadb/node`) for Node.js, Bun, and Deno. Ranking, relaxation, and crash recovery stay in the Rust core.
 
 Two other clients are a different product, also unstarted: network clients in Rust (`persia-client`) and Go (`persia-go`) speak gRPC to `persia-server` (SPEC §13, M14). A Python SDK is v1.2 (M21), after the embedded bindings.
 

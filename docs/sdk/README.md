@@ -73,7 +73,7 @@ is `1`, `FORMAT_MINOR` is `0`. There is no compatibility promise across releases
 
 | Language | First release | Later | Rejected as the primary path |
 |---|---|---|---|
-| Go | cgo, statically linked to `libpersia.a`, C ABI in `persia-ffi`. Module `sdk/persia`. | Optional `persia_purego` tag: purego `dlopen`s the shared library with `CGO_ENABLED=0`, same API (ADR-0018). The build does not fetch it. The caller places it beside the binary, or sets `PERSIA_LIB` (Go SDK only, read by `Open`) | Pure Go; wazero |
+| Go | cgo, statically linked to `libpersia.a`, C ABI in `persia-ffi`. Module `sdk/persia`. | Optional `persia_purego` tag: loads the shared library with `CGO_ENABLED=0` (Unix via purego `Dlopen`, Windows via `syscall.LoadLibrary` and `GetProcAddress`), same API (ADR-0018). The build does not fetch it. The caller places it beside the binary, or sets `PERSIA_LIB` (Go SDK only, read by `Open`) | Pure Go; wazero |
 | TypeScript | N-API addon (`@persiadb/node`) for Node.js, Bun, and Deno, linking the same rlib | `@persiadb/wasm` for browser and edge, after a non-mmap storage backend | WASM as the only binding |
 
 Both languages share `persia-ffi`: one safe Rust API, C exports for Go, N-API calling those Rust functions

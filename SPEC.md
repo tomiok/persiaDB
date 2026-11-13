@@ -2643,8 +2643,9 @@ missing parent directories; an option turns creation off (`OpenOptions::create_i
 and does not create the file (`read_only(true)`, `WithReadOnly`, `{ readOnly: true }`,
 `PERSIA_OPEN_READ_ONLY`). Read-only wins when creation is also requested, including the default: that
 combination is not an error, nothing is created, and a missing path fails. The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C
-ABI. Go links it with cgo and a static library by default, and may instead `dlopen` the shared library under
-the `persia_purego` build tag with `CGO_ENABLED=0`. TypeScript calls the safe Rust API through N-API. wazero
+ABI. Go links it with cgo and a static library by default, and may instead dynamically load the shared
+library under the `persia_purego` build tag with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`).
+TypeScript calls the safe Rust API through N-API. wazero
 is not a binding. A later WASM build for browsers and edge isolates is a separate package and is not the
 first release. The design is `docs/sdk/`.
 
