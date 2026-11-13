@@ -23,6 +23,7 @@ A local database is two files (SPEC §4, §9):
 
 - `<name>.persia` — the index container (header and checksummed frames).
 - `<name>.persia.blobs` — a content-addressed pack of client files (PDF, images, video), referenced from documents.
+  It is created by the first blob stored; a copy or backup takes both files (SPEC §4.8).
 
 The engine (index format, analysis, scoring, query execution) is written in this repository.
 [ADR-0001](./adr/0001-own-engine-and-allowed-dependencies.md) records that decision and the closed list of
@@ -129,7 +130,7 @@ Everything in this section is **planned** unless a paragraph says a primitive is
 | Schema and documents | Planned (M3) | SPEC §6 |
 | Analyzers (`standard`, `en`, `es`, `pt`, …) | Planned (M4); milestone is ready to start | SPEC §6.3 |
 | Crash-safe commit and recovery | Planned (M2, M6) | SPEC §4.5, §8.6 |
-| Blob storage | Planned (M9) | SPEC §9 |
+| Blob storage | In progress (M9): hashing, chunking, blob manifest done; pack file, remote layout, GC next | SPEC §9 |
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
@@ -269,17 +270,33 @@ None of this I/O exists yet. The rules above are the contract the storage and en
 
 The index stores a reference, never the file bytes (SPEC §9). A `blob_id` is the SHA-256 of the
 blob (ADR-0002). Persia hashes the bytes it receives; a caller-supplied id that does not match is
-an error. Chunks default to 4 MiB, each with a CRC32C, so uploads can resume and reads can be
-ranged. Blob bytes are stored as the client sent them (SPEC §9.2). The same content stored twice is one blob.
+an error. Chunks default to 4 MiB (64 KiB to 64 MiB), each with a CRC32C, so uploads can resume and
+reads can be ranged. Blob bytes are stored as the client sent them (SPEC §9.2). The same content
+stored twice is one blob.
+
+An upload stages its chunks under a random `upload_id`, never under a `blob_id`. The blob becomes
+addressable only when its blob manifest (the id, size, chunk size, upload id and one CRC32C per
+chunk) is durable, so no chunk is ever reachable under an id it was not verified for (SPEC §9.2,
+ADR-0034; the manifest encoding is SPEC §9.1.1, ADR-0035). The chunk size floor keeps a manifest
+at 4 bytes per 64 KiB of blob (ROADMAP 9.4.4).
 
 Write order is deliberate: the blob is durable first, then the document that references it is
 committed (SPEC §9.5). A crash in between leaves an orphan, which is harmless. Garbage collection
-keeps anything a live manifest still references, and deletes orphans older than a grace period
-(default 24 hours). `verify` must fail if a referenced blob is missing.
+keeps anything a live manifest, snapshot, WAL record or in-flight upload still references, and
+deletes orphans older than a grace period (default 24 hours). The public API attaches a blob to a
+document only through `put(doc, blob)` or a `BlobRef` that `put_blob` returned, so a reference
+always has bytes behind it; `verify` fails on a referenced blob that is missing (SPEC §9.5, §9.6).
 
-How chunks are staged before the hash is known is an open question (SPEC §18.8) and has to be
-decided before the pack-file work (ROADMAP 9.1.0). The `BlobId` and `BlobRef` value types
-exist in `persia-format` (ROADMAP 1.10.1): limits and binary encoding are in SPEC §9.1 and ADR-0011.
+The `.persia.blobs` file is created by the first blob stored, so a database without blobs is one
+file. A database with blobs is both files: copy them with the database closed, or with the writer
+open copy the container first and then the pack. Copying only the `.persia` file leaves every blob
+reference dangling (SPEC §4.8). `Db::backup` will copy both consistently (ROADMAP 10.1.8).
+
+Done so far (ROADMAP 9.1, 9.4.4): the content hasher, the fixed-size chunker and the blob manifest
+codec in `persia-blob`, and the `BlobId` and `BlobRef` value types in `persia-format` (ROADMAP
+1.10.1; their limits and binary encoding are SPEC §9.1 and ADR-0011). The local pack file (9.2),
+the remote layout (9.3), the document integration (9.4) and GC (9.5) are next. The pack's
+durability order and its rewrite under readers are open questions (SPEC §18.9, §18.10).
 
 ## Architecture
 
@@ -324,7 +341,7 @@ Three rules shape the rest of the design:
 | `persia-storage` | `Storage` trait, memory, local file, later S3 / GCS / Azure. | Planned (M2, M12) |
 | `persia-analysis` | Tokenizers, normalizers, stemmers. | Planned (M4); ready to start |
 | `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | Planned (M3, M5–M8) |
-| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | Planned (M9) |
+| `persia-blob` | Content-addressed chunks, dedup, garbage collection. | In progress (M9) |
 | `persia` | The embedded API: `Db` and `Collection`. | Planned (M10) |
 | `persia-proto` | `persia.proto` and committed generated code. | Planned (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Planned (M11, M13) |
@@ -577,8 +594,8 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
-derives the rest, and it is the live status. The table below is the **2026-10-10** snapshot
-(51 / 400 leaves, 13%). No leaf is currently marked `[~]`.
+derives the rest, and it is the live status. The table below is the **2026-11-13** snapshot
+(348 / 541 MVP leaves, 64%; post-MVP milestones are not counted). Two leaves are marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -586,26 +603,25 @@ while a dependency is unfinished.
 
 | Milestone | Delivers | Depends on | Snapshot |
 |---|---|---|---|
-| **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | Done, 26/26 |
-| **M1** Format primitives | Encodings, codecs, header, frames | M0 | In progress, 43/53 |
-| **M2** Storage | `Storage`, memory, local file, container | M1 | Blocked, 0/25 |
-| **M3** Schema | Collections, documents, manifests | M1 | Blocked, 0/15 |
-| **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Ready, 0/22 |
-| **M5** Segments | Segment writer and reader | M1, M3, M4 | Blocked, 0/35 |
-| **M6** Durability | WAL, commit, merge, recovery | M2, M5 | Blocked, 0/29 |
-| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Blocked, 0/29 |
-| **M8** Relaxation | The zero-results cascade | M7 | Blocked, 0/23 |
-| **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | Blocked, 0/19 |
-| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/17 |
-| **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/22 |
-| **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/28 |
+| **M0** Bootstrap | Workspace, CI, tooling, docs scaffolding | — | In progress, 35/36 |
+| **M1** Format primitives | Encodings, codecs, header, frames | M0 | Done, 53/53 |
+| **M2** Storage | `Storage`, memory, local file, container | M1 | Done, 48/48 |
+| **M3** Schema | Collections, documents, manifests | M1 | Done, 15/15 |
+| **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Done, 29/29 |
+| **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
+| **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
+| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | In progress, 49/51 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 17/42 |
+| **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
+| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
+| **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
+| **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/29 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/17 |
-| **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/21 |
+| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/19 |
+| **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/23 |
 
-Block framing (1.5), the container header and superblock (1.6), and frame encode, decode, and scan
-(1.7.1–1.7.4) are done. The next format leaves are the streaming frame encoder (1.7.5), then mmap (1.8).
-Text analysis (M4) may proceed alongside them. The generated ready-next list is in [`PROGRESS.md`](../PROGRESS.md).
+M1 to M5 are done; M0, M6, M7, M8 and M9 are in progress. The generated ready-next list is in
+[`PROGRESS.md`](../PROGRESS.md).
 
 ### M0 — Project bootstrap
 
@@ -682,9 +698,10 @@ gate on the zero-result rate. The embedded `v0.1` release depends on this milest
 
 ### M9 — Blob store
 
-Blocked on M1 and M2. An ADR for upload staging first (SPEC §18.8), then hashing and chunking,
-the local pack file, the remote key layout, ordering a blob write before the document commit, and
-garbage collection that never deletes a blob a live snapshot still references.
+In progress, 5 of 22. Done: the upload staging ADR (ADR-0034, which resolved SPEC §18.8), the content hasher,
+the fixed-size chunker, the blob manifest codec (ADR-0035) and the chunk size floor (9.4.4). Next: the local pack
+file, the remote key layout, ordering a blob write before the document commit, and garbage collection that never
+deletes a blob a live snapshot still references. A `verify` test for dangling references (9.5.6) is added for v1.0.
 
 ### M10 — Embedded API
 

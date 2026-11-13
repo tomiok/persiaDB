@@ -66,6 +66,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-blob` (breaking): `ChunkSize::new` (and `TryFrom<u32>`) rejects a chunk size below `ChunkSize::MIN`,
+  64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2). The floor bounds a
+  blob manifest at 4 bytes per 64 KiB of blob: a chunk size of 1 let a 4 GiB blob need a 16 GiB manifest. It is a
+  writer's rule: the new `ChunkSize::from_encoding` keeps the encodings' `1..=64 MiB`, and `BlobManifest::decode`
+  reads with it, so no stored manifest or `BlobRef` becomes invalid. Maximum (64 MiB) and default (4 MiB) unchanged.
 - `persia-engine`: a step of the relaxation cascade excludes only the latest step built and not cut of a nested level
   (ROADMAP 8.2.2.4; SPEC §7.1.3, §7.6, ADR-0037 item 2), with every step of the other levels. L2's ladder is nested:
   each step matches what the one before matched. The hits are unchanged. An L2 step now counts L0, L1's step and one
