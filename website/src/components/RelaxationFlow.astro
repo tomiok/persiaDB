@@ -1,7 +1,10 @@
 ---
 import AsciiFigure from './AsciiFigure.astro';
+import { loadStatus } from '../status.mjs';
 
 const base = import.meta.env.BASE_URL.replace(/\/$/, '');
+const relaxation = loadStatus().tokens['%%RELAXATION_CELL%%'];
+// Colors follow the wired transforms: L1 Synonyms, L2 DropTerms, L3 Prefix. L4 and L5 are still Pending.
 
 const diagram = `
 ╔═ relaxation ═════════════════════════════════════════════════════╗ 
@@ -36,15 +39,17 @@ const diagram = `
 <AsciiFigure
     label="Zero-results relaxation cascade"
     diagram={diagram}
-    accent={['L0 exact', 'L2 drop terms']}
-    accentAlt={['L5 fallback']}
+    accent={['L0 exact', 'L1 synonyms', 'L2 drop terms', 'L3 prefix']}
+    accentAlt={['L4 fuzzy', 'L5 fallback']}
 >
     The cascade in <a href="https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on">SPEC §7.6</a>.
     Stop at the first level with enough hits. A stricter level ranks above a looser one.
     Filters stay as written unless <code>relax.filters</code> is <code>last_resort</code>.
-    L0 exact and L2 drop terms build queries. The other levels are still the design.
+    {relaxation}
     The full table is in the
     <a href={`${base}/guide/features/#zero-results-relaxation`}>feature reference</a>.
+    <a href={`${base}/guide/synonym-and-prefix-search/`}>Synonym and prefix search</a>
+    is how L1 and L3 expand a query.
     <a href={`${base}/guide/typo-tolerant-search/#query-relaxation`}>Query relaxation</a>,
     <a href={`${base}/guide/typo-tolerant-search/#never-return-an-empty-page`}>zero results</a>,
     and <a href={`${base}/guide/typo-tolerant-search/#how-terms-are-dropped`}>how terms are dropped</a>

@@ -81,7 +81,7 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 | L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: top documents by static rank or recency, or nothing. |
 
-L0 and L2 `drop_terms` are the levels whose transforms build a query. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the orchestrator, [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the ladder, and [how terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the importance order.
+L0 exact, L1 `synonyms`, L2 `drop_terms`, and L3 `prefix` are the levels whose transforms build a query. L4 `fuzzy` and L5 `fallback` do not. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is how L1 and L3 expand a query. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the orchestrator, [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the ladder, and [how terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the importance order.
 
 The response says what happened. This JSON is the shape in SPEC §7.6, including a fuzzy correction the engine does not produce. `Relaxation.corrected` stays empty (ROADMAP 8.2.4.3):
 

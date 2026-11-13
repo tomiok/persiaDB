@@ -80,6 +80,7 @@ database before commit (SPEC §8.2). Commit is the durable manifest. A second wr
 
 Search is BM25F (SPEC §7.2). A query that does not match is specified to relax — synonyms, dropped terms, prefix,
 edit distance, then a fallback — and the response says what changed (SPEC §7.6). %%RELAXATION_CELL%%
+[Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps.
 M10 depends on M8, so the first core release that the bindings can wrap already includes it. The
 bindings do not implement it themselves. Empty hits are still a successful response when relaxation is
 off or the budget runs out. Facets, sort, and cursors on the engine are [Faceted search](/guide/faceted-search/).

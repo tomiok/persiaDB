@@ -30,7 +30,7 @@ products.commit()?;
 let results = products.search("runing")?;
 ```
 
-That `search` call is illustrative. Fuzzy matching is L4 of the relaxation cascade, and it does not build a query. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Faceted search](/guide/faceted-search/).
+That `search` call is illustrative. Fuzzy matching is L4 of the relaxation cascade, and it does not build a query. L1 synonyms and L3 prefix do, inside `persia-engine`. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Synonym and prefix search](/guide/synonym-and-prefix-search/), [Typo-tolerant search](/guide/typo-tolerant-search/), and [Faceted search](/guide/faceted-search/).
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 

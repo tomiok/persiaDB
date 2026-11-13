@@ -66,12 +66,22 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.engineShort, /tombstone sidecars/);
 	assert.match(status.engineShort, /segment merging/);
 	assert.match(status.engineShort, /filter DSL/);
-	assert.match(status.engineShort, /Relaxation is in progress \(M8, \d+\/\d+\): L2 drop_terms builds a query/);
+	assert.match(
+		status.engineShort,
+		/Relaxation is in progress \(M8, \d+\/\d+\): L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
+	);
+	assert.equal(status.engineShort.includes('synonyms are not built'), false);
+	assert.equal(status.engineShort.includes('prefix are not built'), false);
 	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
 	assert.equal(status.libraryNow.includes('exports no API'), false);
+	assert.match(status.relaxationNow, /L1 synonyms/);
 	assert.match(status.relaxationNow, /L2 drop_terms/);
+	assert.match(status.relaxationNow, /L3 prefix/);
+	assert.match(status.relaxationNow, /QueryLimits can cut or skip that step/);
 	assert.match(status.relaxationNow, /A typo is not corrected/);
 	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
+	assert.equal(status.relaxationNow.includes('A one-term typo still returns no hits'), false);
+	assert.equal(status.relaxationNow.includes('synonyms are not built'), false);
 	assert.match(status.blobNow, /The pack file, remote blobs, document integration, and garbage collection are not written/);
 	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
 	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
@@ -97,13 +107,20 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.pillarEngine, /BM25F scoring and a collection search are in the tree/);
 	assert.match(status.pillarEngine, /no search call on the database handle/);
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
-	assert.match(status.tokens['%%FEATURES_LEAD%%'], /L2 drop_terms can match fewer terms, and a typo is not corrected/);
+	assert.match(
+		status.tokens['%%FEATURES_LEAD%%'],
+		/L1 synonyms, L2 drop_terms, and L3 prefix can loosen a query, and a typo is not corrected/,
+	);
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
 		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
 	);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /L0 exact and L2 drop_terms build queries/);
+	assert.match(
+		status.tokens['%%RELAXATION_CELL%%'],
+		/L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
+	);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Fuzzy and the fallback are not built/);
 	assert.match(status.tokens['%%RELAXATION_CELL%%'], /A typo is not corrected/);
 	assert.match(status.tokens['%%RELAXATION_NOW%%'], /search_relaxed/);
 	assert.match(status.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
@@ -353,6 +370,8 @@ function currentInput(leaves) {
 		hasCollectionSearch: true,
 		hasRelaxSearch: true,
 		hasDropTerms: true,
+		hasSynonyms: true,
+		hasPrefix: true,
 		hasDeadline: true,
 		hasExplain: true,
 		analyzers: ['de', 'en'],
@@ -384,6 +403,30 @@ test('drop_terms marked done without its transform is rejected', () => {
 	const input = currentInput(live);
 	input.hasDropTerms = false;
 	assert.throws(() => buildStatus(input), /marks drop_terms done but the matching code is not in the tree/);
+});
+
+test('unchecked synonym and prefix leaves stay unclaimed', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	live.set('8.2.1', false);
+	live.set('8.2.3', false);
+	const next = buildStatus(currentInput(live));
+	assert.match(next.tokens['%%RELAXATION_CELL%%'], /L0 exact and L2 drop_terms build queries/);
+	assert.match(next.tokens['%%RELAXATION_CELL%%'], /Synonyms, prefix, fuzzy, and the fallback are not built/);
+	assert.match(next.relaxationNow, /A one-term typo still returns no hits/);
+});
+
+test('synonyms marked done without its transform is rejected', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	const input = currentInput(live);
+	input.hasSynonyms = false;
+	assert.throws(() => buildStatus(input), /marks synonyms done but the matching code is not in the tree/);
+});
+
+test('prefix marked done without its transform is rejected', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	const input = currentInput(live);
+	input.hasPrefix = false;
+	assert.throws(() => buildStatus(input), /marks prefix done but the matching code is not in the tree/);
 });
 
 test('relaxation marked done without search_relaxed is rejected', () => {

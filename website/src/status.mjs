@@ -139,6 +139,8 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasCollectionSearch The engine's CollectionViews::search, over a collection snapshot.
  * @property {boolean} hasRelaxSearch CollectionViews::search_relaxed, the cascade orchestrator.
  * @property {boolean} hasDropTerms L2 wired to its transform (not the pending stub).
+ * @property {boolean} hasSynonyms L1 wired to its transform (not the pending stub).
+ * @property {boolean} hasPrefix L3 wired to its transform (not the pending stub).
  * @property {boolean} hasDeadline Execution::deadline, a search deadline.
  * @property {boolean} hasExplain SearchRequest.explain and the Explanation tree.
  * @property {string[]} analyzers
@@ -360,8 +362,8 @@ function areNotBuilt(items) {
 
 /**
  * Plan and orchestrator versus the levels that loosen a query.
- * L0 always runs. L2 drop_terms builds a query once its three leaves are checked and the transform is wired.
- * Synonyms, prefix, fuzzy, and the fallback stay unclaimed until their representative leaf is checked.
+ * L0 always runs. A later level is claimed only when its representative leaf is checked and its transform is wired:
+ * L1 synonyms, L2 drop_terms (its three leaves), L3 prefix. Fuzzy and the fallback stay unclaimed until theirs are.
  * @param {StatusInput} ctx
  * @param {Milestone} m8
  */
@@ -369,10 +371,21 @@ function relaxationFacts(ctx, m8) {
 	const count = `${m8.done}/${m8.leaves}`;
 	const framework = requireDone(ctx, RELAX_FRAMEWORK, ctx.hasRelaxSearch, 'relaxation');
 	const drop = requireDone(ctx, RELAX_DROP, ctx.hasDropTerms, 'drop_terms');
+	const synonyms = requireDone(ctx, ['8.2.1'], ctx.hasSynonyms, 'synonyms');
+	const prefix = requireDone(ctx, ['8.2.3'], ctx.hasPrefix, 'prefix');
+	const synonymsBuild = synonyms === 'done' && ctx.hasSynonyms;
+	const prefixBuild = prefix === 'done' && ctx.hasPrefix;
+	const dropBuild = drop === 'done' && ctx.hasDropTerms;
+	/** @type {string[]} */
+	const built = ['L0 exact'];
+	if (synonymsBuild) built.push('L1 synonyms');
+	if (dropBuild) built.push('L2 drop_terms');
+	if (prefixBuild) built.push('L3 prefix');
+	const builtPhrase = `${englishList(built)} build queries`;
 	const levels = groupState(ctx.leaves, RELAX_LEVELS);
 	const exactOnly = framework === 'done' && levels === 'todo' && drop === 'todo' && ctx.hasRelaxSearch;
 	const levelsDone = m8.state === 'done' && levels === 'done' && ctx.hasRelaxSearch;
-	const dropBuilds = framework === 'done' && drop === 'done' && ctx.hasDropTerms && levels !== 'done';
+	const partial = framework === 'done' && ctx.hasRelaxSearch && levels !== 'done' && built.length > 1;
 	const unstarted = m8.done === 0 && m8.state !== 'in progress' && framework === 'todo' && drop === 'todo' && levels === 'todo';
 	/** @type {string[]} */
 	const missing = RELAX_STILL.filter(([id]) => groupState(ctx.leaves, [id]) !== 'done').map(([, name]) => name);
@@ -391,14 +404,32 @@ function relaxationFacts(ctx, m8) {
 		cell = `In progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
 		now = `Relaxation is in progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
 		gap = `Relaxation is in progress (${m8.id}, ${count}): every cascade level builds a query.`;
-	} else if (dropBuilds && missing.length > 0) {
+	} else if (partial && missing.length > 0) {
 		const still = areNotBuilt(missing);
 		const typo = typoOpen ? ' A typo is not corrected.' : '';
-		const oneTerm = typoOpen && missing.includes('the fallback') ? ' A one-term typo still returns no hits.' : '';
+		// L3 can match a one-term query whose analyzed form is a prefix. That sentence is only true while prefix does not build.
+		const oneTerm = typoOpen && !prefixBuild && missing.includes('the fallback') ? ' A one-term typo still returns no hits.' : '';
 		const corrected = groupState(ctx.leaves, ['8.2.4.3']) !== 'done' ? ' Corrected terms stay empty.' : '';
-		cell = `In progress (${m8.id}, ${count}). L0 exact and L2 drop_terms build queries. ${capitalize(still)}.${typo}`;
-		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code, and so are BoolQuery minimum_should_match and L2 drop_terms: terms drop least important first (a stopword, then a lower IDF, then a later position), the ladder is 75%, 50%, then one term, and a query of one term skips the level. ${capitalize(still)}.${corrected}${typo} A query of two or more terms can match fewer of them.${oneTerm}`;
-		gap = `Relaxation is in progress (${m8.id}, ${count}): L2 drop_terms builds a query, and ${still}.`;
+		/** @type {string[]} */
+		const details = [];
+		if (synonymsBuild) {
+			details.push('L1 expands synonym runs as alternatives, and QueryLimits can cut or skip that step');
+		}
+		if (dropBuild) {
+			details.push(
+				'L2 drops terms least important first (a stopword, then a lower IDF, then a later position); the ladder is 75%, 50%, then one term, and a query of one term skips L2',
+			);
+		}
+		if (prefixBuild) {
+			details.push(
+				'L3 prefix-expands the last analyzed term and other analyzed terms of at least 3 characters, at most 50 terms kept by collection df, and QueryLimits can cut or skip that step',
+			);
+		}
+		const detail = details.length > 0 ? `${details.join('. ')}. ` : '';
+		const fewer = dropBuild ? ' A query of two or more terms can match fewer of them.' : '';
+		cell = `In progress (${m8.id}, ${count}). ${capitalize(builtPhrase)}. ${capitalize(still)}.${typo}`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code. ${capitalize(builtPhrase)}. ${detail}${capitalize(still)}.${corrected}${typo}${fewer}${oneTerm}`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}): ${builtPhrase}, and ${still}.`;
 	} else if (exactOnly) {
 		cell = `In progress (${m8.id}, ${count}). The orchestrator runs, and only the exact level builds a query, so a typo still returns no hits.`;
 		now = `Relaxation is in progress (${m8.id}, ${count}). RelaxPlan, CollectionViews::search_relaxed, step-first ranking, the time budget, and the response metadata are library code. Levels after exact do not build a query, so a search that matches nothing still returns no hits. Synonyms, dropped terms, prefix and fuzzy as cascade steps, the fallback, and corrected terms are not written.`;
@@ -412,10 +443,11 @@ function relaxationFacts(ctx, m8) {
 		now = `Relaxation is in progress (${m8.id}, ${count}). Not every cascade level builds a query.`;
 		gap = `Relaxation is in progress (${m8.id}, ${count}).`;
 	}
+	const later = englishList(built.slice(1));
 	const lead = levelsDone
 		? ''
-		: dropBuilds && missing.length > 0
-			? `Relaxation is in progress (${m8.id}, ${count}): L2 drop_terms can match fewer terms${typoOpen ? ', and a typo is not corrected' : ''}.`
+		: partial && missing.length > 0
+			? `Relaxation is in progress (${m8.id}, ${count}): ${later} can loosen a query${typoOpen ? ', and a typo is not corrected' : ''}.`
 			: exactOnly
 				? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
 				: unstarted
@@ -883,6 +915,8 @@ function readInput() {
 		),
 		hasRelaxSearch: implHasMethod(relaxedRs, 'CollectionViews', 'search_relaxed'),
 		hasDropTerms: /RelaxLevel::DropTerms => Arc::new\(drop_terms::DropTerms\)/.test(relaxRs),
+		hasSynonyms: /RelaxLevel::Synonyms => Arc::new\(synonyms::Synonyms\)/.test(relaxRs),
+		hasPrefix: /RelaxLevel::Prefix => Arc::new\(prefix::Prefix\)/.test(relaxRs),
 		hasDeadline: implHasMethod(execRs, 'Execution', 'deadline'),
 		hasExplain: /pub explain: bool/.test(searchRs) && /pub enum Explanation\b/.test(explainRs),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),

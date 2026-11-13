@@ -100,7 +100,10 @@ test('figure captions follow the same snapshot', () => {
 	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
 	assert.match(queryPathCaption(parsed), /The query milestone is in progress \(M7/);
-	assert.match(queryPathCaption(parsed), /L2 drop_terms builds a query/);
+	assert.match(
+		queryPathCaption(parsed),
+		/L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
+	);
 	assert.equal(queryPathCaption(parsed).includes('not started (M8)'), false);
 	assert.match(storageDiagramCaption(parsed), /Block framing is done \(M1,/);
 	assert.match(storageDiagramCaption(parsed), /S3, GCS, and Azure are not started \(M12\)/);

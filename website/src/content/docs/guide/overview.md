@@ -32,7 +32,7 @@ A longer definition of the embedded library — in your process, one file, no se
 [What is an embedded search database?](/guide/embedded-search/).
 Where the design sits next to SQLite FTS5, Tantivy, and Meilisearch is
 [Comparison](/guide/comparison/). That page is not a benchmark. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
-How a typo is supposed to avoid an empty page is [Typo-tolerant search](/guide/typo-tolerant-search/).
+How a query with too few hits is loosened is [Typo-tolerant search](/guide/typo-tolerant-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 Filters, facets, sort, and paging are [Faceted search](/guide/faceted-search/).
 Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 

@@ -51,7 +51,7 @@ head:
             "name": "Can a search set a deadline?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Yes. Execution::deadline stops the search once a clock passes an instant, and a CancelToken cancels it. That is separate from the relaxation budget, which starts after the exact level. L2 drop_terms can spend that budget. Synonyms, prefix, fuzzy, and the fallback do not build a query. %%RELAXATION_CELL%%"
+              "text": "Yes. Execution::deadline stops the search once a clock passes an instant, and a CancelToken cancels it. That is separate from the relaxation budget, which starts after the exact level. L1 synonyms, L2 drop_terms, and L3 prefix can spend that budget. Fuzzy and the fallback do not build a query. %%RELAXATION_CELL%%"
             }
           },
           {
@@ -80,7 +80,7 @@ Faceted search here means a ranked page plus counts of the keyword values those 
 
 A filter is not part of the score. The DSL is `term`, `terms`, `range`, `exists`, `and`, `or`, and `not` (SPEC §7.1.2). `Filter::from_json` parses them and checks them against the schema. A bad filter is an error. User text is not: the compiler degrades bad syntax to plain terms.
 
-Evaluation is library code (ROADMAP 7.4.5). A `bool` keeps a bitmap of the documents that pass, per segment or memtable view, and the matcher stays inside it. Deleted documents are already left out of the view. Filters stay strict when a query has too few hits, unless the caller sets `relax.filters` to `last_resort`. That opt-in does not run (ROADMAP 8.2.6). L2 `drop_terms` copies the filter onto every step it builds. %%RELAXATION_NOW%% [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is that step.
+Evaluation is library code (ROADMAP 7.4.5). A `bool` keeps a bitmap of the documents that pass, per segment or memtable view, and the matcher stays inside it. Deleted documents are already left out of the view. Filters stay strict when a query has too few hits, unless the caller sets `relax.filters` to `last_resort`. That opt-in does not run (ROADMAP 8.2.6). L1 synonyms, L2 `drop_terms`, and L3 prefix keep the filter on the step they build. A request filter joins a compiled query at its root (ROADMAP 8.1.17). %%RELAXATION_NOW%% [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the L2 step. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is L1 and L3.
 
 ## Facets
 
@@ -90,7 +90,7 @@ Each facet counts live matching documents that hold the value, once per distinct
 
 With a facet, every match is visited. Without one, a score sort may skip documents that cannot enter the page (SPEC §7.3, §7.4).
 
-`CollectionViews::search_relaxed` counts the matches of every cascade step it built, each document once, at its first step. SPEC §7.5 marks that as an interim rule (ROADMAP 8.1.9). L0 and L2 `drop_terms` are the steps that build a query, so a loosened page can count matches the exact query does not have. Which of those counts a facet should keep is still open.
+`CollectionViews::search_relaxed` counts the matches of every cascade step it built, each document once, at its first step. SPEC §7.5 marks that as an interim rule (ROADMAP 8.1.9). L0, L1 synonyms, L2 `drop_terms`, and L3 prefix are the steps that build a query, so a loosened page can count matches the exact query does not have. Which of those counts a facet should keep is still open.
 
 ## Sort
 
@@ -153,7 +153,7 @@ let next = SearchRequest {
 
 `CollectionViews::search_with` takes an `Execution` (SPEC §7.3, ROADMAP 7.6). `Execution::deadline` stops the search with `Interrupt::DeadlineExceeded` once the clock reads the instant or later. `Execution::cancel` stops it with `Interrupt::Cancelled` once the token is cancelled. The check runs before each view, every 256 matches of a view, and every 1,024 steps of its readers (postings, terms, columns). The error is `RequestError::Interrupted`, before the page's documents are read. The default execution has neither a deadline nor a token, and it prunes on the global thread pool. The merged page does not depend on which view finishes first.
 
-That deadline is not the relaxation budget. `budget_ms` (default 50) is read after the exact level finishes, so the exact level is never cut by it (SPEC §7.6, ROADMAP 8.1.4). The request deadline still applies to every step, including exact. L2 `drop_terms` can spend the budget on a looser query. Synonyms, prefix, fuzzy, and the fallback build no step, so they do not. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the budget.
+That deadline is not the relaxation budget. `budget_ms` (default 50) is read after the exact level finishes, so the exact level is never cut by it (SPEC §7.6, ROADMAP 8.1.4). The request deadline still applies to every step, including exact. L1 synonyms, L2 `drop_terms`, and L3 prefix can spend the budget on a looser query. Fuzzy and the fallback build no step, so they do not. [Query relaxation](/guide/typo-tolerant-search/#query-relaxation) is the budget.
 
 ## Explain
 
@@ -161,7 +161,7 @@ That deadline is not the relaxation budget. `budget_ms` (default 50) is read aft
 
 Explain covers the page's hits only, one pass per view. It costs about one unpruned search of each view that holds a hit on the page. A deadline is read during that pass too.
 
-Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). Which relaxation level a hit matched joins the explanation later (ROADMAP 8.3.4). A hit of `search_relaxed` already states its level on `RelaxedHit.level`. That level is `exact` or `drop_terms` until the other levels build a query.
+Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). Which relaxation level a hit matched joins the explanation later (ROADMAP 8.3.4). A hit of `search_relaxed` already states its level on `RelaxedHit.level`. That level is `exact`, `synonyms`, `drop_terms`, or `prefix` until fuzzy and the fallback build a query.
 
 ## What is still planned
 
@@ -191,7 +191,7 @@ The default sort is score descending, then segment order with the memtable last,
 
 ### Can a search set a deadline?
 
-Yes. `Execution::deadline` stops the search once a clock passes an instant, and a `CancelToken` cancels it. That is separate from the relaxation budget, which starts after the exact level. L2 `drop_terms` can spend that budget. Synonyms, prefix, fuzzy, and the fallback do not build a query. %%RELAXATION_CELL%%
+Yes. `Execution::deadline` stops the search once a clock passes an instant, and a `CancelToken` cancels it. That is separate from the relaxation budget, which starts after the exact level. L1 synonyms, L2 `drop_terms`, and L3 prefix can spend that budget. Fuzzy and the fallback do not build a query. %%RELAXATION_CELL%%
 
 ### Does explain return highlighted snippets?
 
@@ -200,6 +200,7 @@ No. `explain: true` returns a per-hit score tree for the hits on the page. Highl
 ## Read next
 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, the empty-page rule, `minimum_should_match`, and how terms are dropped.
+- [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion. Filters stay on both steps.
 - [Feature reference](/guide/features/) — the status table, the schema sketch, and the relaxation levels.
 - [Features](/features/) — the short status table.
 - [Getting started](/guide/getting-started/) — crates you can call, and the `Db` API that is still illustrative.

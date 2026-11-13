@@ -75,8 +75,9 @@ Integer codecs (`delta`, `bitpack`, `postings`, `for_codec`), varints, zigzag, a
 bounds-checked `Reader` / `Writer` live in those modules. They are library primitives. Segment
 writers in `persia-engine` use them (M5). A ranked search over a collection snapshot is library code in `persia-engine` (`CollectionViews::search`).
 The query compiler, the filter DSL, and the BM25F scorer are (ROADMAP 7.1–7.3). See
-[Faceted search](/guide/faceted-search/) and
-[Typo-tolerant search](/guide/typo-tolerant-search/).
+[Faceted search](/guide/faceted-search/),
+[Typo-tolerant search](/guide/typo-tolerant-search/), and
+[Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
 ## Checksums
 

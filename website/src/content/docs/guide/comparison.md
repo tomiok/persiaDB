@@ -96,6 +96,7 @@ The mechanisms differ. Meilisearch's default is typo tolerance on the terms it s
 Persia DB's specified default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
 with the response naming the step (SPEC §7.6). %%RELAXATION_CELL%%
 [Typo-tolerant search](/guide/typo-tolerant-search/) is which of those levels run, and how a multi-term query drops terms.
+[Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps. Fuzzy matching and the fallback are still designed.
 [Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option
@@ -122,7 +123,8 @@ For a search feature in production today, use one of the established tools. Pers
 
 ## Read next
 
-- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, zero results, `minimum_should_match`, and fuzzy matching that is still designed.
+- [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, zero results, and `minimum_should_match`. Fuzzy matching and the fallback are still designed.
+- [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion, as library code.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.
