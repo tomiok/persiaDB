@@ -1423,9 +1423,10 @@ positive. The weight is not given a floor: any finite `w_f` in `(0, 1000]` is le
 - Per segment: build term iterators → boolean combination → collect top-k with **block-max WAND** (or `MaxScore`).
   Pruning never changes results: a document is skipped only when an upper bound of its score, summed in the same
   (query) order as the score with each clause's bound in its place (a term's or a block's `max_tf` and `min_norm`,
-  §7.2), is at most the score of the `k`-th hit kept. Floating-point addition is monotonic, so such a bound holds
-  exactly. Hits rank by score descending, then docid ascending, and a view is walked in docid order, so a document
-  scoring at most that loses to every hit kept. Pruned and exhaustive top-k are the same hits, scores bit for bit.
+  §7.2), is at most the score of the `k`-th hit kept (strictly below it for a sort led by the score with further keys,
+  §7.4). Floating-point addition is monotonic, so such a bound holds exactly. Hits rank by score descending, then
+  docid ascending, and a view is walked in docid order, so a document scoring at most that loses to every hit kept.
+  Pruned and exhaustive top-k are the same hits, scores bit for bit.
   A threshold on the whole score reaches a `term`, the `should` clauses of a `bool` without `must` (a filter scores 0,
   so with filters too), the `must` clause of a `bool` with one and no `should` (a filter scores 0, so with filters
   too), and what `must_not` and `boost` wrap. A `bool` with several `must` clauses, or with `should` clauses beside

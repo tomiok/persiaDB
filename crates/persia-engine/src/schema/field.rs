@@ -337,7 +337,7 @@ mod tests {
         assert_ne!(pinned, pinned.at_unchecked(2));
     }
 
-    /// SPEC §6.2's defaults of a `text` field. The nDCG gate (ROADMAP 7.8.4) ranks by them but sees only a change
+    /// SPEC §6.2.2's defaults of a `text` field. The nDCG gate (ROADMAP 7.8.4) ranks by them but sees only a change
     /// that reorders a judged top 10: a `k1` of 1.3 moves none (found by its mutation check).
     #[test]
     fn text_defaults_are_the_specs() {

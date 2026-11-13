@@ -167,6 +167,11 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
             // The response states the user text, and at L0 the text of the clauses that compiled (SPEC §7.6).
             assert_eq!(relaxed.relaxation.original.as_deref(), Some(q));
             assert_eq!(relaxed.relaxation.effective, Some(text.effective()));
+            // The relaxed search plans with the default too: its cursors record no proximity (SPEC §7.4).
+            assert!(
+                relaxed.hits.iter().all(|h| !h.hit.cursor().proximity),
+                "{q:?} relaxed with proximity"
+            );
             let relaxed: Vec<&str> = relaxed.hits.iter().map(|h| h.hit.document.id()).collect();
             assert_eq!(relaxed, ranked, "{q:?}");
             let judged = j["grades"]

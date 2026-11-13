@@ -19,9 +19,10 @@
 //!    8.1.2, 8.2.2): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses, each
 //!    step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as a plain
 //!    search, when it has `min_results` hits.
-//! 6. A sort led by the score with a later key on the `n` column (both orders, both `missing` placements) ranks as
-//!    the score order re-sorted, among exact score ties, by the reference's `n` values, then location: every strategy
-//!    and thread, and pages walked by cursor across ties (ROADMAP 7.4.11; SPEC §7.4).
+//! 6. A sort led by the score with a later key on the `n` column (both orders and `missing` placements, with the
+//!    proximity bonus and without) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
+//!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
+//!    the one after its cursor (ROADMAP 7.4.11; SPEC §7.4).
 
 #![allow(
     clippy::unwrap_used,
@@ -755,7 +756,13 @@ fn check(
             }
         }
 
-        check_score_then_column(&views, &plan, &full, &live, (schema, fields[3]), case.k)?;
+        check_score_then_column(
+            &views,
+            [(&plan, &full), (&off, &no_bonus)],
+            &live,
+            (schema, fields[3]),
+            case.k,
+        )?;
 
         // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
         // would also build a step for one programmatic term: ROADMAP 8.1.19), a search returns each step's matches the
@@ -899,21 +906,24 @@ fn check(
 }
 
 /// Invariant 6: a sort led by the score with a later key on the `n` column (ROADMAP 7.4.11; SPEC §7.4), both orders
-/// and `missing` placements, ranks as the reference does: `full` (the score order, its scores the reference's within
-/// the tolerance) re-sorted, among hits tied bit for bit on the score, by the reference's own `n` values, then
-/// location. Every strategy and thread returns that order, scores bit for bit, and so do pages of `k` walked
-/// by cursor, a page boundary falling inside a tie group (the vocabulary and `n` are small, so ties are common).
+/// and `missing` placements, ranks as the reference does: a plan's whole score order (its scores the reference's
+/// within the tolerance) re-sorted, among hits tied bit for bit on the score, by the reference's own `n` values, then
+/// location. On the calling thread every strategy returns that order, scores bit for bit, and so do pages of `k`
+/// walked by cursor, a page boundary falling inside a tie group (the vocabulary and `n` are small, so ties are
+/// common). On the pool, where only a page smaller than the matches gives the views a threshold to share, the first
+/// page of `k` and the page after its cursor are slices of it. One sort runs with proximity, the other with the
+/// default plan (each `(plan, order)` pair).
 fn check_score_then_column(
     views: &CollectionViews<'_>,
-    plan: &SearchPlan,
-    full: &[SearchHit],
+    plans: [(&SearchPlan, &[SearchHit]); 2],
     live: &BTreeMap<String, Values>,
     (schema, n): (&CollectionSchema, FieldId),
     k: usize,
 ) -> Result<(), TestCaseError> {
-    // Both orders and both `missing` placements, in two sorts (each sort costs a whole search and a cursor walk per
-    // strategy).
-    for (order, missing) in [(Order::Desc, Missing::Last), (Order::Asc, Missing::First)] {
+    // Both orders and both `missing` placements in two sorts: each costs a whole search, a cursor walk and two pages
+    // per strategy.
+    let sorts = [(Order::Desc, Missing::Last), (Order::Asc, Missing::First)];
+    for ((plan, full), (order, missing)) in plans.into_iter().zip(sorts) {
         let later = SortKey::Field {
             field: n,
             order,
@@ -933,57 +943,62 @@ fn check_score_then_column(
                 .then_with(|| rank(a).cmp(&rank(b)))
         });
         let sort = Sort::new([SortKey::score(), later], schema).unwrap();
+        let what = (order, missing, plan.proximity());
         for pruning in STRATEGIES {
-            // The cursor walk on the calling thread only: the pool already returns the whole order.
-            for (threads, walk) in [(Threads::Current, true), (Threads::Global, false)] {
-                let exec = Execution::new(pruning).threads(threads);
-                let whole = SearchRequest {
-                    sort: sort.clone(),
-                    limit: full.len().max(1),
-                    ..SearchRequest::default()
+            let exec = Execution::new(pruning).threads(Threads::Current);
+            let whole = SearchRequest {
+                sort: sort.clone(),
+                limit: full.len().max(1),
+                ..SearchRequest::default()
+            };
+            let got = views.search_with(plan, &whole, &exec).unwrap().hits;
+            prop_assert_eq!(bits(&got), bits(&want), "{:?} {:?}", what, pruning);
+            for h in &got {
+                let key = live[h.document.id()].n.map_or(SortValue::Missing, |v| {
+                    SortValue::Key(persia_format::for_codec::i64_to_key(v))
+                });
+                prop_assert_eq!(&h.sort[1], &key);
+            }
+            let page = |after: Option<persia_engine::db::Cursor>| SearchRequest {
+                sort: sort.clone(),
+                limit: k,
+                search_after: after,
+                ..SearchRequest::default()
+            };
+            let mut seen: Vec<SearchHit> = Vec::new();
+            let mut after = None;
+            loop {
+                let hits = views.search_with(plan, &page(after), &exec).unwrap().hits;
+                let Some(last) = hits.last() else {
+                    break;
                 };
-                let got = views.search_with(plan, &whole, &exec).unwrap().hits;
+                after = Some(last.cursor());
+                seen.extend(hits);
+                prop_assert!(seen.len() <= want.len(), "pages repeat hits");
+            }
+            prop_assert_eq!(
+                bits(&seen),
+                bits(&want),
+                "pages of {}, {:?} {:?}",
+                k,
+                what,
+                pruning
+            );
+            // On the pool: a page of `k`, then the page after its last cursor.
+            let pool = Execution::new(pruning).threads(Threads::Global);
+            let first = views.search_with(plan, &page(None), &pool).unwrap().hits;
+            prop_assert_eq!(&bits(&first)[..], &bits(&want)[..k.min(want.len())]);
+            if let Some(last) = first.last() {
+                let second = views
+                    .search_with(plan, &page(Some(last.cursor())), &pool)
+                    .unwrap()
+                    .hits;
+                let end = (first.len() + k).min(want.len());
                 prop_assert_eq!(
-                    bits(&got),
-                    bits(&want),
-                    "{:?} {:?} {:?}",
-                    order,
-                    missing,
-                    pruning
-                );
-                for h in &got {
-                    let key = live[h.document.id()].n.map_or(SortValue::Missing, |v| {
-                        SortValue::Key(persia_format::for_codec::i64_to_key(v))
-                    });
-                    prop_assert_eq!(&h.sort[1], &key);
-                }
-                if !walk {
-                    continue;
-                }
-                let mut seen: Vec<SearchHit> = Vec::new();
-                let mut after = None;
-                loop {
-                    let page = SearchRequest {
-                        sort: sort.clone(),
-                        limit: k,
-                        search_after: after,
-                        ..SearchRequest::default()
-                    };
-                    let hits = views.search_with(plan, &page, &exec).unwrap().hits;
-                    let Some(last) = hits.last() else {
-                        break;
-                    };
-                    after = Some(last.cursor());
-                    seen.extend(hits);
-                    prop_assert!(seen.len() <= want.len(), "pages repeat hits");
-                }
-                prop_assert_eq!(
-                    bits(&seen),
-                    bits(&want),
-                    "pages of {}, {:?} {:?} {:?}",
-                    k,
-                    order,
-                    missing,
+                    bits(&second),
+                    bits(&want[first.len()..end]),
+                    "pool, {:?} {:?}",
+                    what,
                     pruning
                 );
             }
