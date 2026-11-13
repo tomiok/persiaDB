@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **348 of 541** MVP leaves done (64%), 2 in progress (last snapshot 2026-11-13). Post-MVP work is 0 of 179 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **350 of 541** MVP leaves done (65%), 0 in progress (last snapshot 2026-11-13). Post-MVP work is 0 of 179 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -226,7 +226,7 @@ flowchart TD
 | `persia-format` | Encodings, frames, header, superblock, checksums, compression, mmap. No I/O policy. | Implemented. |
 | `persia-storage` | `Storage`, memory, local files, the single-file container, crash-test faults. | Implemented. S3, GCS, and Azure Blob are M12. |
 | `persia-analysis` | Tokenizers, normalizers, stemmers, the analyzer registry. No internal dependencies. | Implemented. |
-| `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 and M7 still in progress. Relaxation is M8. |
+| `persia-engine` | Schema, documents, manifests, segments, memtable, WAL, commit, recovery, merges, query compilation, BM25F, and search. Synchronous. I/O only through `Storage`. | Implemented as library code, M6 still in progress (M7 done). Relaxation is M8. |
 | `persia-cli` | The `persia` binary. | Inspect, dump, file sweep, and `verify`. See [CLI](#cli). |
 | `persia` | The embedded facade: `Db`, `Collection`. | Placeholder for M10: the dependency edges, no types. |
 | `persia-blob` | Content-addressed chunks, dedup, GC. | Core model implemented: content hash, fixed-size chunker, blob manifest encoding. The pack file, remote layout, `put_blob`/`get_blob` and GC are still in progress in M9. |
@@ -248,7 +248,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M4** Text analysis | ✅ done | 29/29 |
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
-| **M7** Query engine & ranking | 🔨 in progress | 49/51 |
+| **M7** Query engine & ranking | ✅ done | 51/51 |
 | **M8** Zero-results avoidance | 🔨 in progress | 17/42 |
 | **M9** Blob store | 🔨 in progress | 5/22 |
 | **M10** Embedded API | ⏳ blocked | 0/21 |

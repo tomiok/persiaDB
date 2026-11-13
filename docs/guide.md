@@ -43,7 +43,7 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
   built-in analyzers (SPEC §6.3).
 - `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
   the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
-  BM25F, top-k, filters, sort, facets, pages, and explain (M7, 49 of 51); and the relaxation cascade with
+  BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
   levels L1–L3 (M8, 17 of 42).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
@@ -128,7 +128,7 @@ crates under `persia`. The public API that wraps it is M10, so you cannot call t
 | Capability | Status | Defined in |
 |---|---|---|
 | Open a file and search | Planned (M10); `persia-engine` opens, writes, and searches as library code (M6, M7) | SPEC §8, §10.2 |
-| Full-text search, filters, facets, sort | In progress (M7): done except a configurable tie-break (7.4.11) and an nDCG@10 gate (7.8.4) | SPEC §7 |
+| Full-text search, filters, facets, sort | Done as library code (M7), including a tie-break after the score (`["score", {"field": ...}]`, pruned) and an nDCG@10 gate in CI; public through `Db` in M10 | SPEC §7 |
 | Zero-results relaxation | In progress (M8): the cascade and L1–L3 done; L4 fuzzy, L5 fallback, request options next | SPEC §7.6 |
 | Schema and documents | Done (M3) | SPEC §6 |
 | Analyzers (`standard`, `en`, `es`, `pt`, …) | Done (M4) | SPEC §6.3 |
@@ -623,7 +623,7 @@ while a dependency is unfinished.
 | **M4** Text analysis | Tokenizers, stemmers, analyzers | M0 | Done, 29/29 |
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
 | **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
-| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | In progress, 49/51 |
+| **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Done, 51/51 |
 | **M8** Relaxation | The zero-results cascade | M7 | In progress, 17/42 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
 | **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
@@ -633,7 +633,7 @@ while a dependency is unfinished.
 | **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/19 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/23 |
 
-M1 to M5 are done; M0, M6, M7, M8 and M9 are in progress. The generated ready-next list is in
+M1 to M5 and M7 are done; M0, M6, M8 and M9 are in progress. The generated ready-next list is in
 [`PROGRESS.md`](../PROGRESS.md).
 
 ### M0 — Project bootstrap
@@ -694,12 +694,13 @@ merge throughput (6.5.6, 6.5.7), refreshing a read-only database in place (6.6.6
 
 ### M7 — Query engine and ranking
 
-In progress (49 of 51). Depends on M5; end-to-end tests also need M6. Done: the query AST and a parser
+Done (51 of 51). Depends on M5; end-to-end tests also need M6. The query AST and a parser
 that does not fail on messy user text, collection statistics, BM25F checked against hand-computed examples
 and the reference scorer, term proximity off by default (7.3.5), boolean and phrase matching, top-k with
 block-max WAND, filters, sort, pagination, facets, parallel segment search, explain, and an nDCG@10
-baseline (7.8.2). In progress: a configurable tie-break (7.4.11) and an nDCG@10 regression gate in CI
-(7.8.4). Benchmarks of this milestone may start the v1 performance work early (M15).
+baseline (7.8.2) with a regression gate in CI (7.8.4), and a tie-break after the score that prunes too
+(7.4.11; a collection-level default is 32.5.1, v1.1). Benchmarks of this milestone may start the v1
+performance work early (M15).
 
 ### M8 — Zero-results avoidance
 
