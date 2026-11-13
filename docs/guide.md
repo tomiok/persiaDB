@@ -342,7 +342,7 @@ path) and stays the place for that detail.
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
       ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (SPEC §13.2)
-      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
+      ▲ embedded bindings (Go via cgo by default, or purego; TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
 ```
 
 Three rules shape the rest of the design:

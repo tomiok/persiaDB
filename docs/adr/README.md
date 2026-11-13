@@ -40,7 +40,7 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0015](./0015-header-never-rewritten-in-place.md) | The header page is never rewritten in place; `format_minor` is recorded by rewrites | accepted |
 | [0016](./0016-windows-behavior-and-platform-durability.md) | Windows behavior and platform durability | accepted (amended by 0021) |
 | [0017](./0017-mapped-container-reads.md) | Mapped container reads: an opt-in window over the committed frames | proposed (amended by 0021) |
-| [0018](./0018-embedded-sdk-bindings.md) | Embedded Go and TypeScript bindings share one C ABI | proposed |
+| [0018](./0018-embedded-sdk-bindings.md) | Embedded Go and TypeScript bindings share one C ABI | proposed (amended 2026-11-13: optional `persia_purego` tag) |
 | [0019](./0019-sweeping-temporary-files.md) | Stale temporary files are swept under their lock, on request only | proposed |
 | [0020](./0020-cli-depends-on-storage.md) | The `persia` CLI may depend on `persia-storage` directly | proposed |
 | [0021](./0021-os-calls-for-file-system-type-and-identity.md) | `libc` and `windows-sys` for the file system type and the Windows file identity | proposed |

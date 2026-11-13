@@ -1670,8 +1670,8 @@ documents a prefix would, and the stacked grams would add their scores together.
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
 when the word's `fields` weight differs from that boost. The boost is their ratio, clamped to
 `[f64::from_bits(1), 1000]` (§7.1: `0 < w ≤ 1000`; the low end is the least positive `f64`, because a ratio
-that underflows to 0 is not a valid boost). A `fields` weight far above the schema boost is therefore scored
-at 1000. So a document matches the word when an exact field holds the term or an
+that underflows to 0 is not a valid boost). A `fields` weight far above the schema boost therefore
+gives the prefix a boost of 1000, not a field weight of 1000. So a document matches the word when an exact field holds the term or an
 expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
 L0's other required clauses stay as they are, and so do its root's `must_not` (its excluded clauses) and `filter`, and a programmatic root `bool`
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
@@ -1769,7 +1769,8 @@ each view and while its readers walk (§7.3). Which relaxation level a hit match
 
 **Open** (ROADMAP 10.1.9). `Db::open(path)` is the same rule in every language (§13.1). It opens the
 database at a filesystem path. When the container does not exist, the open creates it, after creating any
-missing parent directories. An existing container is opened and is never truncated or replaced (§4.5.1).
+missing parent directories. An existing container is opened and is never replaced. A read-write
+open's recovery may still truncate or quarantine an uncommitted tail (§4.5.1). A read-only open does not.
 `OpenOptions` (§14):
 
 - `create_if_missing` defaults to true. `false` fails when the container is absent and creates nothing,

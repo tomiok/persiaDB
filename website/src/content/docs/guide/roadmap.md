@@ -172,7 +172,7 @@ Multi-tenant is numbered before Persia Cloud because the hosted service is one f
 
 ## M16 — Embedded SDKs (v1.1)
 
-Blocked on M15. Go via cgo and `@persiadb/node` via N-API, both through `persia-ffi`, as [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md) already specify. This page does not repeat that design. The network clients stay M14. The browser build is M28.
+Blocked on M15. Go via cgo by default, with an optional `persia_purego` tag, and `@persiadb/node` via N-API, both through `persia-ffi`, as [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md) already specify. This page does not repeat that design. The network clients stay M14. The browser build is M28.
 
 ## M17 — Highlighting and snippets (v1.1)
 

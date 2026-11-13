@@ -43,8 +43,11 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
    `staticlib`, and `cdylib`. The default Go build (`CGO_ENABLED=1`, no extra tag) links `libpersia.a` and
    calls the C functions. Prebuilt static libraries per OS/architecture are how a Go developer builds
    without a Rust toolchain; a source build remains available. An optional build tag, `persia_purego`, uses
-   `github.com/ebitengine/purego` to `dlopen` the prebuilt shared
-   library (`libpersia.so`, `libpersia.dylib`, `persia.dll`) with `CGO_ENABLED=0`, behind the same Go API.
+   `github.com/ebitengine/purego` to load the prebuilt shared library with `CGO_ENABLED=0`, behind the
+   same Go API. On Unix that is `purego.Dlopen` (`libpersia.so`, `libpersia.dylib`). On Windows amd64
+   `purego.Dlopen` and `purego.Dlsym` are not compiled: the tag loads `persia.dll` with `syscall.LoadLibrary`
+   and resolves symbols with `syscall.GetProcAddress`, then `purego.RegisterLibFunc` (whose Windows
+   `loadSymbol` is `GetProcAddress`). No Go callback crosses the boundary.
    It is not the default. `go build -tags persia_purego` does not download the shared library. The caller
    places it beside the binary, or sets `PERSIA_LIB` to its path, and `Open` loads it. A missing file is an
    error from `Open`, not a failure at process start. `PERSIA_LIB` is a runtime variable of the Go SDK

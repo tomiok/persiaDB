@@ -394,8 +394,9 @@ and `PERSIA_LIB_DIR` are in [distribution.md](./distribution.md).
 ### Without cgo (`persia_purego`)
 
 cgo and the static library stay the default (ADR-0018). An optional build tag loads the same API through
-[`github.com/ebitengine/purego`](https://github.com/ebitengine/purego), which `dlopen`s the prebuilt shared
-library with `CGO_ENABLED=0`:
+[`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) with `CGO_ENABLED=0`. On Unix that
+is `purego.Dlopen`. On Windows amd64 `purego.Dlopen` and `purego.Dlsym` are not compiled, so the tag
+loads `persia.dll` with `syscall.LoadLibrary` and `syscall.GetProcAddress`, then `purego.RegisterLibFunc`.
 
 ```bash
 CGO_ENABLED=0 go build -tags persia_purego

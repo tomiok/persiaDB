@@ -106,7 +106,9 @@ cgo and `libpersia.a` stay the default (ADR-0018). The tag is the build that doe
 CGO_ENABLED=0 go build -tags persia_purego
 ```
 
-`github.com/ebitengine/purego` `dlopen`s the shared library when `Open` runs. The Go API does not change.
+On Unix, `github.com/ebitengine/purego` `Dlopen`s the shared library when `Open` runs. On Windows amd64
+`purego.Dlopen` is not compiled, so `Open` loads `persia.dll` with `syscall.LoadLibrary` and resolves
+symbols with `syscall.GetProcAddress`, then `purego.RegisterLibFunc`. The Go API does not change.
 `go build -tags persia_purego` does not fetch that library and does not link it into the binary. The cgo
 build downloads `libpersia.a` into the build cache; this build does not download `libpersia.so`. The
 caller places the file before `Open`:
@@ -180,14 +182,16 @@ One core tag, then the bindings. Never the other way around: the bindings have n
    unstable and is not the binding cut. Publishing the modules is M16.4, after M16.1–M16.3. The core is not
    published to crates.io until its own release-engineering leaf (10.5.1) says so. The bindings do not
    require the core to be on crates.io; they build from the git tag.
-2. CI on that tag builds `persia-ffi` staticlibs and the `.node` packages. The workflow lives in
+2. CI on that tag builds `persia-ffi` staticlibs, the shared libraries for the `persia_purego` matrix
+   (`libpersia.so`, `libpersia.dylib`, `persia.dll`, crate type `cdylib`), and the `.node` packages. The workflow lives in
    `.github/workflows/` next to the existing CI. It does not run on every pull request of the core:
    a docs change or a format-crate change does not need six cross compilers. It runs on tags, on
    workflow dispatch, and on pull requests that touch `crates/persia-ffi/**`, `sdk/persia/**`, or
    `sdk/node/**`.
 3. Conformance (below) runs against those artifacts on linux amd64 at least, and on one macOS and one
    Windows runner for the smoke subset.
-4. Publish GitHub release assets: staticlibs, checksums, header. Publish npm platform packages first,
+4. Publish GitHub release assets: staticlibs, the shared libraries from step 2, checksums for both,
+   and the header. Publish npm platform packages first,
    then `@persiadb/node`, with provenance. Publish the Go module by tagging
    `sdk/persia/vX.Y.Z` (Go's submodule tag convention).
 5. Append a row to the compatibility table and a CHANGELOG entry under the SDK heading.
