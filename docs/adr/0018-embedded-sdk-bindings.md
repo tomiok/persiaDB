@@ -45,8 +45,11 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
    without a Rust toolchain; a source build remains available. An optional build tag, `persia_purego`, uses
    `github.com/ebitengine/purego` to `dlopen` the prebuilt shared
    library (`libpersia.so`, `libpersia.dylib`, `persia.dll`) with `CGO_ENABLED=0`, behind the same Go API.
-   It is not the default. The dynamic library must ship beside the binary or be located via `PERSIA_LIB`
-   (a path to the file). The platform matrix is the Go matrix in `docs/sdk/distribution.md` (linux amd64,
+   It is not the default. `go build -tags persia_purego` does not download the shared library. The caller
+   places it beside the binary, or sets `PERSIA_LIB` to its path, and `Open` loads it. A missing file is an
+   error from `Open`, not a failure at process start. `PERSIA_LIB` is a runtime variable of the Go SDK
+   only, not a server `PERSIA_*` knob (SPEC §14). The platform matrix is the Go matrix in
+   `docs/sdk/distribution.md` (linux amd64,
    linux arm64, darwin amd64, darwin arm64, windows amd64). A pure-Go engine and WASM-in-Go (wazero) stay
    rejected, for the reasons in Alternatives.
 4. **TypeScript uses N-API first, WASM later.** The first package is an N-API addon (napi-rs) for Node.js,
@@ -95,7 +98,8 @@ workspace so napi's build script does not enter a workspace that forbids `build.
 - cgo is part of the default Go build. Cross-compilation and a missing C compiler are the cost. Prebuilt
   static libraries and a documented source-build tag are the mitigation, not a second engine. The
   `persia_purego` tag drops the C compiler (`CGO_ENABLED=0`) and instead requires the shared library beside
-  the binary or named by `PERSIA_LIB`. That build is the same API, not a second engine.
+  the binary or named by `PERSIA_LIB`. `Open` loads it; the build does not fetch it. `PERSIA_LIB` is that
+  package's runtime variable, not a server knob. That build is the same API, not a second engine.
 - CI gains, later, a matrix that produces those libraries and the per-platform `.node` packages. Users of the
   embedded engine do not run that matrix.
 - Host processes inherit ADR-0010: a fault on a mapped page kills the process, Go runtime and libuv included.

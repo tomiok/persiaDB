@@ -179,7 +179,7 @@ products.commit()?;
 let results = products.search("runing")?;
 ```
 
-`Db::open` creates `app.persia` and any missing parent directories ([SPEC §8.1](./SPEC.md#81-operations)). `OpenOptions::create_if_missing(false)` requires the file to exist. `OpenOptions::read_only(true)` opens an existing file and creates nothing. Callers never call `tick()` or `merge_step()`: commits and merges run on background threads, and `close` joins them ([SPEC §8.2](./SPEC.md#82-flow), ROADMAP 10.2.6).
+`Db::open` creates `app.persia` and any missing parent directories ([SPEC §8.1](./SPEC.md#81-operations)). `OpenOptions::create_if_missing(false)` requires the file to exist. `OpenOptions::read_only(true)` opens an existing file and creates nothing. Read-only wins when creation is also requested, including the default: that combination is not an error, and a missing path fails. Callers never call `tick()` or `merge_step()`: commits and merges run on background threads, and `close` joins them ([SPEC §8.2](./SPEC.md#82-flow), ROADMAP 10.2.6).
 
 Go and TypeScript will call that same Rust core in-process. See [SDKs](#sdks).
 

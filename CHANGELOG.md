@@ -68,7 +68,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - SPEC §8.1, §13.1, and §14: `Db::open(path)` creates the container and any missing parent directories.
   `OpenOptions::create_if_missing(false)` requires the file to exist. Read-only opens an existing file and
-  creates nothing. The same rule is the Go, TypeScript, and C open (ROADMAP 10.1.9). Callers of `Db` never
+  creates nothing. Read-only wins when creation is also requested, including the default: that combination
+  is not an error, and a missing path fails. The same rule is the Go, TypeScript, and C open (ROADMAP 10.1.9).
+  `PERSIA_LIB` is a runtime variable of the Go embedded SDK only, not a server knob. Callers of `Db` never
   call `tick()` or `merge_step()`: the facade runs commits and merges on background threads, and `close`
   joins them (ROADMAP 10.2.6).
 - SPEC §7.6: an L3 prefix's field-weight ratio is clamped to `[f64::from_bits(1), 1000]`. A `fields` weight

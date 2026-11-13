@@ -232,7 +232,11 @@ usual way to append fields without breaking an old caller. Zero-initialized fiel
 There is no `PERSIA_OPEN_CREATE` flag to set. The first version carries `flags`
 (`PERSIA_OPEN_MUST_EXIST`, `PERSIA_OPEN_READ_ONLY`) and nothing else. `PERSIA_OPEN_MUST_EXIST` requires the
 file to exist and creates nothing. `PERSIA_OPEN_READ_ONLY` opens an existing container and does not create
-it or a parent; a missing path fails. The struct is caller-allocated and passed by pointer, never by
+it or a parent; a missing path fails. Read-only wins over the default create: `PERSIA_OPEN_READ_ONLY`
+alone is not an error, nothing is created, and a missing path fails. That is Rust
+`create_if_missing(true)` with `read_only(true)`, Go `WithCreate(true)` with `WithReadOnly()`, and
+TypeScript `{ create: true, readOnly: true }`. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY`
+is the same open. The struct is caller-allocated and passed by pointer, never by
 value, which is the purego-friendly rule in ADR-0018: opaque handles, pointer and length buffers, no
 struct-by-value, and no callbacks. Knobs from SPEC §14 (`memtable_bytes`, `fsync_policy`, `relax.*`,
 mapped reads) are added when `OpenOptions` in Rust has them (ROADMAP 10.1.1), at the end of the struct,

@@ -165,8 +165,9 @@ fn expand(query: &Query, last: bool, expands: &dyn Fn(FieldId) -> Option<f64>) -
                 // A `prefix` scores with the schema boost as its field weight (SPEC §7.2), as a `term` does: a `fields`
                 // weight other than it scales the prefix by their ratio, within a boost's range (SPEC §7.1).
                 let schema = expands(f.field).unwrap_or(f.weight);
-                // A weight far below the boost can round the ratio to 0, which is no boost: the smallest one keeps the
-                // prefix scaled down.
+                // A weight far below the boost can underflow the ratio to 0. A boost of 0 is invalid
+                // (SPEC §7.1: `0 < w`), not the absence of a boost, so the ratio is clamped to the least
+                // positive `f64` and the prefix stays scaled down.
                 let ratio = (f.weight / schema).clamp(MIN_BOOST, MAX_BOOST);
                 if ratio.to_bits() == 1.0_f64.to_bits() || ratio.is_nan() {
                     q

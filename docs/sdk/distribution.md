@@ -106,21 +106,30 @@ cgo and `libpersia.a` stay the default (ADR-0018). The tag is the build that doe
 CGO_ENABLED=0 go build -tags persia_purego
 ```
 
-`github.com/ebitengine/purego` `dlopen`s the prebuilt shared library. The Go API does not change. The
-library is not linked into the binary, so it has to be found at process start:
+`github.com/ebitengine/purego` `dlopen`s the shared library when `Open` runs. The Go API does not change.
+`go build -tags persia_purego` does not fetch that library and does not link it into the binary. The cgo
+build downloads `libpersia.a` into the build cache; this build does not download `libpersia.so`. The
+caller places the file before `Open`:
 
 - beside the executable, named `libpersia.so` (linux), `libpersia.dylib` (darwin), or `persia.dll`
   (windows), or
 - `PERSIA_LIB` set to that file's path.
 
-A missing file is an error from `Open`. It is not a linker error at `go build`. The platform matrix is
-the five rows above. The release assets for the tag are those shared libraries, with checksums in the
-same `checksums.txt` as the static libraries. Targets outside the matrix (linux musl, windows arm64, and
-the rest of the "not in the first matrix" list) are unsupported for this tag too. wazero is not a
-substitute: the tag still calls the native library.
+`PERSIA_LIB` is a runtime variable of the Go embedded package only. It is not a SPEC §14 server knob.
+`persia-server` does not read it, and a future server `PERSIA_*` knob must not take the name. The cgo
+build does not read it. `PERSIA_LIB_DIR` is a different variable: a build-time directory for
+`libpersia.a` and `persia.h`.
 
-The tradeoff against the default is the second file. A cgo build is one binary. A `persia_purego` build
-runs only when the shared library is beside it or named by `PERSIA_LIB`.
+The process starts without the library. A missing file is an error from `Open`. It is not a linker error
+at `go build`, and it is not a failure before `main`. The platform matrix is the five rows above. The
+release still publishes the shared libraries as assets, with checksums in the same `checksums.txt` as the
+static libraries; publishing them is not the same as the build downloading them. Targets outside the
+matrix (linux musl, windows arm64, and the rest of the "not in the first matrix" list) are unsupported
+for this tag too. wazero is not a substitute: the tag still calls the native library.
+
+The tradeoff against the default is the second file. A cgo build is one binary, and `go build` fetches
+its static library. A `persia_purego` build runs only when the caller has placed the shared library
+beside it or named it with `PERSIA_LIB`.
 
 Supply chain (SPEC §17): checksums in the module, assets named with the version, the release workflow
 builds them from the tag rather than uploading a developer's laptop. The same tag builds the npm

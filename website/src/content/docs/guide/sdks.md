@@ -40,9 +40,10 @@ The network clients are described on [Server, cloud, and Kubernetes](/guide/serv
 
 One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second search implementation.
 
-- **Go** links a static library through cgo. The library is `persia-ffi`, a C ABI crate that does not
-  exist yet. A pure-Go engine, and a WASM engine hosted by wazero, were rejected: durability is fsync
-  and a writer lock (SPEC §4.5, §8.4), and mapped reads are already part of storage (ADR-0017).
+- **Go** links a static library through cgo by default. An optional `persia_purego` build tag `dlopen`s
+  the shared library with `CGO_ENABLED=0`, behind the same API. The library is `persia-ffi`, a C ABI crate
+  that does not exist yet. A pure-Go engine, and a WASM engine hosted by wazero, were rejected: durability
+  is fsync and a writer lock (SPEC §4.5, §8.4), and mapped reads are already part of storage (ADR-0017).
 - **TypeScript** ships first as an N-API addon (`@persiadb/node`) for Node.js, Bun, and Deno. The addon
   calls the same Rust functions the C ABI calls. A WASM package for browsers and edge isolates comes
   later, only after a storage backend exists that does not need mmap or POSIX fsync. That backend is
@@ -58,7 +59,7 @@ per-platform optional npm dependencies for Node. Until format v1.0 there is no c
 Illustrative. These are not functions in a repository.
 
 ```go
-db, err := persia.Open(ctx, "app.persia", persia.WithCreate())
+db, err := persia.Open(ctx, "app.persia")
 products, err := db.CreateCollection(ctx, schema)
 err = products.Put(ctx, doc)
 err = products.Commit(ctx)
@@ -66,12 +67,16 @@ results, err := products.Search(ctx, persia.Text("runing"))
 ```
 
 ```ts
-const db = await open("app.persia", { create: true });
+const db = await open("app.persia");
 const products = await db.createCollection(schema);
 await products.put(doc);
 await products.commit();
 const results = await products.search("runing");
 ```
+
+`Open` and `open` create the container and any missing parent directories. `WithCreate(false)` and
+`{ create: false }` require the file to exist. Read-only does not create it, and it wins when creation
+is also requested (SPEC §8.1).
 
 `Put` of an existing id is the update (SPEC §8.3). There is no `BEGIN` / `ROLLBACK`: multi-document
 transactions are out of scope (SPEC §1.2). A put is specified to be visible to a later search on that

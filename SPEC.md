@@ -1776,6 +1776,12 @@ missing parent directories. An existing container is opened and is never truncat
   parents included.
 - `read_only` opens an existing container read-only (§4.5.1, §8.6): no lock, no write, and no create of
   the container or of a parent. A read-only open of a missing path fails.
+- `create_if_missing(true)` together with `read_only` is not an error: read-only wins. The open does not
+  create the container or any parent, and a missing path fails. The same combination is Go
+  `WithCreate(true)` with `WithReadOnly()`, TypeScript `{ create: true, readOnly: true }`, and C
+  `PERSIA_OPEN_READ_ONLY` with creation left at its default (there is no create flag). `WithReadOnly()`
+  alone, `{ readOnly: true }` alone, and `PERSIA_OPEN_READ_ONLY` alone are that combination, because
+  creation defaults on. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY` is the same open.
 
 A parent that exists and is not a directory is an error. Creating the directories is the facade's step.
 The container create of §4.5.1 still writes a temporary file in a directory that already exists, and still
@@ -2634,7 +2640,8 @@ SPEC §8, §9.6, §14). Every language uses the open rule in §8.1: the call cre
 missing parent directories; an option turns creation off (`OpenOptions::create_if_missing(false)`, Go
 `WithCreate(false)`, TypeScript `{ create: false }`, C `PERSIA_OPEN_MUST_EXIST`); read-only is its own mode
 and does not create the file (`read_only(true)`, `WithReadOnly`, `{ readOnly: true }`,
-`PERSIA_OPEN_READ_ONLY`). The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C
+`PERSIA_OPEN_READ_ONLY`). Read-only wins when creation is also requested, including the default: that
+combination is not an error, nothing is created, and a missing path fails. The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C
 ABI. Go links it with cgo and a static library by default, and may instead `dlopen` the shared library under
 the `persia_purego` build tag with `CGO_ENABLED=0`. TypeScript calls the safe Rust API through N-API. wazero
 is not a binding. A later WASM build for browsers and edge isolates is a separate package and is not the
@@ -2661,8 +2668,11 @@ They are blocked on the embedded API (M10). They do not replace the `persia` cra
 Embedded: builder options (`OpenOptions`), sensible defaults, no files. `Db::open(path)` creates the
 container and any missing parent directories when the path does not exist (§8.1). `create_if_missing` defaults
 to true; `false` requires the container to exist and creates nothing. `read_only` opens an existing
-container and does not create it.
+container and does not create it. Read-only wins when `create_if_missing` is also true (§8.1).
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
+`PERSIA_LIB` is not a server knob. It is a runtime variable of the Go embedded SDK only
+(`persia_purego`, `docs/sdk/go.md`): the path of the shared library, read when that package's `Open`
+runs. The server does not read it, and a future server knob must not take that name.
 Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `compaction.*`
 (§4.6), `search_threads`,
 `cache_ram_bytes`, `cache_disk_path/bytes`, `block_size`, `blob_chunk_size`, `relax.*`, `query.*` (limits, §7.1.3).
