@@ -1,8 +1,8 @@
 # ADR-0018: Embedded Go and TypeScript bindings share one C ABI
 
-- Status: proposed
+- Status: proposed; amended 2026-11-13 (optional `persia_purego` tag: cgo and the static library stay the default; the C ABI stays purego-friendly; wazero stays rejected)
 - Date: 2026-10-17
-- Related: SPEC §1.1, §3, §8.4, §13, §15; ADR-0001, ADR-0003, ADR-0010, ADR-0017; ROADMAP M10, M14
+- Related: SPEC §1.1, §3, §8.1, §8.4, §13, §15; ADR-0001, ADR-0003, ADR-0010, ADR-0017; ROADMAP M10, M14, 16.2.6
 
 ## Context
 
@@ -39,10 +39,16 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
 2. **One engine.** Go and TypeScript call the Rust core. They do not reimplement segments, the WAL, scoring,
    or relaxation. A file written by the Rust API, the Go binding, or the TypeScript binding is the same file
    (SPEC §15). The bindings add no on-disk bytes.
-3. **Go uses cgo over a C ABI.** `persia-ffi` is a workspace crate with crate types `lib`, `staticlib`, and
-   `cdylib`. Go links the static library and calls the C functions. Prebuilt static libraries per
-   OS/architecture are how a Go developer builds without a Rust toolchain; a source build remains available.
-   Pure Go and WASM-in-Go (wazero) are rejected for the reason in Alternatives.
+3. **Go's default is cgo over a static library.** `persia-ffi` is a workspace crate with crate types `lib`,
+   `staticlib`, and `cdylib`. The default Go build (`CGO_ENABLED=1`, no extra tag) links `libpersia.a` and
+   calls the C functions. Prebuilt static libraries per OS/architecture are how a Go developer builds
+   without a Rust toolchain; a source build remains available. An optional build tag, `persia_purego`, uses
+   `github.com/ebitengine/purego` to `dlopen` the prebuilt shared
+   library (`libpersia.so`, `libpersia.dylib`, `persia.dll`) with `CGO_ENABLED=0`, behind the same Go API.
+   It is not the default. The dynamic library must ship beside the binary or be located via `PERSIA_LIB`
+   (a path to the file). The platform matrix is the Go matrix in `docs/sdk/distribution.md` (linux amd64,
+   linux arm64, darwin amd64, darwin arm64, windows amd64). A pure-Go engine and WASM-in-Go (wazero) stay
+   rejected, for the reasons in Alternatives.
 4. **TypeScript uses N-API first, WASM later.** The first package is an N-API addon (napi-rs) for Node.js,
    Bun, and Deno. It links the `persia-ffi` rlib and calls the same safe Rust functions the C exports call, so
    there is one marshalling of documents and one set of error codes. WASM for the browser and for edge
@@ -60,10 +66,14 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
    `panic = "abort"`. A panic poisons that database handle. A mapped-page fault (`SIGBUS` /
    `EXCEPTION_IN_PAGE_ERROR`, ADR-0010) is not a panic and still ends the process. The bindings do not invent
    a softer rule.
-7. **Foreign calls borrow caller memory for the call only.** The engine copies what it must keep. Returned
-   buffers are allocated by Rust and freed by a `persia_*_free` function, never by the host allocator. No
-   callback from Rust into Go or JavaScript in the first ABI, so a host pointer is never stored and the cgo
-   pointer rules stay simple. Search returns one page (SPEC §7.4); it does not hand back a live iterator.
+7. **Foreign calls borrow caller memory for the call only, and the ABI stays purego-friendly.** The engine
+   copies what it must keep. Returned buffers are allocated by Rust and freed by a `persia_*_free` function,
+   never by the host allocator. No callback from Rust into Go or JavaScript, so a host pointer is never
+   stored and the cgo pointer rules stay simple. Handles are opaque. Buffers cross as a pointer and a
+   length. No struct is passed or returned by value (`persia_open_options` and `persia_bytes` are
+   caller-allocated and passed by pointer). Those four limits are what `purego` can call, and they bind the
+   C ABI whether or not a program sets `persia_purego`. Search returns one page (SPEC §7.4); it does not
+   hand back a live iterator.
 8. **Documents and queries cross the boundary as UTF-8 JSON**, in the shapes SPEC §6.2, §6.4, and §7.1
    already sketch. Go structs and TypeScript values are serialized by the language package. The Rust
    `put_struct` path (ROADMAP 10.1.4) stays inside the Rust crate; the FFI does not grow generics.
@@ -82,8 +92,10 @@ workspace so napi's build script does not enter a workspace that forbids `build.
 ## Consequences
 
 - A Go or TypeScript program links the real engine: one file format, one crash story, one relaxation cascade.
-- cgo is part of the Go build. Cross-compilation and a missing C compiler are the cost. Prebuilt static
-  libraries and a documented source-build tag are the mitigation, not a second engine.
+- cgo is part of the default Go build. Cross-compilation and a missing C compiler are the cost. Prebuilt
+  static libraries and a documented source-build tag are the mitigation, not a second engine. The
+  `persia_purego` tag drops the C compiler (`CGO_ENABLED=0`) and instead requires the shared library beside
+  the binary or named by `PERSIA_LIB`. That build is the same API, not a second engine.
 - CI gains, later, a matrix that produces those libraries and the per-platform `.node` packages. Users of the
   embedded engine do not run that matrix.
 - Host processes inherit ADR-0010: a fault on a mapped page kills the process, Go runtime and libuv included.
@@ -100,20 +112,24 @@ workspace so napi's build script does not enter a workspace that forbids `build.
 - **Pure Go, reimplementing the engine.** Rejected. It forks the product ADR-0001 exists to prevent: a second
   segment writer, a second WAL, a second BM25F, and a permanent risk that the two disagree on crash recovery.
   File-format compatibility (SPEC §15) would depend on two codebases staying in lockstep.
-- **Go via WASM (wazero).** Rejected as the primary binding. The local commit protocol is `fdatasync` and an
-  exclusive lock (SPEC §4.5, §8.4). Mapped reads are part of the storage crate today (ADR-0017). WASI does not
-  offer that contract, and a search engine running inside wazero gives up the mmap path and any later SIMD
-  (ROADMAP 15.2.1) for a host that still could have linked the native library. A no-cgo WASM build can be
-  revisited if a portable `Storage` backend exists and someone needs hosts that forbid cgo. It is not the SDK.
+- **Go via WASM (wazero).** Rejected, including as an alternative to the `persia_purego` tag. The local
+  commit protocol is `fdatasync` and an exclusive lock (SPEC §4.5, §8.4). Mapped reads are part of the
+  storage crate today (ADR-0017). WASI does not offer that contract, and a search engine running inside
+  wazero gives up the mmap path and any later SIMD (ROADMAP 15.2.1) for a host that still could have linked
+  the native library. The purego tag calls that native library. A no-cgo WASM build can be revisited if a
+  portable `Storage` backend exists and someone needs hosts that forbid native code. It is not the SDK.
 - **TypeScript as WASM only.** Rejected for servers. Node, Bun, and Deno can load a native addon and then get
   the same file, the same lock, and the same fsync as Rust. A WASM-only SDK would make the common case (a
   server opening a file) pay for a sandbox aimed at browsers.
 - **N-API with no WASM follow-up.** Rejected as a permanent rule. Browser and edge are real TypeScript
   deployments. They are deferred, not forbidden. They wait on storage, not on a second API design.
-- **One shared library, `dlopen`'d by both Go (purego) and Node.** Rejected for the first release. purego
-  avoids cgo but cannot statically link, so the database stops being a single binary. ffi-napi-style loading
-  of a cdylib from Node is a second, less maintained marshalling layer. napi-rs linking the rlib, and cgo
-  linking the staticlib, produce two artifacts from one Rust API. That is the trade we take.
+- **One shared library, `dlopen`'d by both Go (purego) and Node, as the only build.** Rejected as the
+  default. purego avoids cgo but cannot statically link, so the database stops being a single binary: the
+  shared library has to ship beside the binary or be found through `PERSIA_LIB`, on the platform matrix in
+  `docs/sdk/distribution.md`. That cost is why cgo and `libpersia.a` stay the default. The same Go API under
+  the `persia_purego` tag is the optional build that pays it (decision 3). ffi-napi-style loading of a
+  cdylib from Node stays rejected: it would be a second marshalling layer. napi-rs linking the rlib, and
+  cgo linking the staticlib, stay the two default artifacts from one Rust API.
 - **Making the network client the only Go SDK, and telling embedded users to run `persia-server`.** Rejected.
   It drops the zero-friction pillar for every non-Rust caller, and the server does not exist either (M11).
   The network clients remain the right answer for a remote cluster (M13, M14).

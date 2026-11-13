@@ -65,7 +65,7 @@ Keywords: MUST, SHOULD, MAY follow RFC 2119.
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
       ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (§13.2)
-      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (§13.1, ADR-0018)
+      ▲ embedded bindings (Go via cgo by default, or purego; TypeScript via N-API) call persia through persia-ffi (§13.1, ADR-0018)
 ```
 
 Principles:
@@ -1668,7 +1668,10 @@ analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each wor
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
 `bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`. A `prefix`
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
-when the word's `fields` weight differs from that boost, by their ratio (within a `boost`'s range, §7.1). So a document matches the word when an exact field holds the term or an
+when the word's `fields` weight differs from that boost. The boost is their ratio, clamped to
+`[f64::from_bits(1), 1000]` (§7.1: `0 < w ≤ 1000`; the low end is the least positive `f64`, because a ratio
+that underflows to 0 is not a valid boost). A `fields` weight far above the schema boost is therefore scored
+at 1000. So a document matches the word when an exact field holds the term or an
 expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
 L0's other required clauses stay as they are, and so do its root's `must_not` (its excluded clauses) and `filter`, and a programmatic root `bool`
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
@@ -1764,6 +1767,21 @@ each view and while its readers walk (§7.3). Which relaxation level a hit match
 ### 8.1 Operations
 `put(doc)` (upsert by id), `delete(id)`, `put_batch`, `commit()`/auto-commit policy, `get(id)`.
 
+**Open** (ROADMAP 10.1.9). `Db::open(path)` is the same rule in every language (§13.1). It opens the
+database at a filesystem path. When the container does not exist, the open creates it, after creating any
+missing parent directories. An existing container is opened and is never truncated or replaced (§4.5.1).
+`OpenOptions` (§14):
+
+- `create_if_missing` defaults to true. `false` fails when the container is absent and creates nothing,
+  parents included.
+- `read_only` opens an existing container read-only (§4.5.1, §8.6): no lock, no write, and no create of
+  the container or of a parent. A read-only open of a missing path fails.
+
+A parent that exists and is not a directory is an error. Creating the directories is the facade's step.
+The container create of §4.5.1 still writes a temporary file in a directory that already exists, and still
+refuses to replace a name that is taken. `persia_engine::db::Database` has separate `create` and `open`
+until 10.1.9, and that `create` fails when the parent directory is missing.
+
 ### 8.2 Flow
 1. Op appended to the **WAL** (batched, group commit). Durability level per call: `Buffered | Async | Fsync`, default `Fsync`
    (§8.2.1); a commit syncs whatever is still buffered.
@@ -1779,7 +1797,10 @@ operations, each into one segment of its live documents in docid order (none if 
 deleted), with the tombstone sidecars that delete the older segments' copies of the ids it touched (§8.3), whatever triggered it: `commit()`; a memtable at its size threshold, before the next write to it; or
 `tick()`, which the embedding calls periodically (commits stay on the caller's thread; merge workers only
 merge, ADR-0032) and which commits when any memtable is idle or reached `commit_interval` since its first unflushed
-write. Operations replayed at an open count as
+write. Callers of the public `Db` never call `tick()` or `merge_step()` (ROADMAP 10.2.6): the facade's own
+threads call them, so a commit and a merge both run off the application's thread, and `close` joins those
+threads. On the engine, a commit still runs on the thread that calls `tick` or `merge_step`, and merge
+workers only merge. Operations replayed at an open count as
 written at the open (their age is not logged), so a replayed backlog waits up to one more interval. Flushing all of them makes the
 commit's `wal_start` the end of the log, so a crash never replays a record that is already in a segment. A commit builds every segment before it writes anything, so a failure there changes nothing; a failed
 write, sync or commit after that poisons the database until it is reopened (§4.5). Creating a collection is a commit
@@ -1979,7 +2000,8 @@ merges, and the writer commits. Each plan becomes a job holding its inputs as th
 deletions at the plan's sidecar versions; a worker merges them (§5.5), writes the merged segment, opens it and runs
 `Segment::verify` on it, all in memory. At most one job per thread is in flight, finished ones included, so merged
 bytes waiting for their commit are bounded too (backpressure); plans that find no room are made again later. With
-`merge_threads` 0 a merge runs on the writer's thread, one per step. The embedding drives the writer: a merge step
+`merge_threads` 0 a merge runs on the writer's thread, one per step. The embedding drives the writer, from its background threads rather than from application code (ROADMAP
+10.2.6): a merge step
 commits the jobs that finished, then plans and submits; finishing waits for every merge until the policy plans none;
 cancelling stops every job in flight at its next field or stage and commits nothing; closing the database cancels
 and joins its workers. Tests may hold finished jobs (a hidden `hold_merges` hook, ROADMAP 6.5.14): a step then
@@ -2608,9 +2630,15 @@ Rust facade they would sit beside is still a stub (`crates/persia`).
 ### 13.1 Embedded bindings (Go, TypeScript)
 
 A Go or TypeScript program opens a `.persia` file in-process, the way the Rust `Db` API will (ROADMAP M10,
-SPEC §8, §9.6, §14). The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C ABI
-that Go links with cgo and a safe Rust API that the TypeScript N-API package calls. A later WASM build for
-browsers and edge isolates is a separate package and is not the first release. The design is `docs/sdk/`.
+SPEC §8, §9.6, §14). Every language uses the open rule in §8.1: the call creates the container and any
+missing parent directories; an option turns creation off (`OpenOptions::create_if_missing(false)`, Go
+`WithCreate(false)`, TypeScript `{ create: false }`, C `PERSIA_OPEN_MUST_EXIST`); read-only is its own mode
+and does not create the file (`read_only(true)`, `WithReadOnly`, `{ readOnly: true }`,
+`PERSIA_OPEN_READ_ONLY`). The binding strategy is ADR-0018 (proposed): one crate, `persia-ffi`, exposes a C
+ABI. Go links it with cgo and a static library by default, and may instead `dlopen` the shared library under
+the `persia_purego` build tag with `CGO_ENABLED=0`. TypeScript calls the safe Rust API through N-API. wazero
+is not a binding. A later WASM build for browsers and edge isolates is a separate package and is not the
+first release. The design is `docs/sdk/`.
 
 These bindings add no on-disk bytes. A file written by Rust, Go, or TypeScript is the same file (§15).
 They are blocked on the embedded API (M10). They do not replace the `persia` crate.
@@ -2630,7 +2658,10 @@ They are blocked on the embedded API (M10). They do not replace the `persia` cra
 
 ## 14. Configuration
 
-Embedded: builder options (`OpenOptions`), sensible defaults, no files.
+Embedded: builder options (`OpenOptions`), sensible defaults, no files. `Db::open(path)` creates the
+container and any missing parent directories when the path does not exist (§8.1). `create_if_missing` defaults
+to true; `false` requires the container to exist and creates nothing. `read_only` opens an existing
+container and does not create it.
 Server: flags → env (`PERSIA_*`) → optional TOML. Defaults MUST be production-safe.
 Key knobs: `memtable_bytes`, `commit_interval`, `fsync_policy`, `merge_threads`, `merge.*` (§8.5), `compaction.*`
 (§4.6), `search_threads`,

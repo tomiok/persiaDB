@@ -66,6 +66,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- SPEC §8.1, §13.1, and §14: `Db::open(path)` creates the container and any missing parent directories.
+  `OpenOptions::create_if_missing(false)` requires the file to exist. Read-only opens an existing file and
+  creates nothing. The same rule is the Go, TypeScript, and C open (ROADMAP 10.1.9). Callers of `Db` never
+  call `tick()` or `merge_step()`: the facade runs commits and merges on background threads, and `close`
+  joins them (ROADMAP 10.2.6).
+- SPEC §7.6: an L3 prefix's field-weight ratio is clamped to `[f64::from_bits(1), 1000]`. A `fields` weight
+  far above the schema boost is scored at 1000. A ratio of 0 would be an invalid boost.
+- ADR-0018: cgo and the static `libpersia.a` stay the default Go build. An optional `persia_purego` tag
+  uses purego to `dlopen` the shared library with `CGO_ENABLED=0`, behind the same API. The C ABI stays
+  purego-friendly (opaque handles, pointer and length, no struct-by-value, no callbacks). wazero stays
+  rejected (ROADMAP 16.2.6).
 - `persia-blob` (breaking): `ChunkSize::new` (and `TryFrom<u32>`) rejects a chunk size below `ChunkSize::MIN`,
   64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2; ADR-0041). The floor bounds a
   blob manifest at 4 bytes per 64 KiB of blob: a chunk size of 1 let a 4 GiB blob need a 16 GiB manifest. It is a

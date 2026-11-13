@@ -2,7 +2,7 @@
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
 > until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-13 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **348 of 541 MVP leaves done (64%)**, 2 in progress. That file is regenerated from
+> in [`PROGRESS.md`](../PROGRESS.md): **348 of 543 MVP leaves done (64%)**, 2 in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -59,8 +59,10 @@ The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes a
 Five properties the design does not trade away:
 
 1. **Zero friction.** `Db::open("app.persia")` just works. No daemon and no config file for the embedded
-   library. Server configuration, when it exists, is flags, then `PERSIA_*` environment variables, then
-   an optional TOML file, with production-safe defaults (SPEC §14). Planned: M10, M11.
+   library. The open creates the container and any missing parent directories; `OpenOptions` can require the
+   file to exist or open it read-only (SPEC §8.1, §14). Server configuration, when it exists, is flags,
+   then `PERSIA_*` environment variables, then an optional TOML file, with production-safe defaults
+   (SPEC §14). Planned: M10, M11.
 2. **Own engine.** Index format, analysis, BM25F scoring, and query execution live in this repository,
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
@@ -278,8 +280,11 @@ local file is reclaimed by rewriting live data into a new file and atomically re
 This path is library code in `persia-storage` (M2, done) and `persia-engine` (M6, 49 of 58): the WAL and
 its replay, flush and commit, tombstone sidecars, tiered merges, container compaction, and open and recovery,
 with crash injection at every step of the commit (ROADMAP 2.4.3.1, 6.3.5) and a kill -9 loop (ROADMAP 6.6.4).
-The open M6 leaves are mostly performance (6.1.6, 6.3.11, 6.5.6, 6.5.7), plus refreshing a read-only
-database in place (6.6.6).
+The open M6 leaves are: undoing a failed `put` without rehashing the term arenas (6.1.6), caching
+`MemtableView::df` (6.1.7), flushing without re-indexing (6.3.11), pruning a commit's tombstone lookups
+by each segment's id range (6.4.5), a per-segment id membership filter (6.4.7), a streaming merge writer
+(6.5.6), merge throughput (6.5.7), refreshing a read-only database in place (6.6.6), and `persia verify`
+with custom analyzers (6.6.8).
 
 ### Blobs
 
@@ -488,7 +493,12 @@ let results = products.search("runing")?;
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 
-- `Db::open` on a path or URL, `OpenOptions`, and `close`.
+- `Db::open` on a path or URL, `OpenOptions`, and `close`. `Db::open(path)` creates the container and any
+  missing parent directories (SPEC §8.1). `OpenOptions::create_if_missing(false)` requires the file to exist.
+  `OpenOptions::read_only(true)` opens an existing file and creates nothing. Go, TypeScript, and the C ABI
+  use that same rule (SPEC §13.1).
+- Callers never call `tick()` or `merge_step()`. Commits and merges run on background threads, and `close`
+  joins them (SPEC §8.2, ROADMAP 10.2.6, complementing 10.2.3).
 - Create, open, and drop a collection, and read its schema back.
 - `put`, `put_batch`, `delete`, `get`, `commit`, and `search`.
 - Documents as a dynamic map, or as a `serde` struct (`put_struct`).
@@ -608,7 +618,7 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
 derives the rest, and it is the live status. The table below is the **2026-11-13** snapshot
-(348 / 541 MVP leaves, 64%; post-MVP milestones are not counted). Two leaves are marked `[~]`.
+(348 / 543 MVP leaves, 64%; post-MVP milestones are not counted). Two leaves are marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -626,7 +636,7 @@ while a dependency is unfinished.
 | **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | In progress, 49/51 |
 | **M8** Relaxation | The zero-results cascade | M7 | In progress, 17/42 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
-| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
+| **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/23 |
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
 | **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/29 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |

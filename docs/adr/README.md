@@ -58,9 +58,9 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |
 | [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted |
 | [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041) |
-| [0036](./0036-term-proximity-scoring.md) | Term proximity scoring: pair distance of adjacent required words, bound-safe, off by default | proposed |
+| [0036](./0036-term-proximity-scoring.md) | Term proximity scoring: pair distance of adjacent required words, bound-safe, off by default | accepted |
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
 | [0039](./0039-l1-synonyms-runs-alternatives-and-cuts.md) | L1 `synonyms`: runs of whole clauses, phrase alternatives, one step, and cuts in group order | proposed |
-| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | proposed |
-| [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | proposed |
+| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | accepted |
+| [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | accepted |

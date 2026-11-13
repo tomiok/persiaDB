@@ -380,8 +380,9 @@ fn a_fields_weight_scales_a_prefix_by_its_ratio_to_the_schema_boost() {
 
 #[test]
 fn a_ratio_that_rounds_to_zero_keeps_the_smallest_boost() {
-    // The least positive weight over `title`'s boost 2 rounds to 0, which is no boost: the prefix would score as the
-    // full schema boost, so it keeps the smallest one instead (SPEC §7.1: `0 < w`).
+    // The least positive weight over `title`'s boost 2 underflows the ratio to 0. A boost of 0 is invalid
+    // (SPEC §7.1: `0 < w ≤ 1000`), not the full schema boost, so the ratio is clamped to the least positive
+    // `f64` (`f64::from_bits(1)`) and the prefix keeps that boost.
     let schema = schema();
     let tiny = f64::from_bits(1);
     assert_eq!(tiny / 2.0, 0.0, "the ratio this test is about");

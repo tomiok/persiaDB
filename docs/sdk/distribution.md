@@ -54,8 +54,9 @@ The last element of the import path is the package name, so callers write `persi
 
 ### What `go build` does
 
-1. cgo is required (`CGO_ENABLED=1`). Pure Go builds fail with a clear `#cgo` error that points at this
-   document, not with a missing-symbol error from the linker.
+1. cgo is required (`CGO_ENABLED=1`) unless the build sets `-tags persia_purego` (below). A pure Go build
+   without that tag fails with a clear `#cgo` error that points at this document, not with a
+   missing-symbol error from the linker.
 2. If `PERSIA_LIB_DIR` is set, use `libpersia.a` and `persia.h` from that directory. This is the offline
    and the source-build path.
 3. Otherwise download the release asset for `${GOOS}_${GOARCH}` whose version equals the module
@@ -96,6 +97,30 @@ runtime inside `Open`.
 The static library is large (Rust runtime plus zstd). It is a release asset, not a file committed to
 the git module. `go get` of the module fetches sources of a few hundred kilobytes; the first `go build`
 fetches the library. Builds with `PERSIA_LIB_DIR` set do not fetch it.
+
+### Optional `persia_purego` build
+
+cgo and `libpersia.a` stay the default (ADR-0018). The tag is the build that does not need cgo:
+
+```bash
+CGO_ENABLED=0 go build -tags persia_purego
+```
+
+`github.com/ebitengine/purego` `dlopen`s the prebuilt shared library. The Go API does not change. The
+library is not linked into the binary, so it has to be found at process start:
+
+- beside the executable, named `libpersia.so` (linux), `libpersia.dylib` (darwin), or `persia.dll`
+  (windows), or
+- `PERSIA_LIB` set to that file's path.
+
+A missing file is an error from `Open`. It is not a linker error at `go build`. The platform matrix is
+the five rows above. The release assets for the tag are those shared libraries, with checksums in the
+same `checksums.txt` as the static libraries. Targets outside the matrix (linux musl, windows arm64, and
+the rest of the "not in the first matrix" list) are unsupported for this tag too. wazero is not a
+substitute: the tag still calls the native library.
+
+The tradeoff against the default is the second file. A cgo build is one binary. A `persia_purego` build
+runs only when the shared library is beside it or named by `PERSIA_LIB`.
 
 Supply chain (SPEC §17): checksums in the module, assets named with the version, the release workflow
 builds them from the tag rather than uploading a developer's laptop. The same tag builds the npm
@@ -293,7 +318,7 @@ Do not file these against M14. M14 is the gRPC clients. A reasonable split, once
 wrap:
 
 - `persia-ffi` crate, header, xtask generator, panic and null tests, `ALLOWED` and `UNSAFE_ALLOWED` updates.
-- Go module (`sdk/persia`), cgo wrapper, prebuilt download, race tests.
+- Go module (`sdk/persia`), cgo wrapper, the optional `persia_purego` tag, prebuilt download, race tests.
 - napi package, platform builds, TypeScript types.
 - Conformance adapter for the three embedded runners, sharing scenarios with 14.1.
 - Release workflow and the compatibility table.
