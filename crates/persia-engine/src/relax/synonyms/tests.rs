@@ -127,6 +127,14 @@ fn no_run_no_text_or_a_changed_query_builds_no_step() {
         change(b);
         assert!(steps(&changed).is_empty(), "{:?}", changed.query);
     }
+    // A root that lost the excluded clause: the step would drop the exclusion its `effective` (`-used`) still states.
+    let mut changed = compile("cheap tv -used");
+    assert_eq!(steps(&changed).len(), 1);
+    let Query::Bool(b) = &mut changed.query else {
+        panic!()
+    };
+    b.must_not.clear();
+    assert!(steps(&changed).is_empty(), "{:?}", changed.query);
     // Runs out of order, past the clauses, empty, or over an excluded clause.
     let compiled = compile("tv -box new york");
     for change in [

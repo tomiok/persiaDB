@@ -8,14 +8,6 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-### Changed
-- `persia-engine`: a step of the relaxation cascade excludes only the latest step searched of a nested level
-  (ROADMAP 8.2.2.4; SPEC §7.1.3, §7.6, ADR-0037 item 2), with every step of the other levels. L2's ladder is nested:
-  each step matches what the one before matched. The hits are unchanged. An L2 step now counts L0, L1's step and one
-  L2 step against `QueryLimits`, about 3·n terms instead of (j + 2)·n at step j, so a long query no longer loses its
-  last steps to `max_terms`. A step cut to fit the limits does not replace the steps before it. Benchmark
-  `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
-
 ### Added
 - `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
   to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
@@ -62,6 +54,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine`: a step of the relaxation cascade excludes only the latest step built and not cut of a nested level
+  (ROADMAP 8.2.2.4; SPEC §7.1.3, §7.6, ADR-0037 item 2), with every step of the other levels. L2's ladder is nested:
+  each step matches what the one before matched. The hits are unchanged. An L2 step now counts L0, L1's step and one
+  L2 step against `QueryLimits`, about 3·n terms instead of (j + 2)·n at step j, so a long query no longer loses its
+  last steps to `max_terms`. A step cut to fit the limits does not replace the steps before it. Benchmark
+  `search_relaxed/l2_every_step`: 12.9 ms → 11.5 ms.
 - `persia-engine`: `CollectionViews::search_relaxed` can fail with `RelaxedSearchError::Plan` when a level cannot read
   the statistics it builds from, or when the request's deadline passes before a level builds its steps.
 - `persia-engine` (breaking for struct literals without `..BoolQuery::default()`): `BoolQuery::minimum_should_match`,

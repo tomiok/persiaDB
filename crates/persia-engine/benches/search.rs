@@ -790,8 +790,9 @@ fn collection_expansions(c: &mut Criterion) {
 ///
 /// `l2` and `l2_every_step` (ROADMAP 8.2.2) relax a five-word query no document holds whole (`zz` is in none) to L2
 /// `drop_terms`: the importance `df` reads, then the `minimum_should_match` steps, each excluding L0 and the steps
-/// before it. `l2` stops at the first step with a hit; `l2_every_step` (a `min_results` above every match) runs them
-/// all. `l3` (ROADMAP 8.2.3) runs L0 and L3 alone on a two-word query whose last word starts every term.
+/// before it. `l2` stops at the first step with a hit; `l2_every_step` (the largest `min_results`) reaches each of
+/// them, down to `drop_terms:1`. `l3` (ROADMAP 8.2.3) runs L0 and L3 alone on a two-word query whose last word starts
+/// every term.
 fn relaxed(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();

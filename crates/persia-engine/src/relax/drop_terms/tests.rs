@@ -318,6 +318,19 @@ mod steps {
     }
 
     #[test]
+    fn a_root_that_lost_an_excluded_clause_is_not_relaxed() {
+        // Its steps would drop the exclusion their `effective` (`-blue`) still states.
+        let stats = Stats(BTreeMap::new());
+        let mut compiled = compile("red purple shoes -blue");
+        assert_eq!(steps(&compiled, &stats).len(), 2);
+        let Query::Bool(b) = &mut compiled.query else {
+            panic!()
+        };
+        b.must_not.clear();
+        assert_eq!(labels(&steps(&compiled, &stats)), []);
+    }
+
+    #[test]
     fn a_stopword_drops_before_a_rarer_term_and_ties_drop_the_later_term() {
         // `the` is a stopword of `body` (en), so of a field it searches; in no title, it is the rarest.
         let schema = schema();

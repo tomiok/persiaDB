@@ -314,7 +314,10 @@ impl Compiled {
     /// around the clauses ([`Self::root`]), the query wrapped as `bool { must: [query], filter }`. A one-part query
     /// that is itself a `bool` is wrapped too: a filter beside its `should` clauses would make them optional. The
     /// clauses keep their parts ([`Self::parts`]), so the relaxation levels read them as before. No filter, no change.
-    /// The filter is not checked against [`Self::limits`]: a request holds it to its own (SPEC §7.1.3).
+    /// The joined query is not checked against [`Self::limits`]: the filter adds its nodes and terms, and a level of
+    /// depth (`bool` around the clauses, or the wrap), so it may exceed limits the compiled query was within, as any
+    /// filter joined to a root does. A request holds the joined query to its own limits (SPEC §7.1.3:
+    /// [`Query::validate`]).
     ///
     /// ```
     /// use persia_analysis::AnalyzerRegistry;

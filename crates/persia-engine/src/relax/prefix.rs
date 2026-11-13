@@ -24,6 +24,9 @@ pub(crate) const MIN_LEN: usize = 3;
 /// The largest `boost` a query holds (SPEC §7.1: `0 < w ≤ 1000`).
 const MAX_BOOST: f64 = 1000.0;
 
+/// The smallest `boost` a query holds: the least positive `f64` (SPEC §7.1: `0 < w`).
+const MIN_BOOST: f64 = f64::from_bits(1);
+
 /// L3 `prefix` (SPEC §7.6, ROADMAP 8.2.3, ADR-0040).
 ///
 /// A term is a field's analyzed term of a word: one per field of a `combined` (a word over the default fields), or a
@@ -162,8 +165,10 @@ fn expand(query: &Query, last: bool, expands: &dyn Fn(FieldId) -> Option<f64>) -
                 // A `prefix` scores with the schema boost as its field weight (SPEC §7.2), as a `term` does: a `fields`
                 // weight other than it scales the prefix by their ratio, within a boost's range (SPEC §7.1).
                 let schema = expands(f.field).unwrap_or(f.weight);
-                let ratio = (f.weight / schema).min(MAX_BOOST);
-                if ratio.to_bits() == 1.0_f64.to_bits() || ratio.is_nan() || ratio <= 0.0 {
+                // A weight far below the boost can round the ratio to 0, which is no boost: the smallest one keeps the
+                // prefix scaled down.
+                let ratio = (f.weight / schema).clamp(MIN_BOOST, MAX_BOOST);
+                if ratio.to_bits() == 1.0_f64.to_bits() || ratio.is_nan() {
                     q
                 } else {
                     Query::Boost(BoostQuery {

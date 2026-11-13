@@ -76,8 +76,11 @@ impl Expansion {
                 index = synonym.clauses.end;
                 continue;
             }
+            // An excluded clause's parts are read too: a root whose `must_not` no longer holds them is not the one
+            // the clauses describe, and the step would drop an exclusion its `effective` still states.
+            let parts = compiled.parts(index)?;
             if !clause.negated {
-                units.extend(compiled.parts(index)?.iter().cloned().map(Unit::Plain));
+                units.extend(parts.iter().cloned().map(Unit::Plain));
             }
             index += 1;
         }

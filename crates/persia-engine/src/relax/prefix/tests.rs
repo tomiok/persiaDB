@@ -379,6 +379,29 @@ fn a_fields_weight_scales_a_prefix_by_its_ratio_to_the_schema_boost() {
 }
 
 #[test]
+fn a_ratio_that_rounds_to_zero_keeps_the_smallest_boost() {
+    // The least positive weight over `title`'s boost 2 rounds to 0, which is no boost: the prefix would score as the
+    // full schema boost, so it keeps the smallest one instead (SPEC §7.1: `0 < w`).
+    let schema = schema();
+    let tiny = f64::from_bits(1);
+    assert_eq!(tiny / 2.0, 0.0, "the ratio this test is about");
+    let query = Query::Combined(CombinedQuery {
+        fields: vec![WeightedTerm {
+            field: id(&schema, "title"),
+            term: "sho".into(),
+            weight: tiny,
+        }],
+    });
+    query.validate(&schema, &QueryLimits::default()).unwrap();
+    let s = step_of(&query, None, &text_fields(&schema)).unwrap();
+    assert_eq!(
+        s.query,
+        boosted(prefix_of(id(&schema, "title"), "sho"), tiny)
+    );
+    s.query.validate(&schema, &QueryLimits::default()).unwrap();
+}
+
+#[test]
 fn an_exclusion_added_to_the_root_stays_excluded() {
     // As at L2: the root's `must_not` is kept whole, an exclusion a caller added beside the excluded clauses too.
     let schema = schema();

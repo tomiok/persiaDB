@@ -1615,11 +1615,12 @@ analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each wor
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
 `bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`. A `prefix`
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
-when the word's `fields` weight differs from that boost, by their ratio (at most 1000). So a document matches the word when an exact field holds the term or an
+when the word's `fields` weight differs from that boost, by their ratio (within a `boost`'s range, §7.1). So a document matches the word when an exact field holds the term or an
 expanded field holds a term starting with it, and each expanded field scores its own prefix (§7.1's shared `df`).
 L0's other required clauses stay as they are, and so do its root's `must_not` (its excluded clauses) and `filter`, and a programmatic root `bool`
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
-level. Its `effective` is L0's text, as every clause is kept. The step reads no statistics; held to §7.1.3's limits,
+level. Its `effective` is L0's text, as every clause is kept. Building the step reads no statistics (planning reads the `df`s that keep the
+expansions, §7.1); held to §7.1.3's limits,
 its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
 its own for it to stand for (nested levels, in the cascade below).
 

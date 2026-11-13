@@ -478,8 +478,8 @@ alone, which adds the `relax` module and changes no search code, measured 502 µ
 default build's gap is codegen-unit layout from new code in the crate, not the cascade's work.
 
 The relaxed levels (ROADMAP 8.2.1–8.2.3), same collection and thread. `l1` is `w3 nosuch` relaxed to L1 `synonyms`;
-`l2` is `w3 w40 w7 w120 zz` relaxed to L2's first step with a hit, and `l2_every_step` the same with a `min_results`
-above every match, so it runs the whole ladder; `l3` is `w3 w` with L3 `prefix` alone, its one-letter last word
+`l2` is `w3 w40 w7 w120 zz` relaxed to L2's first step with a hit, and `l2_every_step` the same with the largest
+`min_results` (10 000), so it reaches every rung, down to `drop_terms:1`, whose matches it need not all collect; `l3` is `w3 w` with L3 `prefix` alone, its one-letter last word
 expanded over every term (ROADMAP 8.1.20). Command: `cargo bench -p persia-engine --bench search -- search_relaxed`.
 2026-11-12, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Main is c8d6496, built in a worktree with its own target directory.
 
@@ -491,9 +491,10 @@ expanded over every term (ROADMAP 8.1.20). Command: `cargo bench -p persia-engin
 | ROADMAP 8.2.2.4–8.2.3 | 1 codegen unit | 926 µs | 1.43 ms | 11.47 ms | 22.2 ms |
 
 `l2_every_step` gains about 10% with ROADMAP 8.2.2.4: its last steps exclude L0 and one L2 step instead of every
-earlier one, so they plan fewer excluded queries. `l1` and `l2` move by about 5% in opposite directions between the
-two builds, and `l2` stays slower in the default build with the nested rule turned off (`nested()` false), so those
-moves are layout, not work. The steps they run are the same.
+earlier one, so they plan fewer excluded queries. `l2` is about 5% slower in the default build and about 3% faster
+with one codegen unit; it stayed slower in the default build with `DropTerms::nested` edited to return `false` (a
+local change, not a bench option), so that move is layout, not work. `l1` is 3–5% slower in both builds, unexplained:
+its step is the same query, and its code only reads the root through `Compiled::root` now.
 
 ## `persia-engine` relevance
 

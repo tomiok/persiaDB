@@ -47,7 +47,8 @@ L3 only has to build the `prefix` queries. Several things were still open:
 7. **A `combined` becomes a `bool` of `should`s.** The AST has no multi-field prefix. The fields kept exact stay one
    `combined`, and each expanded field gets its own `prefix`. A `prefix` already scores with its field's schema
    `boost` as the field weight (SPEC §7.2), as a `term` does, so the step adds a `boost` only when the word's
-   `fields` weight differs from it: their ratio, capped at a boost's 1000. (Boosting by the weight itself, as first
+   `fields` weight differs from it: their ratio, clamped to the range a `boost` allows (SPEC §7.1: at most 1000, and
+   the least positive `f64` when a tiny weight rounds it to 0). (Boosting by the weight itself, as first
    built, counted the schema boost twice; the batch review found it.) A `fields` weight then scales the field's
    score instead of entering its saturation as `w_f`. A document matches when any field matches. Each expanded field scores its prefix with the largest kept `df` (§7.1), so BM25F's field
    combination is lost for the expanded fields: their scores add up instead of sharing one saturation.
@@ -58,7 +59,8 @@ L3 only has to build the `prefix` queries. Several things were still open:
    field's reading of the same word, as the compiler builds them). Its `must_not`, `filter` and phrases stay as
    they are. A root with `should` clauses or a `minimum_should_match` is not relaxed, as at L2. For a compiled
    query too, the root's whole `must_not` stays, as at L2 (L1 now reads it the same way).
-9. **`effective` is L0's text**: every clause is kept, as at L1. The step reads no statistics.
+9. **`effective` is L0's text**: every clause is kept, as at L1. Building the step reads no statistics; planning it reads the `df`s that keep
+   the expansions (§7.1).
 
 ## Consequences
 
@@ -69,6 +71,9 @@ L3 only has to build the `prefix` queries. Several things were still open:
   when a prefix cannot keep one term each (`prefix:cut`, `prefix:skipped`).
 - No schema can name an analyzer that stacks tokens yet (schemas name built-in analyzers, none of which stacks). Rule
   5 is tested by giving a collection's memtable such an analyzer directly.
+- The last term expands at any length, so a one- or two-character last word makes each segment's FST range scan
+  walk every term starting with it before the 50 kept by `df` are chosen: about 23 ms in `search_relaxed/l3` against
+  about 1.4 ms for an L2 step. ROADMAP 8.1.20 is to bound it.
 - Bench `search_relaxed/l3` measures the step: L0, then a two-word query whose last word is a prefix.
 
 ## Alternatives considered

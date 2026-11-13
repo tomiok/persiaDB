@@ -32,8 +32,8 @@ cascade return?
    earlier steps match, with the same `must_not` and `filter`: L2's ladder) has only its latest searched step
    excluded. Excluding it excludes the earlier ones with it, so the hits are the same. A step cut to fit the limits
    (item 10) matches less than it was built to: it stands for none of its level's earlier steps, which stay
-   excluded beside it, and the next uncut step stands for them all again (a cut step's matches are its uncut
-   query matches, all of which that step matches). Steps of other levels, L0 included, stay excluded, and so does every step of a
+   excluded beside it, and the next uncut step stands for them all again (a cut step matches a subset of what its
+   uncut query matches, and the next uncut step matches all of that, so all of the cut step's matches). Steps of other levels, L0 included, stay excluded, and so does every step of a
    level not proved nested (L1). A property test checks the same hits, scores and response as excluding every step.
 3. **Hits count from the top.** The cascade needs `need = max(offset + limit, min_results)` hits from the top. Step
    `i` collects `need − found` hits (pruned as any search, SPEC §7.3) and stops the cascade once `found ≥ min_results`
@@ -108,7 +108,7 @@ cascade return?
 - A relaxed step re-plans the earlier steps' queries inside its `must_not`. Expansions (`prefix`, `fuzzy`) expand
   again over the same views, to the same terms. Step `i` copies the queries of the steps it excludes into its
   `must_not`: every earlier one but a nested level's superseded steps (item 2), so an L2 step copies L0, L1's step
-  and one L2 step, whatever its rung. L0 is searched as given, never copied.
+  and the level's latest earlier step built and not cut, with any cut ones after it: none at its first rung. L0 is searched as given, never copied.
 - Scores down a relaxed page are not monotonic across steps. Clients that need one descending number use the rank
   score.
 - A cursor page re-runs the transforms of the steps through the cursor's last one (no search for those it does not

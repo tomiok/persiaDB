@@ -216,10 +216,13 @@ impl<'a> Root<'a> {
     fn compiled(compiled: &Compiled) -> Option<Vec<Term>> {
         let mut terms = Vec::new();
         for (index, clause) in compiled.clauses.iter().enumerate() {
+            // An excluded clause's parts are read too: a root whose `must_not` no longer holds them is not the one the
+            // clauses describe, and the steps would drop an exclusion their `effective` still states.
+            let parts = compiled.parts(index)?;
             if clause.negated {
                 continue;
             }
-            let query = match compiled.parts(index)? {
+            let query = match parts {
                 [one] => one.clone(),
                 parts => Query::Bool(BoolQuery {
                     must: parts.to_vec(),
