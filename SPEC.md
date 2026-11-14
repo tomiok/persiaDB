@@ -1646,8 +1646,12 @@ count is below L0's, and dropping the one term would match every document the ex
 and L0's root `must_not` and `filter` clauses, so excluded clauses stay excluded and filters are not relaxed. Its
 `applied` is `drop_terms:75%`, `drop_terms:50%` or `drop_terms:1`, for the rung that first gave its count (2 terms:
 one step, `drop_terms:75%`, of count 1). The terms are ordered by *importance* (ROADMAP 8.2.2.1), compared
-lexicographically with no weight to tune: a stopword (§7.1.1) is less important than any other term, then a lower
-IDF, then a later position in the query (a user's last word tends to qualify the first ones). A term's IDF is about
+lexicographically with no weight to tune: a term no document holds is less important than any other (ROADMAP
+8.2.2.5, ADR-0042: no hit of a step holds it, so `effective` must not name it), then a stopword (§7.1.1) is less
+important than any other term, then a lower IDF, then a later position in the query (a user's last word tends to
+qualify the first ones). A term holds no document when the `df`s its IDF reads say so: a `term` or every field of a
+`combined` of `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or, with only `should`
+clauses, all of them such. A term's IDF is about
 as BM25F scores it (§7.2), over the search's statistics: a `term`'s, a `combined`'s of its largest `df`, a `phrase`'s
 the sum of its terms', a `bool`'s the sum of its `must` clauses' and the largest of its `should` clauses', `boost` and
 `constant_score` their query's, and 0 for `prefix`, `fuzzy` and `match_all`. Importance does not change which
