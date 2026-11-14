@@ -112,6 +112,7 @@ fn step(query: Query, applied: &str) -> Step {
         applied: applied.into(),
         effective: None,
         alternatives: None,
+        corrected: Vec::new(),
     }
 }
 
@@ -478,22 +479,23 @@ fn explained_hits_add_up_to_their_scores_at_every_step() {
 }
 
 #[test]
-fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_alone() {
+fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_and_l4() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
     let views = c.views(&memtable).unwrap();
     // Every level of the collection's defaults. For one programmatic term L1 builds no step (no text) and L2 skips it
-    // (ROADMAP 8.2.2.3); L3 expands it (ROADMAP 8.2.3), to no term here, and the others wait on ROADMAP 8.2.
+    // (ROADMAP 8.2.2.3); L3 expands it (ROADMAP 8.2.3), to no term here, and so does L4 (ROADMAP 8.2.4: `purple` has 6
+    // characters, distance 1); L5 waits on ROADMAP 8.2.5.
     let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
     assert!(relax.relaxes());
     let out = views
         .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec())
         .unwrap();
     assert_eq!(out.hits.len(), 0);
-    assert_eq!(out.relaxation.level, RelaxLevel::Prefix);
-    assert_eq!(out.relaxation.applied, ["prefix"]);
+    assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
+    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy"]);
 }
 
 #[test]
@@ -1175,6 +1177,106 @@ mod budget {
         assert!(out.relaxation.truncated);
         assert_eq!(out.relaxation.level, RelaxLevel::Exact);
         assert_eq!(out.relaxation.applied.len(), 0);
+    }
+
+    /// Walks the views' terms of `field` as it builds, as L4 does for its corrections, then builds `steps`.
+    #[derive(Debug)]
+    struct Walking {
+        field: FieldId,
+        steps: Vec<Step>,
+    }
+
+    impl LevelTransform for Walking {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            let terms = input.terms.expect("the search gives the views' terms");
+            terms.each_term(
+                self.field,
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+                &crate::search::Expansion::all(),
+                &mut |_, _| Ok(()),
+            )?;
+            Ok(self.steps.clone())
+        }
+    }
+
+    #[test]
+    fn a_level_whose_term_walk_the_budget_passes_truncates_the_cascade() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let walking = Arc::new(Walking {
+            field: body,
+            steps: vec![step(term(body, "hat"), "fuzzy")],
+        });
+        let relax = plan(&budget(6, 10), &[]).with_level(RelaxLevel::Fuzzy, walking.clone() as _);
+        // Reads after L0: the budget's start (t), before the level (t + 4), then the walk's first check (t + 8), past
+        // it: the cascade stops with L0's hits, not an error.
+        let out = views
+            .search_relaxed(
+                &term(body, "red"),
+                &request(10),
+                &relax,
+                &exec().budget_clock(Ticking::new(4)),
+            )
+            .unwrap();
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+        assert!(out.hits.iter().all(|h| h.step == 0));
+        // With time to spare, the walk ends and the step runs.
+        let roomy = plan(&budget(1_000, 10), &[]).with_level(RelaxLevel::Fuzzy, walking as _);
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &roomy, &exec())
+            .unwrap();
+        assert!(!out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
+    }
+
+    /// Moves the request's deadline clock past its deadline, then walks as [`Walking`] does.
+    #[derive(Debug)]
+    struct LateWalk {
+        walk: Walking,
+        deadline: Arc<ManualClock>,
+    }
+
+    impl LevelTransform for LateWalk {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            self.deadline.advance(Duration::from_millis(10));
+            self.walk.steps(input)
+        }
+    }
+
+    #[test]
+    fn the_requests_deadline_passing_during_a_levels_walk_stays_an_error() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let deadline = Arc::new(ManualClock::new(0));
+        let late = Arc::new(LateWalk {
+            walk: Walking {
+                field: body,
+                steps: vec![step(term(body, "hat"), "fuzzy")],
+            },
+            deadline: Arc::clone(&deadline),
+        });
+        // A budget that never passes (its own frozen clock), and a deadline 5 ms away that the level's build passes.
+        let relax = plan(&budget(1_000, 10), &[]).with_level(RelaxLevel::Fuzzy, late as _);
+        let at = Clock::now(&*deadline) + Duration::from_millis(5);
+        let exec = exec().deadline(Arc::clone(&deadline) as _, at);
+        let out = views.search_relaxed(&term(body, "red"), &request(10), &relax, &exec);
+        assert!(
+            matches!(
+                out,
+                Err(crate::db::RelaxedSearchError::Plan(
+                    SearchError::Interrupted(Interrupt::DeadlineExceeded)
+                ))
+            ),
+            "{out:?}"
+        );
     }
 
     #[test]

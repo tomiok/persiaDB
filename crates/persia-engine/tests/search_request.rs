@@ -1858,3 +1858,70 @@ fn a_shared_threshold_skips_only_below_for_a_sort_led_by_the_score() {
         }
     }
 }
+
+/// Three segments: the first two of 1 000 documents whose last 5 are short (the best score, all tied), the others
+/// long, and a third of 3 000 long ones; `n` cycles 0..7. Each of the first two views keeps 5 short and 5 long hits, so
+/// its own threshold is the long score, while the `k`-th of both together is the short one.
+fn merged_tiers() -> Database<SimFile> {
+    let f = fields();
+    let mut db = database(schema());
+    let long = format!("common {}", ["filler"; 15].join(" "));
+    for (segment, size) in [1_000_usize, 1_000, 3_000].into_iter().enumerate() {
+        for i in 0..size {
+            let body = if segment < 2 && i >= size - 5 {
+                "common".to_owned()
+            } else {
+                long.clone()
+            };
+            let d = Document::new(format!("s{segment}-{i}"))
+                .with(f.body, Value::String(body))
+                .with(f.n, Value::I64(i64::try_from(i % 7).unwrap()));
+            db.put("c", &d, Durability::Buffered).unwrap();
+        }
+        db.commit().unwrap();
+    }
+    db
+}
+
+/// A sort led by the score hands its kept hits to the views after it (ROADMAP 7.4.11, 7.6.4; SPEC §7.4): on the
+/// calling thread the third view starts from the `k`-th score of the first two together, the short documents', and
+/// skips its long ones, which tie each earlier view's own threshold and would all be compared on `n` otherwise. The
+/// hits are the exhaustive ones, by `n` either way.
+#[test]
+fn a_sort_led_by_the_score_shares_its_merged_threshold() {
+    let db = merged_tiers();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    assert_eq!(c.segments().len(), 3);
+    let f = fields();
+    let query = term(f.body, "common");
+    let plan = SearchPlan::new(&query, c.schema(), &c.search_statistics(&memtable)).unwrap();
+    for later in [Order::Desc, Order::Asc] {
+        let sort = Sort::new([SortKey::score(), SortKey::field(f.n, later)], c.schema()).unwrap();
+        let request = |facets: bool| SearchRequest {
+            sort: sort.clone(),
+            limit: 10,
+            facets: if facets {
+                vec![FacetRequest::new(f.tag, 3, c.schema()).unwrap()]
+            } else {
+                Vec::new()
+            },
+            projection: Projection::None,
+            ..SearchRequest::default()
+        };
+        let exec = Execution::default().threads(Threads::Current);
+        let all = Execution::new(Pruning::Exhaustive).threads(Threads::Current);
+        let got = views.search_with(&plan, &request(false), &exec).unwrap();
+        let want = views.search_with(&plan, &request(false), &all).unwrap();
+        assert_eq!(located(&got), located(&want), "by {later:?}");
+        let pruned = reads(&views, &plan, &request(false));
+        let faceted = reads(&views, &plan, &request(true));
+        // The first two views are read whole (their long documents tie their own threshold): 2 000 of 5 000 matches.
+        assert!(
+            pruned * 2 < faceted,
+            "{pruned} reads pruned, {faceted} with a facet, by {later:?}"
+        );
+    }
+}

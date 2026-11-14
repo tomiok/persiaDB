@@ -337,6 +337,19 @@ mod tests {
         assert_ne!(pinned, pinned.at_unchecked(2));
     }
 
+    /// SPEC §6.2.2's defaults of a `text` field. The nDCG gate (ROADMAP 7.8.4) ranks by them but sees only a change
+    /// that reorders a judged top 10: a `k1` of 1.3 moves none (found by its mutation check).
+    #[test]
+    fn text_defaults_are_the_specs() {
+        let d = TextOptions::default();
+        assert_eq!(d.analyzer, AnalyzerRef::parse("standard").unwrap());
+        assert_eq!(d.boost.to_bits(), 1.0_f64.to_bits());
+        assert!(!d.positions);
+        assert_eq!(d.k1.to_bits(), 1.2_f64.to_bits());
+        assert_eq!(d.b.to_bits(), 0.75_f64.to_bits());
+        assert!(d.stored);
+    }
+
     #[test]
     fn stored_flag_per_kind() {
         assert!(FieldKind::Stored.stored());

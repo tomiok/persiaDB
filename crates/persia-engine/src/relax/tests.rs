@@ -258,6 +258,7 @@ fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
             applied: String::new(),
             effective: None,
             alternatives: None,
+            corrected: Vec::new(),
         }]
     );
     // L2 skips a single term (ROADMAP 8.2.2.3), and L1 and L3 to L5 wait on ROADMAP 8.2: no step, so the cascade
@@ -288,6 +289,7 @@ fn l0_states_the_text_of_the_clauses_that_compiled() {
             applied: String::new(),
             effective: Some("red shoes".into()),
             alternatives: None,
+            corrected: Vec::new(),
         }]
     );
 }
@@ -310,6 +312,7 @@ fn a_replaced_transform_keeps_its_place_and_a_new_level_goes_in_cascade_order() 
         applied: "prefix".into(),
         effective: None,
         alternatives: None,
+        corrected: Vec::new(),
     };
     let none = RelaxOptions {
         levels: Some(Levels::Custom(vec![Level::Synonyms, Level::Fuzzy])),

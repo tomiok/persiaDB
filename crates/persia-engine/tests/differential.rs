@@ -19,6 +19,10 @@
 //!    8.1.2, 8.2.2): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses, each
 //!    step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as a plain
 //!    search, when it has `min_results` hits.
+//! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
+//!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
+//!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
+//!    the one after its cursor (ROADMAP 7.4.11; SPEC §7.4).
 
 #![allow(
     clippy::unwrap_used,
@@ -37,8 +41,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use persia_engine::db::{
-    CollectionSnapshot, Database, DatabaseOptions, Execution, Located, ManualClock, SearchHit,
-    SearchRequest, SegmentIds, Threads,
+    CollectionSnapshot, CollectionViews, Database, DatabaseOptions, Execution, Located,
+    ManualClock, SearchHit, SearchRequest, SegmentIds, Threads,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::memtable::MemtableView;
@@ -52,7 +56,9 @@ use persia_engine::schema::{
     AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels,
     SchemaBuilder, TextOptions,
 };
-use persia_engine::search::{Explanation, Pruning, SearchPlan};
+use persia_engine::search::{
+    Explanation, Missing, Order, Pruning, SearchPlan, Sort, SortKey, SortValue,
+};
 use persia_engine::view::SearchView;
 use persia_engine::wal::Durability;
 use persia_storage::container::sim::SimFile;
@@ -572,7 +578,7 @@ fn check(
     let views = c.views(memtable).unwrap();
     let stats = c.search_statistics(memtable);
     let all = live.len().max(1);
-    for (q, filter) in &case.queries {
+    for (i, (q, filter)) in case.queries.iter().enumerate() {
         let mut query = engine_query(q, &fields);
         match filter {
             Some((f, false)) => {
@@ -750,6 +756,14 @@ fn check(
             }
         }
 
+        check_score_then_column(
+            &views,
+            [(&plan, &full), (&off, &no_bonus)],
+            &live,
+            (schema, fields[3]),
+            (case.k, live.len() + i),
+        )?;
+
         // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
         // would also build a step for one programmatic term: ROADMAP 8.1.19), a search returns each step's matches the
         // earlier steps lack, step by step, scored and ranked as the reference scores that step's query; L0 alone when it
@@ -885,6 +899,116 @@ fn check(
                 let hits: Vec<SearchHit> = second.hits.into_iter().map(|h| h.hit).collect();
                 let end = (first_hits.len() + case.k).min(whole.len());
                 prop_assert_eq!(bits(&hits), bits(&whole[first_hits.len()..end]));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Invariant 6: a sort led by the score with a later key on the `n` column (ROADMAP 7.4.11; SPEC §7.4), both orders
+/// and `missing` placements, ranks as the reference does: a plan's whole score order (its scores the reference's
+/// within the tolerance) re-sorted, among hits tied bit for bit on the score, by the reference's own `n` values, then
+/// location. On the calling thread every strategy returns that order, scores bit for bit, and so do pages of `k`
+/// walked by cursor, a page boundary falling inside a tie group (the vocabulary and `n` are small, so ties are
+/// common). On the pool, where only a page smaller than the matches gives the views a threshold to share, the first
+/// page of `k` and the page after its cursor are slices of it.
+///
+/// Each call runs two sorts, one per plan (with proximity, then the default plan without it), each costing a whole
+/// search, a cursor walk and two pages per strategy. `turn` picks which of the four order and `missing` pairs: the
+/// plan with proximity takes pair `turn % 4`, the default plan the next one, so as `turn` varies (it is the live
+/// count plus the query's index, and the check runs after every operation) each plan meets every pair.
+fn check_score_then_column(
+    views: &CollectionViews<'_>,
+    plans: [(&SearchPlan, &[SearchHit]); 2],
+    live: &BTreeMap<String, Values>,
+    (schema, n): (&CollectionSchema, FieldId),
+    (k, turn): (usize, usize),
+) -> Result<(), TestCaseError> {
+    const PAIRS: [(Order, Missing); 4] = [
+        (Order::Desc, Missing::Last),
+        (Order::Asc, Missing::First),
+        (Order::Desc, Missing::First),
+        (Order::Asc, Missing::Last),
+    ];
+    let sorts = [PAIRS[turn % 4], PAIRS[(turn + 1) % 4]];
+    for ((plan, full), (order, missing)) in plans.into_iter().zip(sorts) {
+        let later = SortKey::Field {
+            field: n,
+            order,
+            missing,
+        };
+        let rank = |h: &SearchHit| -> (bool, i64) {
+            let v = live[h.document.id()].n;
+            let first = v.is_none() == (missing == Missing::First);
+            let v = v.unwrap_or(0);
+            (!first, if order == Order::Desc { -v } else { v })
+        };
+        let mut want: Vec<SearchHit> = full.to_vec();
+        // `full` is in score order, ties by location: a stable sort keeps the location order within a tie on `n`.
+        want.sort_by(|a, b| {
+            (b.score + 0.0)
+                .total_cmp(&(a.score + 0.0))
+                .then_with(|| rank(a).cmp(&rank(b)))
+        });
+        let sort = Sort::new([SortKey::score(), later], schema).unwrap();
+        let what = (order, missing, plan.proximity());
+        for pruning in STRATEGIES {
+            let exec = Execution::new(pruning).threads(Threads::Current);
+            let whole = SearchRequest {
+                sort: sort.clone(),
+                limit: full.len().max(1),
+                ..SearchRequest::default()
+            };
+            let got = views.search_with(plan, &whole, &exec).unwrap().hits;
+            prop_assert_eq!(bits(&got), bits(&want), "{:?} {:?}", what, pruning);
+            for h in &got {
+                let key = live[h.document.id()].n.map_or(SortValue::Missing, |v| {
+                    SortValue::Key(persia_format::for_codec::i64_to_key(v))
+                });
+                prop_assert_eq!(&h.sort[1], &key);
+            }
+            let page = |after: Option<persia_engine::db::Cursor>| SearchRequest {
+                sort: sort.clone(),
+                limit: k,
+                search_after: after,
+                ..SearchRequest::default()
+            };
+            let mut seen: Vec<SearchHit> = Vec::new();
+            let mut after = None;
+            loop {
+                let hits = views.search_with(plan, &page(after), &exec).unwrap().hits;
+                let Some(last) = hits.last() else {
+                    break;
+                };
+                after = Some(last.cursor());
+                seen.extend(hits);
+                prop_assert!(seen.len() <= want.len(), "pages repeat hits");
+            }
+            prop_assert_eq!(
+                bits(&seen),
+                bits(&want),
+                "pages of {}, {:?} {:?}",
+                k,
+                what,
+                pruning
+            );
+            // On the pool: a page of `k`, then the page after its last cursor.
+            let pool = Execution::new(pruning).threads(Threads::Global);
+            let first = views.search_with(plan, &page(None), &pool).unwrap().hits;
+            prop_assert_eq!(&bits(&first)[..], &bits(&want)[..k.min(want.len())]);
+            if let Some(last) = first.last() {
+                let second = views
+                    .search_with(plan, &page(Some(last.cursor())), &pool)
+                    .unwrap()
+                    .hits;
+                let end = (first.len() + k).min(want.len());
+                prop_assert_eq!(
+                    bits(&second),
+                    bits(&want[first.len()..end]),
+                    "pool, {:?} {:?}",
+                    what,
+                    pruning
+                );
             }
         }
     }

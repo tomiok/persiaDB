@@ -57,6 +57,7 @@ fn term(field: u32, term: &str) -> Query {
 
 fn importance(stopword: bool, idf: f64, position: usize) -> Importance {
     Importance {
+        missing: false,
         stopword,
         idf,
         position,
@@ -81,12 +82,15 @@ proptest! {
     /// The order is a permutation in which no term is more important than one dropped after it.
     #[test]
     fn drop_order_never_drops_a_more_important_term_first(
-        terms in prop::collection::vec((any::<bool>(), 0_u8..4), 0..12),
+        terms in prop::collection::vec((any::<bool>(), any::<bool>(), 0_u8..4), 0..12),
     ) {
         let terms: Vec<Importance> = terms
             .iter()
             .enumerate()
-            .map(|(position, &(stopword, idf))| importance(stopword, f64::from(idf), position))
+            .map(|(position, &(missing, stopword, idf))| Importance {
+                missing,
+                ..importance(stopword, f64::from(idf), position)
+            })
             .collect();
         let order = drop_order(&terms);
         let mut sorted = order.clone();
@@ -95,8 +99,9 @@ proptest! {
         for w in order.windows(2) {
             let (a, b) = (terms[w[0]], terms[w[1]]);
             prop_assert_eq!(a.compare(&b), Ordering::Less, "{:?} before {:?}", a, b);
-            prop_assert!(a.stopword || !b.stopword, "a stopword after a term that is not one");
-            if a.stopword == b.stopword {
+            prop_assert!(a.missing || !b.missing, "a term no document holds after one some do");
+            prop_assert!(a.missing != b.missing || a.stopword || !b.stopword, "a stopword after a term that is not one");
+            if a.missing == b.missing && a.stopword == b.stopword {
                 prop_assert!(a.idf < b.idf || (a.idf == b.idf && a.position > b.position));
             }
         }
@@ -290,7 +295,8 @@ mod steps {
 
     #[test]
     fn each_step_requires_its_count_of_the_terms_most_important_first() {
-        // `shoes` is the most common, `red` next, `purple` in no document (the rarest).
+        // `shoes` is the most common, `red` next; `purple` is in no document: the rarest, but no hit can hold it, so it is
+        // the least important (ROADMAP 8.2.2.5) and no step's `effective` names it.
         let stats = Stats(BTreeMap::from([
             ((title().get(), "red"), 20),
             ((title().get(), "shoes"), 60),
@@ -300,8 +306,8 @@ mod steps {
         assert_eq!(
             labels(&steps),
             [
-                ("drop_terms:75%", 2, Some("red purple -blue")),
-                ("drop_terms:50%", 1, Some("purple -blue")),
+                ("drop_terms:75%", 2, Some("red shoes -blue")),
+                ("drop_terms:50%", 1, Some("red -blue")),
             ]
         );
         for step in &steps {
@@ -309,7 +315,7 @@ mod steps {
             // Any `count` of the terms, most important first; the excluded clause stays excluded.
             assert_eq!(
                 b.should,
-                [combined("purple"), combined("red"), combined("shoes")]
+                [combined("red"), combined("shoes"), combined("purple")]
             );
             assert_eq!(b.must, []);
             assert_eq!(b.must_not, [combined("blue")]);
@@ -358,7 +364,12 @@ mod steps {
         // `e-mail` is one clause of two parts: one term, kept whole.
         let compiled = compile("e-mail red");
         assert_eq!(compiled.clauses[0].parts, 0..2);
-        let stats = Stats(BTreeMap::from([((title().get(), "red"), 99)]));
+        // `e` and `mail` are rarer than `red`, which some document holds too.
+        let stats = Stats(BTreeMap::from([
+            ((title().get(), "red"), 99),
+            ((title().get(), "e"), 5),
+            ((title().get(), "mail"), 5),
+        ]));
         let steps = steps(&compiled, &stats);
         assert_eq!(labels(&steps), [("drop_terms:75%", 1, Some("e-mail"))]);
         let b = bool_of(&steps[0].query);
@@ -688,4 +699,114 @@ fn a_compiled_root_changed_to_hold_should_clauses_is_not_relaxed() {
     changed.minimum_should_match = 1;
     compiled.query = Query::Bool(changed);
     assert_eq!(input(&compiled), 0);
+}
+
+#[test]
+fn a_term_no_document_holds_drops_before_a_stopword() {
+    let missing = |missing, stopword, idf, position| Importance {
+        missing,
+        ..importance(stopword, idf, position)
+    };
+    // A held stopword, a held word, a word no document holds (the highest IDF): the missing one drops first.
+    let terms = [
+        missing(false, true, 1.0, 0),
+        missing(false, false, 2.0, 1),
+        missing(true, false, 9.0, 2),
+    ];
+    assert_eq!(drop_order(&terms), [2, 0, 1]);
+}
+
+#[test]
+fn matches_none_reads_the_dfs() {
+    let stats = stats();
+    assert!(!matches_none(&term(0, "red"), &stats).unwrap());
+    assert!(matches_none(&term(0, "absent"), &stats).unwrap());
+    let combined = |terms: &[(u32, &str)]| {
+        Query::Combined(CombinedQuery {
+            fields: terms
+                .iter()
+                .map(|&(f, t)| WeightedTerm {
+                    field: FieldId::new(f),
+                    term: t.into(),
+                    weight: 1.0,
+                })
+                .collect(),
+        })
+    };
+    // Some field holds `shoes`; no field holds `purple`.
+    assert!(!matches_none(&combined(&[(0, "purple"), (1, "shoes")]), &stats).unwrap());
+    assert!(matches_none(&combined(&[(0, "purple"), (1, "purple")]), &stats).unwrap());
+    let phrase = |terms: &[&str]| {
+        Query::Phrase(PhraseQuery {
+            field: FieldId::new(0),
+            terms: terms
+                .iter()
+                .enumerate()
+                .map(|(i, t)| PhraseTerm {
+                    term: (*t).into(),
+                    position: u32::try_from(i).unwrap(),
+                })
+                .collect(),
+        })
+    };
+    assert!(!matches_none(&phrase(&["red", "shoes"]), &stats).unwrap());
+    assert!(matches_none(&phrase(&["red", "purple"]), &stats).unwrap());
+    // A `bool` requiring a missing clause; one whose `should` clauses are all missing; one with a held `should`.
+    let must = Query::Bool(BoolQuery {
+        must: vec![term(0, "red"), term(0, "purple")],
+        ..BoolQuery::default()
+    });
+    assert!(matches_none(&must, &stats).unwrap());
+    let should = |terms: Vec<Query>| {
+        Query::Bool(BoolQuery {
+            should: terms,
+            ..BoolQuery::default()
+        })
+    };
+    assert!(matches_none(&should(vec![term(0, "a"), term(0, "b")]), &stats).unwrap());
+    assert!(!matches_none(&should(vec![term(0, "a"), term(0, "red")]), &stats).unwrap());
+    assert!(!matches_none(&should(Vec::new()), &stats).unwrap());
+    // `minimum_should_match` counts beside `must` too: two required of one held `should`.
+    let at_least = |m: u32, should: Vec<Query>| {
+        Query::Bool(BoolQuery {
+            must: vec![term(0, "red")],
+            should,
+            minimum_should_match: m,
+            ..BoolQuery::default()
+        })
+    };
+    assert!(
+        matches_none(
+            &at_least(2, vec![term(0, "shoes"), term(0, "absent")]),
+            &stats
+        )
+        .unwrap()
+    );
+    assert!(
+        !matches_none(
+            &at_least(1, vec![term(0, "shoes"), term(0, "absent")]),
+            &stats
+        )
+        .unwrap()
+    );
+    assert!(matches_none(&at_least(1, vec![term(0, "absent")]), &stats).unwrap());
+    assert!(!matches_none(&at_least(0, vec![term(0, "absent")]), &stats).unwrap());
+    let boosted = Query::Boost(BoostQuery {
+        query: Box::new(term(0, "absent")),
+        boost: 2.0,
+    });
+    assert!(matches_none(&boosted, &stats).unwrap());
+    let constant = Query::ConstantScore(ConstantScoreQuery {
+        query: Box::new(term(0, "red")),
+        score: 1.0,
+    });
+    assert!(!matches_none(&constant, &stats).unwrap());
+    // Unknown until planned.
+    let prefix = Query::Prefix(PrefixQuery {
+        field: FieldId::new(0),
+        prefix: "zz".into(),
+        max_expansions: 50,
+    });
+    assert!(!matches_none(&prefix, &stats).unwrap());
+    assert!(!matches_none(&Query::MatchAll, &stats).unwrap());
 }

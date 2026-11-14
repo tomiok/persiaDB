@@ -340,7 +340,8 @@ impl TermSource for ExecTerms<'_> {
 
 /// The thresholds the views of a search share. Each view's own: the worst score it keeps once it keeps `k`. And
 /// one merged over the views finished so far when they are a prefix of the view order (ROADMAP 7.6.4): the `k`-th
-/// best score of all their hits together, which a later view may skip at most (those hits win its ties). On the
+/// best score of all their hits together, which a later view may skip at most (those hits win its ties; a sort led by
+/// the score with further keys skips only below it, `top_sorted` passing the next float down, ROADMAP 7.4.11). On the
 /// calling thread the views finish in order, so each starts from every earlier hit, as one sequential search would.
 ///
 /// A score is stored as `bits + 1` of its (non-negative) `f64`, 0 before one is: the bits of non-negative floats

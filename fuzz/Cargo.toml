@@ -215,3 +215,10 @@ path = "fuzz_targets/blob_manifest.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzzy_automaton"
+path = "fuzz_targets/fuzzy_automaton.rs"
+test = false
+doc = false
+bench = false
