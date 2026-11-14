@@ -387,9 +387,12 @@ fn equal_df_corrections_go_to_the_lower_bytes_and_far_words_stay_as_written() {
     let db = database(&["boots", "boats"]);
     let out = search(&db, "boxts", None);
     assert_eq!(corrected(&out), [("boxts", "boats")]);
+    // L4 corrects `boxts` but finds no hit, so no step did: the response states L0's text and no correction (SPEC
+    // §7.6: the hit step, ROADMAP 8.1.22), though L4 was built.
     let out = search(&db, "boxts qqqqq", None);
-    assert_eq!(corrected(&out), [("boxts", "boats")]);
-    assert_eq!(out.relaxation.effective.as_deref(), Some("boats qqqqq"));
+    assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
+    assert_eq!(corrected(&out), []);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("boxts qqqqq"));
     assert_eq!(hits(&out), []);
 }
 
@@ -402,7 +405,9 @@ fn exclusions_stay_in_effective_and_split_or_short_words_are_not_corrected() {
     assert_eq!(out.relaxation.effective.as_deref(), Some("-blue shoes"));
     assert_eq!(ids(&out), BTreeSet::from(["d0".to_owned()]));
     // `e-mial` is two tokens (`e`, `mial`): searched fuzzily per token, but a word of several parts is not reported.
-    let out = search(&db, "e-mial redd", None);
+    // `e` is short and stays exact, so a document must hold it for the step to find the hit it states.
+    let mail = database(&["e mail red"]);
+    let out = search(&mail, "e-mial redd", None);
     assert_eq!(corrected(&out), [("redd", "red")]);
     assert_eq!(out.relaxation.effective.as_deref(), Some("e-mial red"));
     // `rde` has 3 characters: no `fuzzy`, no correction, no step.
@@ -460,24 +465,9 @@ fn over_fields_the_correction_of_highest_df_wins() {
     assert_eq!(hits(&out).len(), 4);
 }
 
-/// SPEC §7.6 as it stands (ROADMAP 8.1.22 to revisit): a response states its last step's `corrected` and `effective`,
-/// also when that step adds no hit. With the collection's levels, `red shoez` relaxes through L2 (`drop_terms:75%`:
-/// any one word, so every `red` document) and then L4 (`red` and a term near `shoez`), whose matches L2 already took.
-#[test]
-fn a_last_step_that_adds_no_hit_still_states_its_corrections() {
-    let db = database(&["red shoes", "red hat"]);
-    let snapshot = db.snapshot();
-    let c = snapshot.collection("c").unwrap();
-    let memtable = c.memtable();
-    let views = c.views(&memtable).unwrap();
-    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
-        .unwrap()
-        .compile(
-            "red shoez",
-            &DefaultFields::all(c.schema()),
-            &QueryLimits::default(),
-        );
-    let every = RelaxPlan::new(
+/// The collection's levels (L1, L2, L3, L4), `min_results` 10 and no fallback: every step is built.
+fn every_level() -> RelaxPlan {
+    RelaxPlan::new(
         &RelaxationConfig::default(),
         &RelaxOptions {
             min_results: Some(10),
@@ -485,16 +475,95 @@ fn a_last_step_that_adds_no_hit_still_states_its_corrections() {
             ..RelaxOptions::default()
         },
     )
-    .unwrap();
-    let out = views
-        .search_relaxed(&compiled, &request(10), &every, &exec())
-        .unwrap();
+    .unwrap()
+}
+
+fn search_every_level(
+    db: &Database<SimFile>,
+    text: &str,
+    request: &SearchRequest,
+) -> RelaxedResults {
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            text,
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        );
+    views
+        .search_relaxed(&compiled, request, &every_level(), &exec())
+        .unwrap()
+}
+
+/// SPEC §7.6, ROADMAP 8.1.22: the response states the *hit step*'s `effective` and `corrected`, the last step that
+/// found a hit, not the last one built. With the collection's levels, `red shoez` relaxes through L2
+/// (`drop_terms:75%`: any one word, so every `red` document), L3 and L4 (`red` and a term near `shoez`), whose matches
+/// L2 already took: L4 corrects `shoez` to `shoes` but finds no hit, so the response states L2's `red` and no
+/// correction, on every page.
+#[test]
+fn a_last_step_that_adds_no_hit_states_the_step_that_found_one() {
+    let db = database(&["red shoes", "red hat"]);
+    let out = search_every_level(&db, "red shoez", &request(10));
     assert_eq!(
         out.relaxation.applied,
         ["drop_terms:75%", "prefix", "fuzzy"]
     );
     assert!(out.hits.iter().all(|h| h.level == RelaxLevel::DropTerms));
     assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
-    assert_eq!(corrected(&out), [("shoez", "shoes")]);
-    assert_eq!(out.relaxation.effective.as_deref(), Some("red shoes"));
+    assert_eq!(corrected(&out), []);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("red"));
+    // Page by page: the same text, from a cursor whose page searches L2 only.
+    let mut page = request(1);
+    let mut pages = 0;
+    loop {
+        let out = search_every_level(&db, "red shoez", &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        assert_eq!(out.relaxation.effective.as_deref(), Some("red"));
+        assert_eq!(corrected(&out), []);
+        page.search_after = Some(last.cursor());
+        pages += 1;
+    }
+    assert_eq!(pages, 2);
+}
+
+/// The hit step reaches a page that does not search it (ROADMAP 8.1.22): `boots shoez` is held by no document whole.
+/// L2's one-word rung finds `d0` and `d1` (`boots`), and L4 finds `d2` (`boot` and `shoes`, one edit from each word),
+/// so L4 is the hit step. A page of one hit after `d0` is filled by `d1` without searching L4, and still states L4's
+/// correction, from the cursor.
+#[test]
+fn every_page_states_the_hit_step_though_it_does_not_search_it() {
+    let db = database(&["boots", "boots x", "boot shoes"]);
+    let all = search_every_level(&db, "boots shoez", &request(10));
+    assert_eq!(
+        hits(&all),
+        [
+            (1, "d0".to_owned()),
+            (1, "d1".to_owned()),
+            (3, "d2".to_owned())
+        ]
+    );
+    assert_eq!(corrected(&all), [("shoez", "shoes")]);
+    assert_eq!(all.relaxation.effective.as_deref(), Some("boots shoes"));
+    let mut page = request(1);
+    let mut seen = Vec::new();
+    loop {
+        let out = search_every_level(&db, "boots shoez", &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        assert_eq!(out.relaxation.corrected, all.relaxation.corrected);
+        assert_eq!(out.relaxation.effective, all.relaxation.effective);
+        assert_eq!(out.relaxation.applied, all.relaxation.applied);
+        let cursor = last.cursor();
+        assert_eq!(cursor.relaxed.map(|s| s.hit), Some(3));
+        seen.push(last.hit.document.id().to_owned());
+        page.search_after = Some(cursor);
+    }
+    assert_eq!(seen, ["d0", "d1", "d2"]);
 }

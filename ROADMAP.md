@@ -553,7 +553,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.1.19 L3 in the differential suite: the reference model expands `prefix` as SPEC §7.1 does (the 50 terms of highest collection `df`) and builds L3's step by §7.6's rule, so invariant 5 of `tests/differential.rs` runs the collection's levels again (pinned to L2 since L3 builds a step for one programmatic term). Once a schema can name a registered analyzer (6.6.8), test through a database that a field stacking tokens (`edge_ngram`) is not expanded (`db::relaxed` tests give the memtable such an analyzer today) (found in 8.2.3)
 - [ ] 8.1.20 L3's last term is expanded whatever its length, so a one-letter last word (`w`) walks its field's whole term dictionary in every view before keeping 50 by `df` (bench `search_relaxed/l3`: about 23 ms over 4 segments of the bench corpus, against 1.4 ms for an L2 step). Bound it: a minimum length for the last term too (a SPEC §7.6 decision), a per-view walk budget, or `df`-ordered term walks (found in 8.2.3)
 - [ ] 8.1.21 L4 in the differential suite: the reference model expands `fuzzy` as SPEC §7.1 does (the optimal string alignment distance over characters, the 50 terms of highest collection `df`, one shared `idf` and the edit-distance weight) and builds L4's step and corrections by §7.6's rule, so invariant 5 of `tests/differential.rs` runs L3 and L4 beside L2. The reference has no `prefix` or `fuzzy` query yet, so it lands with 8.1.19's expansions; until then `tests/relax_fuzzy.rs` checks the step against an oracle (found in 8.2.4)
-- [ ] 8.1.22 A last step that adds no hit still states its `effective` and, at L4, its `corrected` (SPEC §7.6: the last step's text): with the collection's levels, `red shoez` over `red shoes` reports `corrected: shoez → shoes` though every hit is L2's `red` (`tests/relax_fuzzy.rs` pins it). Decide whether the response states the last step that found a hit instead, keeping every page of a query alike (a cursor page may not search the step), and the same for L3 (found in the 8.2.4 review)
+- [~] 8.1.22 A last step that adds no hit still states its `effective` and, at L4, its `corrected` (SPEC §7.6: the last step's text): with the collection's levels, `red shoez` over `red shoes` reports `corrected: shoez → shoes` though every hit is L2's `red` (`tests/relax_fuzzy.rs` pins it). Decide whether the response states the last step that found a hit instead, keeping every page of a query alike (a cursor page may not search the step), and the same for L3 (found in the 8.2.4 review)
 
 ## 8.2 Levels
 - [x] 8.2.1 L1 synonyms: expand terms with synonym groups (one step; runs of whole clauses, alternatives as phrases, cut in group order; ADR-0039)
@@ -569,7 +569,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
   - [x] 8.2.4.2 FST ∩ automaton term enumeration with cap + df ranking
   - [x] 8.2.4.3 "Did you mean" corrected-query synthesis
   - [x] 8.2.4.4 Length-based distance policy (SPEC §7.6 L4)
-- [ ] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
+- [~] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
 - [ ] 8.2.6 Optional filter relaxation (`last_resort`) with explicit opt-in
 - [ ] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)
 

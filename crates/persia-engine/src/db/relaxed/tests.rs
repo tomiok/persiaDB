@@ -668,7 +668,11 @@ fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
     );
     // A cursor whose step is after its last was not made by a cascade.
     let mut broken = later.cursor();
-    broken.relaxed = Some(StepCursor { step: 2, last: 1 });
+    broken.relaxed = Some(StepCursor {
+        step: 2,
+        last: 1,
+        hit: 1,
+    });
     let broken = SearchRequest {
         search_after: Some(broken),
         ..request(10)
@@ -683,6 +687,30 @@ fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
             }
         ))
     ));
+    // Nor one whose hit step (ROADMAP 8.1.22) is before its step or after its last: a page states it, and its own step
+    // found a hit.
+    for hit in [0, 2] {
+        let mut broken = later.cursor();
+        broken.relaxed = Some(StepCursor {
+            step: 1,
+            last: 1,
+            hit,
+        });
+        let broken = SearchRequest {
+            search_after: Some(broken),
+            ..request(10)
+        };
+        assert!(matches!(
+            views.search_relaxed(&red, &broken, &relax, &exec()),
+            Err(super::RelaxedSearchError::Request(
+                RequestError::CursorStep {
+                    step: 1,
+                    last: 1,
+                    reason,
+                }
+            )) if reason.contains("hit step")
+        ));
+    }
 }
 
 #[test]
@@ -1143,7 +1171,11 @@ mod budget {
         // The page's cursor records the last step completed.
         assert_eq!(
             out.hits.last().unwrap().cursor().relaxed,
-            Some(StepCursor { step: 1, last: 1 })
+            Some(StepCursor {
+                step: 1,
+                last: 1,
+                hit: 1
+            })
         );
         // The same cascade with time to spare is not truncated and reaches drop_terms.
         let roomy = plan(&budget(1_000, 10), &[])
@@ -1513,7 +1545,11 @@ fn cursors_from_other_searches_page_as_their_step_says() {
     assert_eq!(later.hit.cursor(), later.cursor());
     assert_eq!(
         later.cursor().relaxed,
-        Some(StepCursor { step: 1, last: 1 })
+        Some(StepCursor {
+            step: 1,
+            last: 1,
+            hit: 1
+        })
     );
     // A cursor from a step this plan no longer builds (another plan) pages nothing, without an error.
     let nothing = Stub::new(Vec::new());
@@ -1579,7 +1615,7 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
     });
     let relax = plan(&min(1), &[]).with_level(RelaxLevel::DropTerms, Arc::clone(&reads) as _);
 
-    // L0 has no hit: the last step built states its own text.
+    // L0 has no hit: the last step built, which found the hits, states its own text.
     let purple = compile("  purple \t shoes ");
     let out = views
         .search_relaxed(&purple, &request(10), &relax, &exec())
@@ -1611,6 +1647,79 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
     assert_eq!(reads.seen.lock().unwrap().last(), Some(&None));
 }
 
+/// ROADMAP 8.1.22: the response states the *hit step*'s text, the last step that found a hit (SPEC §7.6), not the last
+/// step built; L0's when none did. Every page states the same, also one that does not search the hit step.
+#[test]
+fn the_text_is_the_hit_steps_on_every_page() {
+    use persia_analysis::AnalyzerRegistry;
+
+    use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+
+    let (db, body, _) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    let purple = compiler.compile(
+        "purple shoes",
+        &DefaultFields::all(c.schema()),
+        &QueryLimits::default(),
+    );
+    let with_text = |q: &str, text: &str, applied: &str| Step {
+        effective: Some(text.into()),
+        ..step(term(body, q), applied)
+    };
+    let search = |stub: &Arc<Stub>, page: &SearchRequest| {
+        let relax = plan(&min(10), &[(RelaxLevel::DropTerms, stub)]);
+        views
+            .search_relaxed(&purple, page, &relax, &exec())
+            .unwrap()
+    };
+
+    // `shoes` finds `a` and `c`; `purple`, built last, finds nothing: the text is `shoes`'s.
+    let last_empty = Stub::new(vec![
+        with_text("shoes", "shoes", "drop_terms:75%"),
+        with_text("purple", "purple", "drop_terms:1"),
+    ]);
+    let out = search(&last_empty, &request(10));
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "drop_terms:1"]);
+    assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
+    assert_eq!(ids(&out), [("a", 1), ("c", 1)]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("shoes"));
+
+    // `shoes` finds `a` and `c`, then `green` finds `d`: the hit step is `green`'s, on every page of one hit, though
+    // the page after `a` is filled by `c` and does not search `green`.
+    let later = Stub::new(vec![
+        with_text("shoes", "shoes", "drop_terms:75%"),
+        with_text("green", "green", "drop_terms:1"),
+    ]);
+    assert_eq!(
+        search(&later, &request(10)).relaxation.effective.as_deref(),
+        Some("green")
+    );
+    let mut page = request(1);
+    let mut seen = Vec::new();
+    loop {
+        let out = search(&later, &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        assert_eq!(out.relaxation.effective.as_deref(), Some("green"));
+        let cursor = last.cursor();
+        assert_eq!(cursor.relaxed.map(|s| (s.last, s.hit)), Some((2, 2)));
+        seen.push(last.hit.document.id().to_owned());
+        page.search_after = Some(cursor);
+    }
+    assert_eq!(seen, ["a", "c", "d"]);
+
+    // No step finds a hit: the text is L0's, as asked.
+    let none = Stub::new(vec![with_text("purple", "purple", "drop_terms:75%")]);
+    let out = search(&none, &request(10));
+    assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
+    assert_eq!(ids(&out), []);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("purple shoes"));
+}
 /// ROADMAP 8.1.8: each step after L0 is held to the plan's limits as the query it runs, with the earlier steps it
 /// excludes (SPEC §7.1.3). Expansions are cut to fit; a step no cut fits is skipped and listed.
 mod limits {

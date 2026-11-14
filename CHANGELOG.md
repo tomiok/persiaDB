@@ -76,6 +76,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine` (breaking): a relaxed response states the `effective` and `corrected` of its *hit step*, the last
+  step of the cascade that found a hit (L0 when none did), not of the last step built (ROADMAP 8.1.22; SPEC §7.6,
+  ADR-0043). With the collection's levels, `red shoez` over `red shoes` now reads `effective: "red"` with no
+  correction, as every hit is L2's, though L4 was built (`level` stays `fuzzy`). `db::StepCursor` has a new `hit`
+  field that carries the hit step, so every page of a query states the same text though a page after a cursor may
+  not search that step again; a cursor whose `hit` is before its `step` or after its `last` is
+  `RequestError::CursorStep`.
 - `persia-engine`: L2 `drop_terms` ranks a term no document holds (collection `df` 0) least important, below a
   stopword (ROADMAP 8.2.2.5; SPEC §7.6, ADR-0042 item 8): it is dropped first, so a step's `effective` no longer
   names a word none of its hits holds (`purple red shoes` reads `red shoes`, not `purple red`).

@@ -99,6 +99,9 @@ pub struct StepCursor {
     pub step: usize,
     /// The last step its page's cascade built, at least `step`.
     pub last: usize,
+    /// Its cascade's *hit step* (ROADMAP 8.1.22): the last step that found a hit, from `step` to `last`, whose text
+    /// every page of the query states (`effective`, `corrected`), though a page after the cursor may not search it.
+    pub hit: usize,
 }
 
 /// A hit of a search (SPEC §7.5.1).
@@ -228,7 +231,7 @@ impl CollectionViews<'_> {
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
         let window = self.check_request(request, plan.proximity())?;
-        if let Some(StepCursor { step, last }) =
+        if let Some(StepCursor { step, last, .. }) =
             request.search_after.as_ref().and_then(|c| c.relaxed)
             && step > 0
         {
@@ -292,14 +295,21 @@ impl CollectionViews<'_> {
             })?;
         if let Some(cursor) = &request.search_after {
             request.sort.check(&cursor.values)?;
-            if let Some(StepCursor { step, last }) = cursor.relaxed
-                && step > last
-            {
-                return Err(RequestError::CursorStep {
-                    step,
-                    last,
-                    reason: "its step is after the last step of its cascade",
-                });
+            if let Some(StepCursor { step, last, hit }) = cursor.relaxed {
+                if step > last {
+                    return Err(RequestError::CursorStep {
+                        step,
+                        last,
+                        reason: "its step is after the last step of its cascade",
+                    });
+                }
+                if hit < step || hit > last {
+                    return Err(RequestError::CursorStep {
+                        step,
+                        last,
+                        reason: "its hit step is before its step or after the last step of its cascade",
+                    });
+                }
             }
             let origin = self.cursor_origin();
             if cursor.origin != origin {

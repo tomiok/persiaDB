@@ -1539,7 +1539,7 @@ number and type is an error. The cursor also records the snapshot it came from (
 and the memtable view's version. A search on another snapshot, collection, or memtable view is an error: locations
 are indices into the view that returned the cursor, so using it elsewhere would repeat a hit tied with it on every
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
-also records its hit's step and its cascade's last step (§7.6). It also records whether its plan scored proximity
+also records its hit's step, its cascade's last step and its hit step (§7.6). It also records whether its plan scored proximity
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
 The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
 unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
@@ -1603,17 +1603,23 @@ Rules:
   `level` is the level of the last step the cascade built and did not skip (`exact` when L0 had enough or no later
   level built a step that fits the limits; a cursor's page builds the steps before its own without searching them), `applied` what each step after L0 applied in build order (empty when no level built a
   step; a step cut or skipped to fit §7.1.3's limits is listed with `:cut` or `:skipped`), `original` the
-  user text, `effective` the text of the last step's query, `corrected` each term the fuzzy level replaced, in
+  user text, `effective` the text of the *hit step*'s query, `corrected` each term the fuzzy level replaced in it, in
   query order, and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
-  8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
-  the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
+  8.1.5) defines every field. The *hit step* (ROADMAP 8.1.22, ADR-0043) is the last step of the cascade that found a
+  hit, L0 when none did: `level` and `applied` say what the cascade built, `effective` and `corrected` what the hits
+  were searched for, so a last step that adds no hit (its matches all an earlier step's) does not name terms or
+  corrections no hit was found by. A step found a hit when its search collected one; every step a page searches from the top
+  is searched for at least one hit (it is built only while hits are missing), so whether it found one does not
+  depend on the page. A hit's cursor records the hit step (below), and a cursor's page states the later of the
+  cursor's and the last step that found a hit on that page, as it may not search the step again. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
+  the hit step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
   (ROADMAP 8.2.2.2, below), at L3 L0's, and at L4 L0's with each corrected word replaced by its correction (ROADMAP
   8.2.4.3, below). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
   programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
-  fuzzy). `corrected` is empty unless the last step is L4's.
+  fuzzy). `corrected` is empty unless the hit step is L4's.
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).
@@ -1716,9 +1722,10 @@ fuzzily per token but neither corrected nor rewritten in `effective`, which has 
 corrections walks each such field's terms as planning does (§7.1), keeping one, under the request's deadline,
 cancellation and the budget: a budget that passes during the walk stops the cascade before the level, as before a
 step. A query whose words some document holds, or that is not compiled from `q`, has no correction. As for every
-level, `corrected` and `effective` are the last step's, also when that step adds no hit: with one word some document
-holds and one typo, L2's last rung already matches every document L4 can (ROADMAP 8.1.22 is to decide whether such a
-step should state them). `effective` sets each correction in as the index holds it, not quoted: it names the terms
+level, the response states L4's `corrected` and `effective` only when L4 is the hit step (above): with one word some
+document holds and one typo (`red shoez` over `red shoes`), L2's last rung already matches every document L4 can, so
+the response states L2's `effective` (`red`) and no correction, though L4 was built (`level` `fuzzy`). The same
+holds at L3, whose `effective` is L0's (ROADMAP 8.1.22). `effective` sets each correction in as the index holds it, not quoted: it names the terms
 searched and need not compile back to the step's query (a stem, or a term holding `:`).
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
@@ -1758,15 +1765,17 @@ step's highest (scores from about `2^52.4`), so only the hit's step tells such h
 (§7.3) and column-sort skipping (§7.4) are those of the step's own search, with its earlier steps excluded.
 Thresholds are not shared across steps: a looser hit ranks below a stricter one whatever it scores.
 
-Paging (ROADMAP 8.1.3): `offset` counts the hits from the top across steps. A hit's cursor also records its step
-and the cascade's last step on its page. A search after it builds the steps through that last one (the same
-queries: the same snapshot and query build them alike), skips the steps before the cursor's (still excluded, and
-still searched when the request counts facets, §7.5), and searches the cursor's step after the cursor and the later
-steps from their top while the page has room. So, without `fill`, every page reports the same `level` and
-`applied`. With `fill` it builds past the last step while the page has room. The pages of one query on one
-snapshot, by `offset` or by cursor, are therefore slices of one ranking, as without relaxation (§7.4). A cursor
-without a step (from a search that did not relax) is step 0 of a cascade that stopped at L0. A cursor whose step is
-after its last is an error, and so is a cursor from a step after L0 given to a plain search or to one with
+Paging (ROADMAP 8.1.3): `offset` counts the hits from the top across steps. A hit's cursor also records its step,
+the cascade's last step on its page, and its hit step (ROADMAP 8.1.22). A search after it builds the steps through that
+last one (the same queries: the same snapshot and query build them alike), skips the steps before the cursor's
+(still excluded, and still searched when the request counts facets, §7.5), and searches the cursor's step after the
+cursor and the later steps from their top while the page has room. So, without `fill`, every page reports the same
+`level` and `applied`, and, through the hit step its cursor carries, the same `effective` and `corrected`, though the
+page may not search that step again. With `fill` it builds past the last step while the page has room. The pages of
+one query on one snapshot, by `offset` or by cursor, are therefore slices of one ranking, as without relaxation
+(§7.4). A cursor without a step (from a search that did not relax) is step 0 of a cascade that stopped at L0, its hit
+step 0. A cursor whose step is after its last, or whose hit step is before its step or after its last, is an error,
+and so is a cursor from a step after L0 given to a plain search or to one with
 `relax: false`: every hit it returns ranks before the cursor. A cursor from a step the plan no longer builds
 (another `relax`) pages nothing.
 
@@ -1777,7 +1786,7 @@ builds its steps, before each step, and inside each step's planning and search, 
 passed, the cascade stops. A step in progress is dropped whole: it has not seen all its matches, so the hits it holds
 need not be its best, and a page of them would rank hits the full step ranks lower or does not return. The response
 holds the hits of the steps completed, ranked and paged as above, with `truncated: true`. Its `level` and `applied`
-describe those steps, and a hit's cursor records the last of them as the cascade's last step (on a cursor page, that
+describe those steps, its hit step is the last of them that found a hit, and a hit's cursor records the last of them as the cascade's last step (on a cursor page, that
 or the cursor's own last step, whichever is later, so the next page tries again). On a cursor page with facets, the
 steps before the cursor's are searched to count them and spend the budget too, so such a page may be truncated
 before any hit. A cascade that ends before the budget passes is not truncated.
