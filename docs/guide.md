@@ -1,8 +1,8 @@
 # Persia DB
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
-> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-13 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **350 of 541 MVP leaves done (65%)**, none in progress. That file is regenerated from
+> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-14 snapshot
+> in [`PROGRESS.md`](../PROGRESS.md): **355 of 543 MVP leaves done (65%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -44,12 +44,12 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
 - `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
   the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
   BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
-  levels L1–L3 (M8, 17 of 42).
+  levels L1–L4 (M8, 22 of 44).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
 That is library code under the public facade. `persia` exports no `Db` yet (M10), and `persia-server` is a
-placeholder (M11). Fuzzy and fallback relaxation (L4, L5), the blob pack file, cloud storage, and the server
+placeholder (M11). Fallback relaxation (L5), the blob pack file, cloud storage, and the server
 are still ahead.
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).
@@ -129,7 +129,7 @@ crates under `persia`. The public API that wraps it is M10, so you cannot call t
 |---|---|---|
 | Open a file and search | Planned (M10); `persia-engine` opens, writes, and searches as library code (M6, M7) | SPEC §8, §10.2 |
 | Full-text search, filters, facets, sort | Done as library code (M7), including a tie-break after the score (`["score", {"field": ...}]`, pruned) and an nDCG@10 gate in CI; public through `Db` in M10 | SPEC §7 |
-| Zero-results relaxation | In progress (M8): the cascade and L1–L3 done; L4 fuzzy, L5 fallback, request options next | SPEC §7.6 |
+| Zero-results relaxation | In progress (M8): the cascade and L1–L4 done (L4 fuzzy reports "did you mean" corrections); L5 fallback, request options next | SPEC §7.6 |
 | Schema and documents | Done (M3) | SPEC §6 |
 | Analyzers (`standard`, `en`, `es`, `pt`, …) | Done (M4) | SPEC §6.3 |
 | Crash-safe commit and recovery | Done in M2; in progress in M6 (commit, WAL replay, and recovery done; 9 leaves left) | SPEC §4.5, §8.6 |
@@ -204,11 +204,12 @@ Quality of this cascade is a product feature of the same milestone (ROADMAP M8):
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
 planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
 
-Done so far (M8, 17 of 42): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
-the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, and L3 `prefix` (ROADMAP 8.2.1–8.2.3),
-as library code in `persia-engine`. Not started: L4 `fuzzy` (8.2.4), L5 `fallback` (8.2.5),
-`last_resort` filters (8.2.6), the request options and metrics (8.3), and the quality suite (8.4).
-Until L4 exists, `corrected` is always empty.
+Done so far (M8, 22 of 44): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
+the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, and L4 `fuzzy` (ROADMAP
+8.2.1–8.2.4), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
+edit (two from 8 characters), and reports the words no document holds in `corrected` ("did you mean",
+`Zapatilas` → `zapatillas`), with `effective` reading the corrections. Not started: L5 `fallback`
+(8.2.5), `last_resort` filters (8.2.6), the request options and metrics (8.3), and the quality suite (8.4).
 
 ### Schema, documents, and analysis
 
@@ -624,7 +625,7 @@ while a dependency is unfinished.
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
 | **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
 | **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Done, 51/51 |
-| **M8** Relaxation | The zero-results cascade | M7 | In progress, 17/42 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 22/44 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
 | **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
@@ -704,12 +705,12 @@ performance work early (M15).
 
 ### M8 — Zero-results avoidance
 
-In progress (17 of 42). Depends on M7. The cascade in [Features](#features). Done: orchestration,
+In progress (22 of 44). Depends on M7. The cascade in [Features](#features). Done: orchestration,
 ordering across levels (ADR-0037), the time budget, the response metadata (8.1), synonyms (8.2.1,
-ADR-0039), dropping terms (8.2.2.1–8.2.2.4, ADR-0038), and prefix (8.2.3). Next: fuzzy (Levenshtein
-automaton over the term dictionary, 8.2.4), the fallback (8.2.5), request options and metrics (8.3), a
+ADR-0039), dropping terms (8.2.2, ADR-0038), prefix (8.2.3, ADR-0040), and fuzzy with "did you mean" corrections
+(8.2.4, ADR-0042). Next: the fallback (8.2.5), request options and metrics (8.3), a
 synthetic typo suite and a regression gate on the zero-result rate (8.4), and the framework's open leaves
-(for example facets under relaxation, 8.1.9, and L1 and L3 in the differential suite, 8.1.18, 8.1.19). The embedded
+(for example facets under relaxation, 8.1.9, and L1, L3 and L4 in the differential suite, 8.1.18, 8.1.19, 8.1.21). The embedded
 `v0.1` release depends on this milestone (M10 depends on M8).
 
 ### M9 — Blob store

@@ -56,6 +56,7 @@ mod sort;
 mod top_k;
 mod word;
 
+pub(crate) use expand::expand;
 pub use expand::{EachTerm, Expansion, TermSource};
 pub(crate) use expand::{TermWalk, each_merged_term};
 pub use explain::{

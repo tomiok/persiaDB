@@ -17,7 +17,8 @@ use persia_analysis::AnalyzerRegistry;
 
 use super::*;
 use crate::query::{
-    DefaultFields, FilterValue, QueryCompiler, QueryLimits, TermQuery, WeightedTerm,
+    BoolQuery, BoostQuery, CombinedQuery, DefaultFields, Filter, FilterValue, QueryCompiler,
+    QueryLimits, TermQuery, WeightedTerm,
 };
 use crate::schema::{
     AnalyzerRef, CollectionSchema, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,

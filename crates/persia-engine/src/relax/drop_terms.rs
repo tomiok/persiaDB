@@ -14,27 +14,32 @@ use crate::stats::StatisticsProvider;
 
 /// How important a term of L2 is (SPEC §7.6, ROADMAP 8.2.2.1): L2 drops the least important first.
 ///
-/// Importance compares lexicographically, with no weights to tune: a stopword is less important than any other term,
-/// then a lower IDF is less important, then a later position in the query (what a user types last tends to qualify
+/// Importance compares lexicographically, with no weights to tune: a term no document holds (ROADMAP 8.2.2.5) is less
+/// important than any other, then a stopword is less important than any other term, then a lower IDF is less
+/// important, then a later position in the query (what a user types last tends to qualify
 /// what came first: `red running shoes` keeps `shoes` over `red` when they are as rare).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Importance {
+    /// Whether no document holds the term, by the collection's `df`s ([`Weight::none`]): no hit of any step holds it,
+    /// so a step that kept it would name in its `effective` a word none of its hits has.
+    pub(crate) missing: bool,
     /// Whether the term is a stopword of a field it searches ([`crate::query::CompiledClause::stopword`]). A
     /// programmatic query's terms are not: it has no text to read the word from.
     pub(crate) stopword: bool,
-    /// The term's IDF, about as BM25F scores it ([`query_idf`]).
+    /// The term's IDF, about as BM25F scores it ([`Weight::idf`]).
     pub(crate) idf: f64,
     /// Its position among the query's terms, from 0.
     pub(crate) position: usize,
 }
 
 impl Importance {
-    /// `Less` when `self` is less important than `other`: a stopword before any other term, then the lower IDF,
-    /// then the later position. Positions are distinct among a query's terms, so no two of them tie.
+    /// `Less` when `self` is less important than `other`: a term no document holds before any other, then a stopword,
+    /// then the lower IDF, then the later position. Positions are distinct among a query's terms, so no two of them tie.
     pub(crate) fn compare(&self, other: &Self) -> Ordering {
         other
-            .stopword
-            .cmp(&self.stopword)
+            .missing
+            .cmp(&self.missing)
+            .then_with(|| other.stopword.cmp(&self.stopword))
             .then_with(|| self.idf.total_cmp(&other.idf))
             .then_with(|| other.position.cmp(&self.position))
     }
@@ -50,50 +55,105 @@ pub(crate) fn drop_order(terms: &[Importance]) -> Vec<usize> {
     order
 }
 
-/// The IDF of `query` about as BM25F scores it (SPEC §7.2), over `stats`: a `term`'s own; a `combined` query's from the
-/// largest `df` of its terms, as its score takes it; a `phrase`'s the sum of its terms'. A `bool` sums its `must`
-/// clauses' (all of them score) and adds the largest of its `should` clauses' (the query compiler's alternatives over
-/// fields, of which usually one matches; BM25F sums every one a document matches); `filter` and `must_not` clauses do not score. `boost` and `constant_score` are their
-/// query's. `prefix`, `fuzzy` and `match_all` have no `df` of their own until planned, so they are 0: the least
-/// important of a programmatic query's terms.
+/// [`Weight::idf`] of `query` alone, for tests.
 ///
 /// # Errors
 /// A `df` that cannot be read ([`StatisticsProvider::df`]).
+#[cfg(test)]
 pub(crate) fn query_idf(query: &Query, stats: &dyn StatisticsProvider) -> Result<f64, ReadError> {
+    Ok(weigh(query, stats)?.idf)
+}
+
+/// [`Weight::none`] of `query` alone, for tests: whether it matches no document by the `df`s (ROADMAP 8.2.2.5).
+///
+/// # Errors
+/// A `df` that cannot be read ([`StatisticsProvider::df`]).
+#[cfg(test)]
+pub(crate) fn matches_none(
+    query: &Query,
+    stats: &dyn StatisticsProvider,
+) -> Result<bool, ReadError> {
+    Ok(weigh(query, stats)?.none)
+}
+
+/// What L2 reads of a term from the statistics, each `df` once.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Weight {
+    /// The term's IDF about as BM25F scores it (SPEC §7.2): a `term`'s own; a `combined` query's from the largest `df`
+    /// of its terms, as its score takes it; a `phrase`'s the sum of its terms'. A `bool` sums its `must` clauses' (all
+    /// of them score) and adds the largest of its `should` clauses' (the query compiler's alternatives over fields, of
+    /// which usually one matches; BM25F sums every one a document matches); `filter` and `must_not` clauses do not
+    /// score. `boost` and `constant_score` are their query's. `prefix`, `fuzzy` and `match_all` have no `df` of their
+    /// own until planned, so they are 0: the least important of a programmatic query's terms.
+    pub(crate) idf: f64,
+    /// Whether the term matches no document by the `df`s alone (ROADMAP 8.2.2.5): a `term` of `df` 0, a `combined`
+    /// whose every field's term has `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or
+    /// with fewer other `should` clauses than it requires (its `minimum_should_match`, and at least one when it has no
+    /// `must` or `filter`), and a `boost` or
+    /// `constant_score` of such a query. A `df` counts deleted documents too (SPEC §7.2), so a term of `df` above 0
+    /// may still be held by none: that one is not caught. `prefix`, `fuzzy` and `match_all` are not: their terms are
+    /// only known once planned.
+    pub(crate) none: bool,
+}
+
+/// The [`Weight`] of `query` over `stats`.
+///
+/// # Errors
+/// A `df` that cannot be read ([`StatisticsProvider::df`]).
+pub(crate) fn weigh(query: &Query, stats: &dyn StatisticsProvider) -> Result<Weight, ReadError> {
     let n = stats.doc_count();
+    let weight = |idf, none| Weight { idf, none };
     Ok(match query {
-        Query::Term(t) => idf(n, stats.df(t.field, t.term.as_bytes())?),
+        Query::Term(t) => {
+            let df = stats.df(t.field, t.term.as_bytes())?;
+            weight(idf(n, df), df == 0)
+        }
         Query::Combined(c) => {
             let mut df = 0_u64;
             for f in &c.fields {
                 df = df.max(stats.df(f.field, f.term.as_bytes())?);
             }
-            idf(n, df)
+            weight(idf(n, df), df == 0)
         }
         Query::Phrase(p) => {
-            let mut sum = 0.0;
+            let (mut sum, mut none) = (0.0, false);
             for t in &p.terms {
-                sum += idf(n, stats.df(p.field, t.term.as_bytes())?);
+                let df = stats.df(p.field, t.term.as_bytes())?;
+                sum += idf(n, df);
+                none |= df == 0;
             }
-            sum
+            weight(sum, none)
         }
-        Query::Bool(b) => bool_idf(b, stats)?,
-        Query::Boost(b) => query_idf(&b.query, stats)?,
-        Query::ConstantScore(c) => query_idf(&c.query, stats)?,
-        Query::Prefix(_) | Query::Fuzzy(_) | Query::MatchAll => 0.0,
+        Query::Bool(b) => weigh_bool(b, stats)?,
+        Query::Boost(b) => weigh(&b.query, stats)?,
+        Query::ConstantScore(c) => weigh(&c.query, stats)?,
+        Query::Prefix(_) | Query::Fuzzy(_) | Query::MatchAll => weight(0.0, false),
     })
 }
 
-fn bool_idf(query: &BoolQuery, stats: &dyn StatisticsProvider) -> Result<f64, ReadError> {
-    let mut sum = 0.0;
+fn weigh_bool(query: &BoolQuery, stats: &dyn StatisticsProvider) -> Result<Weight, ReadError> {
+    let (mut sum, mut must_none) = (0.0, false);
     for q in &query.must {
-        sum += query_idf(q, stats)?;
+        let w = weigh(q, stats)?;
+        sum += w.idf;
+        must_none |= w.none;
     }
-    let mut best: f64 = 0.0;
+    let (mut best, mut available): (f64, usize) = (0.0, 0);
     for q in &query.should {
-        best = best.max(query_idf(q, stats)?);
+        let w = weigh(q, stats)?;
+        best = best.max(w.idf);
+        available += usize::from(!w.none);
     }
-    Ok(sum + best)
+    // The `should` clauses it requires (SPEC §7.1): its `minimum_should_match`, and at least one when they are all it
+    // has beside `must_not` (no `must` or `filter`).
+    let mut required = usize::try_from(query.minimum_should_match).unwrap_or(usize::MAX);
+    if query.must.is_empty() && query.filter.is_empty() && !query.should.is_empty() {
+        required = required.max(1);
+    }
+    Ok(Weight {
+        idf: sum + best,
+        none: must_none || available < required,
+    })
 }
 
 /// The fewest terms L2 relaxes (SPEC §7.6, ROADMAP 8.2.2.3). A query of one term (one required clause, whatever its
@@ -263,9 +323,11 @@ impl LevelTransform for DropTerms {
         let rungs = ladder(terms.len());
         let mut importance = Vec::with_capacity(terms.len());
         for (position, term) in terms.iter().enumerate() {
+            let weight = weigh(&term.query, input.stats)?;
             importance.push(Importance {
+                missing: weight.none,
                 stopword: term.stopword,
-                idf: query_idf(&term.query, input.stats)?,
+                idf: weight.idf,
                 position,
             });
         }
@@ -306,6 +368,7 @@ impl LevelTransform for DropTerms {
                 applied: format!("drop_terms:{label}"),
                 effective,
                 alternatives: None,
+                corrected: Vec::new(),
             });
         }
         Ok(steps)

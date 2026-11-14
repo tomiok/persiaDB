@@ -169,6 +169,7 @@ impl LevelTransform for Synonyms {
             applied: "synonyms".to_owned(),
             effective: Some(compiled.effective()),
             alternatives: Some(expansion),
+            corrected: Vec::new(),
         }])
     }
 }

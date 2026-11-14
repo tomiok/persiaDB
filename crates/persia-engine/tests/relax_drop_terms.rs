@@ -142,14 +142,14 @@ fn search(
 #[test]
 fn the_ladder_requires_fewer_terms_step_by_step_and_states_the_text_it_keeps() {
     let db = database();
-    // Three terms, no document with all of them. `purple` is in no document (the rarest), `red` in two titles,
-    // `shoes` in three titles and a body: `shoes` drops first, then `red`.
+    // Three terms, no document with all of them. `purple` is in no document, so no hit can hold it: it drops first
+    // (ROADMAP 8.2.2.5). `red` is in two titles, `shoes` in three titles and a body: `shoes` drops next.
     let out = search(&db, "purple red shoes", 1, None);
     let r = &out.relaxation;
     assert_eq!(r.level, RelaxLevel::DropTerms);
     assert_eq!(r.applied, ["drop_terms:75%"]);
     assert_eq!(r.original.as_deref(), Some("purple red shoes"));
-    assert_eq!(r.effective.as_deref(), Some("purple red"));
+    assert_eq!(r.effective.as_deref(), Some("red shoes"));
     // Two of the three: `a` holds `red` and `shoes`.
     assert_eq!(by_step(&out), [(1, "a")]);
 
@@ -157,7 +157,7 @@ fn the_ladder_requires_fewer_terms_step_by_step_and_states_the_text_it_keeps() {
     let out = search(&db, "purple red shoes", 10_000, None);
     let r = &out.relaxation;
     assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
-    assert_eq!(r.effective.as_deref(), Some("purple"));
+    assert_eq!(r.effective.as_deref(), Some("red"));
     // Within the 50% step, by score: `red` (in two titles) is rarer than `shoes` (three titles and a body), and a
     // shorter title weighs a term more (`shoes box` over `blue running shoes`).
     assert_eq!(
@@ -179,11 +179,11 @@ fn the_ladder_requires_fewer_terms_step_by_step_and_states_the_text_it_keeps() {
 #[test]
 fn excluded_clauses_stay_excluded_and_in_the_text() {
     let db = database();
-    // Two terms: 75% is one of them. `-blue` keeps `c` out of every step.
+    // Two terms: 75% is one of them, `shoes` (`purple` is in no document). `-blue` keeps `c` out of every step.
     let out = search(&db, "purple shoes -blue", 1, None);
     let r = &out.relaxation;
     assert_eq!(r.applied, ["drop_terms:75%"]);
-    assert_eq!(r.effective.as_deref(), Some("purple -blue"));
+    assert_eq!(r.effective.as_deref(), Some("shoes -blue"));
     // By score: the two-token title, the body, then the three-token title.
     assert_eq!(by_step(&out), [(1, "f"), (1, "e"), (1, "a")]);
 }
@@ -408,7 +408,7 @@ fn a_filter_joined_to_a_compiled_query_is_never_relaxed() {
         .unwrap();
     let r = &out.relaxation;
     assert_eq!(r.applied, ["drop_terms:75%", "drop_terms:50%"]);
-    assert_eq!(r.effective.as_deref(), Some("purple"));
+    assert_eq!(r.effective.as_deref(), Some("red"));
     // `acme` is `a`, `c` and `e`: unfiltered, `b` (`red hat`) and `f` (`shoes box`) would match the 50% step.
     let ids: Vec<&str> = by_step(&out).into_iter().map(|h| h.1).collect();
     assert!(ids.iter().all(|id| ["a", "c", "e"].contains(id)), "{ids:?}");

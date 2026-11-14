@@ -6,8 +6,8 @@
 //! `relax: false` ([`RelaxOptions::disabled`]) leaving L0 alone.
 //!
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
-//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2) and L3 `prefix` (ROADMAP 8.2.3) build
-//! queries so far: the others (L4 `fuzzy` and L5 `fallback`, ROADMAP 8.2) build none yet, so the cascade skips them.
+//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2), L3 `prefix` (ROADMAP 8.2.3) and L4
+//! `fuzzy` (ROADMAP 8.2.4) build queries so far: L5 `fallback` (ROADMAP 8.2.5) builds none yet, so the cascade skips it.
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
@@ -44,12 +44,15 @@ use std::time::Duration;
 
 use crate::query::{Compiled, Query, QueryLimits};
 use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, Levels, RelaxationConfig};
+use crate::search::TermSource;
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 
 mod drop_terms;
+mod fuzzy;
 mod prefix;
 mod synonyms;
+mod words;
 
 pub(crate) use synonyms::Expansion;
 
@@ -170,6 +173,10 @@ pub(crate) struct LevelInput<'a> {
     /// ([`Self::expanding`]). A `prefix` scores with that boost as its field weight (SPEC §7.2), so L3 scales by a
     /// `fields` weight relative to it.
     pub(crate) expands: &'a dyn Fn(FieldId) -> Option<f64>,
+    /// The terms of the views the search runs on, which L4 walks for its corrections (SPEC §7.6, ROADMAP 8.2.4.3), as
+    /// planning walks them. None by default ([`Self::new`]): L4 then corrects nothing. The search sets them
+    /// ([`Self::walking`]).
+    pub(crate) terms: Option<&'a dyn TermSource>,
 }
 
 impl<'a> LevelInput<'a> {
@@ -183,12 +190,21 @@ impl<'a> LevelInput<'a> {
             compiled,
             stats,
             expands: &no_field,
+            terms: None,
         }
     }
 
     /// This input with L3 expanding the terms of the fields `expands` accepts.
     pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> Option<f64>) -> Self {
         Self { expands, ..self }
+    }
+
+    /// This input with L4 walking `terms` for its corrections.
+    pub(crate) fn walking(self, terms: &'a dyn TermSource) -> Self {
+        Self {
+            terms: Some(terms),
+            ..self
+        }
     }
 }
 
@@ -221,6 +237,20 @@ pub(crate) struct Step {
     /// rebuilt query keeps its `prefix` and `fuzzy` caps: a step with both is cut in one or the other, not both (no
     /// level builds such a step: compiled text has no `prefix` or `fuzzy`).
     pub(crate) alternatives: Option<Expansion>,
+    /// The words the step replaced, in query order (SPEC §7.6 `corrected`): L4's corrections, empty for any other
+    /// level.
+    pub(crate) corrected: Vec<Correction>,
+}
+
+/// A word the fuzzy level replaced (SPEC §7.6 `"corrected"`, ROADMAP 8.2.4.3): a word no document holds, and the term
+/// of highest collection `df` within its distance, which the response searched instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Correction {
+    /// The word as the user wrote it: `"Zapatilas"`.
+    pub original: String,
+    /// The term the step searched for it, as the index holds it (analyzed: lowercased, and stemmed under a
+    /// stemming analyzer): `"zapatillas"`.
+    pub corrected: String,
 }
 
 /// Builds a level's steps (SPEC §7.6). Called only once the cascade reaches the level; no step skips the level.
@@ -255,6 +285,7 @@ impl LevelTransform for Exact {
             applied: String::new(),
             effective: input.compiled.map(Compiled::effective),
             alternatives: None,
+            corrected: Vec::new(),
         }])
     }
 }
@@ -279,7 +310,7 @@ fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
         RelaxLevel::Synonyms => Arc::new(synonyms::Synonyms),
         RelaxLevel::DropTerms => Arc::new(drop_terms::DropTerms),
         RelaxLevel::Prefix => Arc::new(prefix::Prefix),
-        RelaxLevel::Fuzzy => Arc::new(Pending { leaf: "8.2.4" }),
+        RelaxLevel::Fuzzy => Arc::new(fuzzy::Fuzzy),
         RelaxLevel::Fallback => Arc::new(Pending { leaf: "8.2.5" }),
     }
 }

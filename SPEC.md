@@ -1610,9 +1610,10 @@ Rules:
   8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
   the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
-  (ROADMAP 8.2.2.2, below). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
-  query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy).
-  `corrected` stays empty until the fuzzy level synthesizes the corrected query (ROADMAP 8.2.4.3).
+  (ROADMAP 8.2.2.2, below), at L3 L0's, and at L4 L0's with each corrected word replaced by its correction (ROADMAP
+  8.2.4.3, below). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
+  programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
+  fuzzy). `corrected` is empty unless the last step is L4's.
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).
@@ -1626,7 +1627,7 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0 to L3 build queries; the other levels build none yet (ROADMAP 8.2).
+words; ROADMAP 8.1.10). So far L0 to L4 build queries; L5 builds none yet (ROADMAP 8.2.5).
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1645,8 +1646,13 @@ count is below L0's, and dropping the one term would match every document the ex
 and L0's root `must_not` and `filter` clauses, so excluded clauses stay excluded and filters are not relaxed. Its
 `applied` is `drop_terms:75%`, `drop_terms:50%` or `drop_terms:1`, for the rung that first gave its count (2 terms:
 one step, `drop_terms:75%`, of count 1). The terms are ordered by *importance* (ROADMAP 8.2.2.1), compared
-lexicographically with no weight to tune: a stopword (§7.1.1) is less important than any other term, then a lower
-IDF, then a later position in the query (a user's last word tends to qualify the first ones). A term's IDF is about
+lexicographically with no weight to tune: a term no document holds is less important than any other (ROADMAP
+8.2.2.5, ADR-0042: no hit of a step holds it, so `effective` must not name it), then a stopword (§7.1.1) is less
+important than any other term, then a lower IDF, then a later position in the query (a user's last word tends to
+qualify the first ones). A term holds no document when the `df`s its IDF reads say so: a `term` or every field of a
+`combined` of `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or with fewer other
+`should` clauses than it requires (its `minimum_should_match`, and at least one with no `must` or `filter` clause),
+and a `boost` or `constant_score` around such a query. A term's IDF is about
 as BM25F scores it (§7.2), over the search's statistics: a `term`'s, a `combined`'s of its largest `df`, a `phrase`'s
 the sum of its terms', a `bool`'s the sum of its `must` clauses' and the largest of its `should` clauses', `boost` and
 `constant_score` their query's, and 0 for `prefix`, `fuzzy` and `match_all`. Importance does not change which
@@ -1681,6 +1687,39 @@ level. Its `effective` is L0's text, as every clause is kept. Building the step 
 expansions, §7.1); held to §7.1.3's limits,
 its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
 its own for it to stand for (nested levels, in the cascade below).
+
+L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query: each term it rewrites
+becomes a `fuzzy` of that term with `max_expansions` 50, which planning expands over the views' terms (each view's
+term dictionary intersected with the optimal string alignment automaton) and keeps by collection `df` (§7.1). Its
+terms are L3's: a field's analyzed term of a word clause, or a `term` or `combined` field of a programmatic query, in
+a `text` field whose analyzer does not stack tokens; excluded clauses, phrases, `field:` clauses, filters and a
+programmatic root `bool` with `should` clauses or a `minimum_should_match` stay as they are, for L3's reasons. A
+term's *length* is its number of Unicode scalar values after analysis, as at L3 (`café` is 4, in 5 bytes), and it
+sets the distance (ROADMAP 8.2.4.4): no `fuzzy` below 4, distance 1 from 4 to 7, distance 2 from 8. Unlike L3, the
+last term has no rule of its own: a short word stays exact wherever it is. A rewritten `combined` becomes a `bool` of
+`should` clauses as at L3 (its exact fields as one `combined`, a `fuzzy` per rewritten field, under the ratio
+`boost` of a `fields` weight), and a `fuzzy` scores with the edit-distance weight of §7.1, so an exact term outranks a
+correction at the same frequency and length. A query that rewrites no term skips the level. Held to §7.1.3's limits,
+its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). Being one step, it has no earlier step
+of its own to stand for.
+Its `corrected` and `effective` say what L4 changed ("did you mean", ROADMAP 8.2.4.3). A word is *corrected* when it
+is a required word clause of one part (one token over the default fields: a `term` or a `combined`), no field of it
+holds its term (collection `df` 0, so no document does), and a field the step rewrites has a term within the word's
+distance that a document holds. Its correction is the term that field's `fuzzy` keeps first (§7.1: the highest
+collection `df`, ties by byte order), the highest `df` over the word's fields, ties to the field first in the
+`combined`: so the step searches it under any cut of §7.1.3, which keeps the most frequent terms. `corrected` lists
+each such word in text order, as written (`Zapatilas`), with its correction as the index holds it (`zapatillas`:
+analyzed, so lowercased, and a stem under a stemming analyzer). `effective` is L0's text with each corrected word's
+clause replaced by its correction, every other clause, excluded ones included, as written. A word some document holds
+is widened by its `fuzzy` but not reported: it matched as typed. A word of several tokens (`e-mial`) is matched
+fuzzily per token but neither corrected nor rewritten in `effective`, which has no text per token. Finding the
+corrections walks each such field's terms as planning does (§7.1), keeping one, under the request's deadline,
+cancellation and the budget: a budget that passes during the walk stops the cascade before the level, as before a
+step. A query whose words some document holds, or that is not compiled from `q`, has no correction. As for every
+level, `corrected` and `effective` are the last step's, also when that step adds no hit: with one word some document
+holds and one typo, L2's last rung already matches every document L4 can (ROADMAP 8.1.22 is to decide whether such a
+step should state them). `effective` sets each correction in as the index holds it, not quoted: it names the terms
+searched and need not compile back to the step's query (a stem, or a term holding `:`).
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A

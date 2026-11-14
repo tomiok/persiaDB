@@ -64,3 +64,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0039](./0039-l1-synonyms-runs-alternatives-and-cuts.md) | L1 `synonyms`: runs of whole clauses, phrase alternatives, one step, and cuts in group order | proposed |
 | [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | proposed |
 | [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | proposed |
+| [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed |
