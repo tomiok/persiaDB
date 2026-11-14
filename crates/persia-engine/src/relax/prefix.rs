@@ -54,6 +54,7 @@ impl LevelTransform for Prefix {
                 applied: "prefix".to_owned(),
                 effective: input.compiled.map(Compiled::effective),
                 alternatives: None,
+                corrected: Vec::new(),
             })
             .into_iter()
             .collect())

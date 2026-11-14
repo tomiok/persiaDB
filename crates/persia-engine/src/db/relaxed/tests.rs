@@ -112,6 +112,7 @@ fn step(query: Query, applied: &str) -> Step {
         applied: applied.into(),
         effective: None,
         alternatives: None,
+        corrected: Vec::new(),
     }
 }
 
@@ -1176,6 +1177,61 @@ mod budget {
         assert!(out.relaxation.truncated);
         assert_eq!(out.relaxation.level, RelaxLevel::Exact);
         assert_eq!(out.relaxation.applied.len(), 0);
+    }
+
+    /// Walks the views' terms of `field` as it builds, as L4 does for its corrections, then builds `steps`.
+    #[derive(Debug)]
+    struct Walking {
+        field: FieldId,
+        steps: Vec<Step>,
+    }
+
+    impl LevelTransform for Walking {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            let terms = input.terms.expect("the search gives the views' terms");
+            terms.each_term(
+                self.field,
+                std::ops::Bound::Unbounded,
+                std::ops::Bound::Unbounded,
+                &crate::search::Expansion::all(),
+                &mut |_, _| Ok(()),
+            )?;
+            Ok(self.steps.clone())
+        }
+    }
+
+    #[test]
+    fn a_level_whose_term_walk_the_budget_passes_truncates_the_cascade() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let walking = Arc::new(Walking {
+            field: body,
+            steps: vec![step(term(body, "hat"), "fuzzy")],
+        });
+        let relax = plan(&budget(6, 10), &[]).with_level(RelaxLevel::Fuzzy, walking.clone() as _);
+        // Reads after L0: the budget's start (t), before the level (t + 4), then the walk's first check (t + 8), past
+        // it: the cascade stops with L0's hits, not an error.
+        let out = views
+            .search_relaxed(
+                &term(body, "red"),
+                &request(10),
+                &relax,
+                &exec().budget_clock(Ticking::new(4)),
+            )
+            .unwrap();
+        assert!(out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+        assert!(out.hits.iter().all(|h| h.step == 0));
+        // With time to spare, the walk ends and the step runs.
+        let roomy = plan(&budget(1_000, 10), &[]).with_level(RelaxLevel::Fuzzy, walking as _);
+        let out = views
+            .search_relaxed(&term(body, "red"), &request(10), &roomy, &exec())
+            .unwrap();
+        assert!(!out.relaxation.truncated);
+        assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
     }
 
     #[test]

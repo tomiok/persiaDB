@@ -306,6 +306,7 @@ impl LevelTransform for DropTerms {
                 applied: format!("drop_terms:{label}"),
                 effective,
                 alternatives: None,
+                corrected: Vec::new(),
             });
         }
         Ok(steps)

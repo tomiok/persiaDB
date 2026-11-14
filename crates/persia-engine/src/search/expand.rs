@@ -486,7 +486,7 @@ impl Automaton for Expansion {
 ///
 /// # Errors
 /// As [`TermSource::each_term`]; a `df` that cannot be read.
-pub(super) fn expand(
+pub(crate) fn expand(
     field: FieldId,
     range: (Bound<&[u8]>, Bound<&[u8]>),
     expansion: &Expansion,

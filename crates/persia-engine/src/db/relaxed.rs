@@ -23,6 +23,7 @@ use super::exec::{ExecTerms, Execution};
 use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, StepCursor};
 use super::views::CollectionViews;
 use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
+pub use crate::relax::Correction;
 use crate::relax::{Expansion, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
 use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
@@ -82,7 +83,7 @@ impl RelaxedHit {
 /// assert_eq!(relaxation.level.name(), "exact");
 /// assert!(!relaxation.relaxed());
 /// assert!(!relaxation.truncated);
-/// // A programmatic query has no user text, so no `original` or `effective`; `corrected` waits on ROADMAP 8.2.4.3.
+/// // A programmatic query has no user text, so no `original`, `effective` or `corrected`.
 /// assert_eq!((relaxation.original.as_deref(), relaxation.effective.as_deref()), (None, None));
 /// assert!(relaxation.corrected.is_empty());
 /// // Each hit states the step that found it, at L0 here.
@@ -112,8 +113,9 @@ pub struct Relaxation {
     /// last step's level renders no text for its query. At L2 `drop_terms` it is the clauses the step keeps: its count of
     /// the most important terms and every excluded clause, in text order (`"purple -blue"`).
     pub effective: Option<String>,
-    /// The terms the fuzzy level replaced, in query order (`"corrected"`). Empty until ROADMAP 8.2.4.3 synthesizes
-    /// the corrected query ("did you mean").
+    /// The words the fuzzy level replaced, in query order (`"corrected"`): when the last step is L4's, each required
+    /// word no document holds and the term it searched instead ("did you mean", ROADMAP 8.2.4.3), which
+    /// [`Self::effective`] reads in its place. Empty at any other level, and for a query not compiled from `q`.
     pub corrected: Vec<Correction>,
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
     /// completed before it, and `level` and `applied` describe those steps.
@@ -131,20 +133,33 @@ impl Relaxation {
     pub const SKIPPED: &str = ":skipped";
 
     /// What a cascade that built steps through `level` (`relaxed` when that step is after L0), applying `applied`, did,
-    /// for a query compiled from `original` whose last step reads `effective`. The corrections wait on ROADMAP 8.2.4.3.
+    /// for a query `compiled` from text (`None` for a programmatic one) whose last step reads `effective` and
+    /// `corrected` those words.
     fn of(
         (level, relaxed): (RelaxLevel, bool),
         applied: Vec<String>,
-        text: (Option<String>, Option<String>),
+        compiled: Option<&Compiled>,
+        (effective, corrected): StepText,
         truncated: bool,
     ) -> Self {
-        let (original, effective) = text;
+        // A query without user text has no text form, whatever a level states.
+        let Some(compiled) = compiled else {
+            return Self {
+                level,
+                applied,
+                original: None,
+                effective: None,
+                corrected: Vec::new(),
+                truncated,
+                relaxed,
+            };
+        };
         Self {
             level,
             applied,
-            original,
+            original: Some(compiled.text.clone()),
             effective,
-            corrected: Vec::new(),
+            corrected,
             truncated,
             relaxed,
         }
@@ -155,15 +170,6 @@ impl Relaxation {
     pub fn relaxed(&self) -> bool {
         self.relaxed
     }
-}
-
-/// A term the fuzzy level replaced (SPEC §7.6 `"corrected"`, ROADMAP 8.2.4.3).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Correction {
-    /// The term as the user wrote it: `"zapatilas"`.
-    pub original: String,
-    /// What the response searched instead: `"zapatillas"`.
-    pub corrected: String,
 }
 
 /// The query a relaxed search starts from ([`CollectionViews::search_relaxed`]): a [`Query`] built in code, or one
@@ -232,8 +238,8 @@ struct Built<'q, 's> {
     /// Where the current level's steps start in `earlier`.
     level_start: usize,
     applied: Vec<String>,
-    /// The text of the last step searched (SPEC §7.6 `effective`).
-    effective: Option<String>,
+    /// The text of the last step searched and its corrections (SPEC §7.6 `effective`, `corrected`).
+    text: StepText,
     schema: &'s CollectionSchema,
     limits: QueryLimits,
     /// Each step after L0 is held to the limits beside the steps it excludes, L0 first (SPEC §7.1.3). Built at the
@@ -248,7 +254,7 @@ impl<'q, 's> Built<'q, 's> {
             earlier: Vec::new(),
             level_start: 0,
             applied: Vec::new(),
-            effective: None,
+            text: (None, Vec::new()),
             schema,
             limits,
             fitting: None,
@@ -281,6 +287,15 @@ impl<'q, 's> Built<'q, 's> {
         held(fitting, step, label, alternatives)
     }
 
+    /// The level of the last step built and not skipped, and whether it is after L0: L0's when there is none.
+    fn last_level(&self) -> (RelaxLevel, bool) {
+        self.ran
+            .iter()
+            .enumerate()
+            .rfind(|(_, r)| !r.skipped)
+            .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0))
+    }
+
     /// The steps pushed from now on are the next level's.
     fn begin_level(&mut self) {
         self.level_start = self.earlier.len();
@@ -304,7 +319,7 @@ impl<'q, 's> Built<'q, 's> {
         level: RelaxLevel,
         step: Cow<'q, Query>,
         label: String,
-        text: Option<String>,
+        text: StepText,
         searched: Option<(SearchPlan, Collected)>,
         stands_for_level: bool,
     ) {
@@ -330,7 +345,7 @@ impl<'q, 's> Built<'q, 's> {
                 fitting.exclude(step);
             }
         }
-        self.effective = text;
+        self.text = text;
     }
 }
 
@@ -506,8 +521,12 @@ impl CollectionViews<'_> {
                 truncated = true;
                 break;
             }
+            let first = built.ran.is_empty().then_some(query);
             let input = LevelInput::new(query, compiled, &stats).expanding(&expands);
-            let steps = level_steps(planned, built.ran.is_empty(), input, exec)?;
+            let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
+                truncated = true;
+                break;
+            };
             built.begin_level();
             let nested = planned.transform.nested() && relax.excludes_latest_only();
             for (step, label, text, alternatives) in steps {
@@ -558,31 +577,17 @@ impl CollectionViews<'_> {
                 }
             }
         }
+        let level = built.last_level();
         let Built {
-            ran,
-            applied,
-            effective,
-            ..
+            ran, applied, text, ..
         } = built;
-        // The last step built and not skipped, and whether it is after L0.
-        let level = ran
-            .iter()
-            .enumerate()
-            .rfind(|(_, r)| !r.skipped)
-            .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0));
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
         let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
         let (hits, facets) = self.relaxed_page(ran, request, start.step, last, exec)?;
         Ok(RelaxedResults {
             hits,
             facets,
-            relaxation: Relaxation::of(
-                level,
-                applied,
-                // A query without user text has no text form, whatever a level states.
-                (compiled.map(|c| c.text.clone()), compiled.and(effective)),
-                truncated,
-            ),
+            relaxation: Relaxation::of(level, applied, compiled, text, truncated),
         })
     }
 
@@ -592,6 +597,31 @@ impl CollectionViews<'_> {
         match self.collection().schema().field_by_id(field)?.kind() {
             FieldKind::Text(o) if !self.memtable().stacks_tokens(field) => Some(o.boost),
             _ => None,
+        }
+    }
+
+    /// The steps `planned` builds for `input` ([`level_steps`]), with the views' terms to walk (L4's corrections, SPEC
+    /// §7.6) under the budget's `end` once there is one, as a step's planning walks them. `None` when the budget passed
+    /// while the level built them: the cascade stops there, as within a step. The request's own deadline or token stays
+    /// an error.
+    fn budgeted_level<'q>(
+        &self,
+        planned: &PlannedLevel,
+        first: Option<&'q Query>,
+        input: LevelInput<'_>,
+        exec: &Execution,
+        budget: Option<Instant>,
+    ) -> Result<Option<Vec<BuiltStep<'q>>>, RelaxedSearchError> {
+        let within = budget.map(|end| exec.within_budget(end));
+        let terms = within.as_ref().unwrap_or(exec).terms(self);
+        match level_steps(planned, first, input.walking(&terms), exec) {
+            Ok(steps) => Ok(Some(steps)),
+            Err(SearchError::Interrupted(Interrupt::DeadlineExceeded))
+                if budget.is_some() && exec.interrupt().is_ok() =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e.into()),
         }
     }
 
@@ -716,26 +746,30 @@ impl CollectionViews<'_> {
     }
 }
 
-/// A step as a level built it: its query, what it applied, its text, and the synonym alternatives it may drop to fit.
-type BuiltStep<'a> = (Cow<'a, Query>, String, Option<String>, Option<Expansion>);
+/// A step's text (SPEC §7.6 `effective`) and the words it corrected (`corrected`).
+type StepText = (Option<String>, Vec<Correction>);
 
-/// The steps `planned` builds for `input`: its query, what it applied and its text. L0 (`first`) searches the query
-/// itself, not a copy.
+/// A step as a level built it: its query, what it applied, its text and corrections, and the synonym alternatives it
+/// may drop to fit.
+type BuiltStep<'a> = (Cow<'a, Query>, String, StepText, Option<Expansion>);
+
+/// The steps `planned` builds for `input`: its query, what it applied and its text. L0 (`first`, its query) searches
+/// the query itself, not a copy.
 ///
 /// # Errors
 /// A statistic the level cannot read (L2 reads its terms' `df`); [`SearchError::Interrupted`] once the request's deadline
 /// has passed or it was cancelled.
-fn level_steps<'a>(
+fn level_steps<'q>(
     planned: &PlannedLevel,
-    first: bool,
-    input: LevelInput<'a>,
+    first: Option<&'q Query>,
+    input: LevelInput<'_>,
     exec: &Execution,
-) -> Result<Vec<BuiltStep<'a>>, SearchError> {
-    if first {
+) -> Result<Vec<BuiltStep<'q>>, SearchError> {
+    if let Some(original) = first {
         return Ok(vec![(
-            Cow::Borrowed(input.original),
+            Cow::Borrowed(original),
             String::new(),
-            input.compiled.map(Compiled::effective),
+            (input.compiled.map(Compiled::effective), Vec::new()),
             None,
         )]);
     }
@@ -745,7 +779,14 @@ fn level_steps<'a>(
         .transform
         .steps(&input)?
         .into_iter()
-        .map(|s| (Cow::Owned(s.query), s.applied, s.effective, s.alternatives))
+        .map(|s| {
+            (
+                Cow::Owned(s.query),
+                s.applied,
+                (s.effective, s.corrected),
+                s.alternatives,
+            )
+        })
         .collect())
 }
 

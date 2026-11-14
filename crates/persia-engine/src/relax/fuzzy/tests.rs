@@ -244,8 +244,8 @@ fn a_filter_stays_on_the_step() {
     let schema = schema();
     let filter = Filter::Range {
         field: id(&schema, "n"),
-        lower: std::ops::Bound::Included(FilterValue::I64(1)),
-        upper: std::ops::Bound::Unbounded,
+        lower: Bound::Included(FilterValue::I64(1)),
+        upper: Bound::Unbounded,
     };
     let compiled = compile(&schema, "sneakers").with_filter([filter.clone()]);
     let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();

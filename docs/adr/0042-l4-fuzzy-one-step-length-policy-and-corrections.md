@@ -43,12 +43,30 @@ level mostly has to build the `fuzzy` queries. Several things were still open:
 5. **The cap is planning's**: 50 terms by collection `df`, ties by bytes, as for any `fuzzy` (SPEC §7.1); within the
    limits, `fuzzy:cut` or `fuzzy:skipped` (§7.1.3). No new rule was needed. Being one step, L4 has no earlier step of
    its own for a step to stand for.
+6. **Corrections are the missing words** (ROADMAP 8.2.4.3). A required word of one token that no field holds
+   (collection `df` 0) is corrected to the term its fields' `fuzzy` queries keep first: the highest `df`, then
+   byte order, ties between fields to the earlier one. That term is searched by the step under any cut, since §7.1.3
+   keeps the most frequent terms, so `effective` never names a term the step did not search. A word some document
+   holds is widened but not reported: "did you mean" for a word that exists would mostly guess. `original` is the
+   word as written. `corrected` is the index's term, so under a stemmer it is a stem (`zapatil`): the index has no
+   surface form to give back. A word of several tokens (`e-mial`) is not reported: the compiled clause has no text
+   per token, so `effective` could not replace just one.
+7. **Found when the level builds, not when the step is planned.** L4 walks each missing word's fields with
+   planning's own walk (`search::expand`, keeping one term) over the views' terms (`LevelInput::terms`). A cursor's
+   page builds the step without always searching it, and every page must state the same `corrected` (SPEC §7.6),
+   so taking them from the step's plan would leave some pages without them. The walk runs under the request's
+   deadline and token and, once it has started, the budget. A budget that passes during it truncates the cascade,
+   as it does inside a step.
+8. **ROADMAP 8.2.2.5: a `df`-0 term is L2's least important** (below a stopword). L4 runs only when L2 found too few
+   hits, so it cannot fix an L2 `effective` that names a word no hit holds. Ranking such a word last makes L2 drop it
+   first and report the words its hits can hold.
 
 ## Consequences
 
 - A query whose L0, L1, L2 and L3 find too few hits now relaxes to L4 by default; the default plan's L5 still
   builds nothing (ROADMAP 8.2.5).
-- `search_relaxed/l4` measures the step: L0, then a two-word query whose second word is a typo.
+- `search_relaxed/l4` measures the step: L0, then a two-word query whose second word is a typo. A missing word is walked twice,
+  once for its correction and once when the step is planned, over the fields that rewrite it.
 - The differential suite (`tests/differential.rs`) does not model L4: its reference model has no `prefix` or `fuzzy`
   query at all. ROADMAP 8.1.21 adds L4 beside 8.1.19's L3; meanwhile `tests/relax_fuzzy.rs` checks the step's matches
   against an oracle over random corpora.
@@ -62,3 +80,8 @@ level mostly has to build the `fuzzy` queries. Several things were still open:
 - **Rewrite only the words no document holds**: a word that exists but is the wrong one (`shoe` for `shoes`) would
   never be widened, and SPEC §7.6 says every term.
 - **Byte length**: see item 3.
+- **Corrections from the step's plan**: no second walk, but a cursor page that does not search the step would state
+  none (item 7).
+- **Correct every word, held or not, to its most frequent neighbour** (Elasticsearch's "popular" suggest mode):
+  `shoe` would read `shoes` whenever `shoes` is more frequent, though the user's word matched documents.
+- **Leave a `df`-0 term to L4 (ROADMAP 8.2.2.5's other option)**: see item 8.

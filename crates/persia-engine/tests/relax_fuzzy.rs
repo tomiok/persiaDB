@@ -330,3 +330,125 @@ proptest! {
         prop_assert_eq!(got, want);
     }
 }
+
+/// The corrections of `out`, as `(original, corrected)` pairs.
+fn corrected(out: &RelaxedResults) -> Vec<(&str, &str)> {
+    out.relaxation
+        .corrected
+        .iter()
+        .map(|c| (c.original.as_str(), c.corrected.as_str()))
+        .collect()
+}
+
+#[test]
+fn words_no_document_holds_are_corrected_and_effective_reads_the_corrections() {
+    let db = database(&[
+        "zapatillas rojas",
+        "zapatillas azules",
+        "botas rojas",
+        "zapatos rojos",
+    ]);
+    // `rojas` (df 2) wins over `rojos` (df 1); the word keeps how the user wrote it, the correction is the index's term.
+    let out = search(&db, "Zapatilas  rojs", None);
+    assert_eq!(
+        corrected(&out),
+        [("Zapatilas", "zapatillas"), ("rojs", "rojas")]
+    );
+    assert_eq!(
+        out.relaxation.effective.as_deref(),
+        Some("zapatillas rojas")
+    );
+    assert_eq!(out.relaxation.original.as_deref(), Some("Zapatilas  rojs"));
+}
+
+#[test]
+fn a_word_some_document_holds_is_not_corrected() {
+    // `shoes` is held (and widened to `shoe`), `redd` is not: only `redd` is reported, as `red`.
+    let db = database(&["shoe red", "shoes red"]);
+    let out = search(&db, "shoes redd", None);
+    assert_eq!(corrected(&out), [("redd", "red")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("shoes red"));
+}
+
+#[test]
+fn equal_df_corrections_go_to_the_lower_bytes_and_far_words_stay_as_written() {
+    // `boots` and `boats` both hold df 1 and are one edit from `boxts`: `boats` sorts first. `zzzzz` is near no term,
+    // so it is not corrected, and the step matches nothing (it requires a term within one edit of it).
+    let db = database(&["boots", "boats", "boots zzzzy"]);
+    let out = search(&db, "boxts", None);
+    assert_eq!(corrected(&out), [("boxts", "boots")]);
+    let db = database(&["boots", "boats"]);
+    let out = search(&db, "boxts", None);
+    assert_eq!(corrected(&out), [("boxts", "boats")]);
+    let out = search(&db, "boxts qqqqq", None);
+    assert_eq!(corrected(&out), [("boxts", "boats")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("boats qqqqq"));
+    assert_eq!(hits(&out), []);
+}
+
+#[test]
+fn exclusions_stay_in_effective_and_split_or_short_words_are_not_corrected() {
+    let db = database(&["red shoes", "blue shoes", "mail red"]);
+    // The excluded clause is kept as written; `shoez` is corrected.
+    let out = search(&db, "-blue shoez", None);
+    assert_eq!(corrected(&out), [("shoez", "shoes")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("-blue shoes"));
+    assert_eq!(ids(&out), BTreeSet::from(["d0".to_owned()]));
+    // `e-mial` is two tokens (`e`, `mial`): searched fuzzily per token, but a word of several parts is not reported.
+    let out = search(&db, "e-mial redd", None);
+    assert_eq!(corrected(&out), [("redd", "red")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("e-mial red"));
+    // `rde` has 3 characters: no `fuzzy`, no correction, no step.
+    let out = search(&db, "rde", None);
+    assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+    assert_eq!(corrected(&out), []);
+}
+
+#[test]
+fn every_page_states_the_same_corrections() {
+    let db = database(&["boots red", "boot red", "boats red", "bots red"]);
+    let all = search(&db, "bootz red", None);
+    // `boot` (a deletion), `boots` (a substitution) are within one edit, all df 1: `boot` sorts first.
+    assert_eq!(corrected(&all), [("bootz", "boot")]);
+    let mut page = request(1);
+    let mut pages = 0;
+    loop {
+        let out = search_with(&db, "bootz red", None, &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        assert_eq!(out.relaxation.corrected, all.relaxation.corrected);
+        assert_eq!(out.relaxation.effective, all.relaxation.effective);
+        page.search_after = Some(last.cursor());
+        pages += 1;
+    }
+    assert_eq!(pages, all.hits.len());
+}
+
+#[test]
+fn over_fields_the_correction_of_highest_df_wins() {
+    let schema = SchemaBuilder::new("c")
+        .field("title", FieldKind::Text(TextOptions::default()))
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .build()
+        .unwrap();
+    let title = schema.field("title").unwrap().id();
+    let body = schema.field("body").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [6; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    // `shoez`: `shoes` in one title, `shoed` in three bodies.
+    for (id, t, b) in [
+        ("a", "shoes", "x"),
+        ("b", "x", "shoed"),
+        ("c", "x", "shoed"),
+        ("d", "x", "shoed"),
+    ] {
+        let doc = Document::new(id)
+            .with(title, Value::String(t.into()))
+            .with(body, Value::String(b.into()));
+        db.put("c", &doc, Durability::Buffered).unwrap();
+    }
+    let out = search(&db, "shoez", None);
+    assert_eq!(corrected(&out), [("shoez", "shoed")]);
+    assert_eq!(hits(&out).len(), 4);
+}

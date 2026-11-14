@@ -1610,9 +1610,10 @@ Rules:
   8.1.5) defines every field. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
   the last step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
-  (ROADMAP 8.2.2.2, below). `original` and `effective` are absent when the query was not compiled from `q` (a programmatic
-  query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix, fuzzy).
-  `corrected` stays empty until the fuzzy level synthesizes the corrected query (ROADMAP 8.2.4.3).
+  (ROADMAP 8.2.2.2, below), at L3 L0's, and at L4 L0's with each corrected word replaced by its correction (ROADMAP
+  8.2.4.3, below). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
+  programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
+  fuzzy). `corrected` is empty unless the last step is L4's.
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).
@@ -1696,6 +1697,20 @@ last term has no rule of its own: a short word stays exact wherever it is. A rew
 correction at the same frequency and length. A query that rewrites no term skips the level. Held to §7.1.3's limits,
 its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). Being one step, it has no earlier step
 of its own to stand for.
+Its `corrected` and `effective` say what L4 changed ("did you mean", ROADMAP 8.2.4.3). A word is *corrected* when it
+is a required word clause of one part (one token over the default fields: a `term` or a `combined`), no field of it
+holds its term (collection `df` 0, so no document does), and a field the step rewrites has a term within the word's
+distance that a document holds. Its correction is the term that field's `fuzzy` keeps first (§7.1: the highest
+collection `df`, ties by byte order), the highest `df` over the word's fields, ties to the field first in the
+`combined`: so the step searches it under any cut of §7.1.3, which keeps the most frequent terms. `corrected` lists
+each such word in text order, as written (`Zapatilas`), with its correction as the index holds it (`zapatillas`:
+analyzed, so lowercased, and a stem under a stemming analyzer). `effective` is L0's text with each corrected word's
+clause replaced by its correction, every other clause, excluded ones included, as written. A word some document holds
+is widened by its `fuzzy` but not reported: it matched as typed. A word of several tokens (`e-mial`) is matched
+fuzzily per token but neither corrected nor rewritten in `effective`, which has no text per token. Finding the
+corrections walks each such field's terms as planning does (§7.1), keeping one, under the request's deadline,
+cancellation and the budget: a budget that passes during the walk stops the cascade before the level, as before a
+step. A query whose words some document holds, or that is not compiled from `q`, has no correction.
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A

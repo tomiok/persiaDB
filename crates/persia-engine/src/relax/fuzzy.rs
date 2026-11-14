@@ -7,10 +7,13 @@
 //! stack tokens. Excluded clauses, phrases and `field:` clauses stay exact, as they ask for their text exactly; so do
 //! a stacking field's terms, whose grams would add their scores together.
 
+use core::ops::Bound;
+
 use super::words::Words;
-use super::{LevelInput, LevelTransform, Step};
-use crate::query::{Compiled, DEFAULT_MAX_EXPANSIONS, FuzzyQuery, Query};
+use super::{Correction, LevelInput, LevelTransform, Step};
+use crate::query::{ClauseKind, Compiled, DEFAULT_MAX_EXPANSIONS, FuzzyQuery, Query};
 use crate::schema::FieldId;
+use crate::search::{Expansion, expand};
 use crate::segment::ReadError;
 
 /// The fewest characters (Unicode scalar values of the analyzed term) L4 matches fuzzily (SPEC §7.6): a shorter term
@@ -53,18 +56,125 @@ impl LevelTransform for Fuzzy {
             Some(compiled) => words.of_compiled(compiled),
             None => words.of_query(input.original),
         };
-        Ok(query
-            .map(|query| Step {
-                query,
-                applied: "fuzzy".to_owned(),
-                effective: input.compiled.map(Compiled::effective),
-                alternatives: None,
-            })
-            .into_iter()
-            .collect())
+        let Some(query) = query else {
+            return Ok(Vec::new());
+        };
+        let (effective, corrected) = match input.compiled {
+            Some(compiled) => {
+                let found = corrections(compiled, input)?;
+                let text = effective(compiled, &found);
+                (Some(text), found.into_iter().map(|(_, c)| c).collect())
+            }
+            None => (None, Vec::new()),
+        };
+        Ok(vec![Step {
+            query,
+            applied: "fuzzy".to_owned(),
+            effective,
+            alternatives: None,
+            corrected,
+        }])
     }
 }
 
+/// The corrections of `compiled`'s words, each with its clause's index, in text order (SPEC §7.6 `corrected`, ROADMAP
+/// 8.2.4.3, ADR-0042).
+///
+/// A word is corrected when it is a required word clause of one part (a `term`, or a `combined` over the default
+/// fields: one token), no field of it holds its term (collection `df` 0, so no document does), and some field L4
+/// rewrites has a term within the word's distance that a document holds. Its correction is the term a field's
+/// `fuzzy` keeps first (SPEC §7.1: the highest collection `df`, ties by bytes), the highest `df` over the fields, ties
+/// to the earlier field: it is searched by the step under any cut (§7.1.3 keeps the most frequent). Each such field
+/// is walked as planning walks it ([`expand`], keeping one term). Without the views' terms
+/// ([`LevelInput::terms`]), nothing is corrected.
+///
+/// # Errors
+/// A `df` or a term walk that cannot be read; an interrupt of the walk.
+fn corrections(
+    compiled: &Compiled,
+    input: &LevelInput<'_>,
+) -> Result<Vec<(usize, Correction)>, ReadError> {
+    let Some(terms) = input.terms else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::new();
+    for (index, clause) in compiled.clauses.iter().enumerate() {
+        if clause.negated || clause.kind != ClauseKind::Word {
+            continue;
+        }
+        let Some([part]) = compiled.parts(index) else {
+            continue;
+        };
+        let fields: Vec<(FieldId, &str)> = match part {
+            Query::Term(t) => vec![(t.field, t.term.as_str())],
+            Query::Combined(c) => c
+                .fields
+                .iter()
+                .map(|f| (f.field, f.term.as_str()))
+                .collect(),
+            _ => continue,
+        };
+        // A word a document holds matched as typed: L4 widens it, but does not report it replaced.
+        let mut held = false;
+        for &(field, term) in &fields {
+            if input.stats.df(field, term.as_bytes())? > 0 {
+                held = true;
+                break;
+            }
+        }
+        if held {
+            continue;
+        }
+        let mut best: Option<(u64, Vec<u8>)> = None;
+        for &(field, term) in &fields {
+            if (input.expands)(field).is_none() || term.is_empty() {
+                continue;
+            }
+            let Some(d) = distance(term) else {
+                continue;
+            };
+            let automaton = Expansion::fuzzy(term, d);
+            let all = (Bound::Unbounded, Bound::Unbounded);
+            let kept = expand(field, all, &automaton, 1, terms, input.stats)?;
+            if let Some((found, df)) = kept.into_iter().next()
+                && df > 0
+                && best.as_ref().is_none_or(|(top, _)| df > *top)
+            {
+                best = Some((df, found));
+            }
+        }
+        // Index terms of `text` fields are UTF-8; one that is not is not reported.
+        if let Some((_, found)) = best
+            && let Ok(corrected) = String::from_utf8(found)
+            && let Some(original) = compiled.source(index)
+        {
+            out.push((
+                index,
+                Correction {
+                    original: original.to_owned(),
+                    corrected,
+                },
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// L0's text with each corrected word replaced by its correction (SPEC §7.6 `effective`): every clause, excluded ones
+/// included, in text order, one space apart, as [`Compiled::effective`] renders them.
+fn effective(compiled: &Compiled, corrections: &[(usize, Correction)]) -> String {
+    let mut text = String::new();
+    for index in 0..compiled.clauses.len() {
+        if !text.is_empty() {
+            text.push(' ');
+        }
+        match corrections.iter().find(|(i, _)| *i == index) {
+            Some((_, c)) => text.push_str(&c.corrected),
+            None => text.push_str(compiled.source(index).unwrap_or("")),
+        }
+    }
+    text
+}
 fn fuzzy(field: FieldId, term: &str, distance: u8) -> Query {
     Query::Fuzzy(FuzzyQuery {
         field,
