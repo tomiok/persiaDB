@@ -788,6 +788,17 @@ fn collection_expansions(c: &mut Criterion) {
                 max_expansions: 50,
             }),
         ),
+        // A 1 KiB term at distance 2 (ROADMAP 8.2.4.1): no term is within it, but the walk still steps its automaton
+        // through every term the first few bytes do not rule out.
+        (
+            "fuzzy_long",
+            Query::Fuzzy(FuzzyQuery {
+                field: body,
+                term: format!("w15{}", "x".repeat(1021)),
+                distance: 2,
+                max_expansions: 50,
+            }),
+        ),
     ];
     let mut group = c.benchmark_group("search_expansion_collection");
     for (name, query) in &expansions {

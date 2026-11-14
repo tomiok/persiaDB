@@ -220,35 +220,45 @@ pub struct Expansion {
 
 impl Expansion {
     /// Every term.
-    pub(super) fn all() -> Self {
+    pub(crate) fn all() -> Self {
         Self { fuzzy: None }
     }
 
     /// The terms within `distance` of `term` (SPEC §7.1: optimal string alignment over Unicode scalar values);
-    /// `distance` is 1 or 2.
-    pub(super) fn fuzzy(term: &str, distance: u8) -> Self {
+    /// `distance` is 1 or 2 ([`MAX_DISTANCE`] at most: a larger one is read as it, which a query never asks, SPEC §7.1).
+    /// Public for the fuzz target only.
+    #[doc(hidden)]
+    pub fn fuzzy(term: &str, distance: u8) -> Self {
         Self {
             fuzzy: Some(Arc::new(Fuzzy {
                 query: term.chars().map(u32::from).collect(),
-                distance,
+                distance: distance.min(MAX_DISTANCE),
             })),
         }
     }
 
     /// The optimal string alignment distance of `term` when this is a fuzzy expansion that accepts it (SPEC §7.1).
-    /// `None` for a prefix, or for a term farther than the distance. The query bytes are not analyzed.
-    pub(super) fn distance(&self, term: &[u8]) -> Option<u8> {
+    /// `None` for a prefix, or for a term farther than the distance. The query bytes are not analyzed. Public for the
+    /// fuzz target only.
+    #[doc(hidden)]
+    pub fn distance(&self, term: &[u8]) -> Option<u8> {
         let fuzzy = self.fuzzy.as_ref()?;
         let mut state = fuzzy.start();
         for &byte in term {
-            state = fuzzy.accept(&state, byte);
+            state = fuzzy.accept(state, byte);
         }
-        let mut end = state;
-        fuzzy.flush(&mut end);
-        let d = end.row.last().copied()?;
+        fuzzy.flush(&mut state);
+        let d = fuzzy.end(&state);
         (d <= fuzzy.distance).then_some(d)
     }
 }
+
+/// The largest `fuzzy` distance (SPEC §7.1).
+const MAX_DISTANCE: u8 = 2;
+
+/// The cells of a row the automaton keeps: the band of `2 · distance + 1` columns around the diagonal, at most
+/// [`MAX_DISTANCE`]'s: `2 · 2 + 1`.
+const BAND: usize = 5;
 
 /// A `fuzzy` query's characters and distance.
 #[derive(Debug)]
@@ -260,13 +270,22 @@ struct Fuzzy {
 /// What a term byte that is not part of valid UTF-8 counts as: a character no query character equals.
 const INVALID: u32 = u32::MAX;
 
-/// Where a walk over a term's bytes is, against a `fuzzy` query: the edit distances of the term's characters so far
-/// to each prefix of the query, capped at `distance + 1`, the row before (for a swap), and a UTF-8 sequence not
-/// finished yet.
-#[derive(Debug, Clone)]
+/// Where a walk over a term's bytes is, against a `fuzzy` query (ROADMAP 8.2.4.1): the band of the optimal string
+/// alignment table's row for the term's characters so far, the band of the row before (for a swap), the last
+/// character, and a UTF-8 sequence not finished yet.
+///
+/// Row `i` holds the distances of the term's first `i` characters to each prefix of the query, `D[i][j]`. As
+/// `D[i][j] ≥ |i − j|`, only the `2 · distance + 1` columns `j` in `i − distance ..= i + distance` can be within the
+/// distance; every other one is above it, as is a column outside the table. So the state keeps those cells only,
+/// capped at `distance + 1`, cell `k` being column `i − distance + k`: a step costs O(distance), not O(query
+/// length), and the state is a few bytes on the stack, not a row allocated per byte (SPEC §7.1: a query term may be
+/// 32 KiB).
+#[derive(Debug, Clone, Copy)]
 pub struct FuzzyState {
-    row: Vec<u8>,
-    prev: Vec<u8>,
+    row: [u8; BAND],
+    prev: [u8; BAND],
+    /// `i`: the term characters read so far.
+    chars: usize,
     last: Option<u32>,
     /// The code point so far, its bytes, and the bytes it still needs.
     pending: (u32, u8, u8),
@@ -277,33 +296,61 @@ impl Fuzzy {
         self.distance.saturating_add(1)
     }
 
-    /// The row after the term character `c` (Wagner–Fischer, with the optimal string alignment swap).
+    /// The cells of a row: `2 · distance + 1`.
+    fn width(&self) -> usize {
+        2 * usize::from(self.distance) + 1
+    }
+
+    /// The column of cell `k` in row `i`, `None` outside the table (left of column 0 or right of the query's last).
+    fn column(&self, i: usize, k: usize) -> Option<usize> {
+        let j = i
+            .saturating_add(k)
+            .checked_sub(usize::from(self.distance))?;
+        (j <= self.query.len()).then_some(j)
+    }
+
+    /// The row after the term character `c` (Wagner–Fischer, with the optimal string alignment swap), over the band.
+    #[allow(clippy::many_single_char_names)] // The table's own names: row `i`, column `j`, cell `k`, character `c`, `q`.
     fn step(&self, state: &mut FuzzyState, c: u32) {
         let cap = self.cap();
-        let mut row = Vec::with_capacity(state.row.len());
-        row.push(
-            state
-                .row
-                .first()
-                .map_or(cap, |&r| r.saturating_add(1))
-                .min(cap),
-        );
-        for (i, &q) in self.query.iter().enumerate() {
-            let at = |r: &[u8], j: usize| r.get(j).copied().unwrap_or(cap);
-            let substitute = at(&state.row, i).saturating_add(u8::from(q != c));
-            let insert = at(&state.row, i + 1).saturating_add(1);
-            let delete = at(&row, i).saturating_add(1);
+        let i = state.chars.saturating_add(1);
+        let at = |r: &[u8; BAND], k: usize| r.get(k).copied().unwrap_or(cap);
+        let mut row = [cap; BAND];
+        for k in 0..self.width() {
+            let Some(j) = self.column(i, k) else {
+                continue;
+            };
+            let Some(before) = j.checked_sub(1) else {
+                // Column 0: `i` deletions.
+                if let Some(cell) = row.get_mut(k) {
+                    *cell = u8::try_from(i).unwrap_or(cap).min(cap);
+                }
+                continue;
+            };
+            let q = self.query.get(before).copied().unwrap_or(INVALID);
+            // Row `i − 1`'s column `j − 1` is its cell `k`, its column `j` cell `k + 1`; this row's column `j − 1` is
+            // cell `k − 1`.
+            let substitute = at(&state.row, k).saturating_add(u8::from(q != c));
+            let insert = at(&state.row, k + 1).saturating_add(1);
+            let delete = k
+                .checked_sub(1)
+                .map_or(cap, |l| at(&row, l))
+                .saturating_add(1);
             let mut d = substitute.min(insert).min(delete);
-            // A swap of the query's characters `i - 1` and `i` with the term's last two.
-            if let Some(before) = i.checked_sub(1)
+            // A swap of the query's characters `j − 2` and `j − 1` with the term's last two: row `i − 2`'s column
+            // `j − 2` is its cell `k` too.
+            if let Some(two) = j.checked_sub(2)
                 && state.last == Some(q)
-                && self.query.get(before) == Some(&c)
+                && self.query.get(two) == Some(&c)
             {
-                d = d.min(at(&state.prev, before).saturating_add(1));
+                d = d.min(at(&state.prev, k).saturating_add(1));
             }
-            row.push(d.min(cap));
+            if let Some(cell) = row.get_mut(k) {
+                *cell = d.min(cap);
+            }
         }
         state.prev = core::mem::replace(&mut state.row, row);
+        state.chars = i;
         state.last = Some(c);
     }
 
@@ -316,8 +363,7 @@ impl Fuzzy {
         }
     }
 
-    fn accept(&self, state: &FuzzyState, byte: u8) -> FuzzyState {
-        let mut state = state.clone();
+    fn accept(&self, mut state: FuzzyState, byte: u8) -> FuzzyState {
         let (cp, len, need) = state.pending;
         if need > 0 {
             if byte & 0xC0 == 0x80 {
@@ -354,26 +400,44 @@ impl Fuzzy {
         state
     }
 
-    fn is_match(&self, state: &FuzzyState) -> bool {
-        let mut end = state.clone();
-        self.flush(&mut end);
-        end.row.last().is_some_and(|&d| d <= self.distance)
+    /// The distance of the whole term to the whole query, capped at `distance + 1`: the row's cell of the query's last
+    /// column, which is outside the band (so above the distance) when the lengths differ by more than it.
+    fn end(&self, state: &FuzzyState) -> u8 {
+        self.query
+            .len()
+            .saturating_add(usize::from(self.distance))
+            .checked_sub(state.chars)
+            .filter(|&k| k < self.width())
+            .and_then(|k| state.row.get(k).copied())
+            .unwrap_or(self.cap())
     }
 
-    /// No row entry within the distance: every later one is at least the row's smallest (a swap adds 1 to the row
-    /// before, whose diagonal bounds this row), so no extension of the term matches.
+    fn is_match(&self, state: &FuzzyState) -> bool {
+        let mut end = *state;
+        self.flush(&mut end);
+        self.end(&end) <= self.distance
+    }
+
+    /// No cell within the distance: every later one is at least the row's smallest (a swap adds 1 to the row before,
+    /// whose diagonal bounds this row), and every column outside the band is above the distance, so no extension of
+    /// the term matches.
     fn can_match(&self, state: &FuzzyState) -> bool {
         state.row.iter().any(|&d| d <= self.distance)
     }
 
     fn start(&self) -> FuzzyState {
         let cap = self.cap();
-        let row = (0..=self.query.len())
-            .map(|i| u8::try_from(i).unwrap_or(cap).min(cap))
-            .collect::<Vec<_>>();
+        let mut row = [cap; BAND];
+        for (k, cell) in row.iter_mut().enumerate().take(self.width()) {
+            // Row 0: column `j` is `j` insertions.
+            if let Some(j) = self.column(0, k) {
+                *cell = u8::try_from(j).unwrap_or(cap).min(cap);
+            }
+        }
         FuzzyState {
-            prev: vec![cap; row.len()],
             row,
+            prev: [cap; BAND],
+            chars: 0,
             last: None,
             pending: (0, 0, 0),
         }
@@ -407,7 +471,7 @@ impl Automaton for Expansion {
 
     fn accept(&self, state: &Self::State, byte: u8) -> Self::State {
         match (&self.fuzzy, state) {
-            (Some(f), Some(s)) => Some(f.accept(s, byte)),
+            (Some(f), Some(s)) => Some(f.accept(*s, byte)),
             _ => None,
         }
     }
@@ -461,6 +525,7 @@ pub(super) fn expand(
 #[cfg(test)]
 mod tests {
     use fst::Automaton;
+    use proptest::prelude::*;
 
     use super::Expansion;
 
@@ -567,6 +632,73 @@ mod tests {
         assert_eq!(Expansion::all().distance(b"apple"), None);
         assert_eq!(Expansion::fuzzy("ca", 2).distance(b"abc"), None);
         assert_eq!(Expansion::fuzzy("ca", 2).distance(b"ac"), Some(1));
+    }
+
+    /// Pieces of terms: characters of 1 to 4 bytes, and bytes that are not UTF-8 (a lone lead, a stray continuation).
+    const PIECES: [&[u8]; 8] = [
+        b"a",
+        b"b",
+        b"c",
+        "\u{e9}".as_bytes(),
+        "\u{20ac}".as_bytes(),
+        "\u{1f600}".as_bytes(),
+        &[0xC3],
+        &[0x80],
+    ];
+
+    /// A query of up to 40 characters and a term made from it by a few random edits (insertions, deletions,
+    /// substitutions, swaps, and bytes cut from a character), so that terms near the distance are common.
+    fn near() -> impl Strategy<Value = (String, Vec<u8>)> {
+        let query = proptest::collection::vec(0..6_usize, 0..40).prop_map(|v| {
+            v.into_iter()
+                .map(|i| ['a', 'b', 'c', '\u{e9}', '\u{20ac}', '\u{1f600}'][i])
+                .collect::<String>()
+        });
+        let edits = proptest::collection::vec(
+            (0..5_u8, any::<prop::sample::Index>(), 0..PIECES.len()),
+            0..4,
+        );
+        (query, edits).prop_map(|(query, edits)| {
+            let mut term: Vec<Vec<u8>> =
+                query.chars().map(|c| c.to_string().into_bytes()).collect();
+            for (op, at, piece) in edits {
+                let piece = PIECES[piece].to_vec();
+                let i = if term.is_empty() {
+                    0
+                } else {
+                    at.index(term.len())
+                };
+                match op {
+                    0 => term.insert(i, piece),
+                    1 if !term.is_empty() => {
+                        term.remove(i);
+                    }
+                    2 if !term.is_empty() => term[i] = piece,
+                    3 if i + 1 < term.len() => term.swap(i, i + 1),
+                    // Half a multi-byte character: its bytes count one each.
+                    4 if !term.is_empty() && term[i].len() > 1 => term[i].truncate(1),
+                    _ => {}
+                }
+            }
+            (query, term.concat())
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(if cfg!(feature = "slow") { 20_000 } else { 2_000 }))]
+
+        /// The banded automaton (ROADMAP 8.2.4.1) agrees with the textbook table: a term is accepted, with every
+        /// prefix of it pruned by `can_match` only when no extension matches, exactly when its distance is within the
+        /// query's, and `distance` gives that distance.
+        #[test]
+        fn the_band_is_the_table((query, term) in near(), distance in 1..=2_u8) {
+            let a = Expansion::fuzzy(&query, distance);
+            let q: Vec<u32> = query.chars().map(u32::from).collect();
+            let d = osa(&q, &chars(&term));
+            let within = d <= usize::from(distance);
+            prop_assert_eq!(accepts(&a, &term), within, "{:?} ~{} {:?}: {}", query, distance, term, d);
+            prop_assert_eq!(a.distance(&term).map(usize::from), within.then_some(d));
+        }
     }
 
     /// The automaton agrees with the table on every pair over a small alphabet, invalid UTF-8 included.

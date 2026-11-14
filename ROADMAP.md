@@ -560,13 +560,13 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
   - [x] 8.2.2.2 `minimum_should_match` ladder 100/75/50/1
   - [x] 8.2.2.3 Single-term queries skip L2
   - [x] 8.2.2.4 Exclude only the last searched step of a nested level: L2's steps are nested (L0 ⊆ 75% ⊆ 50% ⊆ 1, same `must_not` and `filter`), so excluding the latest one gives the same hits as excluding them all (ADR-0037 item 2), and stops a long query losing L2 steps to `max_terms` (step j uses about (j + 1)·n terms) and re-planning every excluded step (bench `search_relaxed/l2_every_step`). SPEC §7.6 and §7.1.3 wording; L1's steps are not nested and stay excluded (found in the 8.2.2 review)
-  - [ ] 8.2.2.5 Decide whether a term no document holds (`df` 0, often a typo) counts as the most important for L2's `effective`: today it is reported kept unless it is a stopword, though no hit of the step holds it (`purple red shoes` → `purple red`). A stopword is still dropped first. Options: rank `df` 0 last, or leave it to L4's corrections (8.2.4.3) (found in the 8.2.2 review)
+  - [~] 8.2.2.5 Decide whether a term no document holds (`df` 0, often a typo) counts as the most important for L2's `effective`: today it is reported kept unless it is a stopword, though no hit of the step holds it (`purple red shoes` → `purple red`). A stopword is still dropped first. Options: rank `df` 0 last, or leave it to L4's corrections (8.2.4.3) (found in the 8.2.2 review)
 - [x] 8.2.3 L3 prefix expansion (FST range, cap expansions, rank by df)
 - 8.2.4 L4 fuzzy (depends on 6.1.5)
-  - [ ] 8.2.4.1 Levenshtein automaton builder (distance 1–2, transpositions). Since 7.4.12, `search::Expansion` walks the optimal string alignment table row by row (an allocation per byte); compile it to a DFA, or at least keep only the band of 2·distance + 1 columns that can stay within the distance (each byte is O(query length) today, and a query term may be 32 KiB), if `search_top10_expansion/fuzzy` shows planning matters (found in the 7.4.12 review)
-  - [ ] 8.2.4.2 FST ∩ automaton term enumeration with cap + df ranking
-  - [ ] 8.2.4.3 "Did you mean" corrected-query synthesis
-  - [ ] 8.2.4.4 Length-based distance policy (SPEC §7.6 L4)
+  - [~] 8.2.4.1 Levenshtein automaton builder (distance 1–2, transpositions). Since 7.4.12, `search::Expansion` walks the optimal string alignment table row by row (an allocation per byte); compile it to a DFA, or at least keep only the band of 2·distance + 1 columns that can stay within the distance (each byte is O(query length) today, and a query term may be 32 KiB), if `search_top10_expansion/fuzzy` shows planning matters (found in the 7.4.12 review)
+  - [~] 8.2.4.2 FST ∩ automaton term enumeration with cap + df ranking
+  - [~] 8.2.4.3 "Did you mean" corrected-query synthesis
+  - [~] 8.2.4.4 Length-based distance policy (SPEC §7.6 L4)
 - [ ] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
 - [ ] 8.2.6 Optional filter relaxation (`last_resort`) with explicit opt-in
 - [ ] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)

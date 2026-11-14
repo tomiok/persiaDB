@@ -1,0 +1,9 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc dfaeaba939e810746e7fd6470e99bafcbf6b0dbdc0ebd5498f5d13864b932632 # shrinks to (query, term) = ("a", [97, 97]), distance = 1
+cc 964b6aa4aa8653e1b0a3002cf7ae99e6d48564a9a57008571aa80c7545e5a912 # shrinks to (query, term) = ("aaaaaaaaaaaa€€aaaaaabaaaaaa", [97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 97, 226, 130, 172, 226, 130, 172, 97, 97, 97, 97, 97, 98, 97, 97, 97, 97, 97, 97, 97]), distance = 1
+cc 3308c7bb64ac5ae09ece6dc35d6b49a73385f8ae69526aa7b8ca17853e108533 # shrinks to (query, term) = ("aaacb", [97, 97, 97, 97, 97, 98]), distance = 1
