@@ -818,7 +818,7 @@ fn collection_expansions(c: &mut Criterion) {
 /// `drop_terms`: the importance `df` reads, then the `minimum_should_match` steps, each excluding L0 and the steps
 /// before it. `l2` stops at the first step with a hit; `l2_every_step` (the largest `min_results`) reaches each of
 /// them, down to `drop_terms:1`. `l3` (ROADMAP 8.2.3) runs L0 and L3 alone on a two-word query whose last word starts
-/// every term.
+/// every term; `l4` (ROADMAP 8.2.4) L0 and L4 alone on a two-word query whose second word is a typo.
 fn relaxed(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();
@@ -897,24 +897,31 @@ fn relaxed(c: &mut Criterion) {
     });
     // L3 (ROADMAP 8.2.3) alone: `w` is no term, but every term starts with it. L0 (`w3` and `w`) has no hit, so the
     // step requires `w3` exactly (2 characters, not last) and one of the 50 most frequent terms starting `w`.
-    let prefix_only = RelaxPlan::new(
-        schema.relaxation(),
-        &RelaxOptions {
-            levels: Some(Levels::Custom(vec![Level::Prefix])),
-            ..RelaxOptions::default()
-        },
-    )
-    .unwrap();
-    let typing = compiler.compile("w3 w", &DefaultFields::all(schema), &QueryLimits::default());
-    group.bench_function("l3", |b| {
-        b.iter(|| {
-            let out = views
-                .search_relaxed(&typing, &request, &prefix_only, &exec)
-                .unwrap();
-            assert_eq!(out.relaxation.level, RelaxLevel::Prefix);
-            black_box(out)
+    // L4 (ROADMAP 8.2.4) alone: `w1x4` is no term, but one edit from `w104`..`w194` and `w14`. L0 has no hit, so the
+    // step requires `w3` exactly (2 characters) and one of the terms within one edit of `w1x4`.
+    for (name, level, text) in [
+        ("l3", Level::Prefix, "w3 w"),
+        ("l4", Level::Fuzzy, "w3 w1x4"),
+    ] {
+        let alone = RelaxPlan::new(
+            schema.relaxation(),
+            &RelaxOptions {
+                levels: Some(Levels::Custom(vec![level])),
+                ..RelaxOptions::default()
+            },
+        )
+        .unwrap();
+        let query = compiler.compile(text, &DefaultFields::all(schema), &QueryLimits::default());
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views
+                    .search_relaxed(&query, &request, &alone, &exec)
+                    .unwrap();
+                assert_eq!(out.relaxation.level, RelaxLevel::from(level));
+                black_box(out)
+            });
         });
-    });
+    }
     group.finish();
 }
 
