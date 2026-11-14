@@ -1626,7 +1626,7 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0 to L3 build queries; the other levels build none yet (ROADMAP 8.2).
+words; ROADMAP 8.1.10). So far L0 to L4 build queries; L5 builds none yet (ROADMAP 8.2.5).
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1681,6 +1681,21 @@ level. Its `effective` is L0's text, as every clause is kept. Building the step 
 expansions, §7.1); held to §7.1.3's limits,
 its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
 its own for it to stand for (nested levels, in the cascade below).
+
+L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query: each term it rewrites
+becomes a `fuzzy` of that term with `max_expansions` 50, which planning expands over the views' terms (each view's
+term dictionary intersected with the optimal string alignment automaton) and keeps by collection `df` (§7.1). Its
+terms are L3's: a field's analyzed term of a word clause, or a `term` or `combined` field of a programmatic query, in
+a `text` field whose analyzer does not stack tokens; excluded clauses, phrases, `field:` clauses, filters and a
+programmatic root `bool` with `should` clauses or a `minimum_should_match` stay as they are, for L3's reasons. A
+term's *length* is its number of Unicode scalar values after analysis, as at L3 (`café` is 4, in 5 bytes), and it
+sets the distance (ROADMAP 8.2.4.4): no `fuzzy` below 4, distance 1 from 4 to 7, distance 2 from 8. Unlike L3, the
+last term has no rule of its own: a short word stays exact wherever it is. A rewritten `combined` becomes a `bool` of
+`should` clauses as at L3 (its exact fields as one `combined`, a `fuzzy` per rewritten field, under the ratio
+`boost` of a `fields` weight), and a `fuzzy` scores with the edit-distance weight of §7.1, so an exact term outranks a
+correction at the same frequency and length. A query that rewrites no term skips the level. Held to §7.1.3's limits,
+its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). Being one step, it has no earlier step
+of its own to stand for.
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A
