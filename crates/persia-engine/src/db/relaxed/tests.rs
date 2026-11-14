@@ -1234,6 +1234,51 @@ mod budget {
         assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
     }
 
+    /// Moves the request's deadline clock past its deadline, then walks as [`Walking`] does.
+    #[derive(Debug)]
+    struct LateWalk {
+        walk: Walking,
+        deadline: Arc<ManualClock>,
+    }
+
+    impl LevelTransform for LateWalk {
+        fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
+            self.deadline.advance(Duration::from_millis(10));
+            self.walk.steps(input)
+        }
+    }
+
+    #[test]
+    fn the_requests_deadline_passing_during_a_levels_walk_stays_an_error() {
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let deadline = Arc::new(ManualClock::new(0));
+        let late = Arc::new(LateWalk {
+            walk: Walking {
+                field: body,
+                steps: vec![step(term(body, "hat"), "fuzzy")],
+            },
+            deadline: Arc::clone(&deadline),
+        });
+        // A budget that never passes (its own frozen clock), and a deadline 5 ms away that the level's build passes.
+        let relax = plan(&budget(1_000, 10), &[]).with_level(RelaxLevel::Fuzzy, late as _);
+        let at = Clock::now(&*deadline) + Duration::from_millis(5);
+        let exec = exec().deadline(Arc::clone(&deadline) as _, at);
+        let out = views.search_relaxed(&term(body, "red"), &request(10), &relax, &exec);
+        assert!(
+            matches!(
+                out,
+                Err(crate::db::RelaxedSearchError::Plan(
+                    SearchError::Interrupted(Interrupt::DeadlineExceeded)
+                ))
+            ),
+            "{out:?}"
+        );
+    }
+
     #[test]
     fn a_truncated_step_counts_no_facet_and_its_cursor_page_resumes() {
         let (db, body, tag) = database();

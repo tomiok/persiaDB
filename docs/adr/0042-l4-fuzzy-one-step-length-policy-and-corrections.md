@@ -66,7 +66,17 @@ level mostly has to build the `fuzzy` queries. Several things were still open:
 - A query whose L0, L1, L2 and L3 find too few hits now relaxes to L4 by default; the default plan's L5 still
   builds nothing (ROADMAP 8.2.5).
 - `search_relaxed/l4` measures the step: L0, then a two-word query whose second word is a typo. A missing word is walked twice,
-  once for its correction and once when the step is planned, over the fields that rewrite it.
+  once for its correction and once when the step is planned, over the fields that rewrite it. It also runs before the step is fitted to
+  the limits, so a `fuzzy:skipped` step has paid for it, and again on every cursor page that builds the step. A page
+  whose walk the budget passes stops before L4, `truncated`, and states the earlier step: the budget's usual exception
+  to every page stating the same.
+- `corrected` and `effective` are the last step's even when it adds no hit (SPEC §7.6's rule for every level): with
+  one held word and one typo, L2's last rung already holds every document L4 matches. ROADMAP 8.1.22 is to decide it.
+- With the default `max_expansions` of 1024, L4 counts L3's step (50 per word) among the steps it excludes, so from
+  about 10 expanded words it is `fuzzy:cut`, and from about 20 `fuzzy:skipped`.
+- A correction is the most frequent term within the distance, not the nearest: for a word of 8 characters or more, a
+  term two edits away can be named over a rarer one at one edit, which the step scores higher. ROADMAP 8.2.7 makes
+  edits a ranking signal; the rule follows planning's order so the correction is always searched.
 - The differential suite (`tests/differential.rs`) does not model L4: its reference model has no `prefix` or `fuzzy`
   query at all. ROADMAP 8.1.21 adds L4 beside 8.1.19's L3; meanwhile `tests/relax_fuzzy.rs` checks the step's matches
   against an oracle over random corpora.

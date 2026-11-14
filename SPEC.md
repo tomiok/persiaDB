@@ -1714,7 +1714,11 @@ is widened by its `fuzzy` but not reported: it matched as typed. A word of sever
 fuzzily per token but neither corrected nor rewritten in `effective`, which has no text per token. Finding the
 corrections walks each such field's terms as planning does (§7.1), keeping one, under the request's deadline,
 cancellation and the budget: a budget that passes during the walk stops the cascade before the level, as before a
-step. A query whose words some document holds, or that is not compiled from `q`, has no correction.
+step. A query whose words some document holds, or that is not compiled from `q`, has no correction. As for every
+level, `corrected` and `effective` are the last step's, also when that step adds no hit: with one word some document
+holds and one typo, L2's last rung already matches every document L4 can (ROADMAP 8.1.22 is to decide whether such a
+step should state them). `effective` sets each correction in as the index holds it, not quoted: it names the terms
+searched and need not compile back to the step's query (a stem, or a term holding `:`).
 
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A

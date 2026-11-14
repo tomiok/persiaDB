@@ -480,7 +480,7 @@ impl CollectionViews<'_> {
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
     /// after L0 when `relax` does not relax;
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
-    /// from (L2 reads its terms' `df`).
+    /// from (L2 reads its terms' `df`, L4 walks the term dictionaries of the words it corrects).
     pub fn search_relaxed<'q>(
         &self,
         query: impl Into<RelaxedQuery<'q>>,
@@ -757,7 +757,7 @@ type BuiltStep<'a> = (Cow<'a, Query>, String, StepText, Option<Expansion>);
 /// the query itself, not a copy.
 ///
 /// # Errors
-/// A statistic the level cannot read (L2 reads its terms' `df`); [`SearchError::Interrupted`] once the request's deadline
+/// A statistic or a term walk the level cannot read (L2 reads its terms' `df`, L4 walks term dictionaries); [`SearchError::Interrupted`] once the request's deadline
 /// has passed or it was cancelled.
 fn level_steps<'q>(
     planned: &PlannedLevel,

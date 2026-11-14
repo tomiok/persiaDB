@@ -21,6 +21,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   other setting is `RequestError::CursorProximity`.
 - `persia-engine` (breaking): `Explanation::Bool` has a `proximity` field, the bonus and its pairs (`None` while
   proximity is off), and `db::Cursor` a `proximity` field (whether its plan scored the bonus).
+- `persia-engine`: L4 `fuzzy` (ROADMAP 8.2.4; SPEC §7.6, ADR-0042). A query with fewer than `min_results` hits after
+  L3 relaxes to one step, `fuzzy`: each term L3 would rewrite (a word's analyzed term in a `text` field that does not
+  stack tokens) of at least 4 characters becomes a `fuzzy` of 50 expansions kept by collection `df`, at distance 1
+  for 4 to 7 characters and 2 from 8 (Unicode scalar values of the analyzed term). Shorter words, excluded clauses,
+  phrases, `field:` clauses and filters stay exact. Over `QueryLimits` it is listed as `fuzzy:cut` or
+  `fuzzy:skipped`. "Did you mean": `Relaxation::corrected` lists each required one-token word no document holds with
+  the term its `fuzzy` keeps first (`Zapatilas` → `zapatillas`, the index's analyzed form), and `effective` is L0's
+  text with those words replaced. Benchmark `search_relaxed/l4`.
+- `persia-fuzz`: target `fuzzy_automaton` (ROADMAP 8.2.4.1) checks the `fuzzy` automaton against an optimal string
+  alignment table on any query and term bytes.
 - `persia-engine`: L3 `prefix` (ROADMAP 8.2.3; SPEC §7.6, ADR-0040). A query with fewer than `min_results` hits relaxes
   to one step, `prefix`. Its words also match the terms they start: the last term, and every other term of at least 3
   characters (of the analyzed term), becomes a `prefix` of 50 expansions, kept by collection `df`. Excluded clauses,
@@ -66,6 +76,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-engine`: L2 `drop_terms` ranks a term no document holds (collection `df` 0) least important, below a
+  stopword (ROADMAP 8.2.2.5; SPEC §7.6, ADR-0042 item 8): it is dropped first, so a step's `effective` no longer
+  names a word none of its hits holds (`purple red shoes` reads `red shoes`, not `purple red`).
+- `persia-engine`: the `fuzzy` automaton keeps only the band of `2 · distance + 1` cells of each row, with no
+  allocation per byte (ROADMAP 8.2.4.1): a 1 KiB fuzzy term plans in 103 µs instead of 4.94 ms, a short one 20%
+  faster. `db::Correction` is now defined in `relax` and still exported from `db`.
 - `persia-blob` (breaking): `ChunkSize::new` (and `TryFrom<u32>`) rejects a chunk size below `ChunkSize::MIN`,
   64 KiB, with the new `Error::ChunkSizeBelowMin`, a caller's error (ROADMAP 9.4.4; SPEC §9.2; ADR-0041). The floor bounds a
   blob manifest at 4 bytes per 64 KiB of blob: a chunk size of 1 let a 4 GiB blob need a 16 GiB manifest. It is a

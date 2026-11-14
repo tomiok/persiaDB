@@ -175,6 +175,8 @@ fn effective(compiled: &Compiled, corrections: &[(usize, Correction)]) -> String
     }
     text
 }
+
+/// A `fuzzy` of `term` at `distance`, keeping [`DEFAULT_MAX_EXPANSIONS`].
 fn fuzzy(field: FieldId, term: &str, distance: u8) -> Query {
     Query::Fuzzy(FuzzyQuery {
         field,

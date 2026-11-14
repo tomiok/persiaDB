@@ -291,12 +291,20 @@ term is listed by five views. Planning only. `search_top10_expansion` is the sam
 the single segment. Command: `cargo bench -p persia-engine --bench search -- "search_expansion_collection|search_top10_expansion"`.
 Time per query.
 
-| Recorded | collection `prefix` plan | collection `fuzzy` plan | one segment `prefix` | one segment `fuzzy` |
-|---|--:|--:|--:|--:|
-| 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.14) | 826 µs | 618 µs | 25.8 ms | 21.7 ms |
-| 2026-11-02, same machine and session, the commit before 7.4.14 | 3.59 ms | 2.31 ms | 25.1 ms | 21.0 ms |
-| 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.15, its commit; A/B with the row below, alternating, two runs each) | 708–724 µs | 611–616 µs | 25.2–25.6 ms | 21.2–21.6 ms |
-| 2026-11-05, same machine and session, main before 7.4.15 | 840–848 µs | 619–623 µs | 26.7–26.8 ms | 22.3–22.7 ms |
+| Recorded | collection `prefix` plan | collection `fuzzy` plan | one segment `prefix` | one segment `fuzzy` | collection `fuzzy_long` plan |
+|---|--:|--:|--:|--:|--:|
+| 2026-11-02, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.14) | 826 µs | 618 µs | 25.8 ms | 21.7 ms | — |
+| 2026-11-02, same machine and session, the commit before 7.4.14 | 3.59 ms | 2.31 ms | 25.1 ms | 21.0 ms | — |
+| 2026-11-05, rustc 1.99.0, AMD Ryzen 5 3600, Linux (ROADMAP 7.4.15, its commit; A/B with the row below, alternating, two runs each) | 708–724 µs | 611–616 µs | 25.2–25.6 ms | 21.2–21.6 ms | — |
+| 2026-11-05, same machine and session, main before 7.4.15 | 840–848 µs | 619–623 µs | 26.7–26.8 ms | 22.3–22.7 ms | — |
+| 2026-11-13, rustc 1.99.0, AMD Ryzen 5 3600, Linux, main (0316151) before ROADMAP 8.2.4.1 | 721 µs | 623–635 µs | 25.5 ms | 21.2 ms | 4.94 ms |
+| 2026-11-13, same machine and session, ROADMAP 8.2.4 (banded automaton) | 715 µs | 504–509 µs | 25.1 ms | 21.1–22.3 ms | 103 µs |
+
+`fuzzy_long` (ROADMAP 8.2.4.1) is a 1 KiB term at distance 2 over the same collection: no term is within it, so it
+measures the automaton's walk alone. Keeping only the band of `2 · distance + 1` cells per row in a state on the
+stack makes each byte O(distance) instead of O(query length) with an allocation: about 48 times faster there, and
+`fuzzy` plans 20% faster. The one-segment searches are dominated by scoring the kept terms and do not move (the
+21.1–22.3 ms spread is between runs of the same build).
 
 The 7.4.14 one-segment queries were about 3 % slower: a term that loses the cap is no longer cached, so each run read its
 `df` from the segment again. Since 7.4.15 the views' walks are merged and each term's `df` is the sum of their own counts,
@@ -510,6 +518,18 @@ expanded over every term (ROADMAP 8.1.20). Command: `cargo bench -p persia-engin
 | ROADMAP 8.2.2.4–8.2.3 | default | 902 µs | 1.45–1.48 ms | 11.52–11.83 ms | 23.0 ms |
 | main (c8d6496) | 1 codegen unit | 883 µs | 1.48 ms | 12.67 ms | — |
 | ROADMAP 8.2.2.4–8.2.3 | 1 codegen unit | 926 µs | 1.43 ms | 11.47 ms | 22.2 ms |
+
+With L4 (ROADMAP 8.2.4), same collection and thread, default build, 2026-11-13: `l4` is `w3 w1x4` with L4 `fuzzy`
+alone (`w1x4` is one edit from 11 terms; `w3` stays exact), and its correction of `w1x4`. Main is 0316151.
+
+| Recorded | `l0` | `l1` | `l2` | `l2_every_step` | `l3` | `l4` |
+|---|--:|--:|--:|--:|--:|--:|
+| main (0316151) | 468 µs | 943 µs | 1.39 ms | 11.86 ms | 22.6 ms | — |
+| ROADMAP 8.2.4, step without corrections (8.2.4.2) | — | — | — | — | 22.2 ms | 2.49 ms |
+| ROADMAP 8.2.4 | 434 µs | 868 µs | 1.39 ms | 11.64 ms | 22.2 ms | 2.55 ms |
+
+The corrections add about 2.5% to `l4`: a missing word's fields are walked once more, keeping one term, when the level
+builds (ADR-0042 item 7).
 
 `l2_every_step` gains about 10% with ROADMAP 8.2.2.4: its last steps exclude L0 and one L2 step instead of every
 earlier one, so they plan fewer excluded queries. `l2` is about 5% slower in the default build and about 3% faster

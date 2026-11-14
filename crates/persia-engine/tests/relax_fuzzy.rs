@@ -200,11 +200,17 @@ fn over_the_limits_the_fuzzy_queries_are_cut_or_the_step_skipped() {
         ids(&out),
         BTreeSet::from(["d1".to_owned(), "d2".to_owned()])
     );
+    // The corrections are the terms each cut `fuzzy` kept: the step searched them.
+    assert_eq!(corrected(&out), [("abcd", "abcd2"), ("wxyz", "wxyz2")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("abcd2 wxyz2"));
     // 1 left for two queries: no cut fits.
     let out = search(&db, "abcd wxyz", Some(limits(1)));
     assert_eq!(out.relaxation.applied, ["fuzzy:skipped"]);
     assert_eq!(out.relaxation.level, RelaxLevel::Exact);
     assert_eq!(hits(&out), []);
+    // A skipped step states nothing: L0's text, no correction.
+    assert_eq!(corrected(&out), []);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("abcd wxyz"));
 }
 
 #[test]
@@ -451,4 +457,43 @@ fn over_fields_the_correction_of_highest_df_wins() {
     let out = search(&db, "shoez", None);
     assert_eq!(corrected(&out), [("shoez", "shoed")]);
     assert_eq!(hits(&out).len(), 4);
+}
+
+/// SPEC §7.6 as it stands (ROADMAP 8.1.22 to revisit): a response states its last step's `corrected` and `effective`,
+/// also when that step adds no hit. With the collection's levels, `red shoez` relaxes through L2 (`drop_terms:75%`:
+/// any one word, so every `red` document) and then L4 (`red` and a term near `shoez`), whose matches L2 already took.
+#[test]
+fn a_last_step_that_adds_no_hit_still_states_its_corrections() {
+    let db = database(&["red shoes", "red hat"]);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "red shoez",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        );
+    let every = RelaxPlan::new(
+        &RelaxationConfig::default(),
+        &RelaxOptions {
+            min_results: Some(10),
+            fallback: Some(Fallback::None),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let out = views
+        .search_relaxed(&compiled, &request(10), &every, &exec())
+        .unwrap();
+    assert_eq!(
+        out.relaxation.applied,
+        ["drop_terms:75%", "prefix", "fuzzy"]
+    );
+    assert!(out.hits.iter().all(|h| h.level == RelaxLevel::DropTerms));
+    assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
+    assert_eq!(corrected(&out), [("shoez", "shoes")]);
+    assert_eq!(out.relaxation.effective.as_deref(), Some("red shoes"));
 }
