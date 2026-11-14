@@ -1,8 +1,8 @@
 # Persia DB
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
-> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-13 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **350 of 541 MVP leaves done (65%)**, none in progress. That file is regenerated from
+> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-14 snapshot
+> in [`PROGRESS.md`](../PROGRESS.md): **355 of 543 MVP leaves done (65%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -49,7 +49,7 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
 That is library code under the public facade. `persia` exports no `Db` yet (M10), and `persia-server` is a
-placeholder (M11). Fuzzy and fallback relaxation (L4, L5), the blob pack file, cloud storage, and the server
+placeholder (M11). Fallback relaxation (L5), the blob pack file, cloud storage, and the server
 are still ahead.
 
 The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes at `v1.0` (M15).

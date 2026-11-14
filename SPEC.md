@@ -1650,8 +1650,9 @@ lexicographically with no weight to tune: a term no document holds is less impor
 8.2.2.5, ADR-0042: no hit of a step holds it, so `effective` must not name it), then a stopword (§7.1.1) is less
 important than any other term, then a lower IDF, then a later position in the query (a user's last word tends to
 qualify the first ones). A term holds no document when the `df`s its IDF reads say so: a `term` or every field of a
-`combined` of `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or, with only `should`
-clauses, all of them such. A term's IDF is about
+`combined` of `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or with fewer other
+`should` clauses than it requires (its `minimum_should_match`, and at least one with no `must` or `filter` clause),
+and a `boost` or `constant_score` around such a query. A term's IDF is about
 as BM25F scores it (§7.2), over the search's statistics: a `term`'s, a `combined`'s of its largest `df`, a `phrase`'s
 the sum of its terms', a `bool`'s the sum of its `must` clauses' and the largest of its `should` clauses', `boost` and
 `constant_score` their query's, and 0 for `prefix`, `fuzzy` and `match_all`. Importance does not change which

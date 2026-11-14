@@ -87,8 +87,9 @@ pub(crate) struct Weight {
     /// own until planned, so they are 0: the least important of a programmatic query's terms.
     pub(crate) idf: f64,
     /// Whether the term matches no document by the `df`s alone (ROADMAP 8.2.2.5): a `term` of `df` 0, a `combined`
-    /// whose every field's term has `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause, or
-    /// whose `should` clauses are all it requires (no `must` or `filter`) and all such, and a `boost` or
+    /// whose every field's term has `df` 0, a `phrase` with a term of `df` 0, a `bool` with such a `must` clause or
+    /// with fewer other `should` clauses than it requires (its `minimum_should_match`, and at least one when it has no
+    /// `must` or `filter`), and a `boost` or
     /// `constant_score` of such a query. A `df` counts deleted documents too (SPEC §7.2), so a term of `df` above 0
     /// may still be held by none: that one is not caught. `prefix`, `fuzzy` and `match_all` are not: their terms are
     /// only known once planned.
@@ -137,17 +138,21 @@ fn weigh_bool(query: &BoolQuery, stats: &dyn StatisticsProvider) -> Result<Weigh
         sum += w.idf;
         must_none |= w.none;
     }
-    let (mut best, mut every_should_none): (f64, bool) = (0.0, true);
+    let (mut best, mut available): (f64, usize) = (0.0, 0);
     for q in &query.should {
         let w = weigh(q, stats)?;
         best = best.max(w.idf);
-        every_should_none &= w.none;
+        available += usize::from(!w.none);
     }
-    // `should` clauses are all it requires only without `must` and `filter` clauses.
-    let should_only = query.must.is_empty() && query.filter.is_empty() && !query.should.is_empty();
+    // The `should` clauses it requires (SPEC §7.1): its `minimum_should_match`, and at least one when they are all it
+    // has beside `must_not` (no `must` or `filter`).
+    let mut required = usize::try_from(query.minimum_should_match).unwrap_or(usize::MAX);
+    if query.must.is_empty() && query.filter.is_empty() && !query.should.is_empty() {
+        required = required.max(1);
+    }
     Ok(Weight {
         idf: sum + best,
-        none: must_none || should_only && every_should_none,
+        none: must_none || available < required,
     })
 }
 

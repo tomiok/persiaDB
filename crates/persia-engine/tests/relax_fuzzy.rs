@@ -300,7 +300,8 @@ fn allowed(w: &str) -> usize {
 }
 
 /// Words over `a` and `b` of 1 to 8 letters, so every distance is reached. A corpus holds at most 36 distinct words
-/// (12 documents of 3), so no `fuzzy` reaches the 50-term cap.
+/// (12 documents of 3), so no `fuzzy` reaches the 50-term cap. At least 2 documents, so a commit splits every corpus
+/// between a segment and the memtable.
 fn word() -> impl Strategy<Value = String> {
     prop::collection::vec(prop_oneof![Just('a'), Just('b')], 1..9)
         .prop_map(|w| w.into_iter().collect())
@@ -311,7 +312,7 @@ proptest! {
 
     #[test]
     fn the_step_matches_what_the_oracle_says(
-        docs in prop::collection::vec(prop::collection::vec(word(), 1..4), 1..13),
+        docs in prop::collection::vec(prop::collection::vec(word(), 1..4), 2..13),
         query in prop::collection::vec(word(), 1..4),
     ) {
         let texts: Vec<String> = docs.iter().map(|d| d.join(" ")).collect();

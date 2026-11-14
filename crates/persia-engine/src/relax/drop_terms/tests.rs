@@ -766,6 +766,31 @@ fn matches_none_reads_the_dfs() {
     assert!(matches_none(&should(vec![term(0, "a"), term(0, "b")]), &stats).unwrap());
     assert!(!matches_none(&should(vec![term(0, "a"), term(0, "red")]), &stats).unwrap());
     assert!(!matches_none(&should(Vec::new()), &stats).unwrap());
+    // `minimum_should_match` counts beside `must` too: two required of one held `should`.
+    let at_least = |m: u32, should: Vec<Query>| {
+        Query::Bool(BoolQuery {
+            must: vec![term(0, "red")],
+            should,
+            minimum_should_match: m,
+            ..BoolQuery::default()
+        })
+    };
+    assert!(
+        matches_none(
+            &at_least(2, vec![term(0, "shoes"), term(0, "absent")]),
+            &stats
+        )
+        .unwrap()
+    );
+    assert!(
+        !matches_none(
+            &at_least(1, vec![term(0, "shoes"), term(0, "absent")]),
+            &stats
+        )
+        .unwrap()
+    );
+    assert!(matches_none(&at_least(1, vec![term(0, "absent")]), &stats).unwrap());
+    assert!(!matches_none(&at_least(0, vec![term(0, "absent")]), &stats).unwrap());
     let boosted = Query::Boost(BoostQuery {
         query: Box::new(term(0, "absent")),
         boost: 2.0,
