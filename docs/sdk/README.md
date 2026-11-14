@@ -73,17 +73,19 @@ is `1`, `FORMAT_MINOR` is `0`. There is no compatibility promise across releases
 
 | Language | First release | Later | Rejected as the primary path |
 |---|---|---|---|
-| Go | cgo, statically linked to `libpersia`, C ABI in `persia-ffi`. Module `sdk/persia`. | A no-cgo build only if a portable `Storage` exists and a host forbids cgo | Pure Go; wazero |
+| Go | cgo, statically linked to `libpersia.a`, C ABI in `persia-ffi`. Module `sdk/persia`. | Optional `persia_purego` tag: loads the shared library with `CGO_ENABLED=0` (Unix via purego `Dlopen`, Windows via `syscall.LoadLibrary` and `GetProcAddress`), same API (ADR-0018). The build does not fetch it. The caller places it beside the binary, or sets `PERSIA_LIB` (Go SDK only, read by `Open`) | Pure Go; wazero |
 | TypeScript | N-API addon (`@persiadb/node`) for Node.js, Bun, and Deno, linking the same rlib | `@persiadb/wasm` for browser and edge, after a non-mmap storage backend | WASM as the only binding |
 
 Both languages share `persia-ffi`: one safe Rust API, C exports for Go, N-API calling those Rust functions
 for TypeScript. Documents cross as UTF-8 JSON. The reasons and the rejected options are in ADR-0018.
 
 ```
-Go  --cgo-->  persia.h / libpersia.a --+
-                                       +--> persia-ffi (safe Rust) --> persia --> engine
-Node --N-API--> @persiadb/node (rlib) -+
+Go  --cgo (default)-->  persia.h / libpersia.a --+
+Go  --persia_purego-->  libpersia.so/.dylib/dll -+--> persia-ffi (safe Rust) --> persia --> engine
+Node --N-API--> @persiadb/node (rlib) ----------+
 ```
+
+The `persia_purego` arrow is optional. A default `go build` is the cgo arrow. Node does not `dlopen`.
 
 `persia-ffi` is not in the workspace. When it is added it depends only on `persia`, and that edge is added
 to [`ALLOWED`](https://github.com/tomiok/persiaDB/blob/main/xtask/src/check_deps.rs#L23-L40). The Node

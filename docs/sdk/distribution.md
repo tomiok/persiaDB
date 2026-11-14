@@ -54,8 +54,9 @@ The last element of the import path is the package name, so callers write `persi
 
 ### What `go build` does
 
-1. cgo is required (`CGO_ENABLED=1`). Pure Go builds fail with a clear `#cgo` error that points at this
-   document, not with a missing-symbol error from the linker.
+1. cgo is required (`CGO_ENABLED=1`) unless the build sets `-tags persia_purego` (below). A pure Go build
+   without that tag fails with a clear `#cgo` error that points at this document, not with a
+   missing-symbol error from the linker.
 2. If `PERSIA_LIB_DIR` is set, use `libpersia.a` and `persia.h` from that directory. This is the offline
    and the source-build path.
 3. Otherwise download the release asset for `${GOOS}_${GOARCH}` whose version equals the module
@@ -96,6 +97,43 @@ runtime inside `Open`.
 The static library is large (Rust runtime plus zstd). It is a release asset, not a file committed to
 the git module. `go get` of the module fetches sources of a few hundred kilobytes; the first `go build`
 fetches the library. Builds with `PERSIA_LIB_DIR` set do not fetch it.
+
+### Optional `persia_purego` build
+
+cgo and `libpersia.a` stay the default (ADR-0018). The tag is the build that does not need cgo:
+
+```bash
+CGO_ENABLED=0 go build -tags persia_purego
+```
+
+On Unix, `github.com/ebitengine/purego` `Dlopen`s the shared library when `Open` runs. On Windows amd64
+`purego.Dlopen` is not compiled, so `Open` loads `persia.dll` with `syscall.LoadLibrary` and resolves
+symbols with `syscall.GetProcAddress`, then `purego.RegisterLibFunc`. The Go API does not change.
+`go build -tags persia_purego` does not fetch that library and does not link it into the binary. A cgo
+build with `PERSIA_LIB_DIR` unset downloads `libpersia.a` into the build cache; `PERSIA_LIB_DIR` is the
+source and offline path and does not fetch it. This tag does not download `libpersia.so` on either path.
+The caller places the file before `Open`:
+
+- beside the executable, named `libpersia.so` (linux), `libpersia.dylib` (darwin), or `persia.dll`
+  (windows), or
+- `PERSIA_LIB` set to that file's path.
+
+`PERSIA_LIB` is a runtime variable of the Go embedded package only. It is not a SPEC §14 server knob.
+`persia-server` does not read it, and a future server `PERSIA_*` knob must not take the name. The cgo
+build does not read it. `PERSIA_LIB_DIR` is a different variable: a build-time directory for
+`libpersia.a` and `persia.h`.
+
+The process starts without the library. A missing file is an error from `Open`. It is not a linker error
+at `go build`, and it is not a failure before `main`. The platform matrix is the five rows above. The
+release still publishes the shared libraries as assets, with checksums in the same `checksums.txt` as the
+static libraries; publishing them is not the same as the build downloading them. Targets outside the
+matrix (linux musl, windows arm64, and the rest of the "not in the first matrix" list) are unsupported
+for this tag too. wazero is not a substitute: the tag still calls the native library.
+
+The tradeoff against the default is the second file. A cgo build is one binary. With `PERSIA_LIB_DIR`
+unset, `go build` fetches its static library; with `PERSIA_LIB_DIR` set, it uses the library already
+there. A `persia_purego` build runs only when the caller has placed the shared library
+beside it or named it with `PERSIA_LIB`.
 
 Supply chain (SPEC §17): checksums in the module, assets named with the version, the release workflow
 builds them from the tag rather than uploading a developer's laptop. The same tag builds the npm
@@ -146,14 +184,16 @@ One core tag, then the bindings. Never the other way around: the bindings have n
    unstable and is not the binding cut. Publishing the modules is M16.4, after M16.1–M16.3. The core is not
    published to crates.io until its own release-engineering leaf (10.5.1) says so. The bindings do not
    require the core to be on crates.io; they build from the git tag.
-2. CI on that tag builds `persia-ffi` staticlibs and the `.node` packages. The workflow lives in
+2. CI on that tag builds `persia-ffi` staticlibs, the shared libraries for the `persia_purego` matrix
+   (`libpersia.so`, `libpersia.dylib`, `persia.dll`, crate type `cdylib`), and the `.node` packages. The workflow lives in
    `.github/workflows/` next to the existing CI. It does not run on every pull request of the core:
    a docs change or a format-crate change does not need six cross compilers. It runs on tags, on
    workflow dispatch, and on pull requests that touch `crates/persia-ffi/**`, `sdk/persia/**`, or
    `sdk/node/**`.
 3. Conformance (below) runs against those artifacts on linux amd64 at least, and on one macOS and one
    Windows runner for the smoke subset.
-4. Publish GitHub release assets: staticlibs, checksums, header. Publish npm platform packages first,
+4. Publish GitHub release assets: staticlibs, the shared libraries from step 2, checksums for both,
+   and the header. Publish npm platform packages first,
    then `@persiadb/node`, with provenance. Publish the Go module by tagging
    `sdk/persia/vX.Y.Z` (Go's submodule tag convention).
 5. Append a row to the compatibility table and a CHANGELOG entry under the SDK heading.
@@ -293,7 +333,7 @@ Do not file these against M14. M14 is the gRPC clients. A reasonable split, once
 wrap:
 
 - `persia-ffi` crate, header, xtask generator, panic and null tests, `ALLOWED` and `UNSAFE_ALLOWED` updates.
-- Go module (`sdk/persia`), cgo wrapper, prebuilt download, race tests.
+- Go module (`sdk/persia`), cgo wrapper, the optional `persia_purego` tag, prebuilt download, race tests.
 - napi package, platform builds, TypeScript types.
 - Conformance adapter for the three embedded runners, sharing scenarios with 14.1.
 - Release workflow and the compatibility table.
