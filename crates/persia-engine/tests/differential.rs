@@ -16,9 +16,11 @@
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
 //! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
-//!    8.1.2, 8.2.2): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses, each
-//!    step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as a plain
-//!    search, when it has `min_results` hits.
+//!    8.1.2, 8.2.2, 8.2.5): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses,
+//!    then L5 `fallback` (every live document the filter keeps and the root's `must_not` does not match, by recency:
+//!    memtable first, then segments and docids descending), each step's matches the earlier steps lack, scored as the
+//!    reference scores that step; L0 alone, ranked as a plain search, when it has `min_results` hits. The response is
+//!    flagged `fallback` exactly when L5 is the last step that found a hit.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -765,10 +767,19 @@ fn check(
         )?;
 
         // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
-        // would also build a step for one programmatic term: ROADMAP 8.1.19), a search returns each step's matches the
-        // earlier steps lack, step by step, scored and ranked as the reference scores that step's query; L0 alone when it
-        // has `min_results` hits, and every step for a `min_results` above them all.
-        let steps = reference_steps(q, filter.is_some());
+        // would also build a step for one programmatic term: ROADMAP 8.1.19) and then L5 `fallback` (ROADMAP 8.2.5), a
+        // search returns each step's matches the earlier steps lack, step by step, scored and ranked as the reference
+        // scores that step's query (L5: by recency); L0 alone when it has `min_results` hits, and every step for a
+        // `min_results` above them all.
+        let mut steps = reference_steps(q, filter.is_some());
+        // L5 `fallback` (ROADMAP 8.2.5) last: every live document the filter keeps and the root's `must_not` does not
+        // match (a filter wraps the query in a root of its own, without them), ranked by recency alone (this schema has
+        // no static rank).
+        let l5 = steps.len();
+        steps.push((
+            reference_fallback(q, filter.is_some()),
+            "fallback".to_owned(),
+        ));
         // A relaxed search plans with the default: no proximity bonus (SPEC §7.4).
         let l0 = matches(false);
         for min_results in [1, 10_000] {
@@ -799,6 +810,11 @@ fn check(
                 } else {
                     live.iter()
                         .filter(|(id, _)| !taken.contains(id))
+                        .filter(|(id, v)| {
+                            filter
+                                .as_ref()
+                                .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
+                        })
                         .filter_map(|(id, v)| corpus.eval(step, &v.doc).map(|s| (id, s)))
                         .collect()
                 };
@@ -810,11 +826,14 @@ fn check(
                 .map(|(_, l)| l.as_str())
                 .collect();
             prop_assert_eq!(&relaxed.relaxation.applied, &applied, "{:?}", query);
-            let level = if built.len() > 1 {
-                RelaxLevel::DropTerms
-            } else {
-                RelaxLevel::Exact
+            let level = match built.len() {
+                1 => RelaxLevel::Exact,
+                n if n == l5 + 1 => RelaxLevel::Fallback,
+                _ => RelaxLevel::DropTerms,
             };
+            // The response is flagged when L5 is the last step that found a hit (SPEC §7.6).
+            let hit_step = built.iter().rposition(|m| !m.is_empty());
+            prop_assert_eq!(relaxed.relaxation.fallback.is_some(), hit_step == Some(l5));
             prop_assert_eq!(relaxed.relaxation.level, level);
             // Step order first, each step's hits its reference matches, within the tolerance, in the reference order.
             prop_assert!(relaxed.hits.windows(2).all(|w| w[0].step <= w[1].step));
@@ -858,12 +877,17 @@ fn check(
                     }
                 }
                 // Within a step, as in a plain search: score descending, ties by segment order (memtable last), then
-                // docid (SPEC §7.3).
+                // docid (SPEC §7.3). L5 ranks by recency: every score 0, the memtable first, then segments and docids
+                // descending.
                 for pair in hits.windows(2) {
                     let (a, b) = (&pair[0].hit, &pair[1].hit);
+                    let recency = i == l5 && a.score == 0.0 && b.score == 0.0;
                     prop_assert!(
-                        a.score > b.score
-                            || (a.score == b.score && order(a.location) < order(b.location)),
+                        recency && order(a.location) > order(b.location)
+                            || i != l5 && a.score > b.score
+                            || i != l5
+                                && a.score == b.score
+                                && order(a.location) < order(b.location),
                         "step {}: {:?} before {:?}",
                         i,
                         (a.location, a.score),
@@ -1254,4 +1278,19 @@ fn reference_steps(q: &RefQuery, filtered: bool) -> Vec<(RefQuery, String)> {
         steps.push((step, format!("drop_terms:{label}")));
     }
     steps
+}
+
+/// L5 `fallback`'s step as SPEC §7.6 builds it from `q`: `match_all` beside the root `bool`'s `must_not`, which stay
+/// excluded. A filtered query's root is the `bool` that joins the filter (its `must_not` empty), whose filter the
+/// caller applies.
+fn reference_fallback(q: &RefQuery, filtered: bool) -> RefQuery {
+    match q {
+        RefQuery::Bool { must_not, .. } if !filtered && !must_not.is_empty() => RefQuery::Bool {
+            must: vec![RefQuery::All],
+            should: Vec::new(),
+            must_not: must_not.clone(),
+            minimum_should_match: 0,
+        },
+        _ => RefQuery::All,
+    }
 }

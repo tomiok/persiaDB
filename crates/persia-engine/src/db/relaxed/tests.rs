@@ -479,7 +479,7 @@ fn explained_hits_add_up_to_their_scores_at_every_step() {
 }
 
 #[test]
-fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_and_l4() {
+fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_l4_and_l5() {
     let (db, body, _) = database();
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
@@ -487,15 +487,24 @@ fn levels_without_a_step_are_skipped_and_one_term_relaxes_to_l3_and_l4() {
     let views = c.views(&memtable).unwrap();
     // Every level of the collection's defaults. For one programmatic term L1 builds no step (no text) and L2 skips it
     // (ROADMAP 8.2.2.3); L3 expands it (ROADMAP 8.2.3), to no term here, and so does L4 (ROADMAP 8.2.4: `purple` has 6
-    // characters, distance 1); L5 waits on ROADMAP 8.2.5.
+    // characters, distance 1); L5 ranks every document (ROADMAP 8.2.5).
     let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
     assert!(relax.relaxes());
     let out = views
         .search_relaxed(&term(body, "purple"), &request(10), &relax, &exec())
         .unwrap();
-    assert_eq!(out.hits.len(), 0);
-    assert_eq!(out.relaxation.level, RelaxLevel::Fuzzy);
-    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy"]);
+    assert_eq!(out.hits.len(), 5);
+    assert!(
+        out.hits
+            .iter()
+            .all(|h| h.level == RelaxLevel::Fallback && h.step == 3)
+    );
+    assert_eq!(out.relaxation.level, RelaxLevel::Fallback);
+    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy", "fallback"]);
+    assert_eq!(
+        out.relaxation.fallback,
+        Some(crate::relax::FallbackOrder::Recency)
+    );
 }
 
 #[test]
@@ -2408,6 +2417,7 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
         );
     let options = RelaxOptions {
         levels: Some(Levels::Custom(vec![crate::schema::Level::Prefix])),
+        fallback: Some(crate::schema::Fallback::None),
         ..min(1)
     };
     let relax = RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap();

@@ -572,6 +572,8 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [~] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
 - [ ] 8.2.6 Optional filter relaxation (`last_resort`) with explicit opt-in
 - [ ] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)
+- [ ] 8.2.8 (v1.1) A durable per-document index order for L5 `fallback`'s recency (SPEC §7.6, ADR-0044): today recency is index location (memtable, then segments newest first, docids descending), which a merge reorders, as its output is added after the kept segments (§8.5). Record each document's write order (for example the commit `seq` of its write, as a hidden column written at flush and copied through merges) so recency is write time and merge-stable. An on-disk format change: SPEC, version or feature flag, ADR and golden fixture (found in 8.2.5)
+- [ ] 8.2.9 (v1.1) L5 `fallback` by static rank reads every candidate's column key when the FOR bounds (the minimum plus `2^width − 1`, SPEC §5.2.1) do not separate blocks: values spread over their range (the bench's prices) give every block the same bound, so `search_relaxed/l5/static_rank` reads all 50 000 keys (886 µs, ADR-0044). Store an exact maximum per block, or a per-segment order by static rank written at flush (both on-disk format changes), or cache L5's order per snapshot (found in 8.2.5)
 
 ## 8.3 Controls & API
 - [ ] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`

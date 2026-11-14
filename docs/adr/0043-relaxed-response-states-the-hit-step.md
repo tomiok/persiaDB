@@ -3,7 +3,7 @@
 - Status: proposed
 - Date: 2026-11-14
 - Related: SPEC §7.4, §7.6; ROADMAP 8.1.3, 8.1.14, 8.1.22, 8.2.2.5, 8.2.3, 8.2.4.3, 8.2.5; ADR-0037, ADR-0040,
-  ADR-0042
+  ADR-0042, ADR-0044
 
 ## Context
 
@@ -50,6 +50,7 @@ one, so that page cannot tell by itself.
   reports its corrections.
 - The cursor grows by one `usize`. Cursors are in-memory values until the API and server serialize them (ROADMAP
   10.1, 11.x), so no stored format changes.
+- L5's response marker (ADR-0044) uses the same rule: the response is flagged `fallback` when L5 is the hit step.
 
 ## Alternatives considered
 

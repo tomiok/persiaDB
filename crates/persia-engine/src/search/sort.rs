@@ -637,6 +637,44 @@ fn finish<K, W: KeywordReader>(
     Ok(hits)
 }
 
+/// `docid`'s value in `view` for each key of `sort`, as a hit states them (SPEC §7.4): `score` for a score key, else
+/// the column key or keyword bytes (the smallest for an ascending key, the largest for a descending one), or missing.
+/// For hits ranked by another order than `sort` (L5 `fallback`, SPEC §7.6), whose values are still their cursor's.
+///
+/// # Errors
+/// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes.
+pub(crate) fn sort_values<V: SearchView>(
+    sort: &Sort,
+    view: &V,
+    docid: u32,
+    score: f64,
+) -> Result<Vec<SortValue>, RequestError> {
+    let mut values = Vec::with_capacity(sort.keys.len());
+    for &(key, kind) in &sort.keys {
+        values.push(match (key, kind) {
+            (SortKey::Field { field, .. }, Kind::Column) => view
+                .keys(field)?
+                .key(docid)?
+                .map_or(SortValue::Missing, SortValue::Key),
+            (SortKey::Field { field, order, .. }, Kind::Keyword) => {
+                let mut words = view.keywords(field)?;
+                let ords = words.ords(docid)?;
+                let ord = match order {
+                    Order::Asc => ords.first(),
+                    Order::Desc => ords.last(),
+                };
+                match ord.copied() {
+                    Some(ord) => {
+                        SortValue::Keyword(keyword_bytes(&words, ord, key, docid)?.to_vec())
+                    }
+                    None => SortValue::Missing,
+                }
+            }
+            _ => SortValue::Score(score + 0.0),
+        });
+    }
+    Ok(values)
+}
 /// The bytes of keyword ordinal `ord`. `None` is corruption, never an empty value that sorts first.
 fn keyword_bytes<W: KeywordReader>(
     words: &W,

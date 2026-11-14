@@ -24,10 +24,10 @@ use persia_engine::query::{
     BoolQuery, DefaultFields, Filter, FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, QueryCompiler, QueryLimits, TermQuery,
 };
-use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
+use persia_engine::relax::{FallbackOrder, RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels, RelaxationConfig,
-    SchemaBuilder, TextOptions,
+    CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels, RankingConfig,
+    RelaxationConfig, SchemaBuilder, StaticRank, TextOptions,
 };
 use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
@@ -470,6 +470,29 @@ fn filter_sweep(
 /// fields `body` (with `positions` when asked), `price`, `tag` (`facet: true`) and `at`.
 fn collection(segments: u64, positions: bool) -> (Database<SimFile>, [FieldId; 4]) {
     let schema = bench_schema(positions, Vec::new());
+    let id = |name| schema.field(name).unwrap().id();
+    let (body, price, tag, at) = (id("body"), id("price"), id("tag"), id("at"));
+    collection_of(schema, segments, [body, price, tag, at])
+}
+
+/// [`collection`] whose schema ranks by `log1p(price)` (SPEC §6.2.3): the same documents, for L5 by static rank.
+fn ranked_collection(segments: u64) -> (Database<SimFile>, [FieldId; 4]) {
+    let schema = SchemaBuilder::new("bench")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field("price", FieldKind::I64 { stored: true })
+        .field("at", FieldKind::Datetime { stored: false })
+        .field(
+            "tag",
+            FieldKind::Keyword(KeywordOptions {
+                facet: true,
+                ..KeywordOptions::default()
+            }),
+        )
+        .ranking(RankingConfig {
+            static_rank: Some(StaticRank::new("price")),
+        })
+        .build()
+        .unwrap();
     let id = |name| schema.field(name).unwrap().id();
     let (body, price, tag, at) = (id("body"), id("price"), id("tag"), id("at"));
     collection_of(schema, segments, [body, price, tag, at])
@@ -925,6 +948,66 @@ fn relaxed(c: &mut Criterion) {
     group.finish();
 }
 
+/// L5 `fallback` (ROADMAP 8.2.5), in the `search_relaxed` group: `nosuch` is in no document, so L0 has no hit and L5 ranks
+/// every document, its 10 best: by recency alone in the bench collection (the newest views read back from their end),
+/// and by static rank (`log1p` of `price`) then recency in the same collection with one (FOR blocks skipped by the
+/// column's bounds).
+fn relaxed_fallback(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let mut group = c.benchmark_group("search_relaxed");
+    // L5 (ROADMAP 8.2.5): `nosuch` is in no document, so L0 has no hit and L5 ranks every document, its 10 best: by
+    // recency alone in the bench collection (the newest views read back from their end), and by static rank (`log1p`
+    // of `price`) then recency in the same collection with one (FOR blocks skipped by the column's bounds).
+    let fallback = RelaxPlan::new(
+        schema.relaxation(),
+        &RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let nosuch = compiler.compile(
+        "nosuch",
+        &DefaultFields::all(schema),
+        &QueryLimits::default(),
+    );
+    group.bench_function("l5/recency", |b| {
+        b.iter(|| {
+            let out = views
+                .search_relaxed(&nosuch, &request, &fallback, &exec)
+                .unwrap();
+            assert_eq!(out.relaxation.fallback, Some(FallbackOrder::Recency));
+            black_box(out)
+        });
+    });
+    let (ranked, _) = ranked_collection(4);
+    let ranked_snapshot = ranked.snapshot();
+    let ranked_coll = ranked_snapshot.collection("bench").unwrap();
+    let ranked_memtable = ranked_coll.memtable();
+    let ranked_views = ranked_coll.views(&ranked_memtable).unwrap();
+    group.bench_function("l5/static_rank", |b| {
+        b.iter(|| {
+            let out = ranked_views
+                .search_relaxed(&nosuch, &request, &fallback, &exec)
+                .unwrap();
+            assert_eq!(out.relaxation.fallback, Some(FallbackOrder::StaticRank));
+            black_box(out)
+        });
+    });
+    group.finish();
+}
+
 /// Compiling user text (SPEC §7.1.1) without synonyms, and with the groups of [`synonym_compiler`], which the compiler
 /// scans for (SPEC §6.3.2): a match compiles its alternatives. The maps are built once, by the first compilation.
 fn compile(c: &mut Criterion) {
@@ -972,6 +1055,7 @@ criterion_group!(
     suite,
     collection_expansions,
     relaxed,
+    relaxed_fallback,
     compile
 );
 criterion_main!(benches);

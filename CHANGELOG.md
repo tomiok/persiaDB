@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: L5 `fallback` (ROADMAP 8.2.5; SPEC §6.2.3, §7.6, §7.7; ADR-0044). With `fallback: "static_rank"`
+  (the default), a query that still has fewer than `min_results` hits after L4 relaxes to one last step, `fallback`:
+  the live documents the request's filter keeps, its excluded clauses do not match and no earlier step matched,
+  ranked by the collection's static rank (the hit's score), then by recency, most recent first, whatever the
+  request's sort. Recency is where the index holds a document (the memtable, then segments newest first, docids
+  descending), not write time: a merge can reorder ties (a durable index order is ROADMAP 8.2.8). Without
+  `ranking.static_rank`, or with weight 0, recency alone orders. Nothing is scored: FOR blocks whose largest value
+  cannot rank are skipped, and by recency alone each view is read back from its end. The response is flagged:
+  `Relaxation::fallback` (`"fallback": "static_rank" | "recency"`) is set when L5 found the hits; `level` is
+  `fallback`, `applied` lists `fallback`, `effective` is the excluded clauses alone. New: `relax::FallbackOrder` and
+  `search::Explanation::StaticRank`. Benchmarks `search_relaxed/l5/recency` and `search_relaxed/l5/static_rank`.
 - `persia-engine`: term proximity (ROADMAP 7.3.5; SPEC §7.2, §7.3, §7.7; ADR-0036), **off by default** until it is
   evaluated on judged queries (ROADMAP 15.1.6). `SearchPlan::with_proximity` turns it on: a `bool` then adds, after
   its `must` clauses, `Σ λ · min(idf) · 1/d²` over its adjacent `must` words (`term` or `combined`), `d` their least

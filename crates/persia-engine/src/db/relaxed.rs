@@ -24,9 +24,13 @@ use super::search::{Collected, Cursor, Part, Ranked, SearchHit, SearchRequest, S
 use super::views::CollectionViews;
 use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
 pub use crate::relax::Correction;
-use crate::relax::{Expansion, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score};
+use crate::relax::{
+    Expansion, FallbackOrder, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score,
+};
 use crate::schema::{CollectionSchema, FieldId, FieldKind};
-use crate::search::{FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan};
+use crate::search::{
+    Explanation, FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan,
+};
 use crate::stats::SearchStatistics;
 
 /// A hit of a relaxed search: the hit, and the step of the cascade that found it.
@@ -123,6 +127,11 @@ pub struct Relaxation {
     /// The budget (`budget_ms`) passed before the cascade finished (SPEC §7.6): the hits are those of the steps
     /// completed before it, and `level` and `applied` describe those steps.
     pub truncated: bool,
+    /// The explicit flag that L5 `fallback` found the hits (`"fallback"`, SPEC §7.6, ROADMAP 8.2.5): the order it
+    /// ranked them in when L5 is the hit step, `None` otherwise. Those hits are the collection's ranking of the
+    /// documents the filters keep and no stricter step matched, not matches of the query's words. Every page of a
+    /// query states the same, as [`Self::effective`] does.
+    pub fallback: Option<FallbackOrder>,
     /// Whether a step after L0 was built and not skipped: [`Self::relaxed`].
     relaxed: bool,
 }
@@ -153,6 +162,7 @@ impl Relaxation {
                 original: None,
                 effective: None,
                 corrected: Vec::new(),
+                fallback: None,
                 truncated,
                 relaxed,
             };
@@ -163,6 +173,7 @@ impl Relaxation {
             original: Some(compiled.text.clone()),
             effective,
             corrected,
+            fallback: None,
             truncated,
             relaxed,
         }
@@ -224,10 +235,28 @@ pub enum RelaxedSearchError {
     Request(#[from] RequestError),
 }
 
+/// A step to search: its query, the earlier steps it excludes, and whether it is L5's, which ranks its own hits.
+#[derive(Clone, Copy)]
+struct StepSearch<'a, 'q> {
+    step: &'a Query,
+    earlier: &'a [Cow<'q, Query>],
+    fallback: bool,
+}
+
+/// What a step's search found.
+struct Searched {
+    /// The step's plan, with its earlier steps excluded: it explains the step's hits.
+    plan: SearchPlan,
+    collected: Collected,
+    /// L5's explanations of its hits, in rank order (empty unless the page is explained): L5 ranks its hits by static
+    /// rank and recency, which its plan does not score. `None` for any other step.
+    fallback: Option<Vec<Option<Explanation>>>,
+}
+
 /// A step the cascade built, and what its search found when it ran one.
 struct Ran {
     level: RelaxLevel,
-    searched: Option<(SearchPlan, Collected)>,
+    searched: Option<Searched>,
     /// Its text and corrections (SPEC §7.6 `effective`, `corrected`), which the response states when it is the hit step.
     text: StepText,
     /// Not searched: it does not fit the limits (SPEC §7.1.3), and later steps do not exclude it.
@@ -304,23 +333,23 @@ impl<'q, 's> Built<'q, 's> {
         let found = self.ran.iter().rposition(|r| {
             r.searched
                 .as_ref()
-                .is_some_and(|(_, collected)| !collected.ranked.is_empty())
+                .is_some_and(|s| !s.collected.ranked.is_empty())
         });
         found.max(carried)
     }
 
     /// The steps built, what they applied, the hit step's text (L0's when no step found a hit, or when the plan no
     /// longer builds the cursor's hit step) and where the page is in the cascade, from `start`.
-    fn finish(self, start: Start) -> (Vec<Ran>, Vec<String>, StepText, PageSteps) {
+    fn finish(self, start: Start) -> Finished {
         let hit = self.hit_step(start.hit);
         let Self {
             mut ran, applied, ..
         } = self;
         let text = hit.filter(|&h| h < ran.len()).unwrap_or(0);
-        let text = ran
-            .get_mut(text)
-            .map(|r| core::mem::take(&mut r.text))
-            .unwrap_or_default();
+        let (text, hit_level) = ran.get_mut(text).map_or_else(
+            || ((None, Vec::new()), RelaxLevel::Exact),
+            |r| (core::mem::take(&mut r.text), r.level),
+        );
         // The cursor's page built at least its last step; with fewer steps now (another plan), the page ends sooner.
         let last = ran.len().saturating_sub(1).max(start.last.unwrap_or(0));
         let at = PageSteps {
@@ -328,7 +357,13 @@ impl<'q, 's> Built<'q, 's> {
             last,
             hit: hit.unwrap_or(0),
         };
-        (ran, applied, text, at)
+        Finished {
+            ran,
+            applied,
+            text,
+            at,
+            hit_level,
+        }
     }
 
     /// The steps pushed from now on are the next level's.
@@ -356,7 +391,7 @@ impl<'q, 's> Built<'q, 's> {
         step: Cow<'q, Query>,
         label: String,
         text: StepText,
-        searched: Option<(SearchPlan, Collected)>,
+        searched: Option<Searched>,
         stands_for_level: bool,
     ) {
         let first = self.ran.is_empty();
@@ -603,13 +638,22 @@ impl CollectionViews<'_> {
                         explain: request.explain,
                         window: wanted,
                     };
-                    let Some(searched) =
-                        self.budgeted_step(&step, &built.earlier, &stats, &part, exec, budget)?
+                    let Some(searched) = self.budgeted_step(
+                        StepSearch {
+                            step: &step,
+                            earlier: &built.earlier,
+                            fallback: planned.level == RelaxLevel::Fallback,
+                        },
+                        &stats,
+                        &part,
+                        exec,
+                        budget,
+                    )?
                     else {
                         truncated = true;
                         break 'levels;
                     };
-                    found = found.saturating_add(searched.1.ranked.len());
+                    found = found.saturating_add(searched.collected.ranked.len());
                     Some(searched)
                 } else {
                     None
@@ -622,13 +666,36 @@ impl CollectionViews<'_> {
                 }
             }
         }
+        self.respond(built, start, request, exec, (compiled, truncated))
+    }
+
+    /// The response of the cascade `built` from `start`: its page of `request` and what it did, for a query
+    /// `compiled` from text (or not) and `truncated` by the budget (or not).
+    fn respond(
+        &self,
+        built: Built<'_, '_>,
+        start: Start,
+        request: &SearchRequest,
+        exec: &Execution,
+        (compiled, truncated): (Option<&Compiled>, bool),
+    ) -> Result<RelaxedResults, RelaxedSearchError> {
         let level = built.last_level();
-        let (ran, applied, text, at) = built.finish(start);
+        let Finished {
+            ran,
+            applied,
+            text,
+            at,
+            hit_level,
+        } = built.finish(start);
         let (hits, facets) = self.relaxed_page(ran, request, at, exec)?;
+        let mut relaxation = Relaxation::of(level, applied, compiled, text, truncated);
+        // The explicit flag (SPEC §7.6): L5 found the hits the response states.
+        relaxation.fallback = (hit_level == RelaxLevel::Fallback)
+            .then(|| FallbackOrder::of(self.collection().schema().ranking()));
         Ok(RelaxedResults {
             hits,
             facets,
-            relaxation: Relaxation::of(level, applied, compiled, text, truncated),
+            relaxation,
         })
     }
 
@@ -671,31 +738,34 @@ impl CollectionViews<'_> {
     /// request's own deadline or token stays an error.
     fn budgeted_step(
         &self,
-        step: &Query,
-        earlier: &[Cow<'_, Query>],
+        step: StepSearch<'_, '_>,
         stats: &SearchStatistics<'_>,
         part: &Part<'_>,
         exec: &Execution,
         budget: Option<Instant>,
-    ) -> Result<Option<(SearchPlan, Collected)>, RelaxedSearchError> {
+    ) -> Result<Option<Searched>, RelaxedSearchError> {
         let Some(end) = budget else {
-            return self.search_step(step, earlier, stats, part, exec).map(Some);
+            return self.search_step(step, stats, part, exec).map(Some);
         };
-        match self.search_step(step, earlier, stats, part, &exec.within_budget(end)) {
+        match self.search_step(step, stats, part, &exec.within_budget(end)) {
             Ok(searched) => Ok(Some(searched)),
             Err(e) if is_deadline(&e) && exec.interrupt().is_ok() => Ok(None),
             Err(e) => Err(e),
         }
     }
-    /// Plans `step` with the `earlier` steps excluded ([`plan_step`]) and collects `part` of it under `exec`.
+    /// Plans `step` with the `earlier` steps excluded ([`plan_step`]) and collects `part` of it under `exec`: by the
+    /// request's sort, or by L5's own order for the fallback's step (SPEC §7.6, [`Self::collect_fallback`]).
     fn search_step(
         &self,
-        step: &Query,
-        earlier: &[Cow<'_, Query>],
+        StepSearch {
+            step,
+            earlier,
+            fallback,
+        }: StepSearch<'_, '_>,
         stats: &SearchStatistics<'_>,
         part: &Part<'_>,
         exec: &Execution,
-    ) -> Result<(SearchPlan, Collected), RelaxedSearchError> {
+    ) -> Result<Searched, RelaxedSearchError> {
         let terms = exec.terms(self);
         let plan = plan_step(step, earlier, self.collection().schema(), stats, &terms)?;
         // `check_request` was given `false` for every step: a step planned with the bonus would record another
@@ -704,8 +774,20 @@ impl CollectionViews<'_> {
             !plan.proximity(),
             "a relaxation step planned with proximity"
         );
+        if fallback {
+            let found = self.collect_fallback(&plan, part, exec)?;
+            return Ok(Searched {
+                plan,
+                collected: found.collected,
+                fallback: Some(found.explanations),
+            });
+        }
         let collected = self.collect(&plan, part, exec)?;
-        Ok((plan, collected))
+        Ok(Searched {
+            plan,
+            collected,
+            fallback: None,
+        })
     }
     /// The page of the steps `ran`: their hits in step order from `request.offset` (counted from the cursor's step
     /// `at.first`), at most `request.limit`, each explained by its step's plan when asked, and the facets of every step
@@ -736,7 +818,12 @@ impl CollectionViews<'_> {
             },
         ) in ran.into_iter().enumerate()
         {
-            let Some((plan, collected)) = searched else {
+            let Some(Searched {
+                plan,
+                collected,
+                fallback,
+            }) = searched
+            else {
                 continue;
             };
             for (facet, counted) in facets.iter_mut().zip(collected.facets) {
@@ -758,10 +845,17 @@ impl CollectionViews<'_> {
             if page.is_empty() {
                 continue;
             }
-            let explanations = if request.explain {
-                self.explain_page(&plan, &segments, &page, collected.kept, exec)?
-            } else {
-                Vec::new()
+            let explanations = match fallback {
+                // L5 explained its hits as it ranked them, in rank order: the page's are from `skipped` on.
+                Some(explained) => explained
+                    .into_iter()
+                    .skip(skipped)
+                    .take(page.len())
+                    .collect(),
+                None if request.explain => {
+                    self.explain_page(&plan, &segments, &page, collected.kept, exec)?
+                }
+                None => Vec::new(),
             };
             let page = self.page_hits(
                 &segments,
@@ -792,6 +886,17 @@ impl CollectionViews<'_> {
         }
         Ok((hits, facets.into_iter().map(FacetCounter::finish).collect()))
     }
+}
+
+/// What the cascade built, as the page and the response state it ([`Built::finish`]).
+struct Finished {
+    ran: Vec<Ran>,
+    applied: Vec<String>,
+    /// The hit step's text and corrections.
+    text: StepText,
+    at: PageSteps,
+    /// The hit step's level (L0's when no step found a hit).
+    hit_level: RelaxLevel,
 }
 
 /// Where a page is in its cascade: the cursor's step it starts in, the cascade's last step, and its hit step (SPEC §7.6).
@@ -915,6 +1020,8 @@ fn plan_step(
     });
     SearchPlan::with_terms(&excluded, schema, stats, terms)
 }
+
+mod fallback;
 
 #[cfg(test)]
 mod tests;

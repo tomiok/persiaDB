@@ -875,7 +875,7 @@ negative.
 | `enabled` | `true` | `false` runs L0 only |
 | `min_results` | `1` | `1–10 000` |
 | `levels` | `"default"` | `"default"` (every level after L0, as the engine defines them) or an array of `"synonyms"`, `"drop_terms"`, `"prefix"`, `"fuzzy"`: distinct, in cascade order. L0 always runs and is not listed; L5 is `fallback`. `[]` runs L0, then the fallback |
-| `fallback` | `"static_rank"` | `"static_rank"` or `"none"`; without `ranking.static_rank`, `static_rank` returns the most recently indexed documents |
+| `fallback` | `"static_rank"` | `"static_rank"` or `"none"`; without `ranking.static_rank`, `static_rank` returns the most recently indexed documents, recent by where the index holds them, not by write time (§7.6 L5) |
 | `fill` | `false` | §7.6 |
 | `filters` | `"never"` | `"never"` or `"last_resort"` |
 | `budget_ms` | `50` | `1–60 000` |
@@ -1599,12 +1599,14 @@ Rules:
 "relaxation": { "level": "fuzzy", "applied": ["drop_terms:75%","fuzzy"],
                 "original": "zapatilas rojs", "effective": "zapatillas rojas",
                 "corrected": {"zapatilas":"zapatillas","rojs":"rojas"}, "truncated": false }
+// when L5 found the hits:  "level": "fallback", "applied": [..., "fallback"], "fallback": "static_rank"
 ```
   `level` is the level of the last step the cascade built and did not skip (`exact` when L0 had enough or no later
   level built a step that fits the limits; a cursor's page builds the steps before its own without searching them), `applied` what each step after L0 applied in build order (empty when no level built a
   step; a step cut or skipped to fit §7.1.3's limits is listed with `:cut` or `:skipped`), `original` the
   user text, `effective` the text of the *hit step*'s query, `corrected` each term the fuzzy level replaced in it, in
-  query order, and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
+  query order, `fallback` the order L5 ranked its hits in (`"static_rank"` or `"recency"`, below) when the hit step is
+  L5's and absent otherwise (the explicit flag that the response holds documents the query's words do not match), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. The *hit step* (ROADMAP 8.1.22, ADR-0043) is the last step of the cascade that found a
@@ -1616,8 +1618,8 @@ Rules:
   cursor's and the last step that found a hit on that page, as it may not search the step again. `original` is the text read of `q` (§7.1.1's sources), and `effective` the text of
   the hit step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
-  (ROADMAP 8.2.2.2, below), at L3 L0's, and at L4 L0's with each corrected word replaced by its correction (ROADMAP
-  8.2.4.3, below). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
+  (ROADMAP 8.2.2.2, below), at L3 L0's, at L4 L0's with each corrected word replaced by its correction (ROADMAP
+  8.2.4.3, below), and at L5 its excluded clauses alone (empty when it has none: no word was searched, ROADMAP 8.2.5). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
   programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
   fuzzy). `corrected` is empty unless the hit step is L4's.
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
@@ -1633,7 +1635,7 @@ its queries only when the cascade reaches it, so a query that has `min_results` 
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
-words; ROADMAP 8.1.10). So far L0 to L4 build queries; L5 builds none yet (ROADMAP 8.2.5).
+words; ROADMAP 8.1.10). Every level builds queries; L5 builds one whose hits it ranks itself (ROADMAP 8.2.5, below).
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1728,6 +1730,41 @@ the response states L2's `effective` (`red`) and no correction, though L4 was bu
 holds at L3, whose `effective` is L0's (ROADMAP 8.1.22). `effective` sets each correction in as the index holds it, not quoted: it names the terms
 searched and need not compile back to the step's query (a stem, or a term holding `:`).
 
+L5 `fallback` (ROADMAP 8.2.5, ADR-0044). With `fallback: "static_rank"` (the default) the plan ends with L5, which
+builds one step, listed as `fallback`; `"none"` builds no L5. Its query is L0's root `must_not` and `filter` around
+`match_all`: of a query compiled from `q`, its excluded clauses and the request's filter (§7.1: the root `bool`'s);
+of a programmatic query, a root `bool`'s `must_not` and `filter`, and none for any other root. So excluded clauses
+stay excluded and filters are not relaxed (`filters: "last_resort"` is ROADMAP 8.2.6), and, as every step, it
+excludes the steps searched before it (the cascade, below): its hits are the live documents the filters keep, the
+excluded clauses do not match and no earlier step matched. A deleted document is never one (§7.3: no search matches
+it). Held to §7.1.3's limits beside the steps it excludes, it is `fallback:cut` or `fallback:skipped` as any step.
+Unlike the other steps, L5 has no words to score, so it ranks its hits by its own order, whatever the request's
+sort: the static rank (§6.2.3), which is each hit's score, descending, then *recency*, most recent first. Recency is
+where the index holds a document: the memtable first, then the segments from the last the manifest lists to the
+first, each by docid descending (the reverse of §7.3's location order). It is not write time: nothing stores when a
+document was written, and a merged segment is added after the kept segments (§8.5), so once a merge commits its
+documents rank as more recent than those of segments flushed after its inputs. An upsert is a new document in the
+memtable, so the newest version of a document is the most recent. A durable per-document index order is ROADMAP
+8.2.8 (v1.1). Without `ranking.static_rank`, or with its `weight` 0, every score is 0 and recency alone orders the
+hits (`fallback: "recency"` in the response, `"static_rank"` otherwise). The order is a function of the snapshot and
+memtable view: it is the same on every page, and a value's place by static rank is the same whatever the segments
+hold it; only the order of equal static ranks may change once a merge commits. Each hit's sort values are the
+request's keys' values for its document (a `score` key is its static rank), as a hit of any step states them; a
+cursor from an L5 hit pages by L5's order from the cursor's location, whose static rank the page reads again there.
+Each hit's rank score is its step's (below), so L5's hits rank below every earlier step's. An explained L5 hit gives
+its static rank (§7.7). L5 reads no term statistics and scores nothing: with a static rank, each segment visits its FOR blocks
+(§5.2.1) best first by the static rank of their bound, stops at the first that cannot beat the worst hit kept, and
+within a block passes over a candidate whose column key is below the smallest key that could (the memtable, without
+bounds, is walked in docid order); by recency alone, it reads each view's
+candidates from its last docid back, newest view first, and stops once it has the hits it needs. With facets
+(§7.5) every candidate is visited and counted, as for any step. Its `effective` is its excluded clauses (empty when
+it has none) and it has no `corrected`; when it is the hit step (above), the response's `fallback` names its order,
+so a client can tell the hits are the collection's ranking, not matches of the words. As every step it collects only
+the hits still missing, so without `fill` it runs only when the earlier steps found fewer than `min_results`, and
+with `fill` it fills the rest of the page below their hits. The request's deadline,
+cancellation and the budget apply as in any step: L5 is built only when the cascade reaches it, checked before it
+is searched and at its reads (§7.3), and dropped whole when the budget passes during it.
+
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A
 level whose steps are *nested*, each matching every document the level's earlier steps match, with the same
@@ -1802,7 +1839,7 @@ A `bool` lists every `must` clause and the `should` clauses that match, in query
 nothing and are not listed); a `bool` with proximity pairs (§7.2) also lists, between them, its bonus and per pair the
 first word's index, `λ · min(idf)`, the field the closeness came from, `d`, `π` and their product (0 when no field
 holds both within the window); a `boost` reports its factor (for a fuzzy term, the edit-distance weight from §7.1); a
-`constant_score` its score; `match_all` scores 0. Each node gives its score, and the root's is the hit's, bit for
+`constant_score` its score; `match_all` scores 0. An L5 `fallback` hit (§7.6) is explained as `static_rank`: its score, the static rank of §6.2.3 (0 without `ranking.static_rank`), and the field's value it came from (none when the document lacks it). Each node gives its score, and the root's is the hit's, bit for
 bit: it reads the same postings and norms, and sums in the same order. The page's hits are explained one view at a
 time, in one pass: the view's tree is built once (each leaf an unpruned matcher, each `bool`'s filters the documents
 the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher

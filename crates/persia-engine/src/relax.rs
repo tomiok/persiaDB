@@ -6,8 +6,9 @@
 //! `relax: false` ([`RelaxOptions::disabled`]) leaving L0 alone.
 //!
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
-//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2), L3 `prefix` (ROADMAP 8.2.3) and L4
-//! `fuzzy` (ROADMAP 8.2.4) build queries so far: L5 `fallback` (ROADMAP 8.2.5) builds none yet, so the cascade skips it.
+//! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2), L3 `prefix` (ROADMAP 8.2.3), L4
+//! `fuzzy` (ROADMAP 8.2.4) and L5 `fallback` (ROADMAP 8.2.5) build queries; L5's step only selects the documents the
+//! cascade then ranks by static rank and recency ([`FallbackOrder`]).
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
@@ -43,12 +44,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::query::{Compiled, Query, QueryLimits};
-use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, Levels, RelaxationConfig};
+use crate::schema::{
+    Fallback, FieldId, FilterRelaxation, Level, Levels, RankingConfig, RelaxationConfig,
+};
 use crate::search::TermSource;
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
 
 mod drop_terms;
+mod fallback;
 mod fuzzy;
 mod prefix;
 mod synonyms;
@@ -105,6 +109,51 @@ impl fmt::Display for RelaxLevel {
     }
 }
 
+/// How L5 `fallback` ranked its hits (SPEC §7.6, ROADMAP 8.2.5): the response's `"fallback"`, set when the hits were
+/// found by L5, so a client can tell they are the collection's ranking, not matches of the query's words.
+///
+/// ```
+/// use persia_engine::relax::FallbackOrder;
+/// use persia_engine::schema::{RankingConfig, StaticRank};
+///
+/// assert_eq!(FallbackOrder::of(&RankingConfig::default()), FallbackOrder::Recency);
+/// let ranking = RankingConfig { static_rank: Some(StaticRank::new("sales")) };
+/// assert_eq!(FallbackOrder::of(&ranking), FallbackOrder::StaticRank);
+/// assert_eq!(FallbackOrder::StaticRank.name(), "static_rank");
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum FallbackOrder {
+    /// By the collection's static rank (SPEC §6.2.3), the hits' score, then recency.
+    StaticRank,
+    /// By recency alone, most recent first: the collection has no static rank, or one of `weight` 0, so every
+    /// score is 0. Recent by where the index holds a document (SPEC §7.6), not by write time.
+    Recency,
+}
+
+impl FallbackOrder {
+    /// The order L5 ranks by in a collection ranked by `ranking`.
+    pub fn of(ranking: &RankingConfig) -> Self {
+        match &ranking.static_rank {
+            Some(rank) if rank.weight > 0.0 => Self::StaticRank,
+            _ => Self::Recency,
+        }
+    }
+
+    /// Its name in responses: `"static_rank"` or `"recency"`.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::StaticRank => "static_rank",
+            Self::Recency => "recency",
+        }
+    }
+}
+
+impl fmt::Display for FallbackOrder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
+    }
+}
 /// A query's `relax` (SPEC §7.1, §7.6): each setting it gives overrides the collection's ([`RelaxationConfig`]), and
 /// those it leaves `None` keep it. The default overrides nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -290,19 +339,6 @@ impl LevelTransform for Exact {
     }
 }
 
-/// A level whose transform is not built yet (`leaf`, ROADMAP 8.2): no step, so the cascade skips it.
-#[derive(Debug)]
-struct Pending {
-    #[allow(dead_code)] // Read by `Debug`, which names the leaf the level waits on.
-    leaf: &'static str,
-}
-
-impl LevelTransform for Pending {
-    fn steps(&self, _input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
-        Ok(Vec::new())
-    }
-}
-
 /// The transform of `level` as this version of the engine defines it.
 fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
     match level {
@@ -311,7 +347,7 @@ fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
         RelaxLevel::DropTerms => Arc::new(drop_terms::DropTerms),
         RelaxLevel::Prefix => Arc::new(prefix::Prefix),
         RelaxLevel::Fuzzy => Arc::new(fuzzy::Fuzzy),
-        RelaxLevel::Fallback => Arc::new(Pending { leaf: "8.2.5" }),
+        RelaxLevel::Fallback => Arc::new(fallback::Fallback),
     }
 }
 

@@ -62,6 +62,15 @@ pub enum Explanation {
     },
     /// `match_all`, or a `bool` with neither `must` nor `should`: 0.
     All,
+    /// A hit of the relaxation cascade's L5 `fallback` (SPEC §7.6, §7.7), which no query word scores: its score is the
+    /// collection's static rank (SPEC §6.2.3), 0 without one.
+    StaticRank {
+        /// The score.
+        score: f64,
+        /// The static rank field's value as the static rank reads it (a `datetime` in microseconds); `None` when the
+        /// collection has no static rank or the document no value.
+        value: Option<f64>,
+    },
 }
 
 impl Explanation {
@@ -70,9 +79,10 @@ impl Explanation {
         match self {
             Self::Word(w) => w.score,
             Self::Phrase(p) => p.score,
-            Self::Bool { score, .. } | Self::Boost { score, .. } | Self::Constant { score, .. } => {
-                *score
-            }
+            Self::Bool { score, .. }
+            | Self::Boost { score, .. }
+            | Self::Constant { score, .. }
+            | Self::StaticRank { score, .. } => *score,
             Self::All => 0.0,
         }
     }
