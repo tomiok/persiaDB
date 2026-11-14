@@ -13,7 +13,10 @@ use crate::segment::ReadError;
 pub(crate) const APPLIED: &str = "fallback";
 
 /// L5 `fallback`: one step, whose query is L0's exclusions and filters (SPEC §7.6). Its `effective` is the excluded
-/// clauses alone, in text order (empty when there are none: no word is searched); it corrects nothing.
+/// clauses alone, in text order (empty when there are none: no word is searched); it corrects nothing. Only the root
+/// `bool`'s `must_not` and `filter` are kept, where the compiler puts excluded clauses and a request joins its filter
+/// (SPEC §7.1); a programmatic query with a filter deeper in it (under a `boost`, or in a nested `bool`) falls back without
+/// it, as SPEC §7.6 states.
 #[derive(Debug)]
 pub(crate) struct Fallback;
 

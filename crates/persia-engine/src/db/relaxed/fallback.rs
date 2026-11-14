@@ -54,19 +54,16 @@ impl<'s> Ranking<'s> {
     /// The ranking of `schema`'s collection ([`FallbackOrder::of`]). A static rank whose field the schema lacks
     /// (validation forbids it) ranks by recency.
     pub(super) fn of(schema: &'s CollectionSchema) -> Self {
-        let Some(rank) = schema.ranking().static_rank.as_ref() else {
-            return Self::Recency;
-        };
-        if FallbackOrder::of(schema.ranking()) == FallbackOrder::Recency {
-            return Self::Recency;
-        }
-        match schema.field(&rank.field) {
-            Some(f) => Self::StaticRank {
-                rank,
-                field: f.id(),
-                kind: f.field_type(),
-            },
-            None => Self::Recency,
+        let rank = schema.ranking().static_rank.as_ref();
+        match rank.zip(rank.and_then(|r| schema.field(&r.field))) {
+            Some((rank, f)) if FallbackOrder::of(schema.ranking()) == FallbackOrder::StaticRank => {
+                Self::StaticRank {
+                    rank,
+                    field: f.id(),
+                    kind: f.field_type(),
+                }
+            }
+            _ => Self::Recency,
         }
     }
 
@@ -326,19 +323,20 @@ impl CollectionViews<'_> {
             Located::Memtable(docid) => (MEMTABLE, docid),
             Located::Segment { index, docid } => (index, docid),
         };
-        let key = match ranking {
-            Ranking::Recency => None,
-            Ranking::StaticRank { field, .. } if view == MEMTABLE => {
-                self.memtable().keys(field)?.key(docid)?
+        // A location the views do not have is an error in either order, not a cursor that pages nothing.
+        let segment = match view {
+            MEMTABLE => None,
+            index => Some(segments.get(index).ok_or(RequestError::HitSegment {
+                index,
+                segments: segments.len(),
+            })?),
+        };
+        let key = match (ranking, segment) {
+            (Ranking::Recency, _) => None,
+            (Ranking::StaticRank { field, .. }, None) => self.memtable().keys(field)?.key(docid)?,
+            (Ranking::StaticRank { field, .. }, Some(segment)) => {
+                segment.keys(field)?.key(docid)?
             }
-            Ranking::StaticRank { field, .. } => segments
-                .get(view)
-                .ok_or(RequestError::HitSegment {
-                    index: view,
-                    segments: segments.len(),
-                })?
-                .keys(field)?
-                .key(docid)?,
         };
         Ok(Key {
             score: ranking.score(key).0,
@@ -433,11 +431,13 @@ impl Walk<'_, '_> {
             if !best.admits(top) {
                 break;
             }
+            // Blocks are visited by bound, later docids first among equal ones, never ahead of a matcher already
+            // walked: each gets a matcher of its own (ROADMAP 8.2.9 counts that cost).
             let mut matcher = self.plan.matcher(view)?;
+            let mut next = matcher.advance(block.start)?;
             // The block's smallest key whose static rank reaches the worst kept hit's, for that worst hit: a key below
             // it ranks lower, and is passed over without computing its static rank.
             let mut floor: Option<(Key, Option<u64>)> = None;
-            let mut next = matcher.advance(block.start)?;
             while let Some(docid) = next.filter(|&d| d < block.end) {
                 next = matcher.next()?;
                 let raw = keys.key(docid)?;

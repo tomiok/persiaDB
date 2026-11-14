@@ -1385,6 +1385,63 @@ mod budget {
         assert!(out.relaxation.truncated);
         assert_eq!(out.hits.len(), 2);
     }
+
+    /// ROADMAP 8.1.22, SPEC §7.6: a cursor's page the budget truncates before the cursor's hit step states the last step
+    /// that found a hit on it, not L0's text.
+    #[test]
+    fn a_truncated_cursor_page_states_the_last_step_that_found_a_hit() {
+        use persia_analysis::AnalyzerRegistry;
+
+        use crate::query::{DefaultFields, QueryCompiler, QueryLimits};
+
+        let (db, body, _) = database();
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let memtable = c.memtable();
+        let views = c.views(&memtable).unwrap();
+        let purple = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+            .unwrap()
+            .compile(
+                "purple shoes",
+                &DefaultFields::all(c.schema()),
+                &QueryLimits::default(),
+            );
+        let with_text = |q: &str, applied: &str| Step {
+            effective: Some(q.into()),
+            ..step(term(body, q), applied)
+        };
+        // `shoes` (L2) finds `a` and `c`; L4, slow to build, finds `d`: the hit step is L4's.
+        let clock = Arc::new(ManualClock::new(0));
+        let drop = Stub::new(vec![with_text("shoes", "drop_terms:75%")]);
+        let fuzzy = slow(&clock, 30, vec![with_text("green", "fuzzy")]);
+        let plan = |ms| {
+            plan(&budget(ms, 10), &[(RelaxLevel::DropTerms, &drop)])
+                .with_level(RelaxLevel::Fuzzy, Arc::clone(&fuzzy) as _)
+        };
+        let exec = exec().budget_clock(Arc::clone(&clock) as _);
+        let first = views
+            .search_relaxed(&purple, &request(1), &plan(60_000), &exec)
+            .unwrap();
+        assert_eq!(first.relaxation.effective.as_deref(), Some("green"));
+        let cursor = first.hits[0].cursor();
+        assert_eq!(
+            cursor.relaxed.map(|s| (s.step, s.last, s.hit)),
+            Some((1, 2, 2))
+        );
+        // The next page finds `c` at L2; building L4 passes the budget, so L4 is not built.
+        let next = SearchRequest {
+            search_after: Some(cursor),
+            ..request(1)
+        };
+        let out = views
+            .search_relaxed(&purple, &next, &plan(10), &exec)
+            .unwrap();
+        assert!(out.relaxation.truncated);
+        assert_eq!(ids(&out), [("c", 1)]);
+        assert_eq!(out.relaxation.effective.as_deref(), Some("shoes"));
+        // Its cursor still carries L4 as the hit step, so the page after it tries again.
+        assert_eq!(out.hits[0].cursor().relaxed.map(|s| s.hit), Some(2));
+    }
     #[test]
     fn the_requests_own_deadline_and_token_are_errors_not_a_truncation() {
         let (db, body, _) = database();
@@ -1729,6 +1786,7 @@ fn the_text_is_the_hit_steps_on_every_page() {
     assert_eq!(ids(&out), []);
     assert_eq!(out.relaxation.effective.as_deref(), Some("purple shoes"));
 }
+
 /// ROADMAP 8.1.8: each step after L0 is held to the plan's limits as the query it runs, with the earlier steps it
 /// excludes (SPEC §7.1.3). Expansions are cut to fit; a step no cut fits is skipped and listed.
 mod limits {

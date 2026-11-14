@@ -1606,7 +1606,8 @@ Rules:
   step; a step cut or skipped to fit §7.1.3's limits is listed with `:cut` or `:skipped`), `original` the
   user text, `effective` the text of the *hit step*'s query, `corrected` each term the fuzzy level replaced in it, in
   query order, `fallback` the order L5 ranked its hits in (`"static_rank"` or `"recency"`, below) when the hit step is
-  L5's and absent otherwise (the explicit flag that the response holds documents the query's words do not match), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
+  L5's and absent otherwise (the explicit flag that the query's ranking ends with documents its words do not match: as
+  `effective`, it is the cascade's, the same on every page, and each hit's `level` says which hits are L5's), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. The *hit step* (ROADMAP 8.1.22, ADR-0043) is the last step of the cascade that found a

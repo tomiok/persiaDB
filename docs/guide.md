@@ -2,7 +2,7 @@
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
 > until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-14 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **355 of 543 MVP leaves done (65%)**, none in progress. That file is regenerated from
+> in [`PROGRESS.md`](../PROGRESS.md): **357 of 545 MVP leaves done (66%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -44,7 +44,7 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
 - `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
   the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
   BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
-  levels L1–L5 (M8, 24 of 44).
+  levels L1–L5 (M8, 24 of 46).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
@@ -207,7 +207,7 @@ Quality of this cascade is a product feature of the same milestone (ROADMAP M8):
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
 planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
 
-Done so far (M8, 24 of 44): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
+Done so far (M8, 24 of 46): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
 the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, L4 `fuzzy` and L5 `fallback` (ROADMAP
 8.2.1–8.2.5), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
 edit (two from 8 characters), and reports the words no document holds in `corrected` ("did you mean",
@@ -615,8 +615,8 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
-derives the rest, and it is the live status. The table below is the **2026-11-13** snapshot
-(350 / 541 MVP leaves, 65%; post-MVP milestones are not counted). No leaf is marked `[~]`.
+derives the rest, and it is the live status. The table below is the **2026-11-14** snapshot
+(357 / 545 MVP leaves, 66%; post-MVP milestones are not counted). No leaf is marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -632,7 +632,7 @@ while a dependency is unfinished.
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
 | **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
 | **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Done, 51/51 |
-| **M8** Relaxation | The zero-results cascade | M7 | In progress, 22/44 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 24/46 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
 | **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/21 |
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
@@ -712,7 +712,7 @@ performance work early (M15).
 
 ### M8 — Zero-results avoidance
 
-In progress (24 of 44). Depends on M7. The cascade in [Features](#features). Done: orchestration,
+In progress (24 of 46). Depends on M7. The cascade in [Features](#features). Done: orchestration,
 ordering across levels (ADR-0037), the time budget, the response metadata (8.1), synonyms (8.2.1,
 ADR-0039), dropping terms (8.2.2, ADR-0038), prefix (8.2.3, ADR-0040), and fuzzy with "did you mean" corrections
 (8.2.4, ADR-0042), the fallback (8.2.5, ADR-0044), and responses that state the last step that found a hit (8.1.22,

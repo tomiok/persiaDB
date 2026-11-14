@@ -130,7 +130,8 @@ pub struct Relaxation {
     /// The explicit flag that L5 `fallback` found the hits (`"fallback"`, SPEC §7.6, ROADMAP 8.2.5): the order it
     /// ranked them in when L5 is the hit step, `None` otherwise. Those hits are the collection's ranking of the
     /// documents the filters keep and no stricter step matched, not matches of the query's words. Every page of a
-    /// query states the same, as [`Self::effective`] does.
+    /// query states the same, as [`Self::effective`] does, also a page holding none of L5's hits: each hit's
+    /// [`RelaxedHit::level`] says which are.
     pub fallback: Option<FallbackOrder>,
     /// Whether a step after L0 was built and not skipped: [`Self::relaxed`].
     relaxed: bool,
@@ -327,25 +328,28 @@ impl<'q, 's> Built<'q, 's> {
             .map_or((RelaxLevel::Exact, false), |(i, r)| (r.level, i > 0))
     }
 
-    /// The cascade's hit step (SPEC §7.6, ROADMAP 8.1.22): the last step whose search collected a hit, or the later
-    /// `carried` one a cursor recorded (its page may not search that step again); `None` when neither is.
-    fn hit_step(&self, carried: Option<usize>) -> Option<usize> {
+    /// The cascade's hit step (SPEC §7.6, ROADMAP 8.1.22): the later of the last step whose search collected a hit
+    /// (`found`) and the `carried` one a cursor recorded (its page may not search that step again), each `None` when
+    /// there is none.
+    fn hit_steps(&self, carried: Option<usize>) -> (Option<usize>, Option<usize>) {
         let found = self.ran.iter().rposition(|r| {
             r.searched
                 .as_ref()
                 .is_some_and(|s| !s.collected.ranked.is_empty())
         });
-        found.max(carried)
+        (found, carried)
     }
 
-    /// The steps built, what they applied, the hit step's text (L0's when no step found a hit, or when the plan no
-    /// longer builds the cursor's hit step) and where the page is in the cascade, from `start`.
+    /// The steps built, what they applied, the hit step's text and where the page is in the cascade, from `start`.
+    /// The text is the carried hit step's when this page built it, else the last step that found a hit here (a page
+    /// the budget truncated before the carried step, or a plan that no longer builds it), else L0's.
     fn finish(self, start: Start) -> Finished {
-        let hit = self.hit_step(start.hit);
+        let (found, carried) = self.hit_steps(start.hit);
         let Self {
             mut ran, applied, ..
         } = self;
-        let text = hit.filter(|&h| h < ran.len()).unwrap_or(0);
+        let built = carried.filter(|&h| h < ran.len());
+        let text = built.max(found).unwrap_or(0);
         let (text, hit_level) = ran.get_mut(text).map_or_else(
             || ((None, Vec::new()), RelaxLevel::Exact),
             |r| (core::mem::take(&mut r.text), r.level),
@@ -355,7 +359,8 @@ impl<'q, 's> Built<'q, 's> {
         let at = PageSteps {
             first: start.step,
             last,
-            hit: hit.unwrap_or(0),
+            // The next page carries the hit step on, as the first page found it.
+            hit: found.max(carried).unwrap_or(0),
         };
         Finished {
             ran,

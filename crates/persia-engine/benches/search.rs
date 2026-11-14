@@ -950,8 +950,8 @@ fn relaxed(c: &mut Criterion) {
 
 /// L5 `fallback` (ROADMAP 8.2.5), in the `search_relaxed` group: `nosuch` is in no document, so L0 has no hit and L5 ranks
 /// every document, its 10 best: by recency alone in the bench collection (the newest views read back from their end),
-/// and by static rank (`log1p` of `price`) then recency in the same collection with one (FOR blocks skipped by the
-/// column's bounds).
+/// and by static rank (`log1p` of `price`) then recency in the same collection with one (FOR blocks visited best first;
+/// the bench's prices give every block the same bound, ROADMAP 8.2.9).
 fn relaxed_fallback(c: &mut Criterion) {
     let (db, _) = collection(4, false);
     let snapshot = db.snapshot();
@@ -966,9 +966,6 @@ fn relaxed_fallback(c: &mut Criterion) {
     let exec = Execution::default().threads(Threads::Current);
     let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
     let mut group = c.benchmark_group("search_relaxed");
-    // L5 (ROADMAP 8.2.5): `nosuch` is in no document, so L0 has no hit and L5 ranks every document, its 10 best: by
-    // recency alone in the bench collection (the newest views read back from their end), and by static rank (`log1p`
-    // of `price`) then recency in the same collection with one (FOR blocks skipped by the column's bounds).
     let fallback = RelaxPlan::new(
         schema.relaxation(),
         &RelaxOptions {

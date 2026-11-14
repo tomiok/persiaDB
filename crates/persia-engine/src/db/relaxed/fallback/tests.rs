@@ -687,7 +687,7 @@ fn blocks_visited_best_first_rank_as_the_whole_order() {
         let id = format!("d{i}");
         let mut doc = Document::new(id.as_str()).with(body, Value::String("w".into()));
         let v = i64::from((i * 7_919) % 97) - 10;
-        if i % 13 != 0 {
+        if !i.is_multiple_of(13) {
             doc = doc.with(sales, Value::I64(v));
         }
         db.put("c", &doc, Durability::Buffered).unwrap();
@@ -696,7 +696,7 @@ fn blocks_visited_best_first_rank_as_the_whole_order() {
             2_000..4_000 => (1, i - 2_000),
             _ => (MEMTABLE, i - 4_000),
         };
-        let score = if i % 13 == 0 {
+        let score = if i.is_multiple_of(13) {
             0.0
         } else {
             f64::from(i32::try_from(v.max(0)).unwrap())
@@ -754,4 +754,220 @@ fn an_f64_bound_past_the_largest_float_stops_there() {
         ..block
     };
     assert_eq!(ranking.threshold(low, 3.5), None);
+}
+
+/// A database of one `body` text field and `sales` (linear static rank when `ranked`), the documents `(id, body,
+/// sales)` written in order, committed after the ids in `commits`, then `deletes` applied in the memtable. Returns the
+/// live ids in write order of their live version (the oracle's recency, newest last: no merge runs).
+fn written(
+    ranked: bool,
+    docs: &[(String, &str, Option<i64>)],
+    commits: &[usize],
+    deletes: &[&str],
+) -> (Database<SimFile>, Vec<(String, f64)>) {
+    let mut builder = SchemaBuilder::new("c")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field("sales", FieldKind::I64 { stored: false });
+    if ranked {
+        let mut rank = StaticRank::new("sales");
+        rank.function = RankFn::Linear;
+        builder = builder.ranking(RankingConfig {
+            static_rank: Some(rank),
+        });
+    }
+    let schema = builder.build().unwrap();
+    let body = schema.field("body").unwrap().id();
+    let sales = schema.field("sales").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [2; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    let mut live: Vec<(String, f64)> = Vec::new();
+    for (n, (id, text, s)) in docs.iter().enumerate() {
+        let mut doc = Document::new(id.as_str()).with(body, Value::String((*text).into()));
+        if let Some(s) = s {
+            doc = doc.with(sales, Value::I64(*s));
+        }
+        db.put("c", &doc, Durability::Buffered).unwrap();
+        live.retain(|(l, _)| l != id);
+        let score = if ranked {
+            s.map_or(0.0, |s| f64::from(i32::try_from(s.max(0)).unwrap()))
+        } else {
+            0.0
+        };
+        live.push((id.clone(), score));
+        if commits.contains(&n) {
+            db.commit().unwrap();
+        }
+    }
+    for id in deletes {
+        db.delete("c", id, Durability::Buffered).unwrap();
+        live.retain(|(l, _)| l != id);
+    }
+    (db, live)
+}
+
+/// The oracle's L5 order: static rank descending, then the most recently written first.
+fn oracle_order(live: &[(String, f64)], keep: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut order: Vec<(usize, &(String, f64))> = live
+        .iter()
+        .enumerate()
+        .filter(|(_, (id, _))| keep(id))
+        .collect();
+    order.sort_by(|a, b| b.1.1.total_cmp(&a.1.1).then(b.0.cmp(&a.0)));
+    order.into_iter().map(|(_, (id, _))| id.clone()).collect()
+}
+
+/// Pages of `k` by cursor, concatenated, bounded so a repeating page fails instead of looping.
+fn paged(db: &Database<SimFile>, text: &str, k: usize, most: usize) -> Vec<String> {
+    let mut all = Vec::new();
+    let mut page = request(k);
+    loop {
+        let out = search(db, text, &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        page.search_after = Some(last.cursor());
+        all.extend(ids(&out).into_iter().map(str::to_owned));
+        assert!(all.len() <= most, "a page repeats hits");
+    }
+    all
+}
+
+/// Blocks with disjoint key ranges (`sales` grows with docid), so blocks below the worst kept hit are never walked,
+/// and a run of the largest value across a block boundary (docids 2 040–2 059 of 3 500, blocks of 1 024), so the
+/// bound ties the worst kept hit: every window and cursor page ranks as the oracle does.
+#[test]
+fn disjoint_blocks_and_a_tie_across_a_block_boundary_rank_as_the_oracle() {
+    let docs: Vec<(String, &str, Option<i64>)> = (0..3_500i64)
+        .map(|i| {
+            let s = if (2_040..2_060).contains(&i) {
+                5_000
+            } else {
+                i / 10
+            };
+            (format!("d{i}"), "w", Some(s))
+        })
+        .collect();
+    let (db, live) = written(true, &docs, &[3_499], &["d2045", "d2050"]);
+    let whole = oracle_order(&live, |_| true);
+    for k in [1, 5, 18, 19, 40, 1_500] {
+        assert_eq!(
+            ids(&search(&db, "nosuch", &request(k))),
+            whole[..k],
+            "window {k}"
+        );
+    }
+    for k in [7, 64] {
+        assert_eq!(
+            paged(&db, "nosuch", k, whole.len())[..200],
+            whole[..200],
+            "pages of {k}"
+        );
+    }
+}
+
+/// By recency alone over views larger than the first window (64): matches sparse near each view's end (only every
+/// tenth of the last 150 documents is not excluded), deletes, and cursors inside a view and at a view's boundary.
+#[test]
+fn recency_reads_back_in_windows_past_sparse_ends_and_view_boundaries() {
+    let mut docs = Vec::new();
+    for view in 0..3 {
+        for i in 0..420u32 {
+            let sparse = i >= 270 && !i.is_multiple_of(10);
+            docs.push((
+                format!("v{view}d{i}"),
+                if sparse { "drop" } else { "keep" },
+                None,
+            ));
+        }
+    }
+    let deletes = ["v2d410", "v2d400", "v1d0", "v0d419", "v0d410"];
+    let (db, live) = written(false, &docs, &[419, 839], &deletes);
+    let whole = oracle_order(&live, |id| {
+        let i: usize = id.split('d').nth(1).unwrap().parse().unwrap();
+        i < 270 || i.is_multiple_of(10)
+    });
+    for k in [1, 63, 64, 65, 200, whole.len()] {
+        assert_eq!(
+            ids(&search(&db, "-drop nosuch", &request(k))),
+            whole[..k],
+            "window {k}"
+        );
+    }
+    for k in [63, 64, 65, 200] {
+        assert_eq!(
+            paged(&db, "-drop nosuch", k, whole.len()),
+            whole,
+            "pages of {k}"
+        );
+    }
+}
+
+/// After the collection's default levels (L1 to L4, every one built for `nosuch`: L3 and L4 expand it to no term),
+/// L5 excludes their steps and still ranks every document.
+#[test]
+fn after_the_default_levels_l5_ranks_what_they_left() {
+    let db = database(true);
+    let every = RelaxPlan::new(
+        &RelaxationConfig::default(),
+        &RelaxOptions {
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let out = search_with(&db, &compile(&db, "nosuch"), &every, &request(100), &exec()).unwrap();
+    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy", "fallback"]);
+    assert_eq!(ids(&out), RANKED);
+    assert!(out.hits.iter().all(|h| h.step == 3));
+    // A word some documents hold: L4 finds them (`reds` is one edit from `red`), L5 the rest below.
+    let out = search_with(&db, &compile(&db, "reds"), &every, &request(100), &exec()).unwrap();
+    let l5: Vec<&str> = out
+        .hits
+        .iter()
+        .filter(|h| h.level == RelaxLevel::Fallback)
+        .map(|h| h.hit.document.id())
+        .collect();
+    assert_eq!(l5, ["e", "b", "g", "c", "i", "j"]);
+}
+
+/// A static rank on an `f64` field, through a database: values and their order as the column keys them, a negative
+/// value ranking as 0 with the documents that have none.
+#[test]
+fn an_f64_static_rank_ranks_by_value() {
+    let mut rank = StaticRank::new("score");
+    rank.function = RankFn::Linear;
+    let schema = SchemaBuilder::new("c")
+        .field("body", FieldKind::Text(TextOptions::default()))
+        .field("score", FieldKind::F64 { stored: false })
+        .ranking(RankingConfig {
+            static_rank: Some(rank),
+        })
+        .build()
+        .unwrap();
+    let body = schema.field("body").unwrap().id();
+    let score = schema.field("score").unwrap().id();
+    let mut db = Database::create_on(SimFile::new(), [1; 16], DatabaseOptions::default()).unwrap();
+    db.create_collection(schema).unwrap();
+    let docs = [
+        ("a", Some(0.5)),
+        ("b", Some(2.25)),
+        ("c", Some(-1.0)),
+        ("d", None),
+        ("e", Some(2.25)),
+        ("f", Some(1e300)),
+    ];
+    for (n, (id, s)) in docs.into_iter().enumerate() {
+        let mut doc = Document::new(id).with(body, Value::String("w".into()));
+        if let Some(s) = s {
+            doc = doc.with(score, Value::F64(s));
+        }
+        db.put("c", &doc, Durability::Buffered).unwrap();
+        if n == 2 {
+            db.commit().unwrap();
+        }
+    }
+    let out = search(&db, "nosuch", &request(10));
+    assert_eq!(ids(&out), ["f", "e", "b", "a", "d", "c"]);
+    let scores: Vec<f64> = out.hits.iter().map(|h| h.hit.score).collect();
+    assert_eq!(scores, [1e300, 2.25, 2.25, 0.5, 0.0, 0.0]);
 }

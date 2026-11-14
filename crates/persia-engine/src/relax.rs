@@ -154,6 +154,7 @@ impl fmt::Display for FallbackOrder {
         f.write_str(self.name())
     }
 }
+
 /// A query's `relax` (SPEC §7.1, §7.6): each setting it gives overrides the collection's ([`RelaxationConfig`]), and
 /// those it leaves `None` keep it. The default overrides nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -675,6 +675,7 @@ pub(crate) fn sort_values<V: SearchView>(
     }
     Ok(values)
 }
+
 /// The bytes of keyword ordinal `ord`. `None` is corruption, never an empty value that sorts first.
 fn keyword_bytes<W: KeywordReader>(
     words: &W,
