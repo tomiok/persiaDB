@@ -75,8 +75,10 @@ The first release a caller can use, `v0.1`, is ROADMAP M10. The format freezes a
 Five properties the design does not trade away:
 
 1. **Zero friction.** `Db::open("app.persia")` just works. No daemon and no config file for the embedded
-   library. Server configuration, when it exists, is flags, then `PERSIA_*` environment variables, then
-   an optional TOML file, with production-safe defaults (SPEC §14). Planned: M10, M11.
+   library. The open creates the container and any missing parent directories; `OpenOptions` can require the
+   file to exist or open it read-only (SPEC §8.1, §14). Server configuration, when it exists, is flags,
+   then `PERSIA_*` environment variables, then an optional TOML file, with production-safe defaults
+   (SPEC §14). Planned: M10, M11.
 2. **Own engine.** Index format, analysis, BM25F scoring, and query execution live in this repository,
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the

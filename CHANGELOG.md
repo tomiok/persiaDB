@@ -94,6 +94,23 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   field that carries the hit step, so every page of a query states the same text though a page after a cursor may
   not search that step again; a cursor whose `hit` is before its `step` or after its `last` is
   `RequestError::CursorStep`.
+- Docs (planned, ROADMAP 10.1.9 and 10.2.6; `persia` does not export `Db` yet): SPEC §8.1, §13.1, and §14
+  now say `Db::open(path)` creates the container and any missing parent directories.
+  `OpenOptions::create_if_missing(false)` requires the file to exist. Read-only opens an existing file and
+  creates nothing. Read-only wins when creation is also requested, including the default: that combination
+  is not an error, and a missing path fails. An existing container is never replaced; a read-write open's
+  recovery may still truncate an uncommitted tail (SPEC §4.5.1). The same rule is the Go, TypeScript, and
+  C open. `PERSIA_LIB` is a runtime variable of the Go embedded SDK only, not a server knob. Callers of
+  `Db` never call `tick()` or `merge_step()`: the facade runs commits and merges on background threads,
+  and `close` joins them.
+- Docs: SPEC §7.6 now matches the engine's L3 clamp. The prefix's boost is the fields-weight / schema-boost
+  ratio, clamped to `[f64::from_bits(1), 1000]`. A fields weight far above the schema boost gives that
+  prefix a boost of 1000. A ratio of 0 would be an invalid boost.
+- Docs (planned, ROADMAP 16.2.6; no Go module yet): ADR-0018 keeps cgo and the static `libpersia.a` as the
+  default Go build and specifies an optional `persia_purego` tag. On Unix it `dlopen`s the shared library
+  with `CGO_ENABLED=0`. On Windows it uses `LoadLibrary` and `GetProcAddress`, because `purego.Dlopen` is
+  not built for Windows. The C ABI stays purego-friendly (opaque handles, pointer and length, no
+  struct-by-value, no callbacks). wazero stays rejected.
 - `persia-engine`: L2 `drop_terms` ranks a term no document holds (collection `df` 0) least important, below a
   stopword (ROADMAP 8.2.2.5; SPEC §7.6, ADR-0042 item 8): it is dropped first, so a step's `effective` no longer
   names a word none of its hits holds (`purple red shoes` reads `red shoes`, not `purple red`).

@@ -20,7 +20,7 @@ SPEC disagree, the SPEC wins and this page is a bug.
  │ persia-format: encodings, frames, superblock, checksums     │
  └─────────────────────────────────────────────────────────────┘
       ▲ persia-server (gRPC/HTTP) embeds the same engine ◀── network SDKs (SPEC §13.2)
-      ▲ embedded bindings (Go via cgo, TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
+      ▲ embedded bindings (Go via cgo by default, or purego; TypeScript via N-API) call persia through persia-ffi (SPEC §13.1, ADR-0018)
 ```
 
 ## Crate dependency graph

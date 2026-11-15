@@ -15,7 +15,7 @@ return `PERSIA_UNSUPPORTED` is not a milestone.
 |---|---|---|
 | `libpersia_ffi.rlib` | `lib` | `sdk/node` (N-API), Rust tests |
 | `libpersia.a` | `staticlib` | Go cgo |
-| `libpersia.so` / `libpersia.dylib` / `persia.dll` | `cdylib` | Optional. Not the first Go path (static linking keeps one binary). |
+| `libpersia.so` / `libpersia.dylib` / `persia.dll` | `cdylib` | The optional Go `persia_purego` tag (ADR-0018). cgo and `libpersia.a` stay the default, so a default build is still one binary. |
 
 The crate depends only on `persia`. It does not depend on `persia-engine` or `persia-storage` directly:
 the dependency arrow stays `persia-ffi` → `persia`, matching the downward rule. When the crate is added,
@@ -115,8 +115,8 @@ report the wrong call.
 | Code | Name | When | Closest core type today |
 |---|---|---|---|
 | 0 | `PERSIA_OK` | Success | — |
-| 1 | `PERSIA_NOT_FOUND` | Missing document, collection, or blob | `persia_storage::ErrorKind::NotFound` ([error.rs L136–L151](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/error.rs#L136-L151)) |
-| 2 | `PERSIA_ALREADY_EXISTS` | Create of a database or collection that is already there | Container create ([path.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/container/path.rs)); `PutOutcome::AlreadyExists` is a storage primitive, not this code |
+| 1 | `PERSIA_NOT_FOUND` | Missing document, collection, or blob, or a database file this open does not create (SPEC §8.1) | `persia_storage::ErrorKind::NotFound` ([error.rs L136–L151](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/error.rs#L136-L151)) |
+| 2 | `PERSIA_ALREADY_EXISTS` | Create of a collection that is already there. `persia_db_open` of an existing database opens it (SPEC §8.1); it is not this code | Container create still reports a taken name ([path.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/container/path.rs)); `PutOutcome::AlreadyExists` is a storage primitive, not this code |
 | 3 | `PERSIA_CONFLICT` | Second writer, or a lost lease once leases exist (SPEC §8.4, §11.3) | `ErrorKind::Conflict` exists for storage and is not yet returned by a database open |
 | 4 | `PERSIA_INVALID_ARGUMENT` | Null, bad UTF-8, schema rejection, limit exceeded (SPEC §17) | Caller errors on the format reader (`OutOfBounds`, `InvalidInputLen`, [error.rs L23–L25](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/error.rs#L23-L25)) |
 | 5 | `PERSIA_CORRUPT` | Bytes on disk or from a peer failed a checksum or a format rule | `Error::Corrupt` / `CorruptBlock`; storage `ErrorKind::Corrupt` |
@@ -227,10 +227,20 @@ persia_status persia_collection_schema(
 ```
 
 `persia_open_options` begins with `uint32_t size` set to `sizeof(persia_open_options)` by the caller, the
-usual way to append fields without breaking an old caller. Zero-initialized fields mean "default". The
-first version carries `flags` (`PERSIA_OPEN_CREATE`, `PERSIA_OPEN_READ_ONLY`) and nothing else. Knobs from
-SPEC §14 (`memtable_bytes`, `fsync_policy`, `relax.*`, mapped reads) are added when `OpenOptions` in Rust
-has them (ROADMAP 10.1.1), at the end of the struct, with a minor ABI bump.
+usual way to append fields without breaking an old caller. Zero-initialized fields mean "default". A null
+`opts` is that default. The default creates the container and any missing parent directories (SPEC §8.1).
+There is no `PERSIA_OPEN_CREATE` flag to set. The first version carries `flags`
+(`PERSIA_OPEN_MUST_EXIST`, `PERSIA_OPEN_READ_ONLY`) and nothing else. `PERSIA_OPEN_MUST_EXIST` requires the
+file to exist and creates nothing. `PERSIA_OPEN_READ_ONLY` opens an existing container and does not create
+it or a parent; a missing path fails. Read-only wins over the default create: `PERSIA_OPEN_READ_ONLY`
+alone is not an error, nothing is created, and a missing path fails. That is Rust
+`create_if_missing(true)` with `read_only(true)`, Go `WithCreate(true)` with `WithReadOnly()`, and
+TypeScript `{ create: true, readOnly: true }`. `PERSIA_OPEN_MUST_EXIST` beside `PERSIA_OPEN_READ_ONLY`
+is the same open. The struct is caller-allocated and passed by pointer, never by
+value, which is the purego-friendly rule in ADR-0018: opaque handles, pointer and length buffers, no
+struct-by-value, and no callbacks. Knobs from SPEC §14 (`memtable_bytes`, `fsync_policy`, `relax.*`,
+mapped reads) are added when `OpenOptions` in Rust has them (ROADMAP 10.1.1), at the end of the struct,
+with a minor ABI bump.
 
 `schema_json` is the collection definition in SPEC §6.2. The core parses it. Unknown fields follow that
 section: the schema is declared at creation; adding a field later is allowed; changing a field's type is

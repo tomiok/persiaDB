@@ -18,7 +18,8 @@ wraps are specified in [c-abi.md](./c-abi.md). Packaging, versions, and CI are i
 | First import | `persia.Open` |
 
 Application code never imports `C` and never calls `persia_bytes_free`. The package boundary is the
-place cgo is allowed.
+place cgo is allowed. The default build is that cgo link. The `persia_purego` tag (below) has no cgo
+and loads the shared library instead.
 
 A program that also talks to a remote cluster imports this package as `persia` and the future network
 module under another name. ROADMAP 14.3 has not picked that package name. This design asks it to be
@@ -44,7 +45,7 @@ import (
 func main() {
     ctx := context.Background()
 
-    db, err := persia.Open(ctx, "app.persia", persia.WithCreate())
+    db, err := persia.Open(ctx, "app.persia")
     if err != nil {
         log.Fatal(err)
     }
@@ -117,9 +118,14 @@ func (c *Collection) Schema(ctx context.Context) (Schema, error)
 func (c *Collection) Close() error
 ```
 
-`Option` values cover `WithCreate`, `WithReadOnly`, and, once Rust `OpenOptions` has them (ROADMAP
-10.1.1, SPEC §14), the knobs the core actually implements. A knob the core does not have is not added
-here first.
+`Open` creates the container and any missing parent directories (SPEC §8.1). `WithCreate(false)` requires
+the file to exist and creates nothing; omitting it, or `WithCreate(true)`, is that default, so
+`WithCreate()` is not required. `WithReadOnly()` opens an existing container and does not create it or a
+parent. `WithCreate(true)` together with `WithReadOnly()` is not an error: read-only wins, nothing is
+created, and a missing path fails. `WithReadOnly()` alone is that combination, because create defaults to
+true. Further `Option` values appear only once Rust `OpenOptions` has the knob (ROADMAP 10.1.1, SPEC
+§14). A knob the core does not have is not added here first. The same rule is what Rust, TypeScript, and
+the C ABI use (SPEC §13.1).
 
 ### Documents
 
@@ -379,11 +385,35 @@ not `v0.1.0-alpha` (ROADMAP 10.5.2, the core's notice that the format is still u
 go get github.com/tomiok/persiaDB/sdk/persia@v1.0.0
 ```
 
-`go build` needs cgo (`CGO_ENABLED=1`) and a C linker. It does not need Rust, because the module
-downloads a checksummed `libpersia.a` for the current `GOOS`/`GOARCH` into the build cache. The first
-matrix is linux amd64, linux arm64, darwin amd64, darwin arm64, and windows amd64 (mingw, which is the
-toolchain Go's cgo uses on Windows). musl is not in that first matrix. Details, the source-build tag,
+The default `go build` needs cgo (`CGO_ENABLED=1`) and a C linker. It does not need Rust, because the
+module downloads a checksummed `libpersia.a` for the current `GOOS`/`GOARCH` into the build cache. The
+first matrix is linux amd64, linux arm64, darwin amd64, darwin arm64, and windows amd64 (mingw, which is
+the toolchain Go's cgo uses on Windows). musl is not in that first matrix. Details, the source-build tag,
 and `PERSIA_LIB_DIR` are in [distribution.md](./distribution.md).
+
+### Without cgo (`persia_purego`)
+
+cgo and the static library stay the default (ADR-0018). An optional build tag loads the same API through
+[`github.com/ebitengine/purego`](https://github.com/ebitengine/purego) with `CGO_ENABLED=0`. On Unix that
+is `purego.Dlopen`. On Windows amd64 `purego.Dlopen` and `purego.Dlsym` are not compiled, so the tag
+loads `persia.dll` with `syscall.LoadLibrary` and `syscall.GetProcAddress`, then `purego.RegisterLibFunc`.
+
+```bash
+CGO_ENABLED=0 go build -tags persia_purego
+```
+
+`persia.Open` and the rest of this page do not change. `go build -tags persia_purego` does not fetch the
+shared library and does not link it in. A cgo build with `PERSIA_LIB_DIR` unset downloads `libpersia.a`;
+`PERSIA_LIB_DIR` uses a library already on disk and does not fetch it. This tag does not download
+`libpersia.so` on either path. The caller places the file before `Open`: beside the executable
+(`libpersia.so`, `libpersia.dylib`, or `persia.dll`), or `PERSIA_LIB` set to that file's path. `Open` is
+what loads it. The process starts without the library. A missing file is an error from `Open`, not a
+linker error at `go build` and not a failure before `main`. `PERSIA_LIB` is a runtime variable of this
+package only. It is not a SPEC §14 server knob: `persia-server` does not read it, and a future server
+`PERSIA_*` knob must not take the name. The cgo build does not read it. `PERSIA_LIB_DIR` is the other
+variable, a build-time directory for the static library. The platform matrix is the same five targets as
+the static library. wazero is not a build mode: the tag still calls the native library. Application code
+still does not import `C`. Details are in [distribution.md](./distribution.md).
 
 `go test -race` is part of CI for this module. The race detector does not see inside the Rust static
 library. Data races on the Go side of the wrapper are what it catches; races inside the engine stay the

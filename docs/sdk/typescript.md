@@ -30,7 +30,7 @@ The npm scope is a proposal. Confirm it is available before the first publish (o
 ```ts
 import { open } from "@persiadb/node";
 
-const db = await open("app.persia", { create: true });
+const db = await open("app.persia");
 try {
   const products = await db.createCollection({
     name: "products",
@@ -87,7 +87,12 @@ export interface CallOptions {
 }
 
 export interface OpenOptions extends CallOptions {
+  // Default true: create the container and any missing parent directories (SPEC §8.1).
+  // false requires the file to exist and creates nothing. `{ create: true }` is not required.
   create?: boolean;
+  // Open an existing container read-only. Does not create the file or a parent.
+  // `{ create: true, readOnly: true }` is not an error: readOnly wins, nothing is created,
+  // and a missing path fails. `{ readOnly: true }` alone is that combination, because create defaults on.
   readOnly?: boolean;
   // Further fields appear only when Rust OpenOptions has the SPEC §14 knob.
 }

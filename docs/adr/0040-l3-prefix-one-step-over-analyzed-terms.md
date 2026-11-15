@@ -1,6 +1,6 @@
 # ADR-0040: L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-12
 - Related: SPEC §6.3.1, §6.3.4, §7.1, §7.1.1, §7.1.3, §7.6; ROADMAP 7.4.12, 8.1.8, 8.1.14, 8.2.2.4, 8.2.3, 8.2.7;
   ADR-0037, ADR-0038, ADR-0039

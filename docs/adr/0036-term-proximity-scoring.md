@@ -1,6 +1,6 @@
 # ADR-0036: Term proximity scoring
 
-- Status: proposed
+- Status: accepted
 - Date: 2026-11-07
 - Related: SPEC §7.2, §7.3, §7.7; ROADMAP 7.3.5, 7.4.4, 7.4.8, 7.8.4, 5.3.4; ROADMAP 32.5.1 (collection ranking defaults)
 
