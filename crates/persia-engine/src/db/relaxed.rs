@@ -12,7 +12,8 @@
 //! runs one search of that query, as [`CollectionViews::search_with`] does.
 //!
 //! Hits rank by step first, then by the sort (ROADMAP 8.1.3): every hit of a stricter step above every hit of a
-//! looser one, whatever their scores. A hit's cursor records its step and the last step of its page's cascade, so the
+//! looser one, whatever their scores. A hit's cursor records its step, the last step of its page's cascade, and its
+//! hit step, so the
 //! next page builds the same steps, searches the cursor's step after the cursor and the later ones from their top,
 //! and the pages are slices of one ranking.
 
@@ -49,7 +50,7 @@ pub struct RelaxedHit {
 
 impl RelaxedHit {
     /// The cursor of the page after this hit (SPEC §7.4, §7.6), for [`CollectionViews::search_relaxed`]: the same as
-    /// [`SearchHit::cursor`] of [`Self::hit`], which records the hit's step and the last step of its cascade too.
+    /// [`SearchHit::cursor`] of [`Self::hit`], which records the hit's step, its cascade's last step, and its hit step.
     pub fn cursor(&self) -> Cursor {
         self.hit.cursor()
     }

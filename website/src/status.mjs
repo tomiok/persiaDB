@@ -364,6 +364,7 @@ function areNotBuilt(items) {
  * Plan and orchestrator versus the levels that loosen a query.
  * L0 always runs. A later level is claimed only when its representative leaf is checked and its transform is wired:
  * L1 synonyms, L2 drop_terms (its three leaves), L3 prefix. Fuzzy and the fallback stay unclaimed until theirs are.
+ * Once every RELAX_LEVELS leaf is checked, the sentences say every cascade level builds a query.
  * @param {StatusInput} ctx
  * @param {Milestone} m8
  */
@@ -385,6 +386,8 @@ function relaxationFacts(ctx, m8) {
 	const levels = groupState(ctx.leaves, RELAX_LEVELS);
 	const exactOnly = framework === 'done' && levels === 'todo' && drop === 'todo' && ctx.hasRelaxSearch;
 	const levelsDone = m8.state === 'done' && levels === 'done' && ctx.hasRelaxSearch;
+	// Representative leaves for L1–L5 are checked, and M8 itself is not finished.
+	const everyLevel = framework === 'done' && levels === 'done' && ctx.hasRelaxSearch && !levelsDone;
 	const partial = framework === 'done' && ctx.hasRelaxSearch && levels !== 'done' && built.length > 1;
 	const unstarted = m8.done === 0 && m8.state !== 'in progress' && framework === 'todo' && drop === 'todo' && levels === 'todo';
 	/** @type {string[]} */
@@ -400,7 +403,7 @@ function relaxationFacts(ctx, m8) {
 		cell = `Done (${m8.id}, ${count}).`;
 		now = `Relaxation is done (${m8.id}, ${count}).`;
 		gap = '';
-	} else if (framework === 'done' && levels === 'done' && ctx.hasRelaxSearch) {
+	} else if (everyLevel) {
 		cell = `In progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
 		now = `Relaxation is in progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
 		gap = `Relaxation is in progress (${m8.id}, ${count}): every cascade level builds a query.`;
@@ -446,13 +449,15 @@ function relaxationFacts(ctx, m8) {
 	const later = englishList(built.slice(1));
 	const lead = levelsDone
 		? ''
-		: partial && missing.length > 0
-			? `Relaxation is in progress (${m8.id}, ${count}): ${later} can loosen a query${typoOpen ? ', and a typo is not corrected' : ''}.`
-			: exactOnly
-				? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
-				: unstarted
-					? `Relaxation has not been started (${m8.id}).`
-					: `Relaxation is ${isState(m8)}. Not every cascade level builds a query.`;
+		: everyLevel
+			? gap
+			: partial && missing.length > 0
+				? `Relaxation is in progress (${m8.id}, ${count}): ${later} can loosen a query${typoOpen ? ', and a typo is not corrected' : ''}.`
+				: exactOnly
+					? `Relaxation is in progress (${m8.id}, ${count}): only the exact level builds a query, so a search that matches nothing returns no hits.`
+					: unstarted
+						? `Relaxation has not been started (${m8.id}).`
+						: `Relaxation is ${isState(m8)}. Not every cascade level builds a query.`;
 	return {
 		cell: seal(cell),
 		now: seal(now),

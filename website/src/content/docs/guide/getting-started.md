@@ -119,11 +119,11 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 | L2 | `drop_terms` | Require fewer terms, dropping low-IDF terms first |
 | L3 | `prefix` | Prefix-expand the last term, and other analyzed terms of length at least 3 |
 | L4 | `fuzzy` | Edit distance 1 or 2, and report the corrected terms |
-| L5 | `fallback` | `static_rank`, or `none` |
+| L5 | `fallback` | Static rank, then index-location recency, flagged with `fallback`. `none` builds no step |
 
 Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
 
-The response is specified to carry what happened. This object is the shape in SPEC §7.6, including a fuzzy correction the engine does not produce. `CollectionViews::search_relaxed` returns a `Relaxation` value. `corrected` stays empty (ROADMAP 8.2.4.3). L0 exact, L1 synonyms, L2 `drop_terms`, and L3 prefix build queries. L4 fuzzy and L5 fallback do not. [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
+The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The engine produces that correction when L4 is the step that found the hits (ROADMAP 8.2.4.3, 8.1.22). L0 through L5 build queries. L5 ranks by static rank, then index-location recency, ignores the request's `sort`, and sets `fallback`. Filter relaxation (`last_resort`) does not run (ROADMAP 8.2.6). [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
 
 ```json
 {

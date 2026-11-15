@@ -129,7 +129,7 @@ pub struct SearchHit {
 
 impl SearchHit {
     /// The cursor of the page after this hit, including the view that produced it, and for a hit of
-    /// `search_relaxed` its step and its cascade's last step (SPEC §7.6), as
+    /// `search_relaxed` its step, its cascade's last step, and its hit step (SPEC §7.6), as
     /// [`RelaxedHit::cursor`](crate::db::RelaxedHit::cursor) gives.
     pub fn cursor(&self) -> Cursor {
         Cursor {

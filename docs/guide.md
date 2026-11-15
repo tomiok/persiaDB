@@ -216,9 +216,11 @@ edit (two from 8 characters), and reports the words no document holds in `correc
 `Zapatilas` → `zapatillas`), with `effective` reading the corrections. The response states the text of the last
 step that found a hit, so a correction no hit was found by is not reported (8.1.22, ADR-0043). L5 returns the
 documents the filters keep, the excluded words do not match and no earlier level found, best first by the
-collection's static rank, then by recency. Recency is where the index holds a document (the memtable, then the
-newest segments), not write time: a merge moves the documents it rewrites above segments flushed after its inputs,
-so without a static rank a merge can reorder the whole fallback, and with one it reorders only ties. L5 sets
+collection's static rank, then by recency. That ranking ignores the request's `sort`. Each hit still carries
+the request's sort values. Recency is where the index holds a document (the memtable, then the newest
+segments, docids descending within a view), not write time: a merge moves the documents it rewrites above
+segments flushed after its inputs, so without a static rank a merge can reorder the whole fallback, and with
+one it reorders only ties. L5 sets
 `"fallback": "static_rank"` or `"recency"` in the response (8.2.5, ADR-0044). Not started: `last_resort` filters
 (8.2.6), the request options and metrics (8.3), and the quality suite (8.4).
 

@@ -25,12 +25,12 @@ let products = db.create_collection(schema)?;
 products.put(doc)?;
 products.commit()?;
 
-// ILLUSTRATIVE. SPEC §7.6's fuzzy step would rewrite a typo.
-// That step does not build a query. There is no persia::Db::search.
+// ILLUSTRATIVE. There is no persia::Db::search.
+// The engine cascade rewrites a typo at L4 when that step found the hits.
 let results = products.search("runing")?;
 ```
 
-That `search` call is illustrative. Fuzzy matching is L4 of the relaxation cascade, and it does not build a query. L1 synonyms and L3 prefix do, inside `persia-engine`. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Synonym and prefix search](/guide/synonym-and-prefix-search/), [Typo-tolerant search](/guide/typo-tolerant-search/), and [Faceted search](/guide/faceted-search/).
+That `search` call is illustrative. L4 fuzzy and L5 fallback build queries inside `persia-engine`, as L1 synonyms and L3 prefix do. L5 ranks by static rank then index-location recency, ignores the request's `sort`, and flags that order with `fallback`. Filter relaxation is still ROADMAP 8.2.6. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Synonym and prefix search](/guide/synonym-and-prefix-search/), [Typo-tolerant search](/guide/typo-tolerant-search/), and [Faceted search](/guide/faceted-search/).
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 
