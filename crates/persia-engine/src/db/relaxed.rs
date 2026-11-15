@@ -113,12 +113,13 @@ pub struct Relaxation {
     pub original: Option<String>,
     /// The text of the *hit step*'s query (`"effective"`), as it reads after relaxing: `"zapatillas rojas"`. The hit step
     /// is the last step that found a hit, L0 when none did (SPEC §7.6, ROADMAP 8.1.22): a last step whose matches an
-    /// earlier step all took does not name what no hit was found by. Every page of a query states the same, as a cursor
-    /// records it ([`StepCursor::hit`](super::StepCursor::hit)). Rendered from its clauses' source text
+    /// earlier step all took does not name what no hit was found by. Without `fill`, every page of a query states
+    /// the same, as a cursor records it ([`StepCursor::hit`](super::StepCursor::hit)); with `fill`, a deeper page may
+    /// build a later step that finds a hit, and state its text. Rendered from its clauses' source text
     /// ([`crate::query::CompiledClause::span`]), so at L0 it is [`Compiled::effective`]: the clauses that compiled,
-    /// without stopwords or text past a limit. `None` when [`Self::original`] is, and when the hit step's level renders
-    /// no text for its query. At L2 `drop_terms` it is the clauses the step keeps: its count of
-    /// the most important terms and every excluded clause, in text order (`"purple -blue"`).
+    /// without stopwords or text past a limit. `None` when [`Self::original`] is, and when the hit step's level
+    /// renders no text for its query. At L2 `drop_terms` it is the clauses the step keeps: its count of the most
+    /// important terms and every excluded clause, in text order (`"purple -blue"`).
     pub effective: Option<String>,
     /// The words the fuzzy level replaced, in query order (`"corrected"`): when the hit step is L4's, each required
     /// word no document holds and the term it searched instead ("did you mean", ROADMAP 8.2.4.3), which
@@ -341,8 +342,9 @@ impl<'q, 's> Built<'q, 's> {
     }
 
     /// The steps built, what they applied, the hit step's text and where the page is in the cascade, from `start`.
-    /// The text is the carried hit step's when this page built it, else the last step that found a hit here (a page
-    /// the budget truncated before the carried step, or a plan that no longer builds it), else L0's.
+    /// The text is the later of the carried hit step, when this page built it (not when the budget truncated the page
+    /// before it, or another plan no longer builds it), and the last step that found a hit here (later with `fill`),
+    /// else L0's.
     fn finish(self, start: Start) -> Finished {
         let (found, carried) = self.hit_steps(start.hit);
         let Self {

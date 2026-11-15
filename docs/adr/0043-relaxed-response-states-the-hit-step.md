@@ -28,9 +28,10 @@ one, so that page cannot tell by itself.
    ["drop_terms:75%", "prefix", "fuzzy"]`, `effective: "red"` and no correction.
 2. **"Found a hit" means its search collected one.** A page from the top searches every step it builds for at least
    one hit: a step is built only while hits are missing (`found < min_results ≤ need`, or with `fill`
-   `found < need`), so it collects `need − found > 0`. Whether a step found one therefore does not depend on the page.
-   Steps a cursor's page searches only to count facets collect none and do not count. They are before the cursor's
-   step, so they are not after the hit step anyway.
+   `found < need`), so it is searched for up to `need − found > 0` hits and collects one whenever any document
+   matches it (L3 above collects none). Whether a step found a hit therefore does not depend on the page. Steps a
+   cursor's page searches only to count facets collect none and do not count. They are before the cursor's step, so
+   they are not after the hit step anyway.
 3. **The cursor carries the hit step** (`StepCursor::hit`, beside `step` and `last`). A cursor's page states the later
    of the cursor's hit step and the last step that found a hit on that page. Without `fill` those are the same as the
    first page's. With `fill`, a deeper page may build more steps and state a later one, as it may already state more

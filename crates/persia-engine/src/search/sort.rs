@@ -405,19 +405,7 @@ pub(crate) fn top_sorted<V: SearchView>(
     let mut threshold: Option<f64> = None;
     look(watch, matcher, prune)?;
     let mut ticks = Ticks::default();
-    let mut readers = sort
-        .keys
-        .iter()
-        .map(|&(key, kind)| {
-            Ok(match (key, kind) {
-                (SortKey::Field { field, .. }, Kind::Column) => Reader::Keys(view.keys(field)?),
-                (SortKey::Field { field, .. }, Kind::Keyword) => {
-                    Reader::Keywords(view.keywords(field)?)
-                }
-                _ => Reader::Score,
-            })
-        })
-        .collect::<Result<Vec<_>, ReadError>>()?;
+    let mut readers = readers(sort, view)?;
     let mut heap = Heap::new(k);
     let mut scratch: Vec<Local> = Vec::with_capacity(sort.keys.len());
     // A column sort reads the score only for a match that enters the heap; a key on the score needs it first.
@@ -544,6 +532,60 @@ struct Considered<'s> {
     after: Option<(&'s [SortValue], Ties)>,
 }
 
+/// A sort key's reader of a view's columns and keywords.
+type ViewReader<'v, V> = Reader<<V as SearchView>::Keys<'v>, <V as SearchView>::Keywords<'v>>;
+
+/// One reader per key of `sort`, of `view`'s columns and keywords.
+fn readers<'v, V: SearchView>(
+    sort: &Sort,
+    view: &'v V,
+) -> Result<Vec<ViewReader<'v, V>>, ReadError> {
+    sort.keys
+        .iter()
+        .map(|&(key, kind)| {
+            Ok(match (key, kind) {
+                (SortKey::Field { field, .. }, Kind::Column) => Reader::Keys(view.keys(field)?),
+                (SortKey::Field { field, .. }, Kind::Keyword) => {
+                    Reader::Keywords(view.keywords(field)?)
+                }
+                _ => Reader::Score,
+            })
+        })
+        .collect()
+}
+
+/// `docid`'s value for `key` from its `reader`: `score` for a score key, the column key, or the keyword ordinal (the
+/// smallest for an ascending key, the largest for a descending one), or missing.
+///
+/// # Errors
+/// A corruption of the view, or a keyword ordinal with no bytes: it fails before a heap keeps it, and materializing
+/// the hit checks again.
+fn local<K: KeyReader, W: KeywordReader>(
+    reader: &mut Reader<K, W>,
+    key: SortKey,
+    docid: u32,
+    score: f64,
+) -> Result<Local, RequestError> {
+    Ok(match reader {
+        Reader::Score => Local::Score(score),
+        Reader::Keys(keys) => keys.key(docid)?.map_or(Local::Missing, Local::Num),
+        Reader::Keywords(words) => {
+            let ords = words.ords(docid)?;
+            let ord = match key.order() {
+                Order::Asc => ords.first(),
+                Order::Desc => ords.last(),
+            };
+            match ord.copied() {
+                Some(ord) => {
+                    keyword_bytes(words, ord, key, docid)?;
+                    Local::Num(ord)
+                }
+                None => Local::Missing,
+            }
+        }
+    })
+}
+
 /// Keeps the match `matcher` is on in `heap` if it ranks before the worst kept one (and after the cursor).
 fn consider<K: KeyReader, W: KeywordReader>(
     c: Considered<'_>,
@@ -573,25 +615,7 @@ fn consider<K: KeyReader, W: KeywordReader>(
     }
     scratch.clear();
     for (&(key, _), reader) in sort.keys.iter().zip(readers.iter_mut()) {
-        scratch.push(match reader {
-            Reader::Score => Local::Score(score.unwrap_or(0.0)),
-            Reader::Keys(keys) => keys.key(docid)?.map_or(Local::Missing, Local::Num),
-            Reader::Keywords(words) => {
-                let ords = words.ords(docid)?;
-                let ord = match key.order() {
-                    Order::Asc => ords.first(),
-                    Order::Desc => ords.last(),
-                };
-                match ord.copied() {
-                    // Fail before the heap keeps the ord. Materializing the hit checks again.
-                    Some(ord) => {
-                        keyword_bytes(words, ord, key, docid)?;
-                        Local::Num(ord)
-                    }
-                    None => Local::Missing,
-                }
-            }
-        });
+        scratch.push(local(reader, key, docid, score.unwrap_or(0.0))?);
     }
     if let Some((cursor, ties)) = after {
         match compare_to_cursor(sort, scratch, cursor, readers, docid)? {
@@ -637,9 +661,9 @@ fn finish<K, W: KeywordReader>(
     Ok(hits)
 }
 
-/// `docid`'s value in `view` for each key of `sort`, as a hit states them (SPEC §7.4): `score` for a score key, else
-/// the column key or keyword bytes (the smallest for an ascending key, the largest for a descending one), or missing.
-/// For hits ranked by another order than `sort` (L5 `fallback`, SPEC §7.6), whose values are still their cursor's.
+/// `docid`'s value in `view` for each key of `sort`, as a hit states them (SPEC §7.4), read as [`top_sorted`] reads
+/// them. For hits ranked by another order than `sort` (L5 `fallback`, SPEC §7.6), whose values are still their
+/// cursor's.
 ///
 /// # Errors
 /// A corruption of the view; a field `view` does not have with the key's type; a keyword ordinal with no bytes.
@@ -649,29 +673,11 @@ pub(crate) fn sort_values<V: SearchView>(
     docid: u32,
     score: f64,
 ) -> Result<Vec<SortValue>, RequestError> {
+    let mut readers = readers(sort, view)?;
     let mut values = Vec::with_capacity(sort.keys.len());
-    for &(key, kind) in &sort.keys {
-        values.push(match (key, kind) {
-            (SortKey::Field { field, .. }, Kind::Column) => view
-                .keys(field)?
-                .key(docid)?
-                .map_or(SortValue::Missing, SortValue::Key),
-            (SortKey::Field { field, order, .. }, Kind::Keyword) => {
-                let mut words = view.keywords(field)?;
-                let ords = words.ords(docid)?;
-                let ord = match order {
-                    Order::Asc => ords.first(),
-                    Order::Desc => ords.last(),
-                };
-                match ord.copied() {
-                    Some(ord) => {
-                        SortValue::Keyword(keyword_bytes(&words, ord, key, docid)?.to_vec())
-                    }
-                    None => SortValue::Missing,
-                }
-            }
-            _ => SortValue::Score(score + 0.0),
-        });
+    for (&(key, _), reader) in sort.keys.iter().zip(readers.iter_mut()) {
+        let local = local(reader, key, docid, score + 0.0)?;
+        values.push(to_sort_value(local, reader, key, docid)?);
     }
     Ok(values)
 }

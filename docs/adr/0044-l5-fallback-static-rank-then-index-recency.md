@@ -50,11 +50,12 @@ L5 but its transform built no step, so a query no level could relax returned not
    static rank never decreases with the key, so both bounds are exact. An `f64` bound is capped at `f64::MAX`'s key
    (stored floats are finite), as the loose bound may reach the keys of `+∞` and NaN. The memtable has no bounds and
    is walked in docid order. The FOR bound is loose: values spread over their range give every block the same one,
-   and then every key is read (ROADMAP 8.2.9). By
-   recency alone, views are read newest first, each from its last docid back in windows that double (a fresh
-   matcher advanced to the window's start), and the walk stops once it holds the hits the page needs. A page of 10
-   reads about 64 candidates. With facets, every candidate is visited and counted, as for any step (§7.5). Views are
-   walked one after another, not on the pool: the recency walk's early stop needs the order.
+   and then every key is read (ROADMAP 8.2.9). By recency alone, views are read newest first, each from its last
+   docid back in windows that double (a fresh matcher advanced to the window's start), and the walk stops once it
+   holds the hits the page needs. The first window is 64 candidates, so a page of 10 whose candidates all match reads
+   one; filters or exclusions that reject candidates make it read larger ones. With facets, every candidate is
+   visited and counted, as for any step (§7.5). Views are walked one after another, not on the pool: the recency
+   walk's early stop needs the order.
 6. **The response.** `level` is `fallback` when L5 was built and not skipped, `applied` lists `fallback` (`:cut` or
    `:skipped` when §7.1.3's limits, counting the steps it excludes, cut or skip it), `effective` is the excluded
    clauses alone (empty when there are none: no word was searched), `corrected` is empty. The explicit marker is

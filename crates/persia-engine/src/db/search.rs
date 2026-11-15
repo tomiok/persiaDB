@@ -82,7 +82,7 @@ pub struct Cursor {
     pub location: Located,
     /// The snapshot, collection and memtable view that produced the hit.
     pub origin: CursorOrigin,
-    /// The relaxation step of the hit and the last step of its page's cascade (SPEC §7.6), from
+    /// The relaxation step of the hit, the last step of its page's cascade and its hit step (SPEC §7.6), from
     /// [`super::RelaxedHit::cursor`]; `None` for a hit of a search that did not relax, which is step 0 of a cascade
     /// that stopped at L0.
     pub relaxed: Option<StepCursor>,
@@ -119,7 +119,8 @@ pub struct SearchHit {
     pub explanation: Option<Explanation>,
     /// The snapshot, collection and memtable view. [`Self::cursor`] copies it.
     pub origin: CursorOrigin,
-    /// Its relaxation step and its cascade's last step (SPEC §7.6), unless step 0 of a cascade that stopped at L0.
+    /// Its relaxation step, its cascade's last step and hit step (SPEC §7.6), unless step 0 of a cascade that stopped
+    /// at L0.
     /// [`Self::cursor`] copies it, so the cursor of any hit pages from where the hit is.
     pub(super) relaxed: Option<StepCursor>,
     /// Whether its plan scored the proximity bonus. [`Self::cursor`] copies it.

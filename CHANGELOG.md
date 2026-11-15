@@ -14,7 +14,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the live documents the request's filter keeps, its excluded clauses do not match and no earlier step matched,
   ranked by the collection's static rank (the hit's score), then by recency, most recent first, whatever the
   request's sort. Recency is where the index holds a document (the memtable, then segments newest first, docids
-  descending), not write time: a merge can reorder ties (a durable index order is ROADMAP 8.2.8). Without
+  descending), not write time: a merge moves the documents it rewrites above segments flushed after its inputs, so it
+  can reorder the whole fallback without a static rank and ties with one (a durable index order is ROADMAP 8.2.8). Without
   `ranking.static_rank`, or with weight 0, recency alone orders. Nothing is scored: FOR blocks whose largest value
   cannot rank are skipped, and by recency alone each view is read back from its end. The response is flagged:
   `Relaxation::fallback` (`"fallback": "static_rank" | "recency"`) is set when L5 found the hits; `level` is
