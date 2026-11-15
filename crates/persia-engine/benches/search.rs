@@ -26,8 +26,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{FallbackOrder, RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, Fallback, FieldId, FieldKind, KeywordOptions, Level, Levels, RankingConfig,
-    RelaxationConfig, SchemaBuilder, StaticRank, TextOptions,
+    CollectionSchema, Fallback, FieldId, FieldKind, FilterRelaxation, KeywordOptions, Level,
+    Levels, RankingConfig, RelaxationConfig, SchemaBuilder, StaticRank, TextOptions,
 };
 use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
 use persia_engine::segment::{Segment, SegmentBuilder, SegmentMeta, SegmentWriter};
@@ -1052,6 +1052,62 @@ fn relaxed_fallback(c: &mut Criterion) {
     group.finish();
 }
 
+/// L6 `filters` (ROADMAP 8.2.6), in the `search_relaxed` group: `w3 w40` under `tag = nosuch`, a filter no document
+/// passes, so every level of the collection's defaults (L2's rungs, L3, L4 and L5) finds nothing under it.
+/// `filters/never` is that cascade, which returns nothing; `filters/last_resort` adds the filter step, `w3 w40`
+/// without the filter, which excludes L5's step alone (L5 matches every document an earlier step does) and finds the
+/// hits.
+fn relaxed_filters(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let tag = schema.field("tag").unwrap().id();
+    let query = compiler
+        .compile(
+            "w3 w40",
+            &DefaultFields::all(schema),
+            &QueryLimits::default(),
+        )
+        .with_filter([Filter::Term {
+            field: tag,
+            value: FilterValue::Keyword("nosuch".into()),
+        }]);
+    let mut group = c.benchmark_group("search_relaxed");
+    for (name, filters, hits) in [
+        ("filters/never", FilterRelaxation::Never, false),
+        ("filters/last_resort", FilterRelaxation::LastResort, true),
+    ] {
+        let relax = RelaxPlan::new(
+            schema.relaxation(),
+            &RelaxOptions {
+                filters: Some(filters),
+                ..RelaxOptions::default()
+            },
+        )
+        .unwrap();
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views
+                    .search_relaxed(&query, &request, &relax, &exec)
+                    .unwrap();
+                assert_eq!(out.relaxation.filters_dropped, hits);
+                assert_eq!(out.hits.is_empty(), !hits);
+                black_box(out)
+            });
+        });
+    }
+    group.finish();
+}
+
 /// Compiling user text (SPEC §7.1.1) without synonyms, and with the groups of [`synonym_compiler`], which the compiler
 /// scans for (SPEC §6.3.2): a match compiles its alternatives. The maps are built once, by the first compilation.
 fn compile(c: &mut Criterion) {
@@ -1101,6 +1157,7 @@ criterion_group!(
     relaxed,
     relaxed_fallback,
     relaxed_tiers,
+    relaxed_filters,
     compile
 );
 criterion_main!(benches);

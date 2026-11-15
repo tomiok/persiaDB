@@ -137,6 +137,12 @@ pub struct Relaxation {
     /// query states the same, as [`Self::effective`] does, also a page holding none of L5's hits: each hit's
     /// [`RelaxedHit::level`] says which are.
     pub fallback: Option<FallbackOrder>,
+    /// The explicit flag that the filter step found hits (`"filters_dropped"`, SPEC §7.6, ROADMAP 8.2.6, ADR-0047): its
+    /// step is the hit step. Only `filters: "last_resort"` plans it, as the cascade's last step, so some hit of the
+    /// ranking matches L0's words without passing the request's filters. Every page of a query states the same, as
+    /// [`Self::effective`] does; each hit's [`RelaxedHit::level`] ([`RelaxLevel::Filters`]) says which. With it,
+    /// [`Self::fallback`] is `None`.
+    pub filters_dropped: bool,
     /// Whether a step after L0 was built and not skipped: [`Self::relaxed`].
     relaxed: bool,
 }
@@ -168,6 +174,7 @@ impl Relaxation {
                 effective: None,
                 corrected: Vec::new(),
                 fallback: None,
+                filters_dropped: false,
                 truncated,
                 relaxed,
             };
@@ -179,6 +186,7 @@ impl Relaxation {
             effective,
             corrected,
             fallback: None,
+            filters_dropped: false,
             truncated,
             relaxed,
         }
@@ -377,6 +385,14 @@ impl<'q, 's> Built<'q, 's> {
         }
     }
 
+    /// Whether the cascade built L2's last rung and did not skip it (ROADMAP 8.2.7).
+    fn drops_terms(&self) -> bool {
+        self.ran
+            .iter()
+            .rfind(|r| r.level == RelaxLevel::DropTerms)
+            .is_some_and(|r| !r.skipped)
+    }
+
     /// The steps pushed from now on are the next level's.
     fn begin_level(&mut self) {
         self.level_start = self.earlier.len();
@@ -394,8 +410,8 @@ impl<'q, 's> Built<'q, 's> {
     }
 
     /// A step of `level` built (and `searched`, unless no hit or facet was wanted of it): excluded from every later one.
-    /// One that `stands_for_level` (a nested level's step as built, ROADMAP 8.2.2.4) matches every document its level's
-    /// earlier steps match, so it replaces them in what the later steps exclude.
+    /// One that `covers` its level's earlier steps (a nested level's step as built, ROADMAP 8.2.2.4) or every earlier
+    /// step (L5's, ADR-0047) matches every document they match, so it replaces them in what the later steps exclude.
     fn push(
         &mut self,
         level: RelaxLevel,
@@ -403,7 +419,7 @@ impl<'q, 's> Built<'q, 's> {
         label: String,
         text: StepText,
         searched: Option<Searched>,
-        stands_for_level: bool,
+        covers: Covers,
     ) {
         let first = self.ran.is_empty();
         if !first {
@@ -415,9 +431,14 @@ impl<'q, 's> Built<'q, 's> {
             text,
             skipped: false,
         });
-        let replaced = stands_for_level && self.earlier.len() > self.level_start;
-        if replaced {
-            self.earlier.truncate(self.level_start);
+        let from = match covers {
+            Covers::Itself => None,
+            Covers::Level => Some(self.level_start),
+            Covers::Earlier => Some(0),
+        };
+        let replaced = from.is_some_and(|from| self.earlier.len() > from);
+        if let Some(from) = from.filter(|_| replaced) {
+            self.earlier.truncate(from);
         }
         self.earlier.push(step);
         // L0 is counted when the fitting is built, at the first step after it.
@@ -427,6 +448,54 @@ impl<'q, 's> Built<'q, 's> {
             } else if let Some(step) = self.earlier.last() {
                 fitting.exclude(step);
             }
+        }
+    }
+}
+
+/// Which earlier steps a step built uncut matches every document of, so later steps need not exclude them beside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Covers {
+    /// None but itself: every earlier step stays excluded.
+    Itself,
+    /// Its level's earlier steps (a nested level, ROADMAP 8.2.2.4).
+    Level,
+    /// Every earlier step (L5, whose `match_all` keeps L0's root exclusions and filters, ADR-0047).
+    Earlier,
+}
+
+impl Covers {
+    /// What a step of `planned` covers under `relax`, `cut` to fit the limits or not: a cut step matches less than its
+    /// level built, so it covers no earlier step (SPEC §7.1.3).
+    fn of(relax: &RelaxPlan, planned: &PlannedLevel, cut: bool) -> Self {
+        if cut || !relax.excludes_latest_only() {
+            Self::Itself
+        } else if planned.transform.covers_earlier() {
+            Self::Earlier
+        } else if planned.transform.nested() {
+            Self::Level
+        } else {
+            Self::Itself
+        }
+    }
+}
+
+/// What decides whether the cascade reaches a step, beside its level ([`Start::builds`]): the plan, `min_results` and
+/// the hits needed from the top.
+#[derive(Clone, Copy)]
+struct Reach<'a> {
+    relax: &'a RelaxPlan,
+    min_results: usize,
+    need: usize,
+}
+
+impl<'a> Reach<'a> {
+    /// For `relax` from `start`, with the request's `window` (`offset + limit`).
+    fn new(relax: &'a RelaxPlan, start: Start, window: usize) -> Self {
+        let min_results = usize::try_from(relax.min_results()).unwrap_or(usize::MAX);
+        Self {
+            relax,
+            min_results,
+            need: start.need(window, min_results),
         }
     }
 }
@@ -487,20 +556,20 @@ impl Start {
         }
     }
 
-    /// Whether the cascade builds step `i`, with `found` hits found before it, `need` from [`Self::need`].
-    fn builds(
-        self,
-        i: usize,
-        found: usize,
-        relax: &RelaxPlan,
-        min_results: usize,
-        need: usize,
-    ) -> bool {
+    /// Whether the cascade builds step `i`, with `found` hits found before it, of a level that `fills` the page or not
+    /// (the filter step only reaches `min_results`, ADR-0047), `need` from [`Self::need`].
+    fn builds(self, i: usize, found: usize, fills: bool, reach: Reach<'_>) -> bool {
+        let Reach {
+            relax,
+            min_results,
+            need,
+        } = reach;
+        let fill = fills && relax.fill() && found < need;
         i == 0
             || relax.relaxes()
                 && match self.last {
-                    None => found < min_results || relax.fill() && found < need,
-                    Some(last) => i <= last || relax.fill() && found < need,
+                    None => found < min_results || fill,
+                    Some(last) => i <= last || fill,
                 }
     }
 }
@@ -588,9 +657,8 @@ impl CollectionViews<'_> {
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
         let start = Start::of(request.search_after.as_ref(), relax);
-        let min_results = usize::try_from(relax.min_results()).unwrap_or(usize::MAX);
-        let need = start.need(window, min_results);
-        let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
+        let reach = Reach::new(relax, start, window);
+        let builds = |i: usize, found: usize, fills: bool| start.builds(i, found, fills, reach);
         let counting = !request.facets.is_empty();
 
         // The plan's limits, else those the query was compiled with (SPEC §7.1.3).
@@ -608,7 +676,7 @@ impl CollectionViews<'_> {
         let mut truncated = false;
         'levels: for planned in relax.planned() {
             // Checked before a level builds its steps: one the cascade does not reach builds nothing.
-            if !builds(built.ran.len(), found) {
+            if !builds(built.ran.len(), found, planned.transform.fills()) {
                 break;
             }
             if budget.is_some_and(|end| clock.now() >= end) {
@@ -618,23 +686,17 @@ impl CollectionViews<'_> {
             let first = built.ran.is_empty().then_some(query);
             // L3 builds its tier step only when L2's last rung (one term) was not built, or was skipped: that rung takes every
             // match of the tier step (ROADMAP 8.2.7). The same snapshot, query and limits build the same steps on every page.
-            let drops_terms = built
-                .ran
-                .iter()
-                .rfind(|r| r.level == RelaxLevel::DropTerms)
-                .is_some_and(|r| !r.skipped);
             let input = LevelInput::new(query, compiled, &stats)
                 .expanding(&expands)
-                .dropping(drops_terms);
+                .dropping(built.drops_terms());
             let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
                 truncated = true;
                 break;
             };
             built.begin_level();
-            let nested = planned.transform.nested() && relax.excludes_latest_only();
             for (step, label, text, alternatives) in steps {
                 let i = built.ran.len();
-                if !builds(i, found) {
+                if !builds(i, found, planned.transform.fills()) {
                     break 'levels;
                 }
                 if budget.is_some_and(|end| clock.now() >= end) {
@@ -649,7 +711,7 @@ impl CollectionViews<'_> {
                 };
                 // Hits this step is to collect: none before the cursor's step, or once the page is full.
                 let wanted = if i >= start.step {
-                    need.saturating_sub(found)
+                    reach.need.saturating_sub(found)
                 } else {
                     0
                 };
@@ -683,7 +745,8 @@ impl CollectionViews<'_> {
                 };
                 // A cut step matches less than its level built (SPEC §7.1.3): it stands for no earlier step, which an
                 // uncut later one does again (a cut step's matches are its uncut ones', which the later step holds).
-                built.push(planned.level, step, label, text, searched, nested && !cut);
+                let covers = Covers::of(relax, planned, cut);
+                built.push(planned.level, step, label, text, searched, covers);
                 if budget.is_none() {
                     budget = clock.now().checked_add(relax.budget());
                 }
@@ -715,6 +778,7 @@ impl CollectionViews<'_> {
         // The explicit flag (SPEC §7.6): L5 found the hits the response states.
         relaxation.fallback = (hit_level == RelaxLevel::Fallback)
             .then(|| FallbackOrder::of(self.collection().schema().ranking()));
+        relaxation.filters_dropped = hit_level == RelaxLevel::Filters;
         Ok(RelaxedResults {
             hits,
             facets,

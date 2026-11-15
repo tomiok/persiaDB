@@ -30,7 +30,7 @@ products.commit()?;
 let results = products.search("runing")?;
 ```
 
-That `search` call is illustrative. L4 fuzzy and L5 fallback build queries inside `persia-engine`, as L1 synonyms and L3 prefix do. L5 ranks by static rank then index-location recency, ignores the request's `sort`, and flags that order with `fallback`. Filter relaxation is still ROADMAP 8.2.6. %%RELAXATION_CELL%% %%QUERY_CELL%% See [Synonym and prefix search](/guide/synonym-and-prefix-search/), [Typo-tolerant search](/guide/typo-tolerant-search/), and [Faceted search](/guide/faceted-search/).
+That `search` call is illustrative. L4 fuzzy and L5 fallback build queries inside `persia-engine`, as L1 synonyms and L3 prefix do. L5 ranks by static rank then index-location recency, ignores the request's `sort`, and flags that order with `fallback`. With `relax.filters: "last_resort"`, one last step (L6) drops the request's filters when every earlier level found fewer than `min_results` hits. Queries that search no word do not plan it, and `filters_dropped` is true only when that step supplies the hits (ROADMAP 8.2.6). %%RELAXATION_CELL%% %%QUERY_CELL%% See [Synonym and prefix search](/guide/synonym-and-prefix-search/), [Typo-tolerant search](/guide/typo-tolerant-search/), and [Faceted search](/guide/faceted-search/).
 
 The intended surface (SPEC §8, §9.6, ROADMAP 10.1):
 

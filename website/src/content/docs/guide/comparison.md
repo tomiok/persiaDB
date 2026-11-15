@@ -96,7 +96,7 @@ The mechanisms differ. Meilisearch's default is typo tolerance on the terms it s
 Persia DB's specified default is a cascade: synonyms, dropped terms, prefix, a fuzzy step, then a fallback,
 with the response naming the step (SPEC §7.6). %%RELAXATION_CELL%%
 [Typo-tolerant search](/guide/typo-tolerant-search/) is which of those levels run, and how a multi-term query drops terms.
-[Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps. Fuzzy matching and the fallback are library code. Filter relaxation is still designed (ROADMAP 8.2.6).
+[Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps. Fuzzy matching and the fallback are library code. Filter relaxation is library code too, only with the `last_resort` opt-in (ROADMAP 8.2.6).
 [Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option

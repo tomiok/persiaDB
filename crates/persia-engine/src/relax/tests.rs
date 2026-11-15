@@ -54,6 +54,81 @@ fn levels_and_names_are_in_cascade_order() {
 }
 
 #[test]
+fn last_resort_alone_plans_the_filter_step_after_every_other_level() {
+    let last = |options: RelaxOptions| RelaxOptions {
+        filters: Some(FilterRelaxation::LastResort),
+        ..options
+    };
+    let collection = RelaxationConfig::default();
+    // `"never"` (the default) never plans it, whatever the other settings.
+    for options in [
+        RelaxOptions::default(),
+        RelaxOptions {
+            levels: Some(Levels::Custom(Vec::new())),
+            fallback: Some(Fallback::None),
+            ..RelaxOptions::default()
+        },
+        RelaxOptions {
+            fill: Some(true),
+            min_results: Some(100),
+            ..RelaxOptions::default()
+        },
+    ] {
+        let plan = RelaxPlan::new(&collection, &options).unwrap();
+        assert!(!levels(&plan).contains(&RelaxLevel::Filters), "{options:?}");
+    }
+    // The opt-in: after L5.
+    let plan = RelaxPlan::new(&collection, &last(RelaxOptions::default())).unwrap();
+    let mut want = ALL.to_vec();
+    want.push(RelaxLevel::Filters);
+    assert_eq!(levels(&plan), want);
+    // Without L5, after the last word level; with no level at all, right after L0, so the plan relaxes.
+    let options = last(RelaxOptions {
+        levels: Some(Levels::Custom(vec![Level::DropTerms])),
+        fallback: Some(Fallback::None),
+        ..RelaxOptions::default()
+    });
+    let plan = RelaxPlan::new(&collection, &options).unwrap();
+    assert_eq!(
+        levels(&plan),
+        [
+            RelaxLevel::Exact,
+            RelaxLevel::DropTerms,
+            RelaxLevel::Filters
+        ]
+    );
+    let options = last(RelaxOptions {
+        levels: Some(Levels::Custom(Vec::new())),
+        fallback: Some(Fallback::None),
+        ..RelaxOptions::default()
+    });
+    let plan = RelaxPlan::new(&collection, &options).unwrap();
+    assert_eq!(levels(&plan), [RelaxLevel::Exact, RelaxLevel::Filters]);
+    assert!(plan.relaxes());
+    // `relax: false` runs L0 alone, the opt-in given or the collection's.
+    let plan = RelaxPlan::new(&collection, &last(RelaxOptions::disabled())).unwrap();
+    assert_eq!(levels(&plan), [RelaxLevel::Exact]);
+    let opted = RelaxationConfig {
+        filters: FilterRelaxation::LastResort,
+        ..RelaxationConfig::default()
+    };
+    let plan = RelaxPlan::new(&opted, &RelaxOptions::disabled()).unwrap();
+    assert_eq!(levels(&plan), [RelaxLevel::Exact]);
+    // The collection's opt-in, and a query's `"never"` over it.
+    let plan = RelaxPlan::new(&opted, &RelaxOptions::default()).unwrap();
+    assert_eq!(levels(&plan).last(), Some(&RelaxLevel::Filters));
+    let never = RelaxOptions {
+        filters: Some(FilterRelaxation::Never),
+        ..RelaxOptions::default()
+    };
+    let plan = RelaxPlan::new(&opted, &never).unwrap();
+    assert_eq!(levels(&plan), ALL);
+    // The level's name, and its place: last.
+    assert_eq!(RelaxLevel::Filters.name(), "filters");
+    assert!(RelaxLevel::Fallback < RelaxLevel::Filters);
+}
+
+#[test]
 fn a_query_overrides_each_setting_it_gives_and_keeps_the_others() {
     let collection = RelaxationConfig {
         min_results: 3,

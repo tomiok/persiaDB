@@ -8,11 +8,12 @@
 //! A level's transform runs only once the cascade reaches it, so a query that has `min_results` hits at L0 builds
 //! nothing more. L0, L1 `synonyms` (ROADMAP 8.2.1), L2 `drop_terms` (ROADMAP 8.2.2), L3 `prefix` (ROADMAP 8.2.3), L4
 //! `fuzzy` (ROADMAP 8.2.4) and L5 `fallback` (ROADMAP 8.2.5) build queries; L5's step only selects the documents the
-//! cascade then ranks by static rank and recency ([`FallbackOrder`]).
+//! cascade then ranks by static rank and recency ([`FallbackOrder`]). With `filters: "last_resort"` the plan ends with
+//! [`RelaxLevel::Filters`] (ROADMAP 8.2.6): L0's query without its filters, only when every earlier step found too few.
 //!
 //! ```
 //! use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
-//! use persia_engine::schema::{Fallback, Level, Levels, RelaxationConfig};
+//! use persia_engine::schema::{Fallback, FilterRelaxation, Level, Levels, RelaxationConfig};
 //!
 //! // The collection's defaults: every level, then the static-rank fallback.
 //! let collection = RelaxationConfig::default();
@@ -33,6 +34,11 @@
 //! assert_eq!(plan.min_results(), 5);
 //! assert_eq!(plan.levels().collect::<Vec<_>>(), [RelaxLevel::Exact, RelaxLevel::Fuzzy]);
 //!
+//! // `filters: "last_resort"` is the explicit opt-in to one last step without the filters.
+//! let options = RelaxOptions { filters: Some(FilterRelaxation::LastResort), ..RelaxOptions::default() };
+//! let plan = RelaxPlan::new(&collection, &options)?;
+//! assert_eq!(plan.levels().last(), Some(RelaxLevel::Filters));
+//!
 //! // `relax: false` runs L0 only.
 //! let plan = RelaxPlan::new(&collection, &RelaxOptions::disabled())?;
 //! assert_eq!(plan.levels().collect::<Vec<_>>(), [RelaxLevel::Exact]);
@@ -51,6 +57,7 @@ use crate::stats::StatisticsProvider;
 
 mod drop_terms;
 mod fallback;
+mod filters;
 mod fuzzy;
 mod options;
 mod prefix;
@@ -76,6 +83,9 @@ pub enum RelaxLevel {
     Fuzzy,
     /// L5: the collection's fallback ranking (ROADMAP 8.2.5).
     Fallback,
+    /// The last resort (ROADMAP 8.2.6, ADR-0047): L0's query without its filters, planned only with
+    /// `filters: "last_resort"` and built only when every earlier step found fewer than `min_results` hits.
+    Filters,
 }
 
 impl RelaxLevel {
@@ -88,6 +98,7 @@ impl RelaxLevel {
             Self::Prefix => "prefix",
             Self::Fuzzy => "fuzzy",
             Self::Fallback => "fallback",
+            Self::Filters => "filters",
         }
     }
 }
@@ -104,13 +115,14 @@ impl From<Level> for RelaxLevel {
 }
 
 /// Every level, in cascade order.
-const LEVELS: [RelaxLevel; 6] = [
+const LEVELS: [RelaxLevel; 7] = [
     RelaxLevel::Exact,
     RelaxLevel::Synonyms,
     RelaxLevel::DropTerms,
     RelaxLevel::Prefix,
     RelaxLevel::Fuzzy,
     RelaxLevel::Fallback,
+    RelaxLevel::Filters,
 ];
 
 impl fmt::Display for RelaxLevel {
@@ -295,6 +307,23 @@ pub(crate) trait LevelTransform: Send + Sync + fmt::Debug {
     fn nested(&self) -> bool {
         false
     }
+
+    /// Whether the level's step, as built, matches every document every earlier step of the cascade matches (SPEC §7.6,
+    /// ADR-0047): L5's `match_all` under L0's root `must_not` and `filter`, which every earlier step keeps. Excluding
+    /// it then excludes them all, so the cascade excludes only it from the later steps (the filter step). `false`
+    /// unless a level proves it. It holds only while every level before L5 keeps L0's root `must_not` and `filter` in
+    /// its steps (L1 to L4 do, and a cut never touches them, SPEC §7.1.3): a new level that rewrites them must not run
+    /// before a level that covers the earlier steps, or the steps after it would return documents twice.
+    fn covers_earlier(&self) -> bool {
+        false
+    }
+
+    /// Whether the cascade builds the level's steps to fill the page (`fill`, SPEC §7.6), or only while the earlier
+    /// steps found fewer than `min_results` hits. Every level fills but the filter step (ROADMAP 8.2.6, ADR-0047): a
+    /// filtered page is never padded with documents the filters reject.
+    fn fills(&self) -> bool {
+        true
+    }
 }
 
 /// L0: the query as compiled.
@@ -322,6 +351,7 @@ fn transform(level: RelaxLevel) -> Arc<dyn LevelTransform> {
         RelaxLevel::Prefix => Arc::new(prefix::Prefix),
         RelaxLevel::Fuzzy => Arc::new(fuzzy::Fuzzy),
         RelaxLevel::Fallback => Arc::new(fallback::Fallback),
+        RelaxLevel::Filters => Arc::new(filters::Filters),
     }
 }
 
@@ -349,7 +379,8 @@ pub struct RelaxPlan {
 impl RelaxPlan {
     /// The cascade of a collection whose defaults are `collection` (its schema's [`CollectionSchema::relaxation`]),
     /// as a query's `options` override them: L0, then the levels `levels` names in cascade order, then L5 unless
-    /// `fallback` is [`Fallback::None`]. Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
+    /// `fallback` is [`Fallback::None`], then [`RelaxLevel::Filters`] when `filters` is [`FilterRelaxation::LastResort`].
+    /// Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
     ///
     /// # Errors
     /// [`RelaxError::OutOfRange`] for a `min_results` outside [`RelaxationConfig::MIN_RESULTS`] or a `budget_ms` outside
@@ -376,11 +407,16 @@ impl RelaxPlan {
         }
         let enabled = options.enabled.unwrap_or(collection.enabled);
         let fallback = options.fallback.unwrap_or(collection.fallback);
+        let filters = options.filters.unwrap_or(collection.filters);
         let mut planned = vec![RelaxLevel::Exact];
         if enabled {
             planned.extend(levels.resolve().iter().copied().map(RelaxLevel::from));
             if fallback == Fallback::StaticRank {
                 planned.push(RelaxLevel::Fallback);
+            }
+            // The last resort, after every other level (ADR-0047): only the explicit opt-in plans it.
+            if filters == FilterRelaxation::LastResort {
+                planned.push(RelaxLevel::Filters);
             }
         }
         Ok(Self {
@@ -393,7 +429,7 @@ impl RelaxPlan {
                 .collect(),
             min_results,
             fill: options.fill.unwrap_or(collection.fill),
-            filters: options.filters.unwrap_or(collection.filters),
+            filters,
             budget: Duration::from_millis(u64::from(budget_ms)),
             limits: None,
             exclude_every_step: false,
@@ -426,7 +462,8 @@ impl RelaxPlan {
         self.fill
     }
 
-    /// Whether filters may be relaxed (ROADMAP 8.2.6 builds that level).
+    /// Whether filters may be relaxed: with [`FilterRelaxation::LastResort`] the plan ends with
+    /// [`RelaxLevel::Filters`] (ROADMAP 8.2.6, ADR-0047), unless it runs L0 alone.
     pub fn filters(&self) -> FilterRelaxation {
         self.filters
     }
