@@ -591,6 +591,8 @@ impl CollectionViews<'_> {
             .or_else(|| compiled.map(|c| c.limits))
             .unwrap_or_default();
         let expands = |field: FieldId| self.expands(field);
+        // L3 builds its tier step only without L2 before it, which would take every match of it (ROADMAP 8.2.7).
+        let drops_terms = relax.levels().any(|l| l == RelaxLevel::DropTerms);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
@@ -607,7 +609,9 @@ impl CollectionViews<'_> {
                 break;
             }
             let first = built.ran.is_empty().then_some(query);
-            let input = LevelInput::new(query, compiled, &stats).expanding(&expands);
+            let input = LevelInput::new(query, compiled, &stats)
+                .expanding(&expands)
+                .dropping(drops_terms);
             let Some(steps) = self.budgeted_level(planned, first, input, exec, budget)? else {
                 truncated = true;
                 break;

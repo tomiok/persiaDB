@@ -1394,6 +1394,10 @@ relaxed search (§7.6) plans every step without it. Without it the bonus is 0 an
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
 
+The score has no typo or exactness component. Within a relaxation level, hits that need fewer edits, or match words
+as typed rather than by completion, rank first because they are earlier steps of the cascade (§7.6, ROADMAP 8.2.7),
+not because they score higher.
+
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
@@ -1707,7 +1711,8 @@ query's step has no `effective`. Building the steps reads the `df`s each term's 
 one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
-L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query: each *term* it expands
+L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query (and before it the tier step
+of ROADMAP 8.2.7, below): each *term* it expands
 becomes a `prefix` of that term with `max_expansions` 50, which planning expands over the views' terms and keeps by
 collection `df` (§7.1). A term is a field's analyzed term of a word: of a query compiled from `q`, one per field of a
 word clause's parts (each `combined`, and each field of a word the fields split apart); of a programmatic query, each
@@ -1732,10 +1737,12 @@ L0's other required clauses stay as they are, and so do its root's `must_not` (i
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
 level. Its `effective` is L0's text, as every clause is kept. Building the step reads no statistics (planning reads the `df`s that keep the
 expansions, §7.1); held to §7.1.3's limits,
-its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
-its own for it to stand for (nested levels, in the cascade below).
+its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Without L2 in the plan, L3 may first build a
+tier step, `prefix:last` (below). Its steps are not nested (each `prefix` keeps its own 50 terms), so each stays
+excluded from the later steps (the cascade, below).
 
-L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query: each term it rewrites
+L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query (and before it the tier step of
+ROADMAP 8.2.7, below): each term it rewrites
 becomes a `fuzzy` of that term with `max_expansions` 50, which planning expands over the views' terms (each view's
 term dictionary intersected with the optimal string alignment automaton) and keeps by collection `df` (§7.1). Its
 terms are L3's: a field's analyzed term of a word clause, or a `term` or `combined` field of a programmatic query, in
@@ -1747,8 +1754,8 @@ last term has no rule of its own: a short word stays exact wherever it is. A rew
 `should` clauses as at L3 (its exact fields as one `combined`, a `fuzzy` per rewritten field, under the ratio
 `boost` of a `fields` weight), and a `fuzzy` scores with the edit-distance weight of §7.1, so an exact term outranks a
 correction at the same frequency and length. A query that rewrites no term skips the level. Held to §7.1.3's limits,
-its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). Being one step, it has no earlier step
-of its own to stand for.
+its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). A term of 8 characters or more first
+gets a tier step, `fuzzy:1` (below). Its steps are not nested, as at L3.
 Its `corrected` and `effective` say what L4 changed ("did you mean", ROADMAP 8.2.4.3). A word is *corrected* when it
 is a required word clause of one part (one token over the default fields: a `term` or a `combined`), no field of it
 holds its term (collection `df` 0, so no document does), and a field the step rewrites has a term within the word's
@@ -1768,6 +1775,37 @@ document holds and one typo (`red shoez` over `red shoes`), L2's last rung alrea
 the response states L2's `effective` (`red`) and no correction, though L4 was built (`level` `fuzzy`). The same
 holds at L3, whose `effective` is L0's (ROADMAP 8.1.22). `effective` sets each correction in as the index holds it, not quoted: it names the terms
 searched and need not compile back to the step's query (a stem, or a term holding `:`).
+
+Typo and exactness tiers (ROADMAP 8.2.7, ADR-0046). Within a level, a hit that needs fewer edits ranks above one that
+needs more, and a word matched as typed ranks above one matched by a completion, before BM25F. The tiers are steps of
+the cascade, built strictest first, not a key or a part of the score. So every rule of steps holds for them:
+exclusion, ranking by step before the request's sort, rank scores, paging, pruning, the budget, facets and `explain`.
+
+- **L4, `fuzzy:1`.** When a term the step rewrites has 8 characters or more (distance 2), L4 first builds the same
+  query with every distance capped at 1, listed as `fuzzy:1`, then its step at each term's own distance, `fuzzy`.
+  Each `fuzzy` keeps its own 50 terms within its distance. The tier is the most edits any one rewritten word
+  needs, not their sum: `fuzzy:1` holds the documents within one edit of every word. A query whose terms are all
+  shorter has the one step. Its corrections are found within the capped distances, so when `fuzzy:1` is the hit
+  step, `corrected` and `effective` name the terms within one edit.
+- **L3, `prefix:last`.** When L3 expands another term beside the last one, and the plan has no L2 before it, L3 first
+  builds its query with the last term alone expanded, listed as `prefix:last`, then its step, `prefix`. Every other
+  word must then be held as typed, so a document holding it exactly ranks above one that needs it completed. After
+  L2 the tier step is not built. L2's one-term rung already took every document holding one of the words as typed,
+  so the tier step would match nothing. With the default levels, every L3 hit needs each of its words completed.
+  Both steps state L0's text.
+- **Not tiered.** L0's stemming is not tiered: a word matched as typed does not rank above one matched by its stem.
+  The index holds the stems alone, so the two cannot be told apart (ROADMAP 8.2.10). L1 is not tiered either. Every
+  L1 hit lacks the original of some run, since L0 took those documents, and counting runs per hit would need a key
+  per hit (ROADMAP 8.2.11). L2's rungs are already tiers, by how many words a hit holds.
+
+The tier steps change only the order across steps, never a score. They lead the rank key before the request's sort
+too, so under a field sort each tier step is sorted by the field on its own. A cursor records a tier step's index as
+it records any step's. Its relaxation settings do not change: the tier steps follow from the levels. Each step
+prunes as its own search does, with the score-led tie-break of ROADMAP 7.4.11, and thresholds are not shared. An
+explained hit's `relaxed` node names its step's `applied` (`fuzzy:1`, `prefix:last`, §7.7). A tier step counts
+against §7.1.3's limits like any step. Once searched, it is excluded from the later steps, and its expansions count
+there in full. A query with many long words may therefore have its `fuzzy` step cut or skipped sooner than one
+without the tier (ROADMAP 8.2.12).
 
 L5 `fallback` (ROADMAP 8.2.5, ADR-0044). With `fallback: "static_rank"` (the default) the plan ends with L5, which
 builds one step, listed as `fallback`; `"none"` builds no L5. Its query is L0's root `must_not` and `filter` around

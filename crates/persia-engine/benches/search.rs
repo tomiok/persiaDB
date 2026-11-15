@@ -26,7 +26,7 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{FallbackOrder, RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels, RankingConfig,
+    CollectionSchema, Fallback, FieldId, FieldKind, KeywordOptions, Level, Levels, RankingConfig,
     RelaxationConfig, SchemaBuilder, StaticRank, TextOptions,
 };
 use persia_engine::search::{FacetRequest, Order, Projection, Pruning, SearchPlan, Sort, SortKey};
@@ -948,6 +948,53 @@ fn relaxed(c: &mut Criterion) {
     group.finish();
 }
 
+/// The tier steps (ROADMAP 8.2.7), in the `search_relaxed` group, each level alone, without the fallback.
+/// `l3/tiers`: `w12` (3 characters, not last) is expanded too, so L3 first searches `w12` exactly beside the 50 most
+/// frequent terms starting `w` (`prefix:last`), which finds the hits, so the cascade stops there (before ROADMAP 8.2.7
+/// its one step expanded both). `l4/tiers`: `w1x4zzzz` (8 characters) may take two edits, so L4 first builds and
+/// searches its step within one edit (`fuzzy:1`); no bench term is that long, so neither step finds a hit, and this
+/// measures what the tier step adds to a query that qualifies.
+fn relaxed_tiers(c: &mut Criterion) {
+    let (db, _) = collection(4, false);
+    let snapshot = db.snapshot();
+    let coll = snapshot.collection("bench").unwrap();
+    let memtable = coll.memtable();
+    let schema = coll.schema();
+    let views = coll.views(&memtable).unwrap();
+    let request = SearchRequest {
+        limit: 10,
+        ..SearchRequest::default()
+    };
+    let exec = Execution::default().threads(Threads::Current);
+    let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
+    let mut group = c.benchmark_group("search_relaxed");
+    for (name, level, text) in [
+        ("l3/tiers", Level::Prefix, "w12 w"),
+        ("l4/tiers", Level::Fuzzy, "w3 w1x4zzzz"),
+    ] {
+        let alone = RelaxPlan::new(
+            schema.relaxation(),
+            &RelaxOptions {
+                levels: Some(Levels::Custom(vec![level])),
+                fallback: Some(Fallback::None),
+                ..RelaxOptions::default()
+            },
+        )
+        .unwrap();
+        let query = compiler.compile(text, &DefaultFields::all(schema), &QueryLimits::default());
+        group.bench_function(name, |b| {
+            b.iter(|| {
+                let out = views
+                    .search_relaxed(&query, &request, &alone, &exec)
+                    .unwrap();
+                assert_eq!(out.relaxation.level, RelaxLevel::from(level));
+                black_box(out)
+            });
+        });
+    }
+    group.finish();
+}
+
 /// L5 `fallback` (ROADMAP 8.2.5), in the `search_relaxed` group: `nosuch` is in no document, so L0 has no hit and L5 ranks
 /// every document, its 10 best: by recency alone in the bench collection (the newest views read back from their end),
 /// and by static rank (`log1p` of `price`) then recency in the same collection with one (FOR blocks visited best first;
@@ -1053,6 +1100,7 @@ criterion_group!(
     collection_expansions,
     relaxed,
     relaxed_fallback,
+    relaxed_tiers,
     compile
 );
 criterion_main!(benches);

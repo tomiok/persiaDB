@@ -8,6 +8,9 @@
 //! 2. A prefix keeps at most 50 terms, those with the highest collection `df` (SPEC §7.1); over `QueryLimits`, the
 //!    step's prefixes are cut (`prefix:cut`) or the step is skipped (`prefix:skipped`, SPEC §7.1.3).
 //! 3. The step states L0's text as `effective`.
+//! 4. Exactness tiers (ROADMAP 8.2.7): without L2 before it, L3 first searches the last word alone expanded
+//!    (`prefix:last`) when another word is expanded too, so a document holding the other words exactly ranks above one
+//!    that needs them completed, whatever their scores (checked against the oracle of 1).
 //!
 //! A field whose analyzer stacks tokens is not expanded (SPEC §6.3.1): schemas name built-in analyzers only, none of
 //! which stacks, so `db::relaxed`'s unit tests give a collection's memtable such an analyzer instead.
@@ -75,6 +78,17 @@ fn search(
     text: &str,
     limits: Option<QueryLimits>,
 ) -> RelaxedResults {
+    let relax = limits.map_or_else(plan, |l| plan().with_limits(l));
+    search_by(db, registry, text, &relax)
+}
+
+/// `text` searched under `relax`.
+fn search_by(
+    db: &Database<SimFile>,
+    registry: &AnalyzerRegistry,
+    text: &str,
+    relax: &RelaxPlan,
+) -> RelaxedResults {
     let snapshot = db.snapshot();
     let c = snapshot.collection("c").unwrap();
     let memtable = c.memtable();
@@ -84,14 +98,13 @@ fn search(
         &DefaultFields::all(c.schema()),
         &QueryLimits::default(),
     );
-    let relax = limits.map_or_else(plan, |l| plan().with_limits(l));
     let request = SearchRequest {
         limit: 1000,
         projection: Projection::None,
         ..SearchRequest::default()
     };
     views
-        .search_relaxed(&compiled, &request, &relax, &exec())
+        .search_relaxed(&compiled, &request, relax, &exec())
         .unwrap()
 }
 
@@ -119,7 +132,9 @@ fn the_words_match_the_terms_they_start_and_the_step_states_l0s_text() {
     let out = search(&db, &registry, "run  sho", None);
     let r = &out.relaxation;
     assert_eq!(r.level, RelaxLevel::Prefix);
-    assert_eq!(r.applied, ["prefix"]);
+    // Without L2 before it, L3 searches the last word alone expanded first, `run` exact (ROADMAP 8.2.7): no document
+    // holds `run` beside a `sho` completion, so its next step finds every hit.
+    assert_eq!(r.applied, ["prefix:last", "prefix"]);
     assert_eq!(r.effective.as_deref(), Some("run sho"));
     let mut ids: Vec<String> = hits(&out).into_iter().map(|h| h.1).collect();
     ids.sort();
@@ -154,25 +169,36 @@ fn a_prefix_keeps_the_fifty_terms_of_highest_df() {
 
 #[test]
 fn over_the_limits_the_prefixes_are_cut_or_the_step_skipped() {
-    // Two words, each a prefix of 50: 100 expansions.
+    // Two words, each a prefix of 50: 100 expansions. L2 runs first, as by default, so L3 builds one step (its tier
+    // step would find nothing after L2, ROADMAP 8.2.7); L2's one rung finds nothing and expands nothing.
     let docs = ["abc1 abd1", "abc2 abd2", "abc3 abd3"];
     let db = database(&docs);
     let registry = AnalyzerRegistry::builtin();
+    let options = RelaxOptions {
+        min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+        levels: Some(Levels::Custom(vec![Level::DropTerms, Level::Prefix])),
+        fallback: Some(Fallback::None),
+        ..RelaxOptions::default()
+    };
+    let search = |db: &Database<SimFile>, registry, text, limits: Option<QueryLimits>| {
+        let relax = RelaxPlan::new(&RelaxationConfig::default(), &options).unwrap();
+        search_by(db, registry, text, &relax.with_limits(limits.unwrap()))
+    };
     let limits = |max_expansions| QueryLimits {
         max_expansions,
         ..QueryLimits::default()
     };
     let out = search(&db, &registry, "abc abd", Some(limits(100)));
-    assert_eq!(out.relaxation.applied, ["prefix"]);
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "prefix"]);
     assert_eq!(hits(&out).len(), 3);
     // 2 left: each prefix keeps its most frequent term, ties by bytes (`abc1`, `abd1`).
     let out = search(&db, &registry, "abc abd", Some(limits(2)));
-    assert_eq!(out.relaxation.applied, ["prefix:cut"]);
-    assert_eq!(hits(&out), [(1, "d0".to_owned())]);
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "prefix:cut"]);
+    assert_eq!(hits(&out), [(2, "d0".to_owned())]);
     // 1 left for two prefixes: no cut fits.
     let out = search(&db, &registry, "abc abd", Some(limits(1)));
-    assert_eq!(out.relaxation.applied, ["prefix:skipped"]);
-    assert_eq!(out.relaxation.level, RelaxLevel::Exact);
+    assert_eq!(out.relaxation.applied, ["drop_terms:75%", "prefix:skipped"]);
+    assert_eq!(out.relaxation.level, RelaxLevel::DropTerms);
     assert_eq!(hits(&out), []);
 }
 
@@ -201,19 +227,32 @@ proptest! {
         let db = database(&refs);
         let out = search(&db, &AnalyzerRegistry::builtin(), &query.join(" "), None);
         let last = query.len() - 1;
+        // Another word of 3 characters or more is expanded too: without L2 before it, L3 then searches the last word
+        // alone expanded first (ROADMAP 8.2.7), so its matches, every other word exact, rank above the rest.
+        let tiered = query[..last].iter().any(|w| w.chars().count() >= 3);
         let mut want = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
             let l0 = query.iter().all(|w| holds(doc, w, false));
+            let last_only = query.iter().enumerate().all(|(j, w)| holds(doc, w, j == last));
             let l3 = query
                 .iter()
                 .enumerate()
                 .all(|(j, w)| holds(doc, w, j == last || w.chars().count() >= 3));
-            if l0 {
-                want.push((0, format!("d{i}")));
+            let step = if l0 {
+                Some(0)
+            } else if tiered && last_only {
+                Some(1)
             } else if l3 {
-                want.push((1, format!("d{i}")));
+                Some(if tiered { 2 } else { 1 })
+            } else {
+                None
+            };
+            if let Some(step) = step {
+                want.push((step, format!("d{i}")));
             }
         }
+        // The page ranks by step first: the tier step's hits lead, whatever their BM25F scores.
+        prop_assert!(out.hits.windows(2).all(|w| w[0].step <= w[1].step));
         let mut got = hits(&out);
         got.sort();
         want.sort();

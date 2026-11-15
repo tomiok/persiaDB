@@ -62,9 +62,10 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
 | [0039](./0039-l1-synonyms-runs-alternatives-and-cuts.md) | L1 `synonyms`: runs of whole clauses, phrase alternatives, one step, and cuts in group order | proposed |
-| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | accepted |
+| [0040](./0040-l3-prefix-one-step-over-analyzed-terms.md) | L3 `prefix`: one step over the analyzed terms, the last one always, stacking fields exact | accepted (amended by 0046) |
 | [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | accepted |
-| [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed |
+| [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed (amended by 0046) |
 | [0043](./0043-relaxed-response-states-the-hit-step.md) | A relaxed response states the text of its hit step, the last step that found a hit | proposed |
 | [0044](./0044-l5-fallback-static-rank-then-index-recency.md) | L5 `fallback`: the collection's static rank, then index recency, flagged in the response | proposed |
 | [0045](./0045-request-relax-options-and-cursor-settings.md) | A request's `relax` options: every key, merged one at a time, and cursors that record the settings | proposed |
+| [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |

@@ -1,0 +1,6 @@
+1.0000  braceelt
+1.0000  taespoon
+1.0000  macarnoi
+1.0000  keybaord
+0.9173  red sho
+0.9835  mean nDCG@10

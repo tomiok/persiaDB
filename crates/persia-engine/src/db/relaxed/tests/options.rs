@@ -102,14 +102,18 @@ fn each_setting_a_query_gives_overrides_the_collections() {
         ]
     );
     assert_eq!(out.relaxation.applied, ["drop_terms:75%"]);
-    // `levels` replaces the collection's: no L2, so L3 and L4 build and add nothing, and L5 ranks every other document.
+    // `levels` replaces the collection's: no L2, so L3 (its tier step too, ROADMAP 8.2.7) and L4 build and add nothing,
+    // and L5 ranks every other document.
     let out = run(
         &views,
         &red_shoes,
         &request(10),
         r#"{"min_results": 3, "levels": ["prefix", "fuzzy"]}"#,
     );
-    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy", "fallback"]);
+    assert_eq!(
+        out.relaxation.applied,
+        ["prefix:last", "prefix", "fuzzy", "fallback"]
+    );
     assert_eq!(out.hits.len(), 5);
     assert!(
         out.hits[1..]

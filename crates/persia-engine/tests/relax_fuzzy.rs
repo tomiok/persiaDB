@@ -11,6 +11,8 @@
 //!    `fuzzy` queries are cut (`fuzzy:cut`) or the step is skipped (`fuzzy:skipped`, SPEC §7.1.3).
 //! 3. An exact term outranks a correction at the same frequency and length (the edit-distance weight, SPEC §7.1).
 //! 4. Pages by cursor are slices of the one ranking across L0 and L4.
+//! 5. Typo tiers (ROADMAP 8.2.7): when a word may take two edits, L4 searches every word within one edit first (`fuzzy:1`),
+//!    so its hits rank above those that need two, whatever their scores (checked against the oracle of 1).
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs)] // Tests: inputs are fixed.
 
@@ -129,7 +131,9 @@ fn misspelled_words_match_the_terms_within_their_distance() {
     let out = search(&db, "zapatilas rojs", None);
     let r = &out.relaxation;
     assert_eq!(r.level, RelaxLevel::Fuzzy);
-    assert_eq!(r.applied, ["fuzzy"]);
+    // `zapatilas` may take two edits, so the tier step within one edit comes first (ROADMAP 8.2.7): it finds `d0`, and
+    // the step at two edits adds nothing.
+    assert_eq!(r.applied, ["fuzzy:1", "fuzzy"]);
     assert_eq!(hits(&out), [(1, "d0".to_owned())]);
     // A short word stays exact: `red` (3) matches only itself.
     let db = database(&["red shoes", "rad shoes", "red shoez"]);
@@ -319,18 +323,30 @@ proptest! {
         let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
         let db = database(&refs);
         let out = search(&db, &query.join(" "), None);
+        // A word of 8 letters or more may take two edits: L4 then searches within one edit first, its tier step
+        // (ROADMAP 8.2.7), so every document within one edit of each word ranks above every other L4 hit.
+        let tiered = query.iter().any(|w| allowed(w) == 2);
+        let within = |doc: &Vec<String>, cap: usize| {
+            query.iter().all(|w| doc.iter().any(|t| osa(w, t) <= allowed(w).min(cap)))
+        };
         let mut want = Vec::new();
         for (i, doc) in docs.iter().enumerate() {
             let l0 = query.iter().all(|w| doc.contains(w));
-            let l4 = query
-                .iter()
-                .all(|w| doc.iter().any(|t| osa(w, t) <= allowed(w)));
-            if l0 {
-                want.push((0, format!("d{i}")));
-            } else if l4 {
-                want.push((1, format!("d{i}")));
+            let step = if l0 {
+                Some(0)
+            } else if tiered && within(doc, 1) {
+                Some(1)
+            } else if within(doc, 2) {
+                Some(if tiered { 2 } else { 1 })
+            } else {
+                None
+            };
+            if let Some(step) = step {
+                want.push((step, format!("d{i}")));
             }
         }
+        // The page ranks by step first: the tier step's hits lead, whatever their BM25F scores.
+        prop_assert!(out.hits.windows(2).all(|w| w[0].step <= w[1].step));
         let mut got = hits(&out);
         got.sort();
         want.sort();
@@ -566,4 +582,73 @@ fn every_page_states_the_hit_step_though_it_does_not_search_it() {
         page.search_after = Some(cursor);
     }
     assert_eq!(seen, ["d0", "d1", "d2"]);
+}
+
+/// ROADMAP 8.2.7: a word of 8 letters or more is searched within one edit first (`fuzzy:1`), then within two, and pages
+/// by cursor are slices of that one ranking: every hit of the tier step, whatever its score, before the next step's.
+#[test]
+fn tier_steps_page_by_cursor_as_one_ranking() {
+    // `sandalls` is one edit from `sandals` and two from `scandals`; the far ones repeat their word, so they would
+    // outscore the near ones in one step.
+    let db = database(&[
+        "sandals with a long description of leather straps",
+        "sandals and more words about summer beaches",
+        "scandals scandals scandals",
+        "scandal scandal",
+        "boots",
+    ]);
+    let all = search(&db, "sandalls", None);
+    assert_eq!(all.relaxation.applied, ["fuzzy:1", "fuzzy"]);
+    // `scandal` is three edits away.
+    let steps: Vec<usize> = all.hits.iter().map(|h| h.step).collect();
+    assert_eq!(steps, [1, 1, 2]);
+    assert_eq!(all.hits[2].hit.document.id(), "d2");
+    // Within one step the far ones keep their own scores; across steps the near ones lead whatever they score.
+    assert!(all.hits[2].hit.score > all.hits[0].hit.score);
+    let mut paged = Vec::new();
+    let mut page = request(1);
+    loop {
+        let out = search_with(&db, "sandalls", None, &page);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        assert_eq!(out.relaxation.applied, ["fuzzy:1", "fuzzy"]);
+        page.search_after = Some(last.cursor());
+        paged.extend(hits(&out));
+    }
+    assert_eq!(paged, hits(&all));
+    // The tier step's corrections are within one edit: `sandalls` reads `sandals`, the hit step's.
+    assert_eq!(corrected(&all), [("sandalls", "sandals")]);
+    assert_eq!(all.relaxation.effective.as_deref(), Some("sandals"));
+    // Even where a term two edits away is more frequent, a cascade that stops at the tier step (`min_results` 1)
+    // corrects within one edit, the distance its hits were searched at.
+    let db = database(&["sandals", "scandals", "scandals", "scandals", "boots"]);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiled = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin())
+        .unwrap()
+        .compile(
+            "sandalls",
+            &DefaultFields::all(c.schema()),
+            &QueryLimits::default(),
+        );
+    let first = RelaxOptions {
+        levels: Some(Levels::Custom(vec![Level::Fuzzy])),
+        fallback: Some(Fallback::None),
+        ..RelaxOptions::default()
+    };
+    let relax = RelaxPlan::new(&RelaxationConfig::default(), &first).unwrap();
+    let out = views
+        .search_relaxed(&compiled, &request(10), &relax, &exec())
+        .unwrap();
+    assert_eq!(hits(&out), [(1, "d0".to_owned())]);
+    assert_eq!(out.relaxation.applied, ["fuzzy:1"]);
+    assert_eq!(corrected(&out), [("sandalls", "sandals")]);
+    // Searched to the end, the hit step is `fuzzy`, which corrects to the most frequent term within two edits.
+    assert_eq!(
+        corrected(&search(&db, "sandalls", None)),
+        [("sandalls", "scandals")]
+    );
 }

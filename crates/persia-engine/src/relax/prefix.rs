@@ -36,29 +36,44 @@ pub(crate) const MIN_LEN: usize = 3;
 pub(crate) struct Prefix;
 
 impl LevelTransform for Prefix {
+    /// The tier step that expands the last term alone (`prefix:last`, ROADMAP 8.2.7, ADR-0046), when another term is
+    /// expanded too and the plan has no L2 before it, then the step that expands every term it may (`prefix`). After
+    /// L2 the tier step would find nothing: its matches hold the other words as typed, so L2's one-term rung took them.
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
-        let leaf = |field: FieldId, term: &str, last: bool| {
-            (last || term.chars().count() >= MIN_LEN).then(|| prefix(field, term))
+        let Some(full) = step(input, false, "prefix") else {
+            return Ok(Vec::new());
         };
-        let words = Words {
-            expands: input.expands,
-            leaf: &leaf,
-        };
-        let query = match input.compiled {
-            Some(compiled) => words.of_compiled(compiled),
-            None => words.of_query(input.original),
-        };
-        Ok(query
-            .map(|query| Step {
-                query,
-                applied: "prefix".to_owned(),
-                effective: input.compiled.map(Compiled::effective),
-                alternatives: None,
-                corrected: Vec::new(),
-            })
-            .into_iter()
-            .collect())
+        if input.drops_terms {
+            return Ok(vec![full]);
+        }
+        match step(input, true, "prefix:last") {
+            Some(last) if last.query != full.query => Ok(vec![last, full]),
+            _ => Ok(vec![full]),
+        }
     }
+}
+
+/// L3's step listed as `applied` (SPEC §7.6): expanding the last term alone (`last_only`), or every term it may. `None`
+/// when it expands no term.
+fn step(input: &LevelInput<'_>, last_only: bool, applied: &str) -> Option<Step> {
+    let leaf = |field: FieldId, term: &str, last: bool| {
+        (last || !last_only && term.chars().count() >= MIN_LEN).then(|| prefix(field, term))
+    };
+    let words = Words {
+        expands: input.expands,
+        leaf: &leaf,
+    };
+    let query = match input.compiled {
+        Some(compiled) => words.of_compiled(compiled),
+        None => words.of_query(input.original),
+    }?;
+    Some(Step {
+        query,
+        applied: applied.to_owned(),
+        effective: input.compiled.map(Compiled::effective),
+        alternatives: None,
+        corrected: Vec::new(),
+    })
 }
 
 fn prefix(field: FieldId, term: &str) -> Query {

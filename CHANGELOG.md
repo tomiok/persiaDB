@@ -17,6 +17,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   "exact"`. New: `RelaxOptions::MAX_JSON_LEN`, `RelaxError::Json`, `relax::RelaxSettings`, `RelaxPlan::settings`,
   `db::Cursor::relax` and `RequestError::CursorRelax`. `fill` is a request key like the others: pages by cursor or offset
   stay slices of one ranking, and a deeper page may build, state and count (facets) more steps.
+- `persia-engine` (breaking): typo and exactness tiers within a relaxation level (ROADMAP 8.2.7; SPEC §7.2, §7.6;
+  ADR-0046). They are steps of the cascade, built strictest first, so they rank before BM25F and before the
+  request's sort. Scores, pruning and cursors work as for any step. When a word has 8 characters or more, L4 first
+  searches every word within one edit (`fuzzy:1`), then within its own distance (`fuzzy`). The tier is the most edits
+  any one word needs. Without L2 in the plan (`levels: ["prefix"]`, search as you type), L3 first searches the last
+  word alone expanded and the others as typed (`prefix:last`), then all of them expanded (`prefix`). `applied` gains
+  these entries and later step indices shift by one, and `fuzzy:1`'s corrections are within one edit. Stemmed
+  matches are not tiered yet (ROADMAP 8.2.10). A typo suite beside the 7.8 relevance gate goes from a mean
+  nDCG@10 of 0.6786 to 0.9835. The 7.8 queries all have hits at L0 and stay at 0.8824. Benchmarks
+  `search_relaxed/l3/tiers` and `search_relaxed/l4/tiers`.
 - `persia-engine` (breaking): `explain: true` on a relaxed search states which step matched each hit (ROADMAP 8.3.4;
   SPEC §7.7). Each explained hit's root is now `Explanation::Relaxed(RelaxedExplanation { level, step, applied,
   explanation })` around its step's tree, with the same score bit for bit: L5's `StaticRank` included, `applied`

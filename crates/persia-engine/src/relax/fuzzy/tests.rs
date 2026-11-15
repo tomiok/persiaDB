@@ -88,7 +88,11 @@ fn step_of(
 ) -> Option<Step> {
     let input = LevelInput::new(query, compiled, &NoStats).expanding(expands);
     let mut steps = Fuzzy.steps(&input).unwrap();
-    assert!(steps.len() <= 1, "one step at most: {steps:?}");
+    // The tier step within one edit comes first when there is one (ROADMAP 8.2.7); the level's own step is last.
+    assert!(steps.len() <= 2, "two steps at most: {steps:?}");
+    if let [near, _] = steps.as_slice() {
+        assert_eq!(near.applied, "fuzzy:1");
+    }
     steps.pop()
 }
 
@@ -326,4 +330,64 @@ fn a_fields_weight_scales_a_fuzzy_by_its_ratio_to_the_schema_boost() {
             boost: 3.0,
         })
     );
+}
+
+/// Every step L4 builds for `text`, in order.
+fn steps(schema: &CollectionSchema, text: &str) -> Vec<Step> {
+    let compiled = compile(schema, text);
+    let expands = text_fields(schema);
+    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&expands);
+    Fuzzy.steps(&input).unwrap()
+}
+
+/// The `(term, distance)` of every `fuzzy` in `query`, in query order.
+fn fuzzies(query: &Query) -> Vec<(String, u8)> {
+    match query {
+        Query::Fuzzy(f) => vec![(f.term.clone(), f.distance)],
+        Query::Bool(b) => b
+            .must
+            .iter()
+            .chain(&b.should)
+            .chain(&b.must_not)
+            .flat_map(fuzzies)
+            .collect(),
+        Query::Boost(b) => fuzzies(&b.query),
+        _ => Vec::new(),
+    }
+}
+
+/// ROADMAP 8.2.7: a term long enough for two edits gets a tier step within one edit first, every other term at its
+/// own distance; without such a term the level is its one step.
+#[test]
+fn a_term_of_two_edits_gets_a_tier_step_within_one_edit_first() {
+    let s = schema();
+    let built = steps(&s, "red zapatillas");
+    let applied: Vec<&str> = built.iter().map(|s| s.applied.as_str()).collect();
+    assert_eq!(applied, ["fuzzy:1", "fuzzy"]);
+    // `red` stays exact in both; `zapatilla` (body, `en`) and `zapatillas` (title) are capped at 1 in the tier step.
+    assert_eq!(
+        fuzzies(&built[0].query),
+        [("zapatilla".to_owned(), 1), ("zapatillas".to_owned(), 1)]
+    );
+    assert_eq!(
+        fuzzies(&built[1].query),
+        [("zapatilla".to_owned(), 2), ("zapatillas".to_owned(), 2)]
+    );
+    // Both state L0's text: without the views' terms nothing is corrected.
+    assert!(
+        built
+            .iter()
+            .all(|s| s.effective.as_deref() == Some("red zapatillas") && s.corrected.is_empty())
+    );
+    // Words of 4 to 7 characters take one edit already: one step.
+    let built = steps(&s, "red shoes");
+    assert_eq!(built.len(), 1);
+    assert_eq!(built[0].applied, "fuzzy");
+    // A word that is long in one field only (`running` is 7 in `title`, `run` in `body`) is not capped either.
+    assert_eq!(steps(&s, "running").len(), 1);
+    // A long word in a field L4 may not rewrite stays exact in both, so the steps would be equal: one step.
+    let title_only = |f: FieldId| (f == id(&s, "title")).then_some(1.0);
+    let compiled = compile(&s, "brand:zapatillas red");
+    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&title_only);
+    assert!(Fuzzy.steps(&input).unwrap().len() <= 1);
 }

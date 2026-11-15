@@ -185,6 +185,10 @@ pub(crate) struct LevelInput<'a> {
     /// planning walks them. None by default ([`Self::new`]): L4 then corrects nothing. The search sets them
     /// ([`Self::walking`]).
     pub(crate) terms: Option<&'a dyn TermSource>,
+    /// Whether the plan runs L2 `drop_terms` before this level (ROADMAP 8.2.7): its one-term rung then takes every
+    /// document that holds one of the query's terms as typed, so L3 builds no step requiring some of them exact (it
+    /// would match nothing). True by default ([`Self::new`]); the search sets it from its plan ([`Self::dropping`]).
+    pub(crate) drops_terms: bool,
 }
 
 impl<'a> LevelInput<'a> {
@@ -199,12 +203,21 @@ impl<'a> LevelInput<'a> {
             stats,
             expands: &no_field,
             terms: None,
+            drops_terms: true,
         }
     }
 
     /// This input with L3 expanding the terms of the fields `expands` accepts.
     pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> Option<f64>) -> Self {
         Self { expands, ..self }
+    }
+
+    /// This input with L2 in the plan before it, or not (ROADMAP 8.2.7).
+    pub(crate) fn dropping(self, drops_terms: bool) -> Self {
+        Self {
+            drops_terms,
+            ..self
+        }
     }
 
     /// This input with L4 walking `terms` for its corrections.
