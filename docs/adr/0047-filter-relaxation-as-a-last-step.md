@@ -34,7 +34,12 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
    Required clauses, `should` clauses, `minimum_should_match`, excluded clauses and any deeper filter stay. Excluded
    clauses are the user's words (`-blue`), not a filter, so a user who wrote `-blue` never gets blue, as at L5. All the
    root's filters go together: dropping them one at a time would need an order SPEC does not have. A query whose root
-   has no filter, or whose root is not a `bool`, builds no step, and the level is skipped.
+   has no filter, or whose root is not a `bool`, builds no step, and the level is skipped. So does a query that
+   searches no word (a root whose only `must` is `match_all`, or with neither `must` nor `should`: an empty `q`,
+   excluded clauses alone, a filter-only `bool`): without its filters it would be every live document at score 0,
+   the unfiltered L5 rejected below, and "browse a category" (an empty `q` and a filter) would be padded with
+   other categories. A root of `should` clauses alone keeps them; without the filters one is then required, where
+   L0 under the filters only scored them, so the step matches documents holding a word.
 3. **No filter is marked hard in this leaf.** Telling a tenancy or permission filter from a soft one needs a new
    request key (for example a `filter` that never relaxes beside one that may), a design for the request JSON (ROADMAP
    10.1, 11.x). SPEC and the guides say a request whose filters enforce access must not set `last_resort`. ROADMAP
@@ -48,9 +53,12 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
    fewer than `min_results` from the top), it collects the hits still missing, as any step, so it fills the page as
    far as its matches go. The decision counts hits from the top, so every page of a query makes the same one: a
    cursor's page builds it only through the cursor's last step, and a deeper page with `fill` does not build it when
-   the first page did not. A filtered page is never padded with documents its filters reject.
+   the first page did not. A filtered page is never padded with documents its filters reject. A budget that stops a
+   page before the step holds for the query's later cursor pages, `fill` or not, as the step is not built again to
+   fill them.
 6. **The response states it.** `level` is `filters` once the step is built. `applied` ends with `filters` (or
-   `filters:skipped` when it does not fit §7.1.3's limits; it has no expansions to cut). A new flag,
+   `filters:cut` or `filters:skipped` under §7.1.3's limits: a compiled query's step has no expansions to cut, a
+   programmatic one's `prefix` and `fuzzy` may be cut). A new flag,
    `Relaxation::filters_dropped` (`"filters_dropped": true`), is set when the filter step is the hit step
    (ADR-0043). Since the step is last, the flag means some hit of the ranking does not pass the request's filters. It
    is the same on every page, as `fallback` is, and each such hit's `level` is `filters`. `fallback` is absent then:

@@ -15,7 +15,7 @@ use crate::segment::ReadError;
 pub(crate) const APPLIED: &str = "filters";
 
 /// The filter step: one step, L0's query without its root filters, whose `effective` is L0's text (no word changes).
-/// A query whose root has no filter builds none, so the level is skipped.
+/// A query whose root has no filter, or no word to match, builds none, so the level is skipped.
 #[derive(Debug)]
 pub(crate) struct Filters;
 
@@ -39,16 +39,22 @@ impl LevelTransform for Filters {
     }
 }
 
-/// L0's query with its root `bool`'s filters dropped, `None` when that root has none. The root is where L5 reads the
-/// filters it keeps (SPEC §7.6): a compiled query's root around its clauses (ROADMAP 8.1.17), else a programmatic root
-/// `bool`. A compiled query's root is its query, so the step keeps its clauses' parts as L0 has them.
+/// L0's query with its root `bool`'s filters dropped, `None` when that root has none, or has no word to match. The
+/// root is where L5 reads the filters it keeps (SPEC §7.6): a compiled query's root around its clauses (ROADMAP
+/// 8.1.17), else a programmatic root `bool`. A compiled query's root is its query, so the step keeps its clauses'
+/// parts as L0 has them.
+///
+/// A root whose only positive clause is `match_all`, or that has none (an empty `q`, one of excluded clauses alone, a
+/// filter-only `bool`), searches no word: without its filters it would match every live document the exclusions leave,
+/// at score 0, the unfiltered L5 ADR-0047 rejects. It builds no step.
 fn unfiltered(input: &LevelInput<'_>) -> Option<Query> {
     let root = match (input.compiled, input.original) {
         (Some(compiled), _) => compiled.root(),
         (None, Query::Bool(root)) => Some(root),
         (None, _) => None,
     }?;
-    (!root.filter.is_empty()).then(|| {
+    let words = !root.should.is_empty() || root.must.iter().any(|q| *q != Query::MatchAll);
+    (words && !root.filter.is_empty()).then(|| {
         Query::Bool(BoolQuery {
             filter: Vec::new(),
             ..root.clone()

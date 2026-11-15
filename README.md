@@ -252,7 +252,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
 | **M7** Query engine & ranking | ✅ done | 51/51 |
-| **M8** Zero-results avoidance | 🔨 in progress | 28/49 |
+| **M8** Zero-results avoidance | 🔨 in progress | 29/51 |
 | **M9** Blob store | 🔨 in progress | 5/22 |
 | **M10** Embedded API | ⏳ blocked | 0/23 |
 | **M11** Server | ⏳ blocked | 0/23 |

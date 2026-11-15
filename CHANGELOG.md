@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
   last word level with `fallback: "none"`). Its step is L0's query with the filters of its root `bool` dropped (a
   compiled query's request filter, a programmatic root `bool`'s `filter`); excluded clauses (`-blue`) stay excluded.
+  A query that searches no word (an empty `q`, excluded words alone, a filter-only `bool`) builds no such step, so
+  browsing a category never pads it with other categories.
   It is built only when every earlier step found fewer than `min_results` hits, never to fill a page under `fill`, so
   with the default fallback it runs only when fewer than `min_results` documents pass the filters at all. The
   response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag

@@ -592,6 +592,28 @@ before and after that change. `l4/tiers` costs about 207 µs
 more: the tier step's planning, its exclusion from the step after it, and one more correction walk. `l3/tiers` is 43%
 faster, because its tier step finds the hits and the cascade stops before expanding `w12`.
 
+With L6 `filters`, `filters: "last_resort"` (ROADMAP 8.2.6, ADR-0047), same collection and thread, 2026-11-15, rustc
+1.99.0, AMD Ryzen 5 3600, Linux. Main is 8e57b00, built in its own worktree and target directory from its own bench
+file. Command: `cargo bench -p persia-engine --bench search --
+'search_relaxed/(plain|l0|off|l1|l2|l3|l4|l5/recency|filters/never|filters/last_resort)$'`, then the word levels again
+with `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`. Every case before `filters/*` runs under `"never"`, whose plan, steps and
+exclusions are unchanged: the cascade only asks each level whether it fills. `filters/never` is `w3 w40` under
+`tag = nosuch`, a filter no document passes, through the collection's default levels: every step finds nothing, so it
+is cheaper than `l0` (the filter's empty bitmap ends each step early). `filters/last_resort` is the same with the
+opt-in: the filter step, `w3 w40` without the filter, excludes L5's step alone and finds the 10 hits.
+
+| Recorded | build | `plain` | `l0` | `off` | `l1` | `l2` | `l3` | `l4` | `l5/recency` | `filters/never` | `filters/last_resort` |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| main (8e57b00) | default | 466 µs | 467 µs | 466 µs | 917 µs | 1.36 ms | 22.6 ms | 2.63 ms | 17.5 µs | — | — |
+| ROADMAP 8.2.6 | default | 450 µs | 451 µs | 453 µs | 916 µs | 1.46 ms | 21.7 ms | 2.59 ms | 17.4 µs | 328 µs | 790 µs |
+| main (8e57b00) | 1 codegen unit | 461 µs | 459 µs | 455 µs | 899 µs | 1.46 ms | 22.5 ms | 2.60 ms | — | — | — |
+| ROADMAP 8.2.6 | 1 codegen unit | 462 µs | 448 µs | 455 µs | 909 µs | 1.42 ms | 22.3 ms | 2.64 ms | — | — | — |
+
+The default build reads `l2` 7% slower and the other cases 1–4% faster. With one codegen unit every case is within
+2.5% of main in either direction, and `l2` is 2.5% faster, so the default build's spread is layout. The filter step
+adds about 460 µs to a cascade that found nothing: its planning and search of `w3 w40` over 4 segments, about what L0
+of the same words costs (`l0`), with one excluded step.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

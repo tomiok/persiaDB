@@ -1,8 +1,9 @@
 //! L5 `fallback` (SPEC §7.6, ROADMAP 8.2.5): the collection's own ranking of the documents no earlier step matched.
 //!
 //! The step's query only selects: L0's root `must_not` and `filter` around `match_all`, so excluded clauses stay
-//! excluded and filters are not relaxed (the filter step after it relaxes them, ROADMAP 8.2.6). The cascade excludes the earlier steps
-//! from it as from any step, and ranks its matches itself (`db::relaxed`): by static rank, then recency.
+//! excluded and filters are not relaxed (the filter step after it relaxes them, ROADMAP 8.2.6). The cascade excludes
+//! the earlier steps from it as from any step, and ranks its matches itself (`db::relaxed`): by static rank, then
+//! recency.
 
 use super::drop_terms::effective;
 use super::{LevelInput, LevelTransform, Step};

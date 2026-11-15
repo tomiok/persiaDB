@@ -467,6 +467,125 @@ fn cursor_pages_across_the_filter_step_are_slices_of_one_ranking() {
 }
 
 #[test]
+fn every_cursor_page_across_the_filter_step_counts_the_same_facets() {
+    let db = database(RelaxationConfig::default());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let query = compile(&views, "red shoes", true);
+    let tag = field(&views, "tag");
+    let relax = plan(&views, r#"{"min_results": 3, "filters": "last_resort"}"#);
+    let page = SearchRequest {
+        facets: vec![FacetRequest::new(tag, 10, c.schema()).unwrap()],
+        ..request(1)
+    };
+    let all = views
+        .search_relaxed(
+            &query,
+            &SearchRequest {
+                limit: 10,
+                ..page.clone()
+            },
+            &relax,
+            &exec(),
+        )
+        .unwrap();
+    // Each page searches the steps before its cursor's to count them, L5 and L6 included: the same counts on every page.
+    let mut request = page;
+    let mut seen = Vec::new();
+    loop {
+        let out = views
+            .search_relaxed(&query, &request, &relax, &exec())
+            .unwrap();
+        assert_eq!(out.facets, all.facets, "after {seen:?}");
+        assert_eq!(out.relaxation, all.relaxation);
+        let Some(last) = out.hits.last() else {
+            break;
+        };
+        seen.push(last.hit.document.id().to_owned());
+        request.search_after = Some(last.cursor());
+    }
+    assert_eq!(seen.len(), 4);
+}
+
+#[test]
+fn a_query_without_words_never_drops_its_filters() {
+    let db = database(RelaxationConfig::default());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let tag = field(&views, "tag");
+    let json = r#"{"min_results": 5, "filters": "last_resort"}"#;
+    // An empty `q` and one of excluded words alone browse what the filter keeps: L0 and L5 hold them, and L6 builds no
+    // step, so no document the filter rejects pads the page.
+    for text in ["", "-shoes"] {
+        let query = compile(&views, text, true);
+        let out = run(&views, &query, &request(10), json);
+        assert!(
+            !out.relaxation
+                .applied
+                .iter()
+                .any(|a| a.starts_with("filters")),
+            "{text:?}"
+        );
+        assert!(!out.relaxation.filters_dropped);
+        assert!(out.hits.len() < 5, "{text:?}");
+        assert!(
+            out.hits
+                .iter()
+                .all(|h| ["a", "d"].contains(&h.hit.document.id())),
+            "{text:?}"
+        );
+    }
+    let filter_only = Query::Bool(BoolQuery {
+        filter: vec![tag_is(tag, "x")],
+        ..BoolQuery::default()
+    });
+    let out = run(&views, &filter_only, &request(10), json);
+    assert_eq!(out.hits.len(), 2);
+    assert!(out.hits.iter().all(|h| h.level != RelaxLevel::Filters));
+}
+
+#[test]
+fn a_root_of_should_clauses_requires_one_of_them_without_its_filters() {
+    let db = database(RelaxationConfig::default());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let body = field(&views, "body");
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    // Under the filter the `should` clauses only score: L0 is every `x` document (`a`, `d`). Without it, one is required.
+    let query = Query::Bool(BoolQuery {
+        should: vec![term("socks"), term("blue")],
+        filter: vec![tag_is(field(&views, "tag"), "x")],
+        ..BoolQuery::default()
+    });
+    let out = run(
+        &views,
+        &query,
+        &request(10),
+        r#"{"min_results": 4, "levels": [], "filters": "last_resort"}"#,
+    );
+    let mut dropped: Vec<&str> = out
+        .hits
+        .iter()
+        .filter(|h| h.level == RelaxLevel::Filters)
+        .map(|h| h.hit.document.id())
+        .collect();
+    dropped.sort_unstable();
+    assert_eq!(dropped, ["c", "e", "f"]);
+    assert_eq!(out.hits.len(), 5);
+}
+
+#[test]
 fn facets_count_the_filter_step_and_explain_states_it() {
     let db = database(RelaxationConfig::default());
     let snapshot = db.snapshot();
@@ -627,8 +746,18 @@ fn a_budget_passed_before_the_filter_step_truncates_the_cascade_there() {
                 [("a", RelaxLevel::Exact), ("d", RelaxLevel::Fallback)]
             );
             assert!(!out.relaxation.filters_dropped);
-            // Its cursor's last step is L5's, so the next page tries again.
-            assert_eq!(out.hits.last().unwrap().cursor().relaxed.unwrap().last, 1);
+            // Its cursor's last step is L5's. A cursor page builds the steps through it and L6 only when that page did,
+            // `fill` or not (L6 never fills): the truncation before L6 holds for the query's later pages.
+            let cursor = out.hits.last().unwrap().cursor();
+            assert_eq!(cursor.relaxed.unwrap().last, 1);
+            let next = SearchRequest {
+                search_after: Some(cursor),
+                ..request(10)
+            };
+            let after = views.search_relaxed(&query, &next, &relax, &exec).unwrap();
+            assert_eq!(after.hits, []);
+            assert_eq!(after.relaxation.applied, ["fallback"]);
+            assert!(!after.relaxation.filters_dropped);
         } else {
             assert_eq!(built, ["fallback", "filters"]);
             assert_eq!(out.hits.len(), 4);
@@ -665,7 +794,7 @@ fn case() -> impl Strategy<Value = Case> {
             1..14,
         ),
         prop::collection::vec(0usize..14, 0..3),
-        prop::collection::vec(0..WORDS.len(), 1..4),
+        prop::collection::vec(0..WORDS.len(), 0..4),
         prop::option::of(0..WORDS.len()),
         prop::bool::weighted(0.8),
         1u32..8,
@@ -866,7 +995,8 @@ fn check(case: &Case) -> Result<(), TestCaseError> {
         .last()
         .is_some_and(|a| a == "filters");
     let too_few = never.hits.len() < usize::try_from(case.min_results).unwrap();
-    prop_assert_eq!(built, case.filtered && too_few);
+    // A query of no word builds no step: without the filter it would match every document.
+    prop_assert_eq!(built, case.filtered && too_few && !case.words.is_empty());
     if !built {
         prop_assert_eq!(&last.relaxation, &never.relaxation);
     }

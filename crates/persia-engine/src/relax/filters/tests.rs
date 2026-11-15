@@ -191,3 +191,58 @@ fn the_filter_step_never_fills_and_l5_covers_every_earlier_step() {
     assert!(super::super::fallback::Fallback.fills());
     assert!(!super::super::drop_terms::DropTerms.covers_earlier());
 }
+
+#[test]
+fn a_query_without_words_builds_no_step() {
+    let schema = schema();
+    // An empty `q`, one of excluded clauses alone, and stopwords only: no word to match without the filter, which would
+    // otherwise be every live document the exclusions leave (the unfiltered L5 ADR-0047 rejects).
+    for text in ["", "-blue", "-blue -\"green hat\""] {
+        let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
+        assert!(
+            compiled.root().is_some_and(|r| !r.filter.is_empty()),
+            "{text:?}"
+        );
+        assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
+    }
+    // A programmatic root of filters, or of `match_all` and filters, alike.
+    for must in [Vec::new(), vec![Query::MatchAll]] {
+        let root = Query::Bool(BoolQuery {
+            must,
+            must_not: vec![Query::Term(TermQuery {
+                field: id(&schema, "body"),
+                term: "blue".into(),
+            })],
+            filter: vec![brand_is(&schema, "acme")],
+            ..BoolQuery::default()
+        });
+        assert_eq!(steps(&root, None), []);
+    }
+}
+
+#[test]
+fn a_root_of_should_clauses_keeps_them_and_one_is_then_required() {
+    let schema = schema();
+    let body = id(&schema, "body");
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    // Under L0 the filter makes the `should` clauses optional (they only score); without it, one is required, as a
+    // `bool` of `should` clauses alone requires: the step matches documents holding a word, not every document.
+    let root = BoolQuery {
+        should: vec![term("red"), term("shoes")],
+        filter: vec![brand_is(&schema, "acme")],
+        ..BoolQuery::default()
+    };
+    let step = one(&Query::Bool(root.clone()), None);
+    assert_eq!(
+        step.query,
+        Query::Bool(BoolQuery {
+            filter: Vec::new(),
+            ..root
+        })
+    );
+}

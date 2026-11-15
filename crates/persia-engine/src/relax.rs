@@ -311,7 +311,9 @@ pub(crate) trait LevelTransform: Send + Sync + fmt::Debug {
     /// Whether the level's step, as built, matches every document every earlier step of the cascade matches (SPEC §7.6,
     /// ADR-0047): L5's `match_all` under L0's root `must_not` and `filter`, which every earlier step keeps. Excluding
     /// it then excludes them all, so the cascade excludes only it from the later steps (the filter step). `false`
-    /// unless a level proves it.
+    /// unless a level proves it. It holds only while every level before L5 keeps L0's root `must_not` and `filter` in
+    /// its steps (L1 to L4 do, and a cut never touches them, SPEC §7.1.3): a new level that rewrites them must not run
+    /// before a level that covers the earlier steps, or the steps after it would return documents twice.
     fn covers_earlier(&self) -> bool {
         false
     }
@@ -377,7 +379,8 @@ pub struct RelaxPlan {
 impl RelaxPlan {
     /// The cascade of a collection whose defaults are `collection` (its schema's [`CollectionSchema::relaxation`]),
     /// as a query's `options` override them: L0, then the levels `levels` names in cascade order, then L5 unless
-    /// `fallback` is [`Fallback::None`]. Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
+    /// `fallback` is [`Fallback::None`], then [`RelaxLevel::Filters`] when `filters` is [`FilterRelaxation::LastResort`].
+    /// Disabled (`enabled: false` in either, the query's winning), it is L0 alone.
     ///
     /// # Errors
     /// [`RelaxError::OutOfRange`] for a `min_results` outside [`RelaxationConfig::MIN_RESULTS`] or a `budget_ms` outside

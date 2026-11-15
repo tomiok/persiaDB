@@ -44,7 +44,7 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
 - `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
   the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
   BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
-  levels L1–L5, typo tiers and per-request `relax` options (M8, 28 of 49).
+  levels L1–L5, typo tiers, per-request `relax` options and the `last_resort` filter step (M8, 29 of 51).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
@@ -233,7 +233,7 @@ the analyzer splits), L3 first expands the last word alone, keeping the others a
 the cascade, so a near match ranks above a far one whatever their scores. On a judged typo suite beside the
 relevance gate, the mean nDCG@10 goes from 0.6786 to 0.9835. Stemmed matches are not tiered yet (8.2.10).
 
-Done so far (M8, 28 of 49): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
+Done so far (M8, 29 of 51): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
 the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, L4 `fuzzy` and L5 `fallback` (ROADMAP
 8.2.1–8.2.5), and the `last_resort` filter step (8.2.6), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
 edit (two from 8 characters), and reports the words no document holds in `corrected` ("did you mean",
@@ -674,7 +674,7 @@ while a dependency is unfinished.
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
 | **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
 | **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Done, 51/51 |
-| **M8** Relaxation | The zero-results cascade | M7 | In progress, 28/49 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 29/51 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
 | **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/23 |
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |

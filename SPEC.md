@@ -874,7 +874,7 @@ negative.
 |---|---|---|
 | `enabled` | `true` | `false` runs L0 only |
 | `min_results` | `1` | `1–10 000` |
-| `levels` | `"default"` | `"default"` (every level after L0, as the engine defines them) or an array of `"synonyms"`, `"drop_terms"`, `"prefix"`, `"fuzzy"`: distinct, in cascade order. L0 always runs and is not listed; L5 is `fallback`. `[]` runs L0, then the fallback |
+| `levels` | `"default"` | `"default"` (every level after L0, as the engine defines them) or an array of `"synonyms"`, `"drop_terms"`, `"prefix"`, `"fuzzy"`: distinct, in cascade order. L0 always runs and is not listed; L5 is `fallback`. `[]` runs L0, then the fallback (and L6 with `filters: "last_resort"`) |
 | `fallback` | `"static_rank"` | `"static_rank"` or `"none"`; without `ranking.static_rank`, `static_rank` returns the most recently indexed documents, recent by where the index holds them, not by write time (§7.6 L5) |
 | `fill` | `false` | §7.6 |
 | `filters` | `"never"` | `"never"` or `"last_resort"`: the explicit opt-in to the filter step, after every other level (§7.6) |
@@ -1631,8 +1631,8 @@ Rules:
   the hit step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
   (ROADMAP 8.2.2.2, below), at L3 L0's, at L4 L0's with each corrected word replaced by its correction (ROADMAP
-  8.2.4.3, below), and at L5 its excluded clauses alone (empty when it has none: no word was searched, ROADMAP 8.2.5), and at L6 L0's
-(ROADMAP 8.2.6). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
+  8.2.4.3, below), and at L5 its excluded clauses alone (empty when it has none: no word was searched, ROADMAP 8.2.5), and at L6
+  L0's (ROADMAP 8.2.6). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
   programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
   fuzzy). `corrected` is empty unless the hit step is L4's.
 - Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never). Then one
@@ -1861,7 +1861,12 @@ clause stays as L0 has it: its required clauses, its `should` clauses and `minim
 (a user who wrote `-blue` never gets blue, as at L5), and any filter deeper in the query. All the root's filters are
 dropped together, in no order. No filter is marked as one that must hold (a tenancy or permission filter): a request
 whose filters enforce access must not set `last_resort` (ROADMAP 8.2.13 is a request key for filters that never
-relax). A query whose root has no filter, or a programmatic root that is not a `bool`, skips the level. Its
+relax). A query whose root has no filter, or a programmatic root that is not a `bool`, skips the level. So does a query that
+searches no word: a root whose only `must` clause is `match_all`, or that has neither `must` nor `should` clauses (an
+empty `q`, one of excluded clauses alone, a filter-only `bool`). Without its filters it would match every live
+document the exclusions leave, at score 0: the collection's documents, not matches of any word. A root of `should`
+clauses alone keeps them, and without the filters one of them is required (§7.1: a `bool` with neither `must` nor
+`filter` clauses requires one `should` clause), where L0 under its filters only scored them. Its
 `effective` is L0's text (no word changes, and filters are not part of `q`) and it has no `corrected`. Its hits rank
 by the request's sort, as any step that scores words, and an explained one is L0's tree around its words (§7.7).
 
@@ -1873,8 +1878,9 @@ clauses do not match, L6 runs with `fallback: "static_rank"` only when fewer tha
 filters and the excluded clauses at all. Its hits are then the documents L0's words match that the filters reject and no earlier step matched.
 The decision counts hits from the top, so every page of a query makes the same one: a cursor's page builds L6 only
 when the cursor's page did (its last step), and a deeper page with `fill` does not build it when the first page did
-not. The budget, the request's deadline and cancellation, and §7.1.3's limits apply as at any step (`filters:skipped`
-when it does not fit; it has no expansions to cut). Facets count its matches (§7.5). The response's `level` is
+not. A budget that stops a page before L6 therefore holds for the query's later cursor pages, `fill` or not: unlike
+the word levels and L5, L6 is not built again to fill them. The budget, the request's deadline and cancellation, and §7.1.3's limits apply as at any step (`filters:cut` or
+`filters:skipped`; a compiled query's step has no expansions to cut, a programmatic one's `prefix` and `fuzzy` may). Facets count its matches (§7.5). The response's `level` is
 `filters` once it is built, and `filters_dropped` is `true` when it is the hit step, so a client can tell that some
 hits do not pass the request's filters; each such hit's `level` is `filters`. With it the hit step, `fallback` is
 absent: L5 is not the hit step. Its place is after every step a plan without it builds, so it changes no earlier
