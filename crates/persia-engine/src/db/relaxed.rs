@@ -31,7 +31,8 @@ use crate::relax::{
 };
 use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use crate::search::{
-    Explanation, FacetCounter, FacetCounts, Interrupt, RequestError, SearchError, SearchPlan,
+    Explanation, FacetCounter, FacetCounts, Interrupt, RelaxedExplanation, RequestError,
+    SearchError, SearchPlan,
 };
 use crate::stats::SearchStatistics;
 
@@ -691,7 +692,7 @@ impl CollectionViews<'_> {
             at,
             hit_level,
         } = built.finish(start);
-        let (hits, facets) = self.relaxed_page(ran, request, at, exec)?;
+        let (hits, facets) = self.relaxed_page(ran, &applied, request, at, exec)?;
         let mut relaxation = Relaxation::of(level, applied, compiled, text, truncated);
         // The explicit flag (SPEC §7.6): L5 found the hits the response states.
         relaxation.fallback = (hit_level == RelaxLevel::Fallback)
@@ -795,10 +796,13 @@ impl CollectionViews<'_> {
     }
     /// The page of the steps `ran`: their hits in step order from `request.offset` (counted from the cursor's step
     /// `at.first`), at most `request.limit`, each explained by its step's plan when asked, and the facets of every step
-    /// summed. `at.last` is the cascade's last step and `at.hit` its hit step, for the hits' cursors.
+    /// summed. `at.last` is the cascade's last step and `at.hit` its hit step, for the hits' cursors. An explained hit
+    /// states its level, step and the step's entry of `applied` (one per step after L0) around its step's tree (ROADMAP
+    /// 8.3.4).
     fn relaxed_page(
         &self,
         ran: Vec<Ran>,
+        applied: &[String],
         request: &SearchRequest,
         at: PageSteps,
         exec: &Execution,
@@ -861,6 +865,21 @@ impl CollectionViews<'_> {
                 }
                 None => Vec::new(),
             };
+            // Every step after L0 listed its entry, skipped ones included: step `i`'s is `applied[i - 1]`.
+            let label = step.checked_sub(1).and_then(|i| applied.get(i)).cloned();
+            let explanations = explanations
+                .into_iter()
+                .map(|e| {
+                    e.map(|explanation| {
+                        Explanation::Relaxed(RelaxedExplanation {
+                            level,
+                            step,
+                            applied: label.clone(),
+                            explanation: Box::new(explanation),
+                        })
+                    })
+                })
+                .collect();
             let page = self.page_hits(
                 &segments,
                 page,

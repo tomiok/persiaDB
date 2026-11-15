@@ -17,6 +17,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   "exact"`. New: `RelaxOptions::MAX_JSON_LEN`, `RelaxError::Json`, `relax::RelaxSettings`, `RelaxPlan::settings`,
   `db::Cursor::relax` and `RequestError::CursorRelax`. `fill` is a request key like the others: pages by cursor or offset
   stay slices of one ranking, and a deeper page may build, state and count (facets) more steps.
+- `persia-engine` (breaking): `explain: true` on a relaxed search states which step matched each hit (ROADMAP 8.3.4;
+  SPEC §7.7). Each explained hit's root is now `Explanation::Relaxed(RelaxedExplanation { level, step, applied,
+  explanation })` around its step's tree, with the same score bit for bit: L5's `StaticRank` included, `applied`
+  being the step's `applied` entry (`None` at L0). Code that matched a relaxed hit's root must look under it:
+  `Explanation::scoring` returns the tree under the wrapper. A plain search's explanations are unchanged.
 - `persia-engine` (breaking): every cursor now records the relaxation settings of its search: levels, `min_results`,
   `fill` and `filters`, but not `budget_ms`. They are `None` for a plain search and for a search of L0 alone. A page
   under other settings is `RequestError::CursorRelax`, so a step-0 cursor from a cascade that relaxes no longer pages

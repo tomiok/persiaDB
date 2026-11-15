@@ -579,7 +579,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [~] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
 - [~] 8.3.2 `fill` mode (continue to fill `limit` from looser levels). The engine's cascade fills since 8.1.2 (`RelaxOptions::fill`); what remains is the request option of 8.3.1 and its tests end to end
 - [ ] 8.3.3 Metrics: relaxation level histogram, % queries relaxed, % still empty
-- [ ] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)
+- [~] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)
 
 ## 8.4 Quality evaluation
 - [ ] 8.4.1 Synthetic typo/term-drop query generator (from corpus) with known ground truth

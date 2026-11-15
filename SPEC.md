@@ -1791,7 +1791,7 @@ hold it; only the order of equal static ranks may change once a merge commits. E
 request's keys' values for its document (a `score` key is its static rank), as a hit of any step states them; a
 cursor from an L5 hit pages by L5's order from the cursor's location, whose static rank the page reads again there.
 Each hit's rank score is its step's (below), so L5's hits rank below every earlier step's. An explained L5 hit gives
-its static rank (§7.7). L5 reads no term statistics and scores nothing: with a static rank, each segment visits its FOR blocks
+its static rank, inside the `relaxed` node every explained relaxed hit has (§7.7). L5 reads no term statistics and scores nothing: with a static rank, each segment visits its FOR blocks
 (§5.2.1) best first by the static rank of their bound, stops at the first that cannot beat the worst hit kept, and
 within a block passes over a candidate whose column key is below the smallest key that could (the memtable, without
 bounds, is walked in docid order); by recency alone, it reads each view's
@@ -1885,7 +1885,20 @@ time, in one pass: the view's tree is built once (each leaf an unpruned matcher,
 the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher
 did not read them) and advanced over its hits in docid order, so a page costs about one unpruned search of each view
 holding its hits. It is done for the page's hits only, and a deadline or a cancellation is read before
-each view and while its readers walk (§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
+each view and while its readers walk (§7.3).
+
+A hit of a relaxed search (§7.6, ROADMAP 8.3.4) is explained inside a root `relaxed` node. The node holds the hit's
+`level`, its `step` (0 for L0), that step's entry of the response's `applied`, and the step's own tree. The entry
+includes `:cut` when the step was cut, and is absent at L0, which applies nothing. The node's score is the tree's,
+bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
+`static_rank`. A plain search's hits, and nodes under the root, never have one. Its JSON is one object key:
+```jsonc
+"explanation": { "relaxed": { "level": "fuzzy", "step": 4, "applied": "fuzzy", "score": 1.25,
+                              "explanation": { /* the step's tree, as above */ } } }
+```
+At L0 `applied` is left out. Each hit also states its `level` and `step` outside the explanation (§7.6), whether
+explained or not. The node lets a client that reads only the explanation see what the score belongs to. Highlights
+are post-v1.
 
 ---
 

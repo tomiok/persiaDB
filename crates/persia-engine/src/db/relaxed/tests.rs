@@ -184,6 +184,10 @@ fn l0_with_enough_hits_is_the_plain_search_and_builds_no_level() {
     let plain = views.search_with(&plain_plan, &request, &exec()).unwrap();
     assert_eq!(later.calls(), 0);
     // The same hits, though their cursors record the relaxation settings (ROADMAP 8.3.1): a plain search has none.
+    assert!(relaxed.hits.iter().all(|h| matches!(
+        &h.hit.explanation,
+        Some(crate::search::Explanation::Relaxed(r)) if r.step == 0 && r.applied.is_none()
+    )));
     assert!(
         relaxed
             .hits
@@ -196,6 +200,8 @@ fn l0_with_enough_hits_is_the_plain_search_and_builds_no_level() {
         .iter()
         .map(|h| crate::db::SearchHit {
             relax: None,
+            // An explained relaxed hit states its step around the tree a plain search gives (ROADMAP 8.3.4).
+            explanation: h.hit.explanation.as_ref().map(|e| e.scoring().clone()),
             ..h.hit.clone()
         })
         .collect();
@@ -2549,5 +2555,6 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
     assert_eq!(applied(), Vec::<String>::new());
 }
 
+mod explain;
 mod fill;
 mod options;

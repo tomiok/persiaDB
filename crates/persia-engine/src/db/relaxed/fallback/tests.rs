@@ -431,8 +431,8 @@ fn a_hit_states_the_sorts_values_and_explains_its_static_rank() {
         ]
     );
     assert_eq!(
-        e.explanation,
-        Some(Explanation::StaticRank {
+        e.explanation.as_ref().map(Explanation::scoring),
+        Some(&Explanation::StaticRank {
             score: 9.0,
             value: Some(9.0)
         })
@@ -444,8 +444,8 @@ fn a_hit_states_the_sorts_values_and_explains_its_static_rank() {
         .unwrap();
     assert_eq!(j.hit.sort[0], crate::search::SortValue::Missing);
     assert_eq!(
-        j.hit.explanation,
-        Some(Explanation::StaticRank {
+        j.hit.explanation.as_ref().map(Explanation::scoring),
+        Some(&Explanation::StaticRank {
             score: 0.0,
             value: None
         })

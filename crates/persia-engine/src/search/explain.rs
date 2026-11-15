@@ -9,6 +9,7 @@
 use roaring::RoaringBitmap;
 
 use crate::query::Filter;
+use crate::relax::RelaxLevel;
 use crate::schema::FieldId;
 use crate::score::TermScorer;
 use crate::segment::{ReadError, norms};
@@ -71,6 +72,9 @@ pub enum Explanation {
         /// collection has no static rank or the document no value.
         value: Option<f64>,
     },
+    /// A hit of the relaxation cascade (SPEC §7.6, §7.7, ROADMAP 8.3.4): the level and step that matched it, around how
+    /// its step scored it. Only a relaxed search's hits have it, at the root, and only there.
+    Relaxed(RelaxedExplanation),
 }
 
 impl Explanation {
@@ -84,6 +88,33 @@ impl Explanation {
             | Self::Constant { score, .. }
             | Self::StaticRank { score, .. } => *score,
             Self::All => 0.0,
+            Self::Relaxed(r) => r.explanation.score(),
+        }
+    }
+}
+
+/// Which step of the relaxation cascade matched a hit (SPEC §7.6, §7.7, ROADMAP 8.3.4), around its step's explanation,
+/// whose score it has, bit for bit.
+#[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
+pub struct RelaxedExplanation {
+    /// The level of the step (`"level"`).
+    pub level: RelaxLevel,
+    /// The step's index in the cascade, 0 for L0 (`"step"`).
+    pub step: usize,
+    /// What the step applied, as the response's `applied` lists it (`"drop_terms:75%"`, `"prefix:cut"`, `"fallback"`);
+    /// `None` for L0, which applies nothing.
+    pub applied: Option<String>,
+    /// How the step scored the hit: its query's tree, or L5's [`Explanation::StaticRank`].
+    pub explanation: Box<Explanation>,
+}
+
+impl Explanation {
+    /// The tree that scores the hit: under [`Self::Relaxed`], its step's explanation; any other node as it is.
+    pub fn scoring(&self) -> &Self {
+        match self {
+            Self::Relaxed(r) => r.explanation.scoring(),
+            other => other,
         }
     }
 }
@@ -753,5 +784,27 @@ mod tests {
         let kept = Selections::default();
         kept.keep(1, &RoaringBitmap::new(), false);
         assert_eq!(plan.explain_kept(&view, &[1_000], &kept).unwrap(), [None]);
+    }
+
+    #[test]
+    fn a_relaxed_node_scores_as_the_tree_it_wraps() {
+        let tree = Explanation::Constant {
+            score: 0.1 + 0.2,
+            query: Box::new(Explanation::All),
+        };
+        let wrapped = Explanation::Relaxed(RelaxedExplanation {
+            level: RelaxLevel::Fuzzy,
+            step: 4,
+            applied: Some("fuzzy".into()),
+            explanation: Box::new(tree.clone()),
+        });
+        assert_eq!(wrapped.score().to_bits(), tree.score().to_bits());
+        assert_eq!(wrapped.scoring(), &tree);
+        assert_eq!(tree.scoring(), &tree);
+        let l5 = Explanation::StaticRank {
+            score: 7.5,
+            value: Some(7.5),
+        };
+        assert_eq!(l5.scoring(), &l5);
     }
 }
