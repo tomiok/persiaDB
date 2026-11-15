@@ -1,6 +1,7 @@
 //! L4 `fuzzy` (SPEC §7.6, ROADMAP 8.2.4): the query with its words also matching the terms within a few edits.
 //!
-//! One step, listed as `fuzzy`, built from L0's query: every term of at least [`MIN_LEN`] characters becomes a `fuzzy`
+//! One step, listed as `fuzzy`, built from L0's query (after a tier step `fuzzy:1` within one edit when a term may
+//! take two, ROADMAP 8.2.7): every term of at least [`MIN_LEN`] characters becomes a `fuzzy`
 //! query of [`DEFAULT_MAX_EXPANSIONS`] terms at the distance its length allows ([`distance`]), which planning expands
 //! over the views' terms (each segment's FST intersected with the automaton, SPEC §7.1) and keeps by collection `df`.
 //! The terms rewritten are L3's ([`super::words`]): words of the user text, in `text` fields whose analyzer does not
@@ -45,25 +46,26 @@ pub(crate) struct Fuzzy;
 
 impl LevelTransform for Fuzzy {
     /// The tier step within one edit (`fuzzy:1`, ROADMAP 8.2.7, ADR-0046), when a term is long enough for two edits
-    /// and capping it changes the query, then the step at each term's own distance (`fuzzy`).
+    /// and capping it changes the query, then the step at each term's own distance (`fuzzy`). The queries are compared
+    /// before either step's corrections are looked for, so a query without such a term walks the terms once.
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
-        let Some(full) = step(input, TWO_EDITS)? else {
+        let Some(full) = query(input, TWO_EDITS) else {
             return Ok(Vec::new());
         };
-        match step(input, 1)? {
-            Some(near) if near.query != full.query => Ok(vec![near, full]),
-            _ => Ok(vec![full]),
+        let mut steps = Vec::with_capacity(2);
+        if let Some(near) = query(input, 1).filter(|near| *near != full) {
+            steps.push(step(input, near, 1)?);
         }
+        steps.push(step(input, full, TWO_EDITS)?);
+        Ok(steps)
     }
 }
 
 /// The most edits L4 allows: [`distance`] of a term of [`TWO_EDITS_LEN`] characters or more.
 const TWO_EDITS: u8 = 2;
 
-/// L4's step with every term's distance capped at `max` (SPEC §7.6, ROADMAP 8.2.7): listed as `fuzzy` at
-/// [`TWO_EDITS`], which caps nothing, and as `fuzzy:1` at 1, its corrections found within the capped distances too.
-/// `None` when it rewrites no term.
-fn step(input: &LevelInput<'_>, max: u8) -> Result<Option<Step>, ReadError> {
+/// L4's query with every term's distance capped at `max` (SPEC §7.6, ROADMAP 8.2.7); `None` when it rewrites no term.
+fn query(input: &LevelInput<'_>, max: u8) -> Option<Query> {
     let leaf = |field: FieldId, term: &str, _last: bool| {
         capped(term, max).map(|distance| fuzzy(field, term, distance))
     };
@@ -71,13 +73,15 @@ fn step(input: &LevelInput<'_>, max: u8) -> Result<Option<Step>, ReadError> {
         expands: input.expands,
         leaf: &leaf,
     };
-    let query = match input.compiled {
+    match input.compiled {
         Some(compiled) => words.of_compiled(compiled),
         None => words.of_query(input.original),
-    };
-    let Some(query) = query else {
-        return Ok(None);
-    };
+    }
+}
+
+/// The step of `query`, L4's [`query`] at `max`: listed as `fuzzy` at [`TWO_EDITS`], which caps nothing, and as
+/// `fuzzy:1` at 1, its corrections found within the capped distances too.
+fn step(input: &LevelInput<'_>, query: Query, max: u8) -> Result<Step, ReadError> {
     let (effective, corrected) = match input.compiled {
         Some(compiled) => {
             let found = corrections(compiled, input, max)?;
@@ -91,13 +95,13 @@ fn step(input: &LevelInput<'_>, max: u8) -> Result<Option<Step>, ReadError> {
     } else {
         "fuzzy".to_owned()
     };
-    Ok(Some(Step {
+    Ok(Step {
         query,
         applied,
         effective,
         alternatives: None,
         corrected,
-    }))
+    })
 }
 
 /// [`distance`] of `term`, at most `max`.

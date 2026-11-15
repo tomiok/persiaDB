@@ -35,7 +35,7 @@ head:
             "name": "Does Persia DB do prefix search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "As a relaxation step, yes. L3 builds one prefix step (and, without L2 in the plan, a step that expands the last term alone first). The last analyzed term, and other analyzed terms of at least 3 characters, become prefixes of at most 50 terms, kept by collection document frequency and expanded over each view with an FST range. Phrases, field clauses, excluded clauses, filters, and edge_ngram fields stay exact. A suggest completion API is not written. There is no search method on persia::Db."
+              "text": "As a relaxation step, yes. L3 builds one prefix step (and, unless L2 already took those documents, a step that expands the last term alone first). The last analyzed term, and other analyzed terms of at least 3 characters, become prefixes of at most 50 terms, kept by collection document frequency and expanded over each view with an FST range. Phrases, field clauses, excluded clauses, filters, and edge_ngram fields stay exact. A suggest completion API is not written. There is no search method on persia::Db."
             }
           },
           {

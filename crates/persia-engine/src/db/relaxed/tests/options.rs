@@ -197,8 +197,21 @@ fn relax_false_returns_l0_alone_states_exact_and_may_be_empty() {
         assert!(r.applied.is_empty() && !r.relaxed() && !r.truncated && r.fallback.is_none());
         let out = run(&views, &all_of(body, &["red", "shoes"]), &request(10), json);
         assert_eq!(ids(&out), [("a", 0)]);
-        // Its cursors record no settings, as a plain search's.
+        // Its cursors record no settings, as a plain search's, so they page a plain search.
         assert_eq!(out.hits[0].cursor().relax, None);
+        let plain = crate::search::SearchPlan::with_terms(
+            &all_of(body, &["red", "shoes"]),
+            c.schema(),
+            &c.search_statistics(&memtable),
+            &views,
+        )
+        .unwrap();
+        let after = SearchRequest {
+            search_after: Some(out.hits[0].cursor()),
+            ..request(10)
+        };
+        let rest = views.search_with(&plain, &after, &exec()).unwrap();
+        assert_eq!(rest.hits.len(), 0);
     }
     // A value out of range is an error also when the query turns the cascade off.
     assert!(matches!(

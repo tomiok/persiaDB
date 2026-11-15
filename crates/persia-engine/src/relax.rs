@@ -185,9 +185,11 @@ pub(crate) struct LevelInput<'a> {
     /// planning walks them. None by default ([`Self::new`]): L4 then corrects nothing. The search sets them
     /// ([`Self::walking`]).
     pub(crate) terms: Option<&'a dyn TermSource>,
-    /// Whether the plan runs L2 `drop_terms` before this level (ROADMAP 8.2.7): its one-term rung then takes every
-    /// document that holds one of the query's terms as typed, so L3 builds no step requiring some of them exact (it
-    /// would match nothing). True by default ([`Self::new`]); the search sets it from its plan ([`Self::dropping`]).
+    /// Whether the cascade built L2's last rung (one term) before this level and did not skip it (ROADMAP 8.2.7): that
+    /// rung takes every document that holds one of the query's terms as typed, so L3 builds no step requiring some of
+    /// them exact (it would match nothing). True by default ([`Self::new`]); the search sets it from the steps it built
+    /// ([`Self::dropping`]). A query L2 builds no step for (one required clause, even one the analyzer splits in
+    /// several terms) or a plan without L2 leaves it false.
     pub(crate) drops_terms: bool,
 }
 
@@ -212,7 +214,7 @@ impl<'a> LevelInput<'a> {
         Self { expands, ..self }
     }
 
-    /// This input with L2 in the plan before it, or not (ROADMAP 8.2.7).
+    /// This input with L2's one-term rung built before it, or not (ROADMAP 8.2.7).
     pub(crate) fn dropping(self, drops_terms: bool) -> Self {
         Self {
             drops_terms,

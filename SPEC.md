@@ -1737,8 +1737,8 @@ L0's other required clauses stay as they are, and so do its root's `must_not` (i
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
 level. Its `effective` is L0's text, as every clause is kept. Building the step reads no statistics (planning reads the `df`s that keep the
 expansions, §7.1); held to §7.1.3's limits,
-its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Without L2 in the plan, L3 may first build a
-tier step, `prefix:last` (below). Its steps are not nested (each `prefix` keeps its own 50 terms), so each stays
+its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Unless L2's one-term rung came first, L3 may
+first build a tier step, `prefix:last` (below). Its steps are not nested (each `prefix` keeps its own 50 terms), so each stays
 excluded from the later steps (the cascade, below).
 
 L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query (and before it the tier step of
@@ -1787,12 +1787,14 @@ exclusion, ranking by step before the request's sort, rank scores, paging, pruni
   needs, not their sum: `fuzzy:1` holds the documents within one edit of every word. A query whose terms are all
   shorter has the one step. Its corrections are found within the capped distances, so when `fuzzy:1` is the hit
   step, `corrected` and `effective` name the terms within one edit.
-- **L3, `prefix:last`.** When L3 expands another term beside the last one, and the plan has no L2 before it, L3 first
-  builds its query with the last term alone expanded, listed as `prefix:last`, then its step, `prefix`. Every other
-  word must then be held as typed, so a document holding it exactly ranks above one that needs it completed. After
-  L2 the tier step is not built. L2's one-term rung already took every document holding one of the words as typed,
-  so the tier step would match nothing. With the default levels, every L3 hit needs each of its words completed.
-  Both steps state L0's text.
+- **L3, `prefix:last`.** When L3 expands another term beside the last one, L3 first builds its query with the last
+  term alone expanded, listed as `prefix:last`, then its step, `prefix`. Every other word must then be held as typed,
+  so a document holding it exactly ranks above one that needs it completed. The tier step is not built when the
+  cascade built L2's last rung (one term) before it and did not skip it. That rung took every document holding one of
+  the query's terms as typed, so the tier step would match nothing. It is built in the other cases: a plan without
+  L2, a query L2 builds no step for (one required clause, also a word the analyzer splits, as `spider-ma` into
+  `spider` and `ma`), or a rung skipped for the limits. The decision depends only on the steps built, so every page
+  of a query makes the same one. Both steps state L0's text.
 - **Not tiered.** L0's stemming is not tiered: a word matched as typed does not rank above one matched by its stem.
   The index holds the stems alone, so the two cannot be told apart (ROADMAP 8.2.10). L1 is not tiered either. Every
   L1 hit lacks the original of some run, since L0 took those documents, and counting runs per hit would need a key
@@ -1929,7 +1931,10 @@ A hit of a relaxed search (§7.6, ROADMAP 8.3.4) is explained inside a root `rel
 `level`, its `step` (0 for L0), that step's entry of the response's `applied`, and the step's own tree. The entry
 includes `:cut` when the step was cut, and is absent at L0, which applies nothing. The node's score is the tree's,
 bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
-`static_rank`. A plain search's hits, and nodes under the root, never have one. Its JSON is one object key:
+`static_rank`. Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
+with `relax: false` wraps its L0 hits as step 0: the two rank alike (§7.6), but their explanations differ by this
+node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is defined
+with the request and response JSON (ROADMAP 10.1, 11.x):
 ```jsonc
 "explanation": { "relaxed": { "level": "fuzzy", "step": 4, "applied": "fuzzy", "score": 1.25,
                               "explanation": { /* the step's tree, as above */ } } }

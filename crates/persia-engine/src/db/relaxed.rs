@@ -463,10 +463,16 @@ impl Start {
             last: 0,
             hit: 0,
         });
+        // A plan of L0 alone stops at L0 whatever a hand-built cursor says of its cascade.
+        let (last, hit) = if relax.is_some() {
+            (at.last, at.hit)
+        } else {
+            (0, 0)
+        };
         Self {
             step: at.step,
-            last: Some(at.last),
-            hit: Some(at.hit),
+            last: Some(last),
+            hit: Some(hit),
             relax,
         }
     }
@@ -512,8 +518,10 @@ impl CollectionViews<'_> {
     /// With a `search_after` cursor ([`RelaxedHit::cursor`]), the steps through the cursor's last one are built
     /// again, those before the cursor's step are not searched for hits (they rank before it; with facets they are
     /// still counted), the cursor's step is searched after the cursor and later ones from their top, until the page
-    /// is full or the last step is passed (with `fill`, until the page is full). A cursor without a step
-    /// ([`SearchHit::cursor`]) is step 0 of a cascade that stopped at L0.
+    /// is full or the last step is passed (with `fill`, until the page is full). A cursor without a step is step 0 of a
+    /// cascade that stopped at L0. A cursor pages only under the relaxation settings that made it
+    /// ([`RelaxPlan::settings`]): a plain search's ([`SearchHit::cursor`]) pages a plan of L0 alone (`relax: false`).
+    /// An explained hit has a root [`Explanation::Relaxed`] naming its step (ROADMAP 8.3.4).
     ///
     /// `query` is a [`Query`] or a [`Compiled`] one ([`RelaxedQuery`]); only a compiled query has the user text the
     /// response's [`Relaxation::original`] and [`Relaxation::effective`] state.
@@ -563,7 +571,8 @@ impl CollectionViews<'_> {
     ///
     /// # Errors
     /// As [`Self::search_with`]; [`RequestError::CursorStep`] for a cursor whose step is after its last, or from a step
-    /// after L0 when `relax` does not relax;
+    /// after L0 when `relax` does not relax; [`RequestError::CursorRelax`] for a cursor from a search with other
+    /// relaxation settings ([`RelaxPlan::settings`]);
     /// [`RelaxedSearchError::Plan`] when a step cannot be planned, or a level cannot read the statistics it builds its steps
     /// from (L2 reads its terms' `df`, L4 walks the term dictionaries of the words it corrects).
     pub fn search_relaxed<'q>(
@@ -591,8 +600,6 @@ impl CollectionViews<'_> {
             .or_else(|| compiled.map(|c| c.limits))
             .unwrap_or_default();
         let expands = |field: FieldId| self.expands(field);
-        // L3 builds its tier step only without L2 before it, which would take every match of it (ROADMAP 8.2.7).
-        let drops_terms = relax.levels().any(|l| l == RelaxLevel::DropTerms);
         let mut built = Built::new(collection.schema(), limits);
         let mut found = 0usize;
         // The end of the budget, read from when L0 finishes (SPEC §7.6): L0 itself is never cut by it.
@@ -609,6 +616,13 @@ impl CollectionViews<'_> {
                 break;
             }
             let first = built.ran.is_empty().then_some(query);
+            // L3 builds its tier step only when L2's last rung (one term) was not built, or was skipped: that rung takes every
+            // match of the tier step (ROADMAP 8.2.7). The same snapshot, query and limits build the same steps on every page.
+            let drops_terms = built
+                .ran
+                .iter()
+                .rfind(|r| r.level == RelaxLevel::DropTerms)
+                .is_some_and(|r| !r.skipped);
             let input = LevelInput::new(query, compiled, &stats)
                 .expanding(&expands)
                 .dropping(drops_terms);

@@ -73,8 +73,10 @@ pub struct CursorOrigin {
 /// Where a page starts (SPEC §7.4): a hit's sort values, location and [`CursorOrigin`], from [`SearchHit::cursor`].
 /// Exact only for that snapshot, collection and memtable view, and under a plan with the same proximity setting
 /// ([`RequestError::CursorProximity`]). Another view is [`RequestError::CursorView`]: locations are indices into the
-/// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. Other plan and
-/// query options are not recorded (ROADMAP 10.1.7): paging is exact only when they are unchanged.
+/// view that returned the hit, so a cursor from elsewhere would repeat a tied hit or pass one over. It also records the
+/// relaxation settings of its search ([`Self::relax`]), and a page under others is [`RequestError::CursorRelax`]
+/// (ROADMAP 8.3.1). Other plan and query options are not recorded (ROADMAP 10.1.7): paging is exact only when they
+/// are unchanged.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cursor {
     /// One value per sort key.
@@ -213,7 +215,8 @@ impl CollectionViews<'_> {
     /// cursor that does not fit the sort; [`RequestError::CursorView`] for a cursor from another snapshot,
     /// collection or memtable view; [`RequestError::CursorProximity`] for a cursor from a plan with the other
     /// proximity setting; [`RequestError::CursorStep`] for a cursor from a relaxation step after L0
-    /// ([`super::RelaxedHit::cursor`]); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
+    /// ([`super::RelaxedHit::cursor`]); [`RequestError::CursorRelax`] for a cursor of a relaxing cascade (a plain search
+    /// runs L0 alone, as `relax: false` does); [`RequestError::TooManyFacets`] above [`MAX_FACETS`];
     /// [`RequestError::MismatchedSortValue`] if two sort values are not of the key's type;
     /// [`RequestError::HitSegment`] if a hit names a segment the views do not have (the hit is not skipped);
     /// [`RequestError::Read`] as [`SearchPlan::matcher`], or for a document that cannot be read.

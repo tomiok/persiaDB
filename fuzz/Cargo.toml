@@ -210,6 +210,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "relax_json"
+path = "fuzz_targets/relax_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "blob_manifest"
 path = "fuzz_targets/blob_manifest.rs"
 test = false

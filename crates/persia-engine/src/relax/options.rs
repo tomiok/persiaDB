@@ -4,7 +4,9 @@
 use std::fmt;
 
 use super::{RelaxLevel, RelaxPlan};
-use crate::schema::{Fallback, FilterRelaxation, Levels, RelaxationConfig, relax_from_json};
+use crate::schema::{
+    Fallback, FilterRelaxation, Levels, RawRelaxation, RelaxationConfig, relax_from_json,
+};
 
 /// A query's `relax` (SPEC §7.1, §7.6): each setting it gives overrides the collection's ([`RelaxationConfig`]), and
 /// those it leaves `None` keep it, one setting at a time. The default overrides nothing. Every setting of SPEC §6.2.3's
@@ -68,7 +70,24 @@ impl RelaxOptions {
                 Self::MAX_JSON_LEN
             )));
         }
-        let options = relax_from_json(json).map_err(RelaxError::Json)?;
+        let RawRelaxation {
+            enabled,
+            min_results,
+            levels,
+            fallback,
+            fill,
+            filters,
+            budget_ms,
+        } = relax_from_json(json).map_err(RelaxError::Json)?;
+        let options = Self {
+            enabled,
+            min_results,
+            levels,
+            fallback,
+            fill,
+            filters,
+            budget_ms,
+        };
         options.validate()?;
         Ok(options)
     }

@@ -11,8 +11,6 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::relax::RelaxOptions;
-
 use super::{
     AnalyzerRef, CollectionSchema, Fallback, FieldKind, FilterRelaxation, KeywordOptions, Level,
     Levels, MAX_SCHEMA_JSON_LEN, Parts, RankFn, RankingConfig, RelaxationConfig, SchemaError,
@@ -355,51 +353,51 @@ struct RawStaticRank {
     function: Option<RankFn>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRelaxation {
+pub(crate) struct RawRelaxation {
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    min_results: Option<u32>,
+    pub(crate) min_results: Option<u32>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    levels: Option<Levels>,
+    pub(crate) levels: Option<Levels>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    fallback: Option<Fallback>,
+    pub(crate) fallback: Option<Fallback>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    fill: Option<bool>,
+    pub(crate) fill: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    filters: Option<FilterRelaxation>,
+    pub(crate) filters: Option<FilterRelaxation>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    budget_ms: Option<u32>,
+    pub(crate) budget_ms: Option<u32>,
 }
 
 fn from_raw(raw: RawSchema) -> Result<CollectionSchema, SchemaError> {
@@ -661,13 +659,13 @@ impl<'de> Deserialize<'de> for Levels {
 /// A query's `relax` (SPEC §7.6, ROADMAP 8.3.1): `false`, `true`, or an object of the keys of a collection's
 /// `relaxation` (SPEC §6.2.3), read as strictly (ADR-0022): an unknown or repeated key, `null` for a key, and any other
 /// shape are errors. The values are not checked against their ranges here ([`RelaxOptions::validate`]).
-pub(crate) fn relax_from_json(json: &str) -> Result<RelaxOptions, String> {
-    let Relax(options) = serde_json::from_str(json).map_err(|e| e.to_string())?;
-    Ok(options)
+pub(crate) fn relax_from_json(json: &str) -> Result<RawRelaxation, String> {
+    let Relax(raw) = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(raw)
 }
 
 /// [`relax_from_json`]'s value.
-struct Relax(RelaxOptions);
+struct Relax(RawRelaxation);
 
 impl<'de> Deserialize<'de> for Relax {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -681,23 +679,14 @@ impl<'de> Deserialize<'de> for Relax {
             }
 
             fn visit_bool<E: de::Error>(self, enabled: bool) -> Result<Relax, E> {
-                Ok(Relax(RelaxOptions {
+                Ok(Relax(RawRelaxation {
                     enabled: Some(enabled),
-                    ..RelaxOptions::default()
+                    ..RawRelaxation::default()
                 }))
             }
 
             fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Relax, A::Error> {
-                let r = RawRelaxation::deserialize(de::value::MapAccessDeserializer::new(map))?;
-                Ok(Relax(RelaxOptions {
-                    enabled: r.enabled,
-                    min_results: r.min_results,
-                    levels: r.levels,
-                    fallback: r.fallback,
-                    fill: r.fill,
-                    filters: r.filters,
-                    budget_ms: r.budget_ms,
-                }))
+                RawRelaxation::deserialize(de::value::MapAccessDeserializer::new(map)).map(Relax)
             }
         }
 

@@ -343,3 +343,32 @@ fn a_completion_scores_as_a_term_of_its_field() {
         );
     }
 }
+
+/// ROADMAP 8.2.7: L3's tier step depends on what L2 built, not on the plan. A word the analyzer splits (`spider-ma` is
+/// `spider` and `ma` under `standard`) is one clause, so L2 builds no step for it, and with the collection's levels L3
+/// still searches `spider` exactly beside `ma` completed first (`prefix:last`), then both completed.
+#[test]
+fn a_split_word_gets_the_tier_step_under_the_default_levels() {
+    let db = database(&["spider man", "spiders mask", "other words"]);
+    let every = RelaxPlan::new(
+        &RelaxationConfig::default(),
+        &RelaxOptions {
+            min_results: Some(*RelaxationConfig::MIN_RESULTS.end()),
+            fallback: Some(Fallback::None),
+            ..RelaxOptions::default()
+        },
+    )
+    .unwrap();
+    let out = search_by(&db, &AnalyzerRegistry::builtin(), "spider-ma", &every);
+    assert_eq!(out.relaxation.applied[..2], ["prefix:last", "prefix"]);
+    assert_eq!(hits(&out), [(1, "d0".to_owned()), (2, "d1".to_owned())]);
+    // Two clauses: L2's one-term rung takes `spider man`, so L3 builds its one step.
+    let out = search_by(&db, &AnalyzerRegistry::builtin(), "spider ma", &every);
+    assert_eq!(out.relaxation.applied[0], "drop_terms:75%");
+    assert!(
+        !out.relaxation
+            .applied
+            .iter()
+            .any(|a| a.starts_with("prefix:last"))
+    );
+}

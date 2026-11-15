@@ -225,3 +225,37 @@ fn a_step_after_a_skipped_one_states_its_own_applied() {
         Some(Explanation::Relaxed(r)) if r.applied.as_deref() == Some("fallback")
     ));
 }
+
+#[test]
+fn a_cut_step_states_its_cut_applied() {
+    let (db, body) = database();
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    // L3's step is a `prefix` of 50 expansions, over the 10 allowed: it is cut to 10 and still finds `epsilon`.
+    let eps = Query::Prefix(crate::query::PrefixQuery {
+        field: body,
+        prefix: "eps".into(),
+        max_expansions: 50,
+    });
+    let relax = every_level(body)
+        .with_level(RelaxLevel::Prefix, Stub::new(vec![step(eps, "prefix")]))
+        .with_limits(QueryLimits {
+            max_expansions: 10,
+            ..QueryLimits::default()
+        });
+    let out = views
+        .search_relaxed(&term(body, "alpha"), &explained(10), &relax, &exec())
+        .unwrap();
+    check(&out);
+    let epsilon = out
+        .hits
+        .iter()
+        .find(|h| h.hit.document.id() == "d4")
+        .unwrap();
+    assert!(matches!(
+        &epsilon.hit.explanation,
+        Some(Explanation::Relaxed(r)) if r.level == RelaxLevel::Prefix && r.applied.as_deref() == Some("prefix:cut")
+    ));
+}

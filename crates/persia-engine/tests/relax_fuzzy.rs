@@ -652,3 +652,39 @@ fn tier_steps_page_by_cursor_as_one_ranking() {
         [("sandalls", "scandals")]
     );
 }
+
+/// ROADMAP 8.2.7, SPEC §7.1.3: a tier step counts against the limits as any step, and once searched the next step
+/// excludes it in full, its expansions counted there and not cut. Two words of 8 characters or more: 100 expansions a
+/// step.
+#[test]
+fn tier_steps_are_held_to_the_limits_and_counted_where_excluded() {
+    let db = database(&["zapatillas bolsitas", "zapatos bolsas", "botas"]);
+    let limits = |max_expansions| QueryLimits {
+        max_expansions,
+        ..QueryLimits::default()
+    };
+    for (max, applied) in [
+        (1024, ["fuzzy:1", "fuzzy"]),
+        // `fuzzy:1` fits; `fuzzy` has 50 left beside the 100 it excludes, so it is cut.
+        (150, ["fuzzy:1", "fuzzy:cut"]),
+        // Nothing left beside `fuzzy:1`: `fuzzy` is skipped.
+        (100, ["fuzzy:1", "fuzzy:skipped"]),
+        // `fuzzy:1` is cut to 60, which `fuzzy` then excludes: nothing left.
+        (60, ["fuzzy:1:cut", "fuzzy:skipped"]),
+        // One expansion for two `fuzzy` queries: both skipped, and a skipped step is not excluded.
+        (1, ["fuzzy:1:skipped", "fuzzy:skipped"]),
+    ] {
+        let out = search(&db, "zapatilas bolsitass", Some(limits(max)));
+        assert_eq!(out.relaxation.applied, applied, "max_expansions {max}");
+        let ids: Vec<String> = hits(&out).into_iter().map(|h| h.1).collect();
+        let distinct: BTreeSet<&String> = ids.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            ids.len(),
+            "max_expansions {max}: a hit twice"
+        );
+        if max > 1 {
+            assert_eq!(hits(&out), [(1, "d0".to_owned())], "max_expansions {max}");
+        }
+    }
+}

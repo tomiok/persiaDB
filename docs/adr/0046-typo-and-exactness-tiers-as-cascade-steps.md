@@ -35,11 +35,15 @@ steps, with exclusion, rank bands, cursors, the budget, facets and `explain` bui
    one edit off on one word and exact on the other. BM25F and the edit-distance weight order them within the step,
    and the exact term weighs more there. The sum would need one step per distribution of edits over the words, which
    grows combinatorially, or a per-hit key (item 6).
-3. **Exact above completed, at L3 without L2.** When L3 expands a term besides the last one, and the plan has no L2,
-   L3 builds `prefix:last` first: the last term alone expanded, every other word as typed. After L2 it is not built.
-   L2's one-term rung takes every document holding one of the words as typed, so the tier step would match nothing
-   and only cost a search. With the default levels, every L3 hit already needs each of its words completed.
-   `prefix:last` matters for plans without L2, such as search as you type.
+3. **Exact above completed, at L3, unless L2 took those documents.** When L3 expands a term besides the last one, L3
+   builds `prefix:last` first: the last term alone expanded, every other word as typed. It is not built when the
+   cascade built L2's last rung (one term) and did not skip it. That rung takes every document holding one of the
+   query's terms as typed, so the tier step would match nothing and only cost a search. The decision reads the steps
+   built, not the plan. A query L2 builds no step for still gets the tier: one required clause, such as a word the
+   analyzer splits (`spider-ma` is `spider` and `ma`), or a programmatic `bool` nested in one `must` clause. So does a
+   query whose L2 rung was skipped for the limits, and any plan without L2, such as search as you type. With the
+   default levels, a multi-clause query's L3 hits already need each of their words completed. The same snapshot,
+   query and limits build the same steps, so every page of a query makes the same decision.
 4. **Each tier step states its own text.** `fuzzy:1` finds its corrections within the capped distances. When it is
    the hit step (ADR-0043), `corrected` and `effective` name terms one edit away. `prefix:last` states L0's text, as
    `prefix` does. `level` stays the level's name (`fuzzy`, `prefix`), and `applied` lists the tier step
@@ -64,8 +68,11 @@ steps, with exclusion, rank bands, cursors, the budget, facets and `explain` bui
   without L2. Its mean nDCG@10 is 0.6786 before the tiers and 0.9835 with them: 1.0000 on the four misspellings
   (from 0.6934, 0.6934, 0.6309 and 0.6653), and `red sho` from 0.7098 to 0.9173.
 - A query that qualifies runs one more step: an extra planning and search, and at L4 its corrections walk the terms
-  once more. Benchmarks `search_relaxed/l3/tiers` and `search_relaxed/l4/tiers` measure it (docs/benchmarks.md).
-  Queries that do not qualify (every rewritten word shorter than 8 characters, or L3 after L2) build the same steps
+  once more. Benchmarks `search_relaxed/l3/tiers` and `search_relaxed/l4/tiers` measure it (docs/benchmarks.md). A
+  qualifying L4 query that finds nothing costs about 207 µs more (156 to 363 µs). An L3 query whose tier step finds
+  the hits stops there and is 43% faster (39.8 to 22.5 ms). Queries that do not qualify move within the build's
+  layout noise: within 1.4% with one codegen unit.
+  Queries that do not qualify (every rewritten word shorter than 8 characters, or L3 after L2's one-term rung) build the same steps
   as before.
 - The tier step counts in full against §7.1.3's limits in the steps that exclude it. L4's `fuzzy` then excludes
   `fuzzy:1`, whose `fuzzy` queries count their expansions again, so a query with many long words reaches
@@ -82,5 +89,7 @@ steps, with exclusion, rank bands, cursors, the budget, facets and `explain` bui
   8.2.11, should judged queries show the sum gains over the steps.
 - **A score component.** ADR-0037's argument: an offset cannot keep every score's order, and it rounds away the low
   bits. The edit-distance weight is already one, and a weight is what let a two-edit decoy win.
-- **`prefix:last` after L2 too.** It is provably empty there unless L2 was skipped for the limits, and it would cost
-  every multi-word query that reaches L3 one more search.
+- **`prefix:last` after L2's one-term rung too.** It matches nothing there, and it would cost every multi-clause query
+  that reaches L3 one more search.
+- **Deciding from the plan** (whether `levels` holds L2), as first written. A query L2 builds no step for (one split
+  word) then lost the tier under the default levels, though its tier step is not empty.

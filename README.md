@@ -30,12 +30,12 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **357 of 550** MVP leaves done (65%), 4 in progress (last snapshot 2026-11-15). Post-MVP work is 0 of 180 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **361 of 550** MVP leaves done (66%), 0 in progress (last snapshot 2026-11-15). Post-MVP work is 0 of 180 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
 
-`persia` does not export `Db` yet (M10). Under it, [`persia-engine`](./crates/persia-engine/src/lib.rs) creates and opens a database file, puts, deletes and commits documents through a WAL, merges segments, and runs a ranked search over a collection snapshot: user text compiled to a query, BM25F scoring, filters, sorts, facets, and pages. Relaxation (M8) is in progress as library code: `search_relaxed` runs the whole cascade: L4 `fuzzy` also reports "did you mean" corrections, and L5 `fallback` returns the collection's top documents by static rank or recency, flagged in the response (`"fallback"`); request options and the `Db` facade are not built yet. The default search path (`CollectionViews::search`) does not relax, so a search that matches nothing returns no hits. A small CLI inspects and verifies files.
+`persia` does not export `Db` yet (M10). Under it, [`persia-engine`](./crates/persia-engine/src/lib.rs) creates and opens a database file, puts, deletes and commits documents through a WAL, merges segments, and runs a ranked search over a collection snapshot: user text compiled to a query, BM25F scoring, filters, sorts, facets, and pages. Relaxation (M8) is in progress as library code: `search_relaxed` runs the whole cascade: L4 `fuzzy` also reports "did you mean" corrections, and L5 `fallback` returns the collection's top documents by static rank or recency, flagged in the response (`"fallback"`). Within a level, hits that need fewer edits rank first, and at L3 so do hits holding the other words as typed when L2 did not take them first (typo tiers). A request's `relax` options (`false`, or any collection key such as `min_results` or `fill`) merge over the collection's settings, and `explain` states the step each hit matched at. The `Db` facade is not built yet. The default search path (`CollectionViews::search`) does not relax, so a search that matches nothing returns no hits. A small CLI inspects and verifies files.
 
 **Space:** dead frames (replaced segments, old manifests, consumed WAL chunks) are reclaimed by compacting the container ([SPEC §4.6](./SPEC.md#46-compaction-of-the-container)). Call `Database::compact` to compact now; besides, every `merge_step` compacts when dead bytes reach 40% of the file and at least 1 MiB, unless `CompactionOptions::automatic` is turned off (`DatabaseOptions::compaction`). `Database::space_usage` reports the live and dead bytes.
 
@@ -48,7 +48,7 @@ The product is a search database you link, the way you link SQLite. The design i
 | **Embedded** | The calling process is the database. `Db::open("app.persia")` is the whole setup: no daemon, no config file, no cluster. | The facade is [M10](./ROADMAP.md). Under it, `persia_engine::db::Database` opens a file, writes, and searches as library code. |
 | **Rust, short dependency list** | The index format, analysis, segment codec, BM25F scoring, and query execution are written in this repository ([ADR-0001](./docs/adr/0001-own-engine-and-allowed-dependencies.md)). | `cargo deny` rejects Tantivy, SQLite, and RocksDB. `cargo xtask check-deps` rejects any direct dependency outside the workspace allow-list. There is no `build.rs`. |
 | **One file, then object storage** | A local database is `<name>.persia`, plus an optional `<name>.persia.blobs` pack. Segments are immutable. The same segment bytes are specified for S3, GCS, and Azure Blob, in front of stateless query nodes. | The container and the segment format exist. Cloud backends, the server, and Kubernetes are M11–M13. |
-| **A page of results** | By design, relaxation is the default ([SPEC §7.6](./SPEC.md#76-zero-results-avoidance-default-on)). Too few hits, and the engine walks synonyms, dropped terms, prefix, a fuzzy step, and a fallback, then names the step that matched. | In progress (M8): synonyms, dropped terms, prefix, fuzzy (with corrections) and the fallback (flagged in the response) are built as library code (`search_relaxed`). The default search path does not relax yet, so a search that matches nothing returns no hits. Request options are next. |
+| **A page of results** | By design, relaxation is the default ([SPEC §7.6](./SPEC.md#76-zero-results-avoidance-default-on)). Too few hits, and the engine walks synonyms, dropped terms, prefix, a fuzzy step, and a fallback, then names the step that matched. | In progress (M8): synonyms, dropped terms, prefix, fuzzy (with corrections and typo tiers) and the fallback (flagged in the response) are built as library code (`search_relaxed`), with per-request `relax` options. The default search path does not relax yet, so a search that matches nothing returns no hits. Metrics and the quality suite are next. |
 
 Out of scope for v1, in the SPEC: SQL, joins, vector search, more than one writer on a shard, and encryption inside the file. Encryption at rest is v1.2. Geo and the enterprise work are v3.0. See [Status](#status).
 
@@ -126,7 +126,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // "n2" says hello twice, so it ranks first. "goodbye" does not match.
     // This call is `CollectionViews::search`, which does not relax (M8).
-    // `search_relaxed` runs L1–L4 as library code; it is not this call, so "helo" returns no hits here.
+    // `search_relaxed` runs L1–L5 as library code; it is not this call, so "helo" returns no hits here.
     let ids: Vec<_> = page.hits.iter().map(|h| h.document.id()).collect();
     assert_eq!(ids, ["n2", "n1"]);
     Ok(())
@@ -252,7 +252,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
 | **M7** Query engine & ranking | ✅ done | 51/51 |
-| **M8** Zero-results avoidance | 🔨 in progress | 24/49 |
+| **M8** Zero-results avoidance | 🔨 in progress | 28/49 |
 | **M9** Blob store | 🔨 in progress | 5/22 |
 | **M10** Embedded API | ⏳ blocked | 0/23 |
 | **M11** Server | ⏳ blocked | 0/23 |
