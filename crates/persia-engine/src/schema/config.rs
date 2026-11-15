@@ -195,7 +195,8 @@ pub enum FilterRelaxation {
     /// Filters always hold.
     #[default]
     Never,
-    /// Filters are dropped only after every other level failed.
+    /// Filters may be dropped by one last step, after every other level, only when those found fewer than
+    /// `min_results` hits (SPEC §7.6, ROADMAP 8.2.6, ADR-0047).
     LastResort,
 }
 

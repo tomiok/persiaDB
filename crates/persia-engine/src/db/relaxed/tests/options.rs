@@ -140,7 +140,8 @@ fn each_setting_a_query_gives_overrides_the_collections() {
             RelaxLevel::Fallback
         ]
     );
-    // `filters: "last_resort"` is accepted (SPEC §6.2.3); no level relaxes a filter until ROADMAP 8.2.6.
+    // `filters: "last_resort"` drops only filters (ROADMAP 8.2.6, `tests/filters.rs`): this query has none, so the filter
+    // step is skipped and the search is `"never"`'s.
     let last_resort = run(
         &views,
         &red_shoes,

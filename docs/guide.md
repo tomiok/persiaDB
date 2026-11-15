@@ -176,7 +176,8 @@ Highlighting is post-v1.
 Relaxation is on by default. If a query returns fewer hits than `min_results` (default 1), the
 engine walks a cascade and stops at the first level that produces enough hits (SPEC §7.6).
 With `fill` set, it keeps going until the page is full. Stricter levels always rank above looser
-ones. Filters stay strict unless `relax.filters` is `last_resort`. A time budget (default 50 ms)
+ones. Filters stay strict unless `relax.filters` is `last_resort`: then one last step, after every other
+level, drops the request's filters, and only when those levels found fewer than `min_results` hits. A time budget (default 50 ms)
 returns the best results so far and sets `truncated`. A query can turn the whole feature off with
 `relax: false`.
 
@@ -188,6 +189,7 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 | L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). When another term expands too, and L2 did not take those documents first, the last term alone expands first. |
 | L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more; shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: the top documents the filters keep, by static rank, then recency, flagged in the response; or nothing (`fallback: "none"`). |
+| L6 | `filters` | Only with `relax.filters: "last_resort"`: L0's words without the request's filters, excluded words still excluded, when every level before found fewer than `min_results` hits. Never built just to fill a page. Flagged with `"filters_dropped": true`. |
 
 The response says what happened. This JSON is the shape in SPEC §7.6. It is illustrative:
 
@@ -204,6 +206,11 @@ The response says what happened. This JSON is the shape in SPEC §7.6. It is ill
 When the last level, L5, found the hits, `level` is `"fallback"` and the object also says how they were ranked,
 `"fallback": "static_rank"` or `"recency"`, so a client can tell they are the collection's best documents, not
 matches of the words.
+
+When the filter step found hits, `level` is `"filters"` and the object has `"filters_dropped": true`: some hits
+do not pass the request's filters, and each of them has `level` `filters`. With the default fallback that happens
+only when fewer than `min_results` documents pass the filters at all. No filter can be marked as one that must hold
+yet (ROADMAP 8.2.13), so do not set `last_resort` on a request whose filters enforce tenancy or permissions.
 
 Quality of this cascade is a product feature of the same milestone (ROADMAP M8): a synthetic typo
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
@@ -228,7 +235,7 @@ relevance gate, the mean nDCG@10 goes from 0.6786 to 0.9835. Stemmed matches are
 
 Done so far (M8, 28 of 49): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
 the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, L4 `fuzzy` and L5 `fallback` (ROADMAP
-8.2.1–8.2.5), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
+8.2.1–8.2.5), and the `last_resort` filter step (8.2.6), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
 edit (two from 8 characters), and reports the words no document holds in `corrected` ("did you mean",
 `Zapatilas` → `zapatillas`), with `effective` reading the corrections. The response states the text of the last
 step that found a hit, so a correction no hit was found by is not reported (8.1.22, ADR-0043). L5 returns the
@@ -239,8 +246,8 @@ segments, docids descending within a view), not write time: a merge moves the do
 segments flushed after its inputs, so without a static rank a merge can reorder the whole fallback, and with
 one it reorders only ties. L5 sets
 `"fallback": "static_rank"` or `"recency"` in the response (8.2.5, ADR-0044). Also done: the typo tiers (8.2.7) and
-the request options, `fill` and `explain` (8.3.1, 8.3.2, 8.3.4). Not started: `last_resort` filters (8.2.6), metrics
-(8.3.3), and the quality suite (8.4).
+the request options, `fill` and `explain` (8.3.1, 8.3.2, 8.3.4). Not started: metrics (8.3.3), and the quality suite
+(8.4).
 
 ### Schema, documents, and analysis
 

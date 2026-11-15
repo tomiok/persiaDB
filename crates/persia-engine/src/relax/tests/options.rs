@@ -222,6 +222,27 @@ fn the_settings_a_cursor_records_are_those_that_decide_the_ranking() {
     ] {
         assert_eq!(settings(&collection, &parse(json).unwrap()), None, "{json}");
     }
+    // The opt-in records the filter step among the levels, also in a plan of no other level, which then relaxes.
+    let last = settings(
+        &collection,
+        &parse(r#"{"filters": "last_resort"}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(last.levels().last(), Some(RelaxLevel::Filters));
+    assert_eq!(last.filters(), FilterRelaxation::LastResort);
+    assert!(
+        last.to_string()
+            .ends_with(", fallback, filters], min_results 1, fill false, filters last_resort")
+    );
+    let alone = settings(
+        &collection,
+        &parse(r#"{"levels": [], "fallback": "none", "filters": "last_resort"}"#).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        alone.levels().collect::<Vec<_>>(),
+        [RelaxLevel::Exact, RelaxLevel::Filters]
+    );
     // A query that restates the collection's settings has the collection's.
     let restated = RelaxationConfig {
         min_results: 3,

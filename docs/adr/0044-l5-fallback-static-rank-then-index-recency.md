@@ -1,6 +1,6 @@
 # ADR-0044: L5 `fallback`: the collection's static rank, then index recency, flagged in the response
 
-- Status: proposed
+- Status: proposed (amended by ADR-0047: `filters: "last_resort"` relaxes filters in one step after L5, which excludes L5's step alone)
 - Date: 2026-11-14
 - Related: SPEC §6.2.3, §7.1.3, §7.3, §7.4, §7.5, §7.6, §7.7, §8.5; ROADMAP 7.4.11, 8.1.3, 8.1.4, 8.1.22, 8.2.5,
   8.2.6, 8.2.8, 8.2.9, 8.3.2, 8.3.4; ADR-0037, ADR-0043
@@ -23,8 +23,8 @@ L5 but its transform built no step, so a query no level could relax returned not
 
 1. **One step, `fallback`, that only selects.** Its query is L0's root `must_not` and `filter` around `match_all`
    (`match_all` alone without either): a compiled query's excluded clauses and the request's filter, a programmatic
-   root `bool`'s `must_not` and `filter`, nothing for any other root. Filters are not relaxed (`filters:
-   "last_resort"` stays ROADMAP 8.2.6), and excluded clauses stay excluded: a user who wrote `-blue` never gets blue
+   root `bool`'s `must_not` and `filter`, nothing for any other root. Filters are not relaxed at L5 (`filters:
+   "last_resort"` adds one step after L5 that drops them, ADR-0047), and excluded clauses stay excluded: a user who wrote `-blue` never gets blue
    documents back. `fallback: "none"` builds no L5, as before.
 2. **Earlier hits are excluded as at every step** (ADR-0037 item 2): the cascade puts the steps searched before L5
    in its `must_not`, so L5 returns the documents no stricter step matched, once. Deleted and replaced documents are
@@ -95,4 +95,4 @@ L5 but its transform built no step, so a query no level could relax returned not
   backward recency walk read a few blocks or windows for a page.
 - **A boolean marker**: it would not say how the hits were ordered; `"static_rank" | "recency"` says both.
 - **Relax filters at L5**: filters are hard constraints (permissions, tenancy); relaxing them is ROADMAP 8.2.6's
-  explicit opt-in.
+  explicit opt-in, one step after L5 (ADR-0047).

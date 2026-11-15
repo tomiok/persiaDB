@@ -1,6 +1,6 @@
 # ADR-0045: A request's `relax` options: every key, merged one at a time, and cursors that record the settings
 
-- Status: proposed
+- Status: proposed (amended by ADR-0047: `filters: "last_resort"` plans the filter step, item 6)
 - Date: 2026-11-15
 - Related: SPEC §6.2.1, §6.2.3, §7.1.3, §7.4, §7.5, §7.6; ROADMAP 8.1.2, 8.1.4, 8.1.9, 8.1.11, 8.2.6, 8.3.1, 8.3.2,
   10.1.7; ADR-0022,
@@ -51,8 +51,9 @@ setting, and that `relax: false` runs L0 only. The engine already merged `RelaxO
    between them, and a step after L0 given to a search of L0 alone is `RequestError::CursorStep`. With equal
    settings, `StepCursor` pages exactly as before. A cursor whose step a plan no longer builds can still come from
    other limits (`RelaxPlan::with_limits`), which are not recorded, and pages nothing.
-6. **`filters: "last_resort"` is accepted and relaxes nothing yet.** §6.2.3 allows it and it is part of the settings.
-   No level drops a filter until ROADMAP 8.2.6, so it searches as `"never"`.
+6. **`filters: "last_resort"` is accepted and part of the settings.** §6.2.3 allows it. Until ROADMAP 8.2.6 no
+   level dropped a filter, so it searched as `"never"`. Since ADR-0047 it plans one last step, L6 `filters`, which
+   the cursor's recorded levels include.
 7. **`fill` is a request key with no rule of its own (ROADMAP 8.3.2).** The cascade has filled since ROADMAP 8.1.2
    (ADR-0037 item 1). A request sets it as it sets any key, and the cursor records it (item 5), so a page never mixes
    a filling ranking with one that stops at `min_results`. With `fill`, a page builds steps until it holds

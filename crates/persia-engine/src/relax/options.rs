@@ -37,7 +37,8 @@ pub struct RelaxOptions {
     pub fallback: Option<Fallback>,
     /// Keep relaxing to fill the page once `min_results` is reached (SPEC §7.6, ROADMAP 8.3.2).
     pub fill: Option<bool>,
-    /// Whether filters may be relaxed. Accepted as SPEC §6.2.3 allows it; no level relaxes them until ROADMAP 8.2.6.
+    /// Whether filters may be relaxed: `"last_resort"` plans the filter step after every other level (ROADMAP 8.2.6,
+    /// ADR-0047).
     pub filters: Option<FilterRelaxation>,
     /// The cascade's time budget in milliseconds, in [`RelaxationConfig::BUDGET_MS`].
     pub budget_ms: Option<u32>,
@@ -255,5 +256,6 @@ const fn level_bit(level: RelaxLevel) -> u16 {
         RelaxLevel::Prefix => 3,
         RelaxLevel::Fuzzy => 4,
         RelaxLevel::Fallback => 5,
+        RelaxLevel::Filters => 6,
     }
 }

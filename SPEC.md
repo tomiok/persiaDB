@@ -877,7 +877,7 @@ negative.
 | `levels` | `"default"` | `"default"` (every level after L0, as the engine defines them) or an array of `"synonyms"`, `"drop_terms"`, `"prefix"`, `"fuzzy"`: distinct, in cascade order. L0 always runs and is not listed; L5 is `fallback`. `[]` runs L0, then the fallback |
 | `fallback` | `"static_rank"` | `"static_rank"` or `"none"`; without `ranking.static_rank`, `static_rank` returns the most recently indexed documents, recent by where the index holds them, not by write time (§7.6 L5) |
 | `fill` | `false` | §7.6 |
-| `filters` | `"never"` | `"never"` or `"last_resort"` |
+| `filters` | `"never"` | `"never"` or `"last_resort"`: the explicit opt-in to the filter step, after every other level (§7.6) |
 | `budget_ms` | `50` | `1–60 000` |
 
 #### 6.2.4 Evolution
@@ -1576,7 +1576,8 @@ over every match, whatever the page: per segment from its keyword column (§5.3.
 memtable from its postings, then merged by value bytes, so counts are exact. The values returned are the `size` with the
 highest count, then ascending bytes; a value no match holds is not returned. When the
 relaxation cascade runs (§7.6), a facet counts the matches of every step it ran, each document once (at its first
-step). Without `fill` that is the same on every page; with `fill` a deeper page may build, and count, more steps.
+step). Without `fill` that is the same on every page; with `fill` a deeper page may build, and count, more steps. The
+filter step (`filters: "last_resort"`, §7.6) counts too: its matches are documents the request's filters reject.
 ROADMAP 8.1.9 confirms or replaces this interim rule.
 
 #### 7.5.1 Hits
@@ -1597,6 +1598,7 @@ stopping at the first level that satisfies `min_results` (or continuing to fill 
 | L3 | `prefix` | Prefix-expand the last term (and others if len ≥ 3) via FST range scan (cap expansions, default 50) |
 | L4 | `fuzzy` | Edit distance 1 (len 4–7) / 2 (len ≥ 8) via Levenshtein automaton ∩ FST (cap expansions, default 50); corrected terms reported |
 | L5 | `fallback` | Per collection: `static_rank` (top by static rank / recency), `none` |
+| L6 | `filters` | Only with `relax.filters = "last_resort"`: L0's query without the request's filters, built only when every earlier step found fewer than `min_results` hits (below) |
 
 Rules:
 - Results from a stricter level always rank above results from a looser level: the level (its step) leads the rank
@@ -1607,6 +1609,7 @@ Rules:
                 "original": "zapatilas rojs", "effective": "zapatillas rojas",
                 "corrected": {"zapatilas":"zapatillas","rojs":"rojas"}, "truncated": false }
 // when L5 found the hits:  "level": "fallback", "applied": [..., "fallback"], "fallback": "static_rank"
+// when the filter step found hits: "level": "filters", "applied": [..., "filters"], "filters_dropped": true
 ```
   `level` is the level of the last step the cascade built and did not skip (`exact` when L0 had enough or no later
   level built a step that fits the limits; a cursor's page builds the steps before its own without searching them), `applied` what each step after L0 applied in build order (empty when no level built a
@@ -1614,7 +1617,8 @@ Rules:
   user text, `effective` the text of the *hit step*'s query, `corrected` each term the fuzzy level replaced in it, in
   query order, `fallback` the order L5 ranked its hits in (`"static_rank"` or `"recency"`, below) when the hit step is
   L5's and absent otherwise (the explicit flag that the query's ranking ends with documents its words do not match: as
-  `effective`, it is the cascade's, the same on every page, and each hit's `level` says which hits are L5's), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
+  `effective`, it is the cascade's, the same on every page, and each hit's `level` says which hits are L5's), `filters_dropped` whether the hit step is the filter step (`true` only then: some hit of the ranking does not pass the
+  request's filters; the same on every page, as `fallback`, and each hit's `level` `filters` says which, ROADMAP 8.2.6), and `truncated` whether the budget cut the cascade (below). Without `fill`, every page of one query on
   one snapshot states the same, unless the budget truncated it; with `fill`, a deeper page may build, and state, more
   steps. Each hit also states its `level`, its step and its rank score (below). The engine's `Relaxation` (ROADMAP
   8.1.5) defines every field. The *hit step* (ROADMAP 8.1.22, ADR-0043) is the last step of the cascade that found a
@@ -1627,16 +1631,19 @@ Rules:
   the hit step's query, rendered from its clauses' source text: at L0 the clauses that compiled, one space apart
   (ROADMAP 8.1.7), at L1 the same (its step keeps every clause, ROADMAP 8.2.1, below), at L2 the clauses its step keeps
   (ROADMAP 8.2.2.2, below), at L3 L0's, at L4 L0's with each corrected word replaced by its correction (ROADMAP
-  8.2.4.3, below), and at L5 its excluded clauses alone (empty when it has none: no word was searched, ROADMAP 8.2.5). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
+  8.2.4.3, below), and at L5 its excluded clauses alone (empty when it has none: no word was searched, ROADMAP 8.2.5), and at L6 L0's
+(ROADMAP 8.2.6). `original`, `effective` and `corrected` are absent (empty) when the query was not compiled from `q` (a
   programmatic query): it has no user text, and the AST has no faithful `q` form (combined weights, boost, prefix,
   fuzzy). `corrected` is empty unless the hit step is L4's.
-- Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never).
+- Filters are **never** relaxed unless `relax.filters = "last_resort"` is explicitly set (default: never). Then one
+  step after every other level, L6 `filters`, drops them, only when those levels found fewer than `min_results` hits
+  (ROADMAP 8.2.6, below).
 - Relaxation has a time budget (`relax.budget_ms`, default 50 ms); exceeding it returns the best so far with
   `truncated: true` (below).
 - Disable per query with `relax: false`.
 
 The plan (ROADMAP 8.1.1): L0, then the levels `relaxation.levels` names in cascade order, then L5 unless `fallback`
-is `"none"`. A level builds
+is `"none"`, then L6 when `filters` is `"last_resort"`. A level builds
 its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
@@ -1652,11 +1659,10 @@ key at a time: the query's value, else the collection's, else §6.2.3's default.
 a key out has the default. `levels` is one key, so a list replaces the collection's list whole. Each value the query
 gives is held to §6.2.3's rule, also when the query or the collection disables the cascade: `min_results` in
 `1–10 000`, `budget_ms` in `1–60 000`, custom `levels` distinct and in cascade order. A value that breaks its rule
-is an error that names the key. `filters: "last_resort"` is accepted. No level relaxes a filter until ROADMAP 8.2.6,
-so it searches as `"never"` does.
+is an error that names the key. `filters: "last_resort"` plans L6 `filters` (below).
 
 `enabled: false` (`relax: false`), from the query or from the collection when the query does not turn it on, runs L0
-alone. So does a plan whose `levels` is `[]` with `fallback: "none"`. The response then states `level: "exact"`, no
+alone. So does a plan whose `levels` is `[]` with `fallback: "none"` and `filters: "never"`. The response then states `level: "exact"`, no
 `applied`, no `fallback` and `truncated: false`. Its page holds L0's hits, and may be empty. A search without a
 cascade (the engine's plain `search`, which plans its query alone) is `relax: false`. A request that wants
 relaxation runs the relaxed search with the merged settings.
@@ -1671,7 +1677,8 @@ error (below), checked first.
 
 `fill` (ROADMAP 8.3.2) is a key of `relax` like any other, and part of the settings a cursor records. With it, each
 page builds steps until it has `offset + limit` hits from the top (from its cursor's step, after a cursor) or the
-steps run out, and L5 fills what the earlier steps leave. Every page builds only the steps it needs. A deeper page
+steps run out, and L5 fills what the earlier steps leave. L6 never fills (below): it is built only to reach
+`min_results`, also with `fill`. Every page builds only the steps it needs. A deeper page
 may build, search and state more steps than the first one (`level`, `applied`, the hit step's text and `fallback`),
 and its facets count the steps it built (§7.5, the interim rule of ROADMAP 8.1.9). The pages of one query, by offset
 or by cursor, are still slices of one ranking: that of a page holding every hit, as without `fill`. A budget that
@@ -1814,7 +1821,7 @@ L5 `fallback` (ROADMAP 8.2.5, ADR-0044). With `fallback: "static_rank"` (the def
 builds one step, listed as `fallback`; `"none"` builds no L5. Its query is L0's root `must_not` and `filter` around
 `match_all`: of a query compiled from `q`, its excluded clauses and the request's filter (§7.1: the root `bool`'s);
 of a programmatic query, a root `bool`'s `must_not` and `filter`, and none for any other root. So excluded clauses
-stay excluded and filters are not relaxed (`filters: "last_resort"` is ROADMAP 8.2.6), and, as every step, it
+stay excluded and filters are not relaxed (L6 relaxes them, below), and, as every step, it
 excludes the steps searched before it (the cascade, below): its hits are the live documents the filters keep, the
 excluded clauses do not match and no earlier step matched. A deleted document is never one (§7.3: no search matches
 it). Held to §7.1.3's limits beside the steps it excludes, it is `fallback:cut` or `fallback:skipped` as any step.
@@ -1845,6 +1852,34 @@ with `fill` it fills the rest of the page below their hits. The request's deadli
 cancellation and the budget apply as in any step: L5 is built only when the cascade reaches it, checked before it
 is searched and at its reads (§7.3), and dropped whole when the budget passes during it.
 
+L6 `filters` (ROADMAP 8.2.6, ADR-0047). Only `filters: "last_resort"` (the request's, else the collection's) plans it,
+as the plan's last level: after L5, or after the last word level when `fallback` is `"none"`, or right after L0 when
+the plan has no other level. It is the explicit opt-in to drop filters, so the default never builds it. It builds one
+step, listed as `filters`, whose query is L0's with the filters of its root `bool` dropped: of a query compiled from
+`q`, the request's filter (§7.1: the root `bool`'s); of a programmatic query, a root `bool`'s `filter`. Every other
+clause stays as L0 has it: its required clauses, its `should` clauses and `minimum_should_match`, its excluded clauses
+(a user who wrote `-blue` never gets blue, as at L5), and any filter deeper in the query. All the root's filters are
+dropped together, in no order. No filter is marked as one that must hold (a tenancy or permission filter): a request
+whose filters enforce access must not set `last_resort` (ROADMAP 8.2.13 is a request key for filters that never
+relax). A query whose root has no filter, or a programmatic root that is not a `bool`, skips the level. Its
+`effective` is L0's text (no word changes, and filters are not part of `q`) and it has no `corrected`. Its hits rank
+by the request's sort, as any step that scores words, and an explained one is L0's tree around its words (§7.7).
+
+L6 is built only while the steps before it found fewer than `min_results` hits from the top, `fill` or not: a
+filtered page is never padded with documents its filters reject because the page has room. Once built, it collects
+the hits still missing, as every step does, so it fills the page as far as its matches go. Since every earlier step
+keeps L0's root filters, and L5 (when the plan has it) returns every document those filters keep and the excluded
+clauses do not match, L6 runs with `fallback: "static_rank"` only when fewer than `min_results` documents pass the
+filters and the excluded clauses at all. Its hits are then the documents L0's words match that the filters reject and no earlier step matched.
+The decision counts hits from the top, so every page of a query makes the same one: a cursor's page builds L6 only
+when the cursor's page did (its last step), and a deeper page with `fill` does not build it when the first page did
+not. The budget, the request's deadline and cancellation, and §7.1.3's limits apply as at any step (`filters:skipped`
+when it does not fit; it has no expansions to cut). Facets count its matches (§7.5). The response's `level` is
+`filters` once it is built, and `filters_dropped` is `true` when it is the hit step, so a client can tell that some
+hits do not pass the request's filters; each such hit's `level` is `filters`. With it the hit step, `fallback` is
+absent: L5 is not the hit step. Its place is after every step a plan without it builds, so it changes no earlier
+step's index, `applied` entry or ranking, and a cursor records it through the settings it already records (`filters`).
+
 The cascade (ROADMAP 8.1.2, ADR-0037): each step after the first searches its query with every earlier step's query
 excluded (`must_not`), so a document is a hit of the first step that matches it, once, at that step's score. A
 level whose steps are *nested*, each matching every document the level's earlier steps match, with the same
@@ -1853,7 +1888,9 @@ step searched excluded, which excludes the earlier ones with it (ROADMAP 8.2.2.4
 searched in earlier levels, L0 included, and of its own level the latest one searched. A step cut to fit the limits
 (§7.1.3) matches less than it was built to, so it does not stand for the level's earlier steps, which stay excluded
 beside it. The next step not cut stands for them all again, as a cut step matches only documents its uncut query
-matches. L1's steps are not nested, and every one stays excluded. The hits are those of excluding every earlier step;
+matches. L1's steps are not nested, and every one stays excluded. L5's step matches every document any earlier step
+matches (`match_all` under L0's root `must_not` and `filter`, which every earlier step keeps), so a step after it
+(L6) excludes it alone (ADR-0047). The hits are those of excluding every earlier step;
 a long query keeps more of its L2 steps within `max_terms`, and planning re-plans fewer excluded steps. Hits
 count from the top: the cascade needs `max(offset + limit, min_results)` of them, each step collects (pruned, §7.3)
 the ones still missing, and the cascade stops once the hits found reach `min_results` (with `fill`, also
@@ -1932,7 +1969,7 @@ A hit of a relaxed search (§7.6, ROADMAP 8.3.4) is explained inside a root `rel
 `level`, its `step` (0 for L0), that step's entry of the response's `applied`, and the step's own tree. The entry
 includes `:cut` when the step was cut, and is absent at L0, which applies nothing. The node's score is the tree's,
 bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
-`static_rank`. Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
+`static_rank`; L6 `filters` around its query's tree (`applied` `"filters"`). Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
 with `relax: false` wraps its L0 hits as step 0: the two rank alike (§7.6), but their explanations differ by this
 node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is defined
 with the request and response JSON (ROADMAP 10.1, 11.x):

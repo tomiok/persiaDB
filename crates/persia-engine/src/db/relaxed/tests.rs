@@ -2557,4 +2557,5 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
 
 mod explain;
 mod fill;
+mod filters;
 mod options;
