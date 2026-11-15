@@ -142,15 +142,25 @@ fn every_level_states_its_step_and_applied_around_its_tree() {
     // Cursor pages state the same, each of its hits' own step, from the cursor's step on.
     let mut request = explained(3);
     let mut paged = Vec::new();
-    loop {
+    // 8 hits by 3: three pages, then an empty one. A cursor that stops advancing fails the bound instead of hanging.
+    let mut finished = false;
+    for _ in 0..=out.hits.len() {
         let page = views
             .search_relaxed(&alpha, &request, &relax, &exec())
             .unwrap();
         check(&page);
-        let Some(last) = page.hits.last() else { break };
+        let Some(last) = page.hits.last() else {
+            finished = true;
+            break;
+        };
         request.search_after = Some(last.cursor());
         paged.extend(page.hits);
     }
+    assert!(
+        finished,
+        "the cursor walk did not end: {} hits",
+        paged.len()
+    );
     // The same hits and explanations; their cursors' last step grows page by page under `fill`.
     let shown = |hits: &[RelaxedHit]| -> Vec<(String, usize, Option<Explanation>)> {
         hits.iter()

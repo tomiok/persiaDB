@@ -3,7 +3,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use persia_engine::relax::{RelaxOptions, RelaxPlan};
+use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::RelaxationConfig;
 
 fuzz_target!(|data: &[u8]| {
@@ -14,8 +14,14 @@ fuzz_target!(|data: &[u8]| {
         assert_eq!(options.validate(), Ok(()));
         let plan =
             RelaxPlan::new(&RelaxationConfig::default(), &options).expect("validated options plan");
-        // A plan runs L0, and records settings exactly when it relaxes.
-        assert!(plan.levels().len() >= 1);
-        assert_eq!(plan.settings().is_some(), plan.relaxes());
+        // L0 runs first, and the levels follow in cascade order, each once.
+        let levels: Vec<RelaxLevel> = plan.levels().collect();
+        assert_eq!(levels.first(), Some(&RelaxLevel::Exact));
+        assert!(levels.windows(2).all(|w| w[0] < w[1]), "{levels:?}");
+        // `relax: false` (`enabled: false`) runs L0 alone and records no settings, as a plain search.
+        if options.enabled == Some(false) {
+            assert_eq!(levels, [RelaxLevel::Exact]);
+            assert_eq!(plan.settings(), None);
+        }
     }
 });

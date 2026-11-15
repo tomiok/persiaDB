@@ -584,7 +584,7 @@ main. The first run of the 8.3.1 commit alone (8a7fc29) read 481 µs and 477 µs
 leaves unchanged. That run shared the machine with a code review, so the table keeps the later, uncontended run of
 7ffaee4, which holds 8.3.1. `search_request/score`, the plain score search, whose code no leaf of this batch changes,
 measured 442–459 µs in the default build. A run during that review read 563 µs. With one codegen unit, 7ffaee4 and
-the branch agree within 0.7% there and on `l0` and `off`, and within 1.4% on `l3` and 0.4% on `l4`. So the default
+the branch agree within 0.9% there and on `l0` and `off`, and within 1.4% on `l3` and 0.4% on `l4`. So the default
 build's 2–4% on `l3` and `l4` is layout, as in the earlier rows. A first version of the tier step walked
 `fuzzy:1`'s corrections even when capping changed nothing, and threw them away. The queries are now compared before
 either step's corrections are walked, which removes that walk. The default build read 2.65 to 2.71 ms for `l4` both

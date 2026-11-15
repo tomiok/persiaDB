@@ -98,7 +98,6 @@ fn ndcg_by_hand() {
     assert!(ndcg(&ids(&["x", "y"]), &judged).abs() < 1e-12);
 }
 
-/// The ranked ids of each judged query, and its judgments.
 /// The judged store: `corpus` in `title` (boost 2) and `body`, both `en` with positions, over two segments and the
 /// memtable, on a fixed clock and segment ids.
 fn store(corpus: &str) -> Database<SimFile> {
@@ -140,6 +139,7 @@ fn store(corpus: &str) -> Database<SimFile> {
     db
 }
 
+/// The ranked ids of each judged query, and its judgments.
 fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
     let db = store(CORPUS);
     let snapshot = db.snapshot();
@@ -340,12 +340,16 @@ fn gate_fails_beyond_tolerance_either_way() {
     }
 }
 
-/// Invariant 3: per query, the smallest change of nDCG@10 one judged document makes moving by one rank (ranks 9 and
-/// 10, the smallest discount step, swapped with the closest other grade, unjudged included) is more than twice the
-/// tolerance, so the gate sees it whatever the rounding.
+/// Invariant 3: per query of both suites, the smallest change of nDCG@10 one judged document makes moving by one rank
+/// (ranks 9 and 10, the smallest discount step, swapped with the closest other grade, unjudged included) is more than
+/// twice the tolerance, so the gate sees it whatever the rounding.
 #[test]
 fn tolerance_is_below_one_rank_move() {
-    let judgments: Vec<Json> = serde_json::from_str(JUDGMENTS).unwrap();
+    let judged = [JUDGMENTS, TYPO_JUDGMENTS];
+    let judgments: Vec<Json> = judged
+        .iter()
+        .flat_map(|j| serde_json::from_str::<Vec<Json>>(j).unwrap())
+        .collect();
     let step = 1.0 / 10_f64.log2() - 1.0 / 11_f64.log2();
     for j in &judgments {
         let mut ideal: Vec<u32> = j["grades"]

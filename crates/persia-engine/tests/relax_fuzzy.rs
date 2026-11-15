@@ -683,8 +683,12 @@ fn tier_steps_are_held_to_the_limits_and_counted_where_excluded() {
             ids.len(),
             "max_expansions {max}: a hit twice"
         );
-        if max > 1 {
-            assert_eq!(hits(&out), [(1, "d0".to_owned())], "max_expansions {max}");
-        }
+        // At 1 both steps are skipped, and this plan has no L5: the page is empty.
+        let expected = if max > 1 {
+            vec![(1, "d0".to_owned())]
+        } else {
+            Vec::new()
+        };
+        assert_eq!(hits(&out), expected, "max_expansions {max}");
     }
 }

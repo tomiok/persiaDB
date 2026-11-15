@@ -1394,8 +1394,9 @@ relaxed search (§7.6) plans every step without it. Without it the bonus is 0 an
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
 
-The score has no typo or exactness component. Within a relaxation level, hits that need fewer edits, or match words
-as typed rather than by completion, rank first because they are earlier steps of the cascade (§7.6, ROADMAP 8.2.7),
+The typo and exactness tiers (§7.6, ROADMAP 8.2.7) add nothing to the score. A `fuzzy` term's score keeps the
+edit-distance weight of §7.1, which orders hits within a step. Across a relaxation level's steps, hits that need fewer
+edits, or match words as typed rather than by completion, rank first because they are earlier steps of the cascade,
 not because they score higher.
 
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
@@ -1784,8 +1785,8 @@ exclusion, ranking by step before the request's sort, rank scores, paging, pruni
 - **L4, `fuzzy:1`.** When a term the step rewrites has 8 characters or more (distance 2), L4 first builds the same
   query with every distance capped at 1, listed as `fuzzy:1`, then its step at each term's own distance, `fuzzy`.
   Each `fuzzy` keeps its own 50 terms within its distance. The tier is the most edits any one rewritten word
-  needs, not their sum: `fuzzy:1` holds the documents within one edit of every word. A query whose terms are all
-  shorter has the one step. Its corrections are found within the capped distances, so when `fuzzy:1` is the hit
+  needs, not their sum: `fuzzy:1` holds the documents within one edit of every rewritten word. A query whose terms
+  are all shorter has the one step. Its corrections are found within the capped distances, so when `fuzzy:1` is the hit
   step, `corrected` and `effective` name the terms within one edit.
 - **L3, `prefix:last`.** When L3 expands another term beside the last one, L3 first builds its query with the last
   term alone expanded, listed as `prefix:last`, then its step, `prefix`. Every other word must then be held as typed,

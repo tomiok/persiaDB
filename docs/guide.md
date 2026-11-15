@@ -185,8 +185,8 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 | L0 | `exact` | Every analyzed term is required. |
 | L1 | `synonyms` | Terms expand through the collection's synonym groups. |
 | L2 | `drop_terms` | Required-term ratio steps from 100% to 75%, 50%, then one term. Low-value terms go first. |
-| L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). Unless L2 took those documents first, the last term alone expands first. |
-| L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more; hits within one edit of every word rank first. Corrections are reported. |
+| L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). When another term expands too, and L2 did not take those documents first, the last term alone expands first. |
+| L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more; shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: the top documents the filters keep, by static rank, then recency, flagged in the response; or nothing (`fallback: "none"`). |
 
 The response says what happened. This JSON is the shape in SPEC §7.6. It is illustrative:
@@ -211,15 +211,18 @@ planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
 
 A query's `relax` is `false`, `true`, or an object of the collection's keys (`enabled`, `min_results`, `levels`,
 `fallback`, `fill`, `filters`, `budget_ms`). Each key it gives overrides the collection's setting. The others keep
-it. Values out of range are errors, even with relaxation off (ROADMAP 8.3.1, ADR-0045). A cursor remembers those
-settings, so the next page under other settings is an error instead of a page from another ranking. With `fill`,
+it. Values out of range are errors, even with relaxation off (ROADMAP 8.3.1, ADR-0045). A cursor remembers the
+settings that decide the ranking: the levels the plan runs (L5 included), `min_results`, `fill` and `filters`. It
+does not remember `budget_ms`, which only truncates a page. The next page under other settings is an error instead
+of a page from another ranking. With `fill`,
 pages by cursor or by offset are still slices of one ranking (8.3.2). `explain: true` wraps each relaxed hit's score
 tree in a node that names its level, step, and what that step applied (8.3.4).
 
-Within a level, typos and completions are tiers (ROADMAP 8.2.7, ADR-0046). When a word has 8 characters or more,
-L4 first searches every word within one edit (`fuzzy:1`), then within each word's own distance. Unless L2's one-term
-rung took those documents first (it does not without L2, as in search as you type, or for a word the analyzer
-splits), L3 first expands the last word alone, keeping the others as typed (`prefix:last`). The tiers are steps of
+Within a level, typos and completions are tiers (ROADMAP 8.2.7, ADR-0046). When a term L4 rewrites has 8
+characters or more, L4 first searches every rewritten term within one edit (`fuzzy:1`), then within each term's own
+distance. Terms shorter than 4 characters stay exact in both. When L3 expands a word besides the last one, and L2's
+one-term rung did not take those documents first (it does not without L2, as in search as you type, or for a word
+the analyzer splits), L3 first expands the last word alone, keeping the others as typed (`prefix:last`). The tiers are steps of
 the cascade, so a near match ranks above a far one whatever their scores. On a judged typo suite beside the
 relevance gate, the mean nDCG@10 goes from 0.6786 to 0.9835. Stemmed matches are not tiered yet (8.2.10).
 

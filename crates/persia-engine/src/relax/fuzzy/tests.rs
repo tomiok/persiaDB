@@ -385,9 +385,15 @@ fn a_term_of_two_edits_gets_a_tier_step_within_one_edit_first() {
     assert_eq!(built[0].applied, "fuzzy");
     // A word that is long in one field only (`running` is 7 in `title`, `run` in `body`) is not capped either.
     assert_eq!(steps(&s, "running").len(), 1);
-    // A long word in a field L4 may not rewrite stays exact in both, so the steps would be equal: one step.
-    let title_only = |f: FieldId| (f == id(&s, "title")).then_some(1.0);
-    let compiled = compile(&s, "brand:zapatillas red");
-    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&title_only);
-    assert!(Fuzzy.steps(&input).unwrap().len() <= 1);
+    // A word long only in a field L4 may not rewrite (`jumpings` is 8 in `title`, `jump` in `body`) stays exact
+    // there, so capping changes nothing: one step.
+    let body_only = |f: FieldId| (f == id(&s, "body")).then_some(1.0);
+    let compiled = compile(&s, "jumpings");
+    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&body_only);
+    let built = Fuzzy.steps(&input).unwrap();
+    assert_eq!(built.len(), 1, "{built:?}");
+    assert_eq!(built[0].applied, "fuzzy");
+    assert_eq!(fuzzies(&built[0].query), [("jump".to_owned(), 1)]);
+    // A `field:` clause stays exact at L4, so it alone builds no step.
+    assert_eq!(steps(&s, "brand:zapatillas red").len(), 0);
 }
