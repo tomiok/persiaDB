@@ -793,6 +793,7 @@ fn bad_requests_are_errors() {
             origin: origin(&snapshot, &memtable),
             relaxed: None,
             proximity: false,
+            relax: None,
         })
     };
     let wrong_count = SearchRequest {
@@ -1086,6 +1087,7 @@ fn a_cursor_from_a_location_no_view_has_is_well_defined() {
             origin: origin(&snapshot, &memtable),
             relaxed: None,
             proximity: false,
+            relax: None,
         }),
         ..base.clone()
     };
@@ -1350,8 +1352,8 @@ fn a_cursor_from_a_plan_with_the_other_proximity_setting_is_an_error() {
     ));
 
     // A relaxed search plans without the bonus (SPEC §7.4): it pages after the default plan's cursor and rejects
-    // the other.
-    let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::default()).unwrap();
+    // the other. It runs L0 alone, as a plain search does, so their cursors' relaxation settings agree (ROADMAP 8.3.1).
+    let relax = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::disabled()).unwrap();
     let exec = Execution::default();
     let relaxed = views
         .search_relaxed(&and, &after(cursor_off), &relax, &exec)

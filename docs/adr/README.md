@@ -67,3 +67,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed |
 | [0043](./0043-relaxed-response-states-the-hit-step.md) | A relaxed response states the text of its hit step, the last step that found a hit | proposed |
 | [0044](./0044-l5-fallback-static-rank-then-index-recency.md) | L5 `fallback`: the collection's static rank, then index recency, flagged in the response | proposed |
+| [0045](./0045-request-relax-options-and-cursor-settings.md) | A request's `relax` options: every key, merged one at a time, and cursors that record the settings | proposed |

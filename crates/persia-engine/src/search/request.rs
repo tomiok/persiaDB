@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 
 use super::{ExecError, Interrupt};
 use crate::document::Document;
+use crate::relax::RelaxSettings;
 use crate::schema::{CollectionSchema, FieldId};
 use crate::segment::ReadError;
 
@@ -76,6 +77,16 @@ pub enum RequestError {
         cursor: bool,
         /// Whether this search's plan does.
         plan: bool,
+    },
+    /// A cursor from a search with other relaxation settings (SPEC §7.4, §7.6, ROADMAP 8.3.1): its levels, `min_results`,
+    /// `fill` or `filters` differ, so this search would build other steps or stop elsewhere, and its page would not be a
+    /// slice of the cursor's ranking. A plain search, and one that runs L0 alone, has none.
+    #[error("cursor from a search with relaxation settings {}; this search has {}", show(cursor.as_ref()), show(search.as_ref()))]
+    CursorRelax {
+        /// The settings the cursor recorded.
+        cursor: Option<RelaxSettings>,
+        /// This search's.
+        search: Option<RelaxSettings>,
     },
     /// A cursor from a relaxation step this search cannot page after (SPEC §7.6, ROADMAP 8.1.3): a step after L0
     /// given to a search that does not relax (every hit it returns ranks before it), or a step after the last step
@@ -235,4 +246,9 @@ impl Projection {
             }
         }
     }
+}
+
+/// Relaxation settings as [`RequestError::CursorRelax`] names them: `none` for a search that runs L0 alone.
+fn show(settings: Option<&RelaxSettings>) -> String {
+    settings.map_or_else(|| "none (L0 only)".to_owned(), ToString::to_string)
 }

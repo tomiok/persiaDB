@@ -576,7 +576,7 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
 - [ ] 8.2.9 (v1.1) L5 `fallback` by static rank reads every candidate's column key when the FOR bounds (the minimum plus `2^width − 1`, SPEC §5.2.1) do not separate blocks: values spread over their range (the bench's prices) give every block the same bound, so `search_relaxed/l5/static_rank` reads all 50 000 keys (886 µs, ADR-0044). Store an exact maximum per block, or a per-segment order by static rank written at flush (both on-disk format changes), or cache L5's order per snapshot. Each block visited, and each window a recency walk reads back, builds the step's matcher again, which looks up the postings of every earlier step it excludes (after the default levels, the L2 ladder and the L3 and L4 expansions): measure L5 after the default levels too (found in 8.2.5)
 
 ## 8.3 Controls & API
-- [ ] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
+- [~] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
 - [ ] 8.3.2 `fill` mode (continue to fill `limit` from looser levels). The engine's cascade fills since 8.1.2 (`RelaxOptions::fill`); what remains is the request option of 8.3.1 and its tests end to end
 - [ ] 8.3.3 Metrics: relaxation level histogram, % queries relaxed, % still empty
 - [ ] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)

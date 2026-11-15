@@ -26,7 +26,8 @@ use super::views::CollectionViews;
 use crate::query::{BoolQuery, Compiled, Fit, Query, QueryLimits, StepLimits};
 pub use crate::relax::Correction;
 use crate::relax::{
-    Expansion, FallbackOrder, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, rank_score,
+    Expansion, FallbackOrder, LevelInput, PlannedLevel, RelaxLevel, RelaxPlan, RelaxSettings,
+    rank_score,
 };
 use crate::schema::{CollectionSchema, FieldId, FieldKind};
 use crate::search::{
@@ -364,6 +365,7 @@ impl<'q, 's> Built<'q, 's> {
             last,
             // The next page carries the hit step on, as the first page found it.
             hit: found.max(carried).unwrap_or(0),
+            relax: start.relax,
         };
         Finished {
             ran,
@@ -437,41 +439,35 @@ struct Start {
     last: Option<usize>,
     /// The hit step the cursor's page stated (ROADMAP 8.1.22).
     hit: Option<usize>,
+    /// The settings of the plan, which every hit's cursor records (ROADMAP 8.3.1).
+    relax: Option<RelaxSettings>,
 }
 
 impl Start {
     /// From the top without a cursor; from `cursor`'s step otherwise, one without a step being step 0 of a cascade
-    /// that stopped at L0.
-    ///
-    /// # Errors
-    /// [`RequestError::CursorStep`] for a cursor from a step after L0 when `relax` does not relax: every hit it
-    /// returns ranks before the cursor, as for a plain search.
-    fn of(cursor: Option<&Cursor>, relax: &RelaxPlan) -> Result<Self, RequestError> {
+    /// that stopped at L0. The request was checked first ([`CollectionViews::check_request`]): a cursor from a step
+    /// after L0 has the settings of a plan that relaxes, as `relax` then does.
+    fn of(cursor: Option<&Cursor>, relax: &RelaxPlan) -> Self {
+        let relax = relax.settings();
         let Some(cursor) = cursor else {
-            return Ok(Self {
+            return Self {
                 step: 0,
                 last: None,
                 hit: None,
-            });
+                relax,
+            };
         };
         let at = cursor.relaxed.unwrap_or(StepCursor {
             step: 0,
             last: 0,
             hit: 0,
         });
-        if at.step > 0 && !relax.relaxes() {
-            return Err(RequestError::CursorStep {
-                step: at.step,
-                last: at.last,
-                reason: "a search that does not relax returns L0's hits only, which rank before it",
-            });
-        }
-        let relaxes = relax.relaxes();
-        Ok(Self {
+        Self {
             step: at.step,
-            last: Some(if relaxes { at.last } else { 0 }),
-            hit: Some(if relaxes { at.hit } else { 0 }),
-        })
+            last: Some(at.last),
+            hit: Some(at.hit),
+            relax,
+        }
     }
 
     /// The hits the cascade counts: from the top, enough to tell `min_results` and fill the window; after a cursor
@@ -578,10 +574,10 @@ impl CollectionViews<'_> {
     ) -> Result<RelaxedResults, RelaxedSearchError> {
         let RelaxedQuery { query, compiled } = query.into();
         // Every step is planned as `SearchPlan::with_terms` plans by default: without proximity (SPEC §7.4).
-        let window = self.check_request(request, false)?;
+        let window = self.check_request(request, false, relax.settings())?;
         let collection = self.collection();
         let stats = collection.search_statistics(self.memtable());
-        let start = Start::of(request.search_after.as_ref(), relax)?;
+        let start = Start::of(request.search_after.as_ref(), relax);
         let min_results = usize::try_from(relax.min_results()).unwrap_or(usize::MAX);
         let need = start.need(window, min_results);
         let builds = |i: usize, found: usize| start.builds(i, found, relax, min_results, need);
@@ -874,7 +870,10 @@ impl CollectionViews<'_> {
             )?;
             // Step 0 of a cascade that stopped at L0 is what a cursor without a step means.
             let PageSteps {
-                last, hit: found, ..
+                last,
+                hit: found,
+                relax,
+                ..
             } = at;
             let relaxed = (step, last) != (0, 0);
             hits.extend(page.into_iter().map(|mut hit| {
@@ -884,6 +883,7 @@ impl CollectionViews<'_> {
                     last,
                     hit: found.max(step),
                 });
+                hit.relax = relax;
                 RelaxedHit {
                     rank_score: rank_score(step, hit.score),
                     hit,
@@ -913,6 +913,7 @@ struct PageSteps {
     first: usize,
     last: usize,
     hit: usize,
+    relax: Option<RelaxSettings>,
 }
 
 /// A step's text (SPEC §7.6 `effective`) and the words it corrected (`corrected`).

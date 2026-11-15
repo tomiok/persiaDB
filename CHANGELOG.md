@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-engine`: a request's `relax` options (ROADMAP 8.3.1; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
+  reads `false`, `true` or an object of every `relaxation` key (`enabled`, `min_results`, `levels`, `fallback`,
+  `fill`, `filters`, `budget_ms`). It is strict: unknown or repeated keys, `null`, other shapes and more than 64 KiB
+  are `RelaxError::Json`. `RelaxOptions::validate` checks the ranges also when the cascade is off. The settings merge
+  over the collection's one key at a time in `RelaxPlan::new`. `relax: false` runs L0 alone and states `level:
+  "exact"`. New: `RelaxOptions::MAX_JSON_LEN`, `RelaxError::Json`, `relax::RelaxSettings`, `RelaxPlan::settings`,
+  `db::Cursor::relax` and `RequestError::CursorRelax`.
+- `persia-engine` (breaking): every cursor now records the relaxation settings of its search: levels, `min_results`,
+  `fill` and `filters`, but not `budget_ms`. They are `None` for a plain search and for a search of L0 alone. A page
+  under other settings is `RequestError::CursorRelax`, so a step-0 cursor from a cascade that relaxes no longer pages
+  a plain search, nor the other way round. `db::Cursor` has a new public field, `relax`.
 - `persia-engine`: L5 `fallback` (ROADMAP 8.2.5; SPEC §6.2.3, §7.6, §7.7; ADR-0044). With `fallback: "static_rank"`
   (the default), a query that still has fewer than `min_results` hits after L4 relaxes to one last step, `fallback`:
   the live documents the request's filter keeps, its excluded clauses do not match and no earlier step matched,

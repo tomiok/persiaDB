@@ -183,7 +183,22 @@ fn l0_with_enough_hits_is_the_plain_search_and_builds_no_level() {
             .unwrap();
     let plain = views.search_with(&plain_plan, &request, &exec()).unwrap();
     assert_eq!(later.calls(), 0);
-    let hits: Vec<_> = relaxed.hits.iter().map(|h| h.hit.clone()).collect();
+    // The same hits, though their cursors record the relaxation settings (ROADMAP 8.3.1): a plain search has none.
+    assert!(
+        relaxed
+            .hits
+            .iter()
+            .all(|h| h.cursor().relax == relax.settings())
+    );
+    assert!(plain.hits.iter().all(|h| h.cursor().relax.is_none()));
+    let hits: Vec<_> = relaxed
+        .hits
+        .iter()
+        .map(|h| crate::db::SearchHit {
+            relax: None,
+            ..h.hit.clone()
+        })
+        .collect();
     assert_eq!(hits, plain.hits);
     assert!(
         relaxed
@@ -666,9 +681,23 @@ fn a_cursor_from_a_later_step_is_an_error_where_it_cannot_page() {
             ..
         })
     ));
-    // A step-0 cursor pages a plain search as before.
+    // A step-0 cursor of a plan that relaxes is one of other relaxation settings for a plain search, which runs L0
+    // alone (ROADMAP 8.3.1); stripped of them, it pages L0.
     let l0 = SearchRequest {
         search_after: Some(out.hits[0].cursor()),
+        ..request(10)
+    };
+    assert!(matches!(
+        views.search_with(&plain, &l0, &exec()),
+        Err(RequestError::CursorRelax {
+            cursor: Some(_),
+            search: None
+        })
+    ));
+    let mut stripped = out.hits[0].cursor();
+    stripped.relax = None;
+    let l0 = SearchRequest {
+        search_after: Some(stripped),
         ..request(10)
     };
     assert_eq!(
@@ -1588,16 +1617,30 @@ fn cursors_from_other_searches_page_as_their_step_says() {
     let synonyms = Stub::new(vec![step(term(body, "hat"), "synonyms")]);
     let relax = plan(&min(10), &[(RelaxLevel::Synonyms, &synonyms)]);
     let red = term(body, "red");
-    // A plain search's cursor (no step) is step 0 of a cascade that stopped at L0: L0 after it, and no further.
+    // A plain search's cursor (no step, no settings) is step 0 of a cascade that stopped at L0: a search that runs L0
+    // alone (`relax: false`) pages L0 after it, and one that relaxes has other settings (ROADMAP 8.3.1).
     let plain =
         SearchPlan::with_terms(&red, c.schema(), &c.search_statistics(&memtable), &views).unwrap();
     let first = views.search_with(&plain, &request(1), &exec()).unwrap();
     assert_eq!(first.hits[0].cursor().relaxed, None);
+    assert_eq!(first.hits[0].cursor().relax, None);
     let next = SearchRequest {
         search_after: Some(first.hits[0].cursor()),
         ..request(10)
     };
-    let out = views.search_relaxed(&red, &next, &relax, &exec()).unwrap();
+    assert!(matches!(
+        views.search_relaxed(&red, &next, &relax, &exec()),
+        Err(super::RelaxedSearchError::Request(
+            RequestError::CursorRelax {
+                cursor: None,
+                search: Some(_)
+            }
+        ))
+    ));
+    let l0_only = RelaxPlan::new(c.schema().relaxation(), &RelaxOptions::disabled()).unwrap();
+    let out = views
+        .search_relaxed(&red, &next, &l0_only, &exec())
+        .unwrap();
     assert_eq!(out.hits.len(), 1);
     assert_eq!(
         (out.hits[0].step, out.relaxation.level),
@@ -2505,3 +2548,5 @@ fn l3_does_not_expand_a_field_whose_analyzer_stacks_tokens() {
     // Stacking now: no field to expand, no step.
     assert_eq!(applied(), Vec::<String>::new());
 }
+
+mod options;

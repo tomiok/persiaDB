@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::query::TermQuery;
-use crate::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
+use crate::schema::{CollectionSchema, FieldKind, Levels, SchemaBuilder, TextOptions};
 
 const ALL: [RelaxLevel; 6] = [
     RelaxLevel::Exact,
@@ -431,3 +431,5 @@ impl StatisticsProvider for NoStats {
         Ok(0)
     }
 }
+
+mod options;

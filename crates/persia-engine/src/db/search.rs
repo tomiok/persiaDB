@@ -12,6 +12,7 @@ use super::snapshot::Located;
 use super::views::CollectionViews;
 use crate::bitmap::Ascending;
 use crate::document::Document;
+use crate::relax::RelaxSettings;
 use crate::search::{
     Explanation, FacetCounter, FacetCounts, FacetRequest, Interruptible, MAX_FACETS, MAX_WINDOW,
     Projection, Pruning, RequestError, SearchPlan, Selections, Sort, SortValue, Steps, Ties, Watch,
@@ -90,6 +91,10 @@ pub struct Cursor {
     /// [`SearchPlan::with_proximity`]). The bonus changes scores, so a page under a plan with the other setting would
     /// repeat or pass over hits: [`RequestError::CursorProximity`].
     pub proximity: bool,
+    /// The relaxation settings of the search that produced the hit (SPEC §7.4, §7.6, ROADMAP 8.3.1): `None` from a plain
+    /// search or a relaxed one that runs L0 alone (`relax: false`). A page under other settings would build other steps
+    /// or stop elsewhere: [`RequestError::CursorRelax`].
+    pub relax: Option<RelaxSettings>,
 }
 
 /// Where in the relaxation cascade a [`Cursor`]'s hit is (SPEC §7.6, ROADMAP 8.1.3).
@@ -125,6 +130,8 @@ pub struct SearchHit {
     pub(super) relaxed: Option<StepCursor>,
     /// Whether its plan scored the proximity bonus. [`Self::cursor`] copies it.
     pub(super) proximity: bool,
+    /// Its search's relaxation settings. [`Self::cursor`] copies it.
+    pub(super) relax: Option<RelaxSettings>,
 }
 
 impl SearchHit {
@@ -138,6 +145,7 @@ impl SearchHit {
             origin: self.origin.clone(),
             relaxed: self.relaxed,
             proximity: self.proximity,
+            relax: self.relax,
         }
     }
 }
@@ -231,17 +239,8 @@ impl CollectionViews<'_> {
         request: &SearchRequest,
         exec: &Execution,
     ) -> Result<SearchResults, RequestError> {
-        let window = self.check_request(request, plan.proximity())?;
-        if let Some(StepCursor { step, last, .. }) =
-            request.search_after.as_ref().and_then(|c| c.relaxed)
-            && step > 0
-        {
-            return Err(RequestError::CursorStep {
-                step,
-                last,
-                reason: "a search that does not relax returns L0's hits only, which rank before it",
-            });
-        }
+        // A plain search runs L0 alone, as `relax: false` does (ROADMAP 8.3.1).
+        let window = self.check_request(request, plan.proximity(), None)?;
         let collected = self.collect(
             plan,
             &Part {
@@ -279,11 +278,14 @@ impl CollectionViews<'_> {
     }
 
     /// The window of `request` (`offset + limit`), once its page, cursor and facets are checked (SPEC §7.4, §7.5).
-    /// `proximity`: whether the plan the page runs scores the proximity bonus, which the cursor must match.
+    /// `proximity`: whether the plan the page runs scores the proximity bonus, which the cursor must match. `relax`: the
+    /// settings of its relaxation cascade, which the cursor must match too (ROADMAP 8.3.1); `None` for a search that
+    /// runs L0 alone, which no cursor from a step after L0 can page.
     pub(super) fn check_request(
         &self,
         request: &SearchRequest,
         proximity: bool,
+        relax: Option<RelaxSettings>,
     ) -> Result<usize, RequestError> {
         let window = request
             .offset
@@ -311,6 +313,13 @@ impl CollectionViews<'_> {
                         reason: "its hit step is before its step or after the last step of its cascade",
                     });
                 }
+                if step > 0 && relax.is_none() {
+                    return Err(RequestError::CursorStep {
+                        step,
+                        last,
+                        reason: "a search that does not relax returns L0's hits only, which rank before it",
+                    });
+                }
             }
             let origin = self.cursor_origin();
             if cursor.origin != origin {
@@ -327,6 +336,12 @@ impl CollectionViews<'_> {
                 return Err(RequestError::CursorProximity {
                     cursor: cursor.proximity,
                     plan: proximity,
+                });
+            }
+            if cursor.relax != relax {
+                return Err(RequestError::CursorRelax {
+                    cursor: cursor.relax,
+                    search: relax,
                 });
             }
         }
@@ -421,6 +436,7 @@ impl CollectionViews<'_> {
                 origin: origin.clone(),
                 relaxed: None,
                 proximity,
+                relax: None,
             });
         }
         Ok(hits)

@@ -1541,6 +1541,8 @@ are indices into the view that returned the cursor, so using it elsewhere would 
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
 also records its hit's step, its cascade's last step and its hit step (§7.6). It also records whether its plan scored proximity
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
+It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
+other settings is an error (§7.6, ROADMAP 8.3.1).
 The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
 unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
 own `SearchPlan` can, and the relaxed search plans with the default (off).
@@ -1629,14 +1631,38 @@ Rules:
 - Disable per query with `relax: false`.
 
 The plan (ROADMAP 8.1.1): L0, then the levels `relaxation.levels` names in cascade order, then L5 unless `fallback`
-is `"none"`. A query's `relax` object takes the keys of §6.2.3's `relaxation`, each overriding the collection's
-setting and held to the same rule (one out of range is an error, also when the query disables the cascade). The
-collection's settings stand for the keys it leaves out. `relax: false` is `enabled: false`: L0 only. A level builds
+is `"none"`. A level builds
 its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
 words; ROADMAP 8.1.10). Every level builds queries; L5 builds one whose hits it ranks itself (ROADMAP 8.2.5, below).
+
+A query's `relax` (ROADMAP 8.3.1, ADR-0045) is `false`, `true` or an object. `false` is `{"enabled": false}`, and
+`true` is `{"enabled": true}`. The object takes the keys of §6.2.3's `relaxation`: `enabled`, `min_results`, `levels`,
+`fallback`, `fill`, `filters` and `budget_ms`. No key is for the collection only. The limits a step is held to
+(§7.1.3) are the engine's, not a key. The JSON is read as strictly as a collection definition (§6.2.1). An unknown
+or repeated key, `null` for a key, any other shape, and more than 64 KiB of text are errors. The settings merge one
+key at a time: the query's value, else the collection's, else §6.2.3's default. A collection definition that leaves
+a key out has the default. `levels` is one key, so a list replaces the collection's list whole. Each value the query
+gives is held to §6.2.3's rule, also when the query or the collection disables the cascade: `min_results` in
+`1–10 000`, `budget_ms` in `1–60 000`, custom `levels` distinct and in cascade order. A value that breaks its rule
+is an error that names the key. `filters: "last_resort"` is accepted. No level relaxes a filter until ROADMAP 8.2.6,
+so it searches as `"never"` does.
+
+`enabled: false` (`relax: false`), from the query or from the collection when the query does not turn it on, runs L0
+alone. So does a plan whose `levels` is `[]` with `fallback: "none"`. The response then states `level: "exact"`, no
+`applied`, no `fallback` and `truncated: false`. Its page holds L0's hits, and may be empty. A search without a
+cascade (the engine's plain `search`, which plans its query alone) is `relax: false`. A request that wants
+relaxation runs the relaxed search with the merged settings.
+
+A cursor records the *relaxation settings* of the search that made it: the levels its plan runs (L5 included),
+`min_results`, `fill` and `filters`. A plan of L0 alone records none, and neither does a plain search, so their
+cursors page each other. `budget_ms` is not recorded. The budget only truncates a page, and the cursor's last step
+already lets the next page try again (below). A page whose settings differ from its cursor's is an error. It would
+build other steps or stop elsewhere, so it would not be a slice of the cursor's ranking. The check runs with the
+cursor's origin and proximity checks (§7.4). A cursor from a step after L0 given to a search of L0 alone is the step
+error (below), checked first.
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1817,8 +1843,9 @@ one query on one snapshot, by `offset` or by cursor, are therefore slices of one
 (§7.4). A cursor without a step (from a search that did not relax) is step 0 of a cascade that stopped at L0, its hit
 step 0. A cursor whose step is after its last, or whose hit step is before its step or after its last, is an error,
 and so is a cursor from a step after L0 given to a plain search or to one with
-`relax: false`: every hit it returns ranks before the cursor. A cursor from a step the plan no longer builds
-(another `relax`) pages nothing.
+`relax: false`: every hit it returns ranks before the cursor. A cursor from a search with another `relax` is an
+error (its settings, above). A cursor from a step the plan no longer builds under the same settings (other limits,
+§7.1.3, which the cursor does not record) pages nothing.
 
 Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
 deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and

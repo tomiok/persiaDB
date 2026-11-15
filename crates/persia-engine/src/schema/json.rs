@@ -11,6 +11,8 @@ use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde::ser::SerializeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::relax::RelaxOptions;
+
 use super::{
     AnalyzerRef, CollectionSchema, Fallback, FieldKind, FilterRelaxation, KeywordOptions, Level,
     Levels, MAX_SCHEMA_JSON_LEN, Parts, RankFn, RankingConfig, RelaxationConfig, SchemaError,
@@ -653,5 +655,52 @@ impl<'de> Deserialize<'de> for Levels {
         }
 
         deserializer.deserialize_any(LevelsVisitor)
+    }
+}
+
+/// A query's `relax` (SPEC §7.6, ROADMAP 8.3.1): `false`, `true`, or an object of the keys of a collection's
+/// `relaxation` (SPEC §6.2.3), read as strictly (ADR-0022): an unknown or repeated key, `null` for a key, and any other
+/// shape are errors. The values are not checked against their ranges here ([`RelaxOptions::validate`]).
+pub(crate) fn relax_from_json(json: &str) -> Result<RelaxOptions, String> {
+    let Relax(options) = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(options)
+}
+
+/// [`relax_from_json`]'s value.
+struct Relax(RelaxOptions);
+
+impl<'de> Deserialize<'de> for Relax {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RelaxVisitor;
+
+        impl<'de> Visitor<'de> for RelaxVisitor {
+            type Value = Relax;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("false, true or an object of relaxation settings")
+            }
+
+            fn visit_bool<E: de::Error>(self, enabled: bool) -> Result<Relax, E> {
+                Ok(Relax(RelaxOptions {
+                    enabled: Some(enabled),
+                    ..RelaxOptions::default()
+                }))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Relax, A::Error> {
+                let r = RawRelaxation::deserialize(de::value::MapAccessDeserializer::new(map))?;
+                Ok(Relax(RelaxOptions {
+                    enabled: r.enabled,
+                    min_results: r.min_results,
+                    levels: r.levels,
+                    fallback: r.fallback,
+                    fill: r.fill,
+                    filters: r.filters,
+                    budget_ms: r.budget_ms,
+                }))
+            }
+        }
+
+        deserializer.deserialize_any(RelaxVisitor)
     }
 }
