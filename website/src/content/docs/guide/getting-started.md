@@ -123,7 +123,7 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 
 Filters are not relaxed unless the caller sets `relax.filters` to `"last_resort"`. `relax: false` on a query turns the cascade off.
 
-The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The engine produces that correction when L4 is the step that found the hits (ROADMAP 8.2.4.3, 8.1.22). L0 through L5 build queries. L5 ranks by static rank, then index-location recency, ignores the request's `sort`, and sets `fallback`. Filter relaxation (`last_resort`) does not run (ROADMAP 8.2.6). [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
+The response is specified to carry what happened. This object is the shape in SPEC §7.6. `CollectionViews::search_relaxed` returns a `Relaxation` value. The engine produces that correction when L4 is the step that found the hits (ROADMAP 8.2.4.3, 8.1.22). L0 through L5 build queries. L5 ranks by static rank, then index-location recency, ignores the request's `sort`, and sets `fallback`. With `relax.filters: "last_resort"`, one last step (L6) drops the request's filters when every earlier level found fewer than `min_results` hits, and sets `filters_dropped` (ROADMAP 8.2.6). [minimum_should_match](/guide/typo-tolerant-search/#minimum_should_match) is the L2 ladder:
 
 ```json
 {
