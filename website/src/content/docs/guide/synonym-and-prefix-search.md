@@ -1,6 +1,6 @@
 ---
 title: "Synonym search and prefix search"
-description: "How synonym search and prefix search work in Persia DB: L1 synonym groups, L3 FST prefix expansion in Rust, and which steps are still not built."
+description: "How synonym search and prefix search work in Persia DB: L1 synonym groups, L3 FST prefix expansion in Rust, and which neighboring steps are still open."
 head:
   - tag: title
     content: "Synonym search and prefix search in Rust | PersiaDB"
@@ -62,7 +62,7 @@ Synonym search and prefix search, in this engine, are two steps of [query relaxa
 
 ## Synonym search in Rust
 
-L1 is one step, listed as `synonyms` (ROADMAP 8.2.1, [ADR-0039](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0039-l1-synonyms-runs-alternatives-and-cuts.md)). It does not rewrite the user's text. `effective` stays the text L0 compiled, because every clause is kept. `corrected` stays empty until fuzzy matching synthesizes a correction (ROADMAP 8.2.4.3), which is not written.
+L1 is one step, listed as `synonyms` (ROADMAP 8.2.1, [ADR-0039](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0039-l1-synonyms-runs-alternatives-and-cuts.md)). It does not rewrite the user's text. `effective` stays the text L0 compiled, because every clause is kept. `corrected` stays empty on this step. L4 fuzzy synthesizes a correction when that step found the hits (ROADMAP 8.2.4.3, 8.1.22).
 
 ### Where the groups live
 
@@ -116,7 +116,7 @@ The same rule applies to a programmatic query. L3 expands `term` and `combined` 
 
 ### How a prefix is expanded
 
-Each expanded term becomes a `prefix` query with `max_expansions` 50 (`DEFAULT_MAX_EXPANSIONS`). Planning expands it once, over the terms of that field in every view the plan runs on (each segment and the memtable). The walk is an FST range (SPEC §7.1, ROADMAP 7.4.12). The terms kept are the ones with the highest collection document frequency, ties broken by bytes, at most 50. Every view then scores those same terms. Their shared idf is the document frequency of the most frequent term kept. A prefix score is not multiplied by an edit distance. That weight belongs to fuzzy matching, which does not build a cascade step.
+Each expanded term becomes a `prefix` query with `max_expansions` 50 (`DEFAULT_MAX_EXPANSIONS`). Planning expands it once, over the terms of that field in every view the plan runs on (each segment and the memtable). The walk is an FST range (SPEC §7.1, ROADMAP 7.4.12). The terms kept are the ones with the highest collection document frequency, ties broken by bytes, at most 50. Every view then scores those same terms. Their shared idf is the document frequency of the most frequent term kept. A prefix score is not multiplied by an edit distance. That weight belongs to L4 fuzzy, which builds its own cascade step (ROADMAP 8.2.4).
 
 An expanded `combined` clause, one word over several text fields, becomes a `bool` of `should` clauses: the fields that stay exact remain one `combined`, and each expanded field gets its own `prefix`. A document matches the word when an exact field holds the term, or an expanded field holds a term that starts with it. A `prefix` scores with that field's schema boost, the same field weight a `term` uses. When the query set a different `fields` weight, the step scales the prefix by the ratio of the two, clamped to the range a `boost` allows (SPEC §7.1).
 
@@ -140,13 +140,13 @@ A query that expands nothing skips the level and is not listed in `applied`.
 |---|---|
 | L1 `synonyms` and L3 `prefix` | Library code, as this page describes. %%RELAXATION_CELL%% |
 | L2 `drop_terms` | Library code. [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped). |
-| L4 `fuzzy` | The cascade builds no step (ROADMAP 8.2.4). An explicit `fuzzy` clause can still be planned over collection terms (ROADMAP 7.4.12). `Relaxation.corrected` stays empty (ROADMAP 8.2.4.3). A typo is not rewritten. |
-| L5 `fallback` | Not written (ROADMAP 8.2.5). `Fallback::None` is the schema value that would allow an empty page. |
+| L4 `fuzzy` | Library code (ROADMAP 8.2.4). One step from L0. An explicit `fuzzy` clause can still be planned over collection terms (ROADMAP 7.4.12). `corrected` is stated when L4 found the hits (ROADMAP 8.2.4.3, 8.1.22). |
+| L5 `fallback` | Library code (ROADMAP 8.2.5). Static rank, then index-location recency (docids descending within a view). The request's `sort` is ignored for that ranking. Hits still carry its values. Flagged with `fallback`. `none` allows an empty page. |
 | Relaxing filters | `last_resort` does not run (ROADMAP 8.2.6). |
 | `suggest` completions | Not written (ROADMAP 18). L3 is not that API. |
 | `persia::Db::search` | Not in the crate (M10). |
 
-A query can still come back empty. L4 and L5 build nothing, so a one-term query that is not a synonym and not a prefix of a kept term has nowhere left to go. A multi-term query returns hits from L1, L2, or L3 only when some document holds an alternative, enough of the terms, or a kept prefix. `RelaxOptions::disabled`, and a collection whose `RelaxationConfig.enabled` is false, run L0 only. The zero-result regression gate is not written (ROADMAP 8.4).
+A query can still come back empty. `fallback: "none"` leaves a miss that L1 through L4 did not match with no last resort. A filter no document passes stays empty, because filter relaxation (`last_resort`) does not run (ROADMAP 8.2.6). `RelaxOptions::disabled`, and a collection whose `RelaxationConfig.enabled` is false, run L0 only. The zero-result regression gate is not written (ROADMAP 8.4).
 
 [Getting started](/guide/getting-started/) separates `CollectionViews::search_relaxed` from the illustrative `Db::search` samples. [What is an embedded search database?](/guide/embedded-search/) is the library shape those samples are aiming at.
 

@@ -537,6 +537,28 @@ with one codegen unit; it stayed slower in the default build with `DropTerms::ne
 local change, not a bench option), so that move is layout, not work. `l1` is 3–5% slower in both builds, unexplained:
 its step is the same query, and its code only reads the root through `Compiled::root` now.
 
+With L5 `fallback` and the hit step (ROADMAP 8.2.5, 8.1.22), same collection and thread, default build, 2026-11-14,
+rustc 1.99.0, AMD Ryzen 5 3600, Linux. Main is b89f51c. `l5/recency` is `nosuch` (in no document) with no level but
+L5, over the bench collection, which has no static rank: the 10 most recent documents, the newest segment read back
+from its end. `l5/static_rank` is the same over a copy of the collection ranked by `log1p(price)`.
+
+| Recorded | `plain` | `l0` | `off` | `l1` | `l2` | `l2_every_step` | `l3` | `l4` | `l5/recency` | `l5/static_rank` |
+|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| main (b89f51c) | 459 µs | 442 µs | 432 µs | 867 µs | 1.42 ms | 11.55 ms | 22.2 ms | 2.51 ms | — | — |
+| ROADMAP 8.2.5, a forward walk with per-document block checks | — | — | — | — | — | — | — | — | 17.0 µs | 2.66 ms |
+| ROADMAP 8.2.5, blocks best first | — | — | — | — | — | — | — | — | 16.7 µs | 1.87 ms |
+| ROADMAP 8.1.22, 8.2.5 | 454 µs | 452 µs | 450 µs | 918 µs | 1.44 ms | 11.49 ms | 23.0 ms | 2.65 ms | 16.0 µs | 886 µs |
+
+`l5/static_rank` reads every key of the collection: a FOR block's bound is its minimum plus `2^width − 1`, and the
+bench's prices are spread over 0–999, so every block's bound is about 1 023 and none can be skipped. Visiting blocks
+best first did not change that; what it saved is the per-document block check. The last row compares each key with
+the block's smallest key whose static rank reaches the worst kept hit's (a binary search over the block's key range,
+again only when that hit changes), so most documents skip the `log1p`: about 18 ns per document. Values whose blocks
+have narrower ranges (sorted, skewed, or clustered by write time) skip whole blocks. ROADMAP 8.2.9 is to store exact
+bounds or a per-segment order. `l1`, `l4` and `off` are 4–6% slower, on code they share with the other levels (each
+step's text kept, the hit step tracked): within the spread of earlier runs (`l1` measured 868–943 µs on unchanged code
+above), not investigated further.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

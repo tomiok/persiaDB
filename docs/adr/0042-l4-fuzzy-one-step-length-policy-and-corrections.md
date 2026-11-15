@@ -70,8 +70,9 @@ level mostly has to build the `fuzzy` queries. Several things were still open:
   the limits, so a `fuzzy:skipped` step has paid for it, and again on every cursor page that builds the step. A page
   whose walk the budget passes stops before L4, `truncated`, and states the earlier step: the budget's usual exception
   to every page stating the same.
-- `corrected` and `effective` are the last step's even when it adds no hit (SPEC §7.6's rule for every level): with
-  one held word and one typo, L2's last rung already holds every document L4 matches. ROADMAP 8.1.22 is to decide it.
+- `corrected` and `effective` were the last step's even when it added no hit: with one held word and one typo, L2's
+  last rung already holds every document L4 matches. ROADMAP 8.1.22 settled it (ADR-0043): the response states the
+  last step that found a hit, so such a query reads L2's text and no correction, the same on every page.
 - With the default `max_expansions` of 1024, L4 counts L3's step (50 per word) among the steps it excludes, so from
   about 10 expanded words it is `fuzzy:cut`, and from about 20 `fuzzy:skipped`.
 - A correction is the most frequent term within the distance, not the nearest: for a word of 8 characters or more, a

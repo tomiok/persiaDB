@@ -44,14 +44,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	const m7 = progress.milestones.find((ms) => ms.id === 'M7');
 	assert.equal(m5?.state, 'done');
 	assert.equal(m6?.state, 'in progress');
-	assert.equal(m7?.state, 'in progress');
-	assert.ok((m7?.done ?? 0) > 0);
+	assert.equal(m7?.state, 'done');
+	assert.equal(m7?.done, m7?.leaves);
 	assert.equal(status.walReady, true);
 	for (const text of [status.engineShort, status.engineNow, status.libraryNow]) {
 		assert.match(text, /WAL with chunks, group commit, and replay/);
-		assert.match(text, /query path is in progress/);
-		assert.match(text, /BM25F scoring/);
-		assert.match(text, /A collection snapshot can be searched as library code/);
+		assert.equal(text.includes('query path is in progress'), false);
 		assert.equal(text.includes('Nothing searches'), false);
 		assert.equal(text.includes('There is no query engine'), false);
 		assert.equal(text.includes('No WAL'), false);
@@ -59,29 +57,28 @@ test('the live tree matches the write path that is actually checked in', () => {
 		assert.equal(text.includes('M5 in progress'), false);
 		assert.equal(text.includes('"'), false);
 	}
-	assert.match(status.preAlpha, /runs a ranked search over a collection snapshot/);
+	assert.match(status.preAlpha, /A search call is in the tree/);
 	assert.equal(status.preAlpha.includes('Nothing runs a search'), false);
 	assert.match(status.preAlpha, /can put, delete, and commit/);
 	assert.equal(status.preAlpha.includes('"'), false);
 	assert.match(status.engineShort, /tombstone sidecars/);
 	assert.match(status.engineShort, /segment merging/);
-	assert.match(status.engineShort, /filter DSL/);
+	assert.equal(status.engineShort.includes('filter DSL'), false);
 	assert.match(
 		status.engineShort,
-		/Relaxation is in progress \(M8, \d+\/\d+\): L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
+		/Relaxation is in progress \(M8, \d+\/\d+\): every cascade level builds a query/,
 	);
 	assert.equal(status.engineShort.includes('synonyms are not built'), false);
 	assert.equal(status.engineShort.includes('prefix are not built'), false);
+	assert.equal(status.engineShort.includes('are not built'), false);
 	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
 	assert.equal(status.libraryNow.includes('exports no API'), false);
-	assert.match(status.relaxationNow, /L1 synonyms/);
-	assert.match(status.relaxationNow, /L2 drop_terms/);
-	assert.match(status.relaxationNow, /L3 prefix/);
-	assert.match(status.relaxationNow, /QueryLimits can cut or skip that step/);
-	assert.match(status.relaxationNow, /A typo is not corrected/);
+	assert.match(status.relaxationNow, /Every cascade level builds a query/);
+	assert.match(status.relaxationNow, /Not every M8 leaf is done/);
+	assert.equal(status.relaxationNow.includes('A typo is not corrected'), false);
 	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
 	assert.equal(status.relaxationNow.includes('A one-term typo still returns no hits'), false);
-	assert.equal(status.relaxationNow.includes('synonyms are not built'), false);
+	assert.equal(status.relaxationNow.includes('are not built'), false);
 	assert.match(status.blobNow, /The pack file, remote blobs, document integration, and garbage collection are not written/);
 	assert.match(status.queryPathNow, /filters, sorts, cursor pages, facets, deadlines, and explain/);
 	assert.equal(status.engineShort.includes('Open and recovery orchestration is only partly done'), false);
@@ -94,35 +91,33 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.engineCalls, /CollectionViews::search runs a ranked search over a collection snapshot/);
 	assert.match(status.engineCalls, /no search on the database handle/);
 	assert.match(status.writePathNow, /replays the WAL/);
-	assert.match(status.writePathNow, /A collection snapshot can be searched as library code/);
+	assert.equal(status.writePathNow.includes('A collection snapshot can be searched as library code'), false);
 	assert.match(status.writePathNow, /Open and recovery orchestration is done/);
 	assert.match(status.noPublicApi, /exports no Db and no Collection/);
-	assert.match(status.noPublicApi, /A search runs only through persia-engine/);
+	assert.equal(status.noPublicApi.includes('A search runs only through persia-engine'), false);
 	assert.match(status.noPublicApi, /unpublished/);
 	assert.match(status.m10Blocked, /M6 \(in progress\)/);
-	assert.match(status.m10Blocked, /M7 \(in progress\)/);
+	assert.equal(status.m10Blocked.includes('M7'), false);
 	assert.match(status.m5Cell, /Done \(M5,/);
 	assert.match(status.m5Cell, /Segments are searched through CollectionViews::search/);
 	assert.match(status.pillarEngine, /WAL, commit, and segment merging/);
-	assert.match(status.pillarEngine, /BM25F scoring and a collection search are in the tree/);
-	assert.match(status.pillarEngine, /no search call on the database handle/);
+	assert.match(status.pillarEngine, /Scoring and query execution are done/);
+	assert.equal(status.pillarEngine.includes('no search call on the database handle'), false);
 	assert.match(status.tokens['%%FEATURES_LEAD%%'], /run as library code in persia-engine/);
-	assert.match(
-		status.tokens['%%FEATURES_LEAD%%'],
-		/L1 synonyms, L2 drop_terms, and L3 prefix can loosen a query, and a typo is not corrected/,
-	);
+	assert.match(status.tokens['%%FEATURES_LEAD%%'], /every cascade level builds a query\./);
+	assert.equal(status.tokens['%%FEATURES_LEAD%%'].includes('a typo is not corrected'), false);
+	assert.equal(status.tokens['%%FEATURES_LEAD%%'].includes('Not every cascade level'), false);
 	assert.match(status.tokens['%%QUERY_CELL%%'], /return ranked hits through CollectionViews::search/);
 	assert.match(
 		status.tokens['%%MATCHING_CELL%%'],
 		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
 	);
-	assert.match(
-		status.tokens['%%RELAXATION_CELL%%'],
-		/L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
-	);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Fuzzy and the fallback are not built/);
-	assert.match(status.tokens['%%RELAXATION_CELL%%'], /A typo is not corrected/);
-	assert.match(status.tokens['%%RELAXATION_NOW%%'], /search_relaxed/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Every cascade level builds a query/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Not every M8 leaf is done/);
+	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('are not built'), false);
+	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('A typo is not corrected'), false);
+	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Every cascade level builds a query/);
+	assert.match(status.tokens['%%RELAXATION_NOW%%'], /Not every M8 leaf is done/);
 	assert.match(status.tokens['%%BLOB_CELL%%'], /The pack file is not written/);
 	assert.match(status.tokens['%%STATE_M8%%'], /^In progress \(M8, \d+\/\d+\)\.$/);
 	assert.match(status.tokens['%%OPEN_CELL%%'], /Database opens a file and CollectionViews::search searches it/);
@@ -148,6 +143,11 @@ test('an unchecked WAL leaf drops the full WAL claim', () => {
 test('the collection search is claimed only with its leaves checked and its code in the tree', () => {
 	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
 	const input = currentInput(live);
+	const progressCopy = structuredClone(input.progress);
+	const m7 = progressCopy.milestones.find((ms) => ms.id === 'M7');
+	if (!m7) throw new Error('missing M7');
+	m7.state = 'in progress';
+	input.progress = progressCopy;
 	assert.match(buildStatus(input).engineShort, /A collection snapshot can be searched as library code/);
 	input.hasCollectionSearch = false;
 	assert.throws(() => buildStatus(input), /marks request done but the matching code is not in the tree/);
@@ -166,6 +166,11 @@ test('a query compiler does not count as a search', () => {
 	for (const id of ['7.5.1', '7.5.2', '7.5.3', '7.5.4']) live.set(id, false);
 	const input = currentInput(live);
 	input.hasCollectionSearch = false;
+	const progressCopy = structuredClone(input.progress);
+	const m7 = progressCopy.milestones.find((ms) => ms.id === 'M7');
+	if (!m7) throw new Error('missing M7');
+	m7.state = 'in progress';
+	input.progress = progressCopy;
 	const next = buildStatus(input);
 	assert.match(next.engineShort, /query path is in progress/);
 	assert.match(next.engineShort, /BM25F scoring/);
@@ -326,8 +331,8 @@ test('docs pages do not keep the stale inventory, and tokens expand', () => {
 	}
 	const faq = substituteStatusText(readFileSync(path.join(docsDir, 'guide/faq.md'), 'utf8'));
 	assert.match(faq, /WAL with chunks, group commit, and replay/);
-	assert.match(faq, /A collection snapshot can be searched as library code/);
-	assert.match(faq, /BM25F scoring/);
+	assert.match(faq, /every cascade level builds a query/);
+	assert.match(faq, /BM25F scorer/);
 	assert.equal(faq.includes('There is no query engine'), false);
 	const code = substituteStatusText(readFileSync(path.join(docsDir, 'guide/code.md'), 'utf8'));
 	assert.match(code, /Public modules:/);
@@ -411,8 +416,15 @@ test('unchecked synonym and prefix leaves stay unclaimed', () => {
 	live.set('8.2.3', false);
 	const next = buildStatus(currentInput(live));
 	assert.match(next.tokens['%%RELAXATION_CELL%%'], /L0 exact and L2 drop_terms build queries/);
-	assert.match(next.tokens['%%RELAXATION_CELL%%'], /Synonyms, prefix, fuzzy, and the fallback are not built/);
-	assert.match(next.relaxationNow, /A one-term typo still returns no hits/);
+	assert.match(next.tokens['%%RELAXATION_CELL%%'], /Synonyms and prefix are not built/);
+	assert.equal(next.relaxationNow.includes('A one-term typo still returns no hits'), false);
+	assert.equal(next.relaxationNow.includes('A typo is not corrected'), false);
+	live.set('8.2.4.1', false);
+	live.set('8.2.5', false);
+	const none = buildStatus(currentInput(live));
+	assert.match(none.tokens['%%RELAXATION_CELL%%'], /Synonyms, prefix, fuzzy, and the fallback are not built/);
+	assert.match(none.relaxationNow, /A typo is not corrected/);
+	assert.match(none.relaxationNow, /A one-term typo still returns no hits/);
 });
 
 test('synonyms marked done without its transform is rejected', () => {

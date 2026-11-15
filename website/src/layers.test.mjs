@@ -76,8 +76,8 @@ test('the live snapshot fills every box and drops the stale labels', () => {
 	assert.equal(m5?.state, 'done');
 	assert.equal(m6?.state, 'in progress');
 	assert.match(view.caption, /WAL with chunks, group commit, and replay/);
-	assert.match(view.caption, /query path is in progress/);
-	assert.match(view.caption, /A collection snapshot can be searched as library code/);
+	assert.match(view.caption, /every cascade level builds a query/);
+	assert.equal(view.caption.includes('query path is in progress'), false);
 	assert.equal(view.caption.includes('no query engine'), false);
 	assert.match(view.caption, /exports no Db or Collection/);
 	assert.equal(view.caption.includes('M5 in progress'), false);
@@ -96,13 +96,13 @@ test('figure captions follow the same snapshot', () => {
 	assert.match(writePathCaption(parsed), /container commit is done \(M2,/);
 	assert.match(writePathCaption(parsed), new RegExp(`in progress \\(M6, ${m6?.done}/${m6?.leaves}\\)`));
 	assert.match(writePathCaption(parsed), /WAL with chunks, group commit, and replay/);
-	assert.match(writePathCaption(parsed), /A collection snapshot can be searched as library code/);
+	assert.equal(writePathCaption(parsed).includes('A collection snapshot can be searched as library code'), false);
 	assert.equal(writePathCaption(parsed).includes('not started (M6)'), false);
 	assert.match(queryPathCaption(parsed), /Text analysis is done \(M4,/);
-	assert.match(queryPathCaption(parsed), /The query milestone is in progress \(M7/);
+	assert.match(queryPathCaption(parsed), /The query milestone is done \(M7/);
 	assert.match(
 		queryPathCaption(parsed),
-		/L0 exact, L1 synonyms, L2 drop_terms, and L3 prefix build queries/,
+		/every cascade level builds a query/,
 	);
 	assert.equal(queryPathCaption(parsed).includes('not started (M8)'), false);
 	assert.match(storageDiagramCaption(parsed), /Block framing is done \(M1,/);

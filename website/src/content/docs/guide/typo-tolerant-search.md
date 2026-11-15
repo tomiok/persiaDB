@@ -27,7 +27,7 @@ head:
             "name": "Does Persia DB do typo-tolerant search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "Partly. The compiler does not turn a typo into a fuzzy clause, and L4 fuzzy does not build a query, so a typo is not rewritten. L1 synonyms can match a configured alternative, and L3 prefix can match a term that starts with an analyzed word. L2 drop_terms can return hits for a query of two or more terms by requiring fewer of them. A one-term query that is not a synonym and not a prefix of a kept term still returns no hits. %%RELAXATION_CELL%% CollectionViews::search and CollectionViews::search_relaxed run over a collection snapshot. There is no search call on the database handle."
+              "text": "Partly, as library code in persia-engine. The compiler does not turn a typo into a fuzzy clause. L4 fuzzy builds one step (edit distance 1 for a term of length 4 to 7, distance 2 from length 8) and reports corrected when that step found the hits. L5 fallback returns the documents the filters keep, ranked by static rank then index-location recency, ignoring the request sort, and flags that order with fallback. L1 synonyms, L2 drop_terms, and L3 prefix build steps too. A page can still be empty when fallback is none, when relaxation is off, or when every document fails the filter. Filter relaxation is still ROADMAP 8.2.6. %%RELAXATION_CELL%% CollectionViews::search and CollectionViews::search_relaxed run over a collection snapshot. There is no search call on the database handle."
             }
           },
           {
@@ -72,7 +72,7 @@ head:
 > When this page and [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SPEC.md) disagree, the SPEC wins.
 > Nothing here is a benchmark.
 
-Typo-tolerant search, in this design, is not a separate fuzzy index. A query that would otherwise come back empty is loosened one step at a time until it has enough hits. That cascade is [query relaxation](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) (SPEC §7.6). It is on by default. Synonyms (L1), dropping terms (L2), and prefix expansion (L3) are library code. Fuzzy edit distance (L4) and the fallback (L5) are not written. How L1 and L3 expand a query is [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+Typo-tolerant search, in this design, is not a separate fuzzy index. A query that would otherwise come back empty is loosened one step at a time until it has enough hits. That cascade is [query relaxation](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) (SPEC §7.6). It is on by default. Synonyms (L1), dropping terms (L2), prefix expansion (L3), fuzzy edit distance (L4), and the fallback (L5) are library code. L5 ranks by static rank, then by where the index holds the document, ignores the request's `sort`, and flags that order with `fallback`. Filter relaxation is still ROADMAP 8.2.6. How L1 and L3 expand a query is [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
 The product goal is embedded full-text search in Rust that, by default, never returns zero results ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). What that library shape is, and what you can call today, is [What is an embedded search database?](/guide/embedded-search/). This page is the search behavior: how a typo is handled, how [BM25F](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f) and filters fit, and which of those pieces are in the repository. Filters, facets, sort, and pages are [Faceted search](/guide/faceted-search/).
 
@@ -110,16 +110,16 @@ The response is `Relaxation` (ROADMAP 8.1.5):
 | `applied` | What each step after L0 applied, in build order. Empty when none did. A step cut to fit the limits ends with `Relaxation::CUT` (`:cut`). One that cannot fit ends with `Relaxation::SKIPPED` (`:skipped`) and is not searched. |
 | `original` | The user text (`Compiled::text`). Absent for a programmatic query. |
 | `effective` | Text of the last step. At L0, the clauses that compiled. At L2, the clauses that step keeps. Absent when `original` is, and when the level renders no text. |
-| `corrected` | `Vec<Correction>`, each `{ original, corrected }`. Empty until the fuzzy level synthesizes a correction (ROADMAP 8.2.4.3). |
+| `corrected` | `Vec<Correction>`, each `{ original, corrected }`. The words L4 replaced, when L4 is the step that found the hits (ROADMAP 8.2.4.3, 8.1.22). Empty otherwise. |
 | `truncated` | The budget passed before the cascade finished. |
 
 `relaxation.relaxed()` is true when a step after L0 was built and not skipped.
 
 A time budget, `budget_ms`, defaults to 50. It starts after the exact level, so that level is never cut by it. Past it, the completed steps come back with `truncated: true` (ROADMAP 8.1.4). A step in progress is dropped whole. A request deadline is separate and applies to every step, including exact. [Faceted search](/guide/faceted-search/) is that deadline (`Execution::deadline`). `Relaxation.truncated` is distinct from `Compiled.truncated`, which means the compiler cut the user's text to fit the query limits. SPEC §7.1.1 calls that cut `query_truncated`.
 
-`RelaxPlan::with_limits` holds every step after L0 to a `QueryLimits` (ROADMAP 8.1.8, SPEC §7.1.3). An L1 step that does not fit has its synonym alternatives cut in group order, then term order, and the cut is named `synonyms:cut`. A step that cannot fit with one alternative each is `synonyms:skipped` (ROADMAP 8.1.13). An L3 step cuts prefix expansions the same way, largest first: `prefix:cut`, or `prefix:skipped` when no cut fits. The fuzzy level builds no step, so it does not apply that cut today. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is both cuts.
+`RelaxPlan::with_limits` holds every step after L0 to a `QueryLimits` (ROADMAP 8.1.8, SPEC §7.1.3). An L1 step that does not fit has its synonym alternatives cut in group order, then term order, and the cut is named `synonyms:cut`. A step that cannot fit with one alternative each is `synonyms:skipped` (ROADMAP 8.1.13). An L3 step cuts prefix expansions the same way, largest first: `prefix:cut`, or `prefix:skipped` when no cut fits. An L4 step cuts fuzzy expansions the same way: `fuzzy:cut`, or `fuzzy:skipped` when no cut fits. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 cuts.
 
-The JSON below is the shape in SPEC §7.6, including a fuzzy correction. This engine does not produce it. `corrected` stays empty, and L4 builds no query.
+The JSON below is the shape in SPEC §7.6. The engine produces a correction when L4 is the step that found the hits. A later step that adds no hit does not replace `effective` or `corrected` (ROADMAP 8.1.22).
 
 ```json
 {
@@ -143,8 +143,8 @@ Each level is specified in SPEC §7.6. The names are the ones `RelaxLevel::name`
 | L1 | `synonyms` | A term expands through the collection's synonym groups. Within a group the terms are alternatives. Expansions per matched term are capped (default 50). | Library code (ROADMAP 8.2.1). One step, `synonyms`, from runs the compiler stored on `Compiled::synonyms`. [Synonym search](/guide/synonym-and-prefix-search/#synonym-search-in-rust). |
 | L2 | `drop_terms` | The share of terms that must match steps from 100% to 75%, to 50%, then to one term. Least important terms are the ones a step reports dropped first. | Library code (ROADMAP 8.2.2.1–8.2.2.4). [minimum_should_match](#minimum_should_match) and [how terms are dropped](#how-terms-are-dropped). |
 | L3 | `prefix` | The last term, and other analyzed terms of length at least 3, expand through an FST prefix scan. Expansions are capped (default 50) and kept by collection df. | Library code (ROADMAP 8.2.3). One step, `prefix`, from L0. [Prefix search](/guide/synonym-and-prefix-search/#prefix-search). |
-| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more. Corrected terms are reported. | An explicit fuzzy clause expands over collection terms (ROADMAP 7.4.12). The cascade builds no L4 step, and `corrected` stays empty (ROADMAP 8.2.4). |
-| L5 | `fallback` | Top documents by static rank, or by recency when the collection has no static rank. `none` allows an empty page. | The cascade level is not written (ROADMAP 8.2.5). `Fallback::None` is the schema value that would allow an empty page. |
+| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more. Corrected terms are reported when this step found the hits. | Library code (ROADMAP 8.2.4). One step, `fuzzy`, from L0. `corrected` is stated when that step found the hits (ROADMAP 8.1.22). An explicit `fuzzy` clause also expands over collection terms (ROADMAP 7.4.12). |
+| L5 | `fallback` | Top documents by static rank, then by index-location recency. The request's `sort` is ignored for this order. `none` allows an empty page. The response flags the order with `fallback`. | Library code (ROADMAP 8.2.5). Docids descend within a view. Hits still carry the request's sort values. Filter relaxation is still ROADMAP 8.2.6. |
 
 ## Never return an empty page
 
@@ -154,17 +154,16 @@ What can return hits today, through `search_relaxed`:
 
 - The exact query, when enough documents hold every required term.
 - An L1 step, when the compiler found a synonym run and a document holds the run or one alternative. [Synonym search](/guide/synonym-and-prefix-search/#how-a-synonym-step-is-built) is that step.
-- A looser L2 step, when the query has at least two required terms and `minimum_should_match` of that step is low enough that some documents hold that many of them. A typo is not rewritten. Documents that hold the other terms can still match. [How terms are dropped](#how-terms-are-dropped) is why the response text and the hits are not the same set of words.
+- A looser L2 step, when the query has at least two required terms and `minimum_should_match` of that step is low enough that some documents hold that many of them. Documents that hold the other terms can still match. [How terms are dropped](#how-terms-are-dropped) is why the response text and the hits are not the same set of words.
 - An L3 step, when an expanded term is a prefix of a term the cap kept. The last analyzed term is expanded at any length. [Prefix search](/guide/synonym-and-prefix-search/#which-terms-become-prefixes) is which words qualify.
+- An L4 step, when a term of length 4 or more is within edit distance of a term the cap kept. Distance is 1 through length 7 and 2 from length 8. `corrected` names the words no document holds, and only when L4 is the step that found the hits (ROADMAP 8.1.22).
+- An L5 step, unless `fallback` is `none`. It returns the documents the filters keep, that the excluded clauses do not match, and that no earlier step matched. Ranking is static rank, then index-location recency (the memtable, then newer segments, docids descending within a view). The request's `sort` does not order these hits. Each hit still carries the request's sort values. The response sets `fallback` to `static_rank` or `recency`.
 
 What still comes back empty:
 
-- A query of one required term that is not a synonym and not a prefix of a kept term. L2 skips a one-term query (ROADMAP 8.2.2.3). Fuzzy and the fallback build no step, so there is nowhere left to go.
-- A multi-term query whose documents do not hold an alternative, enough of the terms, or a kept prefix.
-- A miss that the design would have caught with a fuzzy correction or the static-rank fallback. Those levels build no step.
+- A collection whose `fallback` is `none`, for a query no earlier step matched. L2 skips a one-term query (ROADMAP 8.2.2.3). A term shorter than 4 characters is not a fuzzy match.
+- A filter no document passes. L1 through L5 keep the filter on the step they build. A request filter joins a compiled query at its root (ROADMAP 8.1.17). `FilterRelaxation::LastResort` (`relax.filters: "last_resort"`) does not run (ROADMAP 8.2.6).
 - A query with `RelaxOptions::disabled`, or a collection whose `RelaxationConfig.enabled` is false. L0 only, and an exact miss stays empty.
-
-Filters are not a way out of an empty page. L1, L2, and L3 keep them on the step they build. A request filter joins a compiled query at its root (ROADMAP 8.1.17). `FilterRelaxation::LastResort` (`relax.filters: "last_resort"`) does not run (ROADMAP 8.2.6).
 
 The quality gate is not written either: a synthetic typo suite, a zero-result rate before and after relaxation, and a regression on that rate (ROADMAP 8.4). A tuning guide is planned as ROADMAP 8.4.4 (`docs/relaxation.md`). This project does not publish a zero-result rate.
 
@@ -184,13 +183,13 @@ L2's steps are nested, so a later step excludes only the latest earlier L2 step 
 
 ## How terms are dropped
 
-Importance decides which terms a step reports as kept, not which documents match (ROADMAP 8.2.2.1). It compares lexicographically, with nothing to tune: a stopword is less important than any other term, then a lower IDF, then a later position in the query. Positions do not tie. The last word tends to qualify the earlier ones, so `red running shoes` keeps `shoes` over `red` when the two are equally rare.
+Importance decides which terms a step reports as kept, not which documents match (ROADMAP 8.2.2.1). It compares lexicographically, with nothing to tune: a term no document holds (`df` 0) is less important than any other, then a stopword, then a lower IDF, then a later position in the query (ROADMAP 8.2.2.5). Positions do not tie. The last word tends to qualify the earlier ones, so `red running shoes` keeps `shoes` over `red` when the two are equally rare.
 
 IDF is about the BM25F figure, over the statistics the search scores with. A `term` uses its own document frequency. A `combined` clause uses the largest `df` of its fields. A `phrase` sums its terms. A `bool` sums its `must` clauses and adds the largest of its `should` clauses. `boost` and `constant_score` use their inner query. `prefix`, `fuzzy`, and `match_all` are 0, the least important of a programmatic query's terms. `filter` and `must_not` do not score, so they do not add.
 
 The step's `effective` text is the `k` most important terms and every excluded clause, in text order, one space apart. That string names what the step keeps. It is not a query that compiles to the step. The step matches any `k` of the terms. A programmatic query's step has no `effective`.
 
-A term no document holds (`df` 0, often a typo) currently ranks as important, so `effective` reports it kept unless it is a stopword. A stopword is still dropped first. Whether a missing term should rank last is open (ROADMAP 8.2.2.5). The hits do not have to hold that term: `minimum_should_match` is a count of any of the terms. For `runing shoes`, L0 requires both words and matches nothing if `runing` is absent. The one L2 step requires one of the two. Documents that hold `shoes` can come back. The response does not say the typo was corrected, and `corrected` is empty.
+A term no document holds (`df` 0, often a typo) is the least important, below a stopword, so `effective` does not name it when a step can keep another term (ROADMAP 8.2.2.5). The hits do not have to hold every term: `minimum_should_match` is a count of any of the terms. For `runing shoes`, L0 requires both words and matches nothing if `runing` is absent. The one L2 step requires one of the two. Documents that hold `shoes` can come back, and `effective` names `shoes`. That step found the hits, so the cascade stops before L4 and `corrected` stays empty.
 
 ## Compiling a query
 
@@ -202,7 +201,7 @@ Words are analyzed with each field's query-time analyzer. Fields that agree on t
 
 Filters are a separate JSON object (SPEC §7.1.2): `term`, `terms`, `range`, `exists`, `and`, `or`, and `not`. They are written by programs, so a bad filter is an error. User text is not. `Filter::from_json` parses and validates them against the schema. Evaluating a filter against a segment or the memtable is library code (ROADMAP 7.4.5). [Faceted search](/guide/faceted-search/) is that path.
 
-Limits (SPEC §7.1.3), implemented as `QueryLimits`, reject a hand-built query or a filter that exceeds them. Defaults: 1024 leaf terms, 1024 clauses, 1024 expansions summed across prefix and fuzzy clauses, depth 32, and 8 KiB of `q`. The prefix and fuzzy clauses the engine itself would build use a per-clause cap of 50 (`DEFAULT_MAX_EXPANSIONS`). `RelaxPlan::with_limits` applies those limits to steps after L0, as [query relaxation](#query-relaxation) describes.
+Limits (SPEC §7.1.3), implemented as `QueryLimits`, reject a hand-built query or a filter that exceeds them. Defaults: 1024 leaf terms, 1024 clauses, 1024 expansions summed across prefix and fuzzy clauses, depth 32, and 8 KiB of `q`. The prefix and fuzzy clauses the engine builds use a per-clause cap of 50 (`DEFAULT_MAX_EXPANSIONS`). `RelaxPlan::with_limits` applies those limits to steps after L0, as [query relaxation](#query-relaxation) describes.
 
 This is library code in `persia-engine`. It compiles text. Opening a database and returning hits are `Database` and `CollectionViews`, not this compiler:
 
@@ -232,7 +231,7 @@ let filter = Filter::from_json(
 )?;
 ```
 
-The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required at L0. L3 may then prefix-expand that analyzed term. L4 fuzzy, as a cascade level, is not written. An explicit `prefix` or `fuzzy` clause plans with `SearchPlan::with_terms`, which expands it over the collection terms (ROADMAP 7.4.12). L0 of `search_relaxed` searches the query it was given, so that explicit clause runs as the exact step. It does not make L4 run: the cascade builds L4's step itself, and that transform is empty. Matching, sorts, pages, and facets over a collection snapshot are library code (`CollectionViews::search`). There is no search call on the database handle.
+The AST can also represent `prefix` and `fuzzy` clauses. `Query::validate` accepts a fuzzy distance of 1 or 2. The compiler does not turn a typo into one of those clauses. A typo stays the term the analyzer produced, and under default AND it is required at L0. L3 may then prefix-expand that analyzed term. L4 fuzzy, as a cascade level, builds one step from L0 (ROADMAP 8.2.4): terms of length 4 or more become `fuzzy` clauses, and `corrected` is filled when that step found the hits. An explicit `prefix` or `fuzzy` clause plans with `SearchPlan::with_terms`, which expands it over the collection terms (ROADMAP 7.4.12). L0 of `search_relaxed` searches the query it was given, so that explicit clause runs as the exact step. The cascade still builds L4's own step when it reaches L4. Matching, sorts, pages, and facets over a collection snapshot are library code (`CollectionViews::search`). There is no search call on the database handle.
 
 ## BM25F scoring and filters
 
@@ -264,18 +263,18 @@ The same function, given a block's maximum term frequency and minimum norm, is a
 | `RelaxationConfig`, `RelaxPlan`, `RelaxOptions` | Library code. Schema JSON parses the config. `RelaxPlan::new` applies a query's options over it. |
 | `SynonymMap` and L1 `synonyms` | Library code. The compiler stores runs on `Compiled::synonyms` (ROADMAP 4.2.5, 8.2.1). [Synonym search](/guide/synonym-and-prefix-search/#synonym-search-in-rust). |
 | `BoolQuery.minimum_should_match` and L2 `drop_terms` | Library code (ROADMAP 8.1.6, 8.2.2.1–8.2.2.4). |
-| Term, phrase, boolean, prefix, and fuzzy matching | %%MATCHING_CELL%% An explicit prefix or fuzzy clause expands (ROADMAP 7.4.12). L3 of the cascade builds a prefix step (ROADMAP 8.2.3). L4 does not. |
+| Term, phrase, boolean, prefix, and fuzzy matching | %%MATCHING_CELL%% An explicit prefix or fuzzy clause expands (ROADMAP 7.4.12). L3 of the cascade builds a prefix step (ROADMAP 8.2.3). L4 builds a fuzzy step (ROADMAP 8.2.4). |
 | Filter evaluation, facets, sort, explain | %%MATCHING_CELL%% Explain is library code (ROADMAP 7.7). Which relaxation level a hit matched is not part of the explanation yet (ROADMAP 8.3.4). `RelaxedHit.level` already says it. |
 | Relaxation cascade | %%RELAXATION_CELL%% |
 | `persia::Db::open` and `search` | Not in the crate (M10). |
 
 `persia_engine::db::Database` has `open`, `put`, and `commit`; searching goes through `CollectionViews::search` or `search_relaxed` on a snapshot, not through `Database`. The public `persia` crate exports no `Db`. %%ENGINE_CALLS%%
 
-The call below is the intended API from SPEC §7.1 and §7.6. It is illustrative: these methods are not in the `persia` crate, and the fuzzy correction in the comment is not what the engine runs.
+The call below is the intended API from SPEC §7.1 and §7.6. It is illustrative: these methods are not in the `persia` crate. The cascade those methods would run is library code in `persia-engine`, including L4 and L5.
 
 ```rust
 // ILLUSTRATIVE — these methods are not in the persia crate.
-// The engine cascade does not rewrite a typo. See the sections above.
+// CollectionViews::search_relaxed runs this cascade, including L4 and L5.
 let db = persia::Db::open("app.persia")?;
 let products = db.create_collection(schema)?;
 products.put(doc)?;
@@ -291,7 +290,7 @@ let relaxation = &results.relaxation;
 
 ### Does Persia DB do typo-tolerant search today?
 
-Partly. The compiler does not turn a typo into a fuzzy clause, and L4 fuzzy does not build a query, so a typo is not rewritten. L1 synonyms can match a configured alternative, and L3 prefix can match a term that starts with an analyzed word. L2 `drop_terms` can return hits for a query of two or more terms by requiring fewer of them. A one-term query that is not a synonym and not a prefix of a kept term still returns no hits. %%RELAXATION_CELL%% `CollectionViews::search` and `CollectionViews::search_relaxed` run over a collection snapshot. There is no search call on the database handle. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is those two steps.
+Partly, as library code in `persia-engine`. The compiler does not turn a typo into a fuzzy clause. L4 fuzzy builds one step (edit distance 1 for a term of length 4–7, distance 2 from length 8) and reports `corrected` when that step found the hits. L5 fallback returns the documents the filters keep, ranked by static rank then index-location recency, ignoring the request's `sort`, and flags that order with `fallback`. L1 synonyms, L2 `drop_terms`, and L3 prefix build steps too. A page can still be empty when `fallback` is `none`, when relaxation is off, or when every document fails the filter. Filter relaxation is still ROADMAP 8.2.6. %%RELAXATION_CELL%% `CollectionViews::search` and `CollectionViews::search_relaxed` run over a collection snapshot. There is no search call on the database handle. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is L1 and L3.
 
 ### What is query relaxation?
 

@@ -383,7 +383,7 @@ impl LevelTransform for DropTerms {
 
 /// The text of the clauses of `compiled` a step keeps (SPEC §7.6 `effective`): those `kept` marks (by clause index) and
 /// every excluded one, in text order, one space apart, as [`Compiled::effective`] renders all of them.
-fn effective(compiled: &Compiled, kept: &[bool]) -> String {
+pub(super) fn effective(compiled: &Compiled, kept: &[bool]) -> String {
     let mut text = String::new();
     for (index, clause) in compiled.clauses.iter().enumerate() {
         if !clause.negated && !kept.get(index).copied().unwrap_or(false) {

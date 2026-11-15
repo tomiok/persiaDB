@@ -242,7 +242,7 @@ fn input_query() -> (CollectionSchema, Query) {
 }
 
 #[test]
-fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
+fn l0_is_the_query_as_compiled_and_only_l5_builds_for_one_programmatic_term() {
     let (_, query) = input_query();
     let input = LevelInput::new(&query, None, &NoStats);
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::default()).unwrap();
@@ -261,9 +261,16 @@ fn l0_is_the_query_as_compiled_and_later_levels_build_nothing_for_one_term() {
             corrected: Vec::new(),
         }]
     );
-    // L2 skips a single term (ROADMAP 8.2.2.3), and L1 and L3 to L5 wait on ROADMAP 8.2: no step, so the cascade
-    // skips them.
-    assert!(steps[1..].iter().all(Vec::is_empty));
+    // L1 has no text to scan, L2 skips a single term (ROADMAP 8.2.2.3), and L3 and L4 build only when the search lets
+    // them expand a field (`LevelInput::expanding`): no step, so the cascade skips them. L5 builds its one step, every
+    // document (ROADMAP 8.2.5).
+    let (l5, between) = steps[1..].split_last().unwrap();
+    assert!(between.iter().all(Vec::is_empty));
+    assert_eq!(l5.len(), 1);
+    assert_eq!(
+        (&l5[0].query, l5[0].applied.as_str()),
+        (&Query::MatchAll, "fallback")
+    );
 }
 
 #[test]

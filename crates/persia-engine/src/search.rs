@@ -72,7 +72,7 @@ pub(crate) use interrupt::{Interruptible, Interrupts, Steps};
 pub use plan::SearchPlan;
 pub use request::{MAX_WINDOW, Projection, RequestError};
 pub use sort::{MAX_SORT_KEYS, Missing, Order, Sort, SortKey, SortValue};
-pub(crate) use sort::{Ties, top_sorted};
+pub(crate) use sort::{Ties, sort_values, top_sorted};
 pub use top_k::{Hit, TopK};
 
 use crate::query::QueryError;
