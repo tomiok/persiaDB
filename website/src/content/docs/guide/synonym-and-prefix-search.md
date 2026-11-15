@@ -35,7 +35,7 @@ head:
             "name": "Does Persia DB do prefix search today?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "As a relaxation step, yes. L3 builds one prefix step. The last analyzed term, and other analyzed terms of at least 3 characters, become prefixes of at most 50 terms, kept by collection document frequency and expanded over each view with an FST range. Phrases, field clauses, excluded clauses, filters, and edge_ngram fields stay exact. A suggest completion API is not written. There is no search method on persia::Db."
+              "text": "As a relaxation step, yes. L3 builds one prefix step (and, without L2 in the plan, a step that expands the last term alone first). The last analyzed term, and other analyzed terms of at least 3 characters, become prefixes of at most 50 terms, kept by collection document frequency and expanded over each view with an FST range. Phrases, field clauses, excluded clauses, filters, and edge_ngram fields stay exact. A suggest completion API is not written. There is no search method on persia::Db."
             }
           },
           {
@@ -140,7 +140,7 @@ A query that expands nothing skips the level and is not listed in `applied`.
 |---|---|
 | L1 `synonyms` and L3 `prefix` | Library code, as this page describes. %%RELAXATION_CELL%% |
 | L2 `drop_terms` | Library code. [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped). |
-| L4 `fuzzy` | Library code (ROADMAP 8.2.4). One step from L0. An explicit `fuzzy` clause can still be planned over collection terms (ROADMAP 7.4.12). `corrected` is stated when L4 found the hits (ROADMAP 8.2.4.3, 8.1.22). |
+| L4 `fuzzy` | Library code (ROADMAP 8.2.4, 8.2.7). One step from L0, after a `fuzzy:1` tier step when a word has 8 or more characters. An explicit `fuzzy` clause can still be planned over collection terms (ROADMAP 7.4.12). `corrected` is stated when L4 found the hits (ROADMAP 8.2.4.3, 8.1.22). |
 | L5 `fallback` | Library code (ROADMAP 8.2.5). Static rank, then index-location recency (docids descending within a view). The request's `sort` is ignored for that ranking. Hits still carry its values. Flagged with `fallback`. `none` allows an empty page. |
 | Relaxing filters | `last_resort` does not run (ROADMAP 8.2.6). |
 | `suggest` completions | Not written (ROADMAP 18). L3 is not that API. |

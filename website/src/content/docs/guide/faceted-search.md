@@ -161,7 +161,7 @@ That deadline is not the relaxation budget. `budget_ms` (default 50) is read aft
 
 Explain covers the page's hits only, one pass per view. It costs about one unpruned search of each view that holds a hit on the page. A deadline is read during that pass too.
 
-Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). Which relaxation level a hit matched joins the explanation later (ROADMAP 8.3.4). A hit of `search_relaxed` already states its level on `RelaxedHit.level`. That level is `exact`, `synonyms`, `drop_terms`, `prefix`, `fuzzy`, or `fallback`.
+Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). An explained hit of `search_relaxed` has a root `Explanation::Relaxed` with its level, step, and that step's `applied` around the step's own tree (ROADMAP 8.3.4, SPEC §7.7). Every hit also states its level on `RelaxedHit.level`. That level is `exact`, `synonyms`, `drop_terms`, `prefix`, `fuzzy`, or `fallback`.
 
 ## What is still planned
 
