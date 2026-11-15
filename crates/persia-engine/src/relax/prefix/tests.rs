@@ -422,3 +422,55 @@ fn an_exclusion_added_to_the_root_stays_excluded() {
     assert_eq!(b.must_not, want);
     assert_eq!(b.must_not.last(), Some(&added));
 }
+
+/// Every step L3 builds for `text`, with or without L2 before it.
+fn steps(schema: &CollectionSchema, text: &str, drops_terms: bool) -> Vec<Step> {
+    let compiled = compile(schema, text);
+    let expands = text_fields(schema);
+    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats)
+        .expanding(&expands)
+        .dropping(drops_terms);
+    Prefix.steps(&input).unwrap()
+}
+
+/// The prefixes of every `prefix` in `query`, in query order.
+fn prefixes(query: &Query) -> Vec<String> {
+    match query {
+        Query::Prefix(p) => vec![p.prefix.clone()],
+        Query::Bool(b) => b
+            .must
+            .iter()
+            .chain(&b.should)
+            .chain(&b.must_not)
+            .flat_map(prefixes)
+            .collect(),
+        Query::Boost(b) => prefixes(&b.query),
+        _ => Vec::new(),
+    }
+}
+
+/// ROADMAP 8.2.7: without L2 before it, L3 expands the last term alone first when another term is expanded too; after
+/// L2, whose one-term rung takes every match of that step, it builds its one step.
+#[test]
+fn without_l2_the_last_term_alone_is_expanded_first() {
+    let s = schema();
+    let built = steps(&s, "running sho", false);
+    let applied: Vec<&str> = built.iter().map(|s| s.applied.as_str()).collect();
+    assert_eq!(applied, ["prefix:last", "prefix"]);
+    // `body` (`en`) holds `run`, `title` keeps `running`: exact in the tier step, expanded in the next.
+    assert_eq!(prefixes(&built[0].query), ["sho", "sho"]);
+    assert_eq!(prefixes(&built[1].query), ["run", "running", "sho", "sho"]);
+    assert!(
+        built
+            .iter()
+            .all(|s| s.effective.as_deref() == Some("running sho"))
+    );
+    // After L2: one step.
+    let after = steps(&s, "running sho", true);
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0], built[1]);
+    // Only the last term is expanded (`sh` has 2 characters): the two steps would be equal, so one.
+    assert_eq!(steps(&s, "sh ru", false).len(), 1);
+    // One word is the last term: one step.
+    assert_eq!(steps(&s, "sho", false).len(), 1);
+}

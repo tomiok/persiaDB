@@ -1,6 +1,6 @@
 # ADR-0042: L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words
 
-- Status: proposed
+- Status: proposed (amended by ADR-0046: a tier step `fuzzy:1` before it for terms of 8 characters or more)
 - Date: 2026-11-13
 - Related: SPEC §7.1, §7.1.3, §7.2, §7.6; ROADMAP 7.4.12, 8.1.10, 8.1.14, 8.1.19, 8.2.2.5, 8.2.3, 8.2.4, 8.2.7;
   ADR-0037, ADR-0038, ADR-0039, ADR-0040

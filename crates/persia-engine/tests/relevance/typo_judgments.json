@@ -1,0 +1,7 @@
+[
+  {"q": "braceelt", "grades": {"b1": 3, "b2": 3}},
+  {"q": "taespoon", "grades": {"t1": 3, "t2": 3}},
+  {"q": "macarnoi", "grades": {"m1": 3}},
+  {"q": "keybaord", "grades": {"k1": 3, "k3": 2}},
+  {"q": "red sho", "relax": {"levels": ["prefix"]}, "grades": {"p1": 3, "p2": 1}}
+]

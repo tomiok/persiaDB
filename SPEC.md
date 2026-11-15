@@ -1394,6 +1394,11 @@ relaxed search (§7.6) plans every step without it. Without it the bonus is 0 an
 `π ≤ 1`, and the sum in each addend. `λ` and the window are constants of the scorer: changing them changes ranking
 and goes through the nDCG@10 gate (§16.1).
 
+The typo and exactness tiers (§7.6, ROADMAP 8.2.7) add nothing to the score. A `fuzzy` term's score keeps the
+edit-distance weight of §7.1, which orders hits within a step. Across a relaxation level's steps, hits that need fewer
+edits, or match words as typed rather than by completion, rank first because they are earlier steps of the cascade,
+not because they score higher.
+
 Total = Σ_t score + static_rank contribution (§6.2.3). `N`, `df`, `avglen` are **collection-level**, summed across live segments
 (and across shards when `global_stats: true`, SPEC §11.5). They are summed from each segment's stored statistics
 (§5.1, term `df`, field statistics), which count the segment's deleted documents too until a merge drops them
@@ -1541,6 +1546,8 @@ are indices into the view that returned the cursor, so using it elsewhere would 
 key or pass one over. The same snapshot and the same memtable view page exactly. A cursor from a relaxed search
 also records its hit's step, its cascade's last step and its hit step (§7.6). It also records whether its plan scored proximity
 (§7.2): a page under a plan with the other setting is an error, since the bonus changes the scores and so the order.
+It records the relaxation settings of its search too, none for a plain search or one of L0 alone, and a page under
+other settings is an error (§7.6, ROADMAP 8.3.1).
 The other plan and query options are not recorded yet (ROADMAP 10.1.7), so paging is exact only when they are
 unchanged between pages. A request cannot change `proximity` today (it has no such field): only a caller building its
 own `SearchPlan` can, and the relaxed search plans with the default (off).
@@ -1629,14 +1636,47 @@ Rules:
 - Disable per query with `relax: false`.
 
 The plan (ROADMAP 8.1.1): L0, then the levels `relaxation.levels` names in cascade order, then L5 unless `fallback`
-is `"none"`. A query's `relax` object takes the keys of §6.2.3's `relaxation`, each overriding the collection's
-setting and held to the same rule (one out of range is an error, also when the query disables the cascade). The
-collection's settings stand for the keys it leaves out. `relax: false` is `enabled: false`: L0 only. A level builds
+is `"none"`. A level builds
 its queries only when the cascade reaches it, so a query that has `min_results` hits at L0 builds nothing more. A
 level may build several queries, its *steps*, strictest first (L2's ladder). A level that builds none for a query is
 skipped and not listed in `applied`. Every level builds its steps from L0's query, not from an earlier level's steps:
 L4 `fuzzy` corrects every term of the query, not only those the last L2 step requires (the example above keeps both
 words; ROADMAP 8.1.10). Every level builds queries; L5 builds one whose hits it ranks itself (ROADMAP 8.2.5, below).
+
+A query's `relax` (ROADMAP 8.3.1, ADR-0045) is `false`, `true` or an object. `false` is `{"enabled": false}`, and
+`true` is `{"enabled": true}`. The object takes the keys of §6.2.3's `relaxation`: `enabled`, `min_results`, `levels`,
+`fallback`, `fill`, `filters` and `budget_ms`. No key is for the collection only. The limits a step is held to
+(§7.1.3) are the engine's, not a key. The JSON is read as strictly as a collection definition (§6.2.1). An unknown
+or repeated key, `null` for a key, any other shape, and more than 64 KiB of text are errors. The settings merge one
+key at a time: the query's value, else the collection's, else §6.2.3's default. A collection definition that leaves
+a key out has the default. `levels` is one key, so a list replaces the collection's list whole. Each value the query
+gives is held to §6.2.3's rule, also when the query or the collection disables the cascade: `min_results` in
+`1–10 000`, `budget_ms` in `1–60 000`, custom `levels` distinct and in cascade order. A value that breaks its rule
+is an error that names the key. `filters: "last_resort"` is accepted. No level relaxes a filter until ROADMAP 8.2.6,
+so it searches as `"never"` does.
+
+`enabled: false` (`relax: false`), from the query or from the collection when the query does not turn it on, runs L0
+alone. So does a plan whose `levels` is `[]` with `fallback: "none"`. The response then states `level: "exact"`, no
+`applied`, no `fallback` and `truncated: false`. Its page holds L0's hits, and may be empty. A search without a
+cascade (the engine's plain `search`, which plans its query alone) is `relax: false`. A request that wants
+relaxation runs the relaxed search with the merged settings.
+
+A cursor records the *relaxation settings* of the search that made it: the levels its plan runs (L5 included),
+`min_results`, `fill` and `filters`. A plan of L0 alone records none, and neither does a plain search, so their
+cursors page each other. `budget_ms` is not recorded. The budget only truncates a page, and the cursor's last step
+already lets the next page try again (below). A page whose settings differ from its cursor's is an error. It would
+build other steps or stop elsewhere, so it would not be a slice of the cursor's ranking. The check runs with the
+cursor's origin and proximity checks (§7.4). A cursor from a step after L0 given to a search of L0 alone is the step
+error (below), checked first.
+
+`fill` (ROADMAP 8.3.2) is a key of `relax` like any other, and part of the settings a cursor records. With it, each
+page builds steps until it has `offset + limit` hits from the top (from its cursor's step, after a cursor) or the
+steps run out, and L5 fills what the earlier steps leave. Every page builds only the steps it needs. A deeper page
+may build, search and state more steps than the first one (`level`, `applied`, the hit step's text and `fallback`),
+and its facets count the steps it built (§7.5, the interim rule of ROADMAP 8.1.9). The pages of one query, by offset
+or by cursor, are still slices of one ranking: that of a page holding every hit, as without `fill`. A budget that
+passes while a page fills truncates that page only. The page's cursor records the steps it completed, and the next
+page builds the rest again. The request's deadline and cancellation stay errors.
 
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
@@ -1672,7 +1712,8 @@ query's step has no `effective`. Building the steps reads the `df`s each term's 
 one per term of a `phrase`); the request's deadline and
 cancellation (§7.3) are checked before a level builds, the budget (below) before and after.
 
-L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query: each *term* it expands
+L3 `prefix` (ROADMAP 8.2.3, ADR-0040). It builds one step, listed as `prefix`, from L0's query (and before it the tier step
+of ROADMAP 8.2.7, below): each *term* it expands
 becomes a `prefix` of that term with `max_expansions` 50, which planning expands over the views' terms and keeps by
 collection `df` (§7.1). A term is a field's analyzed term of a word: of a query compiled from `q`, one per field of a
 word clause's parts (each `combined`, and each field of a word the fields split apart); of a programmatic query, each
@@ -1697,10 +1738,12 @@ L0's other required clauses stay as they are, and so do its root's `must_not` (i
 with `should` clauses or a `minimum_should_match` is not relaxed (as L2). A query that expands no term skips the
 level. Its `effective` is L0's text, as every clause is kept. Building the step reads no statistics (planning reads the `df`s that keep the
 expansions, §7.1); held to §7.1.3's limits,
-its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Being one step, L3 has no earlier step of
-its own for it to stand for (nested levels, in the cascade below).
+its prefixes are cut (`prefix:cut`) or it is skipped (`prefix:skipped`). Unless L2's one-term rung came first, L3 may
+first build a tier step, `prefix:last` (below). Its steps are not nested (each `prefix` keeps its own 50 terms), so each stays
+excluded from the later steps (the cascade, below).
 
-L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query: each term it rewrites
+L4 `fuzzy` (ROADMAP 8.2.4, ADR-0042). It builds one step, listed as `fuzzy`, from L0's query (and before it the tier step of
+ROADMAP 8.2.7, below): each term it rewrites
 becomes a `fuzzy` of that term with `max_expansions` 50, which planning expands over the views' terms (each view's
 term dictionary intersected with the optimal string alignment automaton) and keeps by collection `df` (§7.1). Its
 terms are L3's: a field's analyzed term of a word clause, or a `term` or `combined` field of a programmatic query, in
@@ -1712,8 +1755,8 @@ last term has no rule of its own: a short word stays exact wherever it is. A rew
 `should` clauses as at L3 (its exact fields as one `combined`, a `fuzzy` per rewritten field, under the ratio
 `boost` of a `fields` weight), and a `fuzzy` scores with the edit-distance weight of §7.1, so an exact term outranks a
 correction at the same frequency and length. A query that rewrites no term skips the level. Held to §7.1.3's limits,
-its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). Being one step, it has no earlier step
-of its own to stand for.
+its `fuzzy` queries are cut (`fuzzy:cut`) or it is skipped (`fuzzy:skipped`). A term of 8 characters or more first
+gets a tier step, `fuzzy:1` (below). Its steps are not nested, as at L3.
 Its `corrected` and `effective` say what L4 changed ("did you mean", ROADMAP 8.2.4.3). A word is *corrected* when it
 is a required word clause of one part (one token over the default fields: a `term` or a `combined`), no field of it
 holds its term (collection `df` 0, so no document does), and a field the step rewrites has a term within the word's
@@ -1733,6 +1776,39 @@ document holds and one typo (`red shoez` over `red shoes`), L2's last rung alrea
 the response states L2's `effective` (`red`) and no correction, though L4 was built (`level` `fuzzy`). The same
 holds at L3, whose `effective` is L0's (ROADMAP 8.1.22). `effective` sets each correction in as the index holds it, not quoted: it names the terms
 searched and need not compile back to the step's query (a stem, or a term holding `:`).
+
+Typo and exactness tiers (ROADMAP 8.2.7, ADR-0046). Within a level, a hit that needs fewer edits ranks above one that
+needs more, and a word matched as typed ranks above one matched by a completion, before BM25F. The tiers are steps of
+the cascade, built strictest first, not a key or a part of the score. So every rule of steps holds for them:
+exclusion, ranking by step before the request's sort, rank scores, paging, pruning, the budget, facets and `explain`.
+
+- **L4, `fuzzy:1`.** When a term the step rewrites has 8 characters or more (distance 2), L4 first builds the same
+  query with every distance capped at 1, listed as `fuzzy:1`, then its step at each term's own distance, `fuzzy`.
+  Each `fuzzy` keeps its own 50 terms within its distance. The tier is the most edits any one rewritten word
+  needs, not their sum: `fuzzy:1` holds the documents within one edit of every rewritten word. A query whose terms
+  are all shorter has the one step. Its corrections are found within the capped distances, so when `fuzzy:1` is the hit
+  step, `corrected` and `effective` name the terms within one edit.
+- **L3, `prefix:last`.** When L3 expands another term beside the last one, L3 first builds its query with the last
+  term alone expanded, listed as `prefix:last`, then its step, `prefix`. Every other word must then be held as typed,
+  so a document holding it exactly ranks above one that needs it completed. The tier step is not built when the
+  cascade built L2's last rung (one term) before it and did not skip it. That rung took every document holding one of
+  the query's terms as typed, so the tier step would match nothing. It is built in the other cases: a plan without
+  L2, a query L2 builds no step for (one required clause, also a word the analyzer splits, as `spider-ma` into
+  `spider` and `ma`), or a rung skipped for the limits. The decision depends only on the steps built, so every page
+  of a query makes the same one. Both steps state L0's text.
+- **Not tiered.** L0's stemming is not tiered: a word matched as typed does not rank above one matched by its stem.
+  The index holds the stems alone, so the two cannot be told apart (ROADMAP 8.2.10). L1 is not tiered either. Every
+  L1 hit lacks the original of some run, since L0 took those documents, and counting runs per hit would need a key
+  per hit (ROADMAP 8.2.11). L2's rungs are already tiers, by how many words a hit holds.
+
+The tier steps change only the order across steps, never a score. They lead the rank key before the request's sort
+too, so under a field sort each tier step is sorted by the field on its own. A cursor records a tier step's index as
+it records any step's. Its relaxation settings do not change: the tier steps follow from the levels. Each step
+prunes as its own search does, with the score-led tie-break of ROADMAP 7.4.11, and thresholds are not shared. An
+explained hit's `relaxed` node names its step's `applied` (`fuzzy:1`, `prefix:last`, §7.7). A tier step counts
+against §7.1.3's limits like any step. Once searched, it is excluded from the later steps, and its expansions count
+there in full. A query with many long words may therefore have its `fuzzy` step cut or skipped sooner than one
+without the tier (ROADMAP 8.2.12).
 
 L5 `fallback` (ROADMAP 8.2.5, ADR-0044). With `fallback: "static_rank"` (the default) the plan ends with L5, which
 builds one step, listed as `fallback`; `"none"` builds no L5. Its query is L0's root `must_not` and `filter` around
@@ -1756,7 +1832,7 @@ hold it; only the order of equal static ranks may change once a merge commits. E
 request's keys' values for its document (a `score` key is its static rank), as a hit of any step states them; a
 cursor from an L5 hit pages by L5's order from the cursor's location, whose static rank the page reads again there.
 Each hit's rank score is its step's (below), so L5's hits rank below every earlier step's. An explained L5 hit gives
-its static rank (§7.7). L5 reads no term statistics and scores nothing: with a static rank, each segment visits its FOR blocks
+its static rank, inside the `relaxed` node every explained relaxed hit has (§7.7). L5 reads no term statistics and scores nothing: with a static rank, each segment visits its FOR blocks
 (§5.2.1) best first by the static rank of their bound, stops at the first that cannot beat the worst hit kept, and
 within a block passes over a candidate whose column key is below the smallest key that could (the memtable, without
 bounds, is walked in docid order); by recency alone, it reads each view's
@@ -1817,8 +1893,9 @@ one query on one snapshot, by `offset` or by cursor, are therefore slices of one
 (§7.4). A cursor without a step (from a search that did not relax) is step 0 of a cascade that stopped at L0, its hit
 step 0. A cursor whose step is after its last, or whose hit step is before its step or after its last, is an error,
 and so is a cursor from a step after L0 given to a plain search or to one with
-`relax: false`: every hit it returns ranks before the cursor. A cursor from a step the plan no longer builds
-(another `relax`) pages nothing.
+`relax: false`: every hit it returns ranks before the cursor. A cursor from a search with another `relax` is an
+error (its settings, above). A cursor from a step the plan no longer builds under the same settings (other limits,
+§7.1.3, which the cursor does not record) pages nothing.
 
 Budget (ROADMAP 8.1.4): `budget_ms` runs on the clock the search is given (injected: its budget clock, else its
 deadline's, else the system's) from the moment L0 finishes, so L0 is never cut by it. The request's own deadline and
@@ -1849,7 +1926,23 @@ time, in one pass: the view's tree is built once (each leaf an unpruned matcher,
 the search's matcher selected in that view, ROADMAP 7.7.3; selected the first time they are needed when that matcher
 did not read them) and advanced over its hits in docid order, so a page costs about one unpruned search of each view
 holding its hits. It is done for the page's hits only, and a deadline or a cancellation is read before
-each view and while its readers walk (§7.3). Which relaxation level a hit matched at (§7.6) joins it with the cascade (ROADMAP 8.3.4). Highlights are post-v1.
+each view and while its readers walk (§7.3).
+
+A hit of a relaxed search (§7.6, ROADMAP 8.3.4) is explained inside a root `relaxed` node. The node holds the hit's
+`level`, its `step` (0 for L0), that step's entry of the response's `applied`, and the step's own tree. The entry
+includes `:cut` when the step was cut, and is absent at L0, which applies nothing. The node's score is the tree's,
+bit for bit. Every level has one: L0's around its query's tree, L1 to L4 around their step's query, and L5 around its
+`static_rank`. Nodes under the root never have one. A plain search's hits have none either, while a relaxed search
+with `relax: false` wraps its L0 hits as step 0: the two rank alike (§7.6), but their explanations differ by this
+node. The JSON below is illustrative. The node is one object key, and the JSON of the tree inside it is defined
+with the request and response JSON (ROADMAP 10.1, 11.x):
+```jsonc
+"explanation": { "relaxed": { "level": "fuzzy", "step": 4, "applied": "fuzzy", "score": 1.25,
+                              "explanation": { /* the step's tree, as above */ } } }
+```
+At L0 `applied` is left out. Each hit also states its `level` and `step` outside the explanation (§7.6), whether
+explained or not. The node lets a client that reads only the explanation see what the score belongs to. Highlights
+are post-v1.
 
 ---
 

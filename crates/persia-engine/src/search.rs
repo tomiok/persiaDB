@@ -61,7 +61,7 @@ pub use expand::{EachTerm, Expansion, TermSource};
 pub(crate) use expand::{TermWalk, each_merged_term};
 pub use explain::{
     Explanation, FieldExplanation, PairExplanation, PhraseExplanation, ProximityExplanation,
-    WordExplanation,
+    RelaxedExplanation, WordExplanation,
 };
 pub(crate) use facet::FacetCounter;
 pub use facet::{

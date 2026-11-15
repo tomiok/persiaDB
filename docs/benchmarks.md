@@ -559,6 +559,39 @@ bounds or a per-segment order. `l1`, `l4` and `off` are 4–6% slower, on code t
 step's text kept, the hit step tracked): within the spread of earlier runs (`l1` measured 868–943 µs on unchanged code
 above), not investigated further.
 
+With the request's `relax` options, `explain`'s relaxed node and the tier steps (ROADMAP 8.3.1, 8.3.2, 8.3.4, 8.2.7),
+same collection and thread, 2026-11-15, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Each tree was built in its own worktree
+and target directory, and ran the same bench file (the branch's, with the tier cases). Main is 37819f3. 7ffaee4 is the
+branch with 8.3.1, 8.3.2 and 8.3.4, before 8.2.7. Command: `cargo bench -p persia-engine --bench search --
+'search_relaxed/(plain|l0|off|l1|l2|l3|l4|l3/tiers|l4/tiers)$|search_request/score$'`. `l3/tiers` is `w12 w` with L3 alone and no fallback.
+`w12` has 3 characters, so it is expanded too. With the tiers, L3 first searches `w12` exactly beside the 50 most
+frequent terms starting with `w` (`prefix:last`). That step finds the hits, so the cascade stops there. Before, one
+step expanded both words. `l4/tiers` is `w3 w1x4zzzz` with L4 alone and no fallback. Its 8-character typo qualifies
+for `fuzzy:1`. No bench term is that long (the vocabulary is `w0` to `w199`), so neither step finds a hit, and the
+row measures what the tier step costs a qualifying query: one more planned and searched step, and its corrections'
+term walk.
+
+| Recorded | build | `search_request/score` | `plain` | `l0` | `off` | `l1` | `l2` | `l3` | `l4` | `l3/tiers` | `l4/tiers` |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| main (37819f3) | default | — | 461 µs | 462 µs | 461 µs | — | — | — | — | — | — |
+| 8.3.1–8.3.4 (7ffaee4) | default | 442 µs | 464 µs | 462 µs | 463 µs | 903 µs | 1.39 ms | 22.4 ms | 2.58 ms | 39.8 ms | 156 µs |
+| ROADMAP 8.2.7 | default | 459 µs | 453 µs | 459 µs | 461 µs | 888 µs | 1.40 ms | 22.4–22.9 ms | 2.65–2.71 ms | 22.5 ms | 363 µs |
+| 8.3.1–8.3.4 (7ffaee4) | 1 codegen unit | 461 µs | — | 470 µs | 469 µs | — | — | 22.5 ms | 2.62 ms | — | — |
+| ROADMAP 8.2.7 | 1 codegen unit | 465 µs | — | 473 µs | 471 µs | — | — | 22.8 ms | 2.63 ms | — | — |
+
+Merging the request's options and checking the cursor's settings do not slow `l0` or `off`. Both are within 0.5% of
+main. The first run of the 8.3.1 commit alone (8a7fc29) read 481 µs and 477 µs, with `plain` at 482 µs on code it
+leaves unchanged. That run shared the machine with a code review, so the table keeps the later, uncontended run of
+7ffaee4, which holds 8.3.1. `search_request/score`, the plain score search, whose code no leaf of this batch changes,
+measured 442–459 µs in the default build. A run during that review read 563 µs. With one codegen unit, 7ffaee4 and
+the branch agree within 0.9% there and on `l0` and `off`, and within 1.4% on `l3` and 0.4% on `l4`. So the default
+build's 2–4% on `l3` and `l4` is layout, as in the earlier rows. A first version of the tier step walked
+`fuzzy:1`'s corrections even when capping changed nothing, and threw them away. The queries are now compared before
+either step's corrections are walked, which removes that walk. The default build read 2.65 to 2.71 ms for `l4` both
+before and after that change. `l4/tiers` costs about 207 µs
+more: the tier step's planning, its exclusion from the step after it, and one more correction walk. `l3/tiers` is 43%
+faster, because its tier step finds the hits and the cascade stops before expanding `w12`.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

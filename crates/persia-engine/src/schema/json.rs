@@ -353,51 +353,51 @@ struct RawStaticRank {
     function: Option<RankFn>,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawRelaxation {
+pub(crate) struct RawRelaxation {
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    enabled: Option<bool>,
+    pub(crate) enabled: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    min_results: Option<u32>,
+    pub(crate) min_results: Option<u32>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    levels: Option<Levels>,
+    pub(crate) levels: Option<Levels>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    fallback: Option<Fallback>,
+    pub(crate) fallback: Option<Fallback>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    fill: Option<bool>,
+    pub(crate) fill: Option<bool>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    filters: Option<FilterRelaxation>,
+    pub(crate) filters: Option<FilterRelaxation>,
     #[serde(
         default,
         deserialize_with = "present",
         skip_serializing_if = "Option::is_none"
     )]
-    budget_ms: Option<u32>,
+    pub(crate) budget_ms: Option<u32>,
 }
 
 fn from_raw(raw: RawSchema) -> Result<CollectionSchema, SchemaError> {
@@ -653,5 +653,43 @@ impl<'de> Deserialize<'de> for Levels {
         }
 
         deserializer.deserialize_any(LevelsVisitor)
+    }
+}
+
+/// A query's `relax` (SPEC §7.6, ROADMAP 8.3.1): `false`, `true`, or an object of the keys of a collection's
+/// `relaxation` (SPEC §6.2.3), read as strictly (ADR-0022): an unknown or repeated key, `null` for a key, and any other
+/// shape are errors. The values are not checked against their ranges here ([`RelaxOptions::validate`]).
+pub(crate) fn relax_from_json(json: &str) -> Result<RawRelaxation, String> {
+    let Relax(raw) = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    Ok(raw)
+}
+
+/// [`relax_from_json`]'s value.
+struct Relax(RawRelaxation);
+
+impl<'de> Deserialize<'de> for Relax {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct RelaxVisitor;
+
+        impl<'de> Visitor<'de> for RelaxVisitor {
+            type Value = Relax;
+
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("false, true or an object of relaxation settings")
+            }
+
+            fn visit_bool<E: de::Error>(self, enabled: bool) -> Result<Relax, E> {
+                Ok(Relax(RawRelaxation {
+                    enabled: Some(enabled),
+                    ..RawRelaxation::default()
+                }))
+            }
+
+            fn visit_map<A: MapAccess<'de>>(self, map: A) -> Result<Relax, A::Error> {
+                RawRelaxation::deserialize(de::value::MapAccessDeserializer::new(map)).map(Relax)
+            }
+        }
+
+        deserializer.deserialize_any(RelaxVisitor)
     }
 }

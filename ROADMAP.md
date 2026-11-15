@@ -571,15 +571,18 @@ Deps: M7. **Key differentiator — treat quality here as a product feature.**
   - [x] 8.2.4.4 Length-based distance policy (SPEC §7.6 L4)
 - [x] 8.2.5 L5 fallback: static_rank / recency top-N; clearly flagged in response
 - [ ] 8.2.6 Optional filter relaxation (`last_resort`) with explicit opt-in
-- [ ] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)
+- [x] 8.2.7 (v1.0) Typo and exactness as a ranking signal: within a relaxation level, 0 edits rank above 1 edit, then 2, before BM25F; exact ranks above stemmed, then prefix (8.2.6 remains optional filter relaxation)
 - [ ] 8.2.8 (v1.1) A durable per-document index order for L5 `fallback`'s recency (SPEC §7.6, ADR-0044): today recency is index location (memtable, then segments newest first, docids descending), which a merge reorders, as its output is added after the kept segments (§8.5). Record each document's write order (for example the commit `seq` of its write, as a hidden column written at flush and copied through merges) so recency is write time and merge-stable. An on-disk format change: SPEC, version or feature flag, ADR and golden fixture (found in 8.2.5)
 - [ ] 8.2.9 (v1.1) L5 `fallback` by static rank reads every candidate's column key when the FOR bounds (the minimum plus `2^width − 1`, SPEC §5.2.1) do not separate blocks: values spread over their range (the bench's prices) give every block the same bound, so `search_relaxed/l5/static_rank` reads all 50 000 keys (886 µs, ADR-0044). Store an exact maximum per block, or a per-segment order by static rank written at flush (both on-disk format changes), or cache L5's order per snapshot. Each block visited, and each window a recency walk reads back, builds the step's matcher again, which looks up the postings of every earlier step it excludes (after the default levels, the L2 ladder and the L3 and L4 expansions): measure L5 after the default levels too (found in 8.2.5)
+- [ ] 8.2.10 (v1.1) Exact above stemmed within a level (ROADMAP 8.2.7, ADR-0046 item 6): a word matched as typed ranks above one matched only by its stem. The index holds the stems alone, so this needs an unstemmed form per token (for example a hidden exact-form term beside each stemmed one at flush, copied through merges): an on-disk format change (SPEC, version or feature flag, ADR and golden fixture), then a tier step of L0 or L1 that requires the exact forms (found in 8.2.7)
+- [ ] 8.2.11 (post-v1) Finer tiers by a per-hit key (ADR-0046 alternatives): total edits over the words, then the number of completed words, and per run at L1 how many runs matched as written, a leading key of score-led sorts with tier-aware pruning. Do it only if judged queries show a gain over the tier steps, which tier by the most edits any one word needs (found in 8.2.7)
+- [ ] 8.2.12 Make L4's tier steps nested by construction, so later steps exclude only the latest one (ROADMAP 8.2.2.4). For example, `fuzzy` keeps `fuzzy:1`'s terms beside its own 50, or `fuzzy:1` keeps only the terms within one edit that `fuzzy` keeps. Today `fuzzy` excludes `fuzzy:1`, whose expansions count again against `max_expansions` (SPEC §7.1.3), so a query with many long words reaches `fuzzy:cut` or `fuzzy:skipped` sooner than before the tiers (found in 8.2.7)
 
 ## 8.3 Controls & API
-- [ ] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
-- [ ] 8.3.2 `fill` mode (continue to fill `limit` from looser levels). The engine's cascade fills since 8.1.2 (`RelaxOptions::fill`); what remains is the request option of 8.3.1 and its tests end to end
+- [x] 8.3.1 Per-query `relax` options override; per-collection defaults; `relax:false`
+- [x] 8.3.2 `fill` mode (continue to fill `limit` from looser levels). The engine's cascade fills since 8.1.2 (`RelaxOptions::fill`); what remains is the request option of 8.3.1 and its tests end to end
 - [ ] 8.3.3 Metrics: relaxation level histogram, % queries relaxed, % still empty
-- [ ] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)
+- [x] 8.3.4 `explain: true` also states which relaxation level a hit matched at (SPEC §7.7; the score breakdown is 7.7.1)
 
 ## 8.4 Quality evaluation
 - [ ] 8.4.1 Synthetic typo/term-drop query generator (from corpus) with known ground truth

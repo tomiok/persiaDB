@@ -44,9 +44,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::query::{Compiled, Query, QueryLimits};
-use crate::schema::{
-    Fallback, FieldId, FilterRelaxation, Level, Levels, RankingConfig, RelaxationConfig,
-};
+use crate::schema::{Fallback, FieldId, FilterRelaxation, Level, RankingConfig, RelaxationConfig};
 use crate::search::TermSource;
 use crate::segment::ReadError;
 use crate::stats::StatisticsProvider;
@@ -54,10 +52,12 @@ use crate::stats::StatisticsProvider;
 mod drop_terms;
 mod fallback;
 mod fuzzy;
+mod options;
 mod prefix;
 mod synonyms;
 mod words;
 
+pub use options::{RelaxError, RelaxOptions, RelaxSettings};
 pub(crate) use synonyms::Expansion;
 
 /// A level of the relaxation cascade (SPEC §7.6), ordered as the cascade runs them: L0 first.
@@ -102,6 +102,16 @@ impl From<Level> for RelaxLevel {
         }
     }
 }
+
+/// Every level, in cascade order.
+const LEVELS: [RelaxLevel; 6] = [
+    RelaxLevel::Exact,
+    RelaxLevel::Synonyms,
+    RelaxLevel::DropTerms,
+    RelaxLevel::Prefix,
+    RelaxLevel::Fuzzy,
+    RelaxLevel::Fallback,
+];
 
 impl fmt::Display for RelaxLevel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -155,58 +165,6 @@ impl fmt::Display for FallbackOrder {
     }
 }
 
-/// A query's `relax` (SPEC §7.1, §7.6): each setting it gives overrides the collection's ([`RelaxationConfig`]), and
-/// those it leaves `None` keep it. The default overrides nothing.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct RelaxOptions {
-    /// `false` runs L0 only (`relax: false`).
-    pub enabled: Option<bool>,
-    /// Relax while there are fewer hits than this, in [`RelaxationConfig::MIN_RESULTS`].
-    pub min_results: Option<u32>,
-    /// The levels after L0, before the fallback.
-    pub levels: Option<Levels>,
-    /// What L5 does.
-    pub fallback: Option<Fallback>,
-    /// Keep relaxing to fill the page once `min_results` is reached.
-    pub fill: Option<bool>,
-    /// Whether filters may be relaxed.
-    pub filters: Option<FilterRelaxation>,
-    /// The cascade's time budget in milliseconds, in [`RelaxationConfig::BUDGET_MS`].
-    pub budget_ms: Option<u32>,
-}
-
-impl RelaxOptions {
-    /// `relax: false`: L0 only, whatever the collection's settings.
-    pub fn disabled() -> Self {
-        Self {
-            enabled: Some(false),
-            ..Self::default()
-        }
-    }
-}
-
-/// A query's `relax` that breaks a rule of SPEC §6.2.3.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum RelaxError {
-    /// A setting outside its range.
-    #[error("relax.{option} = {value}: must be {allowed}")]
-    OutOfRange {
-        /// The setting.
-        option: &'static str,
-        /// The value given.
-        value: u32,
-        /// The range allowed.
-        allowed: &'static str,
-    },
-    /// `levels` repeats a level or lists them out of cascade order.
-    #[error("relax.levels: {problem}")]
-    Levels {
-        /// What is wrong.
-        problem: &'static str,
-    },
-}
-
 /// What a level's transform builds from: L0's query, the user text it was compiled from, and the collection's
 /// statistics. Every level builds on L0's query, not on an earlier level's steps (SPEC §7.6: L4 `fuzzy` corrects
 /// every term, not only those the last L2 step requires). The levels of ROADMAP 8.2 add what else they need.
@@ -227,6 +185,12 @@ pub(crate) struct LevelInput<'a> {
     /// planning walks them. None by default ([`Self::new`]): L4 then corrects nothing. The search sets them
     /// ([`Self::walking`]).
     pub(crate) terms: Option<&'a dyn TermSource>,
+    /// Whether the cascade built L2's last rung (one term) before this level and did not skip it (ROADMAP 8.2.7): that
+    /// rung takes every document that holds one of the query's terms as typed, so L3 builds no step requiring some of
+    /// them exact (it would match nothing). True by default ([`Self::new`]); the search sets it from the steps it built
+    /// ([`Self::dropping`]). A query L2 builds no step for (one required clause, even one the analyzer splits in
+    /// several terms) or a plan without L2 leaves it false.
+    pub(crate) drops_terms: bool,
 }
 
 impl<'a> LevelInput<'a> {
@@ -241,12 +205,21 @@ impl<'a> LevelInput<'a> {
             stats,
             expands: &no_field,
             terms: None,
+            drops_terms: true,
         }
     }
 
     /// This input with L3 expanding the terms of the fields `expands` accepts.
     pub(crate) fn expanding(self, expands: &'a dyn Fn(FieldId) -> Option<f64>) -> Self {
         Self { expands, ..self }
+    }
+
+    /// This input with L2's one-term rung built before it, or not (ROADMAP 8.2.7).
+    pub(crate) fn dropping(self, drops_terms: bool) -> Self {
+        Self {
+            drops_terms,
+            ..self
+        }
     }
 
     /// This input with L4 walking `terms` for its corrections.
@@ -384,14 +357,14 @@ impl RelaxPlan {
     /// A collection's settings were checked when its schema was built; a query's are checked here.
     pub fn new(collection: &RelaxationConfig, options: &RelaxOptions) -> Result<Self, RelaxError> {
         let min_results = options.min_results.unwrap_or(collection.min_results);
-        check(
+        options::check(
             "min_results",
             min_results,
             RelaxationConfig::MIN_RESULTS,
             RelaxationConfig::MIN_RESULTS_ALLOWED,
         )?;
         let budget_ms = options.budget_ms.unwrap_or(collection.budget_ms);
-        check(
+        options::check(
             "budget_ms",
             budget_ms,
             RelaxationConfig::BUDGET_MS,
@@ -435,6 +408,12 @@ impl RelaxPlan {
     /// Whether the plan runs more than L0.
     pub fn relaxes(&self) -> bool {
         self.levels.len() > 1
+    }
+
+    /// The settings its cursors record (ROADMAP 8.3.1): `None` when it runs L0 alone, as a plain search does, so their
+    /// cursors page each other.
+    pub fn settings(&self) -> Option<RelaxSettings> {
+        self.relaxes().then(|| RelaxSettings::of(self))
     }
 
     /// The cascade runs while fewer hits than this were found.
@@ -547,23 +526,6 @@ fn band(step: usize) -> f64 {
         .and_then(|s| s.checked_add(1))
         .filter(|&e| e <= 1022)
         .map_or(0.0, |e| f64::from_bits((1023 - e) << 52))
-}
-
-fn check(
-    option: &'static str,
-    value: u32,
-    range: core::ops::RangeInclusive<u32>,
-    allowed: &'static str,
-) -> Result<(), RelaxError> {
-    if range.contains(&value) {
-        Ok(())
-    } else {
-        Err(RelaxError::OutOfRange {
-            option,
-            value,
-            allowed,
-        })
-    }
 }
 
 #[cfg(test)]

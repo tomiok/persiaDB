@@ -24,6 +24,11 @@
 //! 5. The gate measures the default plan, which leaves the proximity bonus out (SPEC §7.2, ADR-0036): the relaxed
 //!    search plans with the default too (SPEC §7.4). The bonus reorders no judged query today (ADR-0036); ROADMAP
 //!    15.1.6 adds queries it can reorder, records the baseline with it on and off, and decides the default from that.
+//! 6. The typo suite (ROADMAP 8.2.7, ADR-0046): `typo_corpus.json` and `typo_judgments.json`, queries with no hit at L0
+//!    that the typo and exactness tiers decide (a misspelling one edit from the relevant documents and two from a
+//!    decoy that outscores them by BM25F; an unfinished last word without L2), searched through the cascade with each
+//!    query's `relax` (`RelaxOptions::from_json`). Each ranks a relevant document first, and its nDCG is gated as in
+//!    2 against `typo_baseline.txt`: mean 0.6786 before the tiers, 0.9835 with them.
 //!
 //! nDCG@10 is `DCG@10 / IDCG@10`, with `DCG@10 = Σ_{i=1..10} (2^grade_i − 1) / log2(i + 1)` over the hits in rank
 //! order, and `IDCG@10` the same over the judgments sorted by grade.
@@ -93,8 +98,9 @@ fn ndcg_by_hand() {
     assert!(ndcg(&ids(&["x", "y"]), &judged).abs() < 1e-12);
 }
 
-/// The ranked ids of each judged query, and its judgments.
-fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
+/// The judged store: `corpus` in `title` (boost 2) and `body`, both `en` with positions, over two segments and the
+/// memtable, on a fixed clock and segment ids.
+fn store(corpus: &str) -> Database<SimFile> {
     let en = AnalyzerRef::new("en", 1).unwrap();
     let text = |boost| {
         FieldKind::Text(TextOptions {
@@ -119,7 +125,7 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
     let mut db = Database::create_on(SimFile::new(), [7; 16], options).unwrap();
     db.create_collection(schema).unwrap();
 
-    let corpus: Vec<Json> = serde_json::from_str(CORPUS).unwrap();
+    let corpus: Vec<Json> = serde_json::from_str(corpus).unwrap();
     // Two segments and the memtable: scores are collection-level, so the layout does not matter.
     for (i, doc) in corpus.iter().enumerate() {
         let d = Document::new(doc["id"].as_str().unwrap())
@@ -130,7 +136,12 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
             db.commit().unwrap();
         }
     }
+    db
+}
 
+/// The ranked ids of each judged query, and its judgments.
+fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
+    let db = store(CORPUS);
     let snapshot = db.snapshot();
     let c = snapshot.collection("store").unwrap();
     let memtable = c.memtable();
@@ -329,12 +340,16 @@ fn gate_fails_beyond_tolerance_either_way() {
     }
 }
 
-/// Invariant 3: per query, the smallest change of nDCG@10 one judged document makes moving by one rank (ranks 9 and
-/// 10, the smallest discount step, swapped with the closest other grade, unjudged included) is more than twice the
-/// tolerance, so the gate sees it whatever the rounding.
+/// Invariant 3: per query of both suites, the smallest change of nDCG@10 one judged document makes moving by one rank
+/// (ranks 9 and 10, the smallest discount step, swapped with the closest other grade, unjudged included) is more than
+/// twice the tolerance, so the gate sees it whatever the rounding.
 #[test]
 fn tolerance_is_below_one_rank_move() {
-    let judgments: Vec<Json> = serde_json::from_str(JUDGMENTS).unwrap();
+    let judged = [JUDGMENTS, TYPO_JUDGMENTS];
+    let judgments: Vec<Json> = judged
+        .iter()
+        .flat_map(|j| serde_json::from_str::<Vec<Json>>(j).unwrap())
+        .collect();
     let step = 1.0 / 10_f64.log2() - 1.0 / 11_f64.log2();
     for j in &judgments {
         let mut ideal: Vec<u32> = j["grades"]
@@ -362,6 +377,89 @@ fn tolerance_is_below_one_rank_move() {
             smallest > 2.0 * TOLERANCE,
             "{:?}: a one-rank move changes nDCG@{K} by {smallest:.6}, within the tolerance",
             j["q"]
+        );
+    }
+}
+
+const TYPO_CORPUS: &str = include_str!("relevance/typo_corpus.json");
+const TYPO_JUDGMENTS: &str = include_str!("relevance/typo_judgments.json");
+const TYPO_BASELINE: &str = include_str!("relevance/typo_baseline.txt");
+
+/// The typo suite (ROADMAP 8.2.7, ADR-0046): misspelled or unfinished queries over `typo_corpus.json`, none with a hit
+/// at L0, searched through the relaxation cascade with the collection's settings and the query's own `relax`
+/// (`typo_judgments.json`, read by `RelaxOptions::from_json`). Each is a case the typo and exactness tiers decide: a
+/// misspelling one edit from the relevant documents' term and two from a decoy's (`braceelt`: `bracelet`, `bracket`),
+/// whose short title outscores them by BM25F; and, without L2, an unfinished last word beside a word a relevant
+/// document holds exactly (`red sho`), against a decoy that needs both words completed.
+fn run_typos() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
+    let db = store(TYPO_CORPUS);
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("store").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let compiler = QueryCompiler::new(c.schema(), &AnalyzerRegistry::builtin()).unwrap();
+    let fields = DefaultFields::all(c.schema());
+    let request = SearchRequest {
+        limit: K,
+        projection: Projection::None,
+        ..SearchRequest::default()
+    };
+    let judgments: Vec<Json> = serde_json::from_str(TYPO_JUDGMENTS).unwrap();
+    judgments
+        .iter()
+        .map(|j| {
+            let q = j["q"].as_str().unwrap();
+            let options = j.get("relax").map_or_else(RelaxOptions::default, |r| {
+                RelaxOptions::from_json(&r.to_string()).unwrap()
+            });
+            let relax = RelaxPlan::new(c.schema().relaxation(), &options).unwrap();
+            let text = compiler.compile(q, &fields, &QueryLimits::default());
+            let out = views
+                .search_relaxed(&text, &request, &relax, &Execution::default())
+                .unwrap();
+            // No judged typo query has a hit at L0: the cascade decides its ranking.
+            assert!(out.hits.iter().all(|h| h.step > 0), "{q:?} has hits at L0");
+            assert!(out.relaxation.relaxed(), "{q:?} did not relax");
+            let ranked = out
+                .hits
+                .iter()
+                .map(|h| h.hit.document.id().to_owned())
+                .collect();
+            (q.to_owned(), ranked, grades(j))
+        })
+        .collect()
+}
+
+/// A judgment's grades by document id.
+fn grades(j: &Json) -> BTreeMap<String, u32> {
+    j["grades"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(id, g)| (id.clone(), u32::try_from(g.as_u64().unwrap()).unwrap()))
+        .collect()
+}
+
+#[test]
+fn typo_queries_rank_a_relevant_document_first() {
+    let runs = run_typos();
+    assert_eq!(runs.len(), 5);
+    for (q, ranked, judged) in &runs {
+        let top = ranked.first().unwrap_or_else(|| panic!("{q:?}: no hit"));
+        assert!(
+            judged.get(top).copied().unwrap_or(0) >= 2,
+            "{q:?}: best hit {top} is not relevant: {ranked:?}"
+        );
+    }
+}
+
+#[test]
+fn typo_ndcg_stays_within_tolerance_of_its_baseline() {
+    let got = table(&run_typos());
+    if let Err(moved) = gate(TYPO_BASELINE, &got) {
+        panic!(
+            "{moved}\nIf intended, replace tests/relevance/typo_baseline.txt with the table below and say in the PR \
+             which queries moved and why:\n{got}"
         );
     }
 }

@@ -1,0 +1,1 @@
+{"enabled": true, "min_results": 5, "levels": ["synonyms", "drop_terms", "prefix", "fuzzy"], "fallback": "none", "fill": true, "filters": "last_resort", "budget_ms": 200}

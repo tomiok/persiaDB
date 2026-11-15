@@ -1,8 +1,8 @@
 # Persia DB
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
-> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-14 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **357 of 547 MVP leaves done (65%)**, none in progress. That file is regenerated from
+> until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-15 snapshot
+> in [`PROGRESS.md`](../PROGRESS.md): **361 of 550 MVP leaves done (66%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -44,7 +44,7 @@ M1 to M5 are done, and M0 and M6 to M9 are in progress (see [Roadmap](#roadmap))
 - `persia-engine`: schema, documents, and manifests (M3); the segment writer and reader with `verify` (M5);
   the memtable, WAL, commit, deletes, merges, and open and recovery (M6, 49 of 58); query compilation,
   BM25F, top-k, filters, sort, facets, pages, and explain (M7, done); and the relaxation cascade with
-  levels L1–L5 (M8, 24 of 46).
+  levels L1–L5, typo tiers and per-request `relax` options (M8, 28 of 49).
 - `persia-blob` (M9, 5 of 22): the content hasher, the chunker, and the blob manifest codec.
 - `persia-cli`: `inspect`, `dump`, and `verify` for containers and segments (ROADMAP 5.4.2, 5.4.3, 6.6.3, 6.6.10).
 
@@ -130,7 +130,7 @@ crates under `persia`. The public API that wraps it is M10, so you cannot call t
 |---|---|---|
 | Open a file and search | Planned (M10); `persia-engine` opens, writes, and searches as library code (M6, M7) | SPEC §8, §10.2 |
 | Full-text search, filters, facets, sort | Done as library code (M7), including a tie-break after the score (`["score", {"field": ...}]`, pruned) and an nDCG@10 gate in CI; public through `Db` in M10 | SPEC §7 |
-| Zero-results relaxation | In progress (M8): the cascade and L1–L5 done (L4 fuzzy reports "did you mean" corrections; L5 returns the top documents by static rank or recency, flagged `fallback`); request options next | SPEC §7.6 |
+| Zero-results relaxation | In progress (M8): the cascade and L1–L5 done (L4 fuzzy reports "did you mean" corrections; L5 returns the top documents by static rank or recency, flagged `fallback`), typo and exactness tiers within a level, per-request `relax` options (`fill` included), and `explain` stating each hit's step; metrics and the quality suite next | SPEC §7.6 |
 | Schema and documents | Done (M3) | SPEC §6 |
 | Analyzers (`standard`, `en`, `es`, `pt`, …) | Done (M4) | SPEC §6.3 |
 | Crash-safe commit and recovery | Done in M2; in progress in M6 (commit, WAL replay, and recovery done; 9 leaves left) | SPEC §4.5, §8.6 |
@@ -185,8 +185,8 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 | L0 | `exact` | Every analyzed term is required. |
 | L1 | `synonyms` | Terms expand through the collection's synonym groups. |
 | L2 | `drop_terms` | Required-term ratio steps from 100% to 75%, 50%, then one term. Low-value terms go first. |
-| L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). |
-| L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more. Corrections are reported. |
+| L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). When another term expands too, and L2 did not take those documents first, the last term alone expands first. |
+| L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more; shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: the top documents the filters keep, by static rank, then recency, flagged in the response; or nothing (`fallback: "none"`). |
 
 The response says what happened. This JSON is the shape in SPEC §7.6. It is illustrative:
@@ -209,7 +209,24 @@ Quality of this cascade is a product feature of the same milestone (ROADMAP M8):
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
 planned as ROADMAP 8.4.4 (`docs/relaxation.md`).
 
-Done so far (M8, 24 of 46): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
+A query's `relax` is `false`, `true`, or an object of the collection's keys (`enabled`, `min_results`, `levels`,
+`fallback`, `fill`, `filters`, `budget_ms`). Each key it gives overrides the collection's setting. The others keep
+it. Values out of range are errors, even with relaxation off (ROADMAP 8.3.1, ADR-0045). A cursor remembers the
+settings that decide the ranking: the levels the plan runs (L5 included), `min_results`, `fill` and `filters`. It
+does not remember `budget_ms`, which only truncates a page. The next page under other settings is an error instead
+of a page from another ranking. With `fill`,
+pages by cursor or by offset are still slices of one ranking (8.3.2). `explain: true` wraps each relaxed hit's score
+tree in a node that names its level, step, and what that step applied (8.3.4).
+
+Within a level, typos and completions are tiers (ROADMAP 8.2.7, ADR-0046). When a term L4 rewrites has 8
+characters or more, L4 first searches every rewritten term within one edit (`fuzzy:1`), then within each term's own
+distance. Terms shorter than 4 characters stay exact in both. When L3 expands a word besides the last one, and L2's
+one-term rung did not take those documents first (it does not without L2, as in search as you type, or for a word
+the analyzer splits), L3 first expands the last word alone, keeping the others as typed (`prefix:last`). The tiers are steps of
+the cascade, so a near match ranks above a far one whatever their scores. On a judged typo suite beside the
+relevance gate, the mean nDCG@10 goes from 0.6786 to 0.9835. Stemmed matches are not tiered yet (8.2.10).
+
+Done so far (M8, 28 of 49): the cascade (ROADMAP 8.1: steps, ordering across levels, the time budget,
 the response metadata) and levels L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, L4 `fuzzy` and L5 `fallback` (ROADMAP
 8.2.1–8.2.5), as library code in `persia-engine`. L4 matches each word of 4 characters or more within one
 edit (two from 8 characters), and reports the words no document holds in `corrected` ("did you mean",
@@ -221,8 +238,9 @@ the request's sort values. Recency is where the index holds a document (the memt
 segments, docids descending within a view), not write time: a merge moves the documents it rewrites above
 segments flushed after its inputs, so without a static rank a merge can reorder the whole fallback, and with
 one it reorders only ties. L5 sets
-`"fallback": "static_rank"` or `"recency"` in the response (8.2.5, ADR-0044). Not started: `last_resort` filters
-(8.2.6), the request options and metrics (8.3), and the quality suite (8.4).
+`"fallback": "static_rank"` or `"recency"` in the response (8.2.5, ADR-0044). Also done: the typo tiers (8.2.7) and
+the request options, `fill` and `explain` (8.3.1, 8.3.2, 8.3.4). Not started: `last_resort` filters (8.2.6), metrics
+(8.3.3), and the quality suite (8.4).
 
 ### Schema, documents, and analysis
 
@@ -632,8 +650,8 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
-derives the rest, and it is the live status. The table below is the **2026-11-14** snapshot
-(357 / 547 MVP leaves, 65%; post-MVP milestones are not counted). No leaf is marked `[~]`.
+derives the rest, and it is the live status. The table below is the **2026-11-15** snapshot
+(361 / 550 MVP leaves, 66%; post-MVP milestones are not counted). No leaf is marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -649,7 +667,7 @@ while a dependency is unfinished.
 | **M5** Segments | Segment writer and reader | M1, M3, M4 | Done, 48/48 |
 | **M6** Durability | WAL, commit, merge, recovery | M2, M5 | In progress, 49/58 |
 | **M7** Query | Parser, BM25F, top-k, facets | M5 (M6 for end-to-end) | Done, 51/51 |
-| **M8** Relaxation | The zero-results cascade | M7 | In progress, 24/46 |
+| **M8** Relaxation | The zero-results cascade | M7 | In progress, 28/49 |
 | **M9** Blobs | Pack file, remote blobs, GC | M1, M2 | In progress, 5/22 |
 | **M10** Embedded API | `Db` / `Collection`, CLI, `v0.1` | M6, M7, M8, M9 | Blocked, 0/23 |
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
