@@ -3,19 +3,24 @@
 //! Invariants:
 //! 1. One step, `filters`, whose query is L0's root `bool` with its `filter` emptied, every other clause as it is
 //!    (`must`, `should`, `must_not`, `minimum_should_match`), for a compiled query and a programmatic root `bool` alike.
-//! 2. A root without filters, and any other root, builds no step: the level is skipped.
+//! 2. A root without filters, a root that is not a `bool`, and a root that searches no word, build no step: the level
+//!    is skipped. A word is a `term`, `combined`, `phrase`, `prefix` or `fuzzy`, or one of those inside `must` or
+//!    `should` through `bool`, `boost` and `constant_score`. `match_all`, an empty `bool` and exclusions alone are not.
 //! 3. Its `effective` is L0's text; it corrects nothing, has no synonym alternatives and reads no statistics.
 //! 4. It never fills a page, and covers no earlier step; L5 covers every earlier step.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)] // Tests: inputs are fixed.
 
 use persia_analysis::AnalyzerRegistry;
+use proptest::prelude::*;
 
 use super::*;
-use crate::query::{DefaultFields, Query};
-use crate::query::{Filter, FilterValue, QueryCompiler, QueryLimits, TermQuery};
+use crate::query::{
+    BoostQuery, ConstantScoreQuery, DefaultFields, Filter, FilterValue, Query, QueryCompiler,
+    QueryLimits, TermQuery,
+};
 use crate::schema::{
-    CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
+    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, SchemaBuilder, TextOptions,
 };
 use crate::stats::StatisticsProvider;
 
@@ -63,6 +68,42 @@ fn one(query: &Query, compiled: Option<&Compiled>) -> Step {
     let mut steps = steps(query, compiled);
     assert_eq!(steps.len(), 1, "the filter step is one step");
     steps.remove(0)
+}
+
+fn term(schema: &CollectionSchema, text: &str) -> Query {
+    Query::Term(TermQuery {
+        field: id(schema, "body"),
+        term: text.into(),
+    })
+}
+
+fn boost(query: Query) -> Query {
+    Query::Boost(BoostQuery {
+        query: Box::new(query),
+        boost: 2.0,
+    })
+}
+
+fn constant(query: Query) -> Query {
+    Query::ConstantScore(ConstantScoreQuery {
+        query: Box::new(query),
+        score: 1.0,
+    })
+}
+
+/// `clause` as the one positive clause of a root `bool` that also filters on `brand`.
+fn filtered(schema: &CollectionSchema, must: bool, clause: Query) -> Query {
+    let (must, should) = if must {
+        (vec![clause], Vec::new())
+    } else {
+        (Vec::new(), vec![clause])
+    };
+    Query::Bool(BoolQuery {
+        must,
+        should,
+        filter: vec![brand_is(schema, "acme")],
+        ..BoolQuery::default()
+    })
 }
 
 fn brand_is(schema: &CollectionSchema, value: &str) -> Filter {
@@ -138,7 +179,7 @@ fn a_query_without_root_filters_builds_no_step() {
         ..BoolQuery::default()
     });
     assert_eq!(steps(&deep, None), []);
-    let boosted = Query::Boost(crate::query::BoostQuery {
+    let boosted = Query::Boost(BoostQuery {
         query: Box::new(Query::Bool(BoolQuery {
             must: vec![red],
             filter: vec![brand_is(&schema, "acme")],
@@ -195,8 +236,9 @@ fn the_filter_step_never_fills_and_l5_covers_every_earlier_step() {
 #[test]
 fn a_query_without_words_builds_no_step() {
     let schema = schema();
-    // An empty `q`, one of excluded clauses alone, and stopwords only: no word to match without the filter, which would
-    // otherwise be every live document the exclusions leave (the unfiltered L5 ADR-0047 rejects).
+    // An empty `q` and excluded clauses alone: no word to match without the filter, which would otherwise be every
+    // live document the exclusions leave (the unfiltered L5 ADR-0047 rejects). Stopwords are the `en` case below:
+    // this schema's `standard` analyzer keeps `the`.
     for text in ["", "-blue", "-blue -\"green hat\""] {
         let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
         assert!(
@@ -205,18 +247,112 @@ fn a_query_without_words_builds_no_step() {
         );
         assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
     }
-    // A programmatic root of filters, or of `match_all` and filters, alike.
-    for must in [Vec::new(), vec![Query::MatchAll]] {
-        let root = Query::Bool(BoolQuery {
-            must,
-            must_not: vec![Query::Term(TermQuery {
-                field: id(&schema, "body"),
-                term: "blue".into(),
-            })],
-            filter: vec![brand_is(&schema, "acme")],
+    let blue = term(&schema, "blue");
+    // Each of these searches no word, in `must` and in `should`. A non-empty `should` is not itself a word:
+    // `match_all` matches every document.
+    let wordless = [
+        Query::MatchAll,
+        Query::Bool(BoolQuery::default()),
+        Query::Bool(BoolQuery {
+            must_not: vec![blue.clone()],
             ..BoolQuery::default()
-        });
-        assert_eq!(steps(&root, None), []);
+        }),
+        boost(Query::MatchAll),
+        constant(Query::MatchAll),
+        boost(constant(Query::MatchAll)),
+        constant(boost(Query::MatchAll)),
+        Query::Bool(BoolQuery {
+            should: vec![Query::MatchAll],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![Query::Bool(BoolQuery::default())],
+            ..BoolQuery::default()
+        }),
+        boost(Query::Bool(BoolQuery {
+            must_not: vec![blue],
+            ..BoolQuery::default()
+        })),
+    ];
+    for clause in wordless {
+        for must in [true, false] {
+            let root = filtered(&schema, must, clause.clone());
+            assert_eq!(steps(&root, None), [], "must {must}: {root:?}");
+        }
+    }
+    // The query itself is not a root `bool`: nothing to drop, even when the wrapped `bool` has a filter.
+    assert_eq!(steps(&boost(Query::MatchAll), None), []);
+    assert_eq!(steps(&constant(Query::MatchAll), None), []);
+}
+
+#[test]
+fn stopwords_only_build_no_step() {
+    let schema = SchemaBuilder::new("c")
+        .field(
+            "body",
+            FieldKind::Text(TextOptions {
+                analyzer: AnalyzerRef::builtin("en").unwrap(),
+                ..TextOptions::default()
+            }),
+        )
+        .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+        .build()
+        .unwrap();
+    // `the` and `a` analyze to no token, so the compilation is `match_all` and the filter wraps it. That is still
+    // no word: dropping the filter would return every live document.
+    for text in ["the", "the a of", "a and the"] {
+        let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
+        assert!(
+            matches!(
+                &compiled.query,
+                Query::Bool(root) if root.must == [Query::MatchAll] && !root.filter.is_empty()
+            ),
+            "{text:?} compiled to {:?}",
+            compiled.query
+        );
+        assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
+    }
+    // A stopword beside a real word still searches that word.
+    let red = compile(&schema, "the red").with_filter([brand_is(&schema, "acme")]);
+    assert_eq!(steps(&red.query, Some(&red)).len(), 1);
+}
+
+#[test]
+fn a_word_inside_boost_constant_score_or_a_nested_bool_still_builds_the_step() {
+    let schema = schema();
+    let red = term(&schema, "red");
+    let wordy = [
+        boost(red.clone()),
+        constant(red.clone()),
+        Query::Bool(BoolQuery {
+            must: vec![red.clone()],
+            ..BoolQuery::default()
+        }),
+        boost(Query::Bool(BoolQuery {
+            should: vec![red.clone()],
+            ..BoolQuery::default()
+        })),
+        // A wordless sibling does not hide the term.
+        Query::Bool(BoolQuery {
+            should: vec![Query::MatchAll, red.clone()],
+            ..BoolQuery::default()
+        }),
+        Query::Bool(BoolQuery {
+            must: vec![red, Query::MatchAll],
+            ..BoolQuery::default()
+        }),
+    ];
+    for clause in wordy {
+        let root = filtered(&schema, true, clause);
+        let step = one(&root, None);
+        let Query::Bool(built) = step.query else {
+            panic!("the step is the root bool");
+        };
+        let Query::Bool(source) = &root else {
+            panic!("filtered() builds a bool");
+        };
+        assert_eq!(built.filter, []);
+        assert_eq!(&built.must, &source.must);
     }
 }
 
@@ -245,4 +381,90 @@ fn a_root_of_should_clauses_keeps_them_and_one_is_then_required() {
             ..root
         })
     );
+}
+
+/// A clause built only from `match_all`, empty `bool`s and exclusions, through `boost`, `constant_score` and `bool`.
+fn wordless_clause() -> impl Strategy<Value = Query> {
+    let leaf = prop_oneof![
+        Just(Query::MatchAll),
+        Just(Query::Bool(BoolQuery::default())),
+        Just(Query::Bool(BoolQuery {
+            must_not: vec![Query::Term(TermQuery {
+                field: FieldId::new(0),
+                term: "blue".into(),
+            })],
+            ..BoolQuery::default()
+        })),
+    ];
+    leaf.prop_recursive(3, 12, 2, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(boost),
+            inner.clone().prop_map(constant),
+            inner.clone().prop_map(|q| Query::Bool(BoolQuery {
+                must: vec![q],
+                ..BoolQuery::default()
+            })),
+            inner.clone().prop_map(|q| Query::Bool(BoolQuery {
+                should: vec![q],
+                ..BoolQuery::default()
+            })),
+            (inner.clone(), inner).prop_map(|(a, b)| Query::Bool(BoolQuery {
+                must: vec![a],
+                should: vec![b],
+                ..BoolQuery::default()
+            })),
+        ]
+    })
+}
+
+/// A clause that holds `red` in `must` or `should`, through the same wrappers, beside wordless siblings.
+fn wordy_clause() -> impl Strategy<Value = Query> {
+    let red = Query::Term(TermQuery {
+        field: FieldId::new(0),
+        term: "red".into(),
+    });
+    Just(red).prop_recursive(3, 12, 2, |inner| {
+        prop_oneof![
+            inner.clone().prop_map(boost),
+            inner.clone().prop_map(constant),
+            inner.clone().prop_map(|q| Query::Bool(BoolQuery {
+                must: vec![q, Query::MatchAll],
+                ..BoolQuery::default()
+            })),
+            inner.prop_map(|q| Query::Bool(BoolQuery {
+                should: vec![Query::Bool(BoolQuery::default()), q],
+                ..BoolQuery::default()
+            })),
+        ]
+    })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    /// A root whose positive clauses search no word never builds L6, filter or not (SPEC §7.6).
+    #[test]
+    fn a_wordless_query_never_builds_the_filter_step(clause in wordless_clause(), in_must in any::<bool>()) {
+        let schema = schema();
+        let root = filtered(&schema, in_must, clause);
+        prop_assert_eq!(steps(&root, None), []);
+    }
+
+    /// Wrapping a term in `boost`, `constant_score` or a nested `bool` still searches that word, so the step drops
+    /// the root filter and keeps the clause.
+    #[test]
+    fn a_query_that_searches_a_word_drops_its_root_filter(clause in wordy_clause()) {
+        let schema = schema();
+        let root = filtered(&schema, true, clause);
+        let built = steps(&root, None);
+        prop_assert_eq!(built.len(), 1);
+        let Query::Bool(query) = &built[0].query else {
+            return Err(TestCaseError::fail("the step is the root bool"));
+        };
+        let Query::Bool(source) = &root else {
+            return Err(TestCaseError::fail("filtered() builds a bool"));
+        };
+        prop_assert_eq!(query.filter.as_slice(), [].as_slice());
+        prop_assert_eq!(query.must.as_slice(), source.must.as_slice());
+    }
 }

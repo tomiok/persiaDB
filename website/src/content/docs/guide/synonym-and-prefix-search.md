@@ -142,11 +142,11 @@ A query that expands nothing skips the level and is not listed in `applied`.
 | L2 `drop_terms` | Library code. [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped). |
 | L4 `fuzzy` | Library code (ROADMAP 8.2.4, 8.2.7). One step from L0, after a `fuzzy:1` tier step when a word has 8 or more characters. An explicit `fuzzy` clause can still be planned over collection terms (ROADMAP 7.4.12). `corrected` is stated when L4 found the hits (ROADMAP 8.2.4.3, 8.1.22). |
 | L5 `fallback` | Library code (ROADMAP 8.2.5). Static rank, then index-location recency (docids descending within a view). The request's `sort` is ignored for that ranking. Hits still carry its values. Flagged with `fallback`. `none` allows an empty page. |
-| Relaxing filters | Only with `last_resort`, in one last step after L5 (ROADMAP 8.2.6). |
+| Relaxing filters | Only with `last_resort`, as the final step after every enabled earlier level. A query that searches no word does not build it (ROADMAP 8.2.6). |
 | `suggest` completions | Not written (ROADMAP 18). L3 is not that API. |
 | `persia::Db::search` | Not in the crate (M10). |
 
-A query can still come back empty. `fallback: "none"` leaves a miss that L1 through L4 did not match with no last resort. A filter no document passes stays empty unless `relax.filters` is `"last_resort"` (ROADMAP 8.2.6). `RelaxOptions::disabled`, and a collection whose `RelaxationConfig.enabled` is false, run L0 only. The zero-result regression gate is not written (ROADMAP 8.4).
+A query can still come back empty. `fallback: "none"` leaves a miss that L1 through L4 did not match with no last resort. A filter no document passes stays empty unless `relax.filters` is `"last_resort"`; queries that search no word stay empty because the filter step is skipped (ROADMAP 8.2.6). `RelaxOptions::disabled`, and a collection whose `RelaxationConfig.enabled` is false, run L0 only. The zero-result regression gate is not written (ROADMAP 8.4).
 
 [Getting started](/guide/getting-started/) separates `CollectionViews::search_relaxed` from the illustrative `Db::search` samples. [What is an embedded search database?](/guide/embedded-search/) is the library shape those samples are aiming at.
 

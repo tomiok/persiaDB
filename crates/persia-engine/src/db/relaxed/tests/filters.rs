@@ -23,8 +23,8 @@ use crate::db::relaxed::{RelaxedHit, RelaxedQuery, RelaxedResults, RelaxedSearch
 use crate::db::{CollectionViews, Database, DatabaseOptions, ManualClock, SearchRequest};
 use crate::document::{Document, Value};
 use crate::query::{
-    BoolQuery, Compiled, DefaultFields, Filter, FilterValue, Query, QueryCompiler, QueryLimits,
-    TermQuery,
+    BoolQuery, BoostQuery, Compiled, ConstantScoreQuery, DefaultFields, Filter, FilterValue, Query,
+    QueryCompiler, QueryLimits, TermQuery,
 };
 use crate::relax::{LevelInput, LevelTransform, RelaxLevel, RelaxOptions, RelaxPlan, Step};
 use crate::schema::{
@@ -783,7 +783,9 @@ struct Case {
     levels: Option<Vec<bool>>,
     fallback: bool,
     limit: usize,
-    /// L0's form: compiled user text (0), a programmatic root `bool` of `must` words (1), or of `should` words (2).
+    /// L0's form. 0 is compiled user text, 1 a root `bool` of `must` words, 2 of `should` words. 3 and above search
+    /// no word: `should: [match_all]`, `boost` of `match_all`, `constant_score` of `match_all`, a nested empty
+    /// `bool`, or a nested `bool` of exclusions alone. The `words` list is not searched in those shapes.
     shape: u8,
 }
 
@@ -802,7 +804,7 @@ fn case() -> impl Strategy<Value = Case> {
         prop::option::of(prop::collection::vec(any::<bool>(), 4)),
         any::<bool>(),
         1usize..4,
-        0u8..3,
+        0u8..8,
     )
         .prop_map(
             |(
@@ -889,6 +891,49 @@ enum L0 {
 
 impl L0 {
     fn of(case: &Case, views: &CollectionViews<'_>, filtered: bool) -> Self {
+        if case.shape >= 3 {
+            let body = field(views, "body");
+            let term = |w: usize| {
+                Query::Term(TermQuery {
+                    field: body,
+                    term: WORDS[w].into(),
+                })
+            };
+            // None of these names a term the query searches. `shape` 3 puts `match_all` in `should`, which a
+            // non-empty `should` list used to count as a word.
+            let clause = match case.shape {
+                3 => Query::MatchAll,
+                4 => Query::Boost(BoostQuery {
+                    query: Box::new(Query::MatchAll),
+                    boost: 2.0,
+                }),
+                5 => Query::ConstantScore(ConstantScoreQuery {
+                    query: Box::new(Query::MatchAll),
+                    score: 1.0,
+                }),
+                6 => Query::Bool(BoolQuery::default()),
+                _ => Query::Bool(BoolQuery {
+                    must_not: vec![term(0)],
+                    ..BoolQuery::default()
+                }),
+            };
+            let (must, should) = if case.shape == 3 {
+                (Vec::new(), vec![clause])
+            } else {
+                (vec![clause], Vec::new())
+            };
+            return Self::Query(Query::Bool(BoolQuery {
+                must,
+                should,
+                must_not: case.excluded.map(term).into_iter().collect(),
+                filter: if filtered {
+                    vec![tag_is(field(views, "tag"), "x")]
+                } else {
+                    Vec::new()
+                },
+                ..BoolQuery::default()
+            }));
+        }
         if case.shape == 0 {
             let mut text: Vec<String> = case.words.iter().map(|&w| WORDS[w].to_owned()).collect();
             if let Some(w) = case.excluded {
@@ -995,8 +1040,10 @@ fn check(case: &Case) -> Result<(), TestCaseError> {
         .last()
         .is_some_and(|a| a == "filters");
     let too_few = never.hits.len() < usize::try_from(case.min_results).unwrap();
-    // A query of no word builds no step: without the filter it would match every document.
-    prop_assert_eq!(built, case.filtered && too_few && !case.words.is_empty());
+    // A query of no word builds no step: without the filter it would match every document. Shapes 3 and above
+    // are wordless even when `words` is not empty (`match_all`, a wrapper of it, an empty `bool`, exclusions).
+    let words = case.shape < 3 && !case.words.is_empty();
+    prop_assert_eq!(built, case.filtered && too_few && words);
     if !built {
         prop_assert_eq!(&last.relaxation, &never.relaxation);
     }

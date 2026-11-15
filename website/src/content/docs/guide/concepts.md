@@ -40,7 +40,7 @@ A few more words that show up in the roadmap and in contributor docs
 | **Leaf** | One ROADMAP checkbox. One leaf is one issue and one pull request. |
 | **Milestone** | `M0` through `M15` are the MVP (v1.0). `M16` and later are post-MVP and name a target version. A milestone starts only after the milestones it depends on are done, unless the roadmap says otherwise. |
 | **ADR** | An architecture decision record in [`docs/adr/`](https://github.com/tomiok/persiaDB/blob/main/docs/adr/). The SPEC says what the system does; an ADR says why. |
-| **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback). |
+| **Relaxation level** | One step of the cascade, `L0` (exact) through `L5` (fallback), then `L6` (`filters`) when `relax.filters` is `last_resort`. |
 
 Internal document ids are segment-local. Deletions never rewrite a segment: they live in a tombstone
 sidecar referenced by the manifest (SPEC §8.3). The sidecar format is library code (ROADMAP 6.4.2).

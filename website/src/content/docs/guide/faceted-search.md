@@ -80,7 +80,7 @@ Faceted search here means a ranked page plus counts of the keyword values those 
 
 A filter is not part of the score. The DSL is `term`, `terms`, `range`, `exists`, `and`, `or`, and `not` (SPEC §7.1.2). `Filter::from_json` parses them and checks them against the schema. A bad filter is an error. User text is not: the compiler degrades bad syntax to plain terms.
 
-Evaluation is library code (ROADMAP 7.4.5). A `bool` keeps a bitmap of the documents that pass, per segment or memtable view, and the matcher stays inside it. Deleted documents are already left out of the view. Filters stay strict when a query has too few hits, unless the caller sets `relax.filters` to `last_resort`. L1 through L5 keep the filter on the step they build. The opt-in adds one last step, L6, which drops the request's filters only when every earlier level found fewer than `min_results` hits (ROADMAP 8.2.6). Its matches count in the facets, so a facet then shows values the filter rejects, and the response sets `filters_dropped`. A request filter joins a compiled query at its root (ROADMAP 8.1.17). %%RELAXATION_NOW%% [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the L2 step. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is L1 and L3.
+Evaluation is library code (ROADMAP 7.4.5). A `bool` keeps a bitmap of the documents that pass, per segment or memtable view, and the matcher stays inside it. Deleted documents are already left out of the view. Filters stay strict when a query has too few hits, unless the caller sets `relax.filters` to `last_resort`. L1 through L5 keep the filter on the step they build. The opt-in adds one last step, L6, which drops the request's filters only when every earlier level found fewer than `min_results` hits and the query searches a word (ROADMAP 8.2.6). Its matches count in the facets, so a facet then shows values the filter rejects, and when this step supplies the hits the response sets `filters_dropped`. A request filter joins a compiled query at its root (ROADMAP 8.1.17). %%RELAXATION_NOW%% [How terms are dropped](/guide/typo-tolerant-search/#how-terms-are-dropped) is the L2 step. [Synonym and prefix search](/guide/synonym-and-prefix-search/) is L1 and L3.
 
 ## Facets
 
@@ -90,7 +90,7 @@ Each facet counts live matching documents that hold the value, once per distinct
 
 With a facet, every match is visited. Without one, a score sort may skip documents that cannot enter the page (SPEC §7.3, §7.4).
 
-`CollectionViews::search_relaxed` counts the matches of every cascade step it built, each document once, at its first step. SPEC §7.5 marks that as an interim rule (ROADMAP 8.1.9). L0 through L5 build a query, so a loosened page can count matches the exact query does not have. Which of those counts a facet should keep is still open.
+`CollectionViews::search_relaxed` counts the matches of every cascade step it built, each document once, at its first step. SPEC §7.5 marks that as an interim rule (ROADMAP 8.1.9). L0 through L5 build a query, and so does L6 when it runs, so a loosened page can count matches the exact query does not have. Which of those counts a facet should keep is still open.
 
 ## Sort
 
@@ -161,7 +161,7 @@ That deadline is not the relaxation budget. `budget_ms` (default 50) is read aft
 
 Explain covers the page's hits only, one pass per view. It costs about one unpruned search of each view that holds a hit on the page. A deadline is read during that pass too.
 
-Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). An explained hit of `search_relaxed` has a root `Explanation::Relaxed` with its level, step, and that step's `applied` around the step's own tree (ROADMAP 8.3.4, SPEC §7.7). Every hit also states its level on `RelaxedHit.level`. That level is `exact`, `synonyms`, `drop_terms`, `prefix`, `fuzzy`, or `fallback`.
+Highlighted snippets are not this tree. Highlights are post-v1 (SPEC §7.7). An explained hit of `search_relaxed` has a root `Explanation::Relaxed` with its level, step, and that step's `applied` around the step's own tree (ROADMAP 8.3.4, SPEC §7.7). Every hit also states its level on `RelaxedHit.level`. That level is `exact`, `synonyms`, `drop_terms`, `prefix`, `fuzzy`, `fallback`, or `filters`.
 
 ## What is still planned
 

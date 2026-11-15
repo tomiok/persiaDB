@@ -1,8 +1,9 @@
 //! The filter step (SPEC §7.6, ROADMAP 8.2.6, ADR-0047): the cascade's last resort, planned only with
 //! `filters: "last_resort"`.
 //!
-//! Its query is L0's with the root `bool`'s filters dropped: a compiled query's request filter (SPEC §7.1), a
-//! programmatic root `bool`'s `filter`. Everything else stays as L0 has it, excluded clauses (`must_not`) and any filter
+//! Its query is L0's with the root `bool`'s filters dropped: a programmatic root `bool`'s `filter`, or a compiled
+//! query's request filter while [`Compiled::root`] returns that `bool` (replacing `Compiled::query` can lose it,
+//! ROADMAP 8.2.14). Everything else stays as L0 has it, excluded clauses (`must_not`) and any filter
 //! deeper in the query included. The cascade builds it only while the earlier steps found fewer than `min_results`
 //! hits, never to fill a page ([`LevelTransform::fills`]), and excludes the earlier steps from it as from any step,
 //! so its hits are the documents L0's words match that the filters rejected.
@@ -44,22 +45,42 @@ impl LevelTransform for Filters {
 /// 8.1.17), else a programmatic root `bool`. A compiled query's root is its query, so the step keeps its clauses'
 /// parts as L0 has them.
 ///
-/// A root whose only positive clause is `match_all`, or that has none (an empty `q`, one of excluded clauses alone, a
-/// filter-only `bool`), searches no word: without its filters it would match every live document the exclusions leave,
-/// at score 0, the unfiltered L5 ADR-0047 rejects. It builds no step.
+/// A root that searches no word builds no step. A clause searches a word when it is a `term`, `combined`, `phrase`,
+/// `prefix` or `fuzzy`, or a `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should`.
+/// `match_all`, an empty `bool` and a `bool` of exclusions alone do not, at any depth: a root whose `must` and
+/// `should` are only those (an empty `q`, stopwords only, excluded clauses alone, a filter-only `bool`,
+/// `should: [match_all]`, `boost` or `constant_score` of `match_all`) would, without its filters, match every live
+/// document the exclusions leave, at score 0, the unfiltered L5 ADR-0047 rejects.
 fn unfiltered(input: &LevelInput<'_>) -> Option<Query> {
     let root = match (input.compiled, input.original) {
         (Some(compiled), _) => compiled.root(),
         (None, Query::Bool(root)) => Some(root),
         (None, _) => None,
     }?;
-    let words = !root.should.is_empty() || root.must.iter().any(|q| *q != Query::MatchAll);
+    let words = root.must.iter().any(has_word) || root.should.iter().any(has_word);
     (words && !root.filter.is_empty()).then(|| {
         Query::Bool(BoolQuery {
             filter: Vec::new(),
             ..root.clone()
         })
     })
+}
+
+/// Whether `query` matches by at least one term (SPEC §7.6). A term inside `must_not` does not count: exclusions are
+/// not words the query searches. `match_all` and an empty `bool` match documents without naming a term, and so does a
+/// `bool` whose only clauses are exclusions.
+fn has_word(query: &Query) -> bool {
+    match query {
+        Query::Term(_)
+        | Query::Combined(_)
+        | Query::Phrase(_)
+        | Query::Prefix(_)
+        | Query::Fuzzy(_) => true,
+        Query::MatchAll => false,
+        Query::Boost(q) => has_word(&q.query),
+        Query::ConstantScore(q) => has_word(&q.query),
+        Query::Bool(q) => q.must.iter().any(has_word) || q.should.iter().any(has_word),
+    }
 }
 
 #[cfg(test)]

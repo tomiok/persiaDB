@@ -2,7 +2,7 @@
 
 > **Status: pre-alpha.** The public `persia` API (M10) does not exist yet, and the on-disk format is unstable
 > until v1.0. There is no compatibility promise (SPEC §15). Counts in [Roadmap](#roadmap) are the 2026-11-15 snapshot
-> in [`PROGRESS.md`](../PROGRESS.md): **361 of 550 MVP leaves done (66%)**, none in progress. That file is regenerated from
+> in [`PROGRESS.md`](../PROGRESS.md): **362 of 552 MVP leaves done (66%)**, none in progress. That file is regenerated from
 > [`ROADMAP.md`](../ROADMAP.md) and is the live status.
 
 This guide is the narrative source for the project website. Each second-level heading is a page.
@@ -130,7 +130,7 @@ crates under `persia`. The public API that wraps it is M10, so you cannot call t
 |---|---|---|
 | Open a file and search | Planned (M10); `persia-engine` opens, writes, and searches as library code (M6, M7) | SPEC §8, §10.2 |
 | Full-text search, filters, facets, sort | Done as library code (M7), including a tie-break after the score (`["score", {"field": ...}]`, pruned) and an nDCG@10 gate in CI; public through `Db` in M10 | SPEC §7 |
-| Zero-results relaxation | In progress (M8): the cascade and L1–L5 done (L4 fuzzy reports "did you mean" corrections; L5 returns the top documents by static rank or recency, flagged `fallback`), typo and exactness tiers within a level, per-request `relax` options (`fill` included), and `explain` stating each hit's step; metrics and the quality suite next | SPEC §7.6 |
+| Zero-results relaxation | In progress (M8): the cascade and L1–L5 done (L4 fuzzy reports "did you mean" corrections; L5 returns the top documents by static rank or recency, flagged `fallback`), the opt-in L6 `filters` step, typo and exactness tiers within a level, per-request `relax` options (`fill` included), and `explain` stating each hit's step; metrics and the quality suite next | SPEC §7.6 |
 | Schema and documents | Done (M3) | SPEC §6 |
 | Analyzers (`standard`, `en`, `es`, `pt`, …) | Done (M4) | SPEC §6.3 |
 | Crash-safe commit and recovery | Done in M2; in progress in M6 (commit, WAL replay, and recovery done; 9 leaves left) | SPEC §4.5, §8.6 |
@@ -177,7 +177,8 @@ Relaxation is on by default. If a query returns fewer hits than `min_results` (d
 engine walks a cascade and stops at the first level that produces enough hits (SPEC §7.6).
 With `fill` set, it keeps going until the page is full. Stricter levels always rank above looser
 ones. Filters stay strict unless `relax.filters` is `last_resort`: then one last step, after every other
-level, drops the request's filters, and only when those levels found fewer than `min_results` hits. A time budget (default 50 ms)
+level, drops the request's filters, and only when those levels found fewer than `min_results` hits. A query that
+searches no word does not build that step. A time budget (default 50 ms)
 returns the best results so far and sets `truncated`. A query can turn the whole feature off with
 `relax: false`.
 
@@ -189,7 +190,7 @@ returns the best results so far and sets `truncated`. A query can turn the whole
 | L3 | `prefix` | The last term (and other terms of length at least 3) expands through a prefix scan, capped (default 50). When another term expands too, and L2 did not take those documents first, the last term alone expands first. |
 | L4 | `fuzzy` | Edit distance 1 for terms of length 4–7, distance 2 for length 8 or more; shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrections are reported. |
 | L5 | `fallback` | A collection-defined last resort: the top documents the filters keep, by static rank, then recency, flagged in the response; or nothing (`fallback: "none"`). |
-| L6 | `filters` | Only with `relax.filters: "last_resort"`: L0's words without the request's filters, excluded words still excluded, when every level before found fewer than `min_results` hits. Never built just to fill a page. Flagged with `"filters_dropped": true`. |
+| L6 | `filters` | Only with `relax.filters: "last_resort"`: L0's words without the request's filters, excluded words still excluded, when every level before found fewer than `min_results` hits. A query that searches no word (an empty `q`, stopwords only, exclusions alone, a filter-only `bool`, or `match_all` with no term) does not build it. Never built just to fill a page. `"filters_dropped": true` only when this step found the hits. |
 
 The response says what happened. This JSON is the shape in SPEC §7.6. It is illustrative:
 
@@ -208,8 +209,9 @@ When the last level, L5, found the hits, `level` is `"fallback"` and the object 
 matches of the words.
 
 When the filter step found hits, `level` is `"filters"` and the object has `"filters_dropped": true`: some hits
-do not pass the request's filters, and each of them has `level` `filters`. With the default fallback that happens
-only when fewer than `min_results` documents pass the filters at all. No filter can be marked as one that must hold
+do not pass the request's filters, and each of them has `level` `filters`. The flag is set only then, when L6 is the
+hit step. A planned filter step that finds nothing leaves it false. With the default fallback that happens
+only when fewer than `min_results` documents pass the filters and the excluded clauses at all. No filter can be marked as one that must hold
 yet (ROADMAP 8.2.13), so do not set `last_resort` on a request whose filters enforce tenancy or permissions.
 
 Quality of this cascade is a product feature of the same milestone (ROADMAP M8): a synthetic typo
@@ -658,7 +660,7 @@ the SDK milestone (ROADMAP 14.4). Both clients are part of that milestone, after
 Work is a tree: milestone, then section, then leaf. Every leaf is one issue and one pull request.
 Status lives on the leaves only (`[ ]` todo, `[~]` in progress, `[x]` done). [`PROGRESS.md`](../PROGRESS.md)
 derives the rest, and it is the live status. The table below is the **2026-11-15** snapshot
-(361 / 550 MVP leaves, 66%; post-MVP milestones are not counted). No leaf is marked `[~]`.
+(362 / 552 MVP leaves, 66%; post-MVP milestones are not counted). No leaf is marked `[~]`.
 
 A milestone is **done** when every leaf is done, **in progress** when some leaves are done,
 **ready** when its dependencies are done and none of its own leaves have started, and **blocked**
@@ -754,11 +756,12 @@ performance work early (M15).
 
 ### M8 — Zero-results avoidance
 
-In progress (24 of 46). Depends on M7. The cascade in [Features](#features). Done: orchestration,
+In progress (29 of 51). Depends on M7. The cascade in [Features](#features). Done: orchestration,
 ordering across levels (ADR-0037), the time budget, the response metadata (8.1), synonyms (8.2.1,
 ADR-0039), dropping terms (8.2.2, ADR-0038), prefix (8.2.3, ADR-0040), and fuzzy with "did you mean" corrections
-(8.2.4, ADR-0042), the fallback (8.2.5, ADR-0044), and responses that state the last step that found a hit (8.1.22,
-ADR-0043). Next: request options and metrics (8.3), a
+(8.2.4, ADR-0042), the fallback (8.2.5, ADR-0044), the `last_resort` filter step (8.2.6), typo tiers (8.2.7),
+the request options, `fill` and `explain` (8.3.1, 8.3.2, 8.3.4), and responses that state the last step that found a hit (8.1.22,
+ADR-0043). Next: metrics (8.3.3), a
 synthetic typo suite and a regression gate on the zero-result rate (8.4), and the framework's open leaves
 (for example facets under relaxation, 8.1.9, and L1, L3 and L4 in the differential suite, 8.1.18, 8.1.19, 8.1.21). The embedded
 `v0.1` release depends on this milestone (M10 depends on M8).

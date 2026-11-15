@@ -12,12 +12,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
   last word level with `fallback: "none"`). Its step is L0's query with the filters of its root `bool` dropped (a
-  compiled query's request filter, a programmatic root `bool`'s `filter`); excluded clauses (`-blue`) stay excluded.
-  A query that searches no word (an empty `q`, excluded words alone, a filter-only `bool`) builds no such step, so
-  browsing a category never pads it with other categories.
+  programmatic root `bool`'s `filter`, or a compiled query's request filter while `Compiled::root` returns that
+  `bool`; replacing `Compiled::query` can lose the filter, ROADMAP 8.2.14); excluded clauses (`-blue`) stay excluded.
+  A query that searches no word builds no such step, so browsing a category never pads it with other categories.
+  A clause searches a word when it names a term, or holds one in `must` or `should` through `bool`, `boost` and
+  `constant_score`. `match_all`, an empty `bool`, exclusions alone, and a wrapper of those (including
+  `should: [match_all]`) do not. An empty `q`, stopwords only, and a filter-only `bool` are that case.
   It is built only when every earlier step found fewer than `min_results` hits, never to fill a page under `fill`, so
-  with the default fallback it runs only when fewer than `min_results` documents pass the filters at all. The
-  response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag
+  with the default fallback, and L5 searched uncut, it runs only when fewer than `min_results` documents pass both
+  the filters and the excluded clauses. The response's `level` is `filters` once built, `applied` ends with `filters`, and the new flag
   `Relaxation::filters_dropped` (`"filters_dropped": true`) is set when the step found the hits; each such hit's
   `level` is `filters`, and its explanation's `relaxed` node names the step. No filter can be marked as one that must
   hold yet (ROADMAP 8.2.13): do not set `last_resort` on requests whose filters enforce tenancy or permissions.

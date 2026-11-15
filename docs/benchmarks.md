@@ -596,8 +596,8 @@ With L6 `filters`, `filters: "last_resort"` (ROADMAP 8.2.6, ADR-0047), same coll
 1.99.0, AMD Ryzen 5 3600, Linux. Main is 8e57b00, built in its own worktree and target directory from its own bench
 file. Command: `cargo bench -p persia-engine --bench search --
 'search_relaxed/(plain|l0|off|l1|l2|l3|l4|l5/recency|filters/never|filters/last_resort)$'`, then the word levels again
-with `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`. Every case before `filters/*` runs under `"never"`, whose plan, steps and
-exclusions are unchanged: the cascade only asks each level whether it fills. `filters/never` is `w3 w40` under
+with `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`. The relaxing cases before `filters/*` (`l0`, `l1`–`l4`, `l5/recency`) run under the default `"never"`, whose plan, steps and
+exclusions are unchanged: the cascade only asks each level whether it fills. `plain` is not a relaxed search, and `off` disables the cascade. `filters/never` is `w3 w40` under
 `tag = nosuch`, a filter no document passes, through the collection's default levels: every step finds nothing, so it
 is cheaper than `l0` (the filter's empty bitmap ends each step early). `filters/last_resort` is the same with the
 opt-in: the filter step, `w3 w40` without the filter, excludes L5's step alone and finds the 10 hits.
@@ -609,7 +609,7 @@ opt-in: the filter step, `w3 w40` without the filter, excludes L5's step alone a
 | main (8e57b00) | 1 codegen unit | 461 µs | 459 µs | 455 µs | 899 µs | 1.46 ms | 22.5 ms | 2.60 ms | — | — | — |
 | ROADMAP 8.2.6 | 1 codegen unit | 462 µs | 448 µs | 455 µs | 909 µs | 1.42 ms | 22.3 ms | 2.64 ms | — | — | — |
 
-The default build reads `l2` 7% slower and the other cases 1–4% faster. With one codegen unit every case is within
+The default build reads `l2` 7% slower and the other cases 0–4% faster. With one codegen unit every case is within
 2.5% of main in either direction, and `l2` is 2.5% faster, so the default build's spread is layout. The filter step
 adds about 460 µs to a cascade that found nothing: its planning and search of `w3 w40` over 4 segments, about what L0
 of the same words costs (`l0`), with one excluded step.

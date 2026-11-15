@@ -2,7 +2,7 @@
 
 - Status: proposed
 - Date: 2026-11-15
-- Related: SPEC §6.2.3, §7.1, §7.1.3, §7.4, §7.5, §7.6, §7.7; ROADMAP 8.1.9, 8.2.5, 8.2.6, 8.2.13, 8.3.1, 8.3.2, 8.3.4;
+- Related: SPEC §6.2.3, §7.1, §7.1.3, §7.4, §7.5, §7.6, §7.7; ROADMAP 8.1.9, 8.2.5, 8.2.6, 8.2.13, 8.2.14, 8.3.1, 8.3.2, 8.3.4;
   ADR-0037, ADR-0043, ADR-0044, ADR-0045
 
 ## Context
@@ -29,17 +29,23 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
    pass the filters (and the excluded clauses) at all: the filters themselves are why the page is short. That is
    what `last_resort` names, and what `FilterRelaxation::LastResort` already promised ("only after every other level
    failed").
-2. **It drops every filter of the root `bool`, nothing else.** Of a query compiled from `q`, the request's filter
-   (SPEC §7.1: the root's `filter`); of a programmatic query, a root `bool`'s `filter`. These are the filters L5 keeps.
-   Required clauses, `should` clauses, `minimum_should_match`, excluded clauses and any deeper filter stay. Excluded
-   clauses are the user's words (`-blue`), not a filter, so a user who wrote `-blue` never gets blue, as at L5. All the
-   root's filters go together: dropping them one at a time would need an order SPEC does not have. A query whose root
-   has no filter, or whose root is not a `bool`, builds no step, and the level is skipped. So does a query that
-   searches no word (a root whose only `must` is `match_all`, or with neither `must` nor `should`: an empty `q`,
-   excluded clauses alone, a filter-only `bool`): without its filters it would be every live document at score 0,
-   the unfiltered L5 rejected below, and "browse a category" (an empty `q` and a filter) would be padded with
-   other categories. A root of `should` clauses alone keeps them; without the filters one is then required, where
-   L0 under the filters only scored them, so the step matches documents holding a word.
+2. **It drops every filter of the root `bool`, nothing else.** Of a programmatic query, a root `bool`'s `filter`. Of a
+   query compiled from `q`, the request's filter (SPEC §7.1) while `Compiled::root` returns that `bool`. These are the
+   filters L5 keeps when the root is still there. Replacing the public `Compiled::query` with a query that does not
+   hold its clauses' parts makes `Compiled::root` return `None`: this step then builds nothing, and L5 becomes
+   `match_all`, so the request filter is lost. That is a known limitation (ROADMAP 8.2.14), not a guarantee that a
+   replaced query keeps the filter. Required clauses, `should` clauses, `minimum_should_match`, excluded clauses and
+   any deeper filter stay. Excluded clauses are the user's words (`-blue`), not a filter, so a user who wrote `-blue`
+   never gets blue, as at L5. All the root's filters go together: dropping them one at a time would need an order SPEC
+   does not have. A query whose root has no filter, or whose root is not a `bool`, builds no step, and the level is
+   skipped. So does a query that searches no word. A clause searches a word when it names a term (`term`, `combined`,
+   `phrase`, `prefix`, `fuzzy`) or holds such a clause in `must` or `should` of a `bool`, at any depth through `boost`
+   and `constant_score`. A term only in `must_not` does not. `match_all`, an empty `bool` and a `bool` of exclusions
+   alone do not, so neither does `should: [match_all]`, `boost` of `match_all`, `constant_score` of `match_all`, or a
+   nested empty `bool`. Without its filters such a query would be every live document at score 0, the unfiltered L5
+   rejected below, and "browse a category" (an empty `q` and a filter) would be padded with other categories. A root
+   of `should` clauses that do search a word keeps them; without the filters one is then required, where L0 under the
+   filters only scored them, so the step matches documents holding a word.
 3. **No filter is marked hard in this leaf.** Telling a tenancy or permission filter from a soft one needs a new
    request key (for example a `filter` that never relaxes beside one that may), a design for the request JSON (ROADMAP
    10.1, 11.x). SPEC and the guides say a request whose filters enforce access must not set `last_resort`. ROADMAP
@@ -64,12 +70,14 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
    is the same on every page, as `fallback` is, and each such hit's `level` is `filters`. `fallback` is absent then:
    L5 is not the hit step. An explained hit's `relaxed` node gives `level` `filters`, its step and `applied`
    `"filters"` around its query's tree.
-7. **L5 covers every earlier step.** L5's query is `match_all` under L0's root `must_not` and `filter`, which every
-   earlier step keeps, so it matches every document any earlier step matches. The cascade then excludes L5's step
-   alone from the filter step (`LevelTransform::covers_earlier`, as a nested level's latest step stands for its
-   level, ROADMAP 8.2.2.4). The filter step's query is L0 without its filters, with only L5's step under its
-   `must_not`, so it plans a few queries, not every expansion the levels before it built. Without L5 it excludes the
-   earlier steps as any step does. A test compares both against excluding every step.
+7. **L5 covers every earlier step, when its step is searched uncut.** L5's query is `match_all` under L0's root
+   `must_not` and `filter`, which every earlier step keeps, so it matches every document any earlier step matches.
+   The cascade then excludes that uncut step alone from the filter step (`LevelTransform::covers_earlier`, as a
+   nested level's latest step stands for its level, ROADMAP 8.2.2.4). A cut L5 step (`fallback:cut`) matches less
+   than it was built to, so the earlier steps stay excluded beside it (SPEC §7.1.3). The filter step's query is L0
+   without its filters, with only the uncut L5 step under its `must_not`, so it plans a few queries, not every
+   expansion the levels before it built. Without L5 it excludes the earlier steps as any step does. A test compares
+   both against excluding every step.
 8. **Facets, budget, limits and cursors are as for any step.** Facets count its matches under 8.1.9's interim rule,
    so they show the values of the documents the filters rejected that it returned. The budget is checked before it is
    built, before it is searched and at its reads, and a step it passes during is dropped. The cursor already records
