@@ -2,7 +2,8 @@
 
 - Status: proposed
 - Date: 2026-11-15
-- Related: SPEC §6.2.1, §6.2.3, §7.1.3, §7.4, §7.6; ROADMAP 8.1.2, 8.1.4, 8.2.6, 8.3.1, 8.3.2, 10.1.7; ADR-0022,
+- Related: SPEC §6.2.1, §6.2.3, §7.1.3, §7.4, §7.5, §7.6; ROADMAP 8.1.2, 8.1.4, 8.1.9, 8.1.11, 8.2.6, 8.3.1, 8.3.2,
+  10.1.7; ADR-0022,
   ADR-0037, ADR-0043
 
 ## Context
@@ -52,6 +53,15 @@ setting, and that `relax: false` runs L0 only. The engine already merged `RelaxO
    other limits (`RelaxPlan::with_limits`), which are not recorded, and pages nothing.
 6. **`filters: "last_resort"` is accepted and relaxes nothing yet.** §6.2.3 allows it and it is part of the settings.
    No level drops a filter until ROADMAP 8.2.6, so it searches as `"never"`.
+7. **`fill` is a request key with no rule of its own (ROADMAP 8.3.2).** The cascade has filled since ROADMAP 8.1.2
+   (ADR-0037 item 1). A request sets it as it sets any key, and the cursor records it (item 5), so a page never mixes
+   a filling ranking with one that stops at `min_results`. With `fill`, a page builds steps until it holds
+   `offset + limit` hits from the top or the steps run out. L5 fills below the word levels. A deeper page may build,
+   state and count (facets) more steps than the first page. The pages are still slices of the ranking that one page
+   of every hit gives. A budget that passes while a page fills truncates that page only, and the next page builds the
+   remaining steps again. Facets under `fill` keep SPEC §7.5's interim rule, which counts the steps each page built:
+   choosing which matches a facet counts is ROADMAP 8.1.9, and the cost of a cursor page searching the earlier steps
+   again to count them is ROADMAP 8.1.11.
 
 ## Consequences
 

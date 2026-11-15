@@ -9,13 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
-- `persia-engine`: a request's `relax` options (ROADMAP 8.3.1; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
+- `persia-engine`: a request's `relax` options (ROADMAP 8.3.1, 8.3.2; SPEC §6.2.3, §7.6; ADR-0045). `RelaxOptions::from_json`
   reads `false`, `true` or an object of every `relaxation` key (`enabled`, `min_results`, `levels`, `fallback`,
   `fill`, `filters`, `budget_ms`). It is strict: unknown or repeated keys, `null`, other shapes and more than 64 KiB
   are `RelaxError::Json`. `RelaxOptions::validate` checks the ranges also when the cascade is off. The settings merge
   over the collection's one key at a time in `RelaxPlan::new`. `relax: false` runs L0 alone and states `level:
   "exact"`. New: `RelaxOptions::MAX_JSON_LEN`, `RelaxError::Json`, `relax::RelaxSettings`, `RelaxPlan::settings`,
-  `db::Cursor::relax` and `RequestError::CursorRelax`.
+  `db::Cursor::relax` and `RequestError::CursorRelax`. `fill` is a request key like the others: pages by cursor or offset
+  stay slices of one ranking, and a deeper page may build, state and count (facets) more steps.
 - `persia-engine` (breaking): every cursor now records the relaxation settings of its search: levels, `min_results`,
   `fill` and `filters`, but not `budget_ms`. They are `None` for a plain search and for a search of L0 alone. A page
   under other settings is `RequestError::CursorRelax`, so a step-0 cursor from a cascade that relaxes no longer pages

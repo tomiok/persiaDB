@@ -1664,6 +1664,15 @@ build other steps or stop elsewhere, so it would not be a slice of the cursor's 
 cursor's origin and proximity checks (§7.4). A cursor from a step after L0 given to a search of L0 alone is the step
 error (below), checked first.
 
+`fill` (ROADMAP 8.3.2) is a key of `relax` like any other, and part of the settings a cursor records. With it, each
+page builds steps until it has `offset + limit` hits from the top (from its cursor's step, after a cursor) or the
+steps run out, and L5 fills what the earlier steps leave. Every page builds only the steps it needs. A deeper page
+may build, search and state more steps than the first one (`level`, `applied`, the hit step's text and `fallback`),
+and its facets count the steps it built (§7.5, the interim rule of ROADMAP 8.1.9). The pages of one query, by offset
+or by cursor, are still slices of one ranking: that of a page holding every hit, as without `fill`. A budget that
+passes while a page fills truncates that page only. The page's cursor records the steps it completed, and the next
+page builds the rest again. The request's deadline and cancellation stay errors.
+
 L1 `synonyms` (ROADMAP 8.2.1, ADR-0039). It builds one step, listed as `synonyms`, from the runs of words the query
 compiler found to be synonym terms (§6.3.2): L0's query with each run required as `bool { should: [the run, its
 alternatives...] }` (the run's clauses alone, or all of them required), so a document matches with the run or any
