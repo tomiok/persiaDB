@@ -800,7 +800,7 @@ Deps: M11 (stable proto); M13 for shard-awareness.
 
 M14's scope now includes TypeScript. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go & TypeScript)". The network client is 14.5 (`@persiadb/client`). Embedded TypeScript stays 16.3 (`@persiadb/node`).
 
-M14's scope now also covers the embedded (in-process) SDKs. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go, TypeScript & embedded)". That work is 14.6. It depends on M10 (the `persia` facade) and not on M11. The network clients in 14.2–14.5 still depend on M11 and M13. The v1.0 schedule for `@persiadb/node` is 14.6.6 and 14.6.7, which pull 16.3.1–16.3.5. 16.3 stays that duplicate list and is checked when those leaves are done. The M16 leaves that stay on v1.1 are 16.4.1 and 16.6.
+M14's scope now also covers the embedded (in-process) SDKs. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go, TypeScript & embedded)". That work is 14.6. It depends on M10 (the `persia` facade) and not on M11. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. Those still depend on M11 and M13. The v1.0 schedule for `@persiadb/node` is 14.6.6 and 14.6.7, which pull 16.3.1–16.3.5. 16.3 stays that duplicate list and is checked when those leaves are done. The M16 leaves that stay on v1.1 are 16.4.1 and 16.6.
 
 ## 14.1 Conformance suite
 - [ ] 14.1.1 Language-neutral scenario format (YAML): setup, calls, expected results
@@ -832,7 +832,7 @@ M14's scope now also covers the embedded (in-process) SDKs. The heading stays "S
 - [ ] 14.5.2 (v1.0) Release automation for `@persiadb/client`, alongside 14.4.2
 
 ## 14.6 Embedded SDKs (in-process)
-Depends on M10 (the `persia` facade), not on M11. The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). Parity with the gRPC SDKs is the 14.1 runner harness, for the in-process operations those scenarios name (CRUD, search and filters, relaxation, facets, blobs, errors, read-your-writes). TLS, retries, deadlines, and shard routing stay on 14.2–14.5.
+Depends on M10 (the `persia` facade), not on M11. The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). Parity with the gRPC SDKs is the 14.1 runner harness, for the in-process operations those scenarios name (CRUD, search and filters, relaxation, facets, blobs, errors, read-your-writes). TLS, retries, deadlines, and shard routing stay on 14.2, 14.3, and 14.5.
 
 - [ ] 14.6.1 (v1.0) C ABI crate `persia-ffi` (crate types `lib`, `staticlib`, `cdylib`) depending only on `persia`, and a committed `persia.h` from `cargo xtask ffi-header` (no `build.rs`). Safe API over `Db` and `Collection`: open, close, create and open a collection, put, upsert, delete, get, put_batch, commit, search, blobs. C exports catch panics and poison that handle afterwards. Stable error codes mapped from the Rust error type; corruption is an error; a mapped-page fault still ends the process. Record the crate edge in `ALLOWED` and the C-export module in `UNSAFE_ALLOWED`. Pulls 16.1.1–16.1.4 into v1.0 (ADR-0018, ADR-0003, ADR-0010, `docs/sdk/c-abi.md`, SPEC §8.1, §9.6, §13.1, §17)
 - [ ] 14.6.2 (v1.0) [T] A document and a search round-trip through the C API; a panic in the core returns an error and poisons that handle; hostile UTF-8 is an error. Pulls 16.1.5 into v1.0 (`docs/sdk/c-abi.md`)

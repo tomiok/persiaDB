@@ -329,13 +329,14 @@ updated to match.
 
 ## Implementation leaves, when it is time
 
-Those leaves are 14.6 (v1.0). The network clients stay 14.2–14.5. A reasonable split, once M10.1 has types to
+Those leaves are 14.6 (v1.0). Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. A reasonable split, once M10.1 has types to
 wrap:
 
 - `persia-ffi` crate, header, xtask generator, panic and null tests, `ALLOWED` and `UNSAFE_ALLOWED` updates.
 - Go module (`sdk/persia`), cgo wrapper, the optional `persia_purego` tag, prebuilt download, race tests.
 - napi package, platform builds, TypeScript types.
-- Conformance adapter for the three embedded runners, sharing scenarios with 14.1.
+- Python package (`sdk/python`): cffi or ctypes over `persia.h`, a 14.1 conformance adapter, wheels, and the SPEC §13 name (14.6.8–14.6.11).
+- Conformance adapter for the embedded runners, sharing scenarios with 14.1.
 - Release workflow and the compatibility table.
 
 Each of those is one leaf and one pull request, with tests, in the usual way. This design is the brief

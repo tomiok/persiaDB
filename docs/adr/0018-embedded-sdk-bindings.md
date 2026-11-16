@@ -96,7 +96,7 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
     `persia-ffi` and the committed `persia.h`, the embedded Go SDK (cgo and `persia_purego`), `@persiadb/node`,
     the embedded Python package (cffi or ctypes over `persia.h`; installing it does not need a Rust toolchain),
     and the prebuilt checksummed libraries and their CI are 14.6. They depend on the M10 `persia` facade, not
-    on M11. The gRPC and HTTP clients stay 14.2–14.5 and still depend on M11 and M13. Parity with those
+    on M11. Rust and Go network clients stay 14.2 and 14.3, compatibility stays 14.4, and the TypeScript network client stays 14.5. Those still depend on M11 and M13. Parity with those
     clients, where the operation exists in-process, is the 14.1 scenarios. The browser package stays M28.
     The read-only WASM build stays 16.6. Nothing is published before the v1.0 tag (decision 9, ROADMAP 16.4.1).
     The M16, 21.1, and 21.3.1 leaves that 14.6 names are the same work; they are not built twice. SPEC §13

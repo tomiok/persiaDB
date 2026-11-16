@@ -652,7 +652,7 @@ Two families, neither implemented (SPEC §13).
 **Embedded bindings** sit in-process beside the Rust `Db` API. Go calls a C ABI crate `persia-ffi` through
 cgo and a static library by default; an optional `persia_purego` build tag dynamically loads the shared
 library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (ADR-0018,
-[`docs/sdk/`](./sdk/README.md)). Python binds `persia.h` the same way. They are scheduled for v1.0 (ROADMAP 14.6) and blocked on the embedded API (M10). 16.4.1 and 16.6 stay v1.1. A browser/edge WASM build is
+[`docs/sdk/`](./sdk/README.md)). Python binds `persia.h` with cffi or ctypes. They are scheduled for v1.0 (ROADMAP 14.6) and blocked on the embedded API (M10). 16.4.1 and 16.6 stay v1.1. A browser/edge WASM build is
 a later package, not the first one.
 
 **Network clients** are Rust (`sdk/rust`, crate `persia-client`) and Go (`sdk/go`, module `persia-go`).
@@ -688,7 +688,7 @@ while a dependency is unfinished.
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
 | **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/29 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/19 |
+| **M14** SDKs | Network clients after M11 and M13 (Rust and Go 14.2–14.3, compatibility 14.4, TypeScript 14.5); embedded SDKs after M10 (14.6) | M11 and M13 for the network clients; M10 for 14.6 | Blocked, 0/30 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/23 |
 
 M1 to M5 and M7 are done; M0, M6, M8 and M9 are in progress. The generated ready-next list is in
@@ -809,7 +809,7 @@ behind a flag.
 
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation. These are the network clients (14.2–14.5), and they still depend on M11 and M13. The in-process bindings are 14.6 (v1.0): they depend on M10, not on M11. The design is ADR-0018 and
+automation. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. Those still depend on M11 and M13. The in-process bindings are 14.6 (v1.0): they depend on M10, not on M11. The design is ADR-0018 and
 [`docs/sdk/`](./sdk/README.md). The same leaves stay listed under M16 and 21.1. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2.
 
 ### M15 — Benchmarks, hardening, v1.0
