@@ -55,7 +55,7 @@ The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SP
 | Segments are immutable. The same segment bytes live in a local file or in S3, GCS, or Azure Blob. Query nodes are stateless. | SPEC §3, §5, §10, §11 | A segment writer and reader exist (M5). Memory and local-file storage exist (M2). Object-storage backends and Kubernetes are planned (M12, M13). |
 | A power loss leaves the previous commit or the new one. | [SPEC §4.5](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#45-commit-protocol-local), §8 | %%WRITE_PATH_NOW%% |
 | Optional gRPC and HTTP server. Embedded mode has no authentication. | SPEC §12, §14 | Planned (M11). |
-| Embedded Go and TypeScript bindings open the same file in-process. Rust and Go network clients talk to the server. | SPEC §13, [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) | Design only. No Go module and no npm package. Network clients are milestone M14. |
+| Embedded Go, TypeScript, and Python bindings open the same file in-process. Rust and Go network clients talk to the server. | SPEC §13, [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) | Design only, scheduled for v1.0 (ROADMAP 14.6), after the `persia` facade (M10). No Go module and no npm package. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. |
 
 %%M10_BLOCKED%% The on-disk format stays unstable until `v1.0` (M15, [SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)). The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release.
 
@@ -78,7 +78,8 @@ The `persia` command lists and removes temporary and quarantine files next to a 
 ## Read next
 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, BM25F, and filters: design versus what the engine implements.
-- [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion. L4 fuzzy and L5 fallback are library code too. There is no `persia::Db` search.
+- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, and the L5 fallback. Library code. There is no `persia::Db` search.
+- [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain on a collection snapshot.
 - [Comparison](/guide/comparison/) — Persia DB next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.

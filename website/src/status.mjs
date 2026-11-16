@@ -141,6 +141,12 @@ const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commi
  * @property {boolean} hasDropTerms L2 wired to its transform (not the pending stub).
  * @property {boolean} hasSynonyms L1 wired to its transform (not the pending stub).
  * @property {boolean} hasPrefix L3 wired to its transform (not the pending stub).
+ * @property {boolean} hasFuzzy L4 wired to its transform.
+ * @property {boolean} hasFallback L5 wired to its transform.
+ * @property {boolean} hasFilters L6 wired, the last_resort filter step.
+ * @property {boolean} hasTiers Typo tiers: fuzzy:1 and prefix:last.
+ * @property {boolean} hasRelaxOptions Per-query relax options, including fill.
+ * @property {boolean} hasExplainLevel Explanation::Relaxed names the step that matched.
  * @property {boolean} hasDeadline Execution::deadline, a search deadline.
  * @property {boolean} hasExplain SearchRequest.explain and the Explanation tree.
  * @property {string[]} analyzers
@@ -363,8 +369,10 @@ function areNotBuilt(items) {
 /**
  * Plan and orchestrator versus the levels that loosen a query.
  * L0 always runs. A later level is claimed only when its representative leaf is checked and its transform is wired:
- * L1 synonyms, L2 drop_terms (its three leaves), L3 prefix. Fuzzy and the fallback stay unclaimed until theirs are.
- * Once every RELAX_LEVELS leaf is checked, the sentences say every cascade level builds a query.
+ * L1 synonyms, L2 drop_terms (its three leaves), L3 prefix, L4 fuzzy, L5 fallback.
+ * Once every RELAX_LEVELS leaf is checked, the sentences say every cascade level builds a query, and name the
+ * pieces whose own leaves and code are in the tree: corrections, the flagged fallback, typo tiers, relax options,
+ * the last_resort filter step, and an explained hit's step.
  * @param {StatusInput} ctx
  * @param {Milestone} m8
  */
@@ -374,6 +382,33 @@ function relaxationFacts(ctx, m8) {
 	const drop = requireDone(ctx, RELAX_DROP, ctx.hasDropTerms, 'drop_terms');
 	const synonyms = requireDone(ctx, ['8.2.1'], ctx.hasSynonyms, 'synonyms');
 	const prefix = requireDone(ctx, ['8.2.3'], ctx.hasPrefix, 'prefix');
+	requireDone(ctx, ['8.2.4.1'], ctx.hasFuzzy, 'fuzzy');
+	requireDone(ctx, ['8.2.5'], ctx.hasFallback, 'fallback');
+	requireDone(ctx, ['8.2.6'], ctx.hasFilters, 'filter relaxation');
+	requireDone(ctx, ['8.2.7'], ctx.hasTiers, 'typo tiers');
+	requireDone(ctx, ['8.3.1', '8.3.2'], ctx.hasRelaxOptions, 'relax options');
+	requireDone(ctx, ['8.3.4'], ctx.hasExplainLevel, 'relaxed explain');
+	/** @type {string[]} */
+	const detail = [];
+	if (groupState(ctx.leaves, ['8.2.4.1', '8.2.4.2', '8.2.4.3', '8.2.4.4']) === 'done' && ctx.hasFuzzy) {
+		detail.push('L4 fuzzy reports a correction when that step found the hits');
+	}
+	if (groupState(ctx.leaves, ['8.2.5']) === 'done' && ctx.hasFallback) {
+		detail.push('L5 fallback flags its order');
+	}
+	if (groupState(ctx.leaves, ['8.2.7']) === 'done' && ctx.hasTiers) {
+		detail.push('typo tiers rank fewer edits first');
+	}
+	if (groupState(ctx.leaves, ['8.3.1', '8.3.2']) === 'done' && ctx.hasRelaxOptions) {
+		detail.push('relax options can set fill');
+	}
+	if (groupState(ctx.leaves, ['8.2.6']) === 'done' && ctx.hasFilters) {
+		detail.push('last_resort adds one filter step');
+	}
+	if (groupState(ctx.leaves, ['8.3.4']) === 'done' && ctx.hasExplainLevel) {
+		detail.push('an explained hit names its step');
+	}
+	const detailSentence = detail.length > 0 ? ` ${capitalize(englishList(detail))}.` : '';
 	const synonymsBuild = synonyms === 'done' && ctx.hasSynonyms;
 	const prefixBuild = prefix === 'done' && ctx.hasPrefix;
 	const dropBuild = drop === 'done' && ctx.hasDropTerms;
@@ -400,13 +435,13 @@ function relaxationFacts(ctx, m8) {
 	/** @type {string} */
 	let gap;
 	if (levelsDone) {
-		cell = `Done (${m8.id}, ${count}).`;
-		now = `Relaxation is done (${m8.id}, ${count}).`;
+		cell = `Done (${m8.id}, ${count}).${detailSentence}`;
+		now = `Relaxation is done (${m8.id}, ${count}).${detailSentence}`;
 		gap = '';
 	} else if (everyLevel) {
-		cell = `In progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
-		now = `Relaxation is in progress (${m8.id}, ${count}). Every cascade level builds a query. Not every M8 leaf is done.`;
-		gap = `Relaxation is in progress (${m8.id}, ${count}): every cascade level builds a query.`;
+		cell = `In progress (${m8.id}, ${count}). Every cascade level builds a query.${detailSentence} Not every M8 leaf is done.`;
+		now = `Relaxation is in progress (${m8.id}, ${count}). Every cascade level builds a query.${detailSentence} Not every M8 leaf is done.`;
+		gap = `Relaxation is in progress (${m8.id}, ${count}): every cascade level builds a query.${detailSentence}`;
 	} else if (partial && missing.length > 0) {
 		const still = areNotBuilt(missing);
 		const typo = typoOpen ? ' A typo is not corrected.' : '';
@@ -922,6 +957,16 @@ function readInput() {
 		hasDropTerms: /RelaxLevel::DropTerms => Arc::new\(drop_terms::DropTerms\)/.test(relaxRs),
 		hasSynonyms: /RelaxLevel::Synonyms => Arc::new\(synonyms::Synonyms\)/.test(relaxRs),
 		hasPrefix: /RelaxLevel::Prefix => Arc::new\(prefix::Prefix\)/.test(relaxRs),
+		hasFuzzy: /RelaxLevel::Fuzzy => Arc::new\(fuzzy::Fuzzy\)/.test(relaxRs),
+		hasFallback: /RelaxLevel::Fallback => Arc::new\(fallback::Fallback\)/.test(relaxRs),
+		hasFilters: /RelaxLevel::Filters => Arc::new\(filters::Filters\)/.test(relaxRs),
+		hasTiers:
+			/prefix:last/.test(read('crates/persia-engine/src/relax/prefix.rs')) &&
+			/fuzzy:\{max\}/.test(read('crates/persia-engine/src/relax/fuzzy.rs')),
+		hasRelaxOptions:
+			/pub fn from_json/.test(read('crates/persia-engine/src/relax/options.rs')) &&
+			/pub fill: Option<bool>/.test(read('crates/persia-engine/src/relax/options.rs')),
+		hasExplainLevel: /Relaxed\(RelaxedExplanation\)/.test(explainRs),
 		hasDeadline: implHasMethod(execRs, 'Execution', 'deadline'),
 		hasExplain: /pub explain: bool/.test(searchRs) && /pub enum Explanation\b/.test(explainRs),
 		analyzers: builtinAnalyzerNames(read('crates/persia-analysis/src/registry.rs')),

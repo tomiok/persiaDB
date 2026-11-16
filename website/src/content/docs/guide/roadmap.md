@@ -103,9 +103,9 @@ WAND (ROADMAP 7.4.1–7.4.4). %%MATCHING_CELL%%
 ## M8 — Zero-results avoidance
 
 Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level rank order, the
-time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
-dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
-gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [Typo-tolerant search](/guide/typo-tolerant-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/). The embedded `v0.1` release depends on this milestone (M10 depends on M8).
+time budget, synonyms, dropping terms, prefix, fuzzy (a banded optimal-string-alignment automaton over the term
+dictionary, with a transposition counting as one edit), the fallback, typo tiers, per-query relax options, and the response metadata. Plus a synthetic typo suite and a regression
+gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [Typo-tolerant search](/guide/typo-tolerant-search/). Edit distance and the correction are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/). The embedded `v0.1` release depends on this milestone (M10 depends on M8).
 
 ## M9 — Blob store
 
@@ -143,8 +143,8 @@ behind a flag.
 
 Depends on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation. These are network clients. In-process Go and TypeScript bindings are a separate design
-([Embedded SDKs](/guide/sdks/)). The checkboxes are M16 (target v1.1), blocked on v1.0.
+automation. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. Those still depend on M11 and M13. The in-process bindings are 14.6 (v1.0): they depend on M10, not on M11
+([Embedded SDKs](/guide/sdks/)). The same leaves stay listed under M16. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2.
 
 ## M15 — Benchmarks, hardening, v1.0
 
@@ -170,9 +170,11 @@ M0–M15 are the MVP. The live percentage in [PROGRESS.md](https://github.com/to
 
 Multi-tenant is numbered before Persia Cloud because the hosted service is one file per tenant. v2.1, v2.2, and v2.3 are separate targets so a UI kit does not wait on embeddings, and embeddings do not wait on phones. Geo has no dependency on those three; it stays on v3.0 with the enterprise format work. The leaf list is [ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md).
 
+The embedded SDKs core moved to v1.0 via 14.6 (inside M14): `persia-ffi` and `persia.h`, the embedded Go SDK, `@persiadb/node`, the embedded Python package, and their prebuilt libraries. The rows above are unchanged. Still later: 16.4.1 and 16.6 on v1.1, and the Python HTTP client (21.2) on v1.2.
+
 ## M16 — Embedded SDKs (v1.1)
 
-Blocked on M15. Go via cgo by default, with an optional `persia_purego` tag, and `@persiadb/node` via N-API, both through `persia-ffi`, as [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md) already specify. This page does not repeat that design. The network clients stay M14. The browser build is M28.
+The in-process core of this milestone is scheduled for v1.0 as 14.6, so those leaves are not done twice. What stays here is 16.4.1 (publish only after the v1.0 tag) and 16.6 (read-only WASM). The design is [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md). This page does not repeat that design. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. The browser build is M28.
 
 ## M17 — Highlighting and snippets (v1.1)
 
@@ -192,7 +194,7 @@ Blocked on local and cloud storage and on v1.0. SPEC §1.2 leaves encryption to 
 
 ## M21 — Python SDK (v1.2)
 
-Blocked on the C ABI (M16) and on the network-client conformance suite (M14). The embedded package calls `persia.h`. A smaller HTTP client covers programs that will not load a native library. Neither one reimplements the engine.
+The embedded package is 14.6 (v1.0): it calls `persia.h`, and SPEC §13 names it in 14.6.11. The HTTP client (21.2) stays v1.2 and speaks the server's JSON. Neither one reimplements the engine.
 
 ## M22 — Multi-tenant mode (v2.0)
 
@@ -232,4 +234,4 @@ Blocked on Kubernetes (M13), encryption (M20), multi-tenant mode (M22), and the 
 
 ## M31 — Persia Studio (v1.1)
 
-Blocked on the TypeScript SDK (M16). A read-only client that runs in the browser and does not talk to a server. The core is the WASM build that SDK work shares. The user picks the `database.persia/` directory with the File System Access API, which Chromium-based browsers provide. Firefox and Safari do not, and this version does not add a server for them. The page browses segments and the manifest, shows documents and tombstones, runs queries with the BM25 score breakdown, and shows WAL state. Write mode and a local `persia studio` server are out of scope. It is the seed of the v2.0 dashboard (M25).
+Blocked on the read-only WASM build (16.6), which stays in M16. It does not wait on the in-process TypeScript SDK (14.6). A read-only client that runs in the browser and does not talk to a server. The core is that WASM build. The user picks the `database.persia/` directory with the File System Access API, which Chromium-based browsers provide. Firefox and Safari do not, and this version does not add a server for them. The page browses segments and the manifest, shows documents and tombstones, runs queries with the BM25 score breakdown, and shows WAL state. Write mode and a local `persia studio` server are out of scope. It is the seed of the v2.0 dashboard (M25).

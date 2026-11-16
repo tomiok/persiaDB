@@ -138,7 +138,7 @@ crates under `persia`. The public API that wraps it is M10, so you cannot call t
 | gRPC and HTTP server | Planned (M11) | SPEC §12 |
 | S3, GCS, Azure, replication | Planned (M12) | SPEC §10 |
 | Kubernetes, sharding | Planned (M13) | SPEC §11 |
-| Embedded Go and TypeScript bindings | Planned (M16, v1.1). Design: ADR-0018, `docs/sdk/`. | SPEC §13.1 |
+| Embedded Go, TypeScript, and Python bindings | Planned (14.6, v1.0). Design: ADR-0018, `docs/sdk/`. Duplicate leaves stay on M16 and 21.1. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2. | SPEC §13.1 |
 | Rust and Go network SDKs | Planned (M14) | SPEC §13.2 |
 | Integer codecs and `None` / `Zstd` block codecs | Done, as library primitives (M1) | SPEC §4.1, §5.2 |
 
@@ -570,7 +570,7 @@ the format is still unstable (ROADMAP 10.5.2).
 
 **Planned.** Nothing here is running. The server milestone (M11) starts after the embedded API.
 Cloud backends (M12) and distribution (M13) come after the server. Network SDKs (M14) follow the protocol.
-Embedded Go and TypeScript bindings are a separate design (ADR-0018, [`docs/sdk/`](./sdk/README.md)) and
+Embedded Go, TypeScript, and Python bindings are scheduled for v1.0 (ROADMAP 14.6; ADR-0018, [`docs/sdk/`](./sdk/README.md)) and
 wait on the embedded API (M10), not on the server.
 
 ### Server
@@ -652,7 +652,7 @@ Two families, neither implemented (SPEC §13).
 **Embedded bindings** sit in-process beside the Rust `Db` API. Go calls a C ABI crate `persia-ffi` through
 cgo and a static library by default; an optional `persia_purego` build tag dynamically loads the shared
 library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (ADR-0018,
-[`docs/sdk/`](./sdk/README.md)). They are blocked on the embedded API (M10). A browser/edge WASM build is
+[`docs/sdk/`](./sdk/README.md)). Python binds `persia.h` with cffi or ctypes. They are scheduled for v1.0 (ROADMAP 14.6) and blocked on the embedded API (M10). 16.4.1 and 16.6 stay v1.1. A browser/edge WASM build is
 a later package, not the first one.
 
 **Network clients** are Rust (`sdk/rust`, crate `persia-client`) and Go (`sdk/go`, module `persia-go`).
@@ -688,7 +688,7 @@ while a dependency is unfinished.
 | **M11** Server | gRPC, HTTP, image | M10 | Blocked, 0/23 |
 | **M12** Cloud | S3, GCS, Azure, cache, replicate | M2, M6, M9, M11 | Blocked, 0/29 |
 | **M13** Kubernetes | Lease, shards, router, Helm | M11, M12 | Blocked, 0/24 |
-| **M14** SDKs | Rust and Go network clients | M11; M13 for shard routing | Blocked, 0/19 |
+| **M14** SDKs | Network clients after M11 and M13 (Rust and Go 14.2–14.3, compatibility 14.4, TypeScript 14.5); embedded SDKs after M10 (14.6) | M11 and M13 for the network clients; M10 for 14.6 | Blocked, 0/30 |
 | **M15** v1.0 | Benchmarks, hardening, format freeze | M1–M14 (benchmarks may start after M7) | Blocked, 0/23 |
 
 M1 to M5 and M7 are done; M0, M6, M8 and M9 are in progress. The generated ready-next list is in
@@ -809,8 +809,8 @@ behind a flag.
 
 Blocked on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation. These are network clients. In-process Go and TypeScript bindings are ADR-0018 and
-[`docs/sdk/`](./sdk/README.md). The checkboxes are ROADMAP M16 (target v1.1), blocked on v1.0.
+automation. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. Those still depend on M11 and M13. The in-process bindings are 14.6 (v1.0): they depend on M10, not on M11. The design is ADR-0018 and
+[`docs/sdk/`](./sdk/README.md). The same leaves stay listed under M16 and 21.1. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2.
 
 ### M15 — Benchmarks, hardening, v1.0
 
@@ -820,7 +820,7 @@ and the format 1.0 freeze: open questions closed as ADRs, golden fixtures for ev
 version, a documentation site (embedded, server, cloud, Kubernetes, relaxation tuning, operations),
 and the `v1.0.0` release. This guide is source material for that later site (ROADMAP 15.5.4).
 
-M0–M15 are the MVP. Milestones M16–M34 are post-MVP (v1.1 through v3.0) and are listed in [`ROADMAP.md`](../ROADMAP.md) and on the website milestones page. The progress percentage counts M0–M15 only. In short: v1.1 is embedded SDKs, highlighting, autocomplete, and import (M16–M19), Persia Studio (M31), ranking rules (M32), and search features (M33); v1.2 is encryption at rest and the Python SDK (M20–M21), and backup, export, and query analytics (M34); v2.0 is multi-tenant mode, Persia Cloud, CDC connectors, and the web dashboard (M22–M25), with multi-tenant before the hosted service because that service is one file per tenant; v2.1–v2.3 are UI components, AI search, and on-device builds (M26–M28); v3.0 is geo and enterprise (M29–M30).
+M0–M15 are the MVP. Milestones M16–M34 are post-MVP (v1.1 through v3.0) and are listed in [`ROADMAP.md`](../ROADMAP.md) and on the website milestones page. The progress percentage counts M0–M15 only. In short: the embedded SDK core is v1.0 via 14.6. v1.1 is what M16 still holds (16.4.1 and 16.6) plus highlighting, autocomplete, and import (M17–M19), Persia Studio (M31), ranking rules (M32), and search features (M33); v1.2 is encryption at rest (M20), the Python HTTP client (21.2), and backup, export, and query analytics (M34); v2.0 is multi-tenant mode, Persia Cloud, CDC connectors, and the web dashboard (M22–M25), with multi-tenant before the hosted service because that service is one file per tenant; v2.1–v2.3 are UI components, AI search, and on-device builds (M26–M28); v3.0 is geo and enterprise (M29–M30).
 
 ## Contributing
 

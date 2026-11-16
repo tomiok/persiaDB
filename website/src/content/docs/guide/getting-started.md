@@ -80,7 +80,8 @@ products.put(doc)?;
 products.commit()?;
 
 // The design names the relaxation on the response (SPEC §7.6).
-// The engine does not rewrite this typo. See Typo-tolerant search.
+// L4 reports a correction when that step found the hits. A one-term query skips L2.
+// See Fuzzy search.
 let results = products.search("runing")?;
 let relaxation = &results.relaxation;
 ```
@@ -110,15 +111,15 @@ Search is specified to accept a text query or a structured query (SPEC §7.1): f
 
 ### Relaxation
 
-%%RELAXATION_NOW%% If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6). The cascade is [Typo-tolerant search](/guide/typo-tolerant-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+%%RELAXATION_NOW%% If a query has fewer than `min_results` hits (default 1), the engine walks a cascade and stops at the first level that has enough hits (SPEC §7.6). The cascade is [Typo-tolerant search](/guide/typo-tolerant-search/). Edit distance, the correction, and the fallback are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
 | Level | Name | What changes |
 |---|---|---|
 | L0 | `exact` | Every analyzed term is required |
 | L1 | `synonyms` | Collection synonyms, OR within a group |
-| L2 | `drop_terms` | Require fewer terms, dropping low-IDF terms first |
+| L2 | `drop_terms` | Require fewer terms. A term no document holds is least important, then a stopword, then a lower IDF |
 | L3 | `prefix` | Prefix-expand the last term, and other analyzed terms of length at least 3 |
-| L4 | `fuzzy` | Edit distance 1 or 2, and report the corrected terms |
+| L4 | `fuzzy` | Edit distance 1 (length 4–7) or 2 (length 8 or more). Report a correction when this step found the hits |
 | L5 | `fallback` | Static rank, then index-location recency, flagged with `fallback`. `none` builds no step |
 | L6 | `filters` | Only with `relax.filters: "last_resort"`, after every enabled earlier level: L0's words without the request's filters. A query that searches no word does not build it. `"filters_dropped": true` only when this step found the hits |
 
@@ -154,7 +155,7 @@ You don't, yet, through `persia::Db::open`. Those calls are the illustrative blo
 
 ### How do I read which relaxation was applied?
 
-On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, and `corrected`. Stricter levels rank above looser ones. %%RELAXATION_NOW%% See [Typo-tolerant search](/guide/typo-tolerant-search/).
+On the intended API, from the search response field `relaxation` (SPEC §7.6): `level`, `applied`, `original`, `effective`, `corrected`, and `fallback` when L5 found the hits. Stricter levels rank above looser ones. %%RELAXATION_NOW%% See [Typo-tolerant search](/guide/typo-tolerant-search/) and [Fuzzy search](/guide/fuzzy-search/).
 
 ### Is the on-disk format stable?
 
@@ -162,11 +163,11 @@ No. Format version 1.0 is a draft until the v1.0 release (SPEC §15). There is n
 
 ### Is there a server, a cloud backend, or a client SDK?
 
-Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are M14. Embedded Go and TypeScript bindings, which would open a file in-process, are a separate design ([Embedded SDKs](/guide/sdks/)); they are not implemented either. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
+Planned, not started. gRPC and HTTP are M11. S3, GCS, and Azure Blob are M12. Kubernetes sharding is M13. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after M11 and M13. Embedded Go, TypeScript, and Python bindings, which would open a file in-process, are scheduled for v1.0 as ROADMAP 14.6 and depend on the `persia` facade (M10) ([Embedded SDKs](/guide/sdks/)); they are not implemented either. Embedded mode, when it exists, has no authentication and no config file (SPEC §14).
 
 ### Why is a query supposed to avoid empty results?
 
-That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% The collection search it wraps is library code. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two. [Faceted search](/guide/faceted-search/) is the request that search runs.
+That is a product rule (SPEC §7.6), not an optional plugin. A query that matches nothing is relaxed step by step, and the response says what changed. %%RELAXATION_CELL%% The collection search it wraps is library code. [Typo-tolerant search](/guide/typo-tolerant-search/) separates the two. [Fuzzy search](/guide/fuzzy-search/) is the edit-distance step. [Faceted search](/guide/faceted-search/) is the request that search runs.
 
 ### Where is the source of truth?
 

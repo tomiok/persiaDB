@@ -200,6 +200,7 @@ No. `explain: true` returns a per-hit score tree for the hits on the page. Highl
 ## Read next
 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, the empty-page rule, `minimum_should_match`, and how terms are dropped.
+- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, L5 fallback, and the filter step. An explained hit names its step.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion. Filters stay on both steps.
 - [Feature reference](/guide/features/) — the status table, the schema sketch, and the relaxation levels.
 - [Features](/features/) — the short status table.

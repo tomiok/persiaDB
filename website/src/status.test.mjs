@@ -74,6 +74,12 @@ test('the live tree matches the write path that is actually checked in', () => {
 	assert.match(status.libraryNow, /content hashing, chunking, and blob manifests/);
 	assert.equal(status.libraryNow.includes('exports no API'), false);
 	assert.match(status.relaxationNow, /Every cascade level builds a query/);
+	assert.match(status.relaxationNow, /L4 fuzzy reports a correction when that step found the hits/);
+	assert.match(status.relaxationNow, /L5 fallback flags its order/);
+	assert.match(status.relaxationNow, /typo tiers rank fewer edits first/);
+	assert.match(status.relaxationNow, /relax options can set fill/);
+	assert.match(status.relaxationNow, /last_resort adds one filter step/);
+	assert.match(status.relaxationNow, /an explained hit names its step/);
 	assert.match(status.relaxationNow, /Not every M8 leaf is done/);
 	assert.equal(status.relaxationNow.includes('A typo is not corrected'), false);
 	assert.equal(status.relaxationNow.includes('Levels after exact do not build a query'), false);
@@ -113,6 +119,8 @@ test('the live tree matches the write path that is actually checked in', () => {
 		/filters, sorts, cursor pages, facets, deadlines, and explain, through CollectionViews::search/,
 	);
 	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Every cascade level builds a query/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /L4 fuzzy reports a correction when that step found the hits/);
+	assert.match(status.tokens['%%RELAXATION_CELL%%'], /last_resort adds one filter step/);
 	assert.match(status.tokens['%%RELAXATION_CELL%%'], /Not every M8 leaf is done/);
 	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('are not built'), false);
 	assert.equal(status.tokens['%%RELAXATION_CELL%%'].includes('A typo is not corrected'), false);
@@ -377,6 +385,12 @@ function currentInput(leaves) {
 		hasDropTerms: true,
 		hasSynonyms: true,
 		hasPrefix: true,
+		hasFuzzy: true,
+		hasFallback: true,
+		hasFilters: true,
+		hasTiers: true,
+		hasRelaxOptions: true,
+		hasExplainLevel: true,
 		hasDeadline: true,
 		hasExplain: true,
 		analyzers: ['de', 'en'],
@@ -439,6 +453,22 @@ test('prefix marked done without its transform is rejected', () => {
 	const input = currentInput(live);
 	input.hasPrefix = false;
 	assert.throws(() => buildStatus(input), /marks prefix done but the matching code is not in the tree/);
+});
+
+test('fuzzy, fallback, and filter relaxation marked done without their transforms are rejected', () => {
+	const live = parseRoadmapLeaves(readFileSync(path.join(root, 'ROADMAP.md'), 'utf8'));
+	const fuzzy = currentInput(live);
+	fuzzy.hasFuzzy = false;
+	assert.throws(() => buildStatus(fuzzy), /marks fuzzy done but the matching code is not in the tree/);
+	const fallback = currentInput(live);
+	fallback.hasFallback = false;
+	assert.throws(() => buildStatus(fallback), /marks fallback done but the matching code is not in the tree/);
+	const filters = currentInput(live);
+	filters.hasFilters = false;
+	assert.throws(() => buildStatus(filters), /marks filter relaxation done but the matching code is not in the tree/);
+	const tiers = currentInput(live);
+	tiers.hasTiers = false;
+	assert.throws(() => buildStatus(tiers), /marks typo tiers done but the matching code is not in the tree/);
 });
 
 test('relaxation marked done without search_relaxed is rejected', () => {

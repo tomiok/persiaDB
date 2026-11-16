@@ -33,6 +33,7 @@ const guideOrder = [
 	'guide/overview',
 	'guide/embedded-search',
 	'guide/typo-tolerant-search',
+	'guide/fuzzy-search',
 	'guide/synonym-and-prefix-search',
 	'guide/faceted-search',
 	'guide/comparison',
