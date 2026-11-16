@@ -105,10 +105,12 @@ The website summary is the guide page "Embedded SDKs", which links here.
 
 ## Phased roadmap
 
-The phases below are the design. The checkboxes that implement them are ROADMAP M16 (target v1.1): the C ABI,
-the Go module, and `@persiadb/node`. Phase 7, the WASM package, is M28 (target v2.3), which starts with the
-portable storage backend this table asks for. M14 stays the network clients. A binding still cannot be tested
-before `Db` exists (M10). M16 is blocked on v1.0 (M15) so the shipped ABI sits on the frozen format.
+The phases below are the design. The checkboxes that implement the in-process core are ROADMAP 14.6 (v1.0):
+the C ABI, the Go module (cgo and `persia_purego`), `@persiadb/node`, the embedded Python package, and the
+prebuilt libraries. They depend on M10, not on M11. The same leaves stay listed under M16 and 21.1 and are
+not implemented twice. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2. Phase 7, the WASM
+package, is M28 (target v2.3), which starts with the portable storage backend this table asks for. The network
+clients stay 14.2–14.5. A binding still cannot be tested before `Db` exists (M10).
 
 | Phase | When it can start | What the bindings gain | Blocked on |
 |---|---|---|---|
@@ -118,7 +120,7 @@ before `Db` exists (M10). M16 is blocked on v1.0 (M15) so the shipped ABI sits o
 | 3. Blobs | After 10.1.3's blob methods and M9 | `put_blob`, ranged reads, the pull reader in the [C ABI](./c-abi.md). M9 is already a dependency of M10, so this can ship in the same binding release as phase 2 or as the release after it. | Blob store, including the upload-staging question (SPEC §18.8). |
 | 4. Options and shutdown | After 10.2.3 and SPEC §14 knobs existing on `OpenOptions` | Memtable size, fsync policy, thread counts, `relax.*`, clean shutdown of flush and merge threads. Until a knob exists in Rust, the SDK does not invent one. | The Rust builders. |
 | 5. URL open | After 10.1.1 accepts a URL and M12 has a backend | Pass `s3://`, `gs://`, `az://` through. Credentials stay the core's chain (SPEC §10.3). | Cloud backends. |
-| 6. Publish | After M16.1–M16.3, and only once the v1.0 tag exists (M15). M16.4 is this phase: publishing, the compatibility table, and the package builds | Modules and npm packages, prebuilt binaries, the compatibility table. File format, C ABI, and package versions stay distinct (ADR-0018). | The v1.0 format freeze, and sections 16.1–16.3. |
+| 6. Publish | 14.6.10 builds the prebuilt libraries and CI in v1.0. 16.4.1 publishes only after the v1.0 tag (M15). | Modules and npm packages, prebuilt binaries, the compatibility table. File format, C ABI, and package versions stay distinct (ADR-0018). | The v1.0 format freeze, and 14.6.1–14.6.10. |
 | 7. WASM package | ROADMAP M28 (target v2.3), after 28.1 | `@persiadb/wasm` for browser and edge. | A `Storage` that does not need mmap or POSIX fsync (M28.1). Do not start it by compiling `persia-ffi` to `wasm32` and hoping the container works. |
 | — | M11–M14 | Not this SDK. Network clients, retries, shard-aware writes. | Server and distribution. |
 

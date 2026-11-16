@@ -37,7 +37,7 @@ design). Rows look like:
 | `@persiadb/node` 1.0.0 | `v1.0.0` | 0.1 | 1 | 1 |
 | `sdk/persia` v1.0.0 | same | 0.1 | 1 | 1 |
 
-The first published binding follows the core `v1.0.0` tag (ROADMAP M15 and M16.4), after sections 16.1–16.3.
+The first published binding follows the core `v1.0.0` tag (ROADMAP M15 and 16.4.1). The libraries and CI are 14.6.10 (v1.0), which pulls 16.4.2 and 16.4.3. 16.4.1 is the rule that nothing is published before that tag.
 ROADMAP 10.5.2 still tags the core `v0.1.0-alpha` and that tag says the format is unstable; it is not the
 binding cut. Until v1.0 the honest content of a compatibility row, if one were published, would be "this
 package opens files written by the core revision it was built with, and by nothing else we are willing to
@@ -181,7 +181,7 @@ itself rejects N-API.
 One core tag, then the bindings. Never the other way around: the bindings have nothing to wrap.
 
 1. Tag the core `v1.0.0` (ROADMAP M15). The earlier `v0.1.0-alpha` tag (ROADMAP 10.5.2) says the format is
-   unstable and is not the binding cut. Publishing the modules is M16.4, after M16.1–M16.3. The core is not
+   unstable and is not the binding cut. The libraries are built in 14.6.10 (v1.0). Publishing them is 16.4.1, only after the v1.0 tag, once 14.6.1–14.6.10 exist. The core is not
    published to crates.io until its own release-engineering leaf (10.5.1) says so. The bindings do not
    require the core to be on crates.io; they build from the git tag.
 2. CI on that tag builds `persia-ffi` staticlibs, the shared libraries for the `persia_purego` matrix
@@ -329,7 +329,7 @@ updated to match.
 
 ## Implementation leaves, when it is time
 
-Do not file these against M14. M14 is the gRPC clients. A reasonable split, once M10.1 has types to
+Those leaves are 14.6 (v1.0). The network clients stay 14.2–14.5. A reasonable split, once M10.1 has types to
 wrap:
 
 - `persia-ffi` crate, header, xtask generator, panic and null tests, `ALLOWED` and `UNSAFE_ALLOWED` updates.

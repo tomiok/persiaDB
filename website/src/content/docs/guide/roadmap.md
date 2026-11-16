@@ -143,8 +143,8 @@ behind a flag.
 
 Depends on M11 for a stable protocol, and on M13 for shard-aware routing. A language-neutral
 conformance suite, then the Rust client and the Go client, then a compatibility matrix and release
-automation. These are network clients. In-process Go and TypeScript bindings are a separate design
-([Embedded SDKs](/guide/sdks/)). The checkboxes are M16 (target v1.1), blocked on v1.0.
+automation. These are the network clients (14.2–14.5), and they still depend on M11 and M13. The in-process bindings are 14.6 (v1.0): they depend on M10, not on M11
+([Embedded SDKs](/guide/sdks/)). The same leaves stay listed under M16. 16.4.1 and 16.6 stay v1.1. The Python HTTP client (21.2) stays v1.2.
 
 ## M15 — Benchmarks, hardening, v1.0
 
@@ -170,9 +170,11 @@ M0–M15 are the MVP. The live percentage in [PROGRESS.md](https://github.com/to
 
 Multi-tenant is numbered before Persia Cloud because the hosted service is one file per tenant. v2.1, v2.2, and v2.3 are separate targets so a UI kit does not wait on embeddings, and embeddings do not wait on phones. Geo has no dependency on those three; it stays on v3.0 with the enterprise format work. The leaf list is [ROADMAP.md](https://github.com/tomiok/persiaDB/blob/main/ROADMAP.md).
 
+The embedded SDKs core moved to v1.0 via 14.6 (inside M14): `persia-ffi` and `persia.h`, the embedded Go SDK, `@persiadb/node`, the embedded Python package, and their prebuilt libraries. The rows above are unchanged. Still later: 16.4.1 and 16.6 on v1.1, and the Python HTTP client (21.2) on v1.2.
+
 ## M16 — Embedded SDKs (v1.1)
 
-Blocked on M15. Go via cgo by default, with an optional `persia_purego` tag, and `@persiadb/node` via N-API, both through `persia-ffi`, as [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md) already specify. This page does not repeat that design. The network clients stay M14. The browser build is M28.
+The in-process core of this milestone is scheduled for v1.0 as 14.6, so those leaves are not done twice. What stays here is 16.4.1 (publish only after the v1.0 tag) and 16.6 (read-only WASM). The design is [ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](https://github.com/tomiok/persiaDB/blob/main/docs/sdk/README.md). This page does not repeat that design. The network clients stay 14.2–14.5. The browser build is M28.
 
 ## M17 — Highlighting and snippets (v1.1)
 
@@ -192,7 +194,7 @@ Blocked on local and cloud storage and on v1.0. SPEC §1.2 leaves encryption to 
 
 ## M21 — Python SDK (v1.2)
 
-Blocked on the C ABI (M16) and on the network-client conformance suite (M14). The embedded package calls `persia.h`. A smaller HTTP client covers programs that will not load a native library. Neither one reimplements the engine.
+The embedded package is 14.6 (v1.0): it calls `persia.h`, and SPEC §13 names it in 14.6.11. The HTTP client (21.2) stays v1.2 and speaks the server's JSON. Neither one reimplements the engine.
 
 ## M22 — Multi-tenant mode (v2.0)
 
