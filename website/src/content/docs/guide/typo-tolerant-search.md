@@ -1,6 +1,6 @@
 ---
 title: "Typo-tolerant search and zero results"
-description: "How Persia DB handles typo-tolerant embedded search in Rust: query relaxation and zero results, minimum_should_match, drop_terms, and where fuzzy matching and BM25F stand today."
+description: "How Persia DB handles typo-tolerant embedded search in Rust: query relaxation and zero results, minimum_should_match, drop_terms, and fuzzy search with did-you-mean corrections."
 head:
   - tag: title
     content: "Typo-tolerant search in Rust: query relaxation and zero results | PersiaDB"
@@ -74,7 +74,7 @@ head:
 
 Typo-tolerant search, in this design, is not a separate fuzzy index. A query that would otherwise come back empty is loosened one step at a time until it has enough hits. That cascade is [query relaxation](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) (SPEC §7.6). It is on by default. Synonyms (L1), dropping terms (L2), prefix expansion (L3), fuzzy edit distance (L4), and the fallback (L5) are library code. L5 ranks by static rank, then by where the index holds the document, ignores the request's `sort`, and flags that order with `fallback`. With `relax.filters: "last_resort"`, one last step (L6) drops the request's filters when every earlier level found fewer than `min_results` hits. Queries that search no word do not build it, and `filters_dropped` is true only when that step found the hits (ROADMAP 8.2.6). How L1 and L3 expand a query is [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
-The product goal is embedded full-text search in Rust that, by default, never returns zero results ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). What that library shape is, and what you can call today, is [What is an embedded search database?](/guide/embedded-search/). This page is the search behavior: how a typo is handled, how [BM25F](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f) and filters fit, and which of those pieces are in the repository. Filters, facets, sort, and pages are [Faceted search](/guide/faceted-search/).
+The product goal is embedded full-text search in Rust that, by default, never returns zero results ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). What that library shape is, and what you can call today, is [What is an embedded search database?](/guide/embedded-search/). This page is the search behavior: how a typo is handled, how [BM25F](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f) and filters fit, and which of those pieces are in the repository. The edit-distance step, the correction, and the fallback are [Fuzzy search and did-you-mean](/guide/fuzzy-search/). Filters, facets, sort, and pages are [Faceted search](/guide/faceted-search/).
 
 ## What typo-tolerant search means here
 
@@ -143,7 +143,7 @@ Each level is specified in SPEC §7.6. The names are the ones `RelaxLevel::name`
 | L1 | `synonyms` | A term expands through the collection's synonym groups. Within a group the terms are alternatives. Expansions per matched term are capped (default 50). | Library code (ROADMAP 8.2.1). One step, `synonyms`, from runs the compiler stored on `Compiled::synonyms`. [Synonym search](/guide/synonym-and-prefix-search/#synonym-search-in-rust). |
 | L2 | `drop_terms` | The share of terms that must match steps from 100% to 75%, to 50%, then to one term. Least important terms are the ones a step reports dropped first. | Library code (ROADMAP 8.2.2.1–8.2.2.4). [minimum_should_match](#minimum_should_match) and [how terms are dropped](#how-terms-are-dropped). |
 | L3 | `prefix` | The last term, and other analyzed terms of length at least 3, expand through an FST prefix scan. Expansions are capped (default 50) and kept by collection df. When L3 expands a term besides the last one, and L2 did not take those documents first, the last term alone expands first, the others as typed. | Library code (ROADMAP 8.2.3, 8.2.7). One step, `prefix`, from L0. When it expands a term besides the last one, and L2's one-term rung was not built and searched first, a tier step `prefix:last` comes first. [Prefix search](/guide/synonym-and-prefix-search/#prefix-search). |
-| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more. Shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrected terms are reported when this level found the hits. | Library code (ROADMAP 8.2.4, 8.2.7). One step, `fuzzy`, from L0. When a rewritten term has 8 or more characters, two: a tier step `fuzzy:1` (every rewritten term within one edit), then `fuzzy`. `corrected` is stated when the step that found the hits corrected a word (ROADMAP 8.1.22). An explicit `fuzzy` clause also expands over collection terms (ROADMAP 7.4.12). |
+| L4 | `fuzzy` | Edit distance 1 for a term of length 4–7, distance 2 for length 8 or more. Shorter terms stay exact. Hits within one edit of every rewritten term rank first. Corrected terms are reported when this level found the hits. | Library code (ROADMAP 8.2.4, 8.2.7). One step, `fuzzy`, from L0. When a rewritten term has 8 or more characters, two: a tier step `fuzzy:1` (every rewritten term within one edit), then `fuzzy`. `corrected` is stated when the step that found the hits corrected a word (ROADMAP 8.1.22). An explicit `fuzzy` clause also expands over collection terms (ROADMAP 7.4.12). [Fuzzy search](/guide/fuzzy-search/). |
 | L5 | `fallback` | Top documents by static rank, then by index-location recency. The request's `sort` is ignored for this order. `none` allows an empty page. The response flags the order with `fallback`. | Library code (ROADMAP 8.2.5). Docids descend within a view. Hits still carry the request's sort values. Filters stay on this step. |
 | L6 | `filters` | Only with `relax.filters: "last_resort"`: L0's words without the request's filters, excluded words still excluded, when every earlier level found fewer than `min_results` hits. A query that searches no word does not build it. Never built just to fill a page. `filters_dropped` is true only when this step found the hits. | Library code (ROADMAP 8.2.6, ADR-0047). One step, `filters`, from L0, after every enabled earlier level (`fallback: "none"` omits L5). Do not opt in when filters enforce tenancy or permissions: no filter can be marked as one that must hold yet (ROADMAP 8.2.13). |
 
@@ -265,7 +265,7 @@ The same function, given a block's maximum term frequency and minimum norm, is a
 | `SynonymMap` and L1 `synonyms` | Library code. The compiler stores runs on `Compiled::synonyms` (ROADMAP 4.2.5, 8.2.1). [Synonym search](/guide/synonym-and-prefix-search/#synonym-search-in-rust). |
 | `BoolQuery.minimum_should_match` and L2 `drop_terms` | Library code (ROADMAP 8.1.6, 8.2.2.1–8.2.2.4). |
 | Term, phrase, boolean, prefix, and fuzzy matching | %%MATCHING_CELL%% An explicit prefix or fuzzy clause expands (ROADMAP 7.4.12). L3 of the cascade builds a prefix step (ROADMAP 8.2.3). L4 builds a fuzzy step (ROADMAP 8.2.4). |
-| Filter evaluation, facets, sort, explain | %%MATCHING_CELL%% Explain is library code (ROADMAP 7.7). Which relaxation level a hit matched is not part of the explanation yet (ROADMAP 8.3.4). `RelaxedHit.level` already says it. |
+| Filter evaluation, facets, sort, explain | %%MATCHING_CELL%% Explain is library code (ROADMAP 7.7). An explained hit of `search_relaxed` has a root `Explanation::Relaxed` that names the level, the step, and that step's `applied` (ROADMAP 8.3.4). `RelaxedHit.level` says the same. |
 | Relaxation cascade | %%RELAXATION_CELL%% |
 | `persia::Db::open` and `search` | Not in the crate (M10). |
 
@@ -311,6 +311,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. `Da
 
 ## Read next
 
+- [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction returned to the caller, L5 fallback, and the filter step.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — how L1 synonym groups and L3 prefix expansion work, and what they leave exact.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server.

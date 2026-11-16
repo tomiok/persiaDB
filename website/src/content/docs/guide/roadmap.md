@@ -103,9 +103,9 @@ WAND (ROADMAP 7.4.1–7.4.4). %%MATCHING_CELL%%
 ## M8 — Zero-results avoidance
 
 Depends on M7. The cascade in [Feature reference](/guide/features/): orchestration, per-level rank order, the
-time budget, synonyms, dropping terms, prefix, fuzzy (Levenshtein automaton over the term
-dictionary), the fallback, and the response metadata. Plus a synthetic typo suite and a regression
-gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [Typo-tolerant search](/guide/typo-tolerant-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/). The embedded `v0.1` release depends on this milestone (M10 depends on M8).
+time budget, synonyms, dropping terms, prefix, fuzzy (a banded optimal-string-alignment automaton over the term
+dictionary, with a transposition counting as one edit), the fallback, typo tiers, per-query relax options, and the response metadata. Plus a synthetic typo suite and a regression
+gate on the zero-result rate. %%RELAXATION_NOW%% Which levels build a query is [Typo-tolerant search](/guide/typo-tolerant-search/). Edit distance and the correction are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/). The embedded `v0.1` release depends on this milestone (M10 depends on M8).
 
 ## M9 — Blob store
 

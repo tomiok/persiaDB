@@ -32,7 +32,7 @@ A longer definition of the embedded library — in your process, one file, no se
 [What is an embedded search database?](/guide/embedded-search/).
 Where the design sits next to SQLite FTS5, Tantivy, and Meilisearch is
 [Comparison](/guide/comparison/). That page is not a benchmark. Persia DB has no `persia::Db` search API yet (M10); the engine library code can search.
-How a query with too few hits is loosened is [Typo-tolerant search](/guide/typo-tolerant-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+How a query with too few hits is loosened is [Typo-tolerant search](/guide/typo-tolerant-search/). Edit distance, the correction, and the fallback are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 Filters, facets, sort, and paging are [Faceted search](/guide/faceted-search/).
 Short answers on status, the file format, crash safety, SDKs, and the license are on the [FAQ](/guide/faq/).
 
@@ -84,6 +84,7 @@ Five properties the design does not trade away:
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
    response says exactly what changed (SPEC §7.6). %%RELAXATION_CELL%% The query compiler
    and the BM25F scorer are library code. See [Typo-tolerant search](/guide/typo-tolerant-search/),
+   [Fuzzy search](/guide/fuzzy-search/),
    [Faceted search](/guide/faceted-search/), and
    [Feature reference](/guide/features/).
 4. **Cloud-native.** Segments are immutable. A local commit and an object-storage commit publish the
