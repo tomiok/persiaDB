@@ -13,6 +13,10 @@
 //! 4. Pages by cursor are slices of the one ranking across L0 and L4.
 //! 5. Typo tiers (ROADMAP 8.2.7): when a word may take two edits, L4 searches every word within one edit first (`fuzzy:1`),
 //!    so its hits rank above those that need two, whatever their scores (checked against the oracle of 1).
+//!
+//! `tests/differential.rs` checks L4 against its reference model too (ROADMAP 8.1.21), but after L3, which takes the
+//! completions first. The oracle of invariant 1 stays: L4 alone after L0, over two letters, where every word has many
+//! neighbours within one and two edits.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, missing_docs)] // Tests: inputs are fixed.
 

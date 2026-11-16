@@ -19,26 +19,30 @@
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
 //! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
-//!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15, 8.1.19): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a
+//!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15, 8.1.19, 8.1.21): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a
 //!    root `bool`'s `must` clauses beside its `must_not` and `filter`, then L3 `prefix` (the last term and every other
 //!    of 3 characters or more as a `prefix` of 50 expansions, after the tier step `prefix:last` unless L2's last rung
-//!    came first), then L5 `fallback` (every live document the root's filters keep and its `must_not` does not match,
-//!    by recency: memtable first, then segments and docids descending), and under `filters: "last_resort"` L6
+//!    came first), then L4 `fuzzy` (each term of 4 characters or more as a `fuzzy` of 50 expansions at 1 edit, 2
+//!    from 8 characters, after the tier step `fuzzy:1` when a term takes 2), then L5 `fallback` (every live document
+//!    the root's filters keep and its `must_not` does not match, by recency: memtable first, then segments and docids
+//!    descending), and under `filters: "last_resort"` L6
 //!    `filters` (the root without its filters, when it has some and searches a word), each step's matches the earlier
 //!    steps lack, scored as the reference scores that step; L0 alone, ranked as a plain search, when it has
 //!    `min_results` hits. Every step after L0 is held to the case's `max_expansions` beside the steps it excludes
 //!    (SPEC §7.1.3): `applied` lists it `:cut` or `:skipped` as the reference does. The response is flagged
 //!    `fallback` exactly when L5 is the last step that found a hit, and `filters_dropped` exactly when L6 is. User
-//!    text, compiled as SPEC §7.1.1 says (checked), also states its `original` and its hit step's `effective`. A plan
-//!    without L2 runs too, so L3 meets L0's misses alone.
+//!    text, compiled as SPEC §7.1.1 says (checked), also states its `original` and its hit step's `effective` and
+//!    `corrected` (L4's corrections: each word no document holds, replaced by the most frequent term within its
+//!    distance over the fields). A plan without L2 runs too, so L3 and L4 meet L0's misses alone.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
 //!    the one after its cursor (ROADMAP 7.4.11; SPEC §7.4).
 //!
-//! Queries hold `prefix` leaves of few expansions (SPEC §7.1: the terms of highest collection `df`, ties by bytes, one
-//! shared `idf`), checked by invariants 1–4 like any leaf. The vocabulary ([`VOCAB`], [`TYPOS`]) makes completions
-//! common, and the test counts the steps the reference cascade builds, so the property does not pass vacuously.
+//! Queries hold `prefix` and `fuzzy` leaves of few expansions (SPEC §7.1: the terms of highest collection `df`, ties
+//! by bytes, one shared `idf`, a `fuzzy` term's edit-distance weight), checked by invariants 1–4 like any leaf. The
+//! vocabulary ([`VOCAB`], [`TYPOS`]) makes completions and one- and two-edit neighbours common, and the test counts the
+//! steps the reference cascade builds, so the property does not pass vacuously.
 
 #![allow(
     clippy::unwrap_used,
@@ -67,8 +71,8 @@ use persia_engine::memtable::MemtableView;
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, Compiled, ConstantScoreQuery, DefaultFields, Filter,
-    FilterValue, PhraseQuery, PhraseTerm, PrefixQuery, Query, QueryCompiler, QueryLimits,
-    TermQuery, WeightedTerm,
+    FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery, Query, QueryCompiler,
+    QueryLimits, TermQuery, WeightedTerm,
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
@@ -231,6 +235,18 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
             prefix: prefix.clone(),
             max_expansions: u32::try_from(*max_expansions).unwrap(),
         }),
+        RefQuery::Fuzzy {
+            field,
+            term,
+            distance,
+            max_expansions,
+            ..
+        } => Query::Fuzzy(FuzzyQuery {
+            field: fields[*field],
+            term: term.clone(),
+            distance: *distance,
+            max_expansions: u32::try_from(*max_expansions).unwrap(),
+        }),
     }
 }
 
@@ -248,6 +264,15 @@ fn query_word() -> impl Strategy<Value = String> {
         3 => word(),
         1 => prop::sample::select(&TYPOS[..]).prop_map(str::to_owned),
         1 => (word(), 2..8_usize).prop_map(|(w, n)| w.chars().take(n.min(w.chars().count() - 1)).collect()),
+    ]
+}
+
+/// A word of user text: typos as often as the documents' words, so L4 has words to correct (ROADMAP 8.1.21).
+fn text_word() -> impl Strategy<Value = String> {
+    prop_oneof![
+        2 => word(),
+        2 => prop::sample::select(&TYPOS[..]).prop_map(str::to_owned),
+        1 => query_word(),
     ]
 }
 
@@ -334,6 +359,14 @@ fn leaf(params: Params) -> impl Strategy<Value = RefQuery> {
         // SPEC §7.1 expansion (ROADMAP 8.1.19), its few `max_expansions` keeping the terms of highest `df`.
         1 => (0..2_usize, prefix_of(), max_expansions()).prop_map(move |(field, prefix, max_expansions)| {
             RefQuery::Prefix { field, prefix, max_expansions, weight: params[field].0 }
+        }),
+        // A `fuzzy` of either distance (ROADMAP 8.1.21): the vocabulary holds words one and two edits apart.
+        1 => (0..2_usize, query_word(), 1..=2_u8, max_expansions()).prop_map(move |(field, term, distance, max_expansions)| {
+            RefQuery::Fuzzy { field, term, distance, max_expansions, weight: params[field].0 }
+        }),
+        // On the keyword field: `x`, `y` and `z` are one substitution apart, so its cap and ties decide.
+        1 => (prop::sample::select(&TAGS[..]), max_expansions()).prop_map(|(t, max_expansions)| RefQuery::Fuzzy {
+            field: TAG, term: t.to_owned(), distance: 1, max_expansions, weight: 1.0,
         }),
     ]
 }
@@ -543,7 +576,7 @@ impl Text {
 
 fn text(fields: [FieldId; 4]) -> impl Strategy<Value = Text> {
     (
-        prop::collection::vec((query_word(), prop::bool::weighted(0.2)), 1..5),
+        prop::collection::vec((text_word(), prop::bool::weighted(0.2)), 1..4),
         prop::option::weighted(0.3, filter(fields)),
     )
         .prop_map(|(clauses, filter)| Text { clauses, filter })
@@ -562,7 +595,7 @@ fn case() -> impl Strategy<Value = Case> {
                 ),
                 1..4,
             ),
-            prop::collection::vec(text(fields), 0..3),
+            prop::collection::vec(text(fields), 1..3),
             // The default, which the steps' 50-term expansions reach late in a cascade, or a limit that cuts them
             // and skips steps sooner (ROADMAP 8.1.19).
             prop_oneof![2 => Just(QueryLimits::default().max_expansions), 1 => 1..12_usize, 1 => 40..240_usize],
@@ -1225,8 +1258,13 @@ fn collection_searches_match_the_reference() {
             "prefix:last hit",
             "prefix hit",
             "prefix:cut",
-            "prefix:last:cut hit",
+            "prefix:last:cut",
             "prefix:skipped",
+            "fuzzy:1 hit",
+            "fuzzy hit",
+            "fuzzy:cut hit",
+            "fuzzy:skipped",
+            "corrected",
             "fallback hit",
             "filters hit",
         ] {
@@ -1388,61 +1426,48 @@ fn a_prefix_keeps_the_term_of_highest_collection_df() {
     );
 }
 
-/// SPEC §7.1.3 by hand (ROADMAP 8.1.19): L3's step for `ca` over `body` and `title` holds two `prefix`es of 50, and a
-/// limit of 3 expansions cuts them to 1 each, the one left to the first in query order (`body`, the lower field id):
-/// `body` keeps `cat` and `cart`, `title` its most frequent, `cafe`, not `card`. The whole case, every operation,
-/// is also checked against the reference (invariants 1–5).
-#[test]
-fn a_cut_gives_the_expansions_left_in_query_order() {
-    let doc = |title: &[&str], body: &[&str]| Values {
-        doc: vec![
-            title.iter().map(|&w| w.to_owned()).collect(),
-            body.iter().map(|&w| w.to_owned()).collect(),
-            Vec::new(),
-        ],
+/// A document of `title` and `body` words.
+fn titled(title: &[&str], body: &[&str]) -> Values {
+    let words = |ws: &[&str]| ws.iter().map(|&w| w.to_owned()).collect();
+    Values {
+        doc: vec![words(title), words(body), Vec::new()],
         n: None,
-    };
-    let mut ops = vec![
-        Op::Put(0, doc(&[], &["cat"])),
-        Op::Put(1, doc(&[], &["cat"])),
-        Op::Put(2, doc(&[], &["cart"])),
-        Op::Put(3, doc(&["cafe"], &[])),
-        Op::Put(4, doc(&["cafe"], &[])),
-        Op::Put(5, doc(&["card"], &[])),
-    ];
-    let schema = schema(&[(1.0, 1.2, 0.75); 2]);
-    let fields = ids(&schema);
-    assert!(fields[BODY] < fields[TITLE], "body is first in query order");
-    let text = Text {
-        clauses: vec![("ca".to_owned(), false)],
-        filter: None,
-    };
+    }
+}
+
+/// `text` relaxed with the collection's levels over the collection `ops` leave, its steps held to `max_expansions`,
+/// after every operation of the case is checked against the reference (invariants 1–5).
+fn search_text(ops: &[Op], text: &str, max_expansions: usize) -> RelaxedResults {
+    let clauses = text.split(' ').map(|w| (w.to_owned(), false)).collect();
     let case = Case {
         params: [(1.0, 1.2, 0.75); 2],
-        ops: ops.clone(),
+        ops: ops.to_vec(),
         queries: Vec::new(),
-        texts: vec![text.clone()],
-        max_expansions: 3,
+        texts: vec![Text {
+            clauses,
+            filter: None,
+        }],
+        max_expansions,
         k: 2,
     };
     run_case(&case).unwrap();
-    // The engine's hits, which `run_case` found to be the reference's.
-    ops.push(Op::Commit);
+    let schema = schema(&case.params);
+    let fields = ids(&schema);
     let mut db = database(schema.clone());
     let mut model = Model::default();
-    for op in &ops {
+    for op in ops {
         apply(&mut db, &mut model, &fields, op);
     }
     let registry = AnalyzerRegistry::builtin();
     let compiled = QueryCompiler::new(&schema, &registry).unwrap().compile(
-        "ca",
+        text,
         &DefaultFields::all(&schema),
         &QueryLimits::default(),
     );
     let relax = RelaxPlan::new(schema.relaxation(), &RelaxOptions::default())
         .unwrap()
         .with_limits(QueryLimits {
-            max_expansions: 3,
+            max_expansions,
             ..QueryLimits::default()
         });
     let snapshot = db.snapshot();
@@ -1454,13 +1479,73 @@ fn a_cut_gives_the_expansions_left_in_query_order() {
         ..SearchRequest::default()
     };
     let exec = Execution::default().threads(Threads::Current);
-    let out = views
+    views
         .search_relaxed(&compiled, &request, &relax, &exec)
-        .unwrap();
-    assert_eq!(out.relaxation.applied, ["prefix:cut"]);
+        .unwrap()
+}
+
+fn hit_ids(out: &RelaxedResults) -> Vec<&str> {
     let mut hits: Vec<&str> = out.hits.iter().map(|h| h.hit.document.id()).collect();
     hits.sort_unstable();
-    assert_eq!(hits, ["d0", "d1", "d2", "d3", "d4"]);
+    hits
+}
+
+/// SPEC §7.1.3 by hand (ROADMAP 8.1.19): L3's step for `ca` over `body` and `title` holds two `prefix`es of 50, and a
+/// limit of 3 expansions cuts them to 1 each, the one left to the first in query order (`body`, the lower field id):
+/// `body` keeps `cat` and `cart`, `title` its most frequent, `cafe`, not `card`.
+#[test]
+fn a_cut_gives_the_expansions_left_in_query_order() {
+    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
+    assert!(fields[BODY] < fields[TITLE], "body is first in query order");
+    let ops = [
+        Op::Put(0, titled(&[], &["cat"])),
+        Op::Put(1, titled(&[], &["cat"])),
+        Op::Put(2, titled(&[], &["cart"])),
+        Op::Put(3, titled(&["cafe"], &[])),
+        Op::Put(4, titled(&["cafe"], &[])),
+        Op::Put(5, titled(&["card"], &[])),
+        Op::Commit,
+    ];
+    let out = search_text(&ops, "ca", 3);
+    assert_eq!(out.relaxation.applied, ["prefix:cut"]);
+    assert_eq!(hit_ids(&out), ["d0", "d1", "d2", "d3", "d4"]);
+}
+
+/// SPEC §7.6 by hand (ROADMAP 8.1.21): a word no document holds is corrected to the term of highest `df` within its
+/// distance over the default fields, ties to the field first in the `combined` (`body`), and `effective` reads it.
+/// `crat` is one swap from `cart` and one deletion from `cat`; `elehpant`, of 8 characters, is one swap from
+/// `elephant`, so the tier step `fuzzy:1` corrects it. L3 comes first and finds nothing.
+#[test]
+fn a_correction_is_the_highest_df_over_the_fields_ties_to_the_first() {
+    let correction = |out: &RelaxedResults| -> Vec<(String, String)> {
+        let c = &out.relaxation.corrected;
+        c.iter()
+            .map(|c| (c.original.clone(), c.corrected.clone()))
+            .collect()
+    };
+    let pair = |a: &str, b: &str| vec![(a.to_owned(), b.to_owned())];
+    // `title` `cart` 2 over `body` `cat` 1.
+    let ops = [
+        Op::Put(0, titled(&["cart"], &[])),
+        Op::Put(1, titled(&["cart"], &[])),
+        Op::Put(2, titled(&[], &["cat"])),
+    ];
+    let out = search_text(&ops, "crat", 1024);
+    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy"]);
+    assert_eq!(correction(&out), pair("crat", "cart"));
+    assert_eq!(out.relaxation.effective.as_deref(), Some("cart"));
+    // 1 each: the field first in query order, `body`.
+    let out = search_text(&ops[1..], "crat", 1024);
+    assert_eq!(correction(&out), pair("crat", "cat"));
+    let ops = [
+        Op::Put(0, titled(&["elephant"], &[])),
+        Op::Put(1, titled(&["elegant"], &["elegant"])),
+    ];
+    let out = search_text(&ops, "elehpant", 1024);
+    // The tier step finds `d0`, enough: `elegant`, two edits away, is not searched.
+    assert_eq!(out.relaxation.applied, ["prefix", "fuzzy:1"]);
+    assert_eq!(correction(&out), pair("elehpant", "elephant"));
+    assert_eq!(hit_ids(&out), ["d0"]);
 }
 
 /// SPEC §5.3.4's properties of a scored length `q` of `n`: never above `n`, exactly `n` below 40, and otherwise
@@ -1576,22 +1661,23 @@ fn check_relaxed(
     let exec = Execution::default()
         .threads(Threads::Current)
         .budget_clock(Arc::new(ManualClock::new(0)));
-    // The collection's word levels, then a plan without L2, whose L3 runs on L0's misses alone and builds the tier
-    // step `prefix:last` whenever it expands another term beside the last (SPEC §7.6).
-    let collection = [RelaxLevel::DropTerms, RelaxLevel::Prefix];
-    let without_l2 = [RelaxLevel::Prefix];
-    for (min_results, filters, words) in [
-        (1, FilterRelaxation::Never, &collection[..]),
-        (10_000, FilterRelaxation::Never, &collection[..]),
-        (1, FilterRelaxation::LastResort, &collection[..]),
-        (10_000, FilterRelaxation::LastResort, &collection[..]),
-        (10_000, FilterRelaxation::Never, &without_l2[..]),
+    // The collection's levels (L1 builds no step: the collection has no synonyms, and a programmatic query no text),
+    // then a plan without L2, whose L3 and L4 run on L0's misses alone, and whose L3 builds the tier step
+    // `prefix:last` whenever it expands another term beside the last (SPEC §7.6).
+    let collection = [RelaxLevel::DropTerms, RelaxLevel::Prefix, RelaxLevel::Fuzzy];
+    let without_l2 = [RelaxLevel::Prefix, RelaxLevel::Fuzzy];
+    // `"last_resort"` builds what `"never"` does, and L6 after it, so `"never"` runs once, on the plan without L2.
+    for (min_results, filters, words, levels) in [
+        (1, FilterRelaxation::LastResort, &collection[..], None),
+        (10_000, FilterRelaxation::LastResort, &collection[..], None),
+        (10_000, FilterRelaxation::Never, &without_l2[..], Some(())),
     ] {
+        let levels = levels.map(|()| Levels::Custom(words.iter().map(|&l| level_of(l)).collect()));
         let relax = RelaxPlan::new(
             schema.relaxation(),
             &RelaxOptions {
                 min_results: Some(min_results),
-                levels: Some(Levels::Custom(words.iter().map(|&l| level_of(l)).collect())),
+                levels,
                 filters: Some(filters),
                 ..RelaxOptions::default()
             },
@@ -1641,6 +1727,9 @@ fn check_relaxed(
             .iter()
             .map(|(o, c)| (o.as_str(), c.as_str()))
             .collect();
+        if !want.is_empty() {
+            cover("corrected".to_owned());
+        }
         prop_assert_eq!(corrected, want, "{}", what());
         prop_assert_eq!(
             &relaxed.relaxation.original,
@@ -1795,7 +1884,7 @@ const PREFIX_LEN: usize = 3;
 
 impl Reference<'_> {
     /// SPEC §7.6's cascade for `root` (of user `text`, or programmatic): L0, then the plan's `words` levels in cascade
-    /// order (L2 `drop_terms`, L3 `prefix`), L5 `fallback` and, `last_resort`, L6 `filters`. A level is built only
+    /// order (L2 `drop_terms`, L3 `prefix`, L4 `fuzzy`), L5 `fallback` and, `last_resort`, L6 `filters`. A level is built only
     /// while the hits found are fewer than `min_results`, and so is each of its steps. A step is held to the limit
     /// beside the earlier steps it excludes ([`Self::fit`]): as built, cut (`:cut`) or skipped (`:skipped`, not
     /// searched, excluded from none). A searched step's matches are the live documents it matches that no earlier
@@ -1931,6 +2020,20 @@ impl Reference<'_> {
                 out.push(built(full, "prefix", l0_text()));
                 out
             }
+            RelaxLevel::Fuzzy => {
+                let Some(full) = self.rewrite_root(root, &|f, t, _| self.fuzzy(f, t, 2)) else {
+                    return Vec::new();
+                };
+                // The tier step `fuzzy:1` (ROADMAP 8.2.7) when a term may take two edits.
+                let mut out = Vec::new();
+                if let Some(near) = self.rewrite_root(root, &|f, t, _| self.fuzzy(f, t, 1))
+                    && near != full
+                {
+                    out.push(self.fuzzy_step(near, "fuzzy:1", text, 1));
+                }
+                out.push(self.fuzzy_step(full, "fuzzy", text, 2));
+                out
+            }
             RelaxLevel::Fallback => {
                 let excluded = text.map(|t| {
                     t.sources()
@@ -1949,6 +2052,86 @@ impl Reference<'_> {
                 .collect(),
             other => panic!("no reference for {other:?}"),
         }
+    }
+
+    /// L4's `fuzzy` for `term` of `field` (SPEC §7.6): none below 4 characters, distance 1 up to 7 and 2 from 8, capped
+    /// at `max`.
+    fn fuzzy(&self, field: usize, term: &str, max: u8) -> Option<RefQuery> {
+        let distance = match term.chars().count() {
+            0..=3 => return None,
+            4..=7 => 1,
+            _ => 2,
+        };
+        Some(RefQuery::Fuzzy {
+            field,
+            term: term.to_owned(),
+            distance: max.min(distance),
+            max_expansions: 50,
+            weight: self.params[field].0,
+        })
+    }
+
+    /// An L4 step of user `text` (SPEC §7.6, ROADMAP 8.2.4.3): its corrections within distances capped at `max`, and
+    /// `effective` L0's text with each corrected word replaced by its correction.
+    fn fuzzy_step(&self, query: RefQuery, applied: &str, text: Option<&Text>, max: u8) -> Built {
+        let Some(text) = text else {
+            return Built {
+                query,
+                applied: applied.to_owned(),
+                effective: None,
+                corrected: Vec::new(),
+            };
+        };
+        let corrections = self.corrections(text, max);
+        let effective = text
+            .sources()
+            .into_iter()
+            .enumerate()
+            .map(|(i, s)| {
+                corrections
+                    .iter()
+                    .find(|c| c.0 == i)
+                    .map_or(s, |c| c.2.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        Built {
+            query,
+            applied: applied.to_owned(),
+            effective: Some(effective),
+            corrected: corrections.into_iter().map(|(_, o, c)| (o, c)).collect(),
+        }
+    }
+
+    /// The corrections of `text`'s words at distances capped at `max` (SPEC §7.6), each with its clause's index, in
+    /// text order: a required word no default field holds (collection `df` 0) whose rewritten fields hold a term within
+    /// its distance; its correction the term that field's `fuzzy` keeps first (the highest `df`, ties by bytes), the
+    /// highest `df` over the fields, ties to the field first in the `combined` (the schema's order).
+    fn corrections(&self, text: &Text, max: u8) -> Vec<(usize, String, String)> {
+        let ids = ids(self.schema);
+        let mut order = [TITLE, BODY];
+        order.sort_by_key(|&f| ids[f]);
+        let mut out = Vec::new();
+        for (i, (word, excluded)) in text.clauses.iter().enumerate() {
+            if *excluded || order.iter().any(|&f| self.corpus.df(f, word) > 0) {
+                continue;
+            }
+            let mut best: Option<(u64, String)> = None;
+            for &field in &order {
+                let Some(RefQuery::Fuzzy { distance, .. }) = self.fuzzy(field, word, max) else {
+                    continue;
+                };
+                if let Some((term, df, _)) = self.corpus.fuzzy_terms(field, word, distance, 1).pop()
+                    && best.as_ref().is_none_or(|(top, _)| df > *top)
+                {
+                    best = Some((df, term));
+                }
+            }
+            if let Some((_, term)) = best {
+                out.push((i, word.clone(), term));
+            }
+        }
+        out
     }
 
     /// L2's `effective` for user text at count `k` (SPEC §7.6, ROADMAP 8.2.2.2): its `k` most important required
@@ -2137,7 +2320,9 @@ impl Reference<'_> {
 /// The `max_expansions` of every `prefix` and `fuzzy` in `q`, under a `must_not` too, summed (SPEC §7.1.3).
 fn expansions(q: &RefQuery) -> usize {
     match q {
-        RefQuery::Prefix { max_expansions, .. } => *max_expansions,
+        RefQuery::Prefix { max_expansions, .. } | RefQuery::Fuzzy { max_expansions, .. } => {
+            *max_expansions
+        }
         RefQuery::Bool {
             must,
             should,
@@ -2158,7 +2343,9 @@ fn expansions(q: &RefQuery) -> usize {
 /// before its `should` clauses; not those under a `must_not`, which would exclude less.
 fn cuttable<'q>(q: &'q mut RefQuery, caps: &mut Vec<&'q mut usize>) {
     match q {
-        RefQuery::Prefix { max_expansions, .. } => caps.push(max_expansions),
+        RefQuery::Prefix { max_expansions, .. } | RefQuery::Fuzzy { max_expansions, .. } => {
+            caps.push(max_expansions);
+        }
         RefQuery::Bool { must, should, .. } => {
             for c in must.iter_mut().chain(should.iter_mut()) {
                 cuttable(c, caps);
@@ -2278,7 +2465,10 @@ fn reference_unfiltered(q: &RefQuery) -> Option<RefQuery> {
 /// `must` or `should`. `match_all`, an empty `bool` and exclusions alone do not.
 fn searches_word(q: &RefQuery) -> bool {
     match q {
-        RefQuery::Word(_) | RefQuery::Phrase { .. } | RefQuery::Prefix { .. } => true,
+        RefQuery::Word(_)
+        | RefQuery::Phrase { .. }
+        | RefQuery::Prefix { .. }
+        | RefQuery::Fuzzy { .. } => true,
         RefQuery::All => false,
         RefQuery::Bool { must, should, .. } => {
             must.iter().any(searches_word) || should.iter().any(searches_word)

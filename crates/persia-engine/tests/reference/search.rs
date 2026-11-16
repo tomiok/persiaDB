@@ -6,6 +6,7 @@
 use persia_engine::query::Filter;
 
 use super::bm25f::{Clause, Corpus, Doc, quantized};
+use super::expand::edit_weight;
 
 /// A query of the reference, by field index.
 #[derive(Debug, Clone, PartialEq)]
@@ -37,6 +38,16 @@ pub enum Query {
     Prefix {
         field: usize,
         prefix: String,
+        max_expansions: usize,
+        weight: f64,
+    },
+    /// SPEC §7.1: the terms of `field` within `distance` of `term` (the optimal string alignment distance over Unicode
+    /// scalar values, [`super::expand::osa`]), kept and scored as a [`Query::Prefix`]'s, each also multiplied by
+    /// `(distance + 1 − d) / (distance + 1)` for its distance `d`.
+    Fuzzy {
+        field: usize,
+        term: String,
+        distance: u8,
         max_expansions: usize,
         weight: f64,
     },
@@ -225,6 +236,20 @@ impl Corpus {
             } => {
                 let kept = self.prefix_terms(*field, prefix, *max_expansions);
                 let kept = kept.into_iter().map(|(t, df)| (t, df, 1.0)).collect();
+                self.expansion(*field, kept, *weight, doc)
+            }
+            Query::Fuzzy {
+                field,
+                term,
+                distance,
+                max_expansions,
+                weight,
+            } => {
+                let kept = self.fuzzy_terms(*field, term, *distance, *max_expansions);
+                let kept = kept
+                    .into_iter()
+                    .map(|(t, df, d)| (t, df, edit_weight(*distance, d)))
+                    .collect();
                 self.expansion(*field, kept, *weight, doc)
             }
         }
