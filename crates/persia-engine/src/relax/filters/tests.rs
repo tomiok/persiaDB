@@ -185,7 +185,8 @@ fn a_replaced_query_drops_the_request_filter_alone() {
     };
     assert_eq!(root.filter, [own.clone(), acme.clone()]);
     assert_eq!(one(replaced.query(), Some(&replaced)).query, caller);
-    // So does one that already held the request filter, which is not joined twice.
+    // So does one that already held the request filter, which is not joined twice: a root filter equal to the request
+    // filter counts as the request's, and is dropped.
     let holding = Query::Bool(BoolQuery {
         must: vec![term(&schema, "hat")],
         filter: vec![acme.clone(), own.clone()],

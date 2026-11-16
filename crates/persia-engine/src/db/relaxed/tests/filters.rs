@@ -939,7 +939,7 @@ fn case() -> impl Strategy<Value = Case> {
 enum Caller {
     /// The compiled root with one more excluded word: it still holds the clauses' parts, so the word levels read them.
     Exclude(usize),
-    /// Any query of `body` words: `match_all`, `bool` (with a filter `tag = y` of its own or not), `boost`,
+    /// Any query of `body` words: `match_all`, `bool` (with a filter of its own or not), `boost`,
     /// `constant_score`.
     Any(Shape),
 }
@@ -953,7 +953,9 @@ enum Shape {
         should: Vec<Shape>,
         must_not: Vec<Shape>,
         minimum_should_match: u32,
-        own: bool,
+        /// A filter of its own: none (0), `tag = y`, which the request filter `tag = x` leaves nothing beside (1), or
+        /// `tag = x or tag = y`, which keeps every document beside it (2).
+        own: u8,
     },
     Boost(Box<Shape>),
     Constant(Box<Shape>),
@@ -971,7 +973,7 @@ fn caller() -> impl Strategy<Value = Caller> {
                 prop::collection::vec(inner.clone(), 0..3),
                 prop::collection::vec(inner.clone(), 0..2),
                 0u32..3,
-                any::<bool>(),
+                0u8..3,
             )
                 .prop_map(|(must, should, must_not, minimum_should_match, own)| Shape::Bool {
                     must,
@@ -1009,10 +1011,10 @@ impl Shape {
                 must: all(must),
                 should: all(should),
                 must_not: all(must_not),
-                filter: if *own {
-                    vec![tag_is(tag, "y")]
-                } else {
-                    Vec::new()
+                filter: match *own {
+                    0 => Vec::new(),
+                    1 => vec![tag_is(tag, "y")],
+                    _ => vec![Filter::Or(vec![tag_is(tag, "x"), tag_is(tag, "y")])],
                 },
                 minimum_should_match: *minimum_should_match,
             }),

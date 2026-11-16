@@ -32,21 +32,25 @@ is not a root `bool`, and what "the request's filters" means once a caller's que
    `Compiled::query` holds every request filter at its root `bool` whatever a caller puts in, and L0 never searches
    without it.
 3. **The clauses describe the new query only while it holds their parts where they were.** A one-part compilation
-   checks the query against its part, as since ROADMAP 8.1.17. For any other, `with_query` compares the new root
-   with the current one: a `bool` without `should` clauses or a `minimum_should_match` whose `must` and `must_not`
-   hold the clauses' entries at the same indexes keeps them (a caller may add clauses after them). Otherwise the
-   compilation is detached from then on: `parts` and `root` are `None`, and L1 to L4 build no step. Before, any root
-   `bool` was read as the clauses' root, so a query with other entries at those indexes was read as their parts.
+   checks the query against its part, as since ROADMAP 8.1.17, so it describes a later query that holds the part
+   again. For any other, `with_query` compares the new root with the current one: a `bool` without `should` clauses
+   or a `minimum_should_match` whose `must` is the current one and whose `must_not` holds the clauses' entries at the
+   same indexes keeps them (a caller may add exclusions after them, which every level keeps). A required clause a
+   caller adds detaches them: the word levels rebuild `must` from the clauses alone and would relax it away unlisted.
+   Otherwise the compilation is detached from then on: `parts` and `root` are `None`, and L1 to L4 build no step. A
+   compilation of no clause is always detached by a replacement. Before, any root `bool` was read as the clauses'
+   root, so a query with other entries at those indexes was read as their parts.
 4. **L5 keeps the request filter, read from the compilation.** Its query is `match_all` under the root `bool`'s
    `must_not` and `filter`, for a compiled query and a programmatic one alike, plus the kept request filter when the
    root lacks it (it cannot, by item 2, but L5 does not depend on that). A caller's root `bool` keeps its exclusions
    and filters at L5. A caller's query with `should` clauses is wrapped to join the filter, so its exclusions are
    one level down and L5 does not keep them, as for a programmatic query with a deeper `must_not`.
 5. **The filter step drops the request filter alone.** Of a compiled query, the step is L0's root without the kept
-   request filter. A filter the caller's root holds itself is part of that query and stays, and a compiled query with
-   no request filter builds no step even when the caller's root has filters. A programmatic query is unchanged: every
-   filter of its root `bool` is dropped. The no-word rule is ADR-0047 item 2's, as refined on main (a recursive check
-   through `bool`, `boost` and `constant_score`).
+   request filter. A filter the caller's root holds itself is part of that query and stays, unless it equals a request
+   filter: the join does not add that one twice, so the two cannot be told apart, and it counts as the request's. A
+   compiled query with no request filter builds no step even when the caller's root has filters. A programmatic query
+   is unchanged: every filter of its root `bool` is dropped. The no-word rule is ADR-0047 item 2's, as refined on main
+   (a recursive check through `bool`, `boost` and `constant_score`).
 6. **Every other level is unchanged.** L1 to L4 read the clauses' root, which holds the request filter by item 2, and
    keep its `must_not` and `filter` as before. `LevelTransform::covers_earlier` still holds: every earlier step keeps
    the root's `must_not` and `filter`, which L5 keeps.
@@ -60,7 +64,8 @@ is not a root `bool`, and what "the request's filters" means once a caller's que
   replaces a filtered query with terms, `match_all`, a `should` root, `boost` and `constant_score` and checks every
   hit, and the filter step's property test puts a random query in place of the compiled one.
 - The cascade's plan, steps and `applied` are the same for a query that was not replaced: the root's filters are the
-  request filter, so L5 and the filter step build the same queries. Benchmarks are recorded in docs/benchmarks.md.
+  request filter, so L5 and the filter step build the same queries. `search_relaxed/l0`, `off`, `l1`–`l5` and
+  `filters/*` are within 1% of main measured last, either way, with one codegen unit (docs/benchmarks.md).
 
 ## Alternatives considered
 

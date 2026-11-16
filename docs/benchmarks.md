@@ -614,6 +614,26 @@ The default build reads `l2` 7% slower and the other cases 0–4% faster. With o
 adds about 460 µs to a cascade that found nothing: its planning and search of `w3 w40` over 4 segments, about what L0
 of the same words costs (`l0`), with one excluded step.
 
+With the request filter kept beside the compiled query (ROADMAP 8.2.14, ADR-0048), same collection and thread,
+2026-11-15, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Main is 7fe583d, built in its own worktree from its own bench file,
+saved as a criterion baseline and compared with `--baseline`; then both again with `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`.
+Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/(l0|off|l1|l2|l3|l4|l5|filters)'`. None of
+these queries is replaced, so every level builds the same steps: the only new work is L5 copying the root's filters
+and checking the kept request filter against them, and `Compiled::root` reading one more flag.
+
+| Recorded | build | `l0` | `off` | `l1` | `l2` | `l3` | `l4` | `l5/recency` | `l5/static_rank` | `filters/never` | `filters/last_resort` |
+|---|---|--:|--:|--:|--:|--:|--:|--:|--:|--:|--:|
+| main (7fe583d) | default | 477 µs | 480 µs | 897 µs | 1.45 ms | 21.8 ms | 2.64 ms | 17.2 µs | 869 µs | 328 µs | 819 µs |
+| ROADMAP 8.2.14 | default | 468 µs | 468 µs | 910 µs | 1.44 ms | 22.1 ms | 2.63 ms | 17.4 µs | 871 µs | 328 µs | 815 µs |
+| main (7fe583d) | 1 codegen unit | 463 µs | 461 µs | 927 µs | 1.39 ms | 22.0 ms | 2.57 ms | 16.8 µs | 729 µs | 330 µs | 798 µs |
+| ROADMAP 8.2.14 | 1 codegen unit | 456 µs | 463 µs | 938 µs | 1.40 ms | 22.3 ms | 2.54 ms | 16.8 µs | 731 µs | 328 µs | 799 µs |
+
+The default build reads `l0`, `off` and `l4/tiers` 1.7–2.5% faster and `l1`, `l3` and `l5/recency` 1.3–1.9% slower.
+With one codegen unit, `l5/recency`, `l5/static_rank` and `filters/*` show no change, and only `l1` (+1.4%) and `l3`
+(+1.7%) stay above criterion's noise threshold. Main run again after the branch, against its own baseline, reads the
+same drift: `l1` 942 µs (+1.6%) and `l3` 22.2 ms (+0.9%), so the branch is within 1% of main measured last, either way.
+`l2_every_step`, `l3/tiers` and `l4/tiers` are within 1% in both builds.
+
 ## `persia-engine` relevance
 
 `cargo test -p persia-engine --test relevance` (ROADMAP 7.8.2, 7.8.4): 18 user-text queries with graded judgments over

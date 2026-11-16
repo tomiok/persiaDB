@@ -1869,6 +1869,22 @@ fn a_query_put_in_place_keeps_the_request_filter() {
     // A filter joined after the replacement is kept beside the first.
     let both = compiled.with_query(title("a")).with_filter([own.clone()]);
     assert_eq!(both.filter(), [nike.clone(), own.clone()]);
+    // Each filter is kept once, as the root holds it once.
+    let again = both.clone().with_filter([nike.clone()]);
+    assert_eq!(again.filter(), [nike.clone(), own.clone()]);
+    let Query::Bool(root) = again.query() else {
+        panic!()
+    };
+    assert_eq!(root.filter, [nike.clone(), own.clone()]);
+    // A compilation of no clause has nothing to describe: any query put in detaches it.
+    let empty = compiler(&schema)
+        .compile("", &DefaultFields::all(&schema), &QueryLimits::default())
+        .with_filter([nike.clone()])
+        .with_query(Query::Bool(BoolQuery {
+            must: vec![title("a")],
+            ..BoolQuery::default()
+        }));
+    assert_eq!(empty.root(), None);
     let Query::Bool(root) = both.query() else {
         panic!()
     };
@@ -1897,16 +1913,16 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
     let parts: Vec<Vec<Query>> = (0..3)
         .map(|i| compiled.parts(i).unwrap().to_vec())
         .collect();
-    // Clauses added after the parts: still the clauses' root, the request filter once.
+    // Exclusions added after the parts: still the clauses' root, the request filter once.
     let mut more = root.clone();
-    more.must.push(Query::MatchAll);
     more.must_not.push(Query::MatchAll);
     let kept = compiled.clone().with_query(Query::Bool(more.clone()));
     for (i, p) in parts.iter().enumerate() {
         assert_eq!(kept.parts(i), Some(p.as_slice()));
     }
     assert_eq!(kept.root(), Some(&more));
-    // Parts moved, an exclusion lost, `should` clauses or a `minimum_should_match` added: detached.
+    // Parts moved, an exclusion lost, a required clause added (the word levels would relax it away, rebuilding `must`
+    // from the clauses), `should` clauses or a `minimum_should_match` added: detached.
     let mut moved = root.clone();
     moved.must.reverse();
     let mut lost = root.clone();
@@ -1915,7 +1931,9 @@ fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
     should.should.push(Query::MatchAll);
     let mut at_least = root.clone();
     at_least.minimum_should_match = 1;
-    for changed in [moved, lost, should, at_least] {
+    let mut required = root.clone();
+    required.must.push(Query::MatchAll);
+    for changed in [moved, lost, required, should, at_least] {
         let detached = compiled.clone().with_query(Query::Bool(changed.clone()));
         assert_eq!(
             (detached.root(), detached.parts(0), detached.parts(2)),

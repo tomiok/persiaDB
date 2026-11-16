@@ -121,9 +121,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   to the new query again. So `filters: "never"` holds whatever query a caller puts in: before, a query that did not
   hold the clauses' parts made L5 `fallback` search `match_all` without the filter. L5 now keeps the request filter
   beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) drops the request filter alone and
-  keeps a filter the caller's own root holds. A query put in place of a compilation of several parts keeps its clauses
-  only while it holds their parts at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then
-  on (before, any root `bool` was read as the clauses' root).
+  keeps a filter the caller's own root holds (one equal to the request filter counts as the request's). A query put
+  in place of a compilation of several parts keeps its clauses only while its root's `must` is theirs exactly and its
+  `must_not` holds theirs at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then on
+  (before, any root `bool` was read as the clauses' root, and a required clause added beside them was relaxed away).
 - `persia-engine` (breaking): every cursor records the relaxation settings of its search (ROADMAP 8.3.1; SPEC §7.4,
   §7.6; ADR-0045): levels, `min_results`, `fill` and `filters`, but not `budget_ms`. They are `None` for a plain
   search and for a search of L0 alone. A page under other settings is the new `RequestError::CursorRelax`, so a

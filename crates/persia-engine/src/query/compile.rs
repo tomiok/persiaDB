@@ -382,23 +382,30 @@ impl Compiled {
         }
         let query = std::mem::replace(&mut self.query, Query::MatchAll);
         self.query = join(query, &filter, self.part.as_ref());
-        self.filter.extend(filter);
+        for f in filter {
+            if !self.filter.contains(&f) {
+                self.filter.push(f);
+            }
+        }
         self
     }
 
     /// This compilation searching `query` in place of [`Self::query`], joined to the request filter ([`Self::filter`])
     /// as [`Self::with_filter`] joins it (SPEC §7.1.1, ROADMAP 8.2.14): a caller cannot drop the request filter by
-    /// replacing the query, so no relaxation level searches without it. Pass a query without the request filter:
-    /// one it holds at its root already is not added again.
+    /// replacing the query, so no relaxation level before the filter step searches without it. Pass a query without the
+    /// request filter: a root filter equal to one of its filters is not added again, and counts as the request's (the
+    /// filter step drops it).
     ///
     /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a
-    /// one-part compilation's part as itself or as the one `must` clause of a `bool` without `should` clauses, or the
-    /// clauses' entries of the root's `must` and `must_not` at the same indexes, in a root without `should` clauses or a
-    /// `minimum_should_match` (a caller may add clauses after them). Otherwise [`Self::parts`] and [`Self::root`] are
-    /// `None` from then on, and the word levels of the cascade build no step from the clauses; L5 `fallback` keeps the
-    /// request filter beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the request
-    /// filter alone (SPEC §7.6). The text, the clauses' spans and [`Self::effective`] still state what the user wrote.
-    /// The new query is not checked against [`Self::limits`]: a search checks it as it checks any query (SPEC §7.1.3).
+    /// one-part compilation's part as itself or as the one `must` clause of a `bool` without `should` clauses, or, for
+    /// any other compilation, a root without `should` clauses or a `minimum_should_match` whose `must` is the clauses'
+    /// entries exactly and whose `must_not` holds theirs at the same indexes (a caller may add exclusions after them:
+    /// every level keeps the root's `must_not`, but rebuilds `must` from the clauses alone). Otherwise [`Self::parts`]
+    /// and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
+    /// compilation's again once a query holds its part, any other's from then on. L5 `fallback` keeps the request
+    /// filter beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the request filter alone
+    /// (SPEC §7.6). The text, the clauses' spans and [`Self::effective`] still state what the user wrote. The new query
+    /// is not checked against [`Self::limits`]: a search checks it as it checks any query (SPEC §7.1.3).
     ///
     /// ```
     /// use persia_analysis::AnalyzerRegistry;
@@ -439,22 +446,22 @@ impl Compiled {
     }
 
     /// Whether `query`, put in place of a compilation of other than one part, holds every clause's parts where the
-    /// current root holds them: a `bool` without `should` clauses or a `minimum_should_match` with the same entries of
-    /// `must` and `must_not` at the clauses' indexes. False once the clauses describe no root.
+    /// current root holds them: a `bool` without `should` clauses or a `minimum_should_match` whose `must` is the
+    /// current one (the clauses' parts, which the word levels rebuild their steps from, so a `must` clause added beside
+    /// them would be relaxed away), and whose `must_not` holds the clauses' at the same indexes. False once the clauses
+    /// describe no root, and for a compilation of no clause, which has nothing to describe.
     fn holds_parts(&self, query: &Query) -> bool {
         let (Some(old), Query::Bool(new)) = (self.root(), query) else {
             return false;
         };
-        new.should.is_empty()
+        !self.clauses.is_empty()
+            && new.should.is_empty()
             && new.minimum_should_match == 0
-            && self.clauses.iter().all(|clause| {
-                let (old, new) = if clause.negated {
-                    (&old.must_not, &new.must_not)
-                } else {
-                    (&old.must, &new.must)
-                };
-                old.get(clause.parts.clone())
-                    .is_some_and(|parts| new.get(clause.parts.clone()) == Some(parts))
+            && new.must == old.must
+            && self.clauses.iter().filter(|c| c.negated).all(|clause| {
+                old.must_not
+                    .get(clause.parts.clone())
+                    .is_some_and(|parts| new.must_not.get(clause.parts.clone()) == Some(parts))
             })
     }
 }

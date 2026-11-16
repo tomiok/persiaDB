@@ -1295,9 +1295,11 @@ request's `filter` joins `q` (added to a root `bool` without `should` clauses or
 wrapped; a filter the root holds already is not added twice). No query a caller puts in can drop it, so no level of
 §7.6 searches without it. The clauses describe the new query only while it holds their parts where they were: for a
 single required part, that part or a `bool` requiring it (without `should` clauses or a `minimum_should_match`); for
-any other compilation, a root `bool` without those whose `must` and `must_not` hold the clauses' entries at the same
-indexes (clauses a caller adds come after them). A query that does not hold them no longer has its clauses' parts,
-from then on, so the cascade builds no step from them. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+any other compilation, a root `bool` without those whose `must` is the clauses' entries exactly and whose `must_not`
+holds theirs at the same indexes (exclusions a caller adds come after them; a required clause a caller adds would be
+relaxed away, as the word levels rebuild `must` from the clauses alone, so it detaches them). A query that does not
+hold them leaves the clauses without parts, so the cascade builds no step from them: a single required part's again
+once a query holds it, any other compilation's from then on. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
 that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
@@ -1870,7 +1872,8 @@ step, listed as `filters`, whose query is L0's with the request's filters droppe
 programmatic query, every filter of a root `bool`; of a query compiled from `q`, the request's filter, which the
 compiled query keeps beside its query (§7.1.1, ROADMAP 8.2.14, ADR-0048), and nothing else. A query a caller put in
 place of the compiled one holds the request filter at its root (it is joined to it, §7.1.1), and the step drops that
-filter alone: a filter the caller's root `bool` holds itself is part of that query and stays, and with no request
+filter alone: a filter the caller's root `bool` holds itself is part of that query and stays, unless it equals a request
+filter, which the join does not add twice, so it counts as the request's and is dropped; with no request
 filter there is nothing to drop. Every other
 clause stays as L0 has it: its required clauses, its `should` clauses and `minimum_should_match`, its excluded clauses
 (a user who wrote `-blue` never gets blue, as at L5), and any filter deeper in the query. The request's filters are
