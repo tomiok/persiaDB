@@ -223,7 +223,7 @@ let compiled = compiler.compile(
     &DefaultFields::all(&schema),
     &limits,
 );
-compiled.query.validate(&schema, &limits)?;
+compiled.query().validate(&schema, &limits)?;
 
 let filter = Filter::from_json(
     r#"{"range": ["price", {"lte": 100}]}"#,
