@@ -99,8 +99,8 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
     on M11. The gRPC and HTTP clients stay 14.2–14.5 and still depend on M11 and M13. Parity with those
     clients, where the operation exists in-process, is the 14.1 scenarios. The browser package stays M28.
     The read-only WASM build stays 16.6. Nothing is published before the v1.0 tag (decision 9, ROADMAP 16.4.1).
-    The M16 and 21.1 leaves that 14.6 names are the same work; they are not built twice. Naming the Python
-    package in SPEC §13 stays 21.3.1, which 14.6 does not pull forward.
+    The M16, 21.1, and 21.3.1 leaves that 14.6 names are the same work; they are not built twice. SPEC §13
+    names the Python package in 14.6.11, which pulls 21.3.1 into v1.0. The Python HTTP client stays 21.2 (v1.2).
 
 `persia-ffi`, when it is added, depends only on `persia`. That edge is recorded in `ALLOWED`
 (`xtask/src/check_deps.rs`) in the same pull request as the crate. `sdk/node` stays **outside** the Cargo

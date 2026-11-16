@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **364 of 563** MVP leaves done (65%), 0 in progress (last snapshot 2026-11-16). Post-MVP work is 0 of 180 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **364 of 564** MVP leaves done (65%), 0 in progress (last snapshot 2026-11-16). Post-MVP work is 0 of 180 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -258,7 +258,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M11** Server | ⏳ blocked | 0/23 |
 | **M12** Cloud storage backends | ⏳ blocked | 0/29 |
 | **M13** Distribution & Kubernetes | ⏳ blocked | 0/24 |
-| **M14** SDKs | ⏳ blocked | 0/29 |
+| **M14** SDKs | ⏳ blocked | 0/30 |
 | **M15** Benchmarks, hardening, v1.0 | ⏳ blocked | 0/23 |
 <!-- END GENERATED progress:milestones -->
 
@@ -279,13 +279,17 @@ From the table under [After v1.0](./ROADMAP.md) on `main`. None of these leaves 
 
 v2.1, v2.2, and v2.3 are separate targets: UI components, AI search, and on-device storage. Geo stays on v3.0 with the enterprise format work. The ordering notes are in that ROADMAP section.
 
+The embedded SDKs core moved to v1.0 via [14.6](./ROADMAP.md) (inside M14): `persia-ffi` and `persia.h`, the embedded Go SDK, `@persiadb/node`, the embedded Python package, and their prebuilt libraries. The rows above are unchanged. Still later: 16.4.1 (publish only after the v1.0 tag) and 16.6 (read-only WASM) on v1.1, and the Python HTTP client (21.2) on v1.2.
+
 ## SDKs
 
 Rust is the native API. The facade crate is [`persia`](./crates/persia/src/lib.rs), a placeholder until M10. The libraries under it are what a Rust caller can use today, as in the [quickstart](#index-documents-and-search-them).
 
-Go and TypeScript embedded bindings are planned for **v1.1** (M16). The design is [ADR-0018](./docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](./docs/sdk/README.md), and it is not implemented. One C ABI (`persia-ffi`) wraps `persia`. Go calls it through cgo and a static library by default (`sdk/persia`); an optional `persia_purego` build tag dynamically loads the shared library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (`@persiadb/node`) for Node.js, Bun, and Deno. Ranking, relaxation, and crash recovery stay in the Rust core.
+The embedded bindings are planned for **v1.0** ([ROADMAP 14.6](./ROADMAP.md)). They depend on the `persia` facade (M10). The design is [ADR-0018](./docs/adr/0018-embedded-sdk-bindings.md) and [`docs/sdk/`](./docs/sdk/README.md), and it is not implemented. One C ABI (`persia-ffi`) wraps `persia`. Go calls it through cgo and a static library by default (`sdk/persia`); an optional `persia_purego` build tag dynamically loads the shared library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API. TypeScript calls it through N-API (`@persiadb/node`) for Node.js, Bun, and Deno. Python binds the committed `persia.h` with cffi or ctypes, and installing that package does not need a Rust toolchain. Ranking, relaxation, and crash recovery stay in the Rust core.
 
-Two other clients are a different product, also unstarted: network clients in Rust (`persia-client`) and Go (`persia-go`) speak gRPC to `persia-server` (SPEC §13, M14). A Python SDK is v1.2 (M21), after the embedded bindings.
+What stays later inside M16 and M21: publishing only after the v1.0 tag (16.4.1) and the read-only WASM build (16.6) are v1.1. The Python HTTP client (21.2) is v1.2. SPEC §13 names the Python package in 14.6.11.
+
+Network clients in Rust (`persia-client`) and Go (`persia-go`) are a different product, also unstarted. They speak gRPC to `persia-server` (SPEC §13, M14) and still depend on the server (M11) and sharding (M13).
 
 ## Built with Claude Opus 5.5
 
