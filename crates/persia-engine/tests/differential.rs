@@ -56,10 +56,11 @@
 
 mod reference;
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::ops::Bound;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::db::{
@@ -1250,7 +1251,7 @@ fn collection_searches_match_the_reference() {
         case(),
         |case| run_case(&case),
     );
-    let coverage = COVERAGE.lock().unwrap().clone();
+    let coverage = COVERAGE.with_borrow(Clone::clone);
     eprintln!("steps the reference cascade built: {coverage:#?}");
     if std::env::var("PROPTEST_CASES").is_err() {
         for key in [
@@ -1435,18 +1436,33 @@ fn titled(title: &[&str], body: &[&str]) -> Values {
     }
 }
 
-/// `text` relaxed with the collection's levels over the collection `ops` leave, its steps held to `max_expansions`,
+/// A query a hand test relaxes: user text, or a programmatic query.
+enum Input<'a> {
+    Text(&'a str),
+    Query(RefQuery),
+}
+
+/// `input` relaxed with the collection's levels over the collection `ops` leave, its steps held to `max_expansions`,
 /// after every operation of the case is checked against the reference (invariants 1–5).
-fn search_text(ops: &[Op], text: &str, max_expansions: usize) -> RelaxedResults {
-    let clauses = text.split(' ').map(|w| (w.to_owned(), false)).collect();
+fn search_input(ops: &[Op], input: &Input<'_>, max_expansions: usize) -> RelaxedResults {
+    let (queries, texts) = match input {
+        Input::Text(text) => {
+            let clauses = text.split(' ').map(|w| (w.to_owned(), false)).collect();
+            (
+                Vec::new(),
+                vec![Text {
+                    clauses,
+                    filter: None,
+                }],
+            )
+        }
+        Input::Query(q) => (vec![(q.clone(), None)], Vec::new()),
+    };
     let case = Case {
         params: [(1.0, 1.2, 0.75); 2],
         ops: ops.to_vec(),
-        queries: Vec::new(),
-        texts: vec![Text {
-            clauses,
-            filter: None,
-        }],
+        queries,
+        texts,
         max_expansions,
         k: 2,
     };
@@ -1458,12 +1474,6 @@ fn search_text(ops: &[Op], text: &str, max_expansions: usize) -> RelaxedResults 
     for op in ops {
         apply(&mut db, &mut model, &fields, op);
     }
-    let registry = AnalyzerRegistry::builtin();
-    let compiled = QueryCompiler::new(&schema, &registry).unwrap().compile(
-        text,
-        &DefaultFields::all(&schema),
-        &QueryLimits::default(),
-    );
     let relax = RelaxPlan::new(schema.relaxation(), &RelaxOptions::default())
         .unwrap()
         .with_limits(QueryLimits {
@@ -1479,9 +1489,26 @@ fn search_text(ops: &[Op], text: &str, max_expansions: usize) -> RelaxedResults 
         ..SearchRequest::default()
     };
     let exec = Execution::default().threads(Threads::Current);
-    views
-        .search_relaxed(&compiled, &request, &relax, &exec)
-        .unwrap()
+    match input {
+        Input::Text(text) => {
+            let registry = AnalyzerRegistry::builtin();
+            let compiled = QueryCompiler::new(&schema, &registry).unwrap().compile(
+                text,
+                &DefaultFields::all(&schema),
+                &QueryLimits::default(),
+            );
+            views.search_relaxed(&compiled, &request, &relax, &exec)
+        }
+        Input::Query(q) => {
+            let query = engine_query(q, &fields);
+            views.search_relaxed(&query, &request, &relax, &exec)
+        }
+    }
+    .unwrap()
+}
+
+fn search_text(ops: &[Op], text: &str, max_expansions: usize) -> RelaxedResults {
+    search_input(ops, &Input::Text(text), max_expansions)
 }
 
 fn hit_ids(out: &RelaxedResults) -> Vec<&str> {
@@ -1511,12 +1538,59 @@ fn a_cut_gives_the_expansions_left_in_query_order() {
     assert_eq!(hit_ids(&out), ["d0", "d1", "d2", "d3", "d4"]);
 }
 
+/// SPEC §7.1.3 and §7.6 by hand (ROADMAP 8.1.19): a cut L2 rung stands for no earlier rung, so both stay excluded and
+/// count in full. `bool { must: [prefix(ca, 50), cat, bee] }` under a limit of 120: L2's 75% rung (count 2) fits
+/// beside L0 (50 + 50), its 50% rung does not beside L0 and the 75% rung, and is cut to the 20 left
+/// (`drop_terms:50%:cut`). L3 then counts L0, the 75% rung and the cut rung (120): its step is skipped, where it would be
+/// cut had the cut rung replaced the 75% one. Its tier step is not built: L2's last rung was built and searched. L5
+/// finds the one document.
+#[test]
+fn a_cut_rung_leaves_the_earlier_rungs_excluded() {
+    let word = |w: &str| {
+        RefQuery::Word(vec![Clause {
+            field: BODY,
+            term: w.to_owned(),
+            weight: 1.0,
+        }])
+    };
+    let root = RefQuery::Bool {
+        must: vec![
+            RefQuery::Prefix {
+                field: BODY,
+                prefix: "ca".to_owned(),
+                max_expansions: 50,
+                weight: 1.0,
+            },
+            word("cat"),
+            word("bee"),
+        ],
+        should: Vec::new(),
+        must_not: Vec::new(),
+        filter: Vec::new(),
+        minimum_should_match: 0,
+    };
+    let ops = [Op::Put(0, titled(&[], &["elephant"]))];
+    let out = search_input(&ops, &Input::Query(root), 120);
+    assert_eq!(
+        out.relaxation.applied,
+        [
+            "drop_terms:75%",
+            "drop_terms:50%:cut",
+            "prefix:skipped",
+            "fallback"
+        ]
+    );
+    assert_eq!(hit_ids(&out), ["d0"]);
+}
+
 /// SPEC §7.6 by hand (ROADMAP 8.1.21): a word no document holds is corrected to the term of highest `df` within its
 /// distance over the default fields, ties to the field first in the `combined` (`body`), and `effective` reads it.
 /// `crat` is one swap from `cart` and one deletion from `cat`; `elehpant`, of 8 characters, is one swap from
 /// `elephant`, so the tier step `fuzzy:1` corrects it. L3 comes first and finds nothing.
 #[test]
 fn a_correction_is_the_highest_df_over_the_fields_ties_to_the_first() {
+    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
+    assert!(fields[BODY] < fields[TITLE], "body is first in query order");
     let correction = |out: &RelaxedResults| -> Vec<(String, String)> {
         let c = &out.relaxation.corrected;
         c.iter()
@@ -1625,13 +1699,16 @@ fn search_relaxed(
     .unwrap()
 }
 
-/// How often the reference cascade built each kind of step, over a test's cases (ROADMAP 8.1.19, 8.1.21): its
-/// `applied` (`:cut` and `:skipped` included), and `"<applied> hit"` when it found a hit. The property must not pass
-/// because the levels it checks never run.
-static COVERAGE: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
+thread_local! {
+    /// How often the reference cascade built each kind of step, over a test's cases (ROADMAP 8.1.19, 8.1.21): its
+    /// `applied` (`:cut` and `:skipped` included), and `"<applied> hit"` when it found a hit. The property must not pass
+    /// because the levels it checks never run. Per thread, as proptest runs a test's cases on its own thread: another test
+    /// of the binary, run beside it by `cargo test`, does not count.
+    static COVERAGE: RefCell<BTreeMap<String, usize>> = const { RefCell::new(BTreeMap::new()) };
+}
 
 fn cover(key: String) {
-    *COVERAGE.lock().unwrap().entry(key).or_default() += 1;
+    COVERAGE.with_borrow_mut(|c| *c.entry(key).or_default() += 1);
 }
 
 /// Invariant 5: relaxed with the collection's levels (ROADMAP 8.1.19), held to the case's `max_expansions` (SPEC
@@ -1664,6 +1741,15 @@ fn check_relaxed(
     // The collection's levels (L1 builds no step: the collection has no synonyms, and a programmatic query no text),
     // then a plan without L2, whose L3 and L4 run on L0's misses alone, and whose L3 builds the tier step
     // `prefix:last` whenever it expands another term beside the last (SPEC §7.6).
+    prop_assert_eq!(
+        schema.relaxation().levels.resolve(),
+        [
+            Level::Synonyms,
+            Level::DropTerms,
+            Level::Prefix,
+            Level::Fuzzy
+        ]
+    );
     let collection = [RelaxLevel::DropTerms, RelaxLevel::Prefix, RelaxLevel::Fuzzy];
     let without_l2 = [RelaxLevel::Prefix, RelaxLevel::Fuzzy];
     // `"last_resort"` builds what `"never"` does, and L6 after it, so `"never"` runs once, on the plan without L2.
@@ -2169,6 +2255,24 @@ impl Reference<'_> {
         step: &RefQuery,
         excluded: &[(RelaxLevel, RefQuery)],
     ) -> Option<(RefQuery, bool)> {
+        // The generated queries stay within every other limit (terms, clauses, depth), which this model leaves out: an
+        // engine step over one would be skipped where the reference searches it.
+        let whole = RefQuery::Bool {
+            must: vec![step.clone()],
+            should: Vec::new(),
+            must_not: excluded.iter().map(|(_, q)| q.clone()).collect(),
+            filter: Vec::new(),
+            minimum_should_match: 0,
+        };
+        let others = QueryLimits {
+            max_expansions: usize::MAX,
+            ..QueryLimits::default()
+        };
+        let checked = engine_query(&whole, &ids(self.schema)).validate(self.schema, &others);
+        assert!(
+            checked.is_ok(),
+            "a step over a limit the reference does not model: {checked:?}"
+        );
         let before: usize = excluded.iter().map(|(_, q)| expansions(q)).sum();
         let own = expansions(step);
         if before + own <= self.max_expansions {
@@ -2242,6 +2346,9 @@ impl Reference<'_> {
     /// field's weight over its schema boost when they differ; within a `bool` its `must` and `should` clauses (the
     /// last `must` clause and every `should` clause holding the last term of a last `q`), and under a `boost`.
     /// Phrases, `must_not`, filters, expansions, `match_all` and `constant_score` stay as they are.
+    ///
+    /// Two details follow the engine (`relax/words.rs`), not a SPEC rule, and these generators never reach them: a
+    /// `combined` left with one `should` clause is that clause, and an empty term is kept exact.
     fn rewrite(&self, q: &RefQuery, last: bool, leaf: &Leaf<'_>) -> Option<RefQuery> {
         let open = |c: &Clause| {
             (c.field != TAG && !c.term.is_empty()).then(|| leaf(c.field, &c.term, last))?

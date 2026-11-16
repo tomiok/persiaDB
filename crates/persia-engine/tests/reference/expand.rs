@@ -1,6 +1,9 @@
 //! Reference `prefix` and `fuzzy` expansion (SPEC §7.1), written from the SPEC text alone: the terms a field holds in
 //! the documents the statistics count, those a query accepts, the `max_expansions` of highest collection `df` kept
 //! (ties by byte order), and the optimal string alignment distance by its textbook table, over Unicode scalar values.
+//!
+//! The differential suite's terms are all valid UTF-8 (documents hold strings), so the rule for a byte that is not is
+//! checked here, by hand, alone.
 
 #![allow(dead_code, clippy::cast_precision_loss)]
 

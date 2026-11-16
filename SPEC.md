@@ -1251,7 +1251,8 @@ by Unicode whitespace and all required (default AND); each is `[-][field:](word 
 
 - A **word** is analyzed with the query-time analyzer (§6.3.4) of each default field: the `text` fields named by
   `fields` (`"name"` or `"name^weight"`; a weight overrides the schema `boost` as `w_f`), or every `text` field with its
-  `boost`. Fields where the word analyzes to no token (a stopword) are left out. When the fields agree on how to
+  `boost`. The default fields are in that order: as `fields` names them, else in ascending field id (§6.2.1), and each
+  `combined` lists its fields in it. Fields where the word analyzes to no token (a stopword) are left out. When the fields agree on how to
   split the word (no two of their token spans overlap unless equal; a field may lack a span, as for a stopword), the
   tokens of each span become one `combined` over the fields that have it, each required: `e-mail` gives two. When
   they split it differently (`standard` gives `e`, `mail`; `whitespace` keeps `e-mail`), one field's split must not
@@ -1340,9 +1341,10 @@ any cut ones after it), not every one. The limits are the ones the search sets, 
 defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
 its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
 first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
-`applied` lists it as `"<applied>:cut"`. Each becomes the smaller of its own and one shared count, the highest whose sum
-fits, and the expansions that count leaves go one each to the queries it lowered, in query order (depth first, a
-`bool`'s `must` clauses before its `should` clauses), as L1's alternatives are cut below (ROADMAP 8.1.19). Those under a `must_not` of the step count but are not cut: fewer would
+`applied` lists it as `"<applied>:cut"`. Each such `max_expansions` becomes the smaller of its own and one shared count
+`c`, the highest `c` whose sum fits; the expansions left over at `c` (fewer than the queries `c` lowered) go one each, in
+query order (depth first, a `bool`'s `must` clauses before its `should` clauses), to the first queries `c` lowered, as
+L1's alternatives are cut below (ROADMAP 8.1.19). Those under a `must_not` of the step count but are not cut: fewer would
 exclude less, so the step would match more than its level built. A step that fits no cut (over terms, clauses or depth, or with fewer expansions left than it has
 such queries) is *skipped*: it is not searched, `applied` lists it as `"<applied>:skipped"`, later steps do not
 exclude its matches, and the cascade goes on to the next step, checked the same way. A step that is invalid for
@@ -1747,7 +1749,8 @@ expanded whatever its length, as the word a user may still be typing. Excluded c
 and `field:` clauses are not expanded, since they ask for their text exactly. Neither are a field's terms when its
 analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
-`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field the `prefix`. A `prefix`
+`bool` of `should` clauses: its exact fields as one `combined`, and per expanded field, in the `combined`'s order, the
+`prefix`. A `prefix`
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
 when the word's `fields` weight differs from that boost. The boost is their ratio, clamped to
 `[f64::from_bits(1), 1000]` (§7.1: `0 < w ≤ 1000`; the low end is the least positive `f64`, because a ratio
@@ -1780,7 +1783,8 @@ gets a tier step, `fuzzy:1` (below). Its steps are not nested, as at L3.
 Its `corrected` and `effective` say what L4 changed ("did you mean", ROADMAP 8.2.4.3). A word is *corrected* when it
 is a required word clause of one part (one token over the default fields: a `term` or a `combined`), no field of it
 holds its term (collection `df` 0, so no document does), and a field the step rewrites has a term within the word's
-distance that a document holds. Its correction is the term that field's `fuzzy` keeps first (§7.1: the highest
+distance of collection `df` above 0 (a segment's deleted documents count, §7.2, so until a merge drops them the term may
+be one only deleted documents hold). Its correction is the term that field's `fuzzy` keeps first (§7.1: the highest
 collection `df`, ties by byte order), the highest `df` over the word's fields, ties to the field first in the
 `combined`: so the step searches it under any cut of §7.1.3, which keeps the most frequent terms. `corrected` lists
 each such word in text order, as written (`Zapatilas`), with its correction as the index holds it (`zapatillas`:
