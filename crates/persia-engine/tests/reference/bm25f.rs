@@ -27,7 +27,7 @@ pub struct Corpus {
 }
 
 /// One field of a query word: its index, its term and its weight `w_f`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Clause {
     pub field: usize,
     pub term: String,
@@ -62,13 +62,19 @@ impl Corpus {
     /// The score of `doc` for the word `clauses` (SPEC §7.2): `df` is the largest of the clauses', `k1` the weighted
     /// mean of the fields'.
     pub fn score(&self, clauses: &[Clause], doc: &Doc) -> f64 {
-        let n = self.n();
         let df = clauses
             .iter()
             .map(|c| self.df(c.field, &c.term))
             .max()
-            .unwrap_or(0)
-            .min(n);
+            .unwrap_or(0);
+        self.score_with_df(clauses, doc, df)
+    }
+
+    /// As [`Self::score`], with the document frequency `df` given: a `prefix` or `fuzzy` scores each term it keeps
+    /// with the largest `df` among them (SPEC §7.1).
+    pub fn score_with_df(&self, clauses: &[Clause], doc: &Doc, df: u64) -> f64 {
+        let n = self.n();
+        let df = df.min(n);
         let idf = (1.0 + (n as f64 - df as f64 + 0.5) / (df as f64 + 0.5)).ln();
         let wsum: f64 = clauses.iter().map(|c| c.weight).sum();
         let k1 = clauses

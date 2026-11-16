@@ -1340,7 +1340,9 @@ any cut ones after it), not every one. The limits are the ones the search sets, 
 defaults; L0 is the caller's query, already held to them, and is only checked to be valid. A step over a limit has
 its expansions cut to what is left: the `max_expansions` of its `prefix` and `fuzzy` queries are lowered, the largest
 first and none below 1, to sum to exactly the expansions left (each query keeps its most frequent terms, §7.1), and
-`applied` lists it as `"<applied>:cut"`. Those under a `must_not` of the step count but are not cut: fewer would
+`applied` lists it as `"<applied>:cut"`. Each becomes the smaller of its own and one shared count, the highest whose sum
+fits, and the expansions that count leaves go one each to the queries it lowered, in query order (depth first, a
+`bool`'s `must` clauses before its `should` clauses), as L1's alternatives are cut below (ROADMAP 8.1.19). Those under a `must_not` of the step count but are not cut: fewer would
 exclude less, so the step would match more than its level built. A step that fits no cut (over terms, clauses or depth, or with fewer expansions left than it has
 such queries) is *skipped*: it is not searched, `applied` lists it as `"<applied>:skipped"`, later steps do not
 exclude its matches, and the cascade goes on to the next step, checked the same way. A step that is invalid for
