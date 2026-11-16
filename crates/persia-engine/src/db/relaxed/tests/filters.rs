@@ -333,6 +333,28 @@ fn a_query_put_in_place_never_loses_the_request_filter() {
             ("g", RelaxLevel::Filters)
         ]
     );
+    // A clone of the compiled query (which holds the request filter) with a `should` clause added: the join wraps it,
+    // and the filter step drops the request filter from the clone's root too, so it finds what the filter rejected.
+    let Query::Bool(mut clone) = red_shoes.query().clone() else {
+        panic!()
+    };
+    clone.should.push(term("again"));
+    let cloned = red_shoes.clone().with_query(Query::Bool(clone));
+    let last = run(
+        &views,
+        &cloned,
+        &request(10),
+        r#"{"min_results": 7, "filters": "last_resort"}"#,
+    );
+    let dropped: Vec<(&str, RelaxLevel)> = ids(&last)
+        .into_iter()
+        .filter(|&(_, level)| level == RelaxLevel::Filters)
+        .collect();
+    // `red shoes` without the filter, `again` scoring: `g` holds it.
+    assert_eq!(
+        dropped,
+        [("g", RelaxLevel::Filters), ("e", RelaxLevel::Filters)]
+    );
 }
 
 #[test]

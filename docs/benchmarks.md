@@ -617,7 +617,8 @@ of the same words costs (`l0`), with one excluded step.
 With the request filter kept beside the compiled query (ROADMAP 8.2.14, ADR-0048), same collection and thread,
 2026-11-15, rustc 1.99.0, AMD Ryzen 5 3600, Linux. Main is 7fe583d, built in its own worktree from its own bench file,
 saved as a criterion baseline and compared with `--baseline`; then both again with `CARGO_PROFILE_BENCH_CODEGEN_UNITS=1`.
-Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/(l0|off|l1|l2|l3|l4|l5|filters)'`. None of
+Command: `cargo bench -p persia-engine --bench search -- 'search_relaxed/(l0|off|l1|l2|l3|l4|l5|filters)'` (unanchored, so it
+also runs `l2_every_step`, `l3/tiers` and `l4/tiers`, in the second table). None of
 these queries is replaced, so every level builds the same steps: the only new work is L5 copying the root's filters
 and checking the kept request filter against them, and `Compiled::root` reading one more flag.
 
@@ -632,7 +633,20 @@ The default build reads `l0`, `off` and `l4/tiers` 1.7–2.5% faster and `l1`, `
 With one codegen unit, `l5/recency`, `l5/static_rank` and `filters/*` show no change, and only `l1` (+1.4%) and `l3`
 (+1.7%) stay above criterion's noise threshold. Main run again after the branch, against its own baseline, reads the
 same drift: `l1` 942 µs (+1.6%) and `l3` 22.2 ms (+0.9%), so the branch is within 1% of main measured last, either way.
-`l2_every_step`, `l3/tiers` and `l4/tiers` are within 1% in both builds.
+
+| Recorded | build | `l2_every_step` | `l3/tiers` | `l4/tiers` |
+|---|---|--:|--:|--:|
+| main (7fe583d) | default | 11.7 ms | 22.3 ms | 358 µs |
+| ROADMAP 8.2.14 | default | 11.6 ms | 22.2 ms | 352 µs |
+| main (7fe583d) | 1 codegen unit | 11.7 ms | 22.2 ms | 354 µs |
+| ROADMAP 8.2.14 | 1 codegen unit | 11.7 ms | 22.3 ms | 357 µs |
+
+`l2_every_step` and `l3/tiers` are within 1% of main in both builds; `l4/tiers` reads 1.7% faster in the default
+build and 0.5% slower with one codegen unit.
+
+After the review fix that drops the request filter from a caller root the join wrapped too (one comparison per filter
+step), `filters/last_resort` with one codegen unit reads 792 µs, +0.5% on main, within noise; `filters/never`, which
+never builds the step, reads 337 µs (+1.9%) in the same run, the drift above.
 
 ## `persia-engine` relevance
 

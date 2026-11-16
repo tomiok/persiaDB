@@ -12,8 +12,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
   last word level with `fallback: "none"`). Its step is L0's query with the filters of its root `bool` dropped (a
-  programmatic root `bool`'s `filter`, or a compiled query's request filter, kept beside it since ROADMAP 8.2.14);
-  excluded clauses (`-blue`) stay excluded.
+  programmatic root `bool`'s `filter`, or a compiled query's request filter: the step drops it, and since ROADMAP 8.2.14
+  the compilation stores it beside its query, `Compiled::filter`); excluded clauses (`-blue`) stay excluded.
   A query that searches no word builds no such step, so browsing a category never pads it with other categories.
   A clause searches a word when it names a term, or holds one in `must` or `should` through `bool`, `boost` and
   `constant_score`. `match_all`, an empty `bool`, exclusions alone, and a wrapper of those (including
@@ -121,7 +121,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   to the new query again. So `filters: "never"` holds whatever query a caller puts in: before, a query that did not
   hold the clauses' parts made L5 `fallback` search `match_all` without the filter. L5 now keeps the request filter
   beside the root `bool`'s `must_not` and `filter`; the filter step (`last_resort`) drops the request filter alone and
-  keeps a filter the caller's own root holds (one equal to the request filter counts as the request's). A query put
+  keeps a filter the caller's own root holds (one equal to the request filter counts as the request's, also in a caller
+  root the join wrapped because of its `should` clauses). A query put
   in place of a compilation of several parts keeps its clauses only while its root's `must` is theirs exactly and its
   `must_not` holds theirs at the same indexes, else `Compiled::parts` and `Compiled::root` are `None` from then on
   (before, any root `bool` was read as the clauses' root, and a required clause added beside them was relaxed away).

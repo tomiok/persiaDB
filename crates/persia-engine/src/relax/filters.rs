@@ -42,9 +42,13 @@ impl LevelTransform for Filters {
 }
 
 /// L0's query with the request's filters dropped from its root `bool`, `None` when there are none, or the root has no
-/// word to match. Of a programmatic query, every filter of its root `bool`; of a compiled one, its request filter
+/// word to match. Of a programmatic query, every filter of its root `bool`. Of a compiled one, its request filter
 /// ([`Compiled::filter`]), which `Compiled::query` holds at its root `bool` whatever query a caller put in (ROADMAP
-/// 8.2.14). The step keeps the rest of that root as L0 has it, a compiled query's clauses' parts included.
+/// 8.2.14), and nothing else: a filter of the caller's own stays, unless it equals a request filter, which counts as
+/// the request's (the join does not add it twice, so the two cannot be told apart). When the join wrapped the
+/// caller's query (a root with `should` clauses, `Compiled::wrapped`), that root is the caller's: the request's
+/// filters are dropped from it too, or a clone of the compiled query with `should` clauses added would keep them. The
+/// step keeps the rest of the root as L0 has it, a compiled query's clauses' parts included.
 ///
 /// A root that searches no word builds no step. A clause searches a word when it is a `term`, `combined`, `phrase`,
 /// `prefix` or `fuzzy`, or a `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should`.
@@ -57,25 +61,35 @@ fn unfiltered(input: &LevelInput<'_>) -> Option<Query> {
         return None;
     };
     let words = root.must.iter().any(has_word) || root.should.iter().any(has_word);
-    let (dropped, filter) = match input.compiled {
-        // The request filter alone, kept beside the compilation (ROADMAP 8.2.14): a filter a caller's query holds at
-        // its root (`Compiled::with_query`) is part of that query, not of the request.
-        Some(compiled) => (
-            !compiled.filter().is_empty(),
-            root.filter
-                .iter()
-                .filter(|f| !compiled.filter().contains(f))
-                .cloned()
-                .collect(),
-        ),
-        None => (!root.filter.is_empty(), Vec::new()),
+    let Some(compiled) = input.compiled else {
+        return (words && !root.filter.is_empty()).then(|| {
+            Query::Bool(BoolQuery {
+                filter: Vec::new(),
+                ..root.clone()
+            })
+        });
     };
-    (words && dropped).then(|| {
-        Query::Bool(BoolQuery {
-            filter,
-            ..root.clone()
-        })
-    })
+    let request = compiled.filter();
+    if !words || request.is_empty() {
+        return None;
+    }
+    let without = |root: &BoolQuery| BoolQuery {
+        filter: root
+            .filter
+            .iter()
+            .filter(|f| !request.contains(f))
+            .cloned()
+            .collect(),
+        ..root.clone()
+    };
+    let mut step = without(root);
+    // The wrapped caller root, only while L0 is the compilation's own query, which holds it as its one `must`.
+    if let (Some(Query::Bool(caller)), [only]) = (compiled.wrapped(), step.must.as_mut_slice())
+        && matches!(only, Query::Bool(b) if b == caller)
+    {
+        *only = Query::Bool(without(caller));
+    }
+    Some(Query::Bool(step))
 }
 
 /// Whether `query` matches by at least one term (SPEC §7.6). A term inside `must_not` does not count: exclusions are

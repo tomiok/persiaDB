@@ -47,7 +47,11 @@ is not a root `bool`, and what "the request's filters" means once a caller's que
    one level down and L5 does not keep them, as for a programmatic query with a deeper `must_not`.
 5. **The filter step drops the request filter alone.** Of a compiled query, the step is L0's root without the kept
    request filter. A filter the caller's root holds itself is part of that query and stays, unless it equals a request
-   filter: the join does not add that one twice, so the two cannot be told apart, and it counts as the request's. A
+   filter: the join does not add that one twice, so the two cannot be told apart, and it counts as the request's. When
+   the join wrapped the caller's query (its root has `should` clauses or a `minimum_should_match`), the wrapped root is
+   the caller's, and the request's filters are dropped from it too (`Compiled` records that it wrapped): a clone of
+   `Compiled::query` with `should` clauses added, which holds the request filter one level down, would otherwise keep
+   it, and the step would search L0's filtered matches again and find nothing. A
    compiled query with no request filter builds no step even when the caller's root has filters. A programmatic query
    is unchanged: every filter of its root `bool` is dropped. The no-word rule is ADR-0047 item 2's, as refined on main
    (a recursive check through `bool`, `boost` and `constant_score`).

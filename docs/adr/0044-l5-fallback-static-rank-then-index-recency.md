@@ -3,7 +3,7 @@
 - Status: proposed (amended by ADR-0047: `filters: "last_resort"` relaxes filters in one step after L5, which excludes L5's step alone; amended by ADR-0048: L5 keeps a compiled query's request filter, kept beside the compilation, whatever query a caller put in)
 - Date: 2026-11-14
 - Related: SPEC §6.2.3, §7.1.3, §7.3, §7.4, §7.5, §7.6, §7.7, §8.5; ROADMAP 7.4.11, 8.1.3, 8.1.4, 8.1.22, 8.2.5,
-  8.2.6, 8.2.8, 8.2.9, 8.3.2, 8.3.4; ADR-0037, ADR-0043
+  8.2.6, 8.2.8, 8.2.9, 8.2.14, 8.3.2, 8.3.4; ADR-0037, ADR-0043, ADR-0047, ADR-0048
 
 ## Context
 

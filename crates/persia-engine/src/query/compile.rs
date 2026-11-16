@@ -193,6 +193,10 @@ pub struct Compiled {
     /// its clauses' parts where they were: its root is then not the clauses' ([`Self::root`]). A one-part compilation
     /// checks its query against [`Self::part`] instead.
     detached: bool,
+    /// Whether the last join of the request filter wrapped the query, `bool { must: [query], filter }`, rather than
+    /// adding to its root ([`join`]): the query wrapped is then a root of its own (a caller's with `should` clauses, or a
+    /// one-part compilation's part), and the filter step drops the request filter from it too ([`Self::wrapped`]).
+    wrapped: bool,
 }
 
 /// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
@@ -321,6 +325,17 @@ impl Compiled {
         &self.filter
     }
 
+    /// The query the request filter's join wrapped (`bool { must: [query], filter }`), when it wrapped one: a root of
+    /// its own below [`Self::query`]'s, which the filter step drops the request filter from too (SPEC §7.6, ROADMAP
+    /// 8.2.14). A caller's root with `should` clauses that holds the request filter (a clone of [`Self::query`] with
+    /// `should` clauses added) keeps it there. `None` when the filter was added to the query's own root, or none joined.
+    pub(crate) fn wrapped(&self) -> Option<&Query> {
+        match &self.query {
+            Query::Bool(root) if self.wrapped => root.must.first(),
+            _ => None,
+        }
+    }
+
     /// How [`Self::query`] holds a one-part compilation's part: as itself, or as the one `must` clause of a `bool` without
     /// `should` clauses (a request's filter, or an exclusion a caller added, beside it). `None` for anything else, and
     /// for a compilation of other than one part.
@@ -381,7 +396,10 @@ impl Compiled {
             return self;
         }
         let query = std::mem::replace(&mut self.query, Query::MatchAll);
-        self.query = join(query, &filter, self.part.as_ref());
+        let (query, wrapped) = join(query, &filter, self.part.as_ref());
+        self.query = query;
+        // Added to the root of an earlier wrap, the query is still that wrap.
+        self.wrapped |= wrapped;
         for f in filter {
             if !self.filter.contains(&f) {
                 self.filter.push(f);
@@ -437,8 +455,8 @@ impl Compiled {
         if self.part.is_none() && !self.holds_parts(&query) {
             self.detached = true;
         }
-        self.query = if self.filter.is_empty() {
-            query
+        (self.query, self.wrapped) = if self.filter.is_empty() {
+            (query, false)
         } else {
             join(query, &self.filter, self.part.as_ref())
         };
@@ -468,8 +486,9 @@ impl Compiled {
 
 /// `query` with `filter` joined as the filter clauses of its root `bool` ([`Compiled::with_filter`]): added to the
 /// root's filters, but for one it holds already, when the root is a `bool` without `should` clauses or a
-/// `minimum_should_match` and not a one-part compilation's `part` itself; else `bool { must: [query], filter }`.
-fn join(query: Query, filter: &[Filter], part: Option<&Query>) -> Query {
+/// `minimum_should_match` and not a one-part compilation's `part` itself; else `bool { must: [query], filter }`. Also
+/// whether it wrapped.
+fn join(query: Query, filter: &[Filter], part: Option<&Query>) -> (Query, bool) {
     match query {
         Query::Bool(mut root)
             if root.should.is_empty()
@@ -481,7 +500,7 @@ fn join(query: Query, filter: &[Filter], part: Option<&Query>) -> Query {
                     root.filter.push(f.clone());
                 }
             }
-            Query::Bool(root)
+            (Query::Bool(root), false)
         }
         query => {
             let mut joined = Vec::with_capacity(filter.len());
@@ -490,11 +509,14 @@ fn join(query: Query, filter: &[Filter], part: Option<&Query>) -> Query {
                     joined.push(f.clone());
                 }
             }
-            Query::Bool(BoolQuery {
-                must: vec![query],
-                filter: joined,
-                ..BoolQuery::default()
-            })
+            (
+                Query::Bool(BoolQuery {
+                    must: vec![query],
+                    filter: joined,
+                    ..BoolQuery::default()
+                }),
+                true,
+            )
         }
     }
 }
@@ -858,6 +880,7 @@ fn finish(
         synonyms,
         filter: Vec::new(),
         detached: false,
+        wrapped: false,
     }
 }
 

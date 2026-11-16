@@ -9,7 +9,8 @@
 //! 3. Its `effective` is L0's text; it corrects nothing, has no synonym alternatives and reads no statistics.
 //! 4. It never fills a page, and covers no earlier step; L5 covers every earlier step.
 //! 5. Of a compiled query it drops the request filter alone (`Compiled::filter`, ROADMAP 8.2.14), whatever query a
-//!    caller put in: a filter the caller's root holds stays, and without a request filter no step is built.
+//!    caller put in: a filter the caller's root holds stays unless it equals a request filter, which counts as the
+//!    request's and is dropped, also from a caller root the join wrapped; without a request filter no step is built.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)] // Tests: inputs are fixed.
 
@@ -211,6 +212,57 @@ fn a_replaced_query_drops_the_request_filter_alone() {
     // A wordless query put in builds no step either, request filter or not.
     let wordless = filtered.with_query(Query::MatchAll);
     assert_eq!(steps(wordless.query(), Some(&wordless)), []);
+}
+
+#[test]
+fn a_request_filter_the_wrapped_caller_root_holds_is_dropped_there_too() {
+    // A caller clones the compiled query (which holds the request filter) and adds `should` clauses: the join wraps it,
+    // as a filter beside `should` clauses would make them optional, so the caller's root holds the request filter one
+    // level down. The step drops it there too, or it would search L0's filtered matches again and find nothing.
+    let schema = schema();
+    let acme = brand_is(&schema, "acme");
+    let filtered = compile(&schema, "red shoes").with_filter([acme.clone()]);
+    let Query::Bool(mut caller) = filtered.query().clone() else {
+        panic!()
+    };
+    caller.should.push(term(&schema, "hat"));
+    let replaced = filtered.clone().with_query(Query::Bool(caller.clone()));
+    let Query::Bool(wrapper) = replaced.query() else {
+        panic!()
+    };
+    assert_eq!(wrapper.must, [Query::Bool(caller.clone())]);
+    caller.filter.clear();
+    assert_eq!(
+        one(replaced.query(), Some(&replaced)).query,
+        Query::Bool(BoolQuery {
+            must: vec![Query::Bool(caller.clone())],
+            ..BoolQuery::default()
+        })
+    );
+    // A filter of the caller's own beside it stays; so does a request filter deeper than the caller's root.
+    let own = brand_is(&schema, "other");
+    let deeper = Query::Bool(BoolQuery {
+        must: vec![term(&schema, "red")],
+        filter: vec![acme.clone()],
+        ..BoolQuery::default()
+    });
+    let caller = BoolQuery {
+        must: vec![deeper.clone()],
+        should: vec![term(&schema, "hat")],
+        filter: vec![own.clone(), acme.clone()],
+        ..BoolQuery::default()
+    };
+    let replaced = filtered.with_query(Query::Bool(caller.clone()));
+    assert_eq!(
+        one(replaced.query(), Some(&replaced)).query,
+        Query::Bool(BoolQuery {
+            must: vec![Query::Bool(BoolQuery {
+                filter: vec![own],
+                ..caller
+            })],
+            ..BoolQuery::default()
+        })
+    );
 }
 
 #[test]
