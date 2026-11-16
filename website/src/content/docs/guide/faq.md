@@ -63,7 +63,7 @@ head:
             "name": "What languages and SDKs does Persia DB support?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The implementation language is Rust, and nothing is published for other languages. The embedded API crate persia exports no types, so there is no Rust database API to wrap yet.\n\nEmbedded Go and TypeScript bindings are a design only (ADR-0018, Embedded SDKs). There is no Go module and no npm package. The directories sdk/persia and sdk/node do not exist. Rust and Go network clients (persia-client, persia-go) are milestone M14, after the server (M11) and sharding (M13). Those directories do not exist either."
+              "text": "The implementation language is Rust, and nothing is published for other languages. The embedded API crate persia exports no types, so there is no Rust database API to wrap yet.\n\nEmbedded bindings are a design only (ADR-0018, Embedded SDKs), scheduled for v1.0 as ROADMAP 14.6, after the persia facade (M10). They share one C ABI, persia-ffi and persia.h. Go uses cgo (and an optional persia_purego tag), TypeScript uses N-API (@persiadb/node), and Python uses cffi or ctypes. There is no Go module, no npm package, and no Python package yet. The directories sdk/persia and sdk/node do not exist. Rust and Go network clients (persia-client, persia-go) are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after the server (M11) and sharding (M13). Those directories do not exist either."
             }
           },
           {
@@ -156,7 +156,7 @@ What you can build against today is still a library, not that server. `persia-fo
 
 The implementation language is Rust, and nothing is published for other languages. The embedded API crate `persia` exports no types, so there is no Rust database API to wrap yet.
 
-Embedded Go and TypeScript bindings are a design only ([ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md), [Embedded SDKs](/guide/sdks/)). There is no Go module and no npm package. The directories `sdk/persia` and `sdk/node` do not exist. Rust and Go network clients (`persia-client`, `persia-go`) are milestone M14, after the server (M11) and sharding (M13). Those directories do not exist either.
+Embedded bindings are a design only ([ADR-0018](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0018-embedded-sdk-bindings.md), [Embedded SDKs](/guide/sdks/)), scheduled for v1.0 as ROADMAP 14.6, after the `persia` facade (M10). They share one C ABI, `persia-ffi` and `persia.h`. Go uses cgo (and an optional `persia_purego` tag), TypeScript uses N-API (`@persiadb/node`), and Python uses cffi or ctypes. There is no Go module, no npm package, and no Python package yet. The directories `sdk/persia` and `sdk/node` do not exist. Rust and Go network clients (`persia-client`, `persia-go`) are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after the server (M11) and sharding (M13). Those directories do not exist either.
 
 ## What file format does Persia DB use?
 

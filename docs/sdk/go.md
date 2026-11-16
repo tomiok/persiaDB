@@ -378,7 +378,7 @@ through `pread`.
 
 ## Build
 
-Everyday install, once a release exists. The module tag follows the core `v1.0.0` tag (M15, then M16.4),
+Everyday install, once a release exists. The module is ROADMAP 14.6 (v1.0). Its tag follows the core `v1.0.0` tag (M15); 16.4.1 says it is not published before that tag,
 not `v0.1.0-alpha` (ROADMAP 10.5.2, the core's notice that the format is still unstable):
 
 ```bash

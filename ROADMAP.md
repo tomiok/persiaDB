@@ -800,6 +800,8 @@ Deps: M11 (stable proto); M13 for shard-awareness.
 
 M14's scope now includes TypeScript. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go & TypeScript)". The network client is 14.5 (`@persiadb/client`). Embedded TypeScript stays 16.3 (`@persiadb/node`).
 
+M14's scope now also covers the embedded (in-process) SDKs. The heading stays "SDKs (Rust & Go)"; the title that names the scope is "SDKs (Rust, Go, TypeScript & embedded)". That work is 14.6. It depends on M10 (the `persia` facade) and not on M11. Rust and Go network clients are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5. Those still depend on M11 and M13. The v1.0 schedule for `@persiadb/node` is 14.6.6 and 14.6.7, which pull 16.3.1–16.3.5. 16.3 stays that duplicate list and is checked when those leaves are done. The M16 leaves that stay on v1.1 are 16.4.1 and 16.6.
+
 ## 14.1 Conformance suite
 - [ ] 14.1.1 Language-neutral scenario format (YAML): setup, calls, expected results
 - [ ] 14.1.2 Scenarios: CRUD, search+filters, relaxation, facets, blobs (range), errors, read-your-writes
@@ -828,6 +830,21 @@ M14's scope now includes TypeScript. The heading stays "SDKs (Rust & Go)"; the t
 ## 14.5 TypeScript network client (`@persiadb/client`) (v1.0)
 - [ ] 14.5.1 (v1.0) HTTP/JSON client `@persiadb/client` per SPEC §12, with a 14.1 conformance-suite adapter
 - [ ] 14.5.2 (v1.0) Release automation for `@persiadb/client`, alongside 14.4.2
+
+## 14.6 Embedded SDKs (in-process)
+Depends on M10 (the `persia` facade), not on M11. The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). Parity with the gRPC SDKs is the 14.1 runner harness, for the in-process operations those scenarios name (CRUD, search and filters, relaxation, facets, blobs, errors, read-your-writes). TLS, retries, deadlines, and shard routing stay on 14.2, 14.3, and 14.5.
+
+- [ ] 14.6.1 (v1.0) C ABI crate `persia-ffi` (crate types `lib`, `staticlib`, `cdylib`) depending only on `persia`, and a committed `persia.h` from `cargo xtask ffi-header` (no `build.rs`). Safe API over `Db` and `Collection`: open, close, create and open a collection, put, upsert, delete, get, put_batch, commit, search, blobs. C exports catch panics and poison that handle afterwards. Stable error codes mapped from the Rust error type; corruption is an error; a mapped-page fault still ends the process. Record the crate edge in `ALLOWED` and the C-export module in `UNSAFE_ALLOWED`. Pulls 16.1.1–16.1.4 into v1.0 (ADR-0018, ADR-0003, ADR-0010, `docs/sdk/c-abi.md`, SPEC §8.1, §9.6, §13.1, §17)
+- [ ] 14.6.2 (v1.0) [T] A document and a search round-trip through the C API; a panic in the core returns an error and poisons that handle; hostile UTF-8 is an error. Pulls 16.1.5 into v1.0 (`docs/sdk/c-abi.md`)
+- [ ] 14.6.3 (v1.0) Embedded Go SDK: module `github.com/tomiok/persiaDB/sdk/persia`, package `persia`, cgo linked to `libpersia`. `Open`, collections, put, get, delete, search, blobs, `context.Context`, and `errors.Is` sentinels, with the cancellation check `docs/sdk/go.md` already describes. The call surface covers the in-process operations in the 14.1 scenarios. Pulls 16.2.1–16.2.2 into v1.0 (ADR-0018, `docs/sdk/go.md`, SPEC §13.1)
+- [ ] 14.6.4 (v1.0) [T] Go conformance adapter for the 14.1 scenarios with `transport: embedded`, the same scenarios the gRPC SDKs run through the 14.1 runner harness. `go test` with the race detector; a file written by Go opens in Rust and returns the same hits. Pulls 16.2.4–16.2.5 into v1.0 (SPEC §13.2, `docs/sdk/go.md`)
+- [ ] 14.6.5 (v1.0) Optional build tag `persia_purego`: on Unix, `github.com/ebitengine/purego` dlopens the prebuilt shared library with `CGO_ENABLED=0`; on Windows amd64, `syscall.LoadLibrary` and `GetProcAddress` load `persia.dll`, because `purego.Dlopen` is not built for Windows. Same Go API as the cgo build. cgo with the static `libpersia.a` stays the default. The build does not fetch the shared library; the caller places it beside the binary or names it with `PERSIA_LIB`, a Go-SDK-only runtime variable read by `Open` (not a server `PERSIA_*` knob, and not a failure before `main`). The platform matrix is the Go matrix in `docs/sdk/distribution.md`. The C ABI stays purego-friendly: opaque handles, pointer+length buffers, no struct-by-value and no callbacks. wazero stays rejected. Checksummed cdylibs for this tag are published by 14.6.10. Pulls 16.2.6 into v1.0 (ADR-0018, `docs/sdk/go.md`, `docs/sdk/distribution.md`). [T] `go test -tags persia_purego` with `CGO_ENABLED=0` opens a file the cgo build wrote and returns the same hits
+- [ ] 14.6.6 (v1.0) Embedded TypeScript SDK `@persiadb/node`: N-API addon outside the Cargo workspace, linking the `persia-ffi` rlib. Promises, `PersiaError.code`, and `get` of a missing id returns null. Workers stay as `docs/sdk/typescript.md` describes them. The call surface covers the in-process operations in the 14.1 scenarios. Pulls 16.3.1–16.3.2 into v1.0 (ADR-0003, ADR-0018, `docs/sdk/typescript.md`)
+- [ ] 14.6.7 (v1.0) [T] `@persiadb/node` conformance adapter, the same 14.1 scenarios as 14.6.4. Node, and Bun or Deno, opens a file written by Rust and returns the same hits. Pulls 16.3.4–16.3.5 into v1.0 (SPEC §13.2, `docs/sdk/typescript.md`)
+- [ ] 14.6.8 (v1.0) Embedded Python package (`sdk/python`): bind `persia.h` with cffi or ctypes. Installing the package does not require a Rust toolchain. Open, collection, put, get, delete, search, blobs, and commit. Exceptions carry the stable `code` from 14.6.1. Release the GIL around the native call. One database still has one writer (SPEC §8.4). A call already inside the engine does not cancel. The call surface covers the in-process operations in the 14.1 scenarios. SPEC §13 names this package in 14.6.11, in the same release. Pulls 21.1.1–21.1.3 into v1.0 (ADR-0018, `docs/sdk/c-abi.md`, `docs/sdk/distribution.md`)
+- [ ] 14.6.9 (v1.0) [T] Python conformance adapter (`transport: embedded`), the same 14.1 scenarios as 14.6.4. A file written in Python opens in Rust and returns the same hits. Pulls 21.1.5 into v1.0 (SPEC §13.2, `docs/sdk/c-abi.md`)
+- [ ] 14.6.10 (v1.0) Prebuilt checksummed libraries and CI: static libraries per OS and architecture and a documented source build; cdylibs and their checksums for `persia_purego`; prebuilt `.node` binaries per platform and an npm pack dry-run; Python wheels that ship the prebuilt library and a `pip` dry-run. CI builds that matrix. Users of the engine do not run it. Compatibility table for the Go module, `@persiadb/node`, and the Python package against the core tag they were built from. File format, C ABI, and package versions stay distinct numbers. Pulls 16.2.3, 16.3.3, 16.4.2, 16.4.3, and 21.1.4 into v1.0 (ADR-0018, SPEC §15, `docs/sdk/distribution.md`). [T] The dry-runs install without a Rust toolchain, and each published artifact has a checksum beside it
+- [ ] 14.6.11 (v1.0) SPEC §13 names the embedded Python package beside the Go and TypeScript bindings, on its own path, and a short guide page. That package is 14.6.8. Pulls 21.3.1 into v1.0 (SPEC §13.1, ADR-0018)
 
 ---
 
@@ -884,6 +901,8 @@ M0–M15 above are the MVP. Nothing in them is renumbered. A later milestone sti
 | v2.3 | M28 On-device |
 | v3.0 | M29 Geo, M30 Enterprise |
 
+The embedded SDKs core moved to v1.0 via 14.6 (inside M14): `persia-ffi` and the committed `persia.h`, the embedded Go SDK (cgo and `persia_purego`), `@persiadb/node`, the embedded Python package, and their prebuilt checksummed libraries and CI. SPEC §13 names that Python package in 14.6.11. The rows above are unchanged.
+
 Two orderings differ from a straight list of the features. Multi-tenant is M22 and Persia Cloud is M23, so the hosted service can depend on one file per tenant. v2.1, v2.2, and v2.3 are separate targets so the UI kit does not wait on embeddings, and embeddings do not wait on a portable storage backend. Geo (M29) has no dependency on M26–M28; it stays on v3.0 beside the enterprise format work, and it can move earlier later without renumbering M16–M28. Encryption (M20) is a dependency of Persia Cloud. That only orders work inside the table above: v1.2 still comes before v2.0.
 
 M32 is ranking rules (v1.1). Its BM25+/BM25L leaf (32.3.1) is v1.2 and ships only if the nDCG baseline justifies it. M33 (v1.1) is the search features v1.0 does not cover: CJK segmentation and pluggable tokenizers, reindex with an alias swap, delete-by-query, numeric and range facets, and distinct/group-by. M34 (v1.2) is user-facing backup and export, and analytics of zero-result queries. The read-only WASM build Persia Studio loads is 16.6.
@@ -894,6 +913,8 @@ M32 is ranking rules (v1.1). Its BM25+/BM25L leaf (32.3.1) is v1.2 and ships onl
 Deps: M15 (format 1.0 and the M10 facade).
 
 The design is ADR-0018 and `docs/sdk/` (C ABI, Go, TypeScript, distribution). This milestone schedules that design. It does not restate it. Network clients stay M14. The browser package is M28. A read-only WASM build for Persia Studio is 16.6 (v1.1); it is not the M28 package.
+
+14.6 schedules these leaves for v1.0, so they are not implemented twice: 16.1.1–16.1.4 are 14.6.1, 16.1.5 is 14.6.2, 16.2.1–16.2.2 are 14.6.3, 16.2.4–16.2.5 are 14.6.4, 16.2.6 is 14.6.5, 16.3.1–16.3.2 are 14.6.6, 16.3.4–16.3.5 are 14.6.7, and 16.2.3, 16.3.3, 16.4.2, and 16.4.3 are 14.6.10. When that 14.6 leaf is done, check the M16 leaf too. 16.2.6 also names the cdylib checksums 14.6.10 publishes, so check 16.2.6 only once 14.6.5 and 14.6.10 are both done. 16.4.1 and 16.6 are not in 14.6 and stay on v1.1.
 
 ## 16.1 C ABI (`persia-ffi`)
 - [ ] 16.1.1 Add `persia-ffi` (crate types `lib`, `staticlib`, `cdylib`) depending only on `persia`; record the edge in `ALLOWED` and the C-export module in `UNSAFE_ALLOWED` (ADR-0018, ADR-0003)
@@ -1032,6 +1053,8 @@ Deps: M14, M16.
 One engine (ADR-0001). The embedded package calls the C ABI from M16 (`docs/sdk/c-abi.md`). It does not reimplement segments, the WAL, or ranking. The network client speaks the server's HTTP JSON (SPEC §12) for processes that will not load a native library.
 
 ## 21.1 Embedded (`sdk/python`)
+21.1.1–21.1.3 are 14.6.8, 21.1.5 is 14.6.9, and 21.1.4 is 14.6.10, scheduled for v1.0 so they are not implemented twice. When that 14.6 leaf is done, check the 21.1 leaf too. 21.2 stays on v1.2. 21.3.1 is 14.6.11.
+
 - [ ] 21.1.1 Package layout. Bind `persia.h` with cffi or ctypes. Installing the package does not require a Rust toolchain (`docs/sdk/distribution.md`)
 - [ ] 21.1.2 Open, collection, put, get, delete, search, blobs, and commit. Exceptions carry the stable `code` from 16.1.4
 - [ ] 21.1.3 Release the GIL around the native call. One database still has one writer (SPEC §8.4). A call already inside the engine does not cancel
@@ -1043,6 +1066,8 @@ One engine (ADR-0001). The embedded package calls the C ABI from M16 (`docs/sdk/
 - [ ] 21.2.2 [T] The 14.1 scenarios against `persia-server`, with the same expectations as `persia-client`
 
 ## 21.3 Docs
+21.3.1 is scheduled for v1.0 as 14.6.11, so it is not written twice. When 14.6.11 is done, check 21.3.1 too.
+
 - [ ] 21.3.1 SPEC §13 names the Python package beside the Go and TypeScript bindings, on its own path. A short guide page
 
 ---
