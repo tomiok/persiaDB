@@ -166,8 +166,9 @@ mod tests {
         // `\xff` is one character: a substitution away from `t`, never equal to it.
         assert_eq!(osa("cat", b"ca\xff"), 1);
         assert_eq!(osa("cat", b"cat\xff"), 1);
-        // A truncated two-byte sequence is two invalid bytes, so two characters.
+        // A lone lead byte is one invalid character.
         assert_eq!(osa("cat", b"ca\xc3"), 1);
+        // A truncated three-byte sequence is two invalid bytes, so two characters.
         assert_eq!(osa("ca", b"ca\xe2\x82"), 2);
         // Two invalid bytes do not swap into a match either.
         assert_eq!(osa("ab", b"\xff\xfe"), 2);
@@ -209,8 +210,10 @@ mod tests {
     }
 
     #[test]
-    fn deleted_documents_count_in_the_df_that_keeps_a_term() {
-        // The second document is deleted: it still counts (SPEC §7.2), so `cart` (2) outranks `cat` (1).
+    fn the_df_that_keeps_a_term_counts_every_counted_document() {
+        // `counted` is every document the statistics count, so `cart` (2) outranks `cat` (1). That a segment's deleted
+        // documents are among them (SPEC §7.2) is `Model::corpus`'s rule in `differential.rs`, checked against the
+        // engine by `a_prefix_keeps_the_term_of_highest_collection_df` there.
         let c = corpus(&["cart cat", "cart"]);
         assert_eq!(c.prefix_terms(0, "ca", 1), [("cart".to_owned(), 2)]);
     }
