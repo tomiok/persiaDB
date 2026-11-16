@@ -42,7 +42,7 @@ impl StatisticsProvider for NoStats {
 
 fn steps(compiled: &Compiled) -> Vec<Step> {
     Synonyms
-        .steps(&LevelInput::new(&compiled.query, Some(compiled), &NoStats))
+        .steps(&LevelInput::new(compiled.query(), Some(compiled), &NoStats))
         .unwrap()
 }
 
@@ -56,7 +56,7 @@ fn should(query: &Query) -> &[Query] {
 #[test]
 fn each_run_is_required_as_itself_or_an_alternative_beside_l0s_other_clauses() {
     let compiled = compile("cheap new york tv -used");
-    let Query::Bool(root) = &compiled.query else {
+    let Query::Bool(root) = compiled.query() else {
         panic!()
     };
     let [step] = steps(&compiled).try_into().unwrap();
@@ -103,7 +103,7 @@ fn a_query_of_one_run_is_the_run_or_its_alternatives() {
     let compiled = compile("tv");
     let [step] = steps(&compiled).try_into().unwrap();
     let run = should(&step.query);
-    assert_eq!(run[0], compiled.query);
+    assert_eq!(&run[0], compiled.query());
     assert_eq!(&run[1..], compiled.synonyms[0].alternatives.as_slice());
 }
 
@@ -112,7 +112,7 @@ fn no_run_no_text_or_a_changed_query_builds_no_step() {
     assert_eq!(steps(&compile("cheap stand")).len(), 0);
     let compiled = compile("cheap tv");
     // A programmatic query.
-    let input = LevelInput::new(&compiled.query, None, &NoStats);
+    let input = LevelInput::new(compiled.query(), None, &NoStats);
     assert_eq!(Synonyms.steps(&input).unwrap().len(), 0);
     // A root the compiler would not build.
     for change in [
@@ -120,21 +120,14 @@ fn no_run_no_text_or_a_changed_query_builds_no_step() {
         |b: &mut BoolQuery| b.minimum_should_match = 1,
         |b: &mut BoolQuery| b.must.clear(),
     ] {
-        let mut changed = compiled.clone();
-        let Query::Bool(b) = &mut changed.query else {
-            panic!()
-        };
-        change(b);
-        assert!(steps(&changed).is_empty(), "{:?}", changed.query);
+        let changed = crate::relax::tests::with_root(compiled.clone(), change);
+        assert!(steps(&changed).is_empty(), "{:?}", changed.query());
     }
     // A root that lost the excluded clause: the step would drop the exclusion its `effective` (`-used`) still states.
-    let mut changed = compile("cheap tv -used");
+    let changed = compile("cheap tv -used");
     assert_eq!(steps(&changed).len(), 1);
-    let Query::Bool(b) = &mut changed.query else {
-        panic!()
-    };
-    b.must_not.clear();
-    assert!(steps(&changed).is_empty(), "{:?}", changed.query);
+    let changed = crate::relax::tests::with_root(changed, |b| b.must_not.clear());
+    assert!(steps(&changed).is_empty(), "{:?}", changed.query());
     // Runs out of order, past the clauses, empty, or over an excluded clause.
     let compiled = compile("tv -box new york");
     for change in [
@@ -263,15 +256,13 @@ mod properties {
 #[test]
 fn a_filter_joined_to_the_root_stays_on_the_step() {
     // SPEC §7.1: a request's `filter` is the compiled query's root `bool`'s; L1 keeps it, as L2 does.
-    let mut compiled = compile("cheap tv");
     let filter = Filter::Term {
         field: crate::schema::FieldId::new(0),
         value: crate::query::FilterValue::Bool(true),
     };
-    let Query::Bool(root) = &mut compiled.query else {
-        panic!()
-    };
-    root.filter.push(filter.clone());
+    let compiled = crate::relax::tests::with_root(compile("cheap tv"), |root| {
+        root.filter.push(filter.clone());
+    });
     let [step] = steps(&compiled).try_into().unwrap();
     let Query::Bool(b) = &step.query else {
         panic!()
@@ -290,17 +281,16 @@ fn a_filter_joined_to_a_one_part_query_is_not_read_as_its_clause() {
     // ROADMAP 8.1.17: `tv` compiles to its one part. Joined to a filter, by hand or with `with_filter`, the run is that
     // part, and the filter is the step's root's, once.
     let compiled = compile("tv");
-    let part = compiled.query.clone();
+    let part = compiled.query().clone();
     let filter = Filter::Term {
         field: crate::schema::FieldId::new(0),
         value: crate::query::FilterValue::Bool(true),
     };
-    let mut by_hand = compiled.clone();
-    by_hand.query = Query::Bool(BoolQuery {
+    let by_hand = compiled.clone().with_query(Query::Bool(BoolQuery {
         must: vec![part.clone()],
         filter: vec![filter.clone()],
         ..BoolQuery::default()
-    });
+    }));
     for joined in [by_hand, compiled.with_filter([filter.clone()])] {
         let [step] = steps(&joined).try_into().unwrap();
         let Query::Bool(b) = &step.query else {
@@ -340,12 +330,13 @@ fn the_expansion_is_cut_when_the_compilation_cut_any_run() {
 #[test]
 fn an_exclusion_added_to_the_root_stays_on_the_step() {
     // As at L2: the root's `must_not` is kept whole, an exclusion a caller added beside the excluded clauses too.
-    let mut compiled = compile("cheap tv -used");
     let added = Query::MatchAll;
-    let Query::Bool(root) = &mut compiled.query else {
+    let compiled = crate::relax::tests::with_root(compile("cheap tv -used"), |root| {
+        root.must_not.push(added.clone());
+    });
+    let Query::Bool(root) = compiled.query() else {
         panic!()
     };
-    root.must_not.push(added.clone());
     let want = root.must_not.clone();
     let [step] = steps(&compiled).try_into().unwrap();
     let Query::Bool(b) = &step.query else {

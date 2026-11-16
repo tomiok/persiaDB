@@ -1,9 +1,9 @@
 # ADR-0044: L5 `fallback`: the collection's static rank, then index recency, flagged in the response
 
-- Status: proposed (amended by ADR-0047: `filters: "last_resort"` relaxes filters in one step after L5, which excludes L5's step alone)
+- Status: proposed (amended by ADR-0047: `filters: "last_resort"` relaxes filters in one step after L5, which excludes L5's step alone; amended by ADR-0048: L5 keeps a compiled query's request filter, kept beside the compilation, whatever query a caller put in)
 - Date: 2026-11-14
 - Related: SPEC §6.2.3, §7.1.3, §7.3, §7.4, §7.5, §7.6, §7.7, §8.5; ROADMAP 7.4.11, 8.1.3, 8.1.4, 8.1.22, 8.2.5,
-  8.2.6, 8.2.8, 8.2.9, 8.3.2, 8.3.4; ADR-0037, ADR-0043
+  8.2.6, 8.2.8, 8.2.9, 8.2.14, 8.3.2, 8.3.4; ADR-0037, ADR-0043, ADR-0047, ADR-0048
 
 ## Context
 
@@ -25,10 +25,13 @@ L5 but its transform built no step, so a query no level could relax returned not
    (`match_all` alone without either): a compiled query's excluded clauses and the request's filter, a programmatic
    root `bool`'s `must_not` and `filter`, nothing for any other root. Filters are not relaxed at L5 (`filters:
    "last_resort"` adds one step after L5 that drops them, ADR-0047), and excluded clauses stay excluded: a user who wrote `-blue` never gets blue
-   documents back. `fallback: "none"` builds no L5, as before.
+   documents back. `fallback: "none"` builds no L5, as before. Amended by ADR-0048: the request filter is kept beside
+   the compiled query, which is replaced only through `Compiled::with_query`, and L5 reads it from there beside the root
+   `bool`'s `must_not` and `filter`, so a query a caller put in no longer falls back without it.
 2. **Earlier hits are excluded as at every step** (ADR-0037 item 2): the cascade puts the steps searched before L5
    in its `must_not`, so L5 returns the documents no stricter step matched, once. Deleted and replaced documents are
-   never matches (§7.3), so L5 never returns one, nor a document the filter drops.
+   never matches (§7.3), so L5 never returns one, nor a document the filter drops: since ADR-0048, also when a caller
+   put a query of their own in place of the compiled one.
 3. **L5 ranks by its own order, whatever the request's sort**: static rank descending (SPEC §6.2.3's
    `weight · fn(v)`, the hit's score), then recency. The request's sort has nothing to rank here (every text score
    would be 0), and a column sort such as `price` ascending is not "the collection's best documents". The hits still

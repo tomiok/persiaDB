@@ -1,10 +1,13 @@
 //! The differential suite (ROADMAP 7.8.1; SPEC §7.1–§7.4, §7.7, §8.3): random corpora written through a `Database`
 //! (puts, upserts, deletes, commits that flush the memtable into segments and drop the segments left with no live
-//! document), then random queries with filters, searched over the whole collection, against the reference
-//! (`tests/reference`), which scans the live documents and counts the statistics itself.
+//! document), then random queries with filters at any depth, searched over the whole collection, against the
+//! reference (`tests/reference`), which scans the live documents and counts the statistics itself. The reference
+//! evaluates every filter kind SPEC §7.1.2 allows (ROADMAP 8.1.15: `term`, `terms`, `range` with every bound shape,
+//! `exists`, `and`, `or`, `not`) by the documents' values, beside `must`, beside `should` alone and beside a
+//! `minimum_should_match`.
 //!
 //! Invariants, after every operation:
-//! 1. A search returns exactly the live documents the reference matches and the filter selects, each once, with
+//! 1. A search returns exactly the live documents the reference matches, filters included, each once, with
 //!    the reference's score within [`EPSILON`] of the query's scale. Statistics count every document of every
 //!    segment, deleted or replaced ones too, plus the memtable's live documents (SPEC §7.2).
 //! 2. Hits rank in the reference's order: no hit above one the reference scores higher beyond the tolerance, every
@@ -16,11 +19,13 @@
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
 //! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
-//!    8.1.2, 8.2.2, 8.2.5): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses,
-//!    then L5 `fallback` (every live document the filter keeps and the root's `must_not` does not match, by recency:
-//!    memtable first, then segments and docids descending), each step's matches the earlier steps lack, scored as the
-//!    reference scores that step; L0 alone, ranked as a plain search, when it has `min_results` hits. The response is
-//!    flagged `fallback` exactly when L5 is the last step that found a hit.
+//!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s
+//!    `must` clauses beside its `must_not` and `filter`, then L5 `fallback` (every live document the root's filters
+//!    keep and its `must_not` does not match, by recency: memtable first, then segments and docids descending), and
+//!    under `filters: "last_resort"` L6 `filters` (the root without its filters, when it has some and searches a
+//!    word), each step's matches the earlier steps lack, scored as the reference scores that step; L0 alone, ranked as
+//!    a plain search, when it has `min_results` hits. The response is flagged `fallback` exactly when L5 is the last
+//!    step that found a hit, and `filters_dropped` exactly when L6 is.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -40,6 +45,7 @@ mod reference;
 
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::ops::Bound;
 use std::sync::Arc;
 
 use persia_engine::db::{
@@ -55,8 +61,8 @@ use persia_engine::query::{
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
-    AnalyzerRef, CollectionSchema, FieldId, FieldKind, KeywordOptions, Level, Levels,
-    SchemaBuilder, TextOptions,
+    AnalyzerRef, CollectionSchema, FieldId, FieldKind, FilterRelaxation, KeywordOptions, Level,
+    Levels, SchemaBuilder, TextOptions,
 };
 use persia_engine::search::{
     Explanation, Missing, Order, Pruning, SearchPlan, Sort, SortKey, SortValue,
@@ -174,6 +180,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
             must,
             should,
             must_not,
+            filter,
             minimum_should_match,
         } => {
             let all = |qs: &[RefQuery]| qs.iter().map(|q| engine_query(q, fields)).collect();
@@ -181,7 +188,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
                 must: all(must),
                 should: all(should),
                 must_not: all(must_not),
-                filter: Vec::new(),
+                filter: filter.clone(),
                 minimum_should_match: u32::try_from(*minimum_should_match).unwrap(),
             })
         }
@@ -276,36 +283,57 @@ fn leaf(params: Params) -> impl Strategy<Value = RefQuery> {
     ]
 }
 
-fn query(params: Params) -> impl Strategy<Value = RefQuery> {
+/// `filter` clauses of a `bool`: none half the time, else one or two (ROADMAP 8.1.15).
+fn filters(fields: [FieldId; 4]) -> impl Strategy<Value = Vec<Filter>> {
+    prop_oneof![
+        1 => Just(Vec::new()),
+        1 => prop::collection::vec(filter(fields), 1..3),
+    ]
+}
+
+/// A query of the reference, its `bool`s with filters at any depth (ROADMAP 8.1.15): beside `must`, beside `should`
+/// alone (which they make optional, SPEC §7.1), and beside a `minimum_should_match`.
+fn query(params: Params, fields: [FieldId; 4]) -> impl Strategy<Value = RefQuery> {
     leaf(params).prop_recursive(3, 16, 4, move |inner| {
         prop_oneof![
             4 => (
                 prop::collection::vec(inner.clone(), 0..3),
                 prop::collection::vec(inner.clone(), 0..3),
                 prop::collection::vec(inner.clone(), 0..2),
+                filters(fields),
             )
-                .prop_map(|(must, should, must_not)| RefQuery::Bool { must, should, must_not, minimum_should_match: 0 }),
-            // Several required clauses and no `should`: what L2 `drop_terms` relaxes (ROADMAP 8.2.2).
-            2 => (prop::collection::vec(inner.clone(), 2..6), prop::collection::vec(inner.clone(), 0..2))
-                .prop_map(|(must, must_not)| RefQuery::Bool { must, should: Vec::new(), must_not, minimum_should_match: 0 }),
-            // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must`.
-            // The count is drawn once the clauses are, so every value from 1 to one past them comes up.
+                .prop_map(|(must, should, must_not, filter)| RefQuery::Bool { must, should, must_not, filter, minimum_should_match: 0 }),
+            // Several required clauses and no `should`: what L2 `drop_terms` relaxes (ROADMAP 8.2.2), its steps keeping
+            // the root's filters.
+            2 => (prop::collection::vec(inner.clone(), 2..6), prop::collection::vec(inner.clone(), 0..2), filters(fields))
+                .prop_map(|(must, must_not, filter)| RefQuery::Bool { must, should: Vec::new(), must_not, filter, minimum_should_match: 0 }),
+            // `minimum_should_match` (ROADMAP 8.1.6): up to one past the `should` clauses, with or without `must` and
+            // filters. The count is drawn once the clauses are, so every value from 1 to one past them comes up.
             2 => (
                 prop::collection::vec(inner.clone(), 0..2),
                 prop::collection::vec(inner.clone(), 1..5),
                 prop::collection::vec(inner.clone(), 0..2),
+                filters(fields),
             )
-                .prop_flat_map(|(must, should, must_not)| {
+                .prop_flat_map(|(must, should, must_not, filter)| {
                     let most = should.len() + 1;
-                    (Just(must), Just(should), Just(must_not), 1..=most)
+                    (Just(must), Just(should), Just(must_not), Just(filter), 1..=most)
                 })
-                .prop_map(|(must, should, must_not, minimum_should_match)| RefQuery::Bool { must, should, must_not, minimum_should_match }),
+                .prop_map(|(must, should, must_not, filter, minimum_should_match)| RefQuery::Bool { must, should, must_not, filter, minimum_should_match }),
+            // `should` clauses beside filters alone: optional at 0 (every selected document matches), required at
+            // `minimum_should_match` 1 or more (ROADMAP 8.1.15).
+            2 => (
+                prop::collection::vec(inner.clone(), 1..4),
+                prop::collection::vec(filter(fields), 1..3),
+                0..3_usize,
+            )
+                .prop_map(|(should, filter, minimum_should_match)| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), filter, minimum_should_match }),
             // Wide: a disjunction past its few-clause scan, onto its heap (ROADMAP 7.4.7).
             1 => prop::collection::vec(leaf(params), 9..14)
-                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match: 0 }),
+                .prop_map(|should| RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), filter: Vec::new(), minimum_should_match: 0 }),
             // Wide with `minimum_should_match`: the heap skipping documents on too few clauses.
             1 => (prop::collection::vec(leaf(params), 9..14), 2..5_usize).prop_map(|(should, minimum_should_match)| {
-                RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), minimum_should_match }
+                RefQuery::Bool { must: Vec::new(), should, must_not: Vec::new(), filter: Vec::new(), minimum_should_match }
             }),
             1 => (inner.clone(), 0.5..4.0_f64).prop_map(|(q, b)| RefQuery::Boost(Box::new(q), b)),
             1 => (inner, 0.0..5.0_f64).prop_map(|(q, s)| RefQuery::Constant(Box::new(q), s)),
@@ -313,22 +341,46 @@ fn query(params: Params) -> impl Strategy<Value = RefQuery> {
     })
 }
 
-/// A filter over `tag` and `n`, by field id (the schema's ids do not depend on the parameters).
-fn filter(tag: FieldId, n: FieldId) -> impl Strategy<Value = Filter> {
+/// A range bound on `n`: none, inclusive or exclusive.
+fn bound(kind: u8, v: i64) -> Bound<FilterValue> {
+    match kind {
+        0 => Bound::Unbounded,
+        1 => Bound::Included(FilterValue::I64(v)),
+        _ => Bound::Excluded(FilterValue::I64(v)),
+    }
+}
+
+/// A filter of every kind SPEC §7.1.2 allows (ROADMAP 8.1.15), by field id (the schema's ids do not depend on the
+/// parameters): `term` and `terms` on the `keyword` `tag` and the `i64` `n` (values `n` never holds too), `range` on
+/// `n` with every bound shape (`gt`/`gte`, `lt`/`lte`, either side open; never empty), `exists` on `tag`, `n` and the
+/// `text` `title`, and `and`, `or` (empty too) and `not` of those.
+fn filter(fields: [FieldId; 4]) -> impl Strategy<Value = Filter> {
+    let (title, tag, n) = (fields[TITLE], fields[TAG], fields[3]);
     let keyword = || prop::sample::select(&TAGS[..]).prop_map(|t| FilterValue::Keyword(t.into()));
+    // One past the values the documents hold: a term that selects nothing.
+    let number = || (-1_i64..4).prop_map(FilterValue::I64);
     let leaf = prop_oneof![
-        keyword().prop_map(move |value| Filter::Term { field: tag, value }),
-        prop::collection::vec(keyword(), 0..3)
+        2 => keyword().prop_map(move |value| Filter::Term { field: tag, value }),
+        2 => prop::collection::vec(keyword(), 0..3)
             .prop_map(move |values| Filter::Terms { field: tag, values }),
-        (prop::sample::select(&NS[..]), prop::sample::select(&NS[..])).prop_map(move |(a, b)| {
-            Filter::Range {
-                field: n,
-                lower: std::ops::Bound::Included(FilterValue::I64(a.min(b))),
-                upper: std::ops::Bound::Included(FilterValue::I64(a.max(b))),
-            }
-        }),
-        Just(Filter::Exists { field: n }),
-        Just(Filter::Exists { field: tag }),
+        1 => number().prop_map(move |value| Filter::Term { field: n, value }),
+        1 => prop::collection::vec(number(), 0..3)
+            .prop_map(move |values| Filter::Terms { field: n, values }),
+        3 => (0..3_u8, 0..3_u8, prop::sample::select(&NS[..]), prop::sample::select(&NS[..])).prop_map(
+            move |(lo, hi, a, b)| {
+                let (a, b) = (a.min(b), a.max(b));
+                // At least one bound, and not empty: equal bounds are both inclusive (SPEC §7.1.2).
+                let (lo, hi) = match (lo, hi) {
+                    (0, 0) => (1, 0),
+                    (lo, hi) if a == b && lo != 0 && hi != 0 => (1, 1),
+                    kinds => kinds,
+                };
+                Filter::Range { field: n, lower: bound(lo, a), upper: bound(hi, b) }
+            },
+        ),
+        1 => Just(Filter::Exists { field: n }),
+        1 => Just(Filter::Exists { field: tag }),
+        1 => Just(Filter::Exists { field: title }),
     ];
     leaf.prop_recursive(2, 6, 2, |inner| {
         prop_oneof![
@@ -360,15 +412,14 @@ struct Case {
 
 fn case() -> impl Strategy<Value = Case> {
     let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
-    let (tag, n) = (fields[TAG], fields[3]);
     params().prop_flat_map(move |p| {
         (
             Just(p),
             prop::collection::vec(op(), 1..20),
             prop::collection::vec(
                 (
-                    query(p),
-                    prop::option::weighted(0.5, (filter(tag, n), any::<bool>())),
+                    query(p, fields),
+                    prop::option::weighted(0.5, (filter(fields), any::<bool>())),
                 ),
                 1..4,
             ),
@@ -581,43 +632,42 @@ fn check(
     let stats = c.search_statistics(memtable);
     let all = live.len().max(1);
     for (i, (q, filter)) in case.queries.iter().enumerate() {
-        let mut query = engine_query(q, &fields);
-        match filter {
-            Some((f, false)) => {
-                query = Query::Bool(BoolQuery {
-                    must: vec![query],
+        // A case's filter joins its query at a root of its own (SPEC §7.1): the query beside it as the `must`, or as a
+        // `should`, which the filter makes optional (every selected document matches, scoring the query or 0). The
+        // reference evaluates that root, filters included (ROADMAP 8.1.15).
+        let root = match filter {
+            Some((f, should)) => {
+                let (must, should) = if *should {
+                    (Vec::new(), vec![q.clone()])
+                } else {
+                    (vec![q.clone()], Vec::new())
+                };
+                RefQuery::Bool {
+                    must,
+                    should,
+                    must_not: Vec::new(),
                     filter: vec![f.clone()],
-                    ..BoolQuery::default()
-                });
+                    minimum_should_match: 0,
+                }
             }
-            // No `must`: the filter alone selects, and the `should` only scores (SPEC §7.1).
-            Some((f, true)) => {
-                query = Query::Bool(BoolQuery {
-                    should: vec![query],
-                    filter: vec![f.clone()],
-                    ..BoolQuery::default()
-                });
-            }
-            None => {}
-        }
-        let optional = matches!(filter, Some((_, true)));
+            None => q.clone(),
+        };
+        let query = engine_query(&root, &fields);
         query.validate(schema, &QueryLimits::default()).unwrap();
         let plan = SearchPlan::new(&query, schema, &stats)
             .unwrap()
             .with_proximity();
+        // The reference's score of `step` for live document `id`, its filters selecting by the document's values.
+        let eval = |step: &RefQuery, id: &str, proximity: bool| {
+            let v = &live[id];
+            let document = v.document(&fields, id);
+            corpus.eval_filtered(step, &v.doc, proximity, &|f| selects(f, &document, schema))
+        };
 
         // Invariant 1: the matches and their scores, with the proximity bonus on (SPEC §7.2; off by default).
         let matches = |proximity: bool| -> BTreeMap<&String, (f64, f64)> {
-            live.iter()
-                .filter(|(id, v)| {
-                    filter
-                        .as_ref()
-                        .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
-                })
-                .filter_map(|(id, v)| match corpus.eval_with(q, &v.doc, proximity) {
-                    None if optional => Some((id, (0.0, 0.0))),
-                    s => s.map(|s| (id, s)),
-                })
+            live.keys()
+                .filter_map(|id| eval(&root, id, proximity).map(|s| (id, s)))
                 .collect()
         };
         let want = matches(true);
@@ -670,11 +720,7 @@ fn check(
             query
         );
         for h in &no_bonus {
-            let v = &live[h.document.id()];
-            let (score, scale) = match corpus.eval_with(q, &v.doc, false) {
-                None if optional => (0.0, 0.0),
-                s => s.unwrap(),
-            };
+            let (score, scale) = eval(&root, h.document.id(), false).unwrap();
             prop_assert!(
                 (h.score - score).abs() <= EPSILON * scale.max(1.0),
                 "{}: {} vs reference {} without proximity for {:?}",
@@ -767,27 +813,33 @@ fn check(
         )?;
 
         // Invariant 5: relaxed with L2 `drop_terms` alone (ROADMAP 8.2.2; L3, which the reference does not model yet,
-        // would also build a step for one programmatic term: ROADMAP 8.1.19) and then L5 `fallback` (ROADMAP 8.2.5), a
-        // search returns each step's matches the earlier steps lack, step by step, scored and ranked as the reference
-        // scores that step's query (L5: by recency); L0 alone when it has `min_results` hits, and every step for a
-        // `min_results` above them all.
-        let mut steps = reference_steps(q, filter.is_some());
-        // L5 `fallback` (ROADMAP 8.2.5) last: every live document the filter keeps and the root's `must_not` does not
-        // match (a filter wraps the query in a root of its own, without them), ranked by recency alone (this schema has
-        // no static rank).
+        // would also build a step for one programmatic term: ROADMAP 8.1.19) and then L5 `fallback` (ROADMAP 8.2.5), and
+        // under `filters: "last_resort"` L6 `filters` (ROADMAP 8.2.6, 8.1.15), a search returns each step's matches the
+        // earlier steps lack, step by step, scored and ranked as the reference scores that step's query (L5: by
+        // recency); L0 alone when it has `min_results` hits, and every step for a `min_results` above them all. Every
+        // step but L6 keeps the root's filters.
+        let mut steps = reference_steps(&root);
+        // L5 `fallback` (ROADMAP 8.2.5) after the word levels: every live document the root's filters keep and its
+        // `must_not` does not match, ranked by recency alone (this schema has no static rank).
         let l5 = steps.len();
-        steps.push((
-            reference_fallback(q, filter.is_some()),
-            "fallback".to_owned(),
-        ));
+        steps.push((reference_fallback(&root), "fallback".to_owned()));
+        // L6 last, under `"last_resort"` alone: the root without its filters, when it has some and searches a word.
+        let l6 = steps.len();
+        let unfiltered = reference_unfiltered(&root);
         // A relaxed search plans with the default: no proximity bonus (SPEC §7.4).
         let l0 = matches(false);
-        for min_results in [1, 10_000] {
+        for (min_results, filters) in [
+            (1, FilterRelaxation::Never),
+            (10_000, FilterRelaxation::Never),
+            (1, FilterRelaxation::LastResort),
+            (10_000, FilterRelaxation::LastResort),
+        ] {
             let relax = RelaxPlan::new(
                 schema.relaxation(),
                 &RelaxOptions {
                     min_results: Some(min_results),
                     levels: Some(Levels::Custom(vec![Level::DropTerms])),
+                    filters: Some(filters),
                     ..RelaxOptions::default()
                 },
             )
@@ -798,6 +850,10 @@ fn check(
             let relaxed = views
                 .search_relaxed(&query, &request, &relax, &exec)
                 .unwrap();
+            let mut steps = steps.clone();
+            if let (FilterRelaxation::LastResort, Some(step)) = (filters, &unfiltered) {
+                steps.push((step.clone(), "filters".to_owned()));
+            }
             // The reference cascade: each step's matches the earlier ones lack, until `min_results` are found.
             let mut taken: Vec<&String> = Vec::new();
             let mut built = Vec::new();
@@ -808,14 +864,9 @@ fn check(
                 let matches: BTreeMap<&String, (f64, f64)> = if i == 0 {
                     l0.clone()
                 } else {
-                    live.iter()
-                        .filter(|(id, _)| !taken.contains(id))
-                        .filter(|(id, v)| {
-                            filter
-                                .as_ref()
-                                .is_none_or(|(f, _)| selects(f, &v.document(&fields, id), schema))
-                        })
-                        .filter_map(|(id, v)| corpus.eval(step, &v.doc).map(|s| (id, s)))
+                    live.keys()
+                        .filter(|id| !taken.contains(id))
+                        .filter_map(|id| eval(step, id, false).map(|s| (id, s)))
                         .collect()
                 };
                 taken.extend(matches.keys().copied());
@@ -828,12 +879,15 @@ fn check(
             prop_assert_eq!(&relaxed.relaxation.applied, &applied, "{:?}", query);
             let level = match built.len() {
                 1 => RelaxLevel::Exact,
+                n if n == l6 + 1 => RelaxLevel::Filters,
                 n if n == l5 + 1 => RelaxLevel::Fallback,
                 _ => RelaxLevel::DropTerms,
             };
-            // The response is flagged when L5 is the last step that found a hit (SPEC §7.6).
+            // The response is flagged when L5 is the last step that found a hit, and states that filters were dropped
+            // when L6 is (SPEC §7.6).
             let hit_step = built.iter().rposition(|m| !m.is_empty());
             prop_assert_eq!(relaxed.relaxation.fallback.is_some(), hit_step == Some(l5));
+            prop_assert_eq!(relaxed.relaxation.filters_dropped, hit_step == Some(l6));
             prop_assert_eq!(relaxed.relaxation.level, level);
             // Step order first, each step's hits its reference matches, within the tolerance, in the reference order.
             prop_assert!(relaxed.hits.windows(2).all(|w| w[0].step <= w[1].step));
@@ -1241,21 +1295,23 @@ proptest! {
 }
 
 /// The steps of the collection's cascade for reference query `q` (SPEC §7.6), with what each applied: L0, then L2
-/// `drop_terms` over the `must` clauses of a root `bool` without `should` (and of a query without a filter, which
-/// wraps it): `minimum_should_match` of them at 75% and 50% of the `n` terms (`max(1, ⌊p · n / 100⌋)`) and at 1, each
-/// count once and below L0's `n`, with the root's `must_not`. Written from the SPEC, not from the engine's ladder.
-fn reference_steps(q: &RefQuery, filtered: bool) -> Vec<(RefQuery, String)> {
+/// `drop_terms` over the `must` clauses of a root `bool` without `should` or a `minimum_should_match`:
+/// `minimum_should_match` of them at 75% and 50% of the `n` terms (`max(1, ⌊p · n / 100⌋)`) and at 1, each count once
+/// and below L0's `n`, with the root's `must_not` and `filter` (filters are not relaxed, ROADMAP 8.1.15). A query
+/// whose filter wraps it (`must: [query]`) has one term. Written from the SPEC, not from the engine's ladder.
+fn reference_steps(q: &RefQuery) -> Vec<(RefQuery, String)> {
     let mut steps = vec![(q.clone(), String::new())];
     let RefQuery::Bool {
         must,
         should,
         must_not,
+        filter,
         minimum_should_match: 0,
     } = q
     else {
         return steps;
     };
-    if filtered || !should.is_empty() {
+    if !should.is_empty() {
         return steps;
     }
     let n = must.len();
@@ -1273,6 +1329,7 @@ fn reference_steps(q: &RefQuery, filtered: bool) -> Vec<(RefQuery, String)> {
             must: Vec::new(),
             should: must.clone(),
             must_not: must_not.clone(),
+            filter: filter.clone(),
             minimum_should_match: count,
         };
         steps.push((step, format!("drop_terms:{label}")));
@@ -1280,17 +1337,56 @@ fn reference_steps(q: &RefQuery, filtered: bool) -> Vec<(RefQuery, String)> {
     steps
 }
 
-/// L5 `fallback`'s step as SPEC §7.6 builds it from `q`: `match_all` beside the root `bool`'s `must_not`, which stay
-/// excluded. A filtered query's root is the `bool` that joins the filter (its `must_not` empty), whose filter the
-/// caller applies.
-fn reference_fallback(q: &RefQuery, filtered: bool) -> RefQuery {
+/// L5 `fallback`'s step as SPEC §7.6 builds it from `q`: `match_all` beside the root `bool`'s `must_not` and `filter`,
+/// so excluded clauses stay excluded and filters are not relaxed; `match_all` alone without either, or for a root of
+/// another kind. A deeper filter is not kept.
+fn reference_fallback(q: &RefQuery) -> RefQuery {
     match q {
-        RefQuery::Bool { must_not, .. } if !filtered && !must_not.is_empty() => RefQuery::Bool {
+        RefQuery::Bool {
+            must_not, filter, ..
+        } if !must_not.is_empty() || !filter.is_empty() => RefQuery::Bool {
             must: vec![RefQuery::All],
             should: Vec::new(),
             must_not: must_not.clone(),
+            filter: filter.clone(),
             minimum_should_match: 0,
         },
         _ => RefQuery::All,
+    }
+}
+
+/// L6 `filters`' step as SPEC §7.6 builds it from a programmatic `q` (ROADMAP 8.2.6, 8.1.15): its root `bool` without
+/// its filters, every other clause as it is; `None` when the root has no filter, is not a `bool`, or searches no word.
+fn reference_unfiltered(q: &RefQuery) -> Option<RefQuery> {
+    let RefQuery::Bool {
+        must,
+        should,
+        must_not,
+        filter,
+        minimum_should_match,
+    } = q
+    else {
+        return None;
+    };
+    let words = must.iter().any(searches_word) || should.iter().any(searches_word);
+    (words && !filter.is_empty()).then(|| RefQuery::Bool {
+        must: must.clone(),
+        should: should.clone(),
+        must_not: must_not.clone(),
+        filter: Vec::new(),
+        minimum_should_match: *minimum_should_match,
+    })
+}
+
+/// Whether `q` searches a word (SPEC §7.6): a word or a phrase, or a `bool`, `boost` or `constant_score` holding one in
+/// `must` or `should`. `match_all`, an empty `bool` and exclusions alone do not.
+fn searches_word(q: &RefQuery) -> bool {
+    match q {
+        RefQuery::Word(_) | RefQuery::Phrase { .. } => true,
+        RefQuery::All => false,
+        RefQuery::Bool { must, should, .. } => {
+            must.iter().any(searches_word) || should.iter().any(searches_word)
+        }
+        RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => searches_word(inner),
     }
 }

@@ -3,6 +3,8 @@
 
 #![allow(dead_code, clippy::cast_precision_loss)]
 
+use persia_engine::query::Filter;
+
 use super::bm25f::{Clause, Corpus, Doc, quantized};
 
 /// A query of the reference, by field index.
@@ -16,12 +18,14 @@ pub enum Query {
         terms: Vec<(String, u32)>,
         weight: f64,
     },
-    /// SPEC §7.1: every `must`, no `must_not`, and at least `minimum_should_match` `should` clauses (0: one when
-    /// there is no `must` and some `should`, the reference having no filters).
+    /// SPEC §7.1: every `must` and `filter`, no `must_not`, and at least `minimum_should_match` `should` clauses (0:
+    /// one when there is neither a `must` nor a `filter` clause and some `should`). A filter selects by the document's
+    /// values ([`Corpus::eval_filtered`]) and does not score.
     Bool {
         must: Vec<Query>,
         should: Vec<Query>,
         must_not: Vec<Query>,
+        filter: Vec<Filter>,
         minimum_should_match: usize,
     },
     Boost(Box<Query>, f64),
@@ -127,9 +131,24 @@ impl Corpus {
         self.eval_with(q, doc, false)
     }
 
-    /// As [`Self::eval`], with or without the proximity bonus.
+    /// As [`Self::eval`], with or without the proximity bonus, for a query without filters (a document's tokens do not
+    /// say whether a filter selects it: [`Self::eval_filtered`]).
     pub fn eval_with(&self, q: &Query, doc: &Doc, proximity: bool) -> Option<(f64, f64)> {
-        let eval = |q| self.eval_with(q, doc, proximity);
+        self.eval_filtered(q, doc, proximity, &|f| {
+            panic!("{f:?} needs the document's values: use eval_filtered")
+        })
+    }
+
+    /// As [`Self::eval_with`], with `selects` saying whether each filter selects `doc` (SPEC §7.1.2: by its values,
+    /// `reference::filter::selects`).
+    pub fn eval_filtered(
+        &self,
+        q: &Query,
+        doc: &Doc,
+        proximity: bool,
+        selects: &dyn Fn(&Filter) -> bool,
+    ) -> Option<(f64, f64)> {
+        let eval = |q| self.eval_filtered(q, doc, proximity, selects);
         match q {
             Query::Word(clauses) => {
                 let held = clauses.iter().any(|c| doc[c.field].contains(&c.term));
@@ -158,9 +177,10 @@ impl Corpus {
                 must,
                 should,
                 must_not,
+                filter,
                 minimum_should_match,
             } => {
-                if must_not.iter().any(|c| eval(c).is_some()) {
+                if must_not.iter().any(|c| eval(c).is_some()) || !filter.iter().all(selects) {
                     return None;
                 }
                 let mut sum = (0.0, 0.0);
@@ -180,7 +200,7 @@ impl Corpus {
                     }
                 }
                 let at_least = match *minimum_should_match {
-                    0 if must.is_empty() && !should.is_empty() => 1,
+                    0 if must.is_empty() && filter.is_empty() && !should.is_empty() => 1,
                     m => m,
                 };
                 (matched >= at_least).then_some(sum)

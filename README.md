@@ -30,7 +30,7 @@
 </p>
 
 <!-- BEGIN GENERATED progress:summary by `cargo xtask progress`. Do not edit by hand. -->
-**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **362 of 552** MVP leaves done (66%), 0 in progress (last snapshot 2026-11-15). Post-MVP work is 0 of 180 and sits outside that percentage.
+**Pre-alpha.** [`PROGRESS.md`](./PROGRESS.md) counts **364 of 553** MVP leaves done (66%), 0 in progress (last snapshot 2026-11-16). Post-MVP work is 0 of 180 and sits outside that percentage.
 <!-- END GENERATED progress:summary -->
 
 Format 1.0 is unstable until the v1.0 release ([SPEC §15](./SPEC.md#15-versioning-and-compatibility)). The [docs homepage](https://tomiok.github.io/persiaDB/) plays this poster from [`persia-hero.webm`](./website/public/persia-hero.webm) and [`persia-hero.mp4`](./website/public/persia-hero.mp4).
@@ -117,7 +117,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &DefaultFields::all(notes.schema()),
             &QueryLimits::default(),
         )
-        .query;
+        .into_query();
     let memtable = notes.memtable();
     let plan = SearchPlan::new(&query, notes.schema(), &notes.search_statistics(&memtable))?;
     let page = notes
@@ -252,7 +252,7 @@ MVP (M0–M15) is the v1.0 release. The live graph, the burn-up, and the ready-n
 | **M5** Segment writer & reader | ✅ done | 48/48 |
 | **M6** Write path, durability, merging | 🔨 in progress | 49/58 |
 | **M7** Query engine & ranking | ✅ done | 51/51 |
-| **M8** Zero-results avoidance | 🔨 in progress | 29/51 |
+| **M8** Zero-results avoidance | 🔨 in progress | 31/52 |
 | **M9** Blob store | 🔨 in progress | 5/22 |
 | **M10** Embedded API | ⏳ blocked | 0/23 |
 | **M11** Server | ⏳ blocked | 0/23 |

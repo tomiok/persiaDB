@@ -1752,7 +1752,7 @@ fn a_compiled_query_states_its_text_and_its_levels_read_it() {
 
     // The same query built in code has no text, and its levels get none.
     let out = views
-        .search_relaxed(&purple.query, &request(10), &relax, &exec())
+        .search_relaxed(purple.query(), &request(10), &relax, &exec())
         .unwrap();
     assert_eq!(out.relaxation.applied.len(), 2);
     assert_eq!(

@@ -66,7 +66,8 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0041](./0041-blob-chunk-size-floor.md) | A writer's blob chunk size has a 64 KiB floor; the encodings keep `1..=64 MiB` | accepted |
 | [0042](./0042-l4-fuzzy-one-step-length-policy-and-corrections.md) | L4 `fuzzy`: one step over L3's terms, a length-based distance, and corrections of missing words | proposed (amended by 0046) |
 | [0043](./0043-relaxed-response-states-the-hit-step.md) | A relaxed response states the text of its hit step, the last step that found a hit | proposed |
-| [0044](./0044-l5-fallback-static-rank-then-index-recency.md) | L5 `fallback`: the collection's static rank, then index recency, flagged in the response | proposed (amended by 0047) |
+| [0044](./0044-l5-fallback-static-rank-then-index-recency.md) | L5 `fallback`: the collection's static rank, then index recency, flagged in the response | proposed (amended by 0047, 0048) |
 | [0045](./0045-request-relax-options-and-cursor-settings.md) | A request's `relax` options: every key, merged one at a time, and cursors that record the settings | proposed (amended by 0047) |
 | [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |
-| [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed |
+| [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed (amended by 0048) |
+| [0048](./0048-request-filter-kept-beside-the-compilation.md) | The request filter is kept beside the compiled query, which is replaced only through it | proposed |

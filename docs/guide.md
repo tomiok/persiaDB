@@ -214,6 +214,12 @@ hit step. A planned filter step that finds nothing leaves it false. With the def
 only when fewer than `min_results` documents pass the filters and the excluded clauses at all. No filter can be marked as one that must hold
 yet (ROADMAP 8.2.13), so do not set `last_resort` on a request whose filters enforce tenancy or permissions.
 
+In the engine API, a compiled query keeps the request filter beside it (`Compiled::filter`). To search a query of
+your own in its place, use `Compiled::with_query`: it joins the request filter to your query again, so under the
+default `"never"` no level, the fallback included, returns a document the filter rejects (ROADMAP 8.2.14). The filter
+step (`last_resort`) drops the request filter alone; a filter your query holds itself stays, unless it equals the
+request filter.
+
 Quality of this cascade is a product feature of the same milestone (ROADMAP M8): a synthetic typo
 suite, a zero-result rate before and after relaxation, and a regression gate. A tuning guide is
 planned as ROADMAP 8.4.4 (`docs/relaxation.md`).

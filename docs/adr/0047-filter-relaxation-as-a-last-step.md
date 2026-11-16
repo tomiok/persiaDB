@@ -1,9 +1,9 @@
 # ADR-0047: Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters
 
-- Status: proposed
+- Status: proposed (amended by ADR-0048: the request filter is kept beside the compilation, so L5 keeps it and the filter step drops it alone, whatever query a caller put in)
 - Date: 2026-11-15
 - Related: SPEC §6.2.3, §7.1, §7.1.3, §7.4, §7.5, §7.6, §7.7; ROADMAP 8.1.9, 8.2.5, 8.2.6, 8.2.13, 8.2.14, 8.3.1, 8.3.2, 8.3.4;
-  ADR-0037, ADR-0043, ADR-0044, ADR-0045
+  ADR-0037, ADR-0043, ADR-0044, ADR-0045, ADR-0048
 
 ## Context
 
@@ -30,15 +30,16 @@ there, because filters are often hard constraints (tenancy, permissions). Severa
    what `last_resort` names, and what `FilterRelaxation::LastResort` already promised ("only after every other level
    failed").
 2. **It drops every filter of the root `bool`, nothing else.** Of a programmatic query, a root `bool`'s `filter`. Of a
-   query compiled from `q`, the request's filter (SPEC §7.1) while `Compiled::root` returns that `bool`. These are the
-   filters L5 keeps when the root is still there. Replacing the public `Compiled::query` with a query that does not
-   hold its clauses' parts makes `Compiled::root` return `None`: this step then builds nothing, and L5 becomes
-   `match_all`, so the request filter is lost. That is a known limitation (ROADMAP 8.2.14), not a guarantee that a
-   replaced query keeps the filter. Required clauses, `should` clauses, `minimum_should_match`, excluded clauses and
+   query compiled from `q`, the request's filter (SPEC §7.1), which the compilation keeps beside its query
+   (`Compiled::filter`, amended by ADR-0048): the step drops that filter alone, whatever query a caller put in place of
+   the compiled one with `Compiled::with_query` (which joins the request filter to it again), and a filter the
+   caller's root `bool` holds itself stays, unless it equals the request filter (then it counts as the request's). Before ADR-0048 the step read the filter through `Compiled::root`, which a
+   replaced query could make `None`, losing the request filter at L5 (ROADMAP 8.2.14). Required clauses, `should` clauses, `minimum_should_match`, excluded clauses and
    any deeper filter stay. Excluded clauses are the user's words (`-blue`), not a filter, so a user who wrote `-blue`
-   never gets blue, as at L5. All the root's filters go together: dropping them one at a time would need an order SPEC
-   does not have. A query whose root has no filter, or whose root is not a `bool`, builds no step, and the level is
-   skipped. So does a query that searches no word. A clause searches a word when it names a term (`term`, `combined`,
+   never gets blue, as at L5. The filters the step drops go together (of a programmatic query every filter of its root
+   `bool`, of a compiled one its request filter): dropping them one at a time would need an order SPEC does not have.
+   A programmatic query whose root has no filter, or whose root is not a `bool`, and a compiled query with no request
+   filter, build no step, and the level is skipped. So does a query that searches no word. A clause searches a word when it names a term (`term`, `combined`,
    `phrase`, `prefix`, `fuzzy`) or holds such a clause in `must` or `should` of a `bool`, at any depth through `boost`
    and `constant_score`. A term only in `must_not` does not. `match_all`, an empty `bool` and a `bool` of exclusions
    alone do not, so neither does `should: [match_all]`, `boost` of `match_all`, `constant_score` of `match_all`, or a

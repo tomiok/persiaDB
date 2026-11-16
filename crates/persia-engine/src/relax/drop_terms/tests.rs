@@ -258,7 +258,7 @@ mod steps {
     }
 
     fn steps(compiled: &Compiled, stats: &dyn StatisticsProvider) -> Vec<Step> {
-        let input = LevelInput::new(&compiled.query, Some(compiled), stats);
+        let input = LevelInput::new(compiled.query(), Some(compiled), stats);
         DropTerms.steps(&input).unwrap()
     }
 
@@ -329,10 +329,7 @@ mod steps {
         let stats = Stats(BTreeMap::new());
         let mut compiled = compile("red purple shoes -blue");
         assert_eq!(steps(&compiled, &stats).len(), 2);
-        let Query::Bool(b) = &mut compiled.query else {
-            panic!()
-        };
-        b.must_not.clear();
+        compiled = crate::relax::tests::with_root(compiled, |b| b.must_not.clear());
         assert_eq!(labels(&steps(&compiled, &stats)), []);
     }
 
@@ -446,7 +443,7 @@ mod steps {
             }
         }
         let compiled = compile("red hat");
-        let input = LevelInput::new(&compiled.query, Some(&compiled), &Broken);
+        let input = LevelInput::new(compiled.query(), Some(&compiled), &Broken);
         assert!(DropTerms.steps(&input).is_err());
     }
 }
@@ -521,14 +518,14 @@ mod single_term {
             let required = compiled.clauses.iter().filter(|c| !c.negated).count();
             assert!(required <= 1, "{text:?}");
             assert_eq!(
-                steps(&compiled.query, Some(&compiled)),
+                steps(compiled.query(), Some(&compiled)),
                 (Vec::new(), 0),
                 "{text:?}"
             );
         }
         // Two required clauses relax, whatever else is excluded; their `df` is read once each.
         let compiled = query_compiler.compile("shoes red -blue", &fields, &QueryLimits::default());
-        let (built, reads) = steps(&compiled.query, Some(&compiled));
+        let (built, reads) = steps(compiled.query(), Some(&compiled));
         assert_eq!(built.len(), 1);
         assert_eq!(reads, 4, "two words over two fields");
     }
@@ -619,12 +616,12 @@ mod random_text {
                     schema.fields().iter().map(move |f| ((f.id().get(), *w), *df))
                 }).collect(),
             );
-            let input = LevelInput::new(&compiled.query, Some(&compiled), &stats);
+            let input = LevelInput::new(compiled.query(), Some(&compiled), &stats);
             let steps = DropTerms.steps(&input).unwrap();
             let required = compiled.clauses.iter().filter(|c| !c.negated).count();
             let negated = compiled.clauses.len() - required;
             prop_assert_eq!(steps.len(), ladder(required).len());
-            let l0_must_not = match &compiled.query {
+            let l0_must_not = match compiled.query() {
                 Query::Bool(b) => b.must_not.clone(),
                 _ => Vec::new(),
             };
@@ -679,7 +676,7 @@ fn a_compiled_root_changed_to_hold_should_clauses_is_not_relaxed() {
     let input = |compiled: &Compiled| {
         DropTerms
             .steps(&LevelInput::new(
-                &compiled.query,
+                compiled.query(),
                 Some(compiled),
                 &crate::relax::tests::NoStats,
             ))
@@ -687,17 +684,19 @@ fn a_compiled_root_changed_to_hold_should_clauses_is_not_relaxed() {
             .len()
     };
     assert_eq!(input(&compiled), 1);
-    let root = |compiled: &mut Compiled| match &mut compiled.query {
-        Query::Bool(root) => std::mem::take(root),
-        q => panic!("two clauses compile to a bool: {q:?}"),
-    };
-    let mut changed = root(&mut compiled);
-    changed.should.push(term(0, "shoes"));
-    compiled.query = Query::Bool(changed.clone());
-    assert_eq!(input(&compiled), 0);
-    changed.should.clear();
-    changed.minimum_should_match = 1;
-    compiled.query = Query::Bool(changed);
+    let should =
+        crate::relax::tests::with_root(compiled.clone(), |b| b.should.push(term(0, "shoes")));
+    assert_eq!(input(&should), 0);
+    // A required clause added beside the clauses: the ladder over them would relax it away, so the compilation is
+    // detached and L2 builds nothing (ROADMAP 8.2.14).
+    let required =
+        crate::relax::tests::with_root(compiled.clone(), |b| b.must.push(term(0, "leather")));
+    assert_eq!(input(&required), 0);
+    // An exclusion added after the clauses is kept on every step: still the clauses' root.
+    let excluded =
+        crate::relax::tests::with_root(compiled.clone(), |b| b.must_not.push(term(0, "blue")));
+    assert_eq!(input(&excluded), 1);
+    compiled = crate::relax::tests::with_root(compiled, |b| b.minimum_should_match = 1);
     assert_eq!(input(&compiled), 0);
 }
 

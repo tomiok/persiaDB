@@ -71,7 +71,11 @@ fuzz_target!(|data: &[u8]| {
         }
     };
     let compiled = compiler.compile(&text, &DefaultFields::all(schema), &limits);
-    assert_eq!(compiled.query.validate(schema, &limits), Ok(()), "{text:?}");
+    assert_eq!(
+        compiled.query().validate(schema, &limits),
+        Ok(()),
+        "{text:?}"
+    );
     // ROADMAP 8.1.7: each clause's span indexes the text read, a prefix of the text, in order, on character boundaries.
     assert!(text.starts_with(compiled.text.as_str()), "{text:?}");
     let mut end = 0;

@@ -52,7 +52,7 @@ fn readme_quickstart() -> Result<(), Box<dyn std::error::Error>> {
             &DefaultFields::all(notes.schema()),
             &QueryLimits::default(),
         )
-        .query;
+        .into_query();
     let memtable = notes.memtable();
     let plan = SearchPlan::new(&query, notes.schema(), &notes.search_statistics(&memtable))?;
     let page =
@@ -71,7 +71,7 @@ fn readme_quickstart() -> Result<(), Box<dyn std::error::Error>> {
             &DefaultFields::all(notes.schema()),
             &QueryLimits::default(),
         )
-        .query;
+        .into_query();
     let plan = SearchPlan::new(&typo, notes.schema(), &notes.search_statistics(&memtable))?;
     let page =
         notes

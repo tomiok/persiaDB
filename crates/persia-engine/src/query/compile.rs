@@ -162,8 +162,10 @@ enum OnePart<'a> {
 #[derive(Debug, Clone, PartialEq)]
 #[non_exhaustive]
 pub struct Compiled {
-    /// The query.
-    pub query: Query,
+    /// The query: as compiled, with the request filter joined ([`Self::with_filter`]), or the one a caller put in
+    /// ([`Self::with_query`]), which holds that filter too. Private so that no caller can replace it without the filter
+    /// (ROADMAP 8.2.14): [`Self::query`] reads it.
+    query: Query,
     /// Whether part of the text was left out to stay within the [`QueryLimits`].
     pub truncated: bool,
     /// The user text as read: all of it, or the prefix [`QueryLimits::max_text_len`] keeps
@@ -183,6 +185,18 @@ pub struct Compiled {
     /// [`Self::query`] so that joining a filter to the query (ROADMAP 8.1.17, [`Self::with_filter`]) leaves the clause its
     /// part. `None` for any other compilation, whose parts are entries of the root `bool`.
     part: Option<Query>,
+    /// The request filter joined to the query ([`Self::with_filter`]), in the order joined: kept beside it, so that a
+    /// query put in its place ([`Self::with_query`]) is joined to it again and every relaxation level keeps it (SPEC
+    /// §7.1.1, §7.6; ROADMAP 8.2.14).
+    filter: Vec<Filter>,
+    /// Whether a query put in place of a compilation of other than one part ([`Self::with_query`]) no longer holds
+    /// its clauses' parts where they were: its root is then not the clauses' ([`Self::root`]). A one-part compilation
+    /// checks its query against [`Self::part`] instead.
+    detached: bool,
+    /// Whether the last join of the request filter wrapped the query, `bool { must: [query], filter }`, rather than
+    /// adding to its root ([`join`]): the query wrapped is then a root of its own (a caller's with `should` clauses, or a
+    /// one-part compilation's part), and the filter step drops the request filter from it too ([`Self::wrapped`]).
+    wrapped: bool,
 }
 
 /// A clause of the user text that compiled to part of a [`Compiled::query`] (SPEC §7.1.1).
@@ -255,10 +269,11 @@ impl Compiled {
 
     /// The queries clause `index` of [`Self::clauses`] compiled to: entries of the root `bool`'s `must` (or
     /// `must_not`), or, for a compilation of one required part, that part (SPEC §7.1.1: a single required part is the
-    /// query itself, until a filter joins it, ROADMAP 8.1.17). `None` past the last clause, and for a one-part
-    /// compilation whose [`Self::query`] was replaced by one that is neither the part nor a `bool` requiring it (its
-    /// clauses no longer describe it). Like [`Self::source`], it takes an index so that it reads only this compilation's
-    /// clauses.
+    /// query itself, until a filter joins it, ROADMAP 8.1.17). `None` past the last clause, and once
+    /// [`Self::with_query`] put in a query that no longer holds them where they were: for a one-part compilation, one
+    /// that is neither the part nor a `bool` requiring it; for any other, one whose root `bool` lacks some clause's
+    /// parts at its indexes, or has `should` clauses or a `minimum_should_match` (its clauses no longer describe it).
+    /// Like [`Self::source`], it takes an index so that it reads only this compilation's clauses.
     pub fn parts(&self, index: usize) -> Option<&[Query]> {
         let clause = self.clauses.get(index)?;
         if let Some(part) = &self.part {
@@ -276,16 +291,48 @@ impl Compiled {
 
     /// The `bool` at the root of [`Self::query`] around the clauses' parts: its `must` and `must_not` hold them, and its
     /// `filter` a request's filter (SPEC §7.1, [`Self::with_filter`]). `None` when the query is not a `bool` around
-    /// them: no clause compiled (`match_all`), the query is the one required part, joined to nothing, or it was
-    /// replaced by one that does not hold that part.
+    /// them: no clause compiled (`match_all`), the query is the one required part, joined to nothing, or
+    /// [`Self::with_query`] put in one that does not hold the parts ([`Self::parts`]).
     pub fn root(&self) -> Option<&BoolQuery> {
         match (&self.part, &self.query) {
             (Some(_), _) => match self.one_part()? {
                 OnePart::Itself => None,
                 OnePart::Wrapped(root) => Some(root),
             },
-            (None, Query::Bool(root)) => Some(root),
+            (None, Query::Bool(root)) if !self.detached => Some(root),
             (None, _) => None,
+        }
+    }
+
+    /// The query a search runs: as compiled, with the request filter joined ([`Self::with_filter`]), or the one
+    /// [`Self::with_query`] put in, joined to that filter again. It holds every filter of [`Self::filter`] at its root
+    /// `bool`, so neither L0 nor a level built from it loses one (SPEC §7.6, ROADMAP 8.2.14).
+    pub fn query(&self) -> &Query {
+        &self.query
+    }
+
+    /// [`Self::query`], taken out of the compilation: for a search that needs neither its text nor its clauses (a plain
+    /// search without the relaxation cascade).
+    #[must_use]
+    pub fn into_query(self) -> Query {
+        self.query
+    }
+
+    /// The request filter joined to the query ([`Self::with_filter`]), kept beside it (SPEC §7.1.1): empty when none
+    /// was. The relaxation levels read it here: L5 `fallback` keeps it and the filter step drops exactly it (SPEC §7.6,
+    /// ROADMAP 8.2.14), whatever query [`Self::with_query`] put in.
+    pub fn filter(&self) -> &[Filter] {
+        &self.filter
+    }
+
+    /// The query the request filter's join wrapped (`bool { must: [query], filter }`), when it wrapped one: a root of
+    /// its own below [`Self::query`]'s, which the filter step drops the request filter from too (SPEC §7.6, ROADMAP
+    /// 8.2.14). A caller's root with `should` clauses that holds the request filter (a clone of [`Self::query`] with
+    /// `should` clauses added) keeps it there. `None` when the filter was added to the query's own root, or none joined.
+    pub(crate) fn wrapped(&self) -> Option<&Query> {
+        match &self.query {
+            Query::Bool(root) if self.wrapped => root.must.first(),
+            _ => None,
         }
     }
 
@@ -310,14 +357,15 @@ impl Compiled {
     }
 
     /// This compilation with `filter` joined as the filter clauses of its root `bool` (SPEC §7.1, §7.1.2; ROADMAP
-    /// 8.1.17), as a request's `filter` joins `q`: added to the root's filters, or, when the query is not a `bool`
-    /// around the clauses ([`Self::root`]), the query wrapped as `bool { must: [query], filter }`. A one-part query
-    /// that is itself a `bool` is wrapped too: a filter beside its `should` clauses would make them optional. The
-    /// clauses keep their parts ([`Self::parts`]), so the relaxation levels read them as before. No filter, no change.
-    /// The joined query is not checked against [`Self::limits`]: the filter adds its nodes and terms, and a level of
-    /// depth (`bool` around the clauses, or the wrap), so it may exceed limits the compiled query was within, as any
-    /// filter joined to a root does. A request holds the joined query to its own limits (SPEC §7.1.3:
-    /// [`Query::validate`]).
+    /// 8.1.17), as a request's `filter` joins `q`, and kept beside the query ([`Self::filter`], ROADMAP 8.2.14): added
+    /// to the root's filters when the query is a `bool` without `should` clauses or a `minimum_should_match`, else the
+    /// query wrapped as `bool { must: [query], filter }`. A one-part query that is itself a `bool` is wrapped too: a
+    /// filter beside its `should` clauses would make them optional, and the part must stay whole. A filter the root
+    /// holds already is not added again. The clauses keep their parts ([`Self::parts`]), so the relaxation levels read
+    /// them as before. No filter, no change. The joined query is not checked against [`Self::limits`]: the filter adds
+    /// its nodes and terms, and a level of depth (`bool` around the clauses, or the wrap), so it may exceed limits the
+    /// compiled query was within, as any filter joined to a root does. A request holds the joined query to its own
+    /// limits (SPEC §7.1.3: [`Query::validate`]).
     ///
     /// ```
     /// use persia_analysis::AnalyzerRegistry;
@@ -331,32 +379,145 @@ impl Compiled {
     /// let brand = schema.field("brand").ok_or("no field")?.id();
     /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
     /// let compiled = compiler.compile("shoes", &DefaultFields::all(&schema), &QueryLimits::default());
-    /// let shoes = compiled.query.clone();
+    /// let shoes = compiled.query().clone();
     /// let nike = Filter::Term { field: brand, value: FilterValue::Keyword("nike".into()) };
     /// let filtered = compiled.with_filter([nike.clone()]);
     /// let root = filtered.root().ok_or("no root")?;
     /// assert_eq!((root.must.as_slice(), root.filter.as_slice()), (std::slice::from_ref(&shoes), std::slice::from_ref(&nike)));
-    /// // The clause is still its one part, without the filter.
+    /// // The clause is still its one part, without the filter, and the filter is kept beside the query.
     /// assert_eq!(filtered.parts(0), Some(std::slice::from_ref(&shoes)));
+    /// assert_eq!(filtered.filter(), std::slice::from_ref(&nike));
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     #[must_use]
     pub fn with_filter(mut self, filter: impl IntoIterator<Item = Filter>) -> Self {
-        let mut filter = filter.into_iter().peekable();
-        if filter.peek().is_none() {
+        let filter: Vec<Filter> = filter.into_iter().collect();
+        if filter.is_empty() {
             return self;
         }
-        if self.root().is_none() {
-            let query = std::mem::replace(&mut self.query, Query::MatchAll);
-            self.query = Query::Bool(BoolQuery {
-                must: vec![query],
-                ..BoolQuery::default()
-            });
-        }
-        if let Query::Bool(root) = &mut self.query {
-            root.filter.extend(filter);
+        let query = std::mem::replace(&mut self.query, Query::MatchAll);
+        let (query, wrapped) = join(query, &filter, self.part.as_ref());
+        self.query = query;
+        // Added to the root of an earlier wrap, the query is still that wrap.
+        self.wrapped |= wrapped;
+        for f in filter {
+            if !self.filter.contains(&f) {
+                self.filter.push(f);
+            }
         }
         self
+    }
+
+    /// This compilation searching `query` in place of [`Self::query`], joined to the request filter ([`Self::filter`])
+    /// as [`Self::with_filter`] joins it (SPEC §7.1.1, ROADMAP 8.2.14): a caller cannot drop the request filter by
+    /// replacing the query, so no relaxation level before the filter step searches without it. Pass a query without the
+    /// request filter: a root filter equal to one of its filters is not added again, and counts as the request's (the
+    /// filter step drops it).
+    ///
+    /// The clauses keep describing the new query only while it holds their parts where they were ([`Self::parts`]): a
+    /// one-part compilation's part as itself or as the one `must` clause of a `bool` without `should` clauses, or, for
+    /// any other compilation, a root without `should` clauses or a `minimum_should_match` whose `must` is the clauses'
+    /// entries exactly and whose `must_not` holds theirs at the same indexes (a caller may add exclusions after them:
+    /// every level keeps the root's `must_not`, but rebuilds `must` from the clauses alone). Otherwise [`Self::parts`]
+    /// and [`Self::root`] are `None`, and the word levels of the cascade build no step from the clauses: a one-part
+    /// compilation's again once a query holds its part, any other's from then on. L5 `fallback` keeps the request
+    /// filter beside the new root `bool`'s `must_not` and `filter`, and the filter step drops the request filter alone
+    /// (SPEC §7.6). The text, the clauses' spans and [`Self::effective`] still state what the user wrote. The new query
+    /// is not checked against [`Self::limits`]: a search checks it as it checks any query (SPEC §7.1.3).
+    ///
+    /// ```
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::query::{BoolQuery, DefaultFields, Filter, FilterValue, Query, QueryCompiler, QueryLimits, TermQuery};
+    /// use persia_engine::schema::{FieldKind, KeywordOptions, SchemaBuilder, TextOptions};
+    ///
+    /// let schema = SchemaBuilder::new("c")
+    ///     .field("title", FieldKind::Text(TextOptions::default()))
+    ///     .field("brand", FieldKind::Keyword(KeywordOptions::default()))
+    ///     .build()?;
+    /// let (title, brand) = (schema.field("title").ok_or("no field")?.id(), schema.field("brand").ok_or("no field")?.id());
+    /// let compiler = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())?;
+    /// let nike = Filter::Term { field: brand, value: FilterValue::Keyword("nike".into()) };
+    /// let compiled = compiler
+    ///     .compile("red shoes", &DefaultFields::all(&schema), &QueryLimits::default())
+    ///     .with_filter([nike.clone()]);
+    /// // Put a query of the caller's own in place of the compiled one: the request filter is joined to it again.
+    /// let boots = Query::Term(TermQuery { field: title, term: "boots".into() });
+    /// let replaced = compiled.with_query(boots.clone());
+    /// let want = Query::Bool(BoolQuery { must: vec![boots], filter: vec![nike.clone()], ..BoolQuery::default() });
+    /// assert_eq!(replaced.query(), &want);
+    /// // It no longer holds the clauses' parts, so they describe nothing; the filter is still kept beside it.
+    /// assert_eq!((replaced.parts(0), replaced.root()), (None, None));
+    /// assert_eq!(replaced.filter(), std::slice::from_ref(&nike));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[must_use]
+    pub fn with_query(mut self, query: Query) -> Self {
+        if self.part.is_none() && !self.holds_parts(&query) {
+            self.detached = true;
+        }
+        (self.query, self.wrapped) = if self.filter.is_empty() {
+            (query, false)
+        } else {
+            join(query, &self.filter, self.part.as_ref())
+        };
+        self
+    }
+
+    /// Whether `query`, put in place of a compilation of other than one part, holds every clause's parts where the
+    /// current root holds them: a `bool` without `should` clauses or a `minimum_should_match` whose `must` is the
+    /// current one (the clauses' parts, which the word levels rebuild their steps from, so a `must` clause added beside
+    /// them would be relaxed away), and whose `must_not` holds the clauses' at the same indexes. False once the clauses
+    /// describe no root, and for a compilation of no clause, which has nothing to describe.
+    fn holds_parts(&self, query: &Query) -> bool {
+        let (Some(old), Query::Bool(new)) = (self.root(), query) else {
+            return false;
+        };
+        !self.clauses.is_empty()
+            && new.should.is_empty()
+            && new.minimum_should_match == 0
+            && new.must == old.must
+            && self.clauses.iter().filter(|c| c.negated).all(|clause| {
+                old.must_not
+                    .get(clause.parts.clone())
+                    .is_some_and(|parts| new.must_not.get(clause.parts.clone()) == Some(parts))
+            })
+    }
+}
+
+/// `query` with `filter` joined as the filter clauses of its root `bool` ([`Compiled::with_filter`]): added to the
+/// root's filters, but for one it holds already, when the root is a `bool` without `should` clauses or a
+/// `minimum_should_match` and not a one-part compilation's `part` itself; else `bool { must: [query], filter }`. Also
+/// whether it wrapped.
+fn join(query: Query, filter: &[Filter], part: Option<&Query>) -> (Query, bool) {
+    match query {
+        Query::Bool(mut root)
+            if root.should.is_empty()
+                && root.minimum_should_match == 0
+                && part.is_none_or(|part| !matches!(part, Query::Bool(p) if *p == root)) =>
+        {
+            for f in filter {
+                if !root.filter.contains(f) {
+                    root.filter.push(f.clone());
+                }
+            }
+            (Query::Bool(root), false)
+        }
+        query => {
+            let mut joined = Vec::with_capacity(filter.len());
+            for f in filter {
+                if !joined.contains(f) {
+                    joined.push(f.clone());
+                }
+            }
+            (
+                Query::Bool(BoolQuery {
+                    must: vec![query],
+                    filter: joined,
+                    ..BoolQuery::default()
+                }),
+                true,
+            )
+        }
     }
 }
 
@@ -717,6 +878,9 @@ fn finish(
         clauses,
         limits: *limits,
         synonyms,
+        filter: Vec::new(),
+        detached: false,
+        wrapped: false,
     }
 }
 

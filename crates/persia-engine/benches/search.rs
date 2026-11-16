@@ -703,7 +703,7 @@ fn suite(c: &mut Criterion) {
             "and",
             compiler
                 .compile("w3 w40", &fields, &QueryLimits::default())
-                .query,
+                .into_query(),
             page.clone(),
         ),
         (
@@ -718,7 +718,7 @@ fn suite(c: &mut Criterion) {
             "phrase",
             compiler
                 .compile("\"w0 w1\"", &fields, &QueryLimits::default())
-                .query,
+                .into_query(),
             page.clone(),
         ),
         ("filtered", filtered.clone(), page.clone()),
@@ -1145,7 +1145,7 @@ fn compile_text(schema: &CollectionSchema, text: &str) -> Query {
     let compiler = QueryCompiler::new(schema, &AnalyzerRegistry::builtin()).unwrap();
     compiler
         .compile(text, &DefaultFields::all(schema), &QueryLimits::default())
-        .query
+        .into_query()
 }
 criterion_group!(
     benches,
