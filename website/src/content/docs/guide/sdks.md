@@ -1,20 +1,20 @@
 ---
 title: "Embedded SDKs"
-description: "The planned in-process Go and TypeScript bindings. Not implemented. Network clients are a different milestone."
+description: "The planned in-process Go, TypeScript, and Python bindings. Not implemented. Network clients are a different milestone."
 head:
   - tag: title
-    content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
+    content: "Planned embedded SDKs for Go, TypeScript, and Python | PersiaDB"
   - tag: meta
     attrs:
       property: og:title
-      content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
+      content: "Planned embedded SDKs for Go, TypeScript, and Python | PersiaDB"
   - tag: meta
     attrs:
       name: twitter:title
-      content: "Planned embedded SDKs for Go and TypeScript | PersiaDB"
+      content: "Planned embedded SDKs for Go, TypeScript, and Python | PersiaDB"
 ---
 
-**Planned. Not implemented.** There is no Go module and no npm package. The Rust API these bindings
+**Planned. Not implemented.** There is no Go module, no npm package, and no Python package. The Rust API these bindings
 will wrap does not exist either: [`persia`](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs#L1-L4)
 exports no types. Nothing on this page opens a database.
 
@@ -29,8 +29,8 @@ SPEC §13 names both, and they are easy to mix up.
 
 | | Embedded bindings | Network clients |
 |---|---|---|
-| Who calls them | A Go or TypeScript program that wants a file, the way Rust will call `Db::open` | A program talking to `persia-server` |
-| Paths | `sdk/persia`, `sdk/node` (neither directory exists) | `sdk/rust` (`persia-client`), `sdk/go` (`persia-go`) |
+| Who calls them | A Go, TypeScript, or Python program that wants a file, the way Rust will call `Db::open` | A program talking to `persia-server` |
+| Paths | `sdk/persia`, `sdk/node`, `sdk/python` (none of these directories exist) | `sdk/rust` (`persia-client`), `sdk/go` (`persia-go`) |
 | Milestone | 14.6 (v1.0), after the `persia` facade (M10). Design: ADR-0018. The same leaves stay listed under M16 and are checked when 14.6 is done. 16.4.1 and 16.6 stay v1.1. | Rust and Go are 14.2 and 14.3, compatibility is 14.4, and the TypeScript network client is 14.5, after the server (M11) and sharding (M13) |
 | Status | Design only | Not started |
 
@@ -38,7 +38,7 @@ The network clients are described on [Server, cloud, and Kubernetes](/guide/serv
 
 ## Recommendation
 
-One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second search implementation.
+One engine, the Rust one (ADR-0001). Go, TypeScript, and Python do not grow a second search implementation.
 
 - **Go** links a static library through cgo by default. An optional `persia_purego` build tag dynamically
   loads the shared library with `CGO_ENABLED=0` (Unix `Dlopen`, Windows `LoadLibrary`), behind the same API.
@@ -50,9 +50,10 @@ One engine, the Rust one (ADR-0001). Go and TypeScript do not grow a second sear
   calls the same Rust functions the C ABI calls. A WASM package for browsers and edge isolates comes
   later, only after a storage backend exists that does not need mmap or POSIX fsync. That backend is
   ROADMAP M28 (target v2.3).
+- **Python** binds the committed `persia.h` with cffi or ctypes (`sdk/python`, ROADMAP 14.6.8). Installing the package does not need a Rust toolchain. Wheels that ship the prebuilt library are 14.6.10. SPEC §13 names the package in 14.6.11. There is no separate Python design page; the contract is the C ABI. The Python HTTP client (21.2) is a different library and stays v1.2.
 
-Prebuilt binaries are how a caller builds without Rust: a checksummed `libpersia.a` for Go, and
-per-platform optional npm dependencies for Node. Until format v1.0 there is no compatibility promise
+Prebuilt binaries are how a caller builds without Rust: a checksummed `libpersia.a` for Go,
+per-platform optional npm dependencies for Node, and Python wheels. Until format v1.0 there is no compatibility promise
 (SPEC §15). The libraries are 14.6 (v1.0). 16.4.1 publishes them only after the v1.0 tag (M15). ROADMAP 10.5.2's
 `v0.1.0-alpha` tag is the core's notice that the format is still unstable; it is not the binding cut.
 
