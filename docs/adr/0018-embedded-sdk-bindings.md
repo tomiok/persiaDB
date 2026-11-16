@@ -1,8 +1,8 @@
 # ADR-0018: Embedded Go and TypeScript bindings share one C ABI
 
-- Status: proposed; amended 2026-11-13 (optional `persia_purego` tag: cgo and the static library stay the default; the C ABI stays purego-friendly; wazero stays rejected)
+- Status: proposed; amended 2026-11-13 (optional `persia_purego` tag: cgo and the static library stay the default; the C ABI stays purego-friendly; wazero stays rejected); amended 2026-11-16 (the in-process core is v1.0, ROADMAP 14.6; it depends on M10, not on M11)
 - Date: 2026-10-17
-- Related: SPEC §1.1, §3, §8.1, §8.4, §13, §15; ADR-0001, ADR-0003, ADR-0010, ADR-0017; ROADMAP M10, M14, 16.2.6
+- Related: SPEC §1.1, §3, §8.1, §8.4, §13, §15; ADR-0001, ADR-0003, ADR-0010, ADR-0017; ROADMAP M10, M14, 14.6, 16.2.6
 
 ## Context
 
@@ -89,7 +89,18 @@ The design that follows from this decision lives in [`docs/sdk/`](../sdk/README.
    versions (SPEC §15), and the ABI major may break on each pre-1.0 release. Three numbers stay distinct:
    file format, C ABI, language-package semver. See [`docs/sdk/distribution.md`](../sdk/distribution.md).
 10. **Binding leaves are M16.** M14 stays the network clients. The browser and edge package is M28, after a
-    portable `Storage` backend. This decision does not restate those leaves.
+    portable `Storage` backend. This decision does not restate those leaves. Superseded for scheduling by
+    decision 11. The technical choices in decisions 1–8 are unchanged.
+11. **The in-process core ships in v1.0 (ROADMAP 14.6).** Amended 2026-11-16. Decision 9's "follows the v1.0
+    tag, then M16" and decision 10's "binding leaves are M16" no longer set the version for the core.
+    `persia-ffi` and the committed `persia.h`, the embedded Go SDK (cgo and `persia_purego`), `@persiadb/node`,
+    the embedded Python package (cffi or ctypes over `persia.h`; installing it does not need a Rust toolchain),
+    and the prebuilt checksummed libraries and their CI are 14.6. They depend on the M10 `persia` facade, not
+    on M11. The gRPC and HTTP clients stay 14.2–14.5 and still depend on M11 and M13. Parity with those
+    clients, where the operation exists in-process, is the 14.1 scenarios. The browser package stays M28.
+    The read-only WASM build stays 16.6. Nothing is published before the v1.0 tag (decision 9, ROADMAP 16.4.1).
+    The M16 and 21.1 leaves that 14.6 names are the same work; they are not built twice. Naming the Python
+    package in SPEC §13 stays 21.3.1, which 14.6 does not pull forward.
 
 `persia-ffi`, when it is added, depends only on `persia`. That edge is recorded in `ALLOWED`
 (`xtask/src/check_deps.rs`) in the same pull request as the crate. `sdk/node` stays **outside** the Cargo
