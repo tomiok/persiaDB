@@ -160,7 +160,7 @@ fn run() -> Vec<(String, Vec<String>, BTreeMap<String, u32>)> {
         .map(|j| {
             let q = j["q"].as_str().unwrap();
             let text = compiler.compile(q, &fields, &QueryLimits::default());
-            let plan = SearchPlan::with_terms(&text.query, c.schema(), &stats, &views).unwrap();
+            let plan = SearchPlan::with_terms(text.query(), c.schema(), &stats, &views).unwrap();
             // The gate measures the default plan: no proximity bonus (SPEC §7.2, ADR-0036; invariant 5).
             assert!(!plan.proximity(), "{q:?} planned with proximity");
             let hits = views

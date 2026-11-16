@@ -8,6 +8,8 @@
 //!    `should` through `bool`, `boost` and `constant_score`. `match_all`, an empty `bool` and exclusions alone are not.
 //! 3. Its `effective` is L0's text; it corrects nothing, has no synonym alternatives and reads no statistics.
 //! 4. It never fills a page, and covers no earlier step; L5 covers every earlier step.
+//! 5. Of a compiled query it drops the request filter alone (`Compiled::filter`, ROADMAP 8.2.14), whatever query a
+//!    caller put in: a filter the caller's root holds stays, and without a request filter no step is built.
 
 #![allow(clippy::unwrap_used, clippy::indexing_slicing, clippy::panic)] // Tests: inputs are fixed.
 
@@ -120,7 +122,7 @@ fn a_compiled_query_drops_its_request_filter_and_keeps_every_clause() {
         .with_filter([brand_is(&schema, "acme"), brand_is(&schema, "zeta")]);
     let root = compiled.root().unwrap().clone();
     assert_eq!(root.filter.len(), 2);
-    let step = one(&compiled.query, Some(&compiled));
+    let step = one(compiled.query(), Some(&compiled));
     assert_eq!(
         step.query,
         Query::Bool(BoolQuery {
@@ -142,9 +144,9 @@ fn a_compiled_query_drops_its_request_filter_and_keeps_every_clause() {
 
     // A one-word compilation wrapped with a filter is the word alone again, in its `bool`.
     let red = compile(&schema, "red");
-    let word = red.query.clone();
+    let word = red.query().clone();
     let filtered = red.with_filter([brand_is(&schema, "acme")]);
-    let step = one(&filtered.query, Some(&filtered));
+    let step = one(filtered.query(), Some(&filtered));
     assert_eq!(
         step.query,
         Query::Bool(BoolQuery {
@@ -156,11 +158,66 @@ fn a_compiled_query_drops_its_request_filter_and_keeps_every_clause() {
 }
 
 #[test]
+fn a_replaced_query_drops_the_request_filter_alone() {
+    let schema = schema();
+    let acme = brand_is(&schema, "acme");
+    let own = brand_is(&schema, "other");
+    let filtered = compile(&schema, "red shoes").with_filter([acme.clone()]);
+    // A term put in place of the compiled query is wrapped to keep the request filter; the step is the wrap without it.
+    let replaced = filtered.clone().with_query(term(&schema, "hat"));
+    assert_eq!(
+        one(replaced.query(), Some(&replaced)).query,
+        Query::Bool(BoolQuery {
+            must: vec![term(&schema, "hat")],
+            ..BoolQuery::default()
+        })
+    );
+    // A root `bool` of the caller's own keeps its own filter: only the request's is dropped.
+    let caller = Query::Bool(BoolQuery {
+        must: vec![term(&schema, "hat")],
+        must_not: vec![term(&schema, "blue")],
+        filter: vec![own.clone()],
+        ..BoolQuery::default()
+    });
+    let replaced = filtered.clone().with_query(caller.clone());
+    let Query::Bool(root) = replaced.query() else {
+        panic!()
+    };
+    assert_eq!(root.filter, [own.clone(), acme.clone()]);
+    assert_eq!(one(replaced.query(), Some(&replaced)).query, caller);
+    // So does one that already held the request filter, which is not joined twice.
+    let holding = Query::Bool(BoolQuery {
+        must: vec![term(&schema, "hat")],
+        filter: vec![acme.clone(), own.clone()],
+        ..BoolQuery::default()
+    });
+    let replaced = filtered.clone().with_query(holding);
+    let Query::Bool(root) = replaced.query() else {
+        panic!()
+    };
+    assert_eq!(root.filter, [acme.clone(), own.clone()]);
+    assert_eq!(
+        one(replaced.query(), Some(&replaced)).query,
+        Query::Bool(BoolQuery {
+            must: vec![term(&schema, "hat")],
+            filter: vec![own.clone()],
+            ..BoolQuery::default()
+        })
+    );
+    // Without a request filter, a caller's own root filter is part of the query: nothing to relax.
+    let unfiltered = compile(&schema, "red shoes").with_query(caller);
+    assert_eq!(steps(unfiltered.query(), Some(&unfiltered)), []);
+    // A wordless query put in builds no step either, request filter or not.
+    let wordless = filtered.with_query(Query::MatchAll);
+    assert_eq!(steps(wordless.query(), Some(&wordless)), []);
+}
+
+#[test]
 fn a_query_without_root_filters_builds_no_step() {
     let schema = schema();
     for text in ["red shoes", "red", "-blue red", ""] {
         let compiled = compile(&schema, text);
-        assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
+        assert_eq!(steps(compiled.query(), Some(&compiled)), [], "{text:?}");
     }
     let body = id(&schema, "body");
     let red = Query::Term(TermQuery {
@@ -245,7 +302,7 @@ fn a_query_without_words_builds_no_step() {
             compiled.root().is_some_and(|r| !r.filter.is_empty()),
             "{text:?}"
         );
-        assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
+        assert_eq!(steps(compiled.query(), Some(&compiled)), [], "{text:?}");
     }
     let blue = term(&schema, "blue");
     // Each of these searches no word, in `must` and in `should`. A non-empty `should` is not itself a word:
@@ -304,17 +361,17 @@ fn stopwords_only_build_no_step() {
         let compiled = compile(&schema, text).with_filter([brand_is(&schema, "acme")]);
         assert!(
             matches!(
-                &compiled.query,
+                compiled.query(),
                 Query::Bool(root) if root.must == [Query::MatchAll] && !root.filter.is_empty()
             ),
             "{text:?} compiled to {:?}",
-            compiled.query
+            compiled.query()
         );
-        assert_eq!(steps(&compiled.query, Some(&compiled)), [], "{text:?}");
+        assert_eq!(steps(compiled.query(), Some(&compiled)), [], "{text:?}");
     }
     // A stopword beside a real word still searches that word.
     let red = compile(&schema, "the red").with_filter([brand_is(&schema, "acme")]);
-    assert_eq!(steps(&red.query, Some(&red)).len(), 1);
+    assert_eq!(steps(red.query(), Some(&red)).len(), 1);
 }
 
 #[test]

@@ -94,7 +94,7 @@ fn step_of(
 
 fn step(schema: &CollectionSchema, text: &str) -> Option<Step> {
     let compiled = compile(schema, text);
-    step_of(&compiled.query, Some(&compiled), &text_fields(schema))
+    step_of(compiled.query(), Some(&compiled), &text_fields(schema))
 }
 
 fn prefix_of(field: FieldId, p: &str) -> Query {
@@ -186,7 +186,7 @@ fn excluded_clauses_phrases_and_field_clauses_stay_exact() {
     let Query::Bool(b) = &s.query else { panic!() };
     // `running` is expanded (`run` in `body`), and nothing else.
     assert_eq!(b.must[0], both(&schema, "running", "run"));
-    assert_eq!(&b.must[1..], &must(&compiled.query)[1..]);
+    assert_eq!(&b.must[1..], &must(compiled.query())[1..]);
     assert_eq!(b.must_not, compiled.root().unwrap().must_not);
     // A quoted single word compiles as a word, and stays exact as a phrase.
     assert_eq!(step(&schema, "tv \"sho\"").map(|s| s.query), None);
@@ -204,7 +204,7 @@ fn fields_it_may_not_expand_stay_exact() {
     let compiled = compile(&schema, "red shoes");
     // As for a field whose analyzer stacks tokens: `title` stays exact, `body` is expanded.
     let not_title = |f: FieldId| text_fields(&schema)(f).filter(|_| f != title);
-    let s = step_of(&compiled.query, Some(&compiled), &not_title).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &not_title).unwrap();
     let exact = |t: &str| {
         Query::Combined(CombinedQuery {
             fields: vec![WeightedTerm {
@@ -222,7 +222,7 @@ fn fields_it_may_not_expand_stay_exact() {
     };
     assert_eq!(must(&s.query), [open("red", "red"), open("shoe", "shoes")]);
     // No field it may expand: no step.
-    assert_eq!(step_of(&compiled.query, Some(&compiled), &|_| None), None);
+    assert_eq!(step_of(compiled.query(), Some(&compiled), &|_| None), None);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn a_filter_stays_on_the_step() {
     };
     // One word: the compiled query is its one part, wrapped by the filter (ROADMAP 8.1.17).
     let compiled = compile(&schema, "sho").with_filter([filter.clone()]);
-    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &text_fields(&schema)).unwrap();
     let Query::Bool(b) = &s.query else { panic!() };
     assert_eq!(b.must, [both(&schema, "sho", "sho")]);
     assert_eq!(b.filter, [filter]);
@@ -353,7 +353,7 @@ fn a_fields_weight_scales_a_prefix_by_its_ratio_to_the_schema_boost() {
     let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
         .unwrap()
         .compile("sho", &fields, &QueryLimits::default());
-    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &text_fields(&schema)).unwrap();
     assert_eq!(
         s.query,
         Query::Bool(BoolQuery {
@@ -370,7 +370,7 @@ fn a_fields_weight_scales_a_prefix_by_its_ratio_to_the_schema_boost() {
     let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
         .unwrap()
         .compile("sho", &fields, &QueryLimits::default());
-    let s = step_of(&compiled.query, Some(&compiled), &half).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &half).unwrap();
     assert_eq!(
         s.query,
         boosted(prefix_of(id(&schema, "title"), "sho"), 1000.0)
@@ -411,13 +411,14 @@ fn an_exclusion_added_to_the_root_stays_excluded() {
         field: id(&schema, "brand"),
         term: "acme".into(),
     });
-    let mut compiled = compile(&schema, "red sho -blue");
-    let Query::Bool(root) = &mut compiled.query else {
+    let compiled = crate::relax::tests::with_root(compile(&schema, "red sho -blue"), |root| {
+        root.must_not.push(added.clone());
+    });
+    let Query::Bool(root) = compiled.query() else {
         panic!()
     };
-    root.must_not.push(added.clone());
     let want = root.must_not.clone();
-    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &text_fields(&schema)).unwrap();
     let Query::Bool(b) = &s.query else { panic!() };
     assert_eq!(b.must_not, want);
     assert_eq!(b.must_not.last(), Some(&added));
@@ -427,7 +428,7 @@ fn an_exclusion_added_to_the_root_stays_excluded() {
 fn steps(schema: &CollectionSchema, text: &str, drops_terms: bool) -> Vec<Step> {
     let compiled = compile(schema, text);
     let expands = text_fields(schema);
-    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats)
+    let input = LevelInput::new(compiled.query(), Some(&compiled), &NoStats)
         .expanding(&expands)
         .dropping(drops_terms);
     Prefix.steps(&input).unwrap()

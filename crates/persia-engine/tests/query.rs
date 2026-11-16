@@ -15,7 +15,7 @@ use std::ops::Bound;
 
 use persia_analysis::AnalyzerRegistry;
 use persia_engine::query::{
-    BoolQuery, BoostQuery, CombinedQuery, Compiled, ConstantScoreQuery, DEFAULT_MAX_EXPANSIONS,
+    BoolQuery, BoostQuery, CombinedQuery, ConstantScoreQuery, DEFAULT_MAX_EXPANSIONS,
     DefaultFields, Filter, FilterValue, FuzzyQuery, MAX_FILTER_JSON_LEN, PhraseQuery, PhraseTerm,
     PrefixQuery, Query, QueryCompiler, QueryError, QueryLimits, TermQuery, WeightedTerm,
     text_within_limit,
@@ -106,9 +106,9 @@ fn show(schema: &CollectionSchema, q: &Query) -> String {
 
 fn compile_with(text: &str, fields: &DefaultFields, limits: &QueryLimits) -> (String, bool) {
     let schema = schema();
-    let Compiled {
-        query, truncated, ..
-    } = compiler(&schema).compile(text, fields, limits);
+    let compiled = compiler(&schema).compile(text, fields, limits);
+    let truncated = compiled.truncated;
+    let query = compiled.into_query();
     // Whatever the text, the query is valid.
     query.validate(&schema, limits).unwrap();
     (show(&schema, &query), truncated)
@@ -247,7 +247,7 @@ fn default_fields_choose_fields_and_weights() {
         .unwrap();
     let compiled =
         compiler(&keywords).compile("red brand:x", &DefaultFields::all(&keywords), &limits);
-    assert_eq!(show(&keywords, &compiled.query), "brand:x");
+    assert_eq!(show(&keywords, compiled.query()), "brand:x");
 }
 
 #[test]
@@ -373,8 +373,8 @@ fn user_text_is_cut_to_the_limits() {
     );
     let compiled = compiler(&schema).compile("red", &fields, &l);
     assert_eq!(
-        (compiled.query, compiled.truncated),
-        (Query::MatchAll, true)
+        (compiled.query(), compiled.truncated),
+        (&Query::MatchAll, true)
     );
     // Text the text limit already cut to nothing stays truncated when the root does not fit either.
     let none = QueryLimits {
@@ -383,8 +383,8 @@ fn user_text_is_cut_to_the_limits() {
     };
     let compiled = compiler(&schema).compile("red", &fields, &none);
     assert_eq!(
-        (compiled.query, compiled.text.as_str(), compiled.truncated),
-        (Query::MatchAll, "", true)
+        (compiled.query(), compiled.text.as_str(), compiled.truncated),
+        (&Query::MatchAll, "", true)
     );
 }
 
@@ -402,7 +402,7 @@ fn a_deep_clause_stays_within_max_depth_when_another_follows() {
     };
     let text = "\"\u{10d6f}[\u{c0}\"\"title:";
     let compiled = compiler(&schema).compile(text, &DefaultFields::all(&schema), &limits);
-    assert_eq!(compiled.query.validate(&schema, &limits), Ok(()));
+    assert_eq!(compiled.query().validate(&schema, &limits), Ok(()));
 }
 
 #[test]
@@ -1252,12 +1252,12 @@ proptest! {
             DefaultFields::parse(&schema, &["body^2"]).unwrap()
         };
         let compiled = compiler(&schema).compile(&text, &fields, &limits);
-        prop_assert_eq!(compiled.query.validate(&schema, &limits), Ok(()));
+        prop_assert_eq!(compiled.query().validate(&schema, &limits), Ok(()));
         // Nothing is cut when the limits are generous.
         let generous = compiler(&schema).compile(&text, &fields, &QueryLimits::default());
         prop_assert!(!generous.truncated || text.len() > QueryLimits::default().max_text_len);
         if !compiled.truncated {
-            prop_assert_eq!(&compiled.query, &generous.query);
+            prop_assert_eq!(compiled.query(), generous.query());
         }
         // A text cut is the same query as compiling that prefix with generous limits, then applying the
         // other limits: the result keeps a prefix of the prefix's clauses. When the reference collapsed
@@ -1273,16 +1273,16 @@ proptest! {
         } else {
             generous
         };
-        let ((must, not), (all_must, all_not)) = (clauses(&compiled.query), clauses(&reference.query));
+        let ((must, not), (all_must, all_not)) = (clauses(compiled.query()), clauses(reference.query()));
         if all_must.is_empty() && all_not.is_empty() {
             // The old check treated an empty reference as a free pass (`collapsed`). No clause in
             // the reference means the compilation is MatchAll.
-            prop_assert_eq!(&compiled.query, &Query::MatchAll);
+            prop_assert_eq!(compiled.query(), &Query::MatchAll);
         } else {
             // A single kept clause is stored unwrapped, so it equals the reference's first must
             // clause rather than a one-element prefix of the flattened list. Later clauses,
             // including exclusions, may have been cut.
-            let unwrapped_first = all_must.first() == Some(&compiled.query);
+            let unwrapped_first = all_must.first() == Some(compiled.query());
             let prefix = all_must.starts_with(&must) && all_not.starts_with(&not);
             prop_assert!(
                 unwrapped_first || prefix,
@@ -1364,9 +1364,9 @@ proptest! {
             (1, 0) => must[0].clone(),
             _ => Query::Bool(BoolQuery { must, must_not, ..BoolQuery::default() }),
         };
-        prop_assert_eq!(&rebuilt, &compiled.query);
+        prop_assert_eq!(&rebuilt, compiled.query());
         let effective = compiler.compile(&compiled.effective(), &fields, &QueryLimits::default());
-        prop_assert_eq!(&effective.query, &compiled.query, "{:?}", compiled.effective());
+        prop_assert_eq!(effective.query(), compiled.query(), "{:?}", compiled.effective());
         prop_assert_eq!(effective.clauses.len(), compiled.clauses.len());
     }
 }
@@ -1407,7 +1407,7 @@ fn compiled_clauses_by_hand() {
     );
     assert_eq!(one.clauses.len(), 1);
     assert_eq!(one.clauses[0].span, 1..11);
-    assert_eq!(one.parts(0), Some(std::slice::from_ref(&one.query)));
+    assert_eq!(one.parts(0), Some(std::slice::from_ref(one.query())));
     assert_eq!((one.source(1), one.parts(1)), (None, None));
     // Text that compiles to nothing has no clause, and its effective text is empty.
     let none = compiler(&schema).compile(
@@ -1415,7 +1415,7 @@ fn compiled_clauses_by_hand() {
         &DefaultFields::parse(&schema, &["body"]).unwrap(),
         &QueryLimits::default(),
     );
-    assert_eq!(none.query, Query::MatchAll);
+    assert_eq!(none.query(), &Query::MatchAll);
     assert_eq!(none.clauses, []);
     assert_eq!(none.effective(), "");
     // Past `max_text_len` the text is the prefix read, and a clause the limits cut is not one.
@@ -1456,34 +1456,32 @@ fn a_filter_joined_to_a_one_part_compilation_leaves_the_clause_its_part() {
     };
     // A word over the default fields (one `combined`) and a phrase in one field.
     for text in ["shoes", "body:\"a b\""] {
-        let mut compiled =
+        let compiled =
             compiler(&schema).compile(text, &DefaultFields::all(&schema), &QueryLimits::default());
-        let part = compiled.query.clone();
+        let part = compiled.query().clone();
         assert_eq!(
             compiled.parts(0),
             Some(std::slice::from_ref(&part)),
             "{text}"
         );
-        // By hand, as SPEC §7.1 describes it.
-        compiled.query = Query::Bool(BoolQuery {
+        // As SPEC §7.1 describes it: the part wrapped, the filter beside it.
+        let by_hand = Query::Bool(BoolQuery {
             must: vec![part.clone()],
             filter: vec![nike.clone()],
             ..BoolQuery::default()
         });
+        let joined_by_api = compiled.with_filter([nike.clone()]);
+        assert_eq!(joined_by_api.query(), &by_hand, "{text}");
         assert_eq!(
-            compiled.parts(0),
+            joined_by_api.parts(0),
             Some(std::slice::from_ref(&part)),
             "{text}"
         );
-        // Through the API, the same.
-        let joined = compiled.clone();
-        compiled.query = part.clone();
-        let joined_by_api = compiled.with_filter([nike.clone()]);
-        assert_eq!(joined_by_api, joined, "{text}");
         assert_eq!(
             joined_by_api.root().unwrap().filter,
             std::slice::from_ref(&nike)
         );
+        assert_eq!(joined_by_api.filter(), std::slice::from_ref(&nike));
     }
     // Two parts (`e-mail` splits in two): the root is already a `bool`, which takes the filter as it is.
     let compiled = compiler(&schema).compile(
@@ -1529,8 +1527,8 @@ fn fields_that_split_a_word_differently_do_not_constrain_each_other() {
     let limits = QueryLimits::default();
     let compile = |text: &str| {
         let compiled = compiler(&schema).compile(text, &DefaultFields::all(&schema), &limits);
-        compiled.query.validate(&schema, &limits).unwrap();
-        show(&schema, &compiled.query)
+        compiled.query().validate(&schema, &limits).unwrap();
+        show(&schema, compiled.query())
     };
     // Same split: one combined per span.
     assert_eq!(compile("shoes"), "(sku:shoes^1|title:shoes^1)");
@@ -1548,7 +1546,7 @@ fn fields_that_split_a_word_differently_do_not_constrain_each_other() {
     // A one-part query that is a `bool` of `should` clauses is not a root around its clause (ROADMAP 8.1.17): a filter
     // wraps it, as one joined to its `should` clauses would make them optional.
     let one = compiler(&schema).compile("e-mail", &DefaultFields::all(&schema), &limits);
-    let part = one.query.clone();
+    let part = one.query().clone();
     assert!(matches!(&part, Query::Bool(b) if !b.should.is_empty()));
     assert_eq!(one.root(), None);
     let any = Filter::Exists {
@@ -1583,8 +1581,8 @@ fn one_long_word_compiles_quickly_and_is_cut() {
     let started = std::time::Instant::now();
     let compiled = compiler(&schema).compile(&text, &DefaultFields::all(&schema), &limits);
     assert_eq!(
-        (compiled.query, compiled.truncated),
-        (Query::MatchAll, true)
+        (compiled.query(), compiled.truncated),
+        (&Query::MatchAll, true)
     );
     // Generous for debug builds; the quadratic grouping took far longer.
     assert!(started.elapsed() < std::time::Duration::from_secs(5));
@@ -1769,25 +1767,165 @@ fn a_replaced_one_part_query_has_no_parts() {
         &DefaultFields::all(&schema),
         &QueryLimits::default(),
     );
-    let part = compiled.query.clone();
-    compiled.query = Query::Term(TermQuery {
+    let part = compiled.query().clone();
+    compiled = compiled.with_query(Query::Term(TermQuery {
         field: schema.field("brand").unwrap().id(),
         term: "nike".into(),
-    });
+    }));
     assert_eq!((compiled.parts(0), compiled.root()), (None, None));
     // Wrapped with an exclusion beside it, the part is still the clause's, and the wrapper the root.
-    compiled.query = Query::Bool(BoolQuery {
+    compiled = compiled.with_query(Query::Bool(BoolQuery {
         must: vec![part.clone()],
         must_not: vec![Query::MatchAll],
         ..BoolQuery::default()
-    });
+    }));
     assert_eq!(compiled.parts(0), Some(std::slice::from_ref(&part)));
     assert_eq!(compiled.root().unwrap().must_not, [Query::MatchAll]);
     // A `bool` that also has `should` clauses is not the clause's.
-    compiled.query = Query::Bool(BoolQuery {
+    compiled = compiled.with_query(Query::Bool(BoolQuery {
         must: vec![part.clone()],
         should: vec![Query::MatchAll],
         ..BoolQuery::default()
-    });
+    }));
     assert_eq!(compiled.parts(0), None);
+}
+
+/// ROADMAP 8.2.14: the request filter is kept beside the compilation, and a query put in its place is joined to it
+/// again, as `with_filter` joins it: added to a root `bool` without `should` clauses or a `minimum_should_match`, once,
+/// else around the query.
+#[test]
+fn a_query_put_in_place_keeps_the_request_filter() {
+    let schema = schema();
+    let brand = |v: &str| Filter::Term {
+        field: schema.field("brand").unwrap().id(),
+        value: FilterValue::Keyword(v.into()),
+    };
+    let title = |t: &str| {
+        Query::Term(TermQuery {
+            field: schema.field("title").unwrap().id(),
+            term: t.into(),
+        })
+    };
+    let (nike, own) = (brand("nike"), brand("own"));
+    let compiled = compiler(&schema)
+        .compile(
+            "red shoes",
+            &DefaultFields::all(&schema),
+            &QueryLimits::default(),
+        )
+        .with_filter([nike.clone()]);
+    assert_eq!(compiled.filter(), std::slice::from_ref(&nike));
+    let wrapped = |q: Query| {
+        Query::Bool(BoolQuery {
+            must: vec![q],
+            filter: vec![nike.clone()],
+            ..BoolQuery::default()
+        })
+    };
+    // A query of another kind, and a `bool` with `should` clauses or a `minimum_should_match` (a filter beside them
+    // would make them optional), are wrapped.
+    let should = Query::Bool(BoolQuery {
+        should: vec![title("a"), title("b")],
+        ..BoolQuery::default()
+    });
+    let at_least = Query::Bool(BoolQuery {
+        must: vec![title("a")],
+        should: vec![title("b")],
+        minimum_should_match: 1,
+        ..BoolQuery::default()
+    });
+    for caller in [title("a"), Query::MatchAll, should, at_least] {
+        let replaced = compiled.clone().with_query(caller.clone());
+        assert_eq!(replaced.query(), &wrapped(caller.clone()));
+        assert_eq!(replaced.filter(), std::slice::from_ref(&nike));
+        assert_eq!((replaced.root(), replaced.parts(0)), (None, None));
+    }
+    // A root `bool` without them takes it beside its own filters, once.
+    for (own_filters, joined) in [
+        (vec![own.clone()], vec![own.clone(), nike.clone()]),
+        (
+            vec![nike.clone(), own.clone()],
+            vec![nike.clone(), own.clone()],
+        ),
+    ] {
+        let replaced = compiled.clone().with_query(Query::Bool(BoolQuery {
+            must: vec![title("a")],
+            filter: own_filters,
+            ..BoolQuery::default()
+        }));
+        let Query::Bool(root) = replaced.query() else {
+            panic!()
+        };
+        assert_eq!(root.filter, joined);
+    }
+    // Without a request filter, the query put in is searched as it is.
+    let plain = compiler(&schema).compile(
+        "red shoes",
+        &DefaultFields::all(&schema),
+        &QueryLimits::default(),
+    );
+    assert_eq!(plain.filter(), []);
+    assert_eq!(plain.with_query(title("a")).query(), &title("a"));
+    // A filter joined after the replacement is kept beside the first.
+    let both = compiled.with_query(title("a")).with_filter([own.clone()]);
+    assert_eq!(both.filter(), [nike.clone(), own.clone()]);
+    let Query::Bool(root) = both.query() else {
+        panic!()
+    };
+    assert_eq!(root.filter, [nike, own]);
+}
+
+/// ROADMAP 8.2.14: a query put in place of a compilation of several parts keeps its clauses while it holds their parts
+/// where they were; once it does not, the clauses describe no query from then on.
+#[test]
+fn a_query_put_in_place_keeps_the_clauses_only_while_it_holds_their_parts() {
+    let schema = schema();
+    let nike = Filter::Term {
+        field: schema.field("brand").unwrap().id(),
+        value: FilterValue::Keyword("nike".into()),
+    };
+    let compiled = compiler(&schema)
+        .compile(
+            "red shoes -blue",
+            &DefaultFields::all(&schema),
+            &QueryLimits::default(),
+        )
+        .with_filter([nike.clone()]);
+    let Query::Bool(root) = compiled.query().clone() else {
+        panic!()
+    };
+    let parts: Vec<Vec<Query>> = (0..3)
+        .map(|i| compiled.parts(i).unwrap().to_vec())
+        .collect();
+    // Clauses added after the parts: still the clauses' root, the request filter once.
+    let mut more = root.clone();
+    more.must.push(Query::MatchAll);
+    more.must_not.push(Query::MatchAll);
+    let kept = compiled.clone().with_query(Query::Bool(more.clone()));
+    for (i, p) in parts.iter().enumerate() {
+        assert_eq!(kept.parts(i), Some(p.as_slice()));
+    }
+    assert_eq!(kept.root(), Some(&more));
+    // Parts moved, an exclusion lost, `should` clauses or a `minimum_should_match` added: detached.
+    let mut moved = root.clone();
+    moved.must.reverse();
+    let mut lost = root.clone();
+    lost.must_not.clear();
+    let mut should = root.clone();
+    should.should.push(Query::MatchAll);
+    let mut at_least = root.clone();
+    at_least.minimum_should_match = 1;
+    for changed in [moved, lost, should, at_least] {
+        let detached = compiled.clone().with_query(Query::Bool(changed.clone()));
+        assert_eq!(
+            (detached.root(), detached.parts(0), detached.parts(2)),
+            (None, None, None),
+            "{changed:?}"
+        );
+        assert_eq!(detached.filter(), std::slice::from_ref(&nike));
+        // From then on, even the compiled root put back describes nothing: the compilation cannot tell.
+        let back = detached.with_query(Query::Bool(root.clone()));
+        assert_eq!((back.root(), back.parts(0)), (None, None));
+        assert_eq!(back.query(), compiled.query());
+    }
 }

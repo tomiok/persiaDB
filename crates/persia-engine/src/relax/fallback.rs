@@ -7,7 +7,7 @@
 
 use super::drop_terms::effective;
 use super::{LevelInput, LevelTransform, Step};
-use crate::query::{BoolQuery, Filter, Query};
+use crate::query::{BoolQuery, Compiled, Filter, Query};
 use crate::segment::ReadError;
 
 /// What L5's step lists in `applied` (SPEC §7.6).
@@ -16,24 +16,31 @@ pub(crate) const APPLIED: &str = "fallback";
 /// L5 `fallback`: one step, whose query is L0's exclusions and filters (SPEC §7.6). Its `effective` is the excluded
 /// clauses alone, in text order (empty when there are none: no word is searched); it corrects nothing. Only the root
 /// `bool`'s `must_not` and `filter` are kept, where the compiler puts excluded clauses and a request joins its filter
-/// (SPEC §7.1); a programmatic query with a filter deeper in it (under a `boost`, or in a nested `bool`) falls back without
-/// it, as SPEC §7.6 states.
+/// (SPEC §7.1), beside a compiled query's request filter ([`Compiled::filter`], ROADMAP 8.2.14), which it keeps
+/// whatever query a caller put in. A query with a filter deeper in it (under a `boost`, or in a nested `bool`, as a
+/// caller's query a compilation wraps to join its filter) falls back without that one, as SPEC §7.6 states.
 #[derive(Debug)]
 pub(crate) struct Fallback;
 
 impl LevelTransform for Fallback {
     fn steps(&self, input: &LevelInput<'_>) -> Result<Vec<Step>, ReadError> {
-        // A compiled query's root around its clauses (ROADMAP 8.1.17), or a programmatic root `bool`: any other root
-        // has neither exclusions nor filters.
-        let root = match (input.compiled, input.original) {
-            (Some(compiled), _) => compiled.root(),
-            (None, Query::Bool(root)) => Some(root),
-            (None, _) => None,
+        // The root `bool` of L0's query, compiled or programmatic: no document L0 matches is one its `must_not`
+        // matches or its `filter` rejects. Any other root has neither. A compiled query's request filter is read from
+        // the compilation too (ROADMAP 8.2.14): `Compiled::query` holds it at its root whatever query a caller put in,
+        // and reading it here keeps L5 from losing it even if the root did not.
+        let root = match input.original {
+            Query::Bool(root) => Some(root),
+            _ => None,
         };
-        let (must_not, filter): (&[Query], &[Filter]) =
-            root.map_or((&[], &[]), |root| (&root.must_not, &root.filter));
+        let must_not: &[Query] = root.map_or(&[], |root| &root.must_not);
+        let mut filter: Vec<Filter> = root.map_or_else(Vec::new, |root| root.filter.clone());
+        for kept in input.compiled.map_or(&[][..], Compiled::filter) {
+            if !filter.contains(kept) {
+                filter.push(kept.clone());
+            }
+        }
         Ok(vec![Step {
-            query: query(must_not, filter),
+            query: query(must_not, &filter),
             applied: APPLIED.to_owned(),
             effective: input.compiled.map(|compiled| effective(compiled, &[])),
             alternatives: None,

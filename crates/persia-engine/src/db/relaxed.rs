@@ -219,7 +219,7 @@ impl<'a> From<&'a Query> for RelaxedQuery<'a> {
 impl<'a> From<&'a Compiled> for RelaxedQuery<'a> {
     fn from(compiled: &'a Compiled) -> Self {
         Self {
-            query: &compiled.query,
+            query: compiled.query(),
             compiled: Some(compiled),
         }
     }

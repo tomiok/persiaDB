@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::*;
-use crate::query::TermQuery;
+use crate::query::{BoolQuery, TermQuery};
 use crate::schema::{CollectionSchema, FieldKind, Levels, SchemaBuilder, TextOptions};
 
 const ALL: [RelaxLevel; 6] = [
@@ -361,13 +361,13 @@ fn l0_states_the_text_of_the_clauses_that_compiled() {
         &DefaultFields::all(&schema),
         &QueryLimits::default(),
     );
-    let input = LevelInput::new(&red.query, Some(&red), &NoStats);
+    let input = LevelInput::new(red.query(), Some(&red), &NoStats);
     let plan = RelaxPlan::new(&RelaxationConfig::default(), &RelaxOptions::disabled()).unwrap();
     let steps = plan.planned()[0].transform.steps(&input).unwrap();
     assert_eq!(
         steps,
         [Step {
-            query: red.query.clone(),
+            query: red.query().clone(),
             applied: String::new(),
             effective: Some("red shoes".into()),
             alternatives: None,
@@ -508,3 +508,13 @@ impl StatisticsProvider for NoStats {
 }
 
 mod options;
+
+/// `compiled` searching its own root `bool` changed by `change`, put in with [`Compiled::with_query`]: how a caller
+/// changes a compiled query (ROADMAP 8.2.14).
+pub(super) fn with_root(compiled: Compiled, change: impl FnOnce(&mut BoolQuery)) -> Compiled {
+    let Query::Bool(mut root) = compiled.query().clone() else {
+        panic!("not a root bool: {:?}", compiled.query())
+    };
+    change(&mut root);
+    compiled.with_query(Query::Bool(root))
+}

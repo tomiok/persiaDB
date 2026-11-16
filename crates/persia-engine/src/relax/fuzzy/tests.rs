@@ -98,7 +98,7 @@ fn step_of(
 
 fn step(schema: &CollectionSchema, text: &str) -> Option<Step> {
     let compiled = compile(schema, text);
-    step_of(&compiled.query, Some(&compiled), &text_fields(schema))
+    step_of(compiled.query(), Some(&compiled), &text_fields(schema))
 }
 
 fn fuzzy_of(field: FieldId, term: &str, distance: u8) -> Query {
@@ -224,7 +224,7 @@ fn fields_it_may_not_rewrite_stay_exact() {
     // Only `title` may be rewritten (as if `body` stacked tokens): `body` stays one exact `combined`.
     let only_title = |f: FieldId| (f == title).then_some(2.0);
     let compiled = compile(&schema, "sneakers");
-    let s = step_of(&compiled.query, Some(&compiled), &only_title).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &only_title).unwrap();
     assert_eq!(
         s.query,
         should(vec![
@@ -234,7 +234,7 @@ fn fields_it_may_not_rewrite_stay_exact() {
     );
     // No field may: no step.
     let none = |_: FieldId| None;
-    assert_eq!(step_of(&compiled.query, Some(&compiled), &none), None);
+    assert_eq!(step_of(compiled.query(), Some(&compiled), &none), None);
     // A `keyword` term of a programmatic query is an identifier: exact.
     let brand = Query::Term(TermQuery {
         field: id(&schema, "brand"),
@@ -252,7 +252,7 @@ fn a_filter_stays_on_the_step() {
         upper: Bound::Unbounded,
     };
     let compiled = compile(&schema, "sneakers").with_filter([filter.clone()]);
-    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &text_fields(&schema)).unwrap();
     match &s.query {
         Query::Bool(b) => {
             assert_eq!(b.filter, [filter]);
@@ -321,7 +321,7 @@ fn a_fields_weight_scales_a_fuzzy_by_its_ratio_to_the_schema_boost() {
     let compiled = QueryCompiler::new(&schema, &AnalyzerRegistry::builtin())
         .unwrap()
         .compile("sandals", &fields, &QueryLimits::default());
-    let s = step_of(&compiled.query, Some(&compiled), &text_fields(&schema)).unwrap();
+    let s = step_of(compiled.query(), Some(&compiled), &text_fields(&schema)).unwrap();
     // Weight 6 over the schema boost 2.
     assert_eq!(
         s.query,
@@ -336,7 +336,7 @@ fn a_fields_weight_scales_a_fuzzy_by_its_ratio_to_the_schema_boost() {
 fn steps(schema: &CollectionSchema, text: &str) -> Vec<Step> {
     let compiled = compile(schema, text);
     let expands = text_fields(schema);
-    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&expands);
+    let input = LevelInput::new(compiled.query(), Some(&compiled), &NoStats).expanding(&expands);
     Fuzzy.steps(&input).unwrap()
 }
 
@@ -389,7 +389,7 @@ fn a_term_of_two_edits_gets_a_tier_step_within_one_edit_first() {
     // there, so capping changes nothing: one step.
     let body_only = |f: FieldId| (f == id(&s, "body")).then_some(1.0);
     let compiled = compile(&s, "jumpings");
-    let input = LevelInput::new(&compiled.query, Some(&compiled), &NoStats).expanding(&body_only);
+    let input = LevelInput::new(compiled.query(), Some(&compiled), &NoStats).expanding(&body_only);
     let built = Fuzzy.steps(&input).unwrap();
     assert_eq!(built.len(), 1, "{built:?}");
     assert_eq!(built[0].applied, "fuzzy");

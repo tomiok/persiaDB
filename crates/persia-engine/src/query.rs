@@ -21,9 +21,9 @@
 //! // Default AND, a quoted phrase, an exclusion and a field; unbalanced quotes are plain text.
 //! let compiled = compiler.compile(r#"red "running shoes" -kids brand:nike "#, &DefaultFields::all(&schema), &limits);
 //! assert!(!compiled.truncated);
-//! let Query::Bool(query) = &compiled.query else { unreachable!() };
+//! let Query::Bool(query) = compiled.query() else { unreachable!() };
 //! assert_eq!((query.must.len(), query.must_not.len()), (3, 1));
-//! compiled.query.validate(&schema, &limits)?;
+//! compiled.query().validate(&schema, &limits)?;
 //!
 //! let filter = Filter::from_json(r#"{"and": [{"term": ["brand", "nike"]}, {"range": ["price", {"lte": 100}]}]}"#, &schema, &limits)?;
 //! assert!(matches!(filter, Filter::And(ref all) if all.len() == 2));

@@ -1288,9 +1288,16 @@ limit) has none. A request's `filter` joins the compiled query as the filter cla
 ROADMAP 8.1.17): added to the root's when the query is a `bool` around the clauses, else the query is wrapped,
 `bool { must: [query], filter }`. A single part that is a `bool` itself (a phrase in a field without positions, a
 word the fields split apart) is wrapped too: a filter beside its `should` clauses would make them optional. The
-clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter. A
-one-part query replaced by one that is neither that part nor a `bool` requiring it (without `should` clauses) no
-longer has its clauses' parts, so the cascade builds no step from them. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
+clauses keep their parts either way, so the cascade (§7.6) reads the same clauses, and every step keeps the filter.
+The compiled query keeps the request filter beside its query too (ROADMAP 8.2.14, ADR-0048), and its query is
+replaced only through it (`Compiled::with_query`): the query a caller puts in is joined to that filter again, as the
+request's `filter` joins `q` (added to a root `bool` without `should` clauses or a `minimum_should_match`, else
+wrapped; a filter the root holds already is not added twice). No query a caller puts in can drop it, so no level of
+§7.6 searches without it. The clauses describe the new query only while it holds their parts where they were: for a
+single required part, that part or a `bool` requiring it (without `should` clauses or a `minimum_should_match`); for
+any other compilation, a root `bool` without those whose `must` and `must_not` hold the clauses' entries at the same
+indexes (clauses a caller adds come after them). A query that does not hold them no longer has its clauses' parts,
+from then on, so the cascade builds no step from them. The clauses' text joined by single spaces is the query's *effective* text, which compiles to the
 same query. Each clause also states whether it is a *stopword* (ROADMAP 8.2.2.1, for §7.6's L2): a word or phrase
 that a default field analyzes to no token because its analyzer's stopword filter removed one. The language analyzers
 (`en`, `es`, `pt`, `fr`, `de`, `it`; §6.3.3) have such a filter, which runs after they normalize (`The`, `the,`,
@@ -1819,12 +1826,13 @@ without the tier (ROADMAP 8.2.12).
 
 L5 `fallback` (ROADMAP 8.2.5, ADR-0044). With `fallback: "static_rank"` (the default) the plan ends with L5, which
 builds one step, listed as `fallback`; `"none"` builds no L5. Its query is L0's root `must_not` and `filter` around
-`match_all`: of a query compiled from `q`, its excluded clauses and the request's filter (§7.1: the root `bool`'s)
-while `Compiled::root` returns that `bool`; of a programmatic query, a root `bool`'s `must_not` and `filter`, and
-none for any other root. Replacing `Compiled::query` with a query that does not hold its clauses' parts makes
-`Compiled::root` return `None`, and L5 is then `match_all` with neither the exclusions nor the filter. That loss is
-a known limitation (ROADMAP 8.2.14), not a guarantee that a replaced query keeps the request filter. When the root is
-present, excluded clauses stay excluded and filters are not relaxed (L6 relaxes them, below), and, as every step, it
+`match_all`: a root `bool`'s `must_not` and `filter`, none for any other root, and of a query compiled from `q` the
+request's filter too, which the compiled query keeps beside its query (§7.1.1, ROADMAP 8.2.14, ADR-0048). So no query
+a caller puts in place of the compiled one loses the request filter at L5: it is joined to that query's root, and L5
+reads it from the compilation. A compiled query's excluded clauses are its root's `must_not`; of a query a caller put
+in, L5 keeps the exclusions its own root `bool` holds (one with `should` clauses is wrapped to join the filter, so its exclusions
+are deeper and L5 does not keep them, as for a programmatic query). Excluded clauses at the root stay excluded and
+filters are not relaxed (L6 relaxes them, below), and, as every step, it
 excludes the steps searched before it (the cascade, below): its hits are the live documents the filters keep, the
 excluded clauses do not match and no earlier step matched. A deleted document is never one (§7.3: no search matches
 it). Held to §7.1.3's limits beside the steps it excludes, it is `fallback:cut` or `fallback:skipped` as any step.
@@ -1858,15 +1866,18 @@ is searched and at its reads (§7.3), and dropped whole when the budget passes d
 L6 `filters` (ROADMAP 8.2.6, ADR-0047). Only `filters: "last_resort"` (the request's, else the collection's) plans it,
 as the plan's last level: after L5, or after the last word level when `fallback` is `"none"`, or right after L0 when
 the plan has no other level. It is the explicit opt-in to drop filters, so the default never builds it. It builds one
-step, listed as `filters`, whose query is L0's with the filters of its root `bool` dropped: of a programmatic
-query, a root `bool`'s `filter`; of a query compiled from `q`, the request's filter (§7.1: the root `bool`'s) while
-`Compiled::root` returns that `bool`. Replacing `Compiled::query` so that `Compiled::root` is `None` makes this step
-skip, the same loss as at L5 (ROADMAP 8.2.14): keeping the filter across that replacement is not a guarantee. Every other
+step, listed as `filters`, whose query is L0's with the request's filters dropped from its root `bool`: of a
+programmatic query, every filter of a root `bool`; of a query compiled from `q`, the request's filter, which the
+compiled query keeps beside its query (§7.1.1, ROADMAP 8.2.14, ADR-0048), and nothing else. A query a caller put in
+place of the compiled one holds the request filter at its root (it is joined to it, §7.1.1), and the step drops that
+filter alone: a filter the caller's root `bool` holds itself is part of that query and stays, and with no request
+filter there is nothing to drop. Every other
 clause stays as L0 has it: its required clauses, its `should` clauses and `minimum_should_match`, its excluded clauses
-(a user who wrote `-blue` never gets blue, as at L5), and any filter deeper in the query. All the root's filters are
+(a user who wrote `-blue` never gets blue, as at L5), and any filter deeper in the query. The request's filters are
 dropped together, in no order. No filter is marked as one that must hold (a tenancy or permission filter): a request
 whose filters enforce access must not set `last_resort` (ROADMAP 8.2.13 is a request key for filters that never
-relax). A query whose root has no filter, or a programmatic root that is not a `bool`, skips the level. So does a query that
+relax). A query without a request filter (of a programmatic one, a root without filters, or a root that is not a
+`bool`) skips the level. So does a query that
 searches no word. A clause searches a word when it is a `term`, `combined`, `phrase`, `prefix` or `fuzzy`, or a
 `bool`, `boost` or `constant_score` that holds such a clause in `must` or `should` (a term only in `must_not` does
 not). `match_all`, an empty `bool` and a `bool` of exclusions alone search none, and neither does a wrapper of one

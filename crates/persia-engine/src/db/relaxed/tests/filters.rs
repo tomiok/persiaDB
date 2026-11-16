@@ -2,7 +2,8 @@
 //! L0's query without its root filters, built only when every earlier step found fewer than `min_results` hits.
 //!
 //! Invariants:
-//! 1. `"never"` never returns a hit its filters reject, at any level, under any plan.
+//! 1. `"never"` never returns a hit its filters reject, at any level, under any plan, whatever query a caller put in
+//!    place of a compiled one (`Compiled::with_query`, ROADMAP 8.2.14).
 //! 2. `"last_resort"` returns the hits `"never"` does, in the same order, and after them, only when those are fewer than
 //!    `min_results`, the documents L0's words match that the filters reject: excluded clauses stay excluded.
 //! 3. Its hits rank by the request's sort; pages by cursor and by offset are slices of one ranking; a cursor from
@@ -241,6 +242,97 @@ fn last_resort_drops_the_filters_only_after_every_level_found_too_few() {
     let never = run(&views, &unfiltered, &request(10), r#"{"min_results": 7}"#);
     assert_eq!(strip(&last.hits), strip(&never.hits));
     assert_eq!(last.relaxation, never.relaxation);
+}
+
+/// ROADMAP 8.2.14: a query a caller put in place of a compiled one (`Compiled::with_query`) keeps the request filter at
+/// every level under `"never"`, L5 included, whatever its shape; `"last_resort"` drops that filter alone.
+#[test]
+fn a_query_put_in_place_never_loses_the_request_filter() {
+    let db = database(RelaxationConfig::default());
+    let snapshot = db.snapshot();
+    let c = snapshot.collection("c").unwrap();
+    let memtable = c.memtable();
+    let views = c.views(&memtable).unwrap();
+    let (body, tag) = (field(&views, "body"), field(&views, "tag"));
+    let term = |t: &str| {
+        Query::Term(TermQuery {
+            field: body,
+            term: t.into(),
+        })
+    };
+    let red_shoes = compile(&views, "red shoes", true);
+    let Query::Bool(root) = red_shoes.query().clone() else {
+        panic!()
+    };
+    let callers = [
+        term("socks"),
+        term("hat"),
+        Query::MatchAll,
+        Query::Bool(BoolQuery {
+            should: vec![term("blue"), term("socks")],
+            ..BoolQuery::default()
+        }),
+        Query::Boost(BoostQuery {
+            query: Box::new(term("shoes")),
+            boost: 2.0,
+        }),
+        Query::ConstantScore(ConstantScoreQuery {
+            query: Box::new(term("red")),
+            score: 1.0,
+        }),
+        // The compiled root with one more exclusion: it still holds the clauses, so the word levels build from them.
+        Query::Bool(BoolQuery {
+            must_not: vec![term("green")],
+            ..root
+        }),
+    ];
+    // Every document the filter keeps (`tag = x`).
+    let kept = ["a", "d"];
+    for caller in callers {
+        let replaced = red_shoes.clone().with_query(caller.clone());
+        // Every level the collection runs, and L5, until every document has been found.
+        let never = run(&views, &replaced, &request(10), r#"{"min_results": 7}"#);
+        for (id, level) in ids(&never) {
+            assert!(
+                kept.contains(&id),
+                "{id} at {level:?} broke the filter: {caller:?}"
+            );
+        }
+        // L5 reached every document the filter keeps that the caller's query does not exclude.
+        let excluded = matches!(&caller, Query::Bool(b) if !b.must_not.is_empty());
+        let mut found: Vec<&str> = ids(&never).into_iter().map(|(id, _)| id).collect();
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            if excluded { &kept[..1] } else { &kept[..] },
+            "{caller:?}"
+        );
+        assert_eq!(never.relaxation.level, RelaxLevel::Fallback, "{caller:?}");
+    }
+    // `"last_resort"` drops the request filter, and only it: the caller's own `tag = y` holds at every level.
+    let own = compile(&views, "red shoes", true).with_query(Query::Bool(BoolQuery {
+        must: vec![term("red")],
+        filter: vec![tag_is(tag, "y")],
+        ..BoolQuery::default()
+    }));
+    let never = run(&views, &own, &request(10), r#"{"min_results": 7}"#);
+    assert_eq!(ids(&never), []);
+    let last = run(
+        &views,
+        &own,
+        &request(10),
+        r#"{"min_results": 7, "filters": "last_resort"}"#,
+    );
+    let mut dropped: Vec<(&str, RelaxLevel)> = ids(&last);
+    dropped.sort_unstable();
+    assert_eq!(
+        dropped,
+        [
+            ("b", RelaxLevel::Filters),
+            ("e", RelaxLevel::Filters),
+            ("g", RelaxLevel::Filters)
+        ]
+    );
 }
 
 #[test]
@@ -787,6 +879,8 @@ struct Case {
     /// no word: `should: [match_all]`, `boost` of `match_all`, `constant_score` of `match_all`, a nested empty
     /// `bool`, or a nested `bool` of exclusions alone. The `words` list is not searched in those shapes.
     shape: u8,
+    /// With `shape` 0, the query a caller puts in place of the compiled one (`Compiled::with_query`, ROADMAP 8.2.14).
+    caller: Option<Caller>,
 }
 
 fn case() -> impl Strategy<Value = Case> {
@@ -805,6 +899,7 @@ fn case() -> impl Strategy<Value = Case> {
         any::<bool>(),
         1usize..4,
         0u8..8,
+        prop::option::weighted(0.4, caller()),
     )
         .prop_map(
             |(
@@ -819,6 +914,7 @@ fn case() -> impl Strategy<Value = Case> {
                 fallback,
                 limit,
                 shape,
+                caller,
             )| {
                 Case {
                     docs,
@@ -832,9 +928,117 @@ fn case() -> impl Strategy<Value = Case> {
                     fallback,
                     limit,
                     shape,
+                    caller,
                 }
             },
         )
+}
+
+/// A query a caller puts in place of a compiled one (`Compiled::with_query`, ROADMAP 8.2.14).
+#[derive(Debug, Clone)]
+enum Caller {
+    /// The compiled root with one more excluded word: it still holds the clauses' parts, so the word levels read them.
+    Exclude(usize),
+    /// Any query of `body` words: `match_all`, `bool` (with a filter `tag = y` of its own or not), `boost`,
+    /// `constant_score`.
+    Any(Shape),
+}
+
+#[derive(Debug, Clone)]
+enum Shape {
+    Word(usize),
+    All,
+    Bool {
+        must: Vec<Shape>,
+        should: Vec<Shape>,
+        must_not: Vec<Shape>,
+        minimum_should_match: u32,
+        own: bool,
+    },
+    Boost(Box<Shape>),
+    Constant(Box<Shape>),
+}
+
+fn caller() -> impl Strategy<Value = Caller> {
+    let leaf = prop_oneof![
+        4 => (0..WORDS.len()).prop_map(Shape::Word),
+        1 => Just(Shape::All),
+    ];
+    let shape = leaf.prop_recursive(3, 12, 3, |inner| {
+        prop_oneof![
+            3 => (
+                prop::collection::vec(inner.clone(), 0..3),
+                prop::collection::vec(inner.clone(), 0..3),
+                prop::collection::vec(inner.clone(), 0..2),
+                0u32..3,
+                any::<bool>(),
+            )
+                .prop_map(|(must, should, must_not, minimum_should_match, own)| Shape::Bool {
+                    must,
+                    should,
+                    must_not,
+                    minimum_should_match,
+                    own,
+                }),
+            1 => inner.clone().prop_map(|s| Shape::Boost(Box::new(s))),
+            1 => inner.prop_map(|s| Shape::Constant(Box::new(s))),
+        ]
+    });
+    prop_oneof![
+        1 => (0..WORDS.len()).prop_map(Caller::Exclude),
+        3 => shape.prop_map(Caller::Any),
+    ]
+}
+
+impl Shape {
+    fn query(&self, body: FieldId, tag: FieldId) -> Query {
+        let all = |shapes: &[Shape]| shapes.iter().map(|s| s.query(body, tag)).collect();
+        match self {
+            Self::Word(w) => Query::Term(TermQuery {
+                field: body,
+                term: WORDS[*w].into(),
+            }),
+            Self::All => Query::MatchAll,
+            Self::Bool {
+                must,
+                should,
+                must_not,
+                minimum_should_match,
+                own,
+            } => Query::Bool(BoolQuery {
+                must: all(must),
+                should: all(should),
+                must_not: all(must_not),
+                filter: if *own {
+                    vec![tag_is(tag, "y")]
+                } else {
+                    Vec::new()
+                },
+                minimum_should_match: *minimum_should_match,
+            }),
+            Self::Boost(s) => Query::Boost(BoostQuery {
+                query: Box::new(s.query(body, tag)),
+                boost: 2.0,
+            }),
+            Self::Constant(s) => Query::ConstantScore(ConstantScoreQuery {
+                query: Box::new(s.query(body, tag)),
+                score: 1.0,
+            }),
+        }
+    }
+
+    /// Whether it searches a word (SPEC §7.6): it is one, or holds one in `must` or `should` of a `bool`, through
+    /// `boost` and `constant_score`.
+    fn searches_word(&self) -> bool {
+        match self {
+            Self::Word(_) => true,
+            Self::All => false,
+            Self::Bool { must, should, .. } => {
+                must.iter().any(Self::searches_word) || should.iter().any(Self::searches_word)
+            }
+            Self::Boost(s) | Self::Constant(s) => s.searches_word(),
+        }
+    }
 }
 
 fn build(case: &Case) -> Database<SimFile> {
@@ -939,7 +1143,30 @@ impl L0 {
             if let Some(w) = case.excluded {
                 text.push(format!("-{}", WORDS[w]));
             }
-            return Self::Compiled(Box::new(compile(views, &text.join(" "), filtered)));
+            let compiled = compile(views, &text.join(" "), filtered);
+            let (body, tag) = (field(views, "body"), field(views, "tag"));
+            let compiled = match &case.caller {
+                None => compiled,
+                Some(Caller::Exclude(w)) => {
+                    let excluded = Shape::Word(*w).query(body, tag);
+                    let query = match compiled.query().clone() {
+                        Query::Bool(mut root)
+                            if root.should.is_empty() && root.minimum_should_match == 0 =>
+                        {
+                            root.must_not.push(excluded);
+                            Query::Bool(root)
+                        }
+                        query => Query::Bool(BoolQuery {
+                            must: vec![query],
+                            must_not: vec![excluded],
+                            ..BoolQuery::default()
+                        }),
+                    };
+                    compiled.with_query(query)
+                }
+                Some(Caller::Any(shape)) => compiled.with_query(shape.query(body, tag)),
+            };
+            return Self::Compiled(Box::new(compiled));
         }
         let body = field(views, "body");
         let term = |w: usize| {
@@ -1042,7 +1269,11 @@ fn check(case: &Case) -> Result<(), TestCaseError> {
     let too_few = never.hits.len() < usize::try_from(case.min_results).unwrap();
     // A query of no word builds no step: without the filter it would match every document. Shapes 3 and above
     // are wordless even when `words` is not empty (`match_all`, a wrapper of it, an empty `bool`, exclusions).
-    let words = case.shape < 3 && !case.words.is_empty();
+    // A query a caller put in searches a word as SPEC §7.6 says (ROADMAP 8.2.14).
+    let words = match (case.shape, &case.caller) {
+        (0, Some(Caller::Any(shape))) => shape.searches_word(),
+        (shape, _) => shape < 3 && !case.words.is_empty(),
+    };
     prop_assert_eq!(built, case.filtered && too_few && words);
     if !built {
         prop_assert_eq!(&last.relaxation, &never.relaxation);
@@ -1071,15 +1302,7 @@ fn check(case: &Case) -> Result<(), TestCaseError> {
     got.sort_unstable();
     prop_assert_eq!(&got, &want);
     prop_assert_eq!(last.relaxation.filters_dropped, !dropped.is_empty());
-    for hit in &last.hits {
-        if let Some(w) = case.excluded {
-            prop_assert!(
-                !doc(hit).0.contains(&w),
-                "{} holds the excluded word",
-                hit.hit.document.id()
-            );
-        }
-    }
+    excluded_words_stay_out(case, &last.hits)?;
     // Each document once.
     let mut seen: Vec<&str> = last.hits.iter().map(|h| h.hit.document.id()).collect();
     seen.sort_unstable();
@@ -1087,6 +1310,28 @@ fn check(case: &Case) -> Result<(), TestCaseError> {
     seen.dedup();
     prop_assert_eq!(seen.len(), n);
     same_ranking(&views, query, case.limit, &last_plan, &last)
+}
+
+/// No hit holds a word the query excludes: the case's excluded word, unless a caller's query put in place of the
+/// compiled one dropped it, and the word a caller excluded beside the clauses.
+fn excluded_words_stay_out(case: &Case, hits: &[RelaxedHit]) -> Result<(), TestCaseError> {
+    let replaced = case.shape == 0 && matches!(case.caller, Some(Caller::Any(_)));
+    let caller = match (case.shape, &case.caller) {
+        (0, Some(Caller::Exclude(w))) => Some(*w),
+        _ => None,
+    };
+    let excluded = case.excluded.filter(|_| !replaced);
+    for hit in hits {
+        for w in [excluded, caller].into_iter().flatten() {
+            prop_assert!(
+                !doc_of(case, hit).0.contains(&w),
+                "{} holds the excluded {}",
+                hit.hit.document.id(),
+                WORDS[w]
+            );
+        }
+    }
+    Ok(())
 }
 
 /// `last`, the page of every hit of `query` under `plan`, is the ranking that excluding every earlier step from each
@@ -1113,7 +1358,8 @@ fn same_ranking(
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(96))]
 
-    /// Invariants 1 to 3 over random documents, queries (words, an excluded word, a filter or none) and plans
+    /// Invariants 1 to 3 over random documents, queries (words, an excluded word, a filter or none, and a random query
+    /// a caller puts in place of a compiled one) and plans
     /// (levels, `fallback`, `fill`, `min_results`).
     #[test]
     fn never_keeps_every_filter_and_last_resort_only_adds_the_filtered_out_matches_last(case in case()) {
