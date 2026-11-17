@@ -1069,15 +1069,16 @@ those analyzers' versions.
   dropped, the earlier default field winning. Each alternative is the term as written, compiled over the default
   fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in one
   without, one word when it is one token), each once, and none that compiles to the run's own query: at most 50
-  compiled alternatives per run (the union may report more terms). The compilation keeps (`Compiled::synonyms`) at
-  most `max_terms − 2 · n` alternatives in all, `n` the terms of its query as `max_terms` counts them (§7.1.3; a
-  request's `filter` joins the query after compilation, §7.1.1, so its values are not among them), each run's share as
-  §7.1.3 shares expansions over the terms its fields report (at most 50; a term that compiles away, as a duplicate or
-  the run's own query, still counts, so a run may keep fewer than its share, and a run left with none takes its share
-  and is then no run), and one each when that is less than one per run: L1's step holds the query's terms twice
-  (§7.6), and at least one per alternative, so it could hold no more. This bounds what is compiled; it does not make
-  the step fit, since an alternative of several words or over several fields takes more terms. The cascade still
-  holds the step to the limits (§7.1.3). A run whose share left out an alternative that the 50-cap keeps is marked
+  compiled alternatives per run (the union may report more terms). L1's step holds the query's terms twice (§7.6), and
+  at least one per alternative, so the compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n`
+  alternatives in all, `n` the terms of its query as `max_terms` counts them (§7.1.3; a request's `filter` joins the
+  query after compilation, §7.1.1, so its values are not among them), each run's share as §7.1.3 shares expansions over
+  the terms its fields report (at most 50; a term that compiles away, as a duplicate or the run's own query, still
+  counts, so a run may keep fewer than its share). A run that keeps no alternative is dropped, and its share goes to no
+  other run. When `max_terms − 2 · n` is less than one per run, the bound does not apply: each run keeps one
+  alternative, so the step cannot fit and the cascade lists it skipped (§7.1.3). The bound limits what is compiled; it
+  does not make the step fit, since an alternative of several words or over several fields takes more terms. The
+  cascade still holds the step to the limits (§7.1.3). A run whose share left out an alternative that the 50-cap keeps is marked
   `CompiledSynonym::cut`.
 
 `nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
