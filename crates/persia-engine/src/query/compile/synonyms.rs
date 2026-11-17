@@ -205,8 +205,9 @@ impl<'c> Scan<'c> {
     ///
     /// L1's step holds L0's terms twice (its own clauses, and L0's query, which it excludes) and at least a term per
     /// alternative (SPEC §7.1.3), so at most `limits.max_terms − 2 · terms` alternatives are compiled in all, each run's
-    /// share as [`share`] cuts (the longest lists first, at least one each), and none when that leaves less than one
-    /// per run: such a step never fits. A hostile text therefore costs the compilation no more than the limits allow
+    /// share as [`share`] cuts (the longest lists first, at least one each), and one each when that leaves less than
+    /// one per run: such a step never fits, and the cascade lists it skipped. A run that keeps none is dropped; its
+    /// share goes to no other run. A hostile text therefore costs the compilation no more than the limits allow
     /// the step. A cascade held to larger limits than the compilation's still sees only these.
     pub(super) fn finish(
         mut self,

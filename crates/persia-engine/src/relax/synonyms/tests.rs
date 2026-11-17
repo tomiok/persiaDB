@@ -175,6 +175,7 @@ mod properties {
             text in text(),
             synonyms in synonyms(),
             max_terms in 1usize..12,
+            keep in prop::collection::vec(0usize..60, 0..4),
         ) {
             let schema = SchemaBuilder::new("c")
                 .field("title", FieldKind::Text(TextOptions { positions: true, ..TextOptions::default() }))
@@ -248,6 +249,39 @@ mod properties {
                 }
                 prop_assert!(run.next().is_none());
                 prop_assert!(required.next().is_none());
+                // Under any cut (ROADMAP 8.1.18; SPEC §7.1.3: each run keeps its first `keep[i]` alternatives, all of
+                // them past the end of `keep`), the step still requires each run as itself or an alternative, the run
+                // first, so it matches every document L0 matches; L0's other clauses, exclusions and filters stay.
+                let cut = expansion.query(&keep);
+                let (must, must_not, filter) = match &cut {
+                    _ if expansion.units.len() == 1
+                        && expansion.must_not.is_empty()
+                        && expansion.filter.is_empty() =>
+                    {
+                        (std::slice::from_ref(&cut), &[][..], &[][..])
+                    }
+                    Query::Bool(b) => (&b.must[..], &b.must_not[..], &b.filter[..]),
+                    other => panic!("not a step: {other:?}"),
+                };
+                prop_assert_eq!(must_not, &expansion.must_not[..]);
+                prop_assert_eq!(filter, &expansion.filter[..]);
+                prop_assert_eq!(must.len(), expansion.units.len());
+                let mut r = 0;
+                for (unit, part) in expansion.units.iter().zip(must) {
+                    match unit {
+                        Unit::Plain(q) => prop_assert_eq!(part, q),
+                        Unit::Expanded { original, alternatives } => {
+                            let kept = keep.get(r).copied().unwrap_or(alternatives.len()).min(alternatives.len());
+                            r += 1;
+                            let Query::Bool(b) = part else { panic!("not a run: {part:?}") };
+                            prop_assert!(b.must.is_empty() && b.filter.is_empty() && b.must_not.is_empty());
+                            prop_assert_eq!(b.minimum_should_match, 0);
+                            prop_assert_eq!(&b.should[0], original);
+                            prop_assert_eq!(&b.should[1..], &alternatives[..kept]);
+                        }
+                    }
+                }
+                cut.validate(&schema, &QueryLimits::UNLIMITED).unwrap();
             }
         }
     }
