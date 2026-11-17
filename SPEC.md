@@ -1062,12 +1062,17 @@ those analyzers' versions.
   analyzed alone but numbered after the words before it by the positions they took (a removed token keeps its
   position, so the run reads as one analysis of its words). A match starts at a word's first token and ends with a
   word's last, so it stands for whole clauses: the longest term from each such start that ends on such an end. Fields
-  that match the same clauses share their alternatives, in the order above. A match of another field that overlaps
+  that match the same clauses share their alternatives: the union of the terms each reports, each place once, in group
+  order, then term order (each term at its place in the group it is reported from), so a later field's term may come
+  before an earlier field's. A match of another field that overlaps
   them is dropped, the earlier default field winning. Each alternative is the term as written, compiled over the
   default fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in
-  one without, one word when it is one token), each once, and none that compiles to the run's own query. The
-  compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n` alternatives in all, `n` its query's terms,
-  each run's share as §7.1.3 shares expansions, and one each when that is less than one per run: L1's step holds the
+  one without, one word when it is one token), each once, and none that compiles to the run's own query, at most 50
+  per run (the cap, again after the union). The
+  compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n` alternatives in all, `n` its query's terms as
+  `max_terms` counts them (§7.1.3), each run's share as §7.1.3 shares expansions over the terms its fields report (at
+  most 50; a term that compiles away, as a duplicate or the run's own query, still counts, so a run may keep fewer than
+  its share), and one each when that is less than one per run: L1's step holds the
   query's terms twice (§7.6), and at least one per alternative, so it could hold no more. This bounds what is
   compiled; it does not make the step fit, since an alternative of several words or over several fields takes more
   terms. The cascade still holds the step to the limits (§7.1.3). A run whose share left out an alternative that the

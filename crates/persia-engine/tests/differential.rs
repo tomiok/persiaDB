@@ -19,8 +19,9 @@
 //!    (`SearchPlan::explain_all`, ROADMAP 7.7.2), in descending order and one past the end, gives what a fresh tree
 //!    gives each of them, matched or not.
 //! 5. Relaxed with the collection's levels, a search returns what the reference cascade returns (SPEC §7.6, ROADMAP
-//!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15, 8.1.19, 8.1.21): L0, then L2 `drop_terms`' `minimum_should_match` ladder over a
-//!    root `bool`'s `must` clauses beside its `must_not` and `filter`, then L3 `prefix` (the last term and every other
+//!    8.1.2, 8.2.2, 8.2.5, 8.2.6, 8.1.15, 8.1.18, 8.1.19, 8.1.21): L0, then L1 `synonyms` for user text (below), then
+//!    L2 `drop_terms`' `minimum_should_match` ladder over a root `bool`'s `must` clauses beside its `must_not` and
+//!    `filter`, then L3 `prefix` (the last term and every other
 //!    of 3 characters or more as a `prefix` of 50 expansions, after the tier step `prefix:last` unless L2's last rung
 //!    came first), then L4 `fuzzy` (each term of 4 characters or more as a `fuzzy` of 50 expansions at 1 edit, 2
 //!    from 8 characters, after the tier step `fuzzy:1` when a term takes 2), then L5 `fallback` (every live document
@@ -28,12 +29,21 @@
 //!    descending), and under `filters: "last_resort"` L6
 //!    `filters` (the root without its filters, when it has some and searches a word), each step's matches the earlier
 //!    steps lack, scored as the reference scores that step; L0 alone, ranked as a plain search, when it has
-//!    `min_results` hits. Every step after L0 is held to the case's `max_expansions` beside the steps it excludes
-//!    (SPEC §7.1.3): `applied` lists it `:cut` or `:skipped` as the reference does. The response is flagged
+//!    `min_results` hits. Every step after L0 is held to the case's `max_expansions` and `max_terms` beside the steps it
+//!    excludes (SPEC §7.1.3): `applied` lists it `:cut` or `:skipped` as the reference does. The response is flagged
 //!    `fallback` exactly when L5 is the last step that found a hit, and `filters_dropped` exactly when L6 is. User
 //!    text, compiled as SPEC §7.1.1 says (checked), also states its `original` and its hit step's `effective` and
 //!    `corrected` (L4's corrections: each word no document holds, replaced by the most frequent term within its
-//!    distance over the fields). A plan without L2 runs too, so L3 and L4 meet L0's misses alone.
+//!    distance over the fields). A plan without L1 and L2 runs too, so L3 and L4 meet L0's misses alone.
+//!    L1 (ROADMAP 8.1.18): the collection has random synonym groups (SPEC §6.2.1), and user text compiles to the runs
+//!    `tests/reference/synonyms.rs` finds (SPEC §6.3.2: the longest term at each word, in each default field, the
+//!    alternatives in group then term order, each once, at most 50, compiled as quoted phrases, and at most
+//!    `max_terms − 2 · n` in all when compiled at the case's `max_terms`), checked against `Compiled::synonyms`. Its
+//!    step requires each run or one of its alternatives; over the limits each run keeps its first alternatives at the
+//!    highest shared count that fits, then one more each in text order where the step still fits (`synonyms:cut`),
+//!    or the step is skipped (`synonyms:skipped`); a compilation that left some out lists it cut. At every count of
+//!    alternatives per run, the step matches every document L0 matches. Each text with a run is also searched at a
+//!    `max_terms` inside its cut window, a different one at each operation.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -59,7 +69,7 @@ mod reference;
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
-use std::ops::Bound;
+use std::ops::{Bound, Range};
 use std::sync::Arc;
 
 use persia_analysis::AnalyzerRegistry;
@@ -120,7 +130,7 @@ const STRATEGIES: [Pruning; 3] = [
 /// Per text field: `boost`, `k1`, `b`.
 type Params = [(f64, f64, f64); 2];
 
-fn schema(p: &Params) -> CollectionSchema {
+fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
     // The whitespace analyzer gives the words as they are, at positions 0, 1, 2...: the reference's tokens.
     let ws = AnalyzerRef::new("whitespace", 1).unwrap();
     let text = |(boost, k1, b)| {
@@ -138,6 +148,7 @@ fn schema(p: &Params) -> CollectionSchema {
         .field("body", text(p[1]))
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("n", FieldKind::I64 { stored: false })
+        .synonyms(synonyms.to_vec())
         .build()
         .unwrap()
 }
@@ -492,14 +503,22 @@ fn params() -> impl Strategy<Value = Params> {
 #[derive(Debug, Clone)]
 struct Case {
     params: Params,
+    /// The collection's synonym groups (SPEC §6.2.1), which L1 expands user text with (ROADMAP 8.1.18).
+    synonyms: Vec<Vec<String>>,
     ops: Vec<Op>,
     /// Each with an optional filter, and whether the query is beside it as a `should` (optional: every selected
     /// document matches, scoring the query or 0) rather than as the `must`.
     queries: Vec<(RefQuery, Option<(Filter, bool)>)>,
     /// User text, compiled and relaxed (invariant 5): what a level states of a query from `q`.
     texts: Vec<Text>,
-    /// The `max_expansions` limit the relaxed steps are held to (SPEC §7.1.3), the other limits the defaults'.
+    /// The `max_expansions` limit the relaxed steps are held to (SPEC §7.1.3).
     max_expansions: usize,
+    /// The `max_terms` limit the relaxed steps are held to (SPEC §7.1.3), which cuts L1's alternatives; the other
+    /// limits the defaults'.
+    max_terms: usize,
+    /// Whether user text is compiled at `max_terms` too (when its query fits it), so the compilation bounds the
+    /// alternatives (SPEC §6.3.2), rather than at the defaults.
+    compile_at_limit: bool,
     k: usize,
 }
 
@@ -575,19 +594,76 @@ impl Text {
     }
 }
 
-fn text(fields: [FieldId; 4]) -> impl Strategy<Value = Text> {
+/// User text drawn from the synonym terms (`pool`, each split into its words) and from [`text_word`], so runs of one
+/// and several words are common: at most 6 words, each excluded at times (which ends a run, SPEC §6.3.2).
+fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> {
+    let chunk = prop_oneof![
+        2 => prop::sample::select(pool).prop_map(|t| t.split_whitespace().map(str::to_owned).collect::<Vec<_>>()),
+        1 => text_word().prop_map(|w| vec![w]),
+    ];
     (
-        prop::collection::vec((text_word(), prop::bool::weighted(0.2)), 1..4),
+        prop::collection::vec(chunk, 1..4),
+        prop::collection::vec(prop::bool::weighted(0.2), 6),
         prop::option::weighted(0.3, filter(fields)),
     )
-        .prop_map(|(clauses, filter)| Text { clauses, filter })
+        .prop_map(|(chunks, excluded, filter)| Text {
+            clauses: chunks.into_iter().flatten().zip(excluded).collect(),
+            filter,
+        })
+}
+
+/// A collection's synonym groups (SPEC §6.2.1) and the terms they hold, which user text draws from: groups of 2 to
+/// 4 terms picked from a few terms of 1 to 3 words, so a term is often in several groups and a longer term often
+/// starts with a shorter one; at times two spaces between words (equal after analysis to one, so a group may shrink
+/// to one term); and at times a word with more alternatives than the 50 a match reports (ROADMAP 8.1.18).
+fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
+    let term = (
+        prop_oneof![3 => 1..2_usize, 2 => 2..4_usize],
+        prop::collection::vec(text_word(), 3),
+        prop::bool::weighted(0.1),
+    )
+        .prop_map(|(n, words, wide)| words[..n].join(if wide { "  " } else { " " }));
+    let pairs: Vec<String> = VOCAB
+        .iter()
+        .flat_map(|a| VOCAB.iter().map(move |b| format!("{a} {b}")))
+        .collect();
+    let many = (word(), prop::sample::subsequence(pairs, 52..64));
+    (
+        prop::collection::vec(term, 2..7),
+        prop::collection::vec(
+            prop::collection::vec(any::<prop::sample::Index>(), 2..5),
+            0..5,
+        ),
+        prop::option::weighted(0.15, many),
+    )
+        .prop_map(|(mut pool, picks, many)| {
+            let mut groups: Vec<Vec<String>> = Vec::new();
+            for pick in picks {
+                let mut group: Vec<String> = Vec::new();
+                for i in pick {
+                    let t = i.get(&pool);
+                    if !group.contains(t) {
+                        group.push(t.clone());
+                    }
+                }
+                if group.len() >= 2 {
+                    groups.push(group);
+                }
+            }
+            if let Some((w, pairs)) = many {
+                groups.push(std::iter::once(w.clone()).chain(pairs).collect());
+                pool.push(w);
+            }
+            (pool, groups)
+        })
 }
 
 fn case() -> impl Strategy<Value = Case> {
-    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
-    params().prop_flat_map(move |p| {
+    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2], &[]));
+    (params(), synonyms()).prop_flat_map(move |(p, (pool, synonyms))| {
         (
             Just(p),
+            Just(synonyms),
             prop::collection::vec(op(), 1..20),
             prop::collection::vec(
                 (
@@ -596,20 +672,39 @@ fn case() -> impl Strategy<Value = Case> {
                 ),
                 1..4,
             ),
-            prop::collection::vec(text(fields), 1..3),
+            prop::collection::vec(text(fields, pool), 1..3),
             // The default, which the steps' 50-term expansions reach late in a cascade, or a limit that cuts them
             // and skips steps sooner (ROADMAP 8.1.19).
             prop_oneof![2 => Just(QueryLimits::default().max_expansions), 1 => 1..12_usize, 1 => 40..240_usize],
+            // The default, or a limit that cuts L1's alternatives, or skips L1 and the steps that exclude it
+            // (ROADMAP 8.1.18).
+            prop_oneof![3 => Just(QueryLimits::default().max_terms), 1 => 8..60_usize, 1 => 60..300_usize],
+            any::<bool>(),
             1..6_usize,
         )
-            .prop_map(|(params, ops, queries, texts, max_expansions, k)| Case {
-                params,
-                ops,
-                queries,
-                texts,
-                max_expansions,
-                k,
-            })
+            .prop_map(
+                |(
+                    params,
+                    synonyms,
+                    ops,
+                    queries,
+                    texts,
+                    max_expansions,
+                    max_terms,
+                    compile_at_limit,
+                    k,
+                )| Case {
+                    params,
+                    synonyms,
+                    ops,
+                    queries,
+                    texts,
+                    max_expansions,
+                    max_terms,
+                    compile_at_limit,
+                    k,
+                },
+            )
     })
 }
 
@@ -1000,6 +1095,8 @@ fn check(
             live: &live,
             eval: &|q, id| eval(q, id, false),
             max_expansions: case.max_expansions,
+            max_terms: case.max_terms,
+            runs: &[],
         };
         check_relaxed(
             &views,
@@ -1015,9 +1112,23 @@ fn check(
     let registry = AnalyzerRegistry::builtin();
     let text_compiler = QueryCompiler::new(schema, &registry).unwrap();
     let defaults = DefaultFields::all(schema);
-    for text in &case.texts {
-        let mut compiled =
-            text_compiler.compile(&text.render(), &defaults, &QueryLimits::default());
+    for (t, text) in case.texts.iter().enumerate() {
+        // Compiled at the case's `max_terms` when its query fits it (SPEC §6.3.2: the compilation then bounds the
+        // alternatives), else at the defaults.
+        let unfiltered = Text {
+            filter: None,
+            ..text.clone()
+        }
+        .root(&case.params, &fields);
+        let compile_limits = if case.compile_at_limit && terms(&unfiltered) <= case.max_terms {
+            QueryLimits {
+                max_terms: case.max_terms,
+                ..QueryLimits::default()
+            }
+        } else {
+            QueryLimits::default()
+        };
+        let mut compiled = text_compiler.compile(&text.render(), &defaults, &compile_limits);
         if let Some(f) = &text.filter {
             compiled = compiled.with_filter([f.clone()]);
         }
@@ -1028,6 +1139,38 @@ fn check(
             "{}",
             text.render()
         );
+        // The runs and their alternatives, as SPEC §6.3.2 finds them (checked).
+        let runs = reference_runs(
+            text,
+            &case.synonyms,
+            &case.params,
+            &fields,
+            (compile_limits.max_terms, terms(&unfiltered)),
+        );
+        let found: Vec<(Range<usize>, Vec<Query>, bool)> = compiled
+            .synonyms
+            .iter()
+            .map(|s| (s.clauses.clone(), s.alternatives.clone(), s.cut))
+            .collect();
+        let want: Vec<(Range<usize>, Vec<Query>, bool)> = runs
+            .iter()
+            .map(|r| {
+                let alternatives = r.alternatives.iter().map(|a| engine_query(a, &fields));
+                (r.clauses.clone(), alternatives.collect(), r.cut)
+            })
+            .collect();
+        prop_assert_eq!(found, want, "{} over {:?}", text.render(), case.synonyms);
+        for run in &runs {
+            if run.cut {
+                cover("synonyms compiled cut".to_owned());
+            }
+            if run.alternatives.len() == reference::synonyms::CAP {
+                cover("synonyms at the cap".to_owned());
+            }
+            if run.clauses.len() > 1 {
+                cover("synonyms run of words".to_owned());
+            }
+        }
         let reference = Reference {
             schema,
             corpus: &corpus,
@@ -1035,6 +1178,8 @@ fn check(
             live: &live,
             eval: &|q, id| eval(q, id, false),
             max_expansions: case.max_expansions,
+            max_terms: case.max_terms,
+            runs: &runs,
         };
         check_relaxed(
             &views,
@@ -1044,6 +1189,40 @@ fn check(
             None,
             case,
         )?;
+        // L1's cut at a `max_terms` within its window (SPEC §7.1.3): from one term below L1's step with one
+        // alternative per run beside L0 (skipped) to one below it with every alternative (cut), a different one at
+        // each operation (`turn`), so the cases meet every cut of their runs.
+        if !runs.is_empty() {
+            let excluded = [(RelaxLevel::Exact, root.clone())];
+            let at = |counts: &[usize]| {
+                terms(&Reference::whole(
+                    reference.synonyms_step(&root, text, counts),
+                    &excluded,
+                ))
+            };
+            let lens: Vec<usize> = runs.iter().map(|r| r.alternatives.len()).collect();
+            let (lo, hi) = (at(&vec![1; runs.len()]), at(&lens));
+            if hi > lo {
+                let max_terms = lo - 1 + (live.len() + t) % (hi - lo + 1);
+                cover("synonyms window".to_owned());
+                let tight = Case {
+                    max_terms,
+                    ..case.clone()
+                };
+                let reference = Reference {
+                    max_terms,
+                    ..reference
+                };
+                check_relaxed(
+                    &views,
+                    Engine::Compiled(&compiled),
+                    &reference,
+                    (&root, Some(text)),
+                    None,
+                    &tight,
+                )?;
+            }
+        }
     }
     Ok(())
 }
@@ -1180,7 +1359,7 @@ fn database(schema: CollectionSchema) -> Database<SimFile> {
 }
 
 fn run_case(case: &Case) -> Result<(), TestCaseError> {
-    let schema = schema(&case.params);
+    let schema = schema(&case.params, &case.synonyms);
     let fields = ids(&schema);
     let mut db = database(schema);
     let mut model = Model::default();
@@ -1255,6 +1434,12 @@ fn collection_searches_match_the_reference() {
     eprintln!("steps the reference cascade built: {coverage:#?}");
     if std::env::var("PROPTEST_CASES").is_err() {
         for key in [
+            "synonyms hit",
+            "synonyms:cut hit",
+            "synonyms:skipped",
+            "synonyms compiled cut",
+            "synonyms at the cap",
+            "synonyms run of words",
             "drop_terms:75% hit",
             "prefix:last hit",
             "prefix hit",
@@ -1283,7 +1468,7 @@ fn the_model_tracks_segments() {
         doc: vec![vec![], vec![w.to_owned()], vec![]],
         n: None,
     };
-    let schema = schema(&params);
+    let schema = schema(&params, &[]);
     let fields = ids(&schema);
     let mut db = database(schema);
     let mut model = Model::default();
@@ -1352,7 +1537,7 @@ fn apply(db: &mut Database<SimFile>, model: &mut Model, fields: &[FieldId; 4], o
 #[test]
 fn a_prefix_keeps_the_term_of_highest_collection_df() {
     let params = [(1.0, 1.2, 0.75); 2];
-    let schema = schema(&params);
+    let schema = schema(&params, &[]);
     let fields = ids(&schema);
     let mut db = database(schema);
     let mut model = Model::default();
@@ -1460,14 +1645,17 @@ fn search_input(ops: &[Op], input: &Input<'_>, max_expansions: usize) -> Relaxed
     };
     let case = Case {
         params: [(1.0, 1.2, 0.75); 2],
+        synonyms: Vec::new(),
         ops: ops.to_vec(),
         queries,
         texts,
         max_expansions,
+        max_terms: QueryLimits::default().max_terms,
+        compile_at_limit: false,
         k: 2,
     };
     run_case(&case).unwrap();
-    let schema = schema(&case.params);
+    let schema = schema(&case.params, &case.synonyms);
     let fields = ids(&schema);
     let mut db = database(schema.clone());
     let mut model = Model::default();
@@ -1522,7 +1710,7 @@ fn hit_ids(out: &RelaxedResults) -> Vec<&str> {
 /// `body` keeps `cat` and `cart`, `title` its most frequent, `cafe`, not `card`.
 #[test]
 fn a_cut_gives_the_expansions_left_in_query_order() {
-    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
+    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2], &[]));
     assert!(fields[BODY] < fields[TITLE], "body is first in query order");
     let ops = [
         Op::Put(0, titled(&[], &["cat"])),
@@ -1589,7 +1777,7 @@ fn a_cut_rung_leaves_the_earlier_rungs_excluded() {
 /// `elephant`, so the tier step `fuzzy:1` corrects it. L3 comes first and finds nothing.
 #[test]
 fn a_correction_is_the_highest_df_over_the_fields_ties_to_the_first() {
-    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2]));
+    let fields = ids(&schema(&[(1.0, 1.2, 0.75); 2], &[]));
     assert!(fields[BODY] < fields[TITLE], "body is first in query order");
     let correction = |out: &RelaxedResults| -> Vec<(String, String)> {
         let c = &out.relaxation.corrected;
@@ -1733,14 +1921,15 @@ fn check_relaxed(
     };
     let limits = QueryLimits {
         max_expansions: case.max_expansions,
+        max_terms: case.max_terms,
         ..QueryLimits::default()
     };
     let exec = Execution::default()
         .threads(Threads::Current)
         .budget_clock(Arc::new(ManualClock::new(0)));
-    // The collection's levels (L1 builds no step: the collection has no synonyms, and a programmatic query no text),
-    // then a plan without L2, whose L3 and L4 run on L0's misses alone, and whose L3 builds the tier step
-    // `prefix:last` whenever it expands another term beside the last (SPEC §7.6).
+    // The collection's levels (L1 builds a step for user text with a run of synonym terms, never for a programmatic
+    // query, which has no text), then a plan without L1 and L2, whose L3 and L4 run on L0's misses alone, and whose
+    // L3 builds the tier step `prefix:last` whenever it expands another term beside the last (SPEC §7.6).
     prop_assert_eq!(
         schema.relaxation().levels.resolve(),
         [
@@ -1750,7 +1939,12 @@ fn check_relaxed(
             Level::Fuzzy
         ]
     );
-    let collection = [RelaxLevel::DropTerms, RelaxLevel::Prefix, RelaxLevel::Fuzzy];
+    let collection = [
+        RelaxLevel::Synonyms,
+        RelaxLevel::DropTerms,
+        RelaxLevel::Prefix,
+        RelaxLevel::Fuzzy,
+    ];
     let without_l2 = [RelaxLevel::Prefix, RelaxLevel::Fuzzy];
     // `"last_resort"` builds what `"never"` does, and L6 after it, so `"never"` runs once, on the plan without L2.
     for (min_results, filters, words, levels) in [
@@ -1932,8 +2126,8 @@ fn check_relaxed(
 type Eval<'a> = dyn Fn(&RefQuery, &str) -> Option<(f64, f64)> + 'a;
 
 /// The reference cascade's view of a collection (SPEC §7.6): its statistics, its live documents, how the reference
-/// scores a query for one of them (filters selecting by its values), and the `max_expansions` limit the steps after
-/// L0 are held to (SPEC §7.1.3; the other limits the defaults, which the generated queries stay well within).
+/// scores a query for one of them (filters selecting by its values), the `max_expansions` and `max_terms` limits the
+/// steps after L0 are held to (SPEC §7.1.3; the other limits the defaults), and the runs of user text L1 expands.
 struct Reference<'a> {
     schema: &'a CollectionSchema,
     corpus: &'a Corpus,
@@ -1941,6 +2135,143 @@ struct Reference<'a> {
     live: &'a BTreeMap<String, Values>,
     eval: &'a Eval<'a>,
     max_expansions: usize,
+    max_terms: usize,
+    runs: &'a [RefRun],
+}
+
+/// A run of user text that is a synonym term (SPEC §6.3.2): the clauses it covers (indexes into [`Text::clauses`]),
+/// its alternatives compiled, and whether the compilation's bound left some out.
+#[derive(Debug)]
+struct RefRun {
+    clauses: Range<usize>,
+    alternatives: Vec<RefQuery>,
+    cut: bool,
+}
+
+/// SPEC §6.3.2's runs of `text` over the default fields `title` and `body` (whitespace: one token per word, at
+/// positions 0, 1, 2... in each maximal stretch of required words, which an excluded word ends). Each field scans its
+/// analysis ([`reference::synonyms::field_matches`]), the fields' matches merge, each alternative compiles as the
+/// quoted phrase `"<term>"` would (one word: a `combined` over the fields; more: a `phrase` per field, one of which
+/// must match), each once and none the run's own query, and the compilation keeps at most `max_terms − 2 · n` of them
+/// (`(max_terms, n)` its limit and its query's terms, [`reference::synonyms::bound`]).
+fn reference_runs(
+    text: &Text,
+    groups: &[Vec<String>],
+    params: &Params,
+    fields: &[FieldId; 4],
+    (max_terms, n): (usize, usize),
+) -> Vec<RefRun> {
+    let analyze = |s: &str| {
+        let tokens: Vec<_> = s
+            .split_whitespace()
+            .zip(0..)
+            .map(|(w, p)| (w.to_owned(), p))
+            .collect();
+        let took = u32::try_from(tokens.len()).unwrap();
+        (tokens, took)
+    };
+    let synonyms = reference::synonyms::Synonyms::new(groups, &analyze);
+    let mut order = [TITLE, BODY];
+    order.sort_by_key(|&f| fields[f]);
+    let word = |w: &str| {
+        RefQuery::Word(
+            order
+                .iter()
+                .map(|&field| Clause {
+                    field,
+                    term: w.to_owned(),
+                    weight: params[field].0,
+                })
+                .collect(),
+        )
+    };
+    let quoted = |term: &str| {
+        let (tokens, _) = analyze(term);
+        if tokens.len() == 1 {
+            return word(&tokens[0].0);
+        }
+        let mut phrases: Vec<RefQuery> = order
+            .iter()
+            .map(|&field| RefQuery::Phrase {
+                field,
+                terms: tokens.clone(),
+                weight: params[field].0,
+            })
+            .collect();
+        if phrases.len() == 1 {
+            return phrases.remove(0);
+        }
+        RefQuery::Bool {
+            must: Vec::new(),
+            should: phrases,
+            must_not: Vec::new(),
+            filter: Vec::new(),
+            minimum_should_match: 0,
+        }
+    };
+    let mut runs: Vec<(Range<usize>, usize, Vec<RefQuery>)> = Vec::new();
+    let mut start = 0;
+    while start < text.clauses.len() {
+        if text.clauses[start].1 {
+            start += 1;
+            continue;
+        }
+        let end = (start..text.clauses.len())
+            .find(|&i| text.clauses[i].1)
+            .unwrap_or(text.clauses.len());
+        let words: Vec<&str> = text.clauses[start..end]
+            .iter()
+            .map(|c| c.0.as_str())
+            .collect();
+        let per_field = order
+            .iter()
+            .map(|_| reference::synonyms::field_matches(&synonyms, &words, &analyze))
+            .collect();
+        for (covered, terms) in reference::synonyms::merge(per_field) {
+            let clauses = start + covered.start..start + covered.end;
+            let parts: Vec<RefQuery> = words[covered].iter().map(|w| word(w)).collect();
+            let own = if parts.len() == 1 {
+                parts[0].clone()
+            } else {
+                RefQuery::Bool {
+                    must: parts,
+                    should: Vec::new(),
+                    must_not: Vec::new(),
+                    filter: Vec::new(),
+                    minimum_should_match: 0,
+                }
+            };
+            // Every term the fields report compiled, each once, none the run's own query; the run's share is of the
+            // terms reported (at most 50), so one that compiles away still counts.
+            let reported = terms.len().min(reference::synonyms::CAP);
+            let mut alternatives: Vec<RefQuery> = Vec::new();
+            for (_, t) in terms {
+                let q = quoted(&t);
+                if q != own && !alternatives.contains(&q) {
+                    alternatives.push(q);
+                }
+            }
+            if !alternatives.is_empty() {
+                runs.push((clauses, reported, alternatives));
+            }
+        }
+        start = end;
+    }
+    let lens: Vec<usize> = runs.iter().map(|r| r.1).collect();
+    runs.into_iter()
+        .zip(reference::synonyms::bound(&lens, max_terms, n))
+        .map(|((clauses, _, mut alternatives), keep)| {
+            // Cut when the share left out an alternative the 50-cap keeps.
+            let keep = keep.min(reference::synonyms::CAP);
+            let cut = alternatives.len() > keep && keep < reference::synonyms::CAP;
+            alternatives.truncate(keep);
+            RefRun {
+                clauses,
+                alternatives,
+                cut,
+            }
+        })
+        .collect()
 }
 
 /// A step of the reference cascade: its query as searched (cut when the limits cut it), what it applied, its level,
@@ -1970,9 +2301,9 @@ const PREFIX_LEN: usize = 3;
 
 impl Reference<'_> {
     /// SPEC §7.6's cascade for `root` (of user `text`, or programmatic): L0, then the plan's `words` levels in cascade
-    /// order (L2 `drop_terms`, L3 `prefix`, L4 `fuzzy`), L5 `fallback` and, `last_resort`, L6 `filters`. A level is built only
+    /// order (L1 `synonyms`, L2 `drop_terms`, L3 `prefix`, L4 `fuzzy`), L5 `fallback` and, `last_resort`, L6 `filters`. A level is built only
     /// while the hits found are fewer than `min_results`, and so is each of its steps. A step is held to the limit
-    /// beside the earlier steps it excludes ([`Self::fit`]): as built, cut (`:cut`) or skipped (`:skipped`, not
+    /// beside the earlier steps it excludes ([`Self::fit`], [`Self::fit_synonyms`]): as built, cut (`:cut`) or skipped (`:skipped`, not
     /// searched, excluded from none). A searched step's matches are the live documents it matches that no earlier
     /// step took.
     fn cascade(
@@ -2013,7 +2344,12 @@ impl Reference<'_> {
                 if taken.len() >= min_results {
                     break 'levels;
                 }
-                let Some((query, cut)) = self.fit(&built.query, &excluded) else {
+                let fitted = if level == RelaxLevel::Synonyms {
+                    self.fit_synonyms(root, text, &excluded, &steps[0])
+                } else {
+                    self.fit(&built.query, &excluded)
+                };
+                let Some((query, cut)) = fitted else {
                     steps.push(RefStep {
                         applied: format!("{}:skipped", built.applied),
                         level,
@@ -2070,6 +2406,19 @@ impl Reference<'_> {
             corrected: Vec::new(),
         };
         match level {
+            // One step of user text with a run (SPEC §7.6 L1), its `effective` L0's; the limits hold it apart
+            // ([`Self::fit_synonyms`]).
+            RelaxLevel::Synonyms => match text {
+                Some(t) if !self.runs.is_empty() => {
+                    let all: Vec<usize> = self.runs.iter().map(|r| r.alternatives.len()).collect();
+                    vec![built(
+                        self.synonyms_step(root, t, &all),
+                        "synonyms",
+                        l0_text(),
+                    )]
+                }
+                _ => Vec::new(),
+            },
             RelaxLevel::DropTerms => drop_terms_steps(root)
                 .into_iter()
                 .map(|(q, applied, k)| {
@@ -2246,33 +2595,56 @@ impl Reference<'_> {
             .join(" ")
     }
 
-    /// `step` held to the `max_expansions` limit beside the `excluded` steps (SPEC §7.1.3): every `max_expansions` of
-    /// the step and of the steps it excludes is counted, those under a `must_not` too. Within the limit, the step as
-    /// built (`false`). Over it, the step's own `prefix`s and `fuzzy`s outside a `must_not` are cut ([`share`]) to the
-    /// expansions left (`true`); `None` (skipped) when fewer are left than it has such queries.
+    /// Whether `whole` (a step beside the steps it excludes) is within the limits other than `max_expansions` (SPEC
+    /// §7.1.3): at most `max_terms` leaf terms ([`terms`]), and the default `max_clauses` and `max_depth`, which the
+    /// engine's validation judges (the reference counts no nodes). The term count must be the engine's: its
+    /// validation accepts exactly that many.
+    fn within(&self, whole: &RefQuery) -> bool {
+        let fields = ids(self.schema);
+        let query = engine_query(whole, &fields);
+        let at = |max_terms| {
+            let limits = QueryLimits {
+                max_terms,
+                max_expansions: usize::MAX,
+                ..QueryLimits::default()
+            };
+            query.validate(self.schema, &limits).is_ok()
+        };
+        if !at(usize::MAX) {
+            return false;
+        }
+        let n = terms(whole);
+        assert!(
+            at(n) && (n == 0 || !at(n - 1)),
+            "the reference counts {n} terms in {whole:?}"
+        );
+        n <= self.max_terms
+    }
+
+    /// `step` beside the steps it excludes, as the limits count it (SPEC §7.1.3).
+    fn whole(step: RefQuery, excluded: &[(RelaxLevel, RefQuery)]) -> RefQuery {
+        RefQuery::Bool {
+            must: vec![step],
+            should: Vec::new(),
+            must_not: excluded.iter().map(|(_, q)| q.clone()).collect(),
+            filter: Vec::new(),
+            minimum_should_match: 0,
+        }
+    }
+
+    /// `step` held to the limits beside the `excluded` steps (SPEC §7.1.3). Over the terms, clauses or depth, `None`
+    /// (skipped): cutting expansions removes no term. Otherwise every `max_expansions` of the step and of the steps it
+    /// excludes is counted, those under a `must_not` too. Within the limit, the step as built (`false`). Over it, the
+    /// step's own `prefix`s and `fuzzy`s outside a `must_not` are cut ([`share`]) to the expansions left (`true`);
+    /// `None` (skipped) when fewer are left than it has such queries.
     fn fit(
         &self,
         step: &RefQuery,
         excluded: &[(RelaxLevel, RefQuery)],
     ) -> Option<(RefQuery, bool)> {
-        // The generated queries stay within every other limit (terms, clauses, depth), which this model leaves out: an
-        // engine step over one would be skipped where the reference searches it.
-        let whole = RefQuery::Bool {
-            must: vec![step.clone()],
-            should: Vec::new(),
-            must_not: excluded.iter().map(|(_, q)| q.clone()).collect(),
-            filter: Vec::new(),
-            minimum_should_match: 0,
-        };
-        let others = QueryLimits {
-            max_expansions: usize::MAX,
-            ..QueryLimits::default()
-        };
-        let checked = engine_query(&whole, &ids(self.schema)).validate(self.schema, &others);
-        assert!(
-            checked.is_ok(),
-            "a step over a limit the reference does not model: {checked:?}"
-        );
+        if !self.within(&Self::whole(step.clone(), excluded)) {
+            return None;
+        }
         let before: usize = excluded.iter().map(|(_, q)| expansions(q)).sum();
         let own = expansions(step);
         if before + own <= self.max_expansions {
@@ -2291,6 +2663,119 @@ impl Reference<'_> {
         }
         share(&mut caps, left);
         Some((cut, true))
+    }
+
+    /// L1's step held to the limits beside the `excluded` steps (SPEC §7.1.3, ROADMAP 8.1.13): with every alternative
+    /// the compilation kept when it fits (cut, `true`, when the compilation left some out), else with each run's
+    /// first alternatives as [`reference::synonyms::cut`] counts them (`true`), else `None` (skipped). At every count
+    /// of alternatives per run, the step matches each document `l0` matched (ROADMAP 8.1.18).
+    fn fit_synonyms(
+        &self,
+        root: &RefQuery,
+        text: Option<&Text>,
+        excluded: &[(RelaxLevel, RefQuery)],
+        l0: &RefStep,
+    ) -> Option<(RefQuery, bool)> {
+        let Some(text) = text else {
+            panic!("L1 builds from user text alone");
+        };
+        let lens: Vec<usize> = self.runs.iter().map(|r| r.alternatives.len()).collect();
+        let step = |counts: &[usize]| self.synonyms_step(root, text, counts);
+        let top = lens.iter().copied().max().unwrap_or(0);
+        let l0 = l0.matches.as_ref().unwrap();
+        for c in 1..=top {
+            let counts: Vec<usize> = lens.iter().map(|&l| l.min(c)).collect();
+            let q = step(&counts);
+            for id in l0.keys() {
+                assert!(
+                    (self.eval)(&q, id).is_some(),
+                    "L1's step with {counts:?} alternatives misses {id}, which L0 matches: {q:?}"
+                );
+            }
+        }
+        let fits = |counts: &[usize]| {
+            let whole = Self::whole(step(counts), excluded);
+            self.within(&whole) && expansions(&whole) <= self.max_expansions
+        };
+        if fits(&lens) {
+            return Some((step(&lens), self.runs.iter().any(|r| r.cut)));
+        }
+        reference::synonyms::cut(&lens, &fits).map(|counts| (step(&counts), true))
+    }
+
+    /// L1's step for `root` of user `text` (SPEC §7.6): each run, with its first `counts` alternatives, required as
+    /// `bool { should: [the run, its alternatives...] }` (the run its word, or a `bool` requiring its words) in place
+    /// of its words in the root's `must`; L0's other required words, its excluded words and its filter as they are.
+    /// A root of one word is that `bool` alone.
+    fn synonyms_step(&self, root: &RefQuery, text: &Text, counts: &[usize]) -> RefQuery {
+        let (must, must_not, filter) = match root {
+            RefQuery::Bool {
+                must,
+                must_not,
+                filter,
+                ..
+            } => (must.clone(), must_not.clone(), filter.clone()),
+            word => (vec![word.clone()], Vec::new(), Vec::new()),
+        };
+        // The position in the root's `must` of each required clause.
+        let mut slot = BTreeMap::new();
+        for (i, _) in text.clauses.iter().enumerate().filter(|(_, c)| !c.1) {
+            slot.insert(i, slot.len());
+        }
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < text.clauses.len() {
+            if text.clauses[i].1 {
+                i += 1;
+                continue;
+            }
+            let Some((run, &count)) = self
+                .runs
+                .iter()
+                .zip(counts)
+                .find(|(r, _)| r.clauses.start == i)
+            else {
+                out.push(must[slot[&i]].clone());
+                i += 1;
+                continue;
+            };
+            let mut parts: Vec<RefQuery> = run
+                .clauses
+                .clone()
+                .map(|c| must[slot[&c]].clone())
+                .collect();
+            let own = if parts.len() == 1 {
+                parts.remove(0)
+            } else {
+                RefQuery::Bool {
+                    must: parts,
+                    should: Vec::new(),
+                    must_not: Vec::new(),
+                    filter: Vec::new(),
+                    minimum_should_match: 0,
+                }
+            };
+            out.push(RefQuery::Bool {
+                must: Vec::new(),
+                should: std::iter::once(own)
+                    .chain(run.alternatives[..count].iter().cloned())
+                    .collect(),
+                must_not: Vec::new(),
+                filter: Vec::new(),
+                minimum_should_match: 0,
+            });
+            i = run.clauses.end;
+        }
+        if out.len() == 1 && must_not.is_empty() && filter.is_empty() {
+            return out.remove(0);
+        }
+        RefQuery::Bool {
+            must: out,
+            should: Vec::new(),
+            must_not,
+            filter,
+            minimum_should_match: 0,
+        }
     }
 
     /// L3's and L4's step for `root` (SPEC §7.6): the terms of a root `bool`'s `must` clauses rewritten by `leaf`, the
@@ -2446,6 +2931,48 @@ fn expansions(q: &RefQuery) -> usize {
     }
 }
 
+/// SPEC §7.1.3's `max_terms` count of `q`: per field of a word (a `term` or `combined`), per `prefix` and `fuzzy`, per
+/// `phrase` term, and per filter value ([`filter_terms`]).
+fn terms(q: &RefQuery) -> usize {
+    match q {
+        RefQuery::Word(clauses) => clauses.len(),
+        RefQuery::Phrase { terms, .. } => terms.len(),
+        RefQuery::Prefix { .. } | RefQuery::Fuzzy { .. } => 1,
+        RefQuery::Bool {
+            must,
+            should,
+            must_not,
+            filter,
+            ..
+        } => {
+            must.iter()
+                .chain(should)
+                .chain(must_not)
+                .map(terms)
+                .sum::<usize>()
+                + filter.iter().map(filter_terms).sum::<usize>()
+        }
+        RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => terms(inner),
+        RefQuery::All => 0,
+    }
+}
+
+/// A filter's values as `max_terms` counts them (SPEC §7.1.3): a `term`'s one, a `terms`' each, a `range`'s bounds.
+fn filter_terms(f: &Filter) -> usize {
+    match f {
+        Filter::Term { .. } => 1,
+        Filter::Terms { values, .. } => values.len(),
+        Filter::Range { lower, upper, .. } => [lower, upper]
+            .iter()
+            .filter(|b| !matches!(b, Bound::Unbounded))
+            .count(),
+        Filter::Exists { .. } => 0,
+        Filter::And(fs) | Filter::Or(fs) => fs.iter().map(filter_terms).sum(),
+        Filter::Not(inner) => filter_terms(inner),
+        other => panic!("not a filter the suite generates: {other:?}"),
+    }
+}
+
 /// The `max_expansions` a cut may lower in `q` (SPEC §7.1.3), in query order: depth first, a `bool`'s `must` clauses
 /// before its `should` clauses; not those under a `must_not`, which would exclude less.
 fn cuttable<'q>(q: &'q mut RefQuery, caps: &mut Vec<&'q mut usize>) {
@@ -2587,6 +3114,7 @@ fn searches_word(q: &RefQuery) -> bool {
 /// The schema's name of a word level.
 fn level_of(level: RelaxLevel) -> Level {
     match level {
+        RelaxLevel::Synonyms => Level::Synonyms,
         RelaxLevel::DropTerms => Level::DropTerms,
         RelaxLevel::Prefix => Level::Prefix,
         RelaxLevel::Fuzzy => Level::Fuzzy,

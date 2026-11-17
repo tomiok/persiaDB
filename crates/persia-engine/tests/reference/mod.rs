@@ -5,3 +5,4 @@ pub mod bm25f;
 pub mod expand;
 pub mod filter;
 pub mod search;
+pub mod synonyms;
