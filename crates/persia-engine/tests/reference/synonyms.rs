@@ -134,7 +134,7 @@ impl Synonyms {
                         && Shape::of(run).as_ref() == Some(shape)
                         && !self.alternatives(id, 1).is_empty()
                 })
-                .max_by_key(|&id| (self.shapes[id].len(), std::cmp::Reverse(id)));
+                .max_by_key(|&id| self.shapes[id].len());
             match best {
                 Some(id) => {
                     let len = self.shapes[id].len();
@@ -248,8 +248,9 @@ pub fn bound(lens: &[usize], max_terms: usize, n: usize) -> Vec<usize> {
 
 /// SPEC §7.1.3's cut of L1's step: each list (`lens`, in text order) keeps its first alternatives; every list is
 /// lowered to the highest count that `fits`, none below 1, then, in text order, a list that count cut takes one more
-/// where the step still fits. `None` (skipped) when one alternative each does not fit.
-pub fn cut(lens: &[usize], fits: &dyn Fn(&[usize]) -> bool) -> Option<Vec<usize>> {
+/// where the step still fits. The shared count and each list's count; `None` (skipped) when one alternative each does
+/// not fit.
+pub fn cut(lens: &[usize], fits: &dyn Fn(&[usize]) -> bool) -> Option<(usize, Vec<usize>)> {
     let at = |c: usize| lens.iter().map(|&l| l.min(c)).collect::<Vec<_>>();
     let top = lens.iter().copied().max().unwrap_or(1);
     let c = (1..=top).rev().find(|&c| fits(&at(c)))?;
@@ -262,7 +263,7 @@ pub fn cut(lens: &[usize], fits: &dyn Fn(&[usize]) -> bool) -> Option<Vec<usize>
             }
         }
     }
-    Some(counts)
+    Some((c, counts))
 }
 
 #[cfg(test)]
@@ -431,18 +432,18 @@ mod tests {
     fn the_cut_lowers_the_longest_first_then_gives_one_more_in_text_order() {
         // The step fits when the counts sum to at most 7.
         let fits = |c: &[usize]| c.iter().sum::<usize>() <= 7;
-        assert_eq!(cut(&[5, 1, 5], &fits), Some(vec![3, 1, 3]));
+        assert_eq!(cut(&[5, 1, 5], &fits), Some((3, vec![3, 1, 3])));
         // At a shared 2 (sum 6) one is left: the first list lowered takes it.
         let fits = |c: &[usize]| c.iter().sum::<usize>() <= 7;
-        assert_eq!(cut(&[4, 4, 4], &fits), Some(vec![3, 2, 2]));
+        assert_eq!(cut(&[4, 4, 4], &fits), Some((2, vec![3, 2, 2])));
         // A list may take one more where an earlier one could not: weights 3, 1.
         let fits = |c: &[usize]| 3 * c[0] + c[1] <= 9;
-        assert_eq!(cut(&[4, 4], &fits), Some(vec![2, 3]));
+        assert_eq!(cut(&[4, 4], &fits), Some((2, vec![2, 3])));
         // One each does not fit: skipped.
         assert_eq!(
             cut(&[2, 2], &|c: &[usize]| c.iter().sum::<usize>() < 2),
             None
         );
-        assert_eq!(cut(&[2, 3], &|_| true), Some(vec![2, 3]));
+        assert_eq!(cut(&[2, 3], &|_| true), Some((3, vec![2, 3])));
     }
 }

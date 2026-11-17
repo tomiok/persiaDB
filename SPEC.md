@@ -1049,7 +1049,8 @@ those analyzers' versions.
   Used for optional prefix indexing. It stacks tokens, so it applies at index time only (§6.3.4).
 - **synonyms** (query time only, §7.6 L1): not a filter of the token stream but a lookup over it. Each term of every
   group (§6.2.1) is analyzed with the field's query-time analysis (§6.3.4) into a token sequence; a term that yields no tokens is ignored,
-  and terms equal after analysis are one term. A term whose groups all shrink to it alone (`["New York", "new york"]`
+  and terms equal after analysis are one term, which a group gives at its first place there, written as there (an
+  alternative compiles that writing over the other fields). A term whose groups all shrink to it alone (`["New York", "new york"]`
   under lowercasing) has nothing to expand to and never matches. Scanning the analyzed query left to right, the
   longest term starting at each token matches when its texts are equal and its position gaps equal (a stopword gap
   must line up), the matched tokens are skipped, and the match reports, in group order, then term order, the other
@@ -1064,19 +1065,20 @@ those analyzers' versions.
   word's last, so it stands for whole clauses: the longest term from each such start that ends on such an end. Fields
   that match the same clauses share their alternatives: the union of the terms each reports, each place once, in group
   order, then term order (each term at its place in the group it is reported from), so a later field's term may come
-  before an earlier field's. A match of another field that overlaps
-  them is dropped, the earlier default field winning. Each alternative is the term as written, compiled over the
-  default fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in
-  one without, one word when it is one token), each once, and none that compiles to the run's own query, at most 50
-  per run (the cap, again after the union). The
-  compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n` alternatives in all, `n` its query's terms as
-  `max_terms` counts them (§7.1.3), each run's share as §7.1.3 shares expansions over the terms its fields report (at
-  most 50; a term that compiles away, as a duplicate or the run's own query, still counts, so a run may keep fewer than
-  its share), and one each when that is less than one per run: L1's step holds the
-  query's terms twice (§7.6), and at least one per alternative, so it could hold no more. This bounds what is
-  compiled; it does not make the step fit, since an alternative of several words or over several fields takes more
-  terms. The cascade still holds the step to the limits (§7.1.3). A run whose share left out an alternative that the
-  50-cap keeps is marked `CompiledSynonym::cut`.
+  before an earlier field's. A match of another field that overlaps those clauses without matching them exactly is
+  dropped, the earlier default field winning. Each alternative is the term as written, compiled over the default
+  fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in one
+  without, one word when it is one token), each once, and none that compiles to the run's own query: at most 50
+  compiled alternatives per run (the union may report more terms). The compilation keeps (`Compiled::synonyms`) at
+  most `max_terms − 2 · n` alternatives in all, `n` the terms of its query as `max_terms` counts them (§7.1.3; a
+  request's `filter` joins the query after compilation, §7.1.1, so its values are not among them), each run's share as
+  §7.1.3 shares expansions over the terms its fields report (at most 50; a term that compiles away, as a duplicate or
+  the run's own query, still counts, so a run may keep fewer than its share, and a run left with none takes its share
+  and is then no run), and one each when that is less than one per run: L1's step holds the query's terms twice
+  (§7.6), and at least one per alternative, so it could hold no more. This bounds what is compiled; it does not make
+  the step fit, since an alternative of several words or over several fields takes more terms. The cascade still
+  holds the step to the limits (§7.1.3). A run whose share left out an alternative that the 50-cap keeps is marked
+  `CompiledSynonym::cut`.
 
 `nfkc`, `lowercase` and `fold` may lengthen a token (`ﷺ` becomes 18 characters, `ß` → `ss`), so an analyzer that
 bounds token length puts the length guard (§6.3.1) after them, and before `edge_ngram` so a token's prefixes stay

@@ -41,8 +41,9 @@
 //!    `max_terms − 2 · n` in all when compiled at the case's `max_terms`), checked against `Compiled::synonyms`. Its
 //!    step requires each run or one of its alternatives; over the limits each run keeps its first alternatives at the
 //!    highest shared count that fits, then one more each in text order where the step still fits (`synonyms:cut`),
-//!    or the step is skipped (`synonyms:skipped`); a compilation that left some out lists it cut. At every count of
-//!    alternatives per run, the step matches every document L0 matches. Each text with a run is also searched at a
+//!    or the step is skipped (`synonyms:skipped`); a compilation that left some out lists it cut. The reference's step
+//!    matches every document L0 matches at every count of alternatives per run (a self-check; the engine's step, which
+//!    no search can see, is checked for it in-crate, `relax::synonyms`). Each text with a run is also searched at a
 //!    `max_terms` inside its cut window, a different one at each operation.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
@@ -83,7 +84,7 @@ use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::{
     BoolQuery, BoostQuery, CombinedQuery, Compiled, ConstantScoreQuery, DefaultFields, Filter,
     FilterValue, FuzzyQuery, PhraseQuery, PhraseTerm, PrefixQuery, Query, QueryCompiler,
-    QueryLimits, TermQuery, WeightedTerm,
+    QueryError, QueryLimits, TermQuery, WeightedTerm,
 };
 use persia_engine::relax::{RelaxLevel, RelaxOptions, RelaxPlan};
 use persia_engine::schema::{
@@ -595,7 +596,8 @@ impl Text {
 }
 
 /// User text drawn from the synonym terms (`pool`, each split into its words) and from [`text_word`], so runs of one
-/// and several words are common: at most 6 words, each excluded at times (which ends a run, SPEC §6.3.2).
+/// and several words are common: at most 6 words (a term past the sixth is cut short, on purpose: a partial run), each
+/// excluded at times (which ends a run, SPEC §6.3.2).
 fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> {
     let chunk = prop_oneof![
         2 => prop::sample::select(pool).prop_map(|t| t.split_whitespace().map(str::to_owned).collect::<Vec<_>>()),
@@ -1104,7 +1106,7 @@ fn check(
             &reference,
             (&root, None),
             Some(&no_bonus),
-            case,
+            (case, false),
         )?;
     }
     // Invariant 5 for user text: compiled as SPEC §7.1.1 says (checked against the reference's own form), then
@@ -1187,11 +1189,12 @@ fn check(
             &reference,
             (&root, Some(text)),
             None,
-            case,
+            (case, false),
         )?;
         // L1's cut at a `max_terms` within its window (SPEC §7.1.3): from one term below L1's step with one
-        // alternative per run beside L0 (skipped) to one below it with every alternative (cut), a different one at
-        // each operation (`turn`), so the cases meet every cut of their runs.
+        // alternative per run beside L0 (skipped) to that step with every alternative the compilation kept (as it is,
+        // listed cut when the compilation cut it), a different one at each operation (`t` and the live count), so the
+        // cases meet every cut of their runs.
         if !runs.is_empty() {
             let excluded = [(RelaxLevel::Exact, root.clone())];
             let at = |counts: &[usize]| {
@@ -1202,26 +1205,24 @@ fn check(
             };
             let lens: Vec<usize> = runs.iter().map(|r| r.alternatives.len()).collect();
             let (lo, hi) = (at(&vec![1; runs.len()]), at(&lens));
-            if hi > lo {
-                let max_terms = lo - 1 + (live.len() + t) % (hi - lo + 1);
-                cover("synonyms window".to_owned());
-                let tight = Case {
-                    max_terms,
-                    ..case.clone()
-                };
-                let reference = Reference {
-                    max_terms,
-                    ..reference
-                };
-                check_relaxed(
-                    &views,
-                    Engine::Compiled(&compiled),
-                    &reference,
-                    (&root, Some(text)),
-                    None,
-                    &tight,
-                )?;
-            }
+            let max_terms = lo - 1 + (live.len() + t) % (hi - lo + 2);
+            cover("synonyms window".to_owned());
+            let tight = Case {
+                max_terms,
+                ..case.clone()
+            };
+            let reference = Reference {
+                max_terms,
+                ..reference
+            };
+            check_relaxed(
+                &views,
+                Engine::Compiled(&compiled),
+                &reference,
+                (&root, Some(text)),
+                None,
+                (&tight, true),
+            )?;
         }
     }
     Ok(())
@@ -1438,8 +1439,11 @@ fn collection_searches_match_the_reference() {
             "synonyms:cut hit",
             "synonyms:skipped",
             "synonyms compiled cut",
+            "synonyms compiled cut that fits",
             "synonyms at the cap",
             "synonyms run of words",
+            "synonyms window",
+            "synonyms cut one more",
             "drop_terms:75% hit",
             "prefix:last hit",
             "prefix hit",
@@ -1899,19 +1903,20 @@ fn cover(key: String) {
     COVERAGE.with_borrow_mut(|c| *c.entry(key).or_default() += 1);
 }
 
-/// Invariant 5: relaxed with the collection's levels (ROADMAP 8.1.19), held to the case's `max_expansions` (SPEC
-/// §7.1.3), a search returns what the reference cascade ([`Reference::cascade`]) returns: the same steps, in order,
-/// with what each applied (`:cut` and `:skipped` included) and its level; each step's matches the earlier steps lack,
-/// scored and ranked as the reference scores the step's query (L5: by recency); the response's `level`, its `fallback`
-/// and `filters_dropped` flags, and for user text its `original` and its hit step's `effective`. L0 alone ranks as
-/// the `plain` search when it has `min_results` hits, and pages are slices of the one ranking.
+/// Invariant 5: relaxed with the collection's levels (ROADMAP 8.1.19), held to the case's `max_expansions` and
+/// `max_terms` (SPEC §7.1.3), a search returns what the reference cascade ([`Reference::cascade`]) returns: the same
+/// steps, in order, with what each applied (`:cut` and `:skipped` included) and its level; each step's matches the
+/// earlier steps lack, scored and ranked as the reference scores the step's query (L5: by recency); the response's
+/// `level`, its `fallback` and `filters_dropped` flags, and for user text its `original` and its hit step's
+/// `effective`. L0 alone ranks as the `plain` search when it has `min_results` hits, and pages are slices of the one
+/// ranking. A `window` pass (L1's cut window, ROADMAP 8.1.18) runs only the plans that hold L1.
 fn check_relaxed(
     views: &CollectionViews<'_>,
     engine: Engine<'_>,
     reference: &Reference<'_>,
     (root, text): (&RefQuery, Option<&Text>),
     plain: Option<&[SearchHit]>,
-    case: &Case,
+    (case, window): (&Case, bool),
 ) -> Result<(), TestCaseError> {
     let schema = reference.schema;
     let request = SearchRequest {
@@ -1952,6 +1957,10 @@ fn check_relaxed(
         (10_000, FilterRelaxation::LastResort, &collection[..], None),
         (10_000, FilterRelaxation::Never, &without_l2[..], Some(())),
     ] {
+        // The window pass checks L1 alone: the plan without L1 builds what the case already checked.
+        if window && levels.is_some() {
+            continue;
+        }
         let levels = levels.map(|()| Levels::Custom(words.iter().map(|&l| level_of(l)).collect()));
         let relax = RelaxPlan::new(
             schema.relaxation(),
@@ -2251,15 +2260,15 @@ fn reference_runs(
                     alternatives.push(q);
                 }
             }
-            if !alternatives.is_empty() {
-                runs.push((clauses, reported, alternatives));
-            }
+            // A run whose terms all compile away still takes its share, and is then no run (SPEC §6.3.2).
+            runs.push((clauses, reported, alternatives));
         }
         start = end;
     }
     let lens: Vec<usize> = runs.iter().map(|r| r.1).collect();
     runs.into_iter()
         .zip(reference::synonyms::bound(&lens, max_terms, n))
+        .filter(|((_, _, alternatives), _)| !alternatives.is_empty())
         .map(|((clauses, _, mut alternatives), keep)| {
             // Cut when the share left out an alternative the 50-cap keeps.
             let keep = keep.min(reference::synonyms::CAP);
@@ -2608,14 +2617,18 @@ impl Reference<'_> {
                 max_expansions: usize::MAX,
                 ..QueryLimits::default()
             };
-            query.validate(self.schema, &limits).is_ok()
+            query.validate(self.schema, &limits)
         };
-        if !at(usize::MAX) {
-            return false;
+        // Over the clauses or the depth, the step is skipped; invalid for another reason, it is an error (SPEC
+        // §7.1.3), which no generated step is.
+        match at(usize::MAX) {
+            Ok(()) => {}
+            Err(QueryError::TooManyClauses { .. } | QueryError::TooDeep { .. }) => return false,
+            Err(e) => panic!("an invalid step: {e:?} in {whole:?}"),
         }
         let n = terms(whole);
         assert!(
-            at(n) && (n == 0 || !at(n - 1)),
+            at(n).is_ok() && (n == 0 || at(n - 1).is_err()),
             "the reference counts {n} terms in {whole:?}"
         );
         n <= self.max_terms
@@ -2667,8 +2680,10 @@ impl Reference<'_> {
 
     /// L1's step held to the limits beside the `excluded` steps (SPEC §7.1.3, ROADMAP 8.1.13): with every alternative
     /// the compilation kept when it fits (cut, `true`, when the compilation left some out), else with each run's
-    /// first alternatives as [`reference::synonyms::cut`] counts them (`true`), else `None` (skipped). At every count
-    /// of alternatives per run, the step matches each document `l0` matched (ROADMAP 8.1.18).
+    /// first alternatives as [`reference::synonyms::cut`] counts them (`true`), else `None` (skipped). The reference's
+    /// own step, at every shared count of alternatives per run and at the cut's counts, matches each document `l0`
+    /// matched (ROADMAP 8.1.18): a self-check of how it puts the runs in place. The engine's step is checked for the
+    /// same by `relax::synonyms` in-crate, as no search can see it (L0's documents are excluded from L1's hits).
     fn fit_synonyms(
         &self,
         root: &RefQuery,
@@ -2681,26 +2696,38 @@ impl Reference<'_> {
         };
         let lens: Vec<usize> = self.runs.iter().map(|r| r.alternatives.len()).collect();
         let step = |counts: &[usize]| self.synonyms_step(root, text, counts);
-        let top = lens.iter().copied().max().unwrap_or(0);
         let l0 = l0.matches.as_ref().unwrap();
-        for c in 1..=top {
-            let counts: Vec<usize> = lens.iter().map(|&l| l.min(c)).collect();
-            let q = step(&counts);
+        let holds_l0 = |counts: &[usize]| {
+            let q = step(counts);
             for id in l0.keys() {
                 assert!(
                     (self.eval)(&q, id).is_some(),
                     "L1's step with {counts:?} alternatives misses {id}, which L0 matches: {q:?}"
                 );
             }
+        };
+        let top = lens.iter().copied().max().unwrap_or(0);
+        for c in 1..=top {
+            holds_l0(&lens.iter().map(|&l| l.min(c)).collect::<Vec<_>>());
         }
         let fits = |counts: &[usize]| {
             let whole = Self::whole(step(counts), excluded);
             self.within(&whole) && expansions(&whole) <= self.max_expansions
         };
         if fits(&lens) {
-            return Some((step(&lens), self.runs.iter().any(|r| r.cut)));
+            let compiled_cut = self.runs.iter().any(|r| r.cut);
+            if compiled_cut {
+                cover("synonyms compiled cut that fits".to_owned());
+            }
+            return Some((step(&lens), compiled_cut));
         }
-        reference::synonyms::cut(&lens, &fits).map(|counts| (step(&counts), true))
+        let (shared, counts) = reference::synonyms::cut(&lens, &fits)?;
+        holds_l0(&counts);
+        // The cut's second phase gave a list one more than the shared count.
+        if counts.iter().any(|&c| c > shared) {
+            cover("synonyms cut one more".to_owned());
+        }
+        Some((step(&counts), true))
     }
 
     /// L1's step for `root` of user `text` (SPEC §7.6): each run, with its first `counts` alternatives, required as
