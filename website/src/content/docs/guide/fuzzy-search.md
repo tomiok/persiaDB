@@ -241,6 +241,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. The
 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — the whole cascade, `minimum_should_match`, and how L2 drops a term before L4 runs.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion, the steps before fuzzy.
+- [BM25F ranking](/guide/ranking/) — the score inside a step, the edit-distance weight, static rank on L5, and proximity off by default.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.
 - [Comparison](/guide/comparison/) — next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no `persia::Db` yet.

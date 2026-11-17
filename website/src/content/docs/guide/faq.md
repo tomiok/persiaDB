@@ -39,7 +39,7 @@ head:
             "name": "How is Persia DB different from SQLite FTS5, Tantivy, and Meilisearch?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is a placeholder binary that exits with not implemented (M11).\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% Facets, sort, and paging are explained at https://tomiok.github.io/persiaDB/guide/faceted-search/. The cascade is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/. Fuzzy search and did-you-mean are explained at https://tomiok.github.io/persiaDB/guide/fuzzy-search/. Synonym groups and prefix expansion are explained at https://tomiok.github.io/persiaDB/guide/synonym-and-prefix-search/."
+              "text": "The longer page is Persia DB vs SQLite FTS5, Tantivy, and Meilisearch. It is not a benchmark, and this project does not publish speed numbers.\n\nSQLite FTS5 is a full-text module inside SQLite, a C library. You search with SQL, and the index lives in the SQLite database file. It is a released part of SQLite.\n\nTantivy is a Rust full-text search library. Its index is a directory of segment files, and indexing and serving are your code. It is a released library. Persia DB does not use Tantivy. ADR-0001 forbids depending on another search engine.\n\nMeilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: persia-server is a placeholder binary that exits with not implemented (M11).\n\nThe Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% How a hit is scored is explained at https://tomiok.github.io/persiaDB/guide/ranking/. Facets, sort, and paging are explained at https://tomiok.github.io/persiaDB/guide/faceted-search/. The cascade is explained at https://tomiok.github.io/persiaDB/guide/typo-tolerant-search/. Fuzzy search and did-you-mean are explained at https://tomiok.github.io/persiaDB/guide/fuzzy-search/. Synonym groups and prefix expansion are explained at https://tomiok.github.io/persiaDB/guide/synonym-and-prefix-search/."
             }
           },
           {
@@ -55,7 +55,15 @@ head:
             "name": "Do filters, facets, sort, and paging exist?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "%%MATCHING_CELL%% There is no search method on the database handle. The longer page is https://tomiok.github.io/persiaDB/guide/faceted-search/. Typo tolerance is separate. %%RELAXATION_CELL%%"
+              "text": "%%MATCHING_CELL%% There is no search method on the database handle. The longer page is https://tomiok.github.io/persiaDB/guide/faceted-search/. How a hit is scored is https://tomiok.github.io/persiaDB/guide/ranking/. Typo tolerance is separate. %%RELAXATION_CELL%%"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does Persia DB rank search results?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "With BM25F (SPEC section 7.2). Each text field has a weight, k1, and b. The score uses the collection's document count, document frequency, and average field length. TermScorer and CollectionViews::search are library code on a collection snapshot. There is no search method on persia::Db (M10). Proximity is off unless a plan calls SearchPlan::with_proximity. A relaxed search orders by cascade step first, then by the request sort. The longer page is https://tomiok.github.io/persiaDB/guide/ranking/. %%MATCHING_CELL%%"
             }
           },
           {
@@ -140,11 +148,15 @@ Tantivy is a Rust full-text search library. Its index is a directory of segment 
 
 Meilisearch is a standalone search server written in Rust. Clients use HTTP, and typo tolerance is on by default. It is a released server. The Persia DB server is planned (milestone M11) and is not written: `persia-server` is a placeholder binary that exits with "not implemented (M11)".
 
-The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% Facets, sort, and paging are [Faceted search](/guide/faceted-search/). The cascade is [Typo-tolerant search](/guide/typo-tolerant-search/). Fuzzy matching, did-you-mean corrections, and the fallback are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+The Persia DB design is an embedded Rust library, one local .persia file, the same segment bytes in object storage, and query relaxation on by default. The query compiler, the filter DSL, and a BM25F scorer are library code. A ranked search over a collection snapshot is library code too. A search call on a database handle is not. %%RELAXATION_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, and paging are [Faceted search](/guide/faceted-search/). The cascade is [Typo-tolerant search](/guide/typo-tolerant-search/). Fuzzy matching, did-you-mean corrections, and the fallback are [Fuzzy search](/guide/fuzzy-search/). Synonym groups and prefix expansion are [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
 ## Do filters, facets, sort, and paging exist?
 
-%%MATCHING_CELL%% There is no `search` method on the database handle (M10). The longer page is [Faceted search](/guide/faceted-search/). Typo tolerance is separate: %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/), [Fuzzy search](/guide/fuzzy-search/), and [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+%%MATCHING_CELL%% There is no `search` method on the database handle (M10). The longer page is [Faceted search](/guide/faceted-search/). How a hit is scored is [BM25F ranking](/guide/ranking/). Typo tolerance is separate: %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/), [Fuzzy search](/guide/fuzzy-search/), and [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+
+## How does Persia DB rank search results?
+
+With BM25F (SPEC §7.2). Each `text` field has a weight, `k1`, and `b`. The score uses the collection's document count, document frequency, and average field length. `TermScorer` and `CollectionViews::search` are library code on a collection snapshot. There is no `search` method on `persia::Db` (M10). Proximity is off unless a plan calls `SearchPlan::with_proximity`. A relaxed search orders by cascade step first, then by the request sort. The longer page is [BM25F ranking](/guide/ranking/). %%MATCHING_CELL%%
 
 ## Is Persia DB embedded or a server?
 

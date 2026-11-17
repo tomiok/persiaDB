@@ -44,6 +44,7 @@ Specified, and searchable only as engine library code today:
 
 - The query compiler, the filter DSL, and a BM25F scorer are library code (ROADMAP 7.1–7.3).
   %%MATCHING_CELL%% There is no `search` call on a database handle (M10).
+  How a hit is scored is [BM25F ranking](/guide/ranking/).
   Analysis libraries are in the tree. The project does not wrap Tantivy, Lucene, or SQLite
   ([ADR-0001](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0001-own-engine-and-allowed-dependencies.md)).
   Filters, facets, sort, and paging are [Faceted search](/guide/faceted-search/).
@@ -98,7 +99,7 @@ with the response naming the step (SPEC §7.6). %%RELAXATION_CELL%%
 [Typo-tolerant search](/guide/typo-tolerant-search/) is which of those levels run, and how a multi-term query drops terms.
 [Fuzzy search and did-you-mean](/guide/fuzzy-search/) is the L4 step, the correction, and the L5 fallback. Filter relaxation is library code too, only with the `last_resort` opt-in (ROADMAP 8.2.6).
 [Synonym and prefix search](/guide/synonym-and-prefix-search/) is the L1 and L3 steps.
-[Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
+[BM25F ranking](/guide/ranking/) is how a hit is scored. [Faceted search](/guide/faceted-search/) is filters, facets, sort, and paging, which the engine runs as library code.
 The deployment is different as well. Meilisearch is a service you operate.
 Persia DB is specified as a library you open on a file, with a server only as a later option
 ([Server, cloud, and Kubernetes](/guide/server/), M11).
@@ -127,6 +128,7 @@ For a search feature in production today, use one of the established tools. Pers
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, zero results, and `minimum_should_match`.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction returned to the caller, and the L5 fallback. Library code.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion, as library code.
+- [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, and proximity off by default.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server, and what this repository implements.
 - [Overview](/guide/overview/) — what the project is, and what already exists.

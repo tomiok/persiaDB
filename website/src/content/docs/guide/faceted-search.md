@@ -98,7 +98,7 @@ The default is score descending. A `Sort` has at most 16 keys (`MAX_SORT_KEYS`).
 
 Numbers and datetimes compare by value. `false` is before `true`. Keywords compare by bytes. A document with several keyword values sorts by its smallest ascending and by its largest descending. Every hit still carries its score.
 
-After the keys, ties break by segment order (the manifest's), the memtable last, then docid (SPEC §7.3). A collection-wide default tie-break would be a schema option and a new manifest version. It is not part of v1 (ROADMAP 32.5.1).
+After the keys, ties break by segment order (the manifest's), the memtable last, then docid (SPEC §7.3). A collection-wide default tie-break would be a schema option and a new manifest version. It is not part of v1 (ROADMAP 32.5.1). How the score itself is computed, and when a later sort key can still reorder a tie, is [BM25F ranking](/guide/ranking/#sort-and-tie-break).
 
 Pruning applies when the first key is the score descending: a document that cannot beat the worst kept hit is skipped. Further keys, such as score then a timestamp, skip only a document that scores strictly below that hit. A numeric or datetime key with `missing: last` can skip FOR blocks whose keys all rank after the worst hit the view keeps. A sort led by score ascending, by a keyword or bool, or by a column with `missing: first` visits every match. Either way the hits are the ones a full scan would keep.
 
@@ -157,7 +157,7 @@ That deadline is not the relaxation budget. `budget_ms` (default 50) is read aft
 
 ## Explain
 
-`SearchRequest.explain` defaults to false. Set it and each hit on the page carries an `Explanation`: a tree of the clauses that matched that document (SPEC §7.7, ROADMAP 7.7). A word reports `idf`, `k1`, `tf~`, and per field the frequency, norm, and contribution. A phrase reports its terms and phrase frequency. A `bool` lists `must` clauses and the `should` clauses that matched. Filters and `must_not` score nothing and are left out. The root score is the hit's score, bit for bit.
+`SearchRequest.explain` defaults to false. Set it and each hit on the page carries an `Explanation`: a tree of the clauses that matched that document (SPEC §7.7, ROADMAP 7.7). The formula those nodes add up is [BM25F ranking](/guide/ranking/#explain). A word reports `idf`, `k1`, `tf~`, and per field the frequency, norm, and contribution. A phrase reports its terms and phrase frequency. A `bool` lists `must` clauses and the `should` clauses that matched. Filters and `must_not` score nothing and are left out. The root score is the hit's score, bit for bit.
 
 Explain covers the page's hits only, one pass per view. It costs about one unpruned search of each view that holds a hit on the page. A deadline is read during that pass too.
 
@@ -199,6 +199,7 @@ No. `explain: true` returns a per-hit score tree for the hits on the page. Highl
 
 ## Read next
 
+- [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score-led pruning, and proximity off by default.
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, the empty-page rule, `minimum_should_match`, and how terms are dropped.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, L5 fallback, and the filter step. An explained hit names its step.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion. Filters stay on both steps.

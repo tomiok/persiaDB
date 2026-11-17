@@ -44,13 +44,14 @@ and boolean must / should / must-not. The default operator is AND. Invalid synta
 terms rather than failing the request (ROADMAP 7.1.2). Filters (term, range, exists, and / or / not)
 are separate from the text and are not relaxed unless you opt in.
 
-Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a collection may add a
+Ranking is BM25F (SPEC §7.2): each field has a weight, `k1`, and `b`, and a collection may set a
 static rank (for example `log1p` of a sales field). Collection statistics (`N`, document frequency,
 average field length) are summed across live segments. Scores must match the reference model
 within a documented epsilon (SPEC §7.2). `TermScorer` and `persia-engine/tests/reference` do that
 for one term (ROADMAP 7.3.4). Ranked hits over one segment or memtable view are library code
-(ROADMAP 7.4.1–7.4.4), and so is a collection search (`CollectionViews::search`). A search call on the database handle is not (M10). Filters, facets, sort, cursor pages, deadlines, and explain are
-[Faceted search](/guide/faceted-search/). The longer account of typos, relaxation, and this scorer is
+(ROADMAP 7.4.1–7.4.4), and so is a collection search (`CollectionViews::search`). A search call on the database handle is not (M10). The formula, the bounds, proximity, and where the static rank is applied are
+[BM25F ranking](/guide/ranking/). Filters, facets, sort, cursor pages, deadlines, and explain are
+[Faceted search](/guide/faceted-search/). The longer account of typos and relaxation is
 [Typo-tolerant search](/guide/typo-tolerant-search/).
 
 Over one view — a segment, or the memtable — `SearchPlan` collects the top k by score, then docid,

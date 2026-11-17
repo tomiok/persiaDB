@@ -83,7 +83,8 @@ Five properties the design does not trade away:
    behind a small allowed-dependency list (ADR-0001).
 3. **Never zero results by default.** A query that matches nothing is relaxed step by step, and the
    response says exactly what changed (SPEC §7.6). %%RELAXATION_CELL%% The query compiler
-   and the BM25F scorer are library code. See [Typo-tolerant search](/guide/typo-tolerant-search/),
+   and the BM25F scorer are library code. See [BM25F ranking](/guide/ranking/),
+   [Typo-tolerant search](/guide/typo-tolerant-search/),
    [Fuzzy search](/guide/fuzzy-search/),
    [Faceted search](/guide/faceted-search/), and
    [Feature reference](/guide/features/).

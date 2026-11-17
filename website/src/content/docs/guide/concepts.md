@@ -20,7 +20,7 @@ Names below are the ones used in code and in the SPEC. The short definitions are
 | Term | Meaning |
 |---|---|
 | **Database** | One Persia DB: collections plus blobs. Opened by a filesystem path or a URL. |
-| **Collection** | Documents that share a schema, analyzers, and ranking config. |
+| **Collection** | Documents that share a schema, analyzers, and ranking config. How a hit is scored is [BM25F ranking](/guide/ranking/). |
 | **Document** | A record with a string `id`, typed fields, and an optional blob reference. |
 | **Segment** | An immutable, self-contained index for one collection (SPEC §5). Once written, it is never edited. |
 | **Memtable** | The in-memory buffer of recent writes. Searches see it, so a `put` is visible before the next flush. |

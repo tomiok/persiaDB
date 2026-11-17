@@ -59,7 +59,7 @@ The design contract is [SPEC.md](https://github.com/tomiok/persiaDB/blob/main/SP
 
 %%M10_BLOCKED%% The on-disk format stays unstable until `v1.0` (M15, [SPEC §15](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#15-versioning-and-compatibility)). The crates are unpublished (`publish = false`, version 0.0.0). There is no crates.io release.
 
-[SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency and throughput figures and labels them as targets, not promises. This project does not publish search benchmarks. There is no `Db::search`. %%MATCHING_CELL%% A search call on the database handle is not. Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
+[SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency and throughput figures and labels them as targets, not promises. This project does not publish search benchmarks. There is no `Db::search`. %%MATCHING_CELL%% A search call on the database handle is not. How a hit is scored is [BM25F ranking](/guide/ranking/). Facets, sort, cursors, deadlines, and explain are [Faceted search](/guide/faceted-search/).
 
 Out of scope for v1 ([SPEC §1.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#12-non-goals-v1)): text extraction, OCR, and transcription (clients supply text; blob bytes stay opaque); vector or semantic search; SQL, joins, multi-document transactions, and cross-collection queries; more than one writer on a shard; encryption at rest inside the file.
 
@@ -80,6 +80,7 @@ The `persia` command lists and removes temporary and quarantine files next to a 
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — query relaxation, BM25F, and filters: design versus what the engine implements.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, and the L5 fallback. Library code. There is no `persia::Db` search.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion.
+- [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score-led pruning, and proximity off by default.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain on a collection snapshot.
 - [Comparison](/guide/comparison/) — Persia DB next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.

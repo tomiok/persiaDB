@@ -107,7 +107,7 @@ Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetim
 
 `put` is an upsert by id. `delete` writes a tombstone. `commit` publishes a manifest. A `put` is specified to be visible to a later search on that database before commit (read-your-writes, SPEC §8.2–§8.4). One writer; a second writer fails immediately. Handles are specified as `Send` and `Sync`.
 
-Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% The longer page for facets, sort, cursors, deadlines, and explain is [Faceted search](/guide/faceted-search/).
+Search is specified to accept a text query or a structured query (SPEC §7.1): fields and boosts, filters, sort, `limit` / `offset`, facets, and `relax`. Scoring is BM25F plus an optional static rank (SPEC §7.2). %%MATCHING_CELL%% How a hit is scored is [BM25F ranking](/guide/ranking/). The longer page for facets, sort, cursors, deadlines, and explain is [Faceted search](/guide/faceted-search/).
 
 ### Relaxation
 

@@ -51,7 +51,7 @@ head:
             "name": "Is BM25F scoring implemented?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "The formula is. TermScorer scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. CollectionViews::search walks postings and returns a ranked page. This project does not publish search benchmarks."
+              "text": "The formula is. TermScorer scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. CollectionViews::search walks postings and returns a ranked page. The longer page is https://tomiok.github.io/persiaDB/guide/ranking/. This project does not publish search benchmarks."
             }
           },
           {
@@ -74,7 +74,7 @@ head:
 
 Typo-tolerant search, in this design, is not a separate fuzzy index. A query that would otherwise come back empty is loosened one step at a time until it has enough hits. That cascade is [query relaxation](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#76-zero-results-avoidance-default-on) (SPEC §7.6). It is on by default. Synonyms (L1), dropping terms (L2), prefix expansion (L3), fuzzy edit distance (L4), and the fallback (L5) are library code. L5 ranks by static rank, then by where the index holds the document, ignores the request's `sort`, and flags that order with `fallback`. With `relax.filters: "last_resort"`, one last step (L6) drops the request's filters when every earlier level found fewer than `min_results` hits. Queries that search no word do not build it, and `filters_dropped` is true only when that step found the hits (ROADMAP 8.2.6). How L1 and L3 expand a query is [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
-The product goal is embedded full-text search in Rust that, by default, never returns zero results ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). What that library shape is, and what you can call today, is [What is an embedded search database?](/guide/embedded-search/). This page is the search behavior: how a typo is handled, how [BM25F](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f) and filters fit, and which of those pieces are in the repository. The edit-distance step, the correction, and the fallback are [Fuzzy search and did-you-mean](/guide/fuzzy-search/). Filters, facets, sort, and pages are [Faceted search](/guide/faceted-search/).
+The product goal is embedded full-text search in Rust that, by default, never returns zero results ([SPEC §1](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#1-goals-and-non-goals)). What that library shape is, and what you can call today, is [What is an embedded search database?](/guide/embedded-search/). This page is the search behavior: how a typo is handled, how [BM25F](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#72-scoring-bm25f) and filters fit, and which of those pieces are in the repository. The edit-distance step, the correction, and the fallback are [Fuzzy search and did-you-mean](/guide/fuzzy-search/). How a hit's score is computed is [BM25F ranking](/guide/ranking/). Filters, facets, sort, and pages are [Faceted search](/guide/faceted-search/).
 
 ## What typo-tolerant search means here
 
@@ -244,13 +244,13 @@ score(t,d) = idf(t) · tf~ · (k1 + 1) / (k1 + tf~)
 idf(t) = ln(1 + (N − df + 0.5) / (df + 0.5))
 ```
 
-`N`, `df`, and `avglen` are collection-level. `TermScorer` computes one query word from those statistics plus a document's term frequency and norm byte in each field. A `combined` clause is one word over several `text` fields; `df` is the max of the per-field document frequencies. A `term` on a `keyword` field uses weight 1, `b` 0, and `k1` 1.2. The total adds a static rank when the schema has one: `weight · log1p(value)` or `weight · linear(value)` (SPEC §6.2.3). `must` and `should` clauses score. `filter` and `must_not` clauses do not, so a filter never inflates BM25F. An L2 step scores the terms a document actually matched.
+`N`, `df`, and `avglen` are collection-level. `TermScorer` computes one query word from those statistics plus a document's term frequency and norm byte in each field. A `combined` clause is one word over several `text` fields; `df` is the max of the per-field document frequencies. A `term` on a `keyword` field uses weight 1, `b` 0, and `k1` 1.2. SPEC §7.2 writes the total as those term scores plus a static rank when the schema has one (`weight · log1p(value)` or `weight · linear(value)`, SPEC §6.2.3). [BM25F ranking](/guide/ranking/) is that formula, the bounds, proximity, and where the static rank is applied: a query hit's score is the query score, and L5 uses the contribution as its score. `must` and `should` clauses score. `filter` and `must_not` clauses do not, so a filter never inflates BM25F. An L2 step scores the terms a document actually matched.
 
 `StatisticsProvider` is the trait those numbers come from. `SegmentStatistics` sums the segments of one snapshot, deleted documents included until a merge drops them. `SearchStatistics` adds the memtable's live documents. A snapshot computes the segment part once. L2 reads the same statistics for term importance.
 
 The same function, given a block's maximum term frequency and minimum norm, is an upper bound used by MaxScore and block-max WAND (SPEC §7.3, ROADMAP 7.3.3 and 7.4.4) to skip documents that cannot reach the top k.
 
-`persia-engine/tests/reference` evaluates the formula on the quantized field lengths. The scorer must match it within `1e-9 · idf·(k1+1)` (SPEC §7.2, ROADMAP 7.3.4). A differential suite over random corpora and full queries compares ranked order to that reference (ROADMAP 7.8.1). An nDCG gate in CI is still open (ROADMAP 7.8.4). [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency figures and labels them as targets, not promises. This project does not publish search benchmarks.
+`persia-engine/tests/reference` evaluates the formula on the quantized field lengths. The scorer must match it within `1e-9 · idf·(k1+1)` (SPEC §7.2, ROADMAP 7.3.4). A differential suite over random corpora and full queries compares ranked order to that reference (ROADMAP 7.8.1). An nDCG@10 gate runs in CI with the default plan, proximity off (ROADMAP 7.8.4, SPEC §16.1). [BM25F ranking](/guide/ranking/#term-proximity) is why the bonus stays opt-in. [SPEC §16.2](https://github.com/tomiok/persiaDB/blob/main/SPEC.md#16-quality-requirements) lists latency figures and labels them as targets, not promises. This project does not publish search benchmarks.
 
 `TermScorer` scores one query word. Walking postings, applying tombstones, collecting a top-k, filtering, faceting, and sorting are the search path. %%MATCHING_CELL%%
 
@@ -303,7 +303,7 @@ Not by default. SPEC §7.6 keeps filters strict unless `relax.filters` is `"last
 
 ### Is BM25F scoring implemented?
 
-The formula is. `TermScorer` scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. `CollectionViews::search` walks postings and returns a ranked page. This project does not publish search benchmarks.
+The formula is. `TermScorer` scores one query word from a document frequency, a term frequency, and a norm byte, using collection statistics. Static rank and score upper bounds are in the same module. Tests check it against a reference scorer. `CollectionViews::search` walks postings and returns a ranked page. The longer page is [BM25F ranking](/guide/ranking/). This project does not publish search benchmarks.
 
 ### Can I call Db::open and search for a fuzzy query?
 
@@ -311,6 +311,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. `Da
 
 ## Read next
 
+- [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score bounds, and proximity off by default.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction returned to the caller, L5 fallback, and the filter step.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — how L1 synonym groups and L3 prefix expansion work, and what they leave exact.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.

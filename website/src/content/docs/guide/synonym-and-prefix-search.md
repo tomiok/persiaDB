@@ -173,6 +173,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. The
 
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, L5 fallback, and the filter step.
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — the whole cascade, `minimum_should_match`, and how L2 drops terms.
+- [BM25F ranking](/guide/ranking/) — how a prefix and a synonym alternative are scored, and proximity off by default.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. Filters stay strict while L1 and L3 run.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no `persia::Db` yet.
 - [FAQ](/guide/faq/) — production readiness, the file format, and the license.
