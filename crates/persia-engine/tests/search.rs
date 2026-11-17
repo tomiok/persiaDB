@@ -169,6 +169,11 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 3]) -> Query {
             score: *score,
         }),
         RefQuery::All => Query::MatchAll,
+        // This suite plans without the views' terms (`SearchPlan::new`), which rejects expansions:
+        // `tests/differential.rs` checks them.
+        other @ (RefQuery::Prefix { .. } | RefQuery::Fuzzy { .. }) => {
+            panic!("no expansion here: {other:?}")
+        }
     }
 }
 

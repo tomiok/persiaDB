@@ -2,5 +2,6 @@
 //! written from the SPEC text alone, over plain documents, with no index, no quantization tables and no shortcuts.
 
 pub mod bm25f;
+pub mod expand;
 pub mod filter;
 pub mod search;

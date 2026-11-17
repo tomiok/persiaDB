@@ -6,9 +6,10 @@
 use persia_engine::query::Filter;
 
 use super::bm25f::{Clause, Corpus, Doc, quantized};
+use super::expand::edit_weight;
 
 /// A query of the reference, by field index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Query {
     /// One word over one or more fields (a `term` or a `combined`).
     Word(Vec<Clause>),
@@ -31,6 +32,25 @@ pub enum Query {
     Boost(Box<Query>, f64),
     Constant(Box<Query>, f64),
     All,
+    /// SPEC §7.1: the terms of `field` that start with the bytes of `prefix`, at most `max_expansions` of highest
+    /// collection `df` (ties by byte order, [`Corpus::keep`]), each scored as a `term` of weight `weight` (the field's
+    /// schema `boost`) with the largest `df` among them, summed in byte order. Matches a document holding any of them.
+    Prefix {
+        field: usize,
+        prefix: String,
+        max_expansions: usize,
+        weight: f64,
+    },
+    /// SPEC §7.1: the terms of `field` within `distance` of `term` (the optimal string alignment distance over Unicode
+    /// scalar values, [`super::expand::osa`]), kept and scored as a [`Query::Prefix`]'s, each also multiplied by
+    /// `(distance + 1 − d) / (distance + 1)` for its distance `d`.
+    Fuzzy {
+        field: usize,
+        term: String,
+        distance: u8,
+        max_expansions: usize,
+        weight: f64,
+    },
 }
 
 /// `idf(t)` as SPEC §7.2 writes it.
@@ -208,7 +228,60 @@ impl Corpus {
             Query::Boost(inner, boost) => eval(inner).map(|(s, scale)| (s * boost, scale * boost)),
             Query::Constant(inner, score) => eval(inner).map(|_| (*score, *score)),
             Query::All => Some((0.0, 0.0)),
+            Query::Prefix {
+                field,
+                prefix,
+                max_expansions,
+                weight,
+            } => {
+                let kept = self.prefix_terms(*field, prefix, *max_expansions);
+                let kept = kept.into_iter().map(|(t, df)| (t, df, 1.0)).collect();
+                self.expansion(*field, kept, *weight, doc)
+            }
+            Query::Fuzzy {
+                field,
+                term,
+                distance,
+                max_expansions,
+                weight,
+            } => {
+                let kept = self.fuzzy_terms(*field, term, *distance, *max_expansions);
+                let kept = kept
+                    .into_iter()
+                    .map(|(t, df, d)| (t, df, edit_weight(*distance, d)))
+                    .collect();
+                self.expansion(*field, kept, *weight, doc)
+            }
         }
+    }
+
+    /// The score of `doc` for the terms an expansion kept (SPEC §7.1), each with its `df` and the factor it is
+    /// multiplied by: each held term scores as a `term` of `field` at `weight` with the largest of the `df`s, times
+    /// its factor, summed in byte order. `None` when `doc` holds none of them.
+    pub fn expansion(
+        &self,
+        field: usize,
+        kept: Vec<(String, u64, f64)>,
+        weight: f64,
+        doc: &Doc,
+    ) -> Option<(f64, f64)> {
+        let df = kept.iter().map(|k| k.1).max()?;
+        let mut sum: Option<(f64, f64)> = None;
+        for (term, _, factor) in kept {
+            if !doc[field].contains(&term) {
+                continue;
+            }
+            let clauses = [Clause {
+                field,
+                term,
+                weight,
+            }];
+            let score = self.score_with_df(&clauses, doc, df) * factor;
+            let top = idf(self.n(), df) * (self.fields[field].k1 + 1.0) * factor;
+            let (s, t) = sum.unwrap_or((0.0, 0.0));
+            sum = Some((s + score, t + top));
+        }
+        sum
     }
 
     fn word_top(&self, clauses: &[Clause]) -> f64 {
