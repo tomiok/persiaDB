@@ -92,7 +92,7 @@ The step is L0's query with each run required as `bool { should: [the run, its a
 
 Excluded clauses are not expanded. More alternatives there would exclude more documents, which is the opposite of relaxing. Phrases and `field:` clauses stay as the user wrote them. Filters stay strict. Only `relax.filters: "last_resort"` drops them, in one last step after every other level (ROADMAP 8.2.6).
 
-A request filter joins a compiled query at the root `bool`'s `filter` (SPEC §7.1, ROADMAP 8.1.17). L1 keeps that filter, and the root's `must_not`. [Faceted search](/guide/faceted-search/) is the filter DSL and how a filter is evaluated. Filter clauses do not add to the BM25F score.
+A request filter joins a compiled query at the root `bool`'s `filter` (SPEC §7.1, ROADMAP 8.1.17). L1 keeps that filter, and the root's `must_not`. [Filtered full-text search](/guide/filtered-search/) is the DSL, the join, and the score. [Faceted search](/guide/faceted-search/) is how a filter is evaluated, plus facets and sort. Filter clauses do not add to the BM25F score.
 
 A document already returned by an earlier step is excluded from this step, so it is a hit once, at the earlier step's score. L1 builds one step. It is not a nested ladder, so later steps exclude that step in full (SPEC §7.6).
 

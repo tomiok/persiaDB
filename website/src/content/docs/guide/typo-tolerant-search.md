@@ -200,7 +200,7 @@ Before any relaxation, user text becomes a query (SPEC §7.1, §7.1.1). That com
 
 Words are analyzed with each field's query-time analyzer. Fields that agree on token spans become one `combined` clause per span: one query word, several fields, scored as one BM25F term. A phrase on a field with positions stays a phrase. On a field without positions it becomes a boolean that requires each token.
 
-Filters are a separate JSON object (SPEC §7.1.2): `term`, `terms`, `range`, `exists`, `and`, `or`, and `not`. They are written by programs, so a bad filter is an error. User text is not. `Filter::from_json` parses and validates them against the schema. Evaluating a filter against a segment or the memtable is library code (ROADMAP 7.4.5). [Faceted search](/guide/faceted-search/) is that path.
+Filters are a separate JSON object (SPEC §7.1.2): `term`, `terms`, `range`, `exists`, `and`, `or`, and `not`. They are written by programs, so a bad filter is an error. User text is not. `Filter::from_json` parses and validates them against the schema. Evaluating a filter against a segment or the memtable is library code (ROADMAP 7.4.5). [Filtered full-text search](/guide/filtered-search/) is the DSL, the join, and the score. [Faceted search](/guide/faceted-search/) is facets, sort, and paging.
 
 Limits (SPEC §7.1.3), implemented as `QueryLimits`, reject a hand-built query or a filter that exceeds them. Defaults: 1024 leaf terms, 1024 clauses, 1024 expansions summed across prefix and fuzzy clauses, depth 32, and 8 KiB of `q`. The prefix and fuzzy clauses the engine builds use a per-clause cap of 50 (`DEFAULT_MAX_EXPANSIONS`). `RelaxPlan::with_limits` applies those limits to steps after L0, as [query relaxation](#query-relaxation) describes.
 
@@ -314,6 +314,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. `Da
 - [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score bounds, and proximity off by default.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction returned to the caller, L5 fallback, and the filter step.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — how L1 synonym groups and L3 prefix expansion work, and what they leave exact.
+- [Filtered full-text search](/guide/filtered-search/) — operators, how a filter joins the text, and `last_resort`.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no server.
 - [Comparison](/guide/comparison/) — next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.

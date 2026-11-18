@@ -152,7 +152,7 @@ The Persia DB design is an embedded Rust library, one local .persia file, the sa
 
 ## Do filters, facets, sort, and paging exist?
 
-%%MATCHING_CELL%% There is no `search` method on the database handle (M10). The longer page is [Faceted search](/guide/faceted-search/). How a hit is scored is [BM25F ranking](/guide/ranking/). Typo tolerance is separate: %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/), [Fuzzy search](/guide/fuzzy-search/), and [Synonym and prefix search](/guide/synonym-and-prefix-search/).
+%%MATCHING_CELL%% There is no `search` method on the database handle (M10). The filter DSL, and how a filter joins a text query without changing the score, is [Filtered full-text search](/guide/filtered-search/). Facets, sort, and paging are [Faceted search](/guide/faceted-search/). How a hit is scored is [BM25F ranking](/guide/ranking/). Typo tolerance is separate: %%RELAXATION_CELL%% See [Typo-tolerant search](/guide/typo-tolerant-search/), [Fuzzy search](/guide/fuzzy-search/), and [Synonym and prefix search](/guide/synonym-and-prefix-search/).
 
 ## How does Persia DB rank search results?
 

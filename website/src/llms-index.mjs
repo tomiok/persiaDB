@@ -37,6 +37,7 @@ const guideOrder = [
 	'guide/synonym-and-prefix-search',
 	'guide/ranking',
 	'guide/faceted-search',
+	'guide/filtered-search',
 	'guide/comparison',
 	'guide/getting-started',
 	'guide/faq',

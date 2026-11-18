@@ -116,7 +116,7 @@ A query's `fields` list can replace that boost for the words it searches: `"titl
 
 `boost`, `k1`, `b`, and `ranking` are query-time settings. Changing them does not change the schema hash, so a collection can be tuned without a reindex (SPEC §6.2.4, §6.2.5). `positions` is part of the hash: turning it on indexes new bytes and needs a new collection.
 
-A `term` on a `keyword` field uses weight `1`, `b` `0` (no norms), and `k1` `1.2`. A document that holds the value once scores `idf`. One that holds it `n` times has term frequency `n`. A keyword has no boost of its own. Facets count keyword fields. A filter scores nothing, whatever field it reads.
+A `term` on a `keyword` field uses weight `1`, `b` `0` (no norms), and `k1` `1.2`. A document that holds the value once scores `idf`. One that holds it `n` times has term frequency `n`. A keyword has no boost of its own. Facets count keyword fields. A filter scores nothing, whatever field it reads. The operators and the join are [Filtered full-text search](/guide/filtered-search/).
 
 ## Collection statistics
 
@@ -292,6 +292,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. The
 
 ## Read next
 
+- [Filtered full-text search](/guide/filtered-search/) — filters restrict hits and add nothing to this score.
 - [Faceted search](/guide/faceted-search/) — filters, the request sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — the cascade, step-first ranking, and `minimum_should_match`.
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — the edit-distance weight, typo tiers, and L5 static rank.

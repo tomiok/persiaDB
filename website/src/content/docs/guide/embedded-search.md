@@ -81,6 +81,7 @@ The `persia` command lists and removes temporary and quarantine files next to a 
 - [Fuzzy search and did-you-mean](/guide/fuzzy-search/) — L4 edit distance, the correction, and the L5 fallback. Library code. There is no `persia::Db` search.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion.
 - [BM25F ranking](/guide/ranking/) — field weights, collection statistics, static rank, score-led pruning, and proximity off by default.
+- [Filtered full-text search](/guide/filtered-search/) — term, range, and exists beside a text query. Filters restrict hits and leave the BM25F score unchanged.
 - [Faceted search](/guide/faceted-search/) — facets, sort, cursor pages, deadlines, and explain on a collection snapshot.
 - [Comparison](/guide/comparison/) — Persia DB next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [FAQ](/guide/faq/) — short answers on status, the file format, crash safety, SDKs, and the license.

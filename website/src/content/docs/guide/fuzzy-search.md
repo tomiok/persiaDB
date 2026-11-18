@@ -164,7 +164,7 @@ The step is built only when every earlier level found fewer than `min_results` h
 
 For a query compiled from `q`, the filter it drops is the request filter. `Compiled::filter` keeps that filter beside the query, and `Compiled::with_query` joins it to any query put in its place, so no level before L6 loses it (ROADMAP 8.2.14, [ADR-0048](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0048-request-filter-kept-beside-the-compilation.md)). A filter inside the caller's own query stays, unless it is the same filter. A programmatic query drops every filter of its root `bool`.
 
-When this step supplies the hits, the response sets `level` to `filters` and `filters_dropped` to true. Those hits do not pass the request's filters. Facets count them, so a facet can show a value the filter rejects (SPEC §7.5, an interim rule, ROADMAP 8.1.9). Do not opt in when a filter enforces tenancy or permissions: no request key marks a filter as one that must hold (ROADMAP 8.2.13, still open).
+When this step supplies the hits, the response sets `level` to `filters` and `filters_dropped` to true. Those hits do not pass the request's filters. Facets count them, so a facet can show a value the filter rejects (SPEC §7.5, an interim rule, ROADMAP 8.1.9). Do not opt in when a filter enforces tenancy or permissions: no request key marks a filter as one that must hold (ROADMAP 8.2.13, still open). The operators and the join are [Filtered full-text search](/guide/filtered-search/).
 
 ## Relax options
 
@@ -242,6 +242,7 @@ No. `persia::Db` is not in the crate, and `Database` has no `search` method. The
 - [Typo-tolerant search](/guide/typo-tolerant-search/) — the whole cascade, `minimum_should_match`, and how L2 drops a term before L4 runs.
 - [Synonym and prefix search](/guide/synonym-and-prefix-search/) — L1 synonym groups and L3 prefix expansion, the steps before fuzzy.
 - [BM25F ranking](/guide/ranking/) — the score inside a step, the edit-distance weight, static rank on L5, and proximity off by default.
+- [Filtered full-text search](/guide/filtered-search/) — the filter DSL, how a request filter joins the query, and when L6 drops it.
 - [Faceted search](/guide/faceted-search/) — filters, facets, sort, cursor pages, deadlines, and explain. The deadline is not the relaxation budget.
 - [Comparison](/guide/comparison/) — next to SQLite FTS5, Tantivy, and Meilisearch. Not a benchmark.
 - [What is an embedded search database?](/guide/embedded-search/) — in-process full-text search, one file, and no `persia::Db` yet.
