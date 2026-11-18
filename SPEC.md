@@ -1267,7 +1267,8 @@ by Unicode whitespace and all required (default AND); each is `[-][field:](word 
   add requirements on another: each field requires its own tokens (each a one-field `combined`), and one of the
   fields must match.
 - A **`"phrase"`** becomes, per default field, a `phrase` of its tokens (relative positions keep the gaps stopwords
-  leave), or, in a field without `positions`, a `bool` requiring each token; one of the fields must match. A phrase of
+  leave), or, in a field without `positions`, a `bool` requiring each token, and a `term` in a field where it has one
+  token (`"e-mail"` over `whitespace` and `standard`); a field where it has none is left out, and one of the fields must match. A phrase of
   at most one token in every field is a word. Phrases score with the schema `boost`; the weights of `fields` apply to
   words.
 - **`field:`** before a word or phrase limits it to that `text` or `keyword` field, which need not be a default field:
@@ -1758,7 +1759,7 @@ and `field:` clauses are not expanded, since they ask for their text exactly. Ne
 analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
 `bool` of `should` clauses: its exact fields as one `combined`, and per expanded field, in the `combined`'s order, the
-`prefix`. A `prefix`
+`prefix`; a single such clause is the query itself (a one-field `combined`, as of a word the fields split apart, becomes its `prefix`). A `prefix`
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
 when the word's `fields` weight differs from that boost. The boost is their ratio, clamped to
 `[f64::from_bits(1), 1000]` (§7.1: `0 < w ≤ 1000`; the low end is the least positive `f64`, because a ratio
