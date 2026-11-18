@@ -1067,8 +1067,9 @@ those analyzers' versions.
   order, then term order (each term at its place in the group it is reported from), so a later field's term may come
   before an earlier field's. A match of another field that overlaps those clauses without matching them exactly is
   dropped, the earlier default field winning. Each alternative is the term as written, compiled over the default
-  fields as the quoted phrase `"<term>"` would be (a phrase in a field with positions, every term required in one
-  without, one word when it is one token), each once, and none that compiles to the run's own query: at most 50
+  fields as the quoted phrase `"<term>"` would be (§7.1.1: a phrase in a field with positions, every term required in
+  one without, a `term` in a field where it is one token; a word when it is at most one token in every field), each
+  once, and none that compiles to the run's own query: at most 50
   compiled alternatives per run (the union may report more terms). L1's step holds the query's terms twice (§7.6), and
   at least one per alternative, so the compilation keeps (`Compiled::synonyms`) at most `max_terms − 2 · n`
   alternatives in all, `n` the terms of its query as `max_terms` counts them (§7.1.3; a request's `filter` joins the
@@ -1266,9 +1267,9 @@ by Unicode whitespace and all required (default AND); each is `[-][field:](word 
   they split it differently (`standard` gives `e`, `mail`; `whitespace` keeps `e-mail`), one field's split must not
   add requirements on another: each field requires its own tokens (each a one-field `combined`), and one of the
   fields must match.
-- A **`"phrase"`** becomes, per default field, a `phrase` of its tokens (relative positions keep the gaps stopwords
-  leave), or, in a field without `positions`, a `bool` requiring each token, and a `term` in a field where it has one
-  token (`"e-mail"` over `whitespace` and `standard`); a field where it has none is left out, and one of the fields must match. A phrase of
+- A **`"phrase"`** becomes, per default field: a `term` where it has one token (`"e-mail"` in `whitespace`), else a
+  `phrase` of its tokens (relative positions keep the gaps stopwords leave) or, in a field without `positions`, a
+  `bool` requiring each; a field where it has none is left out, and one of the fields must match. A phrase of
   at most one token in every field is a word. Phrases score with the schema `boost`; the weights of `fields` apply to
   words.
 - **`field:`** before a word or phrase limits it to that `text` or `keyword` field, which need not be a default field:
@@ -1759,7 +1760,7 @@ and `field:` clauses are not expanded, since they ask for their text exactly. Ne
 analyzer stacks tokens (`edge_ngram`, §6.3.1): its index already holds each word's prefixes, so the term matches the
 documents a prefix would, and the stacked grams would add their scores together. An expanded `combined` becomes a
 `bool` of `should` clauses: its exact fields as one `combined`, and per expanded field, in the `combined`'s order, the
-`prefix`; a single such clause is the query itself (a one-field `combined`, as of a word the fields split apart, becomes its `prefix`). A `prefix`
+`prefix`; a `bool` of a single `should` clause is that clause (a one-field `combined`, as of a word the fields split apart, becomes its `prefix`). A `prefix`
 scores with its field's schema `boost` as the field weight (§7.2), as a `term` does, so it is under a `boost` only
 when the word's `fields` weight differs from that boost. The boost is their ratio, clamped to
 `[f64::from_bits(1), 1000]` (§7.1: `0 < w ≤ 1000`; the low end is the least positive `f64`, because a ratio
