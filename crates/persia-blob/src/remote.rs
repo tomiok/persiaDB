@@ -35,12 +35,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use persia_format::BlobId;
-use persia_format::widen::usize_from_u32;
+use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_storage::{ErrorKind, Key, PutOutcome, Storage};
 
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
-use crate::store::{BindOutcome, BlobStore};
+use crate::store::{BindOutcome, BlobStore, SMALL_BLOB_MAX};
 
 pub use keys::RemoteKey;
 pub use resume::{ResumeToken, ResumedUpload};
@@ -222,6 +222,30 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
         Err(gone.map_or(Error::ConditionalPutUnsupported, storage))
     }
 
+    /// One `put_if_absent` of the blob's inline manifest (ROADMAP 9.3.3, ADR-0050 item 5), or of its plain manifest
+    /// when it is empty: one round trip, nothing staged. Answers as [`BlobStore::bind`].
+    fn bind_small(&self, manifest: &BlobManifest, bytes: &[u8]) -> Result<BindOutcome> {
+        let invalid = |what| Err(Error::InvalidManifest { what });
+        if u64_from_usize(bytes.len()) > SMALL_BLOB_MAX {
+            return invalid("a small blob over SMALL_BLOB_MAX bytes");
+        }
+        if u64_from_usize(bytes.len()) != manifest.size() {
+            return invalid("a small blob's bytes differ in length from its manifest's size");
+        }
+        if bytes.is_empty() {
+            return self.bind(manifest);
+        }
+        let inline =
+            BlobManifest::new_inline(manifest.blob_id(), manifest.chunk_size(), bytes.to_vec())
+                .map_err(|_| Error::InvalidManifest {
+                    what: "a small blob's bytes are not its manifest's single chunk",
+                })?;
+        if inline.chunk_crcs() != manifest.chunk_crcs() {
+            return invalid("a small blob's bytes are not its manifest's single chunk");
+        }
+        self.bind(&inline)
+    }
+
     fn manifest(&self, blob_id: BlobId) -> Result<Option<BlobManifest>> {
         let Some(bytes) = self.get(&RemoteKey::Manifest(blob_id).key()?)? else {
             return Ok(None);
@@ -234,6 +258,10 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
     fn read_chunk(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
         if index >= manifest.chunk_count() {
             return Err(corrupt("a chunk past the blob's last one was asked for"));
+        }
+        if let Some(bytes) = manifest.inline_bytes() {
+            // Inline: the one chunk is in the manifest, no request.
+            return Ok(bytes.to_vec());
         }
         let key = RemoteKey::Chunk {
             upload_id: manifest.upload_id(),
