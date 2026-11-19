@@ -561,3 +561,45 @@ fn a_failed_link_removes_its_temporary_file_and_poisons() {
     assert_eq!(names, [Path::new(PACK)], "no temporary file left");
     assert!(open(&fs, PackMode::ReadWrite).unwrap().exists());
 }
+
+/// ROADMAP 9.4.7: after a failed slot sync the pack refuses every write until it is reopened, and says so through
+/// `Error::is_store_poisoned`, which `put_blob` reads to stop retrying at once. A bind of the id whose commit failed
+/// stays outcome-unknown; every other write is a plain refusal.
+#[test]
+fn a_pack_poisoned_by_a_failed_slot_sync_reads_as_a_poisoned_store() {
+    for apply in [false, true] {
+        let fs = sim();
+        let store = open(&fs, PackMode::ReadWrite).unwrap();
+        let data = b"a blob whose commit fails";
+        let m = manifest_of(data, 8, 1);
+        stage_all(&store, &m, data).unwrap();
+        // The bind's calls: index append, data sync, slot write, slot sync.
+        let k = fs.mutations() + 3;
+        fs.set_fault(Some(if apply {
+            SimFault::ApplyThenFail(k)
+        } else {
+            SimFault::FailAt(k)
+        }));
+        let first = store.bind(&m).unwrap_err();
+        assert!(first.is_bind_outcome_unknown(), "{first}");
+        assert!(
+            !first.is_store_poisoned(),
+            "the failure itself is the sync's: {first}"
+        );
+        fs.set_fault(None);
+        let again = store.bind(&m).unwrap_err();
+        assert!(
+            again.is_bind_outcome_unknown() && again.is_store_poisoned(),
+            "{again}"
+        );
+        let small = manifest_of(b"tiny", 8, 2);
+        for refused in [
+            store.bind_small(&small, b"tiny").unwrap_err(),
+            store.bind(&manifest_of(b"", 8, 3)).unwrap_err(),
+            store.stage_chunk(UploadId::new(4), 0, b"x").unwrap_err(),
+        ] {
+            assert!(refused.is_store_poisoned(), "{refused}");
+            assert!(!refused.is_bind_outcome_unknown(), "{refused}");
+        }
+    }
+}

@@ -10,6 +10,8 @@
 //! 6. The upload id is pinned at every chunk write, and the blob id at the bind; both until the guard drops.
 //! 7. A small blob (≤ 64 KiB) goes through `bind_small`; a larger one is staged in bounded windows.
 //! 8. A `get_blob` stream pins its blob and upload until it is dropped, so a GC sweep never takes it mid-stream.
+//! 9. A store that refuses every write until reopened (`Error::is_store_poisoned`) ends the bind retry at once, as an
+//!    unknown outcome that discards nothing, instead of at the end of `bind_budget` (ROADMAP 9.4.7).
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -1015,4 +1017,85 @@ fn a_blob_stream_pins_its_blob_and_upload_until_dropped() {
         Err(Error::BlobNotFound { .. })
     ));
     assert!(set.pinned().is_empty(), "a failed open releases its pin");
+}
+
+/// Bind attempts and backoff waits of a `put_blob` over a store poisoned by its first, unknown, bind (ROADMAP 9.4.7).
+fn poisoned_put(len: usize, unknown_lands: bool) -> (Error, usize, Vec<Duration>, Vec<Call>) {
+    let store = FaultyStore::new(Faults {
+        unknown_binds: 1,
+        unknown_lands,
+        unknown_poisons: true,
+        ..Faults::default()
+    });
+    let clock = Arc::new(ManualRetryClock::new());
+    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(11))
+        .with_retry_clock(Arc::clone(&clock) as _);
+    store.watch(blobs.pin_set());
+    let error = blobs
+        .put_blob(&bytes(len, 13)[..], &options(MIN))
+        .unwrap_err();
+    assert!(blobs.pin_set().pinned().is_empty());
+    let calls = store.calls();
+    let binds = calls
+        .iter()
+        .filter(|c| matches!(c, Call::Bind { .. }))
+        .count();
+    (error, binds, clock.sleeps(), calls)
+}
+
+/// Invariant 9: the first bind's outcome is unknown and poisons the store; the retry after one backoff wait is refused
+/// as poisoned (a large blob's `bind` with an unknown outcome, a small blob's `bind_small` with a plain refusal of
+/// its chunk write), so `put_blob` fails at once, still unknown, and discards nothing.
+#[test]
+fn a_poisoned_store_ends_the_bind_retry_at_once_as_unknown() {
+    for lands in [false, true] {
+        for len in [0_usize, 10, 200_000] {
+            let ctx = format!("lands {lands}, len {len}");
+            let (error, binds, sleeps, calls) = poisoned_put(len, lands);
+            assert!(error.is_bind_outcome_unknown(), "{ctx}: {error}");
+            assert!(error.is_store_poisoned(), "{ctx}: {error}");
+            assert_eq!(binds, 2, "{ctx}: {calls:?}");
+            assert_eq!(sleeps.len(), 1, "{ctx}: {sleeps:?}");
+            assert!(
+                !calls.iter().any(|c| matches!(c, Call::Discard(_))),
+                "{ctx}: {calls:?}"
+            );
+        }
+    }
+}
+
+/// Invariant 9: a bind refused as poisoned on its first attempt. The same id's outcome is unknown (an earlier
+/// `put_blob` of the same blob poisoned the store): no wait, one attempt, unknown. Any other blob's refusal is a plain
+/// store error: nothing was bound, and nothing more is retried.
+#[test]
+fn a_store_poisoned_before_the_first_attempt_is_not_retried() {
+    let (store, blobs) = faulty(Faults {
+        unknown_binds: 1,
+        unknown_poisons: true,
+        ..Faults::default()
+    });
+    let clock = Arc::new(ManualRetryClock::new());
+    let blobs = blobs.with_retry_clock(Arc::clone(&clock) as _);
+    // The empty blob stages nothing, so its bind reaches the store: the first poisons it, the second is unknown.
+    let first = blobs.put_blob(&b""[..], &options(MIN)).unwrap_err();
+    assert!(
+        first.is_bind_outcome_unknown() && first.is_store_poisoned(),
+        "{first}"
+    );
+    let sleeps = clock.sleeps().len();
+    let again = blobs.put_blob(&b""[..], &options(MIN)).unwrap_err();
+    assert!(
+        again.is_bind_outcome_unknown() && again.is_store_poisoned(),
+        "{again}"
+    );
+    assert_eq!(clock.sleeps().len(), sleeps, "no wait before giving up");
+    // Another blob: a small one's chunk write and a large one's staging are refused plainly, not unknown.
+    for len in [10_usize, 200_000] {
+        let other = blobs
+            .put_blob(&bytes(len, 14)[..], &options(MIN))
+            .unwrap_err();
+        assert!(matches!(other, Error::PackPoisoned), "{len}: {other}");
+    }
+    assert_eq!(clock.sleeps().len(), sleeps);
+    assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
 }

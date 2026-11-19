@@ -43,6 +43,10 @@ pub struct Faults {
     pub unknown_binds: u32,
     /// Whether a bind whose outcome is reported unknown binds all the same (the write landed).
     pub unknown_lands: bool,
+    /// Whether an injected unknown outcome also poisons the store, as a failed slot sync poisons the pack (ADR-0049
+    /// item 6): from then on every write is refused until a reopen. A later bind of the same id answers
+    /// `BindOutcomeUnknown(PackPoisoned)`, any other write plain `PackPoisoned`, as `PackStore` does (ROADMAP 9.4.7).
+    pub unknown_poisons: bool,
     /// The chunk write (counted from 0, over every upload) that fails with a store error.
     pub fail_stage: Option<usize>,
     /// The store call (counted from 0, over `stage`, `bind`, `manifest`) that fails, and every one after it: a
@@ -56,6 +60,8 @@ struct State {
     faults: Faults,
     stages: usize,
     steps: usize,
+    /// The id whose unknown outcome poisoned the store (`Faults::unknown_poisons`).
+    poisoned: Option<BlobId>,
 }
 
 /// The recording, failing store.
@@ -116,10 +122,12 @@ impl FaultyStore {
         Ok(())
     }
 
+    /// `stages`: whether this bind writes a chunk first (`bind_small` of a non-empty blob, as the default does).
     fn bind_with(
         &self,
         manifest: &BlobManifest,
         small: bool,
+        stages: bool,
         bind: impl FnOnce() -> Result<BindOutcome>,
     ) -> Result<BindOutcome> {
         let pinned = (
@@ -133,11 +141,22 @@ impl FaultyStore {
             pinned,
         });
         self.step()?;
+        if let Some(id) = self.lock().poisoned {
+            // The pack answers so: its staging write refuses plainly, a bind of the id it poisoned on is unknown.
+            return Err(if !stages && id == manifest.blob_id() {
+                Error::BindOutcomeUnknown(Box::new(Error::PackPoisoned))
+            } else {
+                Error::PackPoisoned
+            });
+        }
         let unknown = {
             let mut state = self.lock();
             let unknown = state.faults.unknown_binds > 0;
             if unknown {
                 state.faults.unknown_binds -= 1;
+                if state.faults.unknown_poisons {
+                    state.poisoned = Some(manifest.blob_id());
+                }
             }
             unknown.then_some(state.faults.unknown_lands)
         };
@@ -168,6 +187,9 @@ impl BlobStore for FaultyStore {
             if state.faults.fail_stage == Some(n) {
                 return Err(failed("injected stage failure"));
             }
+            if state.poisoned.is_some() {
+                return Err(Error::PackPoisoned);
+            }
         }
         self.step()?;
         self.inner.stage_chunk(upload_id, index, bytes)
@@ -185,11 +207,13 @@ impl BlobStore for FaultyStore {
     }
 
     fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome> {
-        self.bind_with(manifest, false, || self.inner.bind(manifest))
+        self.bind_with(manifest, false, false, || self.inner.bind(manifest))
     }
 
     fn bind_small(&self, manifest: &BlobManifest, bytes: &[u8]) -> Result<BindOutcome> {
-        self.bind_with(manifest, true, || self.inner.bind_small(manifest, bytes))
+        self.bind_with(manifest, true, !bytes.is_empty(), || {
+            self.inner.bind_small(manifest, bytes)
+        })
     }
 
     fn manifest(&self, blob_id: BlobId) -> Result<Option<BlobManifest>> {

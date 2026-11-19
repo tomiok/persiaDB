@@ -134,7 +134,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
-    ///   bound later, and nothing references it (its upload is left to GC);
+    ///   bound later, and nothing references it (its upload is left to GC). Also before the budget runs out when the
+    ///   store refuses every write until it is reopened: that error has [`Error::is_store_poisoned`] too, and only
+    ///   reopening the store tells whether the blob was bound (ROADMAP 9.4.7);
     /// - [`Error::Corrupt`] when the manifest bound under the id does not name it or another size;
     /// - the store's errors, after which nothing this call returned references the blob.
     pub fn put_blob(
@@ -304,6 +306,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// unknown; after one, an error is no answer (the earlier write may still land), so the loop goes on. Attempts
     /// are spaced by [`backoff`]; no attempt starts at or after `options.bind_budget` past the first (a wait that
     /// would reach that deadline is not waited), and the unknown error is returned then. At least one attempt is made.
+    /// An unknown outcome from a store that refuses every write until reopened ([`Error::is_store_poisoned`]), or such
+    /// a store's error after an unknown outcome, ends the loop at once, still unknown ([`still_unknown`]).
     fn bind(
         &self,
         upload_id: UploadId,
@@ -329,6 +333,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         loop {
             match bind() {
                 Ok(outcome) => return (Ok(outcome), unknown.is_some()),
+                // A store that refuses every write until it is reopened (the pack after a failed sync, SPEC §4.5)
+                // answers nothing more on this handle: the outcome stays unknown, so the retry ends now instead of at
+                // the end of the budget (ROADMAP 9.4.7, ADR-0051 item 3). Only a reopen tells what was bound.
+                Err(e)
+                    if e.is_store_poisoned()
+                        && (unknown.is_some() || e.is_bind_outcome_unknown()) =>
+                {
+                    return (Err(still_unknown(e)), true);
+                }
                 Err(e) if e.is_bind_outcome_unknown() => unknown = Some(e),
                 Err(e) if unknown.is_none() => return (Err(e), false),
                 // Still unknown: this answer says nothing of the earlier attempt's write.
@@ -390,6 +403,17 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         if let Err(error) = self.store.discard_upload(upload_id) {
             tracing::warn!(%upload_id, %error, "discarding a blob upload failed; GC will reclaim its chunks");
         }
+    }
+}
+
+/// `poisoned` (an error with [`Error::is_store_poisoned`]) as an unknown outcome: itself when it already is one, or
+/// wrapped in [`Error::BindOutcomeUnknown`], so the caller learns both that nothing is known and that the store must
+/// be reopened.
+fn still_unknown(poisoned: Error) -> Error {
+    if poisoned.is_bind_outcome_unknown() {
+        poisoned
+    } else {
+        Error::BindOutcomeUnknown(Box::new(poisoned))
     }
 }
 
