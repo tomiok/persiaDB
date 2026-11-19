@@ -357,6 +357,7 @@ fn run_script(store: &PackStore<SimFsFile>, session: &mut Session) {
 /// After a crash: the pack opens, each blob of the script is wholly readable or absent, every `Bound` one is there.
 fn check_recovered(fs: &SimFs, session: &Session, what: &str) {
     let store = open(fs, PackMode::ReadWrite).unwrap_or_else(|e| panic!("{what}: reopen: {e}"));
+    assert!(temporaries(fs).is_empty(), "{what}: swept at the open");
     for (data, chunk, upload) in SCRIPT {
         let m = manifest_of(data, chunk, upload);
         match store.manifest(m.blob_id()).unwrap() {
@@ -538,7 +539,19 @@ fn a_failed_creation_leaves_no_temporary_file_and_can_be_retried() {
                     .all(|p| p == Path::new(PACK) || p.to_string_lossy().contains(".tmp.")),
                 "{what}: {names:?}"
             );
+            // ROADMAP 9.2.6: the read-write open sweeps what the crash left, durably.
+            let left = temporaries(&crashed);
             let reopened = open(&crashed, PackMode::ReadWrite).unwrap();
+            assert_eq!(
+                reopened.recovery().swept,
+                left.len() as u64,
+                "{what}: {left:?}"
+            );
+            assert!(temporaries(&crashed).is_empty(), "{what}");
+            assert!(
+                temporaries(&crashed.crash(CrashLoss::All)).is_empty(),
+                "{what}"
+            );
             let m = manifest_of(b"retry", 4, 2);
             stage_all(&reopened, &m, b"retry").unwrap();
             assert_eq!(reopened.bind(&m).unwrap(), BindOutcome::Bound, "{what}");
@@ -601,5 +614,87 @@ fn a_pack_poisoned_by_a_failed_slot_sync_reads_as_a_poisoned_store() {
             assert!(refused.is_store_poisoned(), "{refused}");
             assert!(!refused.is_bind_outcome_unknown(), "{refused}");
         }
+    }
+}
+
+// --- Stale temporary files (ROADMAP 9.2.6) ---
+
+/// The pack's temporary names (`<pack>.tmp.*`) on `fs`, files only.
+fn temporaries(fs: &SimFs) -> Vec<std::path::PathBuf> {
+    let prefix = format!("{PACK}.tmp.");
+    fs.files()
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| p.to_string_lossy().starts_with(&prefix))
+        .collect()
+}
+
+fn write_file(fs: &SimFs, path: &str) {
+    let file = fs.create_new(Path::new(path)).unwrap();
+    persia_storage::container::ContainerFile::write_all_at(&file, b"left by a crash", 0).unwrap();
+    persia_storage::container::ContainerFile::sync_data(&file).unwrap();
+}
+
+/// A read-write open removes exactly the names a pack creation or rewrite makes (`<pack>.tmp.<16 hex>.<n>`), with or
+/// without a pack, and syncs the directory; a read-only open removes nothing, and nothing else is touched.
+#[test]
+fn a_read_write_open_sweeps_the_stale_temporary_files_of_the_pack() {
+    let stale = [
+        format!("{PACK}.tmp.0123456789abcdef.0"),
+        format!("{PACK}.tmp.fedcba9876543210.17"),
+    ];
+    let kept = [
+        format!("{PACK}.tmp.0123456789ABCDEF.1"),
+        format!("{PACK}.tmp.0123456789abcdef"),
+        format!("{PACK}.compact.0123456789abcdef.1"),
+        "/db/app.persia.tmp.0123456789abcdef.1".to_owned(),
+        "/db/other.persia.blobs.tmp.0123456789abcdef.1".to_owned(),
+    ];
+    for with_pack in [false, true] {
+        let fs = sim();
+        if with_pack {
+            store_blob(&open(&fs, PackMode::ReadWrite).unwrap(), b"kept", 4, 1);
+        }
+        for name in stale.iter().chain(&kept) {
+            write_file(&fs, name);
+        }
+        // A directory with a temporary file's name is not one.
+        fs.create_dir(Path::new(&format!("{PACK}.tmp.aaaaaaaaaaaaaaaa.2")))
+            .unwrap();
+        fs.sync_dir(Path::new("/db")).unwrap();
+        let before = fs.files();
+
+        let reader = open(&fs, PackMode::ReadOnly).unwrap();
+        assert_eq!(reader.recovery().swept, 0);
+        assert_eq!(fs.files(), before, "a read-only open writes nothing");
+
+        let writer = open(&fs, PackMode::ReadWrite).unwrap();
+        assert_eq!(writer.recovery().swept, 2, "with a pack: {with_pack}");
+        assert_eq!(writer.exists(), with_pack);
+        let names: Vec<String> = fs
+            .files()
+            .into_iter()
+            .map(|(p, _)| p.to_string_lossy().into_owned())
+            .collect();
+        for name in &stale {
+            assert!(!names.contains(name), "{name} swept");
+        }
+        for name in &kept {
+            assert!(names.contains(name), "{name} kept");
+        }
+        // The removals are durable: the directory was synced.
+        let crashed = fs.crash(CrashLoss::All);
+        assert_eq!(temporaries(&crashed).len(), 2, "only the two look-alikes");
+        assert!(
+            crashed
+                .is_dir(Path::new(&format!("{PACK}.tmp.aaaaaaaaaaaaaaaa.2")))
+                .unwrap()
+        );
+        if with_pack {
+            let m = manifest_of(b"kept", 4, 1);
+            assert_eq!(read_all(&writer, &m).unwrap(), b"kept");
+        }
+        drop(writer);
+        assert_eq!(open(&fs, PackMode::ReadWrite).unwrap().recovery().swept, 0);
     }
 }

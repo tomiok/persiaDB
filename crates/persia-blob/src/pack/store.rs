@@ -49,6 +49,9 @@ pub struct PackRecovery {
     /// How many blobs a read-write open committed from after `log_end` (ADR-0049 item 9): the index frames of binds
     /// whose slot write was cut or whose synced slot was damaged since, each with all its chunks.
     pub rolled_forward: u64,
+    /// How many stale temporary files of crashed pack creations or rewrites (`<name>.persia.blobs.tmp.*`) a
+    /// read-write open removed before it opened the pack (SPEC §9.3, ROADMAP 9.2.6).
+    pub swept: u64,
 }
 
 /// A bound blob, as the open's scan found it or a bind wrote it.
@@ -178,6 +181,10 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// index by scanning the committed frames `12288..log_end`. A read-write open then truncates the file to
     /// `log_end` and syncs it: nothing after `log_end` was ever acknowledged.
     ///
+    /// Before it opens the file, a read-write open removes the stale temporary files of crashed pack creations and
+    /// rewrites beside it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]); one it cannot remove is
+    /// logged, not an error: it holds nothing the pack needs, and the next read-write open tries again (ROADMAP 9.2.6).
+    ///
     /// # Errors
     /// [`Error::Corrupt`] for a damaged header, slot or committed frame, [`Error::PackUnsupported`] for a newer
     /// format, or [`Error::PackIo`].
@@ -188,7 +195,13 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         db_uuid: [u8; 16],
     ) -> Result<Self> {
         let path = path.as_ref().to_owned();
-        let (pack, recovery) = match vfs.open(&path, mode == PackMode::ReadWrite) {
+        // Before the open, while no creation or rewrite of this pack can be in flight (ADR-0049 item 8).
+        let swept = if mode == PackMode::ReadWrite {
+            u64_from_usize(sweep_stale_files(&*vfs, &path).len())
+        } else {
+            0
+        };
+        let (pack, mut recovery) = match vfs.open(&path, mode == PackMode::ReadWrite) {
             Ok(file) => {
                 let (pack, recovery) = recover(file, mode, db_uuid)?;
                 (Some(pack), recovery)
@@ -196,6 +209,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             Err(e) if e.kind() == io::ErrorKind::NotFound => (None, PackRecovery::default()),
             Err(e) => return Err(io_err("open")(e)),
         };
+        recovery.swept = swept;
         Ok(Self {
             vfs,
             path,
@@ -824,6 +838,9 @@ mod rewrite;
 
 // -- followups (9.2) --
 // Child modules of the pack follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9), if any, go here.
+// The sweep of stale pack temporary files at a read-write open (ROADMAP 9.2.6).
+mod sweep;
+use sweep::sweep_stale_files;
 //
 
 use mapped::Mapper;
