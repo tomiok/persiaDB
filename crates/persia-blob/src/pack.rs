@@ -7,6 +7,9 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 pub mod layout;
+mod store;
+
+pub use store::{PackMode, PackRecovery, PackStore};
 
 /// What the pack's file name adds to its container's: `app.persia` keeps its blobs in `app.persia.blobs` (SPEC §4).
 pub const PACK_SUFFIX: &str = ".blobs";
