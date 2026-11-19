@@ -39,6 +39,45 @@ pub(super) fn map_committed(file: &File, sb: &Superblock) -> io::Result<ByteSour
     Ok(ByteSource::from_mmap(map))
 }
 
+/// Permission to map Persia's append-only files outside a [`Container`]: the blob pack (`persia-blob`, SPEC §9.3,
+/// ADR-0049), whose crate forbids `unsafe`. Only an `unsafe` call makes one, so the embedder states the mapping
+/// contract once, as for [`Container::enable_mapped_reads`], and the holder maps with safe calls.
+#[derive(Debug, Clone, Copy)]
+pub struct MapPermit(());
+
+impl MapPermit {
+    /// The permit.
+    ///
+    /// # Safety
+    /// For every file mapped through this permit (a blob pack opened by `persia_blob::PackStore`), the contract of
+    /// [`Container::enable_mapped_reads`] holds for its committed frames: while a mapping, or a `ByteSource` taken
+    /// from one, is alive, nothing but Persia writes, truncates or hole-punches the file below the end of the mapped
+    /// range (not other programs, not other handles in this process), and at most one read-write handle of the file
+    /// is open where locks are per process. The permit is given only to Persia code that maps committed frames:
+    /// bytes a Persia writer never writes again (SPEC §4.7).
+    pub const unsafe fn new() -> Self {
+        Self(())
+    }
+
+    /// Maps bytes `range` of `file` read-only.
+    ///
+    /// The caller maps only committed frames of a Persia file: bytes that no Persia writer writes, truncates or
+    /// rewrites again (SPEC §4.7; for a blob pack, `12288..log_end` of a slot it read or committed, ADR-0049).
+    ///
+    /// # Errors
+    /// The error from `fstat` or `mmap`, or [`io::ErrorKind::InvalidInput`] for a range past the file's end.
+    // `self` is the proof the contract was accepted: holding a permit is what makes the call sound.
+    #[allow(clippy::unused_self)]
+    pub fn map(self, file: &File, range: Range<u64>) -> io::Result<ByteSource> {
+        // SAFETY: the permit exists, so its maker vouched for `MapPermit::new`'s contract: nothing outside Persia
+        // changes `range` while it is mapped. The caller maps only committed frames (this function's rule), which no
+        // Persia writer changes: frames are append-only, recovery truncates only after `log_end`, and a rewrite
+        // writes a new file and renames it over the old one (SPEC §4.6, §4.7, §9.3).
+        let map = unsafe { MmapFile::map(file, range)? };
+        Ok(ByteSource::from_mmap(map))
+    }
+}
+
 impl Container<File> {
     /// Reads committed frames through a memory mapping from now on, instead of with `pread` (SPEC §4.7, ADR-0017).
     ///

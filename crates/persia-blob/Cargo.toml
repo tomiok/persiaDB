@@ -35,3 +35,7 @@ harness = false
 [[bench]]
 name = "remote"
 harness = false
+
+[[bench]]
+name = "pack"
+harness = false

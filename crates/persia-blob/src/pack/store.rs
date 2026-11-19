@@ -5,6 +5,7 @@ use std::collections::hash_map::RandomState;
 use std::fs::File;
 use std::hash::{BuildHasher, Hasher};
 use std::io;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
@@ -18,7 +19,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Slot};
 use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_format::{BlobId, Reader};
-use persia_storage::container::ContainerFile;
+use persia_storage::container::{ContainerFile, MapPermit};
 use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
@@ -94,6 +95,8 @@ struct Inner<F> {
     pack: Option<Pack<F>>,
     staged: HashMap<(UploadId, u32), Staged>,
     poisoned: bool,
+    /// Set by [`PackStore::enable_mapped_reads`].
+    mapper: Option<Mapper<F>>,
 }
 
 /// The local blob store: the pack file `<name>.persia.blobs` (SPEC §9.3, ADR-0049).
@@ -184,6 +187,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 pack,
                 staged: HashMap::new(),
                 poisoned: false,
+                mapper: None,
             }),
         })
     }
@@ -531,6 +535,9 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
                 chunks: chunks.into_boxed_slice(),
             },
         );
+        if let Some(mapper) = &mut inner.mapper {
+            mapper.remap(pack);
+        }
         inner.staged.retain(|(upload, _), _| *upload != upload_id);
         Ok(BindOutcome::Bound)
     }
@@ -675,6 +682,8 @@ fn write_slot<F: ContainerFile>(
     Ok(sb)
 }
 
+mod mapped;
 mod recover;
 
+use mapped::Mapper;
 use recover::recover;
