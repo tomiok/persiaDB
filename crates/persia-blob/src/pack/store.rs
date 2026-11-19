@@ -684,6 +684,7 @@ fn write_slot<F: ContainerFile>(
 
 mod mapped;
 mod recover;
+mod refresh;
 
 use mapped::Mapper;
-use recover::recover;
+use recover::{check_scan, read_prefix, recover, scan_committed};

@@ -413,3 +413,70 @@ fn a_crash_at_any_call_keeps_bound_blobs_and_never_half_of_one() {
 fn a_crash_at_any_call_keeps_bound_blobs_and_never_half_of_one_many_seeds() {
     crash_at_every_call(64);
 }
+
+// --- Concurrent binds (coordinator's contract rule: only durable manifests are ever exposed) ---
+
+/// Two threads bind the same blob at once while the first slot sync fails. `bind` holds the writer lock across
+/// append, both syncs and the publish, so no thread can see the entry before its commit is durable: an
+/// `AlreadyBound` answer always comes with a `Bound` one, and a failed bind never lends its manifest to the other.
+#[test]
+fn a_concurrent_bind_never_dedups_onto_a_blob_whose_commit_failed() {
+    for round in 0..40_u64 {
+        let fs = sim();
+        let store = Arc::new(open(&fs, PackMode::ReadWrite).unwrap());
+        let data = b"the same bytes, twice";
+        let (a, b) = (manifest_of(data, 4, 1), manifest_of(data, 4, 2));
+        stage_all(&store, &a, data).unwrap();
+        stage_all(&store, &b, data).unwrap();
+        // The first bind's calls: index append, sync, slot write, slot sync. The slot sync takes effect, then fails
+        // (round % 2 == 0) or fails outright: either way that bind's outcome is unknown and the handle is poisoned.
+        let k = fs.mutations() + 3;
+        fs.set_fault(Some(if round % 2 == 0 {
+            SimFault::ApplyThenFail(k)
+        } else {
+            SimFault::FailAt(k)
+        }));
+        let threads: Vec<_> = [a.clone(), b.clone()]
+            .into_iter()
+            .map(|m| {
+                let store = Arc::clone(&store);
+                std::thread::spawn(move || store.bind(&m))
+            })
+            .collect();
+        let results: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let bound = results
+            .iter()
+            .filter(|r| matches!(r, Ok(BindOutcome::Bound)))
+            .count();
+        let deduped = results
+            .iter()
+            .filter(|r| matches!(r, Ok(BindOutcome::AlreadyBound(_))))
+            .count();
+        assert_eq!(
+            bound, 0,
+            "round {round}: the first bind failed, the second ran on a poisoned handle"
+        );
+        assert_eq!(
+            deduped, 0,
+            "round {round}: AlreadyBound onto a commit that never synced: {results:?}"
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| r.as_ref().is_err_and(Error::is_bind_outcome_unknown))
+        );
+        assert!(
+            results
+                .iter()
+                .any(|r| matches!(r, Err(Error::PackPoisoned)))
+        );
+        drop(store);
+        // Whatever the crash keeps, the reopened pack holds the blob whole or not at all.
+        for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(round)] {
+            let store = open(&fs.crash(loss), PackMode::ReadWrite).unwrap();
+            if let Some(m) = store.manifest(a.blob_id()).unwrap() {
+                assert_eq!(read_all(&store, &m).unwrap(), data);
+            }
+        }
+    }
+}
