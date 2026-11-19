@@ -23,7 +23,7 @@ pub enum EntryKind {
     File {
         /// Its length.
         len: u64,
-        /// Its modification time, where the file system records one (`None` on [`sim::SimFs`]).
+        /// Its modification time, where the file system records one (on a [`sim::SimFs`], only one given a clock).
         modified: Option<std::time::SystemTime>,
     },
     /// A directory.
