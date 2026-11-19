@@ -109,6 +109,13 @@ pub trait DocumentLog {
 
     /// [`Database::durable_mark`].
     fn durable_mark(&self) -> WalMark;
+
+    /// [`Database::commit`].
+    ///
+    /// # Errors
+    /// As [`Database::commit`].
+    #[allow(clippy::result_large_err)] // The engine's own error, as `Database::commit` returns it.
+    fn commit(&mut self) -> Result<u64, DatabaseError>;
 }
 
 impl DocumentLog for Database {
@@ -128,6 +135,11 @@ impl DocumentLog for Database {
 
     fn durable_mark(&self) -> WalMark {
         Database::durable_mark(self)
+    }
+
+    #[allow(clippy::result_large_err)] // As the trait.
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        Database::commit(self)
     }
 }
 
@@ -214,8 +226,10 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
         if mark > before {
             self.held.push_back((mark, pins));
         }
-        logged?;
+        // Released on either outcome: a put that failed may have made earlier records durable first (a flush commit
+        // for a full memtable syncs the WAL, then the document may be rejected).
         self.release_durable();
+        logged?;
         Ok(blob_ref)
     }
 
@@ -265,15 +279,17 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
     }
 }
 
-impl<S: BlobStore + ?Sized> BlobDatabase<S, Database> {
-    /// [`Database::commit`], then the pins of the documents it made durable are released.
+impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
+    /// [`Database::commit`], then the pins of the documents it made durable are released, whether it succeeded or
+    /// not.
     ///
     /// # Errors
     /// As [`Database::commit`].
     pub fn commit(&mut self) -> Result<u64, Error> {
-        let seq = self.log.commit()?;
+        let committed = self.log.commit();
+        // Even a failed commit may have synced the WAL first (SPEC §4.5 step 1): what is durable is released.
         self.release_durable();
-        Ok(seq)
+        Ok(committed?)
     }
 }
 

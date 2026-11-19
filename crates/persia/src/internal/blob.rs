@@ -293,8 +293,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// `bind` called until its outcome is known (SPEC §9.4, ADR-0051 item 3), with whether an outcome was ever
     /// unknown, after which the upload is never discarded. A plain error ends the loop only while no attempt was
     /// unknown; after one, an error is no answer (the earlier write may still land), so the loop goes on. Attempts
-    /// are spaced by [`backoff`] and stop once `options.bind_budget` has passed since the first: the unknown error is
-    /// returned then. At least one attempt is made.
+    /// are spaced by [`backoff`]; no attempt starts at or after `options.bind_budget` past the first (a wait that
+    /// would reach that deadline is not waited), and the unknown error is returned then. At least one attempt is made.
     fn bind(
         &self,
         upload_id: UploadId,
@@ -302,6 +302,19 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         bind: impl Fn() -> Result<BindOutcome>,
     ) -> (Result<BindOutcome>, bool) {
         let start = self.clock.now();
+        // The budget left now; `None` once it is used up: no attempt starts at or after the deadline.
+        let left = || {
+            let elapsed = self.clock.now().saturating_sub(start);
+            options
+                .bind_budget
+                .checked_sub(elapsed)
+                .filter(|l| !l.is_zero())
+        };
+        let give_up = |unknown: Option<Error>| {
+            let unknown =
+                unknown.unwrap_or_else(|| Error::BindOutcomeUnknown("no attempt answered".into()));
+            (Err(unknown), true)
+        };
         let mut unknown: Option<Error> = None;
         let mut attempt = 0_u32;
         loop {
@@ -312,18 +325,16 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 // Still unknown: this answer says nothing of the earlier attempt's write.
                 Err(_) => {}
             }
-            let elapsed = self.clock.now().saturating_sub(start);
-            let Some(left) = options
-                .bind_budget
-                .checked_sub(elapsed)
-                .filter(|l| !l.is_zero())
-            else {
-                let unknown = unknown
-                    .unwrap_or_else(|| Error::BindOutcomeUnknown("no attempt answered".into()));
-                return (Err(unknown), true);
-            };
-            self.clock
-                .sleep(backoff(upload_id.get(), attempt).min(left));
+            // A wait that reaches the deadline would only end in giving up: give up now.
+            let wait = backoff(upload_id.get(), attempt);
+            if left().is_none_or(|left| wait >= left) {
+                return give_up(unknown);
+            }
+            self.clock.sleep(wait);
+            // The wait may have taken longer than asked: checked again before the next attempt starts.
+            if left().is_none() {
+                return give_up(unknown);
+            }
             attempt = attempt.saturating_add(1);
         }
     }

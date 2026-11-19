@@ -133,7 +133,7 @@ pub enum Error {
     },
     /// A `put_blob`'s `mime` or `user_meta` breaks a rule of SPEC §9.1 (a caller's error), found before any byte is
     /// read.
-    #[error("invalid blob reference")]
+    #[error("the blob reference put_blob's mime and user_meta describe is invalid")]
     InvalidBlobRef(#[source] persia_format::EncodeError),
 }
 

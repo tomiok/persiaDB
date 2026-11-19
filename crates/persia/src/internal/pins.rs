@@ -39,9 +39,9 @@ pub enum Pinned {
 /// let pins = set.pin([upload]);
 /// assert!(set.is_pinned(upload));
 /// // The sweep's delete does not run while the pin holds.
-/// assert_eq!(set.unless_pinned(upload, || "deleted"), None);
+/// assert_eq!(set.unless_pinned(upload, |_| "deleted"), None);
 /// drop(pins);
-/// assert_eq!(set.unless_pinned(upload, || "deleted"), Some("deleted"));
+/// assert_eq!(set.unless_pinned(upload, |_| "deleted"), Some("deleted"));
 /// ```
 #[derive(Debug, Default)]
 pub struct PinSet {
@@ -77,17 +77,24 @@ impl PinSet {
 
     /// Runs `delete` unless `id` is pinned, holding the pin set's lock throughout (SPEC §9.5: checking an object
     /// against the pin set and deleting it is one step), and returns its result; `None` when `id` is pinned and
-    /// nothing ran. No pin can be taken while `delete` runs, so `delete` must not call `put_blob` or take a pin.
+    /// nothing ran. No pin can be taken or released while `delete` runs: `delete` must not call `put_blob`, take a pin,
+    /// drop a [`Pins`] guard, or query this `PinSet` (each locks it: a deadlock). It reads the pins through the
+    /// [`PinView`] it is given, which sees the locked set without locking it again.
     ///
     /// A `Blob` pin is taken before its manifest is read and its `Upload` pin after, so between the two the upload's
     /// chunks are protected only by the blob pin: the sweep (ROADMAP 9.5.2), deleting an upload's chunks, must also
-    /// find no pinned blob whose manifest names that upload, checked inside `delete` (which may read manifests).
-    pub fn unless_pinned<T>(&self, id: Pinned, delete: impl FnOnce() -> T) -> Option<T> {
+    /// find no pinned blob whose manifest names that upload, checked inside `delete` through its [`PinView`] (it may read
+    /// manifests).
+    pub fn unless_pinned<T>(
+        &self,
+        id: Pinned,
+        delete: impl FnOnce(&PinView<'_>) -> T,
+    ) -> Option<T> {
         let pinned = self.lock();
         if pinned.contains_key(&id) {
             return None;
         }
-        let out = delete();
+        let out = delete(&PinView(&pinned));
         drop(pinned);
         Some(out)
     }
@@ -148,5 +155,22 @@ impl Drop for Pins {
         for id in self.ids.drain(..) {
             self.set.release(id);
         }
+    }
+}
+
+/// The pins of a [`PinSet`] as [`PinSet::unless_pinned`] holds them locked: what its `delete` reads instead of the
+/// set, which it cannot lock again.
+#[derive(Debug, Clone, Copy)]
+pub struct PinView<'a>(&'a BTreeMap<Pinned, usize>);
+
+impl PinView<'_> {
+    /// Whether `id` is pinned.
+    pub fn is_pinned(self, id: Pinned) -> bool {
+        self.0.contains_key(&id)
+    }
+
+    /// Every id pinned, in order.
+    pub fn pinned(self) -> Vec<Pinned> {
+        self.0.keys().copied().collect()
     }
 }

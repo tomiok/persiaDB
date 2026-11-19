@@ -122,6 +122,10 @@ impl DocumentLog for Checked {
         self.db.put(collection, doc, durability)
     }
 
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        self.db.commit()
+    }
+
     fn wal_mark(&self) -> WalMark {
         self.db.wal_mark()
     }
@@ -320,17 +324,8 @@ fn a_rejected_document_unpins_its_blob() {
     assert_eq!(db.held(), 0);
     assert!(db.blobs().pin_set().pinned().is_empty());
     // The blob stays stored, an orphan GC reclaims (SPEC §9.5).
-    assert!(
-        db.blobs()
-            .store()
-            .contains(
-                &db.blobs()
-                    .put_blob(&b"orphan"[..], &PutBlobOptions::default())
-                    .unwrap()
-                    .0
-            )
-            .unwrap()
-    );
+    let stored = db.blobs().store().manifest(blob_id_of(b"orphan")).unwrap();
+    assert!(stored.is_some(), "the blob of a rejected put is not stored");
 }
 
 /// Where a crash of `put(doc, blob)` happens.
@@ -490,6 +485,10 @@ impl DocumentLog for FailsAfterAppending {
         Err(DatabaseError::Poisoned)
     }
 
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        self.0.commit()
+    }
+
     fn wal_mark(&self) -> WalMark {
         self.0.wal_mark()
     }
@@ -547,10 +546,11 @@ fn a_put_whose_bind_stays_unknown_logs_nothing() {
         };
         assert!(e.is_bind_outcome_unknown());
         assert_eq!(db.log().wal_mark(), before);
-        // The whole budget was spent retrying, on the manual clock.
-        assert_eq!(
-            clock.sleeps().iter().sum::<Duration>(),
-            Duration::from_secs(10)
+        // The budget was spent retrying, on the manual clock, up to the wait that would have reached its end.
+        let waited = clock.sleeps().iter().sum::<Duration>();
+        assert!(
+            waited < Duration::from_secs(10) && waited > Duration::from_secs(5),
+            "{waited:?}"
         );
         assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
         drop(db);
@@ -814,4 +814,91 @@ proptest::proptest! {
             }
         }
     }
+}
+
+/// A log that, like a put whose memtable is full, first commits (syncing the WAL, which makes earlier records durable)
+/// and then fails; and whose commit syncs the WAL, then fails, as a commit that fails after its WAL sync does.
+struct SyncsThenFails(Database);
+
+impl DocumentLog for SyncsThenFails {
+    fn put(
+        &mut self,
+        collection: &str,
+        doc: &Document,
+        durability: Durability,
+    ) -> Result<(), DatabaseError> {
+        if doc.id() == "rejected" {
+            self.0.commit()?;
+            return Err(DatabaseError::NoSuchCollection {
+                name: collection.to_owned(),
+            });
+        }
+        self.0.put(collection, doc, durability)
+    }
+
+    fn wal_mark(&self) -> WalMark {
+        self.0.wal_mark()
+    }
+
+    fn durable_mark(&self) -> WalMark {
+        self.0.durable_mark()
+    }
+
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        self.0.commit()?;
+        Err(DatabaseError::Poisoned)
+    }
+}
+
+/// A put or a commit that fails after making earlier records durable releases their pins (only theirs).
+#[test]
+fn a_failed_put_or_commit_releases_what_it_made_durable() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = BlobDatabase::new(
+        SyncsThenFails(database(&dir.path().join("a.persia"))),
+        Blobs::new(Arc::new(MemoryBlobStore::new())),
+    );
+    let pinned = |db: &BlobDatabase<MemoryBlobStore, SyncsThenFails>, r: &BlobRef| {
+        db.blobs().pin_set().is_pinned(Pinned::Blob(r.blob_id()))
+    };
+    let a = db
+        .put(
+            "c",
+            &doc("a"),
+            Blob::from_reader(&b"first"[..]),
+            Durability::Buffered,
+        )
+        .unwrap();
+    assert!(pinned(&db, &a));
+    let error = db
+        .put(
+            "c",
+            &doc("rejected"),
+            Blob::from_reader(&b"rejected"[..]),
+            Durability::Buffered,
+        )
+        .unwrap_err();
+    assert!(matches!(error, Error::Database(_)));
+    assert_eq!(db.held(), 0);
+    assert!(
+        !pinned(&db, &a),
+        "the earlier record is durable: its pins go"
+    );
+    assert!(db.blobs().pin_set().pinned().is_empty());
+
+    let b = db
+        .put(
+            "c",
+            &doc("b"),
+            Blob::from_reader(&b"second"[..]),
+            Durability::Async,
+        )
+        .unwrap();
+    assert!(pinned(&db, &b));
+    assert!(db.commit().is_err());
+    assert_eq!(db.held(), 0);
+    assert!(
+        !pinned(&db, &b),
+        "the failed commit synced the WAL: its pins go"
+    );
 }

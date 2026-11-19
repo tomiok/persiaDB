@@ -66,8 +66,12 @@ pub struct FaultyStore {
     pins: OnceLock<Arc<PinSet>>,
 }
 
-fn failed(what: &str) -> Error {
-    Error::Read(std::io::Error::other(what.to_owned()))
+/// An injected store fault: a store-side error, never `Error::Read` (which is the caller's reader failing).
+fn failed(what: &'static str) -> Error {
+    Error::Corrupt {
+        encoding: "injected store fault",
+        what,
+    }
 }
 
 impl FaultyStore {

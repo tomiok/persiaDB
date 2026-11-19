@@ -27,7 +27,7 @@ use std::time::Duration;
 
 use persia::internal::blob::{Blobs, PutBlobOptions, WINDOW_MAX_CHUNKS};
 use persia::internal::pins::{PinSet, Pinned};
-use persia::internal::retry::{MAX_BACKOFF, ManualRetryClock};
+use persia::internal::retry::{FIRST_BACKOFF, MAX_BACKOFF, ManualRetryClock, RetryClock};
 use persia_blob::{
     BlobId, BlobStore, ChunkSize, Error, MemoryBlobStore, SMALL_BLOB_MAX, UploadId, blob_id_of,
 };
@@ -332,14 +332,96 @@ fn a_bind_that_stays_unknown_for_its_budget_fails_and_discards_nothing() {
             .filter(|c| matches!(c, Call::Bind { .. }))
             .count();
         let sleeps = clock.sleeps();
-        // One wait between two attempts, the whole budget waited, none longer than the cap.
+        // One wait between two attempts, none longer than the cap.
         assert_eq!(binds, sleeps.len() + 1);
-        assert_eq!(sleeps.iter().sum::<Duration>(), budget);
         assert!(sleeps.iter().all(|s| *s <= MAX_BACKOFF));
-        // Growing: each full wait at least the half of the next's (equal jitter), until the cap.
-        assert!(sleeps[1] >= sleeps[0] / 2 && sleeps[4] > sleeps[0]);
+        // Every attempt starts before the deadline (attempt k starts after the first k waits); the wait that would
+        // have reached it was not waited.
+        assert!(starts(&sleeps).iter().all(|at| *at < budget), "{sleeps:?}");
+        assert!(sleeps.iter().sum::<Duration>() > budget.checked_sub(MAX_BACKOFF).unwrap());
+        // Equal jitter: wait n lies in [full/2, full], full = FIRST_BACKOFF·2^n capped at MAX_BACKOFF.
+        for (n, wait) in sleeps.iter().enumerate() {
+            let full = FIRST_BACKOFF
+                .saturating_mul(1 << n.min(20))
+                .min(MAX_BACKOFF);
+            assert!(
+                *wait >= full / 2 && *wait <= full,
+                "wait {n}: {wait:?} outside {:?}..={full:?}",
+                full / 2
+            );
+        }
         assert!(!calls.iter().any(|c| matches!(c, Call::Discard(_))));
         assert!(blobs.pin_set().pinned().is_empty());
+    }
+}
+
+/// When attempt k starts, from the waits before it.
+fn starts(sleeps: &[Duration]) -> Vec<Duration> {
+    let mut at = Duration::ZERO;
+    let mut out = vec![at];
+    for s in sleeps {
+        at += *s;
+        out.push(at);
+    }
+    out
+}
+
+/// A clock whose waits last three times what was asked, like an overloaded machine.
+#[derive(Debug, Default)]
+struct Overshooting(ManualRetryClock);
+
+impl RetryClock for Overshooting {
+    fn now(&self) -> Duration {
+        self.0.now()
+    }
+
+    fn sleep(&self, duration: Duration) {
+        self.0.sleep(duration * 3);
+    }
+}
+
+/// A wait that overruns the deadline is checked after it: no attempt starts at or after the deadline.
+#[test]
+fn no_attempt_starts_at_or_after_the_deadline() {
+    for budget in [
+        Duration::from_millis(1),
+        Duration::from_millis(120),
+        Duration::from_secs(7),
+    ] {
+        let store = FaultyStore::new(Faults {
+            unknown_binds: u32::MAX,
+            ..Faults::default()
+        });
+        let clock = Arc::new(Overshooting::default());
+        let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(11))
+            .with_retry_clock(Arc::clone(&clock) as _);
+        let opts = PutBlobOptions {
+            bind_budget: budget,
+            ..options(MIN)
+        };
+        assert!(
+            blobs
+                .put_blob(&bytes(10, 6)[..], &opts)
+                .unwrap_err()
+                .is_bind_outcome_unknown()
+        );
+        let sleeps = clock.0.sleeps();
+        let binds = store
+            .calls()
+            .iter()
+            .filter(|c| matches!(c, Call::Bind { .. }))
+            .count();
+        let starts = starts(&sleeps);
+        // Either the wait before the deadline was not waited (one attempt per start), or the last wait overran it and
+        // the check after it caught that (no attempt followed it).
+        assert!(
+            binds == sleeps.len() + 1 || (binds == sleeps.len() && starts[binds] >= budget),
+            "{budget:?}: {starts:?}"
+        );
+        assert!(
+            starts[..binds].iter().all(|at| *at < budget),
+            "{budget:?}: {starts:?}"
+        );
     }
 }
 
@@ -516,10 +598,10 @@ fn pins_of_one_id_are_counted() {
     let b = set.pin([id]);
     drop(a);
     assert!(set.is_pinned(id));
-    assert_eq!(set.unless_pinned(id, || ()), None);
+    assert_eq!(set.unless_pinned(id, |_| ()), None);
     drop(b);
     assert!(!set.is_pinned(id));
-    assert_eq!(set.unless_pinned(id, || 1), Some(1));
+    assert_eq!(set.unless_pinned(id, |_| 1), Some(1));
 }
 
 /// The sweep's check and delete are one step: a pin asked for while the delete runs waits for it.
@@ -529,7 +611,7 @@ fn a_pin_waits_for_a_delete_under_the_lock() {
     let id = Pinned::Upload(UploadId::new(3));
     let (tx, rx) = mpsc::channel();
     let pinner = Arc::clone(&set);
-    let ran = set.unless_pinned(id, || {
+    let ran = set.unless_pinned(id, |_| {
         let thread = std::thread::spawn(move || {
             let pins = pinner.pin([id]);
             tx.send(()).unwrap();
@@ -542,6 +624,20 @@ fn a_pin_waits_for_a_delete_under_the_lock() {
     let pins = ran.unwrap().join().unwrap();
     assert!(set.is_pinned(id));
     drop(pins);
+}
+
+/// The sweep's delete reads the pins through the view it is given, without locking the set again: the check that no
+/// pinned blob's manifest names an upload, run inside `delete`, finishes.
+#[test]
+fn a_delete_reads_the_pins_through_its_view() {
+    let set = Arc::new(PinSet::new());
+    let blob = Pinned::Blob(BlobId::from_bytes([2; 32]));
+    let upload = Pinned::Upload(UploadId::new(4));
+    let _pins = set.pin([blob]);
+    let seen = set.unless_pinned(upload, |view| {
+        (view.is_pinned(blob), view.is_pinned(upload), view.pinned())
+    });
+    assert_eq!(seen, Some((true, false, vec![blob])));
 }
 
 // --- Boundaries of put_blob (ROADMAP 9.4.2; SPEC §9.2: small blobs up to 64 KiB, fixed-size chunks) ---------------

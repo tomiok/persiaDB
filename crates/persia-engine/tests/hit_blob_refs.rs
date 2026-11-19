@@ -102,6 +102,23 @@ fn check_hits(db: &Database<SimFile>, expected: &Expected, stage: &str) {
             ..SearchRequest::default()
         };
         let results = views.search(&plan, &request, Pruning::default()).unwrap();
+        // One hit per live document: no superseded version, no document twice.
+        assert_eq!(
+            results.hits.len(),
+            expected.len(),
+            "{stage}: {:?}",
+            request.projection
+        );
+        let locations: std::collections::BTreeSet<_> = results
+            .hits
+            .iter()
+            .map(|h| format!("{:?}", h.location))
+            .collect();
+        assert_eq!(
+            locations.len(),
+            results.hits.len(),
+            "{stage}: a docid twice"
+        );
         let got: Expected = results
             .hits
             .iter()
@@ -127,6 +144,13 @@ fn check_hits(db: &Database<SimFile>, expected: &Expected, stage: &str) {
     assert!(
         !relaxed.hits.is_empty(),
         "{stage}: the relaxed search found nothing"
+    );
+    let ids: std::collections::BTreeSet<_> =
+        relaxed.hits.iter().map(|h| h.hit.document.id()).collect();
+    assert_eq!(
+        ids.len(),
+        relaxed.hits.len(),
+        "{stage}: a relaxed hit twice"
     );
     for hit in &relaxed.hits {
         let d = &hit.hit.document;
