@@ -558,14 +558,18 @@ impl<V: Vfs> LocalStorage<V> {
                         continue;
                     };
                     // Only matching names reach a `stat`: temporary files and other prefixes never do.
-                    let size = match self.vfs.entry_kind(&dir.join(&entry.name)) {
-                        Ok(EntryKind::File { len }) => len,
+                    let (size, last_modified) = match self.vfs.entry_kind(&dir.join(&entry.name)) {
+                        Ok(EntryKind::File { len, modified }) => (len, modified),
                         // Deleted, or replaced by something else, since the directory was read.
                         Ok(_) => continue,
                         Err(err) if err.kind() == io::ErrorKind::NotFound => continue,
                         Err(err) => return Err(err),
                     };
-                    out.push(ObjectMeta { key, size });
+                    out.push(ObjectMeta {
+                        key,
+                        size,
+                        last_modified,
+                    });
                 }
                 _ => {}
             }

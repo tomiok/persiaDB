@@ -451,6 +451,8 @@ impl Vfs for SimFs {
             Node::Dir => EntryKind::Dir,
             Node::File(ino) => EntryKind::File {
                 len: state.file(ino)?.file_len()?,
+                // Simulated files keep no times.
+                modified: None,
             },
         })
     }

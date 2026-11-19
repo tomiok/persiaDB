@@ -380,3 +380,26 @@ fn a_listing_outside_the_prefix_never_reaches_another_upload() {
     store.discard_upload(drop.upload_id()).unwrap();
     assert_eq!(store.staged_chunks(keep.upload_id()).unwrap().len(), 3);
 }
+
+#[test]
+fn staged_chunks_report_when_they_were_written() {
+    use persia_storage::retry::ManualClock;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+    let store = RemoteBlobStore::new(MemoryStorage::with_clock(Arc::clone(&clock) as _));
+    let up = UploadId::new(4);
+    store.stage_chunk(up, 0, b"abcd").unwrap();
+    clock.advance(Duration::from_secs(5));
+    store.stage_chunk(up, 1, b"ef").unwrap();
+    let times: Vec<_> = store
+        .staged_chunks(up)
+        .unwrap()
+        .into_iter()
+        .map(|c| c.last_modified)
+        .collect();
+    assert_eq!(
+        times,
+        [Some(UNIX_EPOCH), Some(UNIX_EPOCH + Duration::from_secs(5))]
+    );
+}

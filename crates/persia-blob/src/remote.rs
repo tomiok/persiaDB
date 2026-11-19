@@ -101,7 +101,7 @@ impl<S: Storage> RemoteBlobStore<S> {
         &self.storage
     }
 
-    /// The chunks staged under `upload_id`, by index, with their lengths. Keys under the upload's prefix that Persia
+    /// The chunks staged under `upload_id`, by index, with their lengths and times. Keys under the upload's prefix that Persia
     /// did not write are skipped.
     ///
     /// # Errors
@@ -121,6 +121,7 @@ impl<S: Storage> RemoteBlobStore<S> {
                 } if u == upload_id => Some(StagedChunk {
                     index,
                     size: meta.size,
+                    last_modified: meta.last_modified,
                 }),
                 _ => None,
             })
@@ -151,6 +152,9 @@ pub struct StagedChunk {
     pub index: u32,
     /// The object's length in bytes, as the listing reports it.
     pub size: u64,
+    /// When the object was written, as the listing reports it (`None` when the backend cannot tell): a sweep ages an
+    /// upload from its newest chunk (SPEC §9.5).
+    pub last_modified: Option<std::time::SystemTime>,
 }
 
 impl<S: Storage> BlobStore for RemoteBlobStore<S> {

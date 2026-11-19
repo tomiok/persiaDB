@@ -23,6 +23,8 @@ pub enum EntryKind {
     File {
         /// Its length.
         len: u64,
+        /// Its modification time, where the file system records one (`None` on [`sim::SimFs`]).
+        modified: Option<std::time::SystemTime>,
     },
     /// A directory.
     Dir,
@@ -193,7 +195,10 @@ impl Vfs for RealFs {
     fn entry_kind(&self, path: &Path) -> io::Result<EntryKind> {
         let meta = std::fs::symlink_metadata(path)?;
         Ok(if meta.is_file() {
-            EntryKind::File { len: meta.len() }
+            EntryKind::File {
+                len: meta.len(),
+                modified: meta.modified().ok(),
+            }
         } else if meta.is_dir() {
             EntryKind::Dir
         } else {
@@ -374,10 +379,13 @@ mod tests {
         entries.sort_by(|a, b| a.name.cmp(&b.name));
         let kinds: Vec<_> = entries.iter().map(|e| e.kind).collect();
         assert_eq!(kinds, [FileType::Dir, FileType::File, FileType::Other]);
-        assert_eq!(
+        assert!(matches!(
             RealFs.entry_kind(&dir.path().join("f")).unwrap(),
-            EntryKind::File { len: 3 }
-        );
+            EntryKind::File {
+                len: 3,
+                modified: Some(_)
+            }
+        ));
         assert_eq!(
             RealFs.entry_kind(&dir.path().join("l")).unwrap(),
             EntryKind::Other
