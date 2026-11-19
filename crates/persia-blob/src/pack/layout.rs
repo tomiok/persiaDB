@@ -533,6 +533,12 @@ fn frame_bytes(
     parts: &[&[u8]],
     payload_len: u64,
 ) -> Result<Vec<u8>> {
+    // SPEC §4.4: 0 and u64::MAX are never written, and recovery rejects them.
+    if frame_seq == 0 || frame_seq == u64::MAX {
+        return Err(Error::InvalidManifest {
+            what: "a frame_seq of 0 or u64::MAX",
+        });
+    }
     let encode = |_| Error::InvalidManifest {
         what: "a frame too large to encode",
     };
@@ -721,6 +727,18 @@ mod tests {
         assert_eq!(bytes, b"chunk bytes");
         assert!(decode_frame(&frame, FIRST_FRAME, FrameKind::BlobIndex).is_err());
         assert!(encode_chunk_frame(1, UploadId::new(1), 0, b"").is_err());
+        // frame_seq 0 and u64::MAX are never written (SPEC §4.4).
+        for seq in [0, u64::MAX] {
+            assert!(
+                encode_chunk_frame(seq, UploadId::new(1), 0, b"x").is_err(),
+                "{seq}"
+            );
+            assert!(
+                encode_index_frame(seq, &manifest(b"", 4, 1), &[]).is_err(),
+                "{seq}"
+            );
+        }
+        assert!(encode_chunk_frame(u64::MAX - 1, UploadId::new(1), 0, b"x").is_ok());
     }
 
     #[test]

@@ -125,7 +125,10 @@ fn roll_forward<F: ContainerFile>(
                     && entries.iter().all(|(e, entry): &(BlobId, Entry)| {
                         *e != id && entry.upload_id != manifest.upload_id()
                     });
-                if !fresh || !chunks.iter().all(known) || !chunks_match(pack, &manifest, &chunks) {
+                if !fresh
+                    || !chunks.iter().all(known)
+                    || !chunks_match(pack, &manifest, &chunks, file_len)
+                {
                     break;
                 }
                 entries.push((
@@ -267,7 +270,12 @@ fn index_frame<F: ContainerFile>(pack: &mut Pack<F>, offset: u64, len: u64) -> R
 /// bytes, and its head names the manifest's upload, index `i`, the chunk's length and the manifest's CRC32C. What a
 /// roll-forward checks before it commits an index it found after `log_end` (ADR-0049 item 9); the frames' CRCs were
 /// checked by the scan, or are committed.
-fn chunks_match<F: ContainerFile>(pack: &Pack<F>, manifest: &BlobManifest, chunks: &[u64]) -> bool {
+fn chunks_match<F: ContainerFile>(
+    pack: &Pack<F>,
+    manifest: &BlobManifest,
+    chunks: &[u64],
+    file_len: u64,
+) -> bool {
     let head_len = FRAME_HEADER_LEN.saturating_add(layout::CHUNK_HEAD_LEN);
     chunks.iter().zip(0_u32..).all(|(&offset, index)| {
         let expected = manifest
@@ -295,5 +303,17 @@ fn chunks_match<F: ContainerFile>(pack: &Pack<F>, manifest: &BlobManifest, chunk
                     && u64::from(h.len) == len
                     && h.crc == crc
             })
+            && whole_frame_valid(pack, offset, file_len)
     })
+}
+
+/// Whether the frame at `offset` passes every check of SPEC §4.4, its CRC over the whole payload included, read in
+/// bounded pieces: a committed chunk frame is otherwise only checked when it is read, and a roll-forward must not
+/// publish a blob a later read finds damaged.
+fn whole_frame_valid<F: ContainerFile>(pack: &Pack<F>, offset: u64, file_len: u64) -> bool {
+    let mut read = |at, buf: &mut [u8]| pack.file.read_exact_at(buf, at);
+    matches!(
+        StreamScanner::new(offset, file_len).check_frame(&mut read),
+        Ok(Ok(header)) if header.offset() == offset
+    )
 }

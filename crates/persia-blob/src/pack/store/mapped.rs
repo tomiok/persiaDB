@@ -34,7 +34,15 @@ impl<F> Mapper<F> {
         }
         match (self.map)(&pack.file, FIRST_FRAME_OFFSET..log_end) {
             Ok(window) => pack.window = Some(window),
-            Err(_) => self.failures = self.failures.saturating_add(1),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                // SPEC §4.7: the fallback to pread is logged and counted, as for the container.
+                tracing::warn!(
+                    error = %e,
+                    log_end,
+                    "blob pack remap failed; frames past the previous mapping are read with pread"
+                );
+            }
         }
     }
 }
@@ -198,6 +206,31 @@ mod tests {
         for (m, i, want) in [(&a, 2, &b"89"[..]), (&b, 0, b"abcd"), (&c, 0, b"xyz")] {
             assert_eq!(read_chunk_checked(&store, m, i).unwrap(), want);
         }
+    }
+
+    /// An error found before anything is written (here the `frame_seq` run exhausted) leaves the handle usable.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "PackStore draws its pack id from SystemTime, which Miri's isolation lacks"
+    )]
+    fn an_error_before_any_write_does_not_poison() {
+        let (_fs, store) = store();
+        put(&store, b"first", 8, 1);
+        let m = manifest_of(b"", 8, 2);
+        let saved = {
+            let mut inner = store.write();
+            let pack = inner.pack.as_mut().unwrap();
+            std::mem::replace(&mut pack.next_frame_seq, u64::MAX)
+        };
+        assert!(matches!(
+            store.bind(&m),
+            Err(crate::Error::InvalidManifest { .. })
+        ));
+        assert!(store.stage_chunk(UploadId::new(3), 0, b"x").is_err());
+        assert!(!store.is_poisoned());
+        store.write().pack.as_mut().unwrap().next_frame_seq = saved;
+        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
     }
 
     #[test]

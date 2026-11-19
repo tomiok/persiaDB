@@ -212,15 +212,15 @@ impl Header {
             });
         }
         check_major(&mut peek)?;
+        let start = r.offset();
         let mut ahead = r.clone();
         let Checksummed(layout) = Checksummed::<Layout>::decode(&mut ahead)?;
         // SPEC §4.2 order: the CRC (checked above), then `incompat_flags`, then `page_size` and reserved bytes.
         let unknown = layout.header.incompat_flags & !rules.known_incompat;
         if unknown != 0 {
             return Err(Error::Unsupported {
-                offset: ahead
-                    .offset()
-                    .saturating_sub(crate::widen::u64_from_usize(HEADER_LEN - INCOMPAT_OFFSET)),
+                // The decode read all HEADER_LEN bytes from `start`, so the field's offset fits.
+                offset: start.saturating_add(crate::widen::u64_from_usize(INCOMPAT_OFFSET)),
                 reason: Unsupported::IncompatFlags { flags: unknown },
             });
         }

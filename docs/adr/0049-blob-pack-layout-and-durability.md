@@ -82,8 +82,8 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
    header and both new-pack slots written to `<name>.persia.blobs.tmp.<nonce>.<n>`, synced, hard-linked to the pack
    name (which fails if it exists), then, whatever happened since the temporary file was created, the temporary name
    removed and the directory synced (as `Container::create_in` does), all before the first chunk is appended. A crash
-   leaves no pack or a complete empty one (and possibly a stale temporary file); a failure the process survives leaves
-   no temporary name. A failure after the link, or a link that finds the name taken (a second writer), stops the
+   leaves no pack or a complete empty one (and possibly a stale temporary file); a failure the process survives removes
+   the temporary name unless that removal fails too, which leaves a stale temporary file for the sweep (ROADMAP 9.2.6). A failure after the link, or a link that finds the name taken (a second writer), stops the
    handle; a reopen finds what the path holds. The pack's directory sync is its own: the pack is not created with the
    container.
 8. **Locking.** The pack takes no lock: only the container's writer, holding the container's writer lock (or, on

@@ -342,8 +342,8 @@ fn parent_of(path: &Path) -> &Path {
 
 /// Creates a new, empty pack at `path` durably (SPEC §9.3, §4.5.2) and returns it open read-write: header and slots
 /// written to a temporary file and synced, the file hard-linked to `path` (which fails if the name exists), then the
-/// temporary name removed and the directory synced whatever happened, as `Container::create_in` does, so no
-/// temporary name is left behind by a failure the process survives.
+/// temporary name removed and the directory synced whatever happened, as `Container::create_in` does. A failure the
+/// process survives leaves a stale temporary file only if that removal fails too (the sweep, ROADMAP 9.2.6, takes it).
 fn create_pack<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
@@ -584,10 +584,16 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
         self.ensure_pack(&mut w)?;
         // Appended, synced, committed and synced under the read side only: readers are not blocked by the syncs,
         // and see the entry only once it is published below.
+        // Encoded and checked first: an error here wrote nothing, so the handle stays usable.
+        let (frame, log_end) = {
+            let inner = self.read();
+            let pack = inner.pack.as_ref().ok_or(Error::PackPoisoned)?;
+            prepare_index(pack, manifest, &chunks)?
+        };
         let committed = {
             let inner = self.read();
             let pack = inner.pack.as_ref().ok_or(Error::PackPoisoned)?;
-            commit(pack, manifest, &chunks)
+            commit(pack, &frame, log_end)
         };
         let (sb, slot) = match committed {
             Ok(done) => done,
@@ -710,23 +716,34 @@ fn staged_bytes<F: ContainerFile>(
     Ok(Some(bytes.to_vec()))
 }
 
-/// Appends the index frame of `manifest` (its chunks at `chunks`) at `pack.end` and commits it (SPEC §9.3, §18.9):
-/// sync the data, write the inactive slot, sync again. Returns the new superblock and its slot, which the caller
-/// publishes; `pack` is not changed. An error before the slot write means the blob is not bound; from the slot write
-/// on its outcome is unknown ([`Error::BindOutcomeUnknown`]).
-fn commit<F: ContainerFile>(
+/// The index frame of `manifest` (its chunks at `chunks`) to append at `pack.end`, and the end it gives the log. Writes
+/// nothing.
+fn prepare_index<F: ContainerFile>(
     pack: &Pack<F>,
     manifest: &BlobManifest,
     chunks: &[u64],
-) -> Result<(PackSuperblock, Slot)> {
+) -> Result<(Vec<u8>, u64)> {
     let frame = encode_index_frame(pack.take_seq()?, manifest, chunks)?;
+    let log_end = pack
+        .end
+        .checked_add(u64_from_usize(frame.len()))
+        .ok_or_else(|| corrupt("the pack's offsets are exhausted"))?;
+    Ok((frame, log_end))
+}
+
+/// Appends the index frame `frame` (from [`prepare_index`]) at `pack.end` and commits it (SPEC §9.3, §18.9): sync the
+/// data, write the inactive slot, sync again. Returns the new superblock and its slot, which the caller publishes;
+/// `pack` is not changed. An error before the slot write means the blob is not bound; from the slot write on its
+/// outcome is unknown ([`Error::BindOutcomeUnknown`]).
+fn commit<F: ContainerFile>(
+    pack: &Pack<F>,
+    frame: &[u8],
+    log_end: u64,
+) -> Result<(PackSuperblock, Slot)> {
     let index_off = pack.end;
     let index_len = u64_from_usize(frame.len());
-    let log_end = index_off
-        .checked_add(index_len)
-        .ok_or_else(|| corrupt("the pack's offsets are exhausted"))?;
     pack.file
-        .write_all_at(&frame, index_off)
+        .write_all_at(frame, index_off)
         .map_err(io_err("append"))?;
     pack.file.sync_data().map_err(io_err("sync"))?;
     let blob_count = pack.sb.blob_count.saturating_add(1);

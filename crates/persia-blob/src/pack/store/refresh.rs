@@ -53,7 +53,8 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             return Err(corrupt("the same seq with other contents"));
         }
         if new.seq < old.seq
-            || new.log_end < old.log_end
+            // Every commit appends its index frame: a newer seq always moves log_end forward.
+            || new.log_end <= old.log_end
             || new.generation != old.generation
             || new.pack_id != old.pack_id
         {

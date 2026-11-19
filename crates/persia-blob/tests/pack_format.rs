@@ -199,8 +199,13 @@ proptest! {
         seed in any::<u64>(),
     ) {
         let m = manifest_of(&data, chunk, upload);
-        let offsets: Vec<u64> = (0..u64::from(m.chunk_count()))
-            .map(|i| FIRST_FRAME + 8 * (seed.wrapping_mul(i + 1) % 1_000_000))
+        // Distinct offsets (the decoder rejects two chunks in one frame), in a seeded order: a permutation of
+        // 0..n by a stride coprime with n.
+        let n = u64::from(m.chunk_count());
+        let stride = (1..=n.max(1)).rev().find(|s| gcd(*s, n.max(1)) == 1 && *s != 0).unwrap_or(1);
+        let base = seed % 1000;
+        let offsets: Vec<u64> = (0..n)
+            .map(|i| FIRST_FRAME + 8 * (base * 1000 + (i * stride + seed) % n))
             .collect();
         let at = FIRST_FRAME + 8 * 1_000_000;
         let frame = encode_index_frame(seq_of(seed), &m, &offsets).unwrap();
@@ -208,20 +213,35 @@ proptest! {
         prop_assert_eq!(decode_index_payload(payload, at).unwrap(), (m, offsets));
     }
 
-    /// Hostile bytes: the decoders return errors, never panic, and never accept a changed frame.
+    /// Hostile bytes: the decoders never panic, and reject what cannot be a valid encoding: random bytes are not a
+    /// frame (the CRC), a header overwritten by them fails its CRC, and a payload shorter than its head is refused. What
+    /// they do accept re-encodes to the same bytes.
     #[test]
-    fn hostile_bytes_never_panic(
+    fn hostile_bytes_are_rejected_or_round_trip(
         bytes in proptest::collection::vec(any::<u8>(), 0..400),
         at in any::<u64>(),
     ) {
-        let _ = decode_chunk_payload(&bytes);
-        let _ = decode_index_payload(&bytes, at);
-        let _ = decode_frame(&bytes, at, FrameKind::BlobChunk);
+        match decode_chunk_payload(&bytes) {
+            Ok((head, chunk)) => {
+                prop_assert!(bytes.len() > 32);
+                prop_assert_eq!(u64::from(head.len), chunk.len() as u64);
+            }
+            Err(e) => prop_assert!(e.is_corruption()),
+        }
+        if bytes.len() < 32 {
+            prop_assert!(decode_chunk_payload(&bytes).is_err());
+        }
+        if let Ok((m, offsets)) = decode_index_payload(&bytes, at) {
+            let reencoded = encode_index_frame(1, &m, &offsets).unwrap();
+            prop_assert_eq!(&reencoded[24..24 + bytes.len()], &bytes[..]);
+        }
+        // A random frame passes its CRC with probability 2^-32: treat a pass as a finding.
+        prop_assert!(decode_frame(&bytes, at, FrameKind::BlobChunk).is_err());
         let mut prefix = new_pack_prefix(UUID, PACK_ID).unwrap();
         let end = bytes.len().min(prefix.len());
         prefix[..end].copy_from_slice(&bytes[..end]);
-        if let Ok(p) = decode_prefix(&prefix) {
-            let _ = p.superblock.check_bounds(at);
+        if end > 0 && prefix[..end] != new_pack_prefix(UUID, PACK_ID).unwrap()[..end] {
+            prop_assert!(decode_prefix(&prefix).is_err(), "a changed header passes its CRC");
         }
     }
 
@@ -356,4 +376,8 @@ proptest! {
         let prefix = golden_one_blob();
         prop_assert!(decode_prefix(&prefix[..len]).unwrap_err().is_corruption());
     }
+}
+
+fn gcd(a: u64, b: u64) -> u64 {
+    if b == 0 { a } else { gcd(b, a % b) }
 }

@@ -188,7 +188,8 @@ fuzz_target!(|data: &[u8]| {
             if len & 0x8000 != 0 {
                 bytes.truncate(bytes.len().saturating_sub(n).max(1));
             } else {
-                bytes.extend(tail.iter().copied().cycle().take(n));
+                // Zeros: what a length that reached the disk before its data reads as (SPEC §4.4).
+                bytes.resize(bytes.len() + n, 0);
             }
             edits = tail;
         }

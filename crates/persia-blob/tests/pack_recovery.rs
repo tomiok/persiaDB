@@ -659,3 +659,47 @@ fn refresh_rejects_the_same_seq_with_other_contents() {
     f.write_all_at(&sb.encode(), at).unwrap();
     assert!(reader.refresh().unwrap_err().is_corruption());
 }
+
+// --- PR review fix-ups ---
+
+/// A cut bind whose chunk frame lies below `log_end` (staged before an earlier commit) and is damaged there: the
+/// roll-forward checks every named chunk frame whole, so it does not publish a blob a read would find damaged.
+#[test]
+fn a_cut_bind_with_a_damaged_committed_chunk_is_not_rolled_forward() {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    let b = manifest_of(b"staged early", 4, 2);
+    stage(&store, &b, b"staged early").unwrap();
+    // Commits b's chunk frames below log_end, in no index yet.
+    let a = put(&store, b"committed", 4, 1);
+    fs.set_fault(Some(SimFault::FailAt(fs.mutations() + 2)));
+    assert!(store.bind(&b).unwrap_err().is_bind_outcome_unknown());
+    drop(store);
+    let mut bytes = fs.crash(CrashLoss::Nothing).read(Path::new(PACK)).unwrap();
+    // b's first chunk frame is the first frame of the pack: damage a byte of its chunk.
+    bytes[FIRST_FRAME as usize + 24 + 32] ^= 1;
+    let fs = with_pack(&bytes);
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    assert_eq!(store.recovery().rolled_forward, 0);
+    assert_eq!(store.manifest(b.blob_id()).unwrap(), None);
+    assert_eq!(read_all(&store, &a).unwrap(), b"committed");
+}
+
+/// Every commit appends its index frame, so a newer seq that leaves `log_end` where it was is a damaged slot.
+#[test]
+fn refresh_rejects_a_newer_seq_that_does_not_move_log_end() {
+    let (bytes, _, _) = two_blobs();
+    let fs = with_pack(&bytes);
+    let reader = open(&fs, PackMode::ReadOnly).unwrap();
+    let p = decode_prefix(&bytes).unwrap();
+    let mut sb = p.superblock;
+    sb.seq += 1;
+    let at = if p.slot == persia_format::superblock::Slot::A {
+        8192
+    } else {
+        4096
+    };
+    let f = fs.open(Path::new(PACK), true).unwrap();
+    f.write_all_at(&sb.encode(), at).unwrap();
+    assert!(reader.refresh().unwrap_err().is_corruption());
+}
