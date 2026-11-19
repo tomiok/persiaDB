@@ -42,6 +42,7 @@ pub use remote::RemoteBlobStore;
 //
 
 // -- documents (9.4) --
-// put_blob and get_blob_range helpers that belong in this crate (SPEC §9.6): their lines go here, and only here.
+// What the blobs-with-documents batch needs from this crate: `put_blob` and `get_blob_range` themselves live in
+// `persia::internal::blob` (ADR-0051), so only this re-export is here.
 // The value type `put_blob` returns (it lives in `persia-format`, which `persia` reaches only through this crate).
 pub use persia_format::BlobRef;

@@ -2,7 +2,8 @@
 
 - Status: proposed
 - Date: 2026-11-18
-- Related: SPEC §7.5.1, §8.2.1, §9.2, §9.5, §9.6, §18.9; ROADMAP 9.4.1–9.4.3, 9.5.1, 9.5.2, 9.5.6; ADR-0034, ADR-0041
+- Related: SPEC §7.5.1, §8.2.1, §9.2, §9.5, §9.6, §18.9; ROADMAP 9.4.1–9.4.3, 9.5.1, 9.5.2, 9.5.6; ADR-0034 (amended
+  by item 3: "retry until it answers" becomes a time budget), ADR-0041
 
 ## Context
 

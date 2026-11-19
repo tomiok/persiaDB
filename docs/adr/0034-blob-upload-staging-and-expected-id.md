@@ -1,7 +1,8 @@
 # ADR-0034: Blob upload staging, binding, and the expected-id API
 
 - Status: accepted; amended 2026-11-07 after review (items 2–4, 6, 7: chunks never overwritten, unknown binding
-  outcomes, read checks, GC pins)
+  outcomes, read checks, GC pins); amended by ADR-0051 (item 3: an unknown binding outcome is retried within a time
+  budget, then `put_blob` fails)
 - Date: 2026-11-07
 - Related: SPEC §9.1–§9.6, §10.1, §10.4, §18.8; ROADMAP 9.1.0–9.1.3, 9.2, 9.3, 9.5; ADR-0002, ADR-0011, ADR-0024, ADR-0035
 

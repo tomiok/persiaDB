@@ -22,8 +22,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   blob is durable, or a given `BlobRef` is found bound and pinned, at every WAL durability (ROADMAP 9.4.1, 9.4.2;
   SPEC §9.5, §9.6; ADR-0051). The writer's pin set keeps GC off a blob until the document referencing it is durable;
   an unknown bind outcome is retried with backoff within `bind_budget` (default 60 s).
-- `persia-engine`: `Database::wal_mark` and `Database::durable_mark`: whether an operation's WAL record is covered by a
-  sync (ROADMAP 9.4.1).
+- `persia-engine`: `Database::wal_mark` and `Database::durable_mark` return WAL positions (`WalMark`): the end of what
+  is logged and of what a sync covers. An operation is durable once `durable_mark` reaches the `wal_mark` read after
+  it (ROADMAP 9.4.1).
 - `persia-blob`: errors `BlobIdMismatch` and `InvalidBlobRef`; `read_manifest_range` (ROADMAP 9.4.2).
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
