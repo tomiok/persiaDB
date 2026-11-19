@@ -650,7 +650,11 @@ fn refresh_rejects_the_same_seq_with_other_contents() {
     // The active slot rewritten with its own seq and another blob_count: two commits never share a seq.
     let mut sb = p.superblock;
     sb.blob_count -= 1;
-    let at = if p.slot == persia_format::superblock::Slot::A { 4096 } else { 8192 };
+    let at = if p.slot == persia_format::superblock::Slot::A {
+        4096
+    } else {
+        8192
+    };
     let f = fs.open(Path::new(PACK), true).unwrap();
     f.write_all_at(&sb.encode(), at).unwrap();
     assert!(reader.refresh().unwrap_err().is_corruption());
