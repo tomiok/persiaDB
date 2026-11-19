@@ -263,10 +263,20 @@ fn pins_are_held_until_the_document_is_durable() {
 
     for level in [Durability::Buffered, Durability::Async] {
         let a = db
-            .put("c", &doc("a"), Blob::from_reader(&b"first"[..]), level)
+            .put(
+                "c",
+                &doc("a"),
+                Blob::from_reader(std::io::Cursor::new(format!("first {level:?}"))),
+                level,
+            )
             .unwrap();
         let b = db
-            .put("c", &doc("b"), Blob::from_reader(&b"second"[..]), level)
+            .put(
+                "c",
+                &doc("b"),
+                Blob::from_reader(std::io::Cursor::new(format!("second {level:?}"))),
+                level,
+            )
             .unwrap();
         assert_eq!(db.held(), 2, "{level:?}");
         assert!(pinned(&db, &a) && pinned(&db, &b));
@@ -288,7 +298,7 @@ fn pins_are_held_until_the_document_is_durable() {
     }
 }
 
-/// A put that fails before its record is appended (the memtable rejects the document) unpins its blob.
+/// A put that fails before its record is appended (no such collection) unpins its blob.
 #[test]
 fn a_rejected_document_unpins_its_blob() {
     let dir = tempfile::tempdir().unwrap();
@@ -508,4 +518,56 @@ fn a_put_that_fails_after_appending_keeps_its_pins() {
             .pin_set()
             .is_pinned(Pinned::Blob(blob_id_of(b"maybe logged")))
     );
+}
+
+/// A bind whose outcome stays unknown fails the put: nothing is logged, nothing discarded.
+#[test]
+fn a_put_whose_bind_stays_unknown_logs_nothing() {
+    for lands in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.persia");
+        let store = FaultyStore::new(Faults {
+            unknown_binds: u32::MAX,
+            unknown_lands: lands,
+            ..Faults::default()
+        });
+        let mut db = BlobDatabase::new(database(&path), Blobs::new(Arc::clone(&store)));
+        let before = db.log().wal_mark();
+        let data = bytes(200_000, 8);
+        let blob = Blob::from_reader(&data[..]).with_options(PutBlobOptions {
+            bind_attempts: 3,
+            ..options()
+        });
+        let Err(Error::Blob(e)) = db.put("c", &doc("x"), blob, Durability::Fsync) else {
+            panic!("the put went through");
+        };
+        assert!(e.is_bind_outcome_unknown());
+        assert_eq!(db.log().wal_mark(), before);
+        assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
+        drop(db);
+        assert!(documents(&Database::open(&path, DatabaseOptions::default()).unwrap()).is_empty());
+    }
+}
+
+/// A stored reference whose size or chunk size differs from the bound blob's is corrupt and logs nothing.
+#[test]
+fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = BlobDatabase::new(
+        database(&dir.path().join("a.persia")),
+        Blobs::new(Arc::new(MemoryBlobStore::new())),
+    );
+    let (r, _pins) = db.put_blob(&b"0123456789"[..], &options()).unwrap();
+    for (size, chunk) in [(11, r.chunk_size()), (10, r.chunk_size() + 1)] {
+        let wrong =
+            BlobRef::new(r.blob_id(), size, r.mime(), chunk, r.user_meta().clone()).unwrap();
+        let before = db.log().wal_mark();
+        let Err(Error::Blob(e)) = db.put("c", &doc("x"), Blob::Stored(wrong), Durability::Fsync)
+        else {
+            panic!("a mismatched reference was logged");
+        };
+        assert!(e.is_corruption());
+        assert_eq!(db.log().wal_mark(), before);
+    }
+    assert!(documents(db.log()).is_empty());
 }

@@ -171,7 +171,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             let outcome = Self::bind(options, || self.store.bind(&manifest));
             (manifest, outcome)
         };
-        let blob_ref = self.bound(&manifest, outcome, options)?;
+        let blob_ref = self.bound(&manifest, outcome, options, &mut pins)?;
         Ok((blob_ref, pins))
     }
 
@@ -182,9 +182,16 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// # Errors
     /// As [`BlobStore::contains`]: [`Error::Corrupt`] when the manifest bound under the id does not match `blob_ref`.
     pub fn pin_contained(&self, blob_ref: &BlobRef) -> Result<Option<Pins>> {
-        // Pinned before the lookup (SPEC §9.5), so GC cannot sweep it between the check and the document's log.
-        let pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
-        Ok(self.store.contains(blob_ref)?.then_some(pins))
+        // Pinned before the lookup (SPEC §9.5), so GC cannot sweep it between the check and the document's log. The
+        // lookup is `BlobStore::contains`'s (the manifest, checked against the reference), and pins the upload the
+        // manifest names too, so its chunks are pinned beside it (ADR-0051 item 5).
+        let mut pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
+        let Some(manifest) = self.store.manifest(blob_ref.blob_id())? else {
+            return Ok(None);
+        };
+        manifest.check_ref(blob_ref)?;
+        pins.add(Pinned::Upload(manifest.upload_id()));
+        Ok(Some(pins))
     }
 
     /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6), every chunk read checked ([`read_range`]).
@@ -289,6 +296,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         manifest: &BlobManifest,
         (outcome, unknown): (Result<BindOutcome>, bool),
         options: &PutBlobOptions,
+        pins: &mut Pins,
     ) -> Result<BlobRef> {
         match outcome? {
             BindOutcome::Bound => reference(
@@ -307,6 +315,10 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 }
                 // The bound manifest may be this upload's own, from an attempt whose outcome was unknown: its chunks
                 // are the blob's then. After an unknown outcome nothing is discarded anyway (SPEC §9.4).
+                // The bound blob's chunks are under its own upload: pinned beside its id (ADR-0051 item 5).
+                if bound.upload_id() != manifest.upload_id() {
+                    pins.add(Pinned::Upload(bound.upload_id()));
+                }
                 if !unknown && bound.upload_id() != manifest.upload_id() {
                     self.discard(manifest.upload_id());
                 }

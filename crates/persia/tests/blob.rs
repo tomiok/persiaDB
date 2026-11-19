@@ -150,6 +150,8 @@ proptest! {
         prop_assert!(store.calls().contains(&Call::Discard(ub)));
         prop_assert!(!store.calls().contains(&Call::Discard(ua)));
         prop_assert_eq!(store.inner.staged_chunk_count(ub), 0);
+        // The duplicate pins the bound blob's upload too, whose chunks it reads.
+        prop_assert_eq!(pb.ids(), &[Pinned::Upload(ub), Pinned::Blob(b.blob_id()), Pinned::Upload(ua)][..]);
         prop_assert_eq!(blobs.get_blob_range(&b, 0..len as u64).unwrap(), data);
     }
 }
@@ -440,7 +442,19 @@ fn a_reference_the_store_lacks_is_not_found() {
     assert!(other.pin_contained(&r).unwrap().is_none());
     assert!(other.pin_set().pinned().is_empty());
     let pins = blobs.pin_contained(&r).unwrap().unwrap();
-    assert_eq!(pins.ids(), [Pinned::Blob(r.blob_id())]);
+    let upload = upload_of(&blobs.put_blob(&b"x"[..], &options(MIN)).unwrap().1);
+    let bound = blobs
+        .store()
+        .manifest(r.blob_id())
+        .unwrap()
+        .unwrap()
+        .upload_id();
+    assert_ne!(upload, bound);
+    // The blob, and the upload its manifest names.
+    assert_eq!(
+        pins.ids(),
+        [Pinned::Blob(r.blob_id()), Pinned::Upload(bound)]
+    );
 }
 
 #[test]

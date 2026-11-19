@@ -1721,6 +1721,7 @@ fn durable_mark_follows_the_syncs_that_cover_each_record() {
     // A sync that fails leaves the mark where it was.
     let durable = wal.durable_mark();
     wal.append(&record, Durability::Buffered).unwrap();
+    // `sync` writes the buffered chunk (one mutation), then syncs: the sync is the call that fails.
     file.set_fault(Some(SimFault::FailAt(file.mutations() + 1)));
     assert!(wal.sync().is_err());
     assert_eq!(wal.durable_mark(), durable);

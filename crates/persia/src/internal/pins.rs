@@ -20,7 +20,9 @@ use persia_blob::{BlobId, UploadId};
 pub enum Pinned {
     /// The chunks staged under an upload.
     Upload(UploadId),
-    /// A bound blob: its blob manifest, and through it the upload its manifest names.
+    /// A bound blob's manifest. Whoever pins one also pins the upload its manifest names (`put_blob` and
+    /// `pin_contained` do), after reading the manifest; a sweep must therefore not delete an upload's chunks while a
+    /// pinned blob's manifest names it, which it checks under the lock (see [`PinSet::unless_pinned`]).
     Blob(BlobId),
 }
 
@@ -76,6 +78,10 @@ impl PinSet {
     /// Runs `delete` unless `id` is pinned, holding the pin set's lock throughout (SPEC §9.5: checking an object
     /// against the pin set and deleting it is one step), and returns its result; `None` when `id` is pinned and
     /// nothing ran. No pin can be taken while `delete` runs, so `delete` must not call `put_blob` or take a pin.
+    ///
+    /// A `Blob` pin is taken before its manifest is read and its `Upload` pin after, so between the two the upload's
+    /// chunks are protected only by the blob pin: the sweep (ROADMAP 9.5.2), deleting an upload's chunks, must also
+    /// find no pinned blob whose manifest names that upload, checked inside `delete` (which may read manifests).
     pub fn unless_pinned<T>(&self, id: Pinned, delete: impl FnOnce() -> T) -> Option<T> {
         let pinned = self.lock();
         if pinned.contains_key(&id) {

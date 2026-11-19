@@ -45,7 +45,11 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
 5. **The pin set** maps each pinned `Pinned::{Upload, Blob}` to a count of live guards, behind one mutex. A `Pins`
    guard releases its ids on drop. GC uses `pinned()` for its mark and `unless_pinned(id, delete)` for each sweep
    delete: the check and the delete run under the lock, so a pin taken after the mark waits and still protects its
-   object (SPEC §9.5). `delete` must not take pins.
+   object (SPEC §9.5). `delete` must not take pins. A `Blob` pin is taken before its manifest is read, and the upload
+   that manifest names is pinned right after (a duplicate pins the bound blob's upload; `pin_contained` pins the
+   upload of the manifest it found), so a referenced blob's chunks are pinned beside its manifest. Between the two
+   pins only the blob pin protects them: the sweep (ROADMAP 9.5.2), before deleting an upload's chunks under the
+   lock, must also find no pinned blob whose manifest names that upload.
 6. **Order of `put(doc, blob)`.** The blob is stored (`put_blob` returns only after `bind` answered, so it is
    durable) or, for `Blob::Stored`, pinned and then checked with `contains` (`BlobNotStored` otherwise), before the
    document is logged with the reference. This holds for every WAL durability, since no WAL byte names the blob
@@ -70,7 +74,12 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
 - Pins of documents logged `Buffered`/`Async` live until the next commit or `Fsync` operation; a writer that never
   commits holds them. GC therefore never sweeps a blob such a document references.
 - `bind_attempts` bounds the retry SPEC §9.4 states as "until it answers": a caller sees an error instead of a hang;
-  the upload stays for GC, and nothing references the blob.
+  the upload stays for GC, and nothing references the blob. Its pins are dropped then, so only the grace period (24 h) keeps
+  the upload's chunks from a sweep while a late conditional write may still bind them: the grace period must stay far
+  above any such delay.
+- `BlobDatabase::log_mut` exposes the engine's `Database::put`, which takes any `set_blob_ref`; M10's `Db` must not
+  re-expose it (SPEC §9.6).
+- Pins of a poisoned database's appended records stay while the `BlobDatabase` lives; M10 drops it on poison.
 
 ## Alternatives considered
 
