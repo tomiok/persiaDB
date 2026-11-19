@@ -14,7 +14,9 @@
 //! use persia_format::checksum::crc32c;
 //! use persia_storage::MemoryStorage;
 //!
-//! let store = RemoteBlobStore::new(MemoryStorage::new());
+//! # // A manual clock stamps objects, so the example reads no system time (and runs under Miri, whose isolation has none).
+//! # let clock = std::sync::Arc::new(persia_storage::retry::ManualClock::new(std::time::UNIX_EPOCH));
+//! let store = RemoteBlobStore::new(MemoryStorage::with_clock(clock));
 //! let data = b"remote bytes";
 //! let upload = UploadId::new(42);
 //! store.stage_chunk(upload, 0, data)?;
