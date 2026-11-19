@@ -27,7 +27,9 @@ pub trait Clock: Send + Sync {
     /// Blocks the calling thread for `duration`.
     fn sleep(&self, duration: Duration);
 
-    /// The current wall-clock time. The default is [`SystemTime::now`].
+    /// The current wall-clock time. The default is [`SystemTime::now`], so a clock given to
+    /// [`MemoryStorage::with_clock`](crate::MemoryStorage::with_clock) to control its objects' times must implement
+    /// `now` itself (as [`ManualClock`] does): one that only implements `sleep` stamps objects with the system time.
     fn now(&self) -> SystemTime {
         SystemTime::now()
     }

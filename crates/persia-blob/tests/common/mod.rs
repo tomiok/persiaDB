@@ -291,3 +291,55 @@ impl<S: Storage> Storage for KeyFaults<S> {
         self.inner.capabilities()
     }
 }
+
+/// A backend whose answers a test scripts: the next `put_if_absent` answers come from `puts` (then the inner
+/// backend's), the next `gets_not_found` gets answer `NotFound`, and with `unsupported` every `put_if_absent` is
+/// `Unsupported` although `conditional_put` is claimed (a backend that lies about its capabilities).
+#[derive(Debug, Default)]
+pub struct Scripted<S> {
+    pub inner: S,
+    pub puts: std::sync::Mutex<std::collections::VecDeque<PutOutcome>>,
+    pub gets_not_found: std::sync::atomic::AtomicU32,
+    pub unsupported: bool,
+}
+
+impl<S: Storage> Storage for Scripted<S> {
+    fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource> {
+        self.inner.get_range(key, range)
+    }
+    fn get(&self, key: &Key) -> Result<Bytes> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let left = self.gets_not_found.load(SeqCst);
+        if left > 0 {
+            self.gets_not_found.store(left - 1, SeqCst);
+            return Err(persia_storage::Error::NotFound { key: key.clone() });
+        }
+        self.inner.get(key)
+    }
+    fn put(&self, key: &Key, data: Bytes) -> Result<()> {
+        self.inner.put(key, data)
+    }
+    fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
+        if self.unsupported {
+            return Err(persia_storage::Error::Unsupported {
+                op: Op::PutIfAbsent,
+            });
+        }
+        if let Some(answer) = self.puts.lock().unwrap().pop_front() {
+            return Ok(answer);
+        }
+        self.inner.put_if_absent(key, data)
+    }
+    fn list(&self, prefix: &KeyPrefix) -> Result<Vec<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+    fn delete(&self, key: &Key) -> Result<()> {
+        self.inner.delete(key)
+    }
+    fn capabilities(&self) -> Capabilities {
+        Capabilities {
+            conditional_put: true,
+            ..self.inner.capabilities()
+        }
+    }
+}

@@ -35,12 +35,13 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use persia_format::BlobId;
+use persia_format::checksum::crc32c;
 use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_storage::{ErrorKind, Key, PutOutcome, Storage};
 
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
-use crate::store::{BindOutcome, BlobStore, SMALL_BLOB_MAX};
+use crate::store::{BindOutcome, BlobStore, SMALL_BLOB_MAX, check_small};
 
 pub use keys::RemoteKey;
 pub use resume::{ResumeToken, ResumedUpload};
@@ -128,6 +129,39 @@ impl<S: Storage> RemoteBlobStore<S> {
             .collect())
     }
 
+    /// `put_if_absent` of `manifest` at its key, mapped onto [`BindOutcome`] (ADR-0050 item 2).
+    fn put_manifest(&self, manifest: &BlobManifest) -> Result<BindOutcome> {
+        let key = RemoteKey::Manifest(manifest.blob_id()).key()?;
+        let bytes = Bytes::from(manifest.encode());
+        let mut attempt = 1;
+        loop {
+            match self.storage.put_if_absent(&key, bytes.clone()) {
+                Ok(PutOutcome::Created) => return Ok(BindOutcome::Bound),
+                Ok(PutOutcome::AlreadyExists) => match self.storage.get(&key) {
+                    Ok(found) => {
+                        let bound = BlobManifest::decode(&found)?;
+                        bound.check_blob_id(manifest.blob_id())?;
+                        return Ok(BindOutcome::AlreadyBound(bound));
+                    }
+                    // Deleted since (a sweep): the outcome is known, not ours, so writing again is no blind retry.
+                    Err(e @ persia_storage::Error::NotFound { .. }) if attempt >= BIND_ATTEMPTS => {
+                        return Err(storage(e));
+                    }
+                    Err(persia_storage::Error::NotFound { .. }) => {
+                        attempt = attempt.saturating_add(1);
+                    }
+                    Err(e) => return Err(storage(e)),
+                },
+                // Nothing was written: the backend refuses conditional writes outright.
+                Err(e) if e.kind() == ErrorKind::Unsupported => {
+                    return Err(Error::ConditionalPutUnsupported);
+                }
+                // SPEC §9.4: the write may still land; the caller binds again and keeps the chunks.
+                Err(e) => return Err(Error::BindOutcomeUnknown(Box::new(e))),
+            }
+        }
+    }
+
     fn require_conditional_put(&self) -> Result<()> {
         if self.storage.capabilities().conditional_put {
             Ok(())
@@ -198,56 +232,44 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
         })
     }
 
+    /// Binds as the contract says. A plain manifest of one chunk of at most [`SMALL_BLOB_MAX`] bytes is bound only if
+    /// that chunk is staged (one `get`): an unknown outcome of [`BlobStore::bind_small`], wrongly retried with `bind`,
+    /// would otherwise bind a manifest with no chunk behind it, since the inline form stages nothing (ADR-0050).
     fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome> {
         self.require_conditional_put()?;
-        let key = RemoteKey::Manifest(manifest.blob_id()).key()?;
-        let bytes = Bytes::from(manifest.encode());
-        let mut gone = None;
-        for _ in 0..BIND_ATTEMPTS {
-            match self.storage.put_if_absent(&key, bytes.clone()) {
-                Ok(PutOutcome::Created) => return Ok(BindOutcome::Bound),
-                Ok(PutOutcome::AlreadyExists) => match self.storage.get(&key) {
-                    Ok(found) => {
-                        let bound = BlobManifest::decode(&found)?;
-                        bound.check_blob_id(manifest.blob_id())?;
-                        return Ok(BindOutcome::AlreadyBound(bound));
-                    }
-                    Err(e @ persia_storage::Error::NotFound { .. }) => gone = Some(e),
-                    Err(e) => return Err(storage(e)),
-                },
-                // Nothing was written: the backend refuses conditional writes outright.
-                Err(e) if e.kind() == ErrorKind::Unsupported => {
-                    return Err(Error::ConditionalPutUnsupported);
-                }
-                // SPEC §9.4: the write may still land; the caller binds again and keeps the chunks.
-                Err(e) => return Err(Error::BindOutcomeUnknown(Box::new(e))),
+        if !manifest.is_inline() && manifest.chunk_count() == 1 && manifest.size() <= SMALL_BLOB_MAX
+        {
+            let key = RemoteKey::Chunk {
+                upload_id: manifest.upload_id(),
+                index: 0,
+            }
+            .key()?;
+            let staged = self.get(&key)?;
+            let matches = staged.is_some_and(|bytes| {
+                u64_from_usize(bytes.len()) == manifest.size()
+                    && manifest.chunk_crcs().first() == Some(&crc32c(&bytes))
+            });
+            if !matches {
+                return Err(Error::InvalidManifest {
+                    what: "a small blob's chunk is not staged: retry an unknown bind_small with bind_small",
+                });
             }
         }
-        Err(gone.map_or(Error::ConditionalPutUnsupported, storage))
+        self.put_manifest(manifest)
     }
 
     /// One `put_if_absent` of the blob's inline manifest (ROADMAP 9.3.3, ADR-0050 item 5), or of its plain manifest
-    /// when it is empty: one round trip, nothing staged. Answers as [`BlobStore::bind`].
+    /// when it is empty: one round trip, nothing staged. Answers as [`BlobStore::bind`]; an unknown outcome is retried
+    /// with `bind_small` and the same bytes (a plain `bind` refuses the manifest: its chunk is not staged).
     fn bind_small(&self, manifest: &BlobManifest, bytes: &[u8]) -> Result<BindOutcome> {
-        let invalid = |what| Err(Error::InvalidManifest { what });
-        if u64_from_usize(bytes.len()) > SMALL_BLOB_MAX {
-            return invalid("a small blob over SMALL_BLOB_MAX bytes");
-        }
-        if u64_from_usize(bytes.len()) != manifest.size() {
-            return invalid("a small blob's bytes differ in length from its manifest's size");
-        }
+        check_small(manifest, bytes)?;
+        self.require_conditional_put()?;
         if bytes.is_empty() {
-            return self.bind(manifest);
+            return self.put_manifest(manifest);
         }
         let inline =
-            BlobManifest::new_inline(manifest.blob_id(), manifest.chunk_size(), bytes.to_vec())
-                .map_err(|_| Error::InvalidManifest {
-                    what: "a small blob's bytes are not its manifest's single chunk",
-                })?;
-        if inline.chunk_crcs() != manifest.chunk_crcs() {
-            return invalid("a small blob's bytes are not its manifest's single chunk");
-        }
-        self.bind(&inline)
+            BlobManifest::new_inline(manifest.blob_id(), manifest.chunk_size(), bytes.to_vec())?;
+        self.put_manifest(&inline)
     }
 
     fn manifest(&self, blob_id: BlobId) -> Result<Option<BlobManifest>> {

@@ -226,6 +226,29 @@ mod tests {
             }
         }
 
+        /// A real manifest key with any one letter's case changed (in `blobs`, the prefix or the id) is not a key Persia
+        /// wrote, and the same for a chunk key.
+        #[test]
+        fn a_key_with_one_letter_recased_does_not_parse(
+            bytes in any::<[u8; 32]>(),
+            upload in any::<u128>(),
+            index in any::<u32>(),
+            at in any::<prop::sample::Index>(),
+        ) {
+            for k in [
+                RemoteKey::Manifest(BlobId::from_bytes(bytes)),
+                RemoteKey::Chunk { upload_id: UploadId::new(upload), index },
+            ] {
+                let text = k.key().unwrap().as_str().to_owned();
+                let letters: Vec<usize> = text.char_indices().filter(|(_, c)| c.is_ascii_lowercase()).map(|(i, _)| i).collect();
+                let i = letters[at.index(letters.len())];
+                let mut recased = text.into_bytes();
+                recased[i] = recased[i].to_ascii_uppercase();
+                let recased = String::from_utf8(recased).unwrap();
+                prop_assert_eq!(RemoteKey::parse(&key(&recased)), None, "{}", recased);
+            }
+        }
+
         /// A parsed key is exactly the key it was parsed from (one text per key).
         #[test]
         fn a_parsed_key_is_canonical(

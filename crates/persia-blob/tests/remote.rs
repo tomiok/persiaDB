@@ -403,3 +403,68 @@ fn staged_chunks_report_when_they_were_written() {
         [Some(UNIX_EPOCH), Some(UNIX_EPOCH + Duration::from_secs(5))]
     );
 }
+
+#[test]
+fn a_bound_manifest_gone_before_its_get_is_written_again() {
+    use common::Scripted;
+    use persia_storage::PutOutcome::{AlreadyExists, Created};
+
+    // AlreadyExists, the get finds nothing (a sweep deleted it), the next attempt is Created: Bound.
+    let store = RemoteBlobStore::new(Scripted::<MemoryStorage>::default());
+    let data = data_of(10, 3);
+    let m = staged_manifest(&store, &data, 4, 1);
+    store
+        .storage()
+        .puts
+        .lock()
+        .unwrap()
+        .extend([AlreadyExists, Created]);
+    store
+        .storage()
+        .gets_not_found
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+    assert_eq!(store.storage().puts.lock().unwrap().len(), 0);
+
+    // Every attempt finds it gone: the last NotFound is reported, a known outcome (not unknown).
+    store
+        .storage()
+        .puts
+        .lock()
+        .unwrap()
+        .extend([AlreadyExists; 3]);
+    store
+        .storage()
+        .gets_not_found
+        .store(3, std::sync::atomic::Ordering::SeqCst);
+    match store.bind(&m) {
+        Err(Error::Storage(e)) => assert_eq!(e.kind(), persia_storage::ErrorKind::NotFound),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        store.storage().puts.lock().unwrap().len(),
+        0,
+        "3 attempts, no more"
+    );
+}
+
+#[test]
+fn a_backend_that_claims_conditional_put_but_refuses_it_cannot_store_blobs() {
+    let store = RemoteBlobStore::new(common::Scripted {
+        unsupported: true,
+        ..common::Scripted::<MemoryStorage>::default()
+    });
+    assert!(matches!(
+        store.stage_chunk(UploadId::new(1), 0, b"x"),
+        Err(Error::ConditionalPutUnsupported)
+    ));
+    let m = common::manifest_of(b"", 4, 1);
+    assert!(matches!(
+        store.bind(&m),
+        Err(Error::ConditionalPutUnsupported)
+    ));
+    assert!(matches!(
+        store.bind_small(&m, b""),
+        Err(Error::ConditionalPutUnsupported)
+    ));
+}

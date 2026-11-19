@@ -129,8 +129,9 @@ impl<S: Storage> RemoteBlobStore<S> {
     /// chunk and the rest under `to`.
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when a chunk vanished or changed; [`Error::StagedChunkConflict`] when `to` already holds
-    /// other bytes; the backend's errors.
+    /// [`Error::InvalidResume`] when a chunk is not of the token's full chunk size (e.g. a short last chunk);
+    /// [`Error::Corrupt`] when a chunk vanished or its CRC32C changed; [`Error::StagedChunkConflict`] when `to` already
+    /// holds other bytes; the backend's errors.
     pub fn restage(&self, from: ResumeToken, chunk_crcs: &[u32], to: UploadId) -> Result<()> {
         let full = u64::from(from.chunk_size.get());
         let window = self.parallelism.get();
@@ -146,10 +147,13 @@ impl<S: Storage> RemoteBlobStore<S> {
                 .key()?;
                 let expected = chunk_crcs.get(usize_from_u32(index)).copied();
                 match self.get(&key)? {
-                    Some(bytes)
-                        if Some(crc32c(&bytes)) == expected
-                            && u64_from_usize(bytes.len()) == full =>
-                    {
+                    // Only full chunks are restaged: the caller passed the CRCs of more than were staged full.
+                    Some(bytes) if u64_from_usize(bytes.len()) != full => {
+                        Err(Error::InvalidResume {
+                            what: "a chunk to restage is not a full chunk of the token's chunk size",
+                        })
+                    }
+                    Some(bytes) if Some(crc32c(&bytes)) == expected => {
                         self.stage_chunk(to, index, &bytes)
                     }
                     _ => Err(Error::Corrupt {

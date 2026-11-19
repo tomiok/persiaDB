@@ -222,3 +222,56 @@ fn an_inline_manifest_under_another_key_is_corrupt() {
     assert_eq!(store.read_chunk(&inline, 0).unwrap(), data);
     assert_eq!(store.read_chunks(&inline, 0..1).unwrap(), [data]);
 }
+
+#[test]
+fn an_unknown_bind_small_retried_with_bind_never_leaves_a_chunkless_manifest() {
+    // Not applied (Transient) and applied with its answer lost (ResponseLost).
+    for fault in [Fault::Transient, Fault::ResponseLost] {
+        let faulty = Arc::new(FaultyStorage::new(MemoryStorage::new(), 1));
+        let store = RemoteBlobStore::new(Arc::clone(&faulty));
+        let data = data_of(10, 8);
+        let m = manifest_of(&data, ChunkSize::MIN, 1);
+        faulty.inject(Trigger::Nth(Op::PutIfAbsent, 1), fault);
+        assert!(
+            store
+                .bind_small(&m, &data)
+                .unwrap_err()
+                .is_bind_outcome_unknown()
+        );
+        // The wrong retry: its chunk was never staged, so `bind` refuses it and writes nothing.
+        assert!(
+            matches!(store.bind(&m), Err(Error::InvalidManifest { .. })),
+            "{fault:?}"
+        );
+        match store.manifest(m.blob_id()).unwrap() {
+            None => assert_eq!(fault, Fault::Transient),
+            Some(bound) => assert!(bound.is_inline(), "{fault:?}: a plain manifest was bound"),
+        }
+        // The right retry.
+        assert_eq!(
+            store.bind_small(&m, &data).unwrap(),
+            BindOutcome::Bound,
+            "{fault:?}"
+        );
+        assert!(store.manifest(m.blob_id()).unwrap().unwrap().is_inline());
+        assert_eq!(read_range(&store, &blob_ref(&m), 0..10).unwrap(), data);
+    }
+}
+
+#[test]
+fn a_one_chunk_small_blob_binds_through_bind_only_when_its_chunk_is_staged() {
+    let store = RemoteBlobStore::new(MemoryStorage::new());
+    let data = data_of(10, 9);
+    let m = manifest_of(&data, ChunkSize::MIN, 1);
+    // Other bytes staged under its upload: refused.
+    store
+        .stage_chunk(m.upload_id(), 0, &data_of(10, 1))
+        .unwrap();
+    assert!(matches!(store.bind(&m), Err(Error::InvalidManifest { .. })));
+    assert_eq!(store.manifest(m.blob_id()).unwrap(), None);
+    // Its own chunk staged: bound as a plain manifest.
+    let m = manifest_of(&data, ChunkSize::MIN, 2);
+    store.stage_chunk(m.upload_id(), 0, &data).unwrap();
+    assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+    assert_eq!(read_range(&store, &blob_ref(&m), 0..10).unwrap(), data);
+}

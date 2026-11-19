@@ -346,7 +346,13 @@ fn restage_rejects_a_chunk_that_changed_or_vanished() {
     stage_some(&store, &data, 4, 1, &[0, 1, 2]);
     let resumed = store.resume(token(1, 4)).unwrap();
     let key = persia_storage::Key::new(chunk_key(1, 1)).unwrap();
-    for change in [Some(&b"XXXX"[..]), Some(b"abc"), None] {
+    // A CRC mismatch or a vanished chunk is corruption; a chunk of another length is a resume that does not fit.
+    for (change, corrupt) in [
+        (Some(&b"XXXX"[..]), true),
+        (Some(b"abc"), false),
+        (Some(b"abcde"), false),
+        (None, true),
+    ] {
         match change {
             Some(b) => store
                 .storage()
@@ -354,14 +360,25 @@ fn restage_rejects_a_chunk_that_changed_or_vanished() {
                 .unwrap(),
             None => store.storage().delete(&key).unwrap(),
         }
-        assert!(
-            store
-                .restage(resumed.token(), resumed.chunk_crcs(), UploadId::new(2))
-                .unwrap_err()
-                .is_corruption(),
-            "{change:?}"
-        );
+        let err = store
+            .restage(resumed.token(), resumed.chunk_crcs(), UploadId::new(2))
+            .unwrap_err();
+        assert_eq!(err.is_corruption(), corrupt, "{change:?}: {err:?}");
+        if !corrupt {
+            assert!(
+                matches!(err, Error::InvalidResume { .. }),
+                "{change:?}: {err:?}"
+            );
+        }
     }
+    // CRCs passed for a short last chunk: not a full chunk.
+    let short = data_of(10, 3);
+    stage_some(&store, &short, 4, 5, &[0, 1, 2]);
+    let crcs = manifest_of(&short, 4, 5).chunk_crcs().to_vec();
+    assert!(matches!(
+        store.restage(token(5, 4), &crcs, UploadId::new(6)),
+        Err(Error::InvalidResume { .. })
+    ));
 }
 
 #[test]
