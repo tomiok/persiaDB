@@ -129,6 +129,7 @@ struct WriterState {
 /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of, read_chunk_checked};
 /// use persia_format::checksum::crc32c;
 ///
+/// # if cfg!(miri) { return Ok(()); } // a real pack file: Miri's isolation has no filesystem or real-time clock
 /// # let dir = tempfile::tempdir()?;
 /// let path = dir.path().join("app.persia.blobs");
 /// let store = PackStore::open(&path, PackMode::ReadWrite, [7; 16])?;
