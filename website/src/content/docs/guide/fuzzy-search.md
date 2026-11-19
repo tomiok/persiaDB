@@ -82,7 +82,7 @@ The same cascade can then rank a [fallback](#fallback-when-nothing-matches) and,
 
 L4 builds one step, listed as `fuzzy`, from L0's query (ROADMAP 8.2.4, [ADR-0042](https://github.com/tomiok/persiaDB/blob/main/docs/adr/0042-l4-fuzzy-one-step-length-policy-and-corrections.md)). It does not continue from the terms L2 dropped. Every required word stays required, widened to the terms within its distance. `must_not` and the request's filters stay on the step.
 
-A term here is one field's analyzed form of a word, the same terms L3 uses. Length is that analyzed term, in Unicode scalar values: `café` is 4. Under the `en` analyzer, `running` is `run`, which is 3, so L4 leaves it exact. The last word has no special case. A short word stays exact wherever it sits. That differs from [prefix search](/guide/synonym-and-prefix-search/#which-terms-become-prefixes), which expands the last term at any length.
+A term here is one field's analyzed form of a word, the same terms L3 uses. Length is that analyzed term, in Unicode scalar values: `café` is 4. Under the `en` analyzer, `running` is `run`, which is 3, so L4 leaves it exact. How that stem is produced, and what the other built-in analyzers emit, is [Text analysis](/guide/text-analysis/). The last word has no special case. A short word stays exact wherever it sits. That differs from [prefix search](/guide/synonym-and-prefix-search/#which-terms-become-prefixes), which expands the last term at any length.
 
 | Analyzed length | Distance |
 |---|---|

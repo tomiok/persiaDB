@@ -103,7 +103,7 @@ The collection schema in SPEC §6.2, as JSON. `CollectionSchema::from_json` in `
 }
 ```
 
-Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored` (SPEC §6.1). Every document also has a string `id` (at most 512 bytes, unique in the collection). Documents are submitted as JSON, or as a `serde` struct via a planned `put_struct`, and stored as CBOR (SPEC §6.4).
+Field types in that schema are `text`, `keyword`, `i64`, `f64`, `bool`, `datetime`, and `stored` (SPEC §6.1). A `text` field's `analyzer` is a built-in pipeline: `en` in the sketch above stems and drops stopwords. The nine names and what each one emits are [Text analysis](/guide/text-analysis/). Every document also has a string `id` (at most 512 bytes, unique in the collection). Documents are submitted as JSON, or as a `serde` struct via a planned `put_struct`, and stored as CBOR (SPEC §6.4).
 
 `put` is an upsert by id. `delete` writes a tombstone. `commit` publishes a manifest. A `put` is specified to be visible to a later search on that database before commit (read-your-writes, SPEC §8.2–§8.4). One writer; a second writer fails immediately. Handles are specified as `Send` and `Sync`.
 

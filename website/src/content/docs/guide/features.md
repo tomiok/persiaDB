@@ -25,7 +25,7 @@ Schema, analyzers, the container commit, segment bytes, and part of the write pa
 | Matching, filters, column sort, paging, facets | %%MATCHING_CELL%% | SPEC §7.3–§7.5 |
 | Zero-results relaxation | %%RELAXATION_CELL%% | SPEC §7.6 |
 | Schema and documents | Done as library code (M3). Not the `Db` API. | SPEC §6 |
-| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). The query compiler runs them when it compiles user text. | SPEC §6.3 |
+| Analyzers (`standard`, `keyword`, `whitespace`, `en`, `es`, `pt`, `fr`, `de`, `it`) | Done as library code (M4). The query compiler runs them when it compiles user text. [Text analysis](/guide/text-analysis/). | SPEC §6.3 |
 | Segment writer and reader | %%M5_CELL%% | SPEC §5 |
 | Crash-safe commit and recovery | %%DURABILITY_CELL%% | SPEC §4.5, §8.6 |
 | Blob storage | %%STATE_M9%% | SPEC §9 |
@@ -138,7 +138,7 @@ lowercase), `keyword`, `whitespace`, and language analyzers `en`, `es`, `pt`, `f
 (stopwords, a Snowball-style stemmer, accent folding). Positions, used for phrases, are opt-in per field
 (SPEC §18.4). The analyzer's name and version are stored in the schema so a later change is visible.
 
-Those pipelines live in `persia-analysis` (M4). That crate analyzes text. Ranked search runs in `persia-engine`.
+Those pipelines live in `persia-analysis` (M4). That crate analyzes text. What each built-in emits, and how the query compiler uses it, is [Text analysis](/guide/text-analysis/). Ranked search runs in `persia-engine`.
 
 ## Durability
 

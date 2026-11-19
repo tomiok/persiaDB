@@ -74,7 +74,7 @@ This is the shape in SPEC §6.2. It is schema JSON, not a search call:
 "synonyms": [["tv", "television"]]
 ```
 
-Each term is analyzed with the field's query-time analyzer, without filters that stack tokens such as `edge_ngram` (SPEC §6.3.4). A term that yields no tokens is ignored. Terms that analyze to the same tokens are one term. A group that collapses to a single term, such as `["New York", "new york"]` under lowercasing, has nothing to expand to and never matches.
+Each term is analyzed with the field's query-time analyzer, without filters that stack tokens such as `edge_ngram` (SPEC §6.3.4). [Text analysis](/guide/text-analysis/) is that pipeline: which built-ins stem, which drop stopwords, and which leave the text as written. A term that yields no tokens is ignored. Terms that analyze to the same tokens are one term. A group that collapses to a single term, such as `["New York", "new york"]` under lowercasing, has nothing to expand to and never matches.
 
 `SynonymMap` in `persia-analysis` is that lookup (ROADMAP 4.2.5). The query compiler runs it and stores the runs on `Compiled::synonyms`. L1 only assembles the step. It reads no collection statistics.
 

@@ -161,6 +161,7 @@ export default defineConfig({
                         { label: 'Typo-tolerant search', slug: 'guide/typo-tolerant-search' },
                         { label: 'Fuzzy search', slug: 'guide/fuzzy-search' },
                         { label: 'Synonym and prefix search', slug: 'guide/synonym-and-prefix-search' },
+                        { label: 'Text analysis', slug: 'guide/text-analysis' },
                         { label: 'BM25F ranking', slug: 'guide/ranking' },
                         { label: 'Faceted search', slug: 'guide/faceted-search' },
                         { label: 'Filtered search', slug: 'guide/filtered-search' },

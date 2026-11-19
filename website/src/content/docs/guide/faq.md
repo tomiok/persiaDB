@@ -63,7 +63,7 @@ head:
             "name": "How does Persia DB rank search results?",
             "acceptedAnswer": {
               "@type": "Answer",
-              "text": "With BM25F (SPEC section 7.2). Each text field has a weight, k1, and b. The score uses the collection's document count, document frequency, and average field length. TermScorer and CollectionViews::search are library code on a collection snapshot. There is no search method on persia::Db (M10). Proximity is off unless a plan calls SearchPlan::with_proximity. A relaxed search orders by cascade step first, then by the request sort. The longer page is https://tomiok.github.io/persiaDB/guide/ranking/. %%MATCHING_CELL%%"
+              "text": "With BM25F (SPEC section 7.2). Each text field has a weight, k1, and b. The terms that score are the field analyzer's terms. Tokenizers, stemming, and stopwords are explained at https://tomiok.github.io/persiaDB/guide/text-analysis/. The score uses the collection's document count, document frequency, and average field length. TermScorer and CollectionViews::search are library code on a collection snapshot. There is no search method on persia::Db (M10). Proximity is off unless a plan calls SearchPlan::with_proximity. A relaxed search orders by cascade step first, then by the request sort. The longer page is https://tomiok.github.io/persiaDB/guide/ranking/. %%MATCHING_CELL%%"
             }
           },
           {
@@ -156,7 +156,7 @@ The Persia DB design is an embedded Rust library, one local .persia file, the sa
 
 ## How does Persia DB rank search results?
 
-With BM25F (SPEC §7.2). Each `text` field has a weight, `k1`, and `b`. The score uses the collection's document count, document frequency, and average field length. `TermScorer` and `CollectionViews::search` are library code on a collection snapshot. There is no `search` method on `persia::Db` (M10). Proximity is off unless a plan calls `SearchPlan::with_proximity`. A relaxed search orders by cascade step first, then by the request sort. The longer page is [BM25F ranking](/guide/ranking/). %%MATCHING_CELL%%
+With BM25F (SPEC §7.2). Each `text` field has a weight, `k1`, and `b`. The terms that score are the field analyzer's terms. Tokenizers, stemming, and stopwords are [Text analysis](/guide/text-analysis/). The score uses the collection's document count, document frequency, and average field length. `TermScorer` and `CollectionViews::search` are library code on a collection snapshot. There is no `search` method on `persia::Db` (M10). Proximity is off unless a plan calls `SearchPlan::with_proximity`. A relaxed search orders by cascade step first, then by the request sort. The longer page is [BM25F ranking](/guide/ranking/). %%MATCHING_CELL%%
 
 ## Is Persia DB embedded or a server?
 
