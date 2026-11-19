@@ -571,3 +571,238 @@ fn a_stored_reference_that_differs_from_its_manifest_logs_nothing() {
     }
     assert!(documents(db.log()).is_empty());
 }
+
+/// Invariant 4 for one reference logged twice: two `Blob::Stored` puts of the same blob at `Buffered` hold its pins
+/// twice, and only the commit that makes both records durable drops them to zero.
+#[test]
+fn two_stored_puts_of_one_reference_hold_its_pins_until_the_commit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = BlobDatabase::new(
+        database(&dir.path().join("a.persia")),
+        Blobs::new(Arc::new(MemoryBlobStore::new())),
+    );
+    let (r, guard) = db.put_blob(&bytes(300, 4)[..], &options()).unwrap();
+    drop(guard);
+    assert!(db.blobs().pin_set().pinned().is_empty());
+    let upload = db
+        .blobs()
+        .store()
+        .manifest(r.blob_id())
+        .unwrap()
+        .unwrap()
+        .upload_id();
+    let ids = [Pinned::Blob(r.blob_id()), Pinned::Upload(upload)];
+    for (n, id) in ["x", "y"].into_iter().enumerate() {
+        db.put("c", &doc(id), Blob::Stored(r.clone()), Durability::Buffered)
+            .unwrap();
+        assert_eq!(db.held(), n + 1);
+        let mut pinned = db.blobs().pin_set().pinned();
+        pinned.sort();
+        let mut want = ids.to_vec();
+        want.sort();
+        assert_eq!(pinned, want, "after put {n}");
+    }
+    // A release with nothing durable releases nothing.
+    db.release_durable();
+    assert_eq!(db.held(), 2);
+    assert!(ids.iter().all(|id| db.blobs().pin_set().is_pinned(*id)));
+    db.commit().unwrap();
+    assert_eq!(db.held(), 0);
+    assert!(db.blobs().pin_set().pinned().is_empty());
+}
+
+/// What a step of [`pins_follow_durability_through_random_operations`] does.
+#[derive(Debug, Clone)]
+enum PinOp {
+    /// A put at this durability (0 `Buffered`, 1 `Async`, 2 `Fsync`) of this blob.
+    Put(u8, BlobChoice),
+    /// A put to a collection that does not exist: rejected before its record is appended.
+    Rejected(u8),
+    /// A put whose blob reader fails: nothing stored, nothing logged.
+    ReaderFails(u8),
+    Commit,
+    /// An `Fsync` delete through `log_mut` (durable for the engine); then `release_durable` or not.
+    DeleteFsync(bool),
+    /// `put_blob` alone, its guard kept.
+    PutBlobKept(u8),
+    /// Drops the oldest kept guard.
+    DropGuard,
+}
+
+#[derive(Debug, Clone)]
+enum BlobChoice {
+    /// New bytes: this seed, small (`false`) or staged in chunks (`true`).
+    New(u8, bool),
+    /// The bytes of an earlier blob again, from a reader (a duplicate).
+    Again(usize),
+    /// The reference of an earlier blob (`Blob::Stored`).
+    Stored(usize),
+}
+
+fn arb_pin_op() -> impl proptest::strategy::Strategy<Value = PinOp> {
+    use proptest::prelude::*;
+    let level = 0..3_u8;
+    let choice = prop_oneof![
+        3 => (any::<u8>(), proptest::bool::weighted(0.15)).prop_map(|(s, l)| BlobChoice::New(s, l)),
+        1 => any::<usize>().prop_map(BlobChoice::Again),
+        2 => any::<usize>().prop_map(BlobChoice::Stored),
+    ];
+    prop_oneof![
+        8 => (level.clone(), choice).prop_map(|(l, c)| PinOp::Put(l, c)),
+        1 => level.clone().prop_map(PinOp::Rejected),
+        1 => level.prop_map(PinOp::ReaderFails),
+        2 => Just(PinOp::Commit),
+        2 => any::<bool>().prop_map(PinOp::DeleteFsync),
+        1 => any::<u8>().prop_map(PinOp::PutBlobKept),
+        1 => Just(PinOp::DropGuard),
+    ]
+}
+
+fn level_of(n: u8) -> Durability {
+    LEVELS[usize::from(n % 3)]
+}
+
+fn blob_bytes(seed: u8, large: bool) -> Vec<u8> {
+    bytes(
+        if large {
+            70_000
+        } else {
+            50 + usize::from(seed)
+        },
+        seed,
+    )
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig {
+        cases: if cfg!(feature = "slow") { 512 } else { 32 },
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x5045_5253_4941_0941),
+        ..proptest::prelude::ProptestConfig::default()
+    })]
+
+    /// Invariant 4 against a model that knows only the durability rules (SPEC §8.2.1): after every step, each
+    /// document logged since the last durable point has its blob and the upload holding the blob's chunks pinned
+    /// (what GC must not sweep, SPEC §9.5); `held` counts exactly the documents not yet released (a release happens
+    /// at each put, commit and `release_durable`); and with nothing held and no `put_blob` guard alive, nothing is
+    /// pinned (no pin leaks, also through failed puts).
+    #[test]
+    fn pins_follow_durability_through_random_operations(
+        ops in proptest::collection::vec(arb_pin_op(), 1..40),
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut db = BlobDatabase::new(
+            database(&dir.path().join("a.persia")),
+            Blobs::with_upload_ids(Arc::new(MemoryBlobStore::new()), SegmentIds::seeded(5)),
+        );
+        let mut stored: Vec<(BlobRef, Vec<u8>)> = Vec::new();
+        // Blobs of the documents logged since the last durable point.
+        let mut pending: Vec<BlobRef> = Vec::new();
+        // Documents whose pins are held; and whether everything held is durable for the engine (not yet released).
+        let (mut held, mut all_durable) = (0_usize, false);
+        let mut guards = std::collections::VecDeque::new();
+        for (step, op) in ops.iter().enumerate() {
+            let ctx = format!("step {step} {op:?}");
+            // `put` releases what is durable first, whatever happens next.
+            let release = |held: &mut usize, all_durable: &mut bool| {
+                if *all_durable {
+                    *held = 0;
+                    *all_durable = false;
+                }
+            };
+            match op {
+                PinOp::Put(l, choice) => {
+                    let level = level_of(*l);
+                    let blob = match choice {
+                        BlobChoice::New(seed, large) => {
+                            Blob::from_reader(std::io::Cursor::new(blob_bytes(*seed, *large)))
+                                .with_options(options())
+                        }
+                        BlobChoice::Again(k) | BlobChoice::Stored(k) if stored.is_empty() => {
+                            let _ = k;
+                            Blob::from_reader(std::io::Cursor::new(blob_bytes(0, false)))
+                                .with_options(options())
+                        }
+                        BlobChoice::Again(k) => Blob::from_reader(std::io::Cursor::new(
+                            stored[k % stored.len()].1.clone(),
+                        ))
+                        .with_options(options()),
+                        BlobChoice::Stored(k) => Blob::Stored(stored[k % stored.len()].0.clone()),
+                    };
+                    let bytes_of = match choice {
+                        BlobChoice::New(seed, large) => Some(blob_bytes(*seed, *large)),
+                        _ if stored.is_empty() => Some(blob_bytes(0, false)),
+                        _ => None,
+                    };
+                    let r = db.put("c", &doc(&format!("d{}", step % 5)), blob, level).unwrap();
+                    if let Some(b) = bytes_of {
+                        stored.push((r.clone(), b));
+                    }
+                    release(&mut held, &mut all_durable);
+                    if level == Durability::Fsync {
+                        pending.clear();
+                        held = 0;
+                    } else {
+                        pending.push(r);
+                        held += 1;
+                    }
+                }
+                PinOp::Rejected(l) => {
+                    let blob = Blob::from_reader(&b"rejected"[..]);
+                    let e = db.put("nope", &doc("x"), blob, level_of(*l)).unwrap_err();
+                    proptest::prop_assert!(matches!(e, Error::Database(_)), "{}: {}", ctx, e);
+                    release(&mut held, &mut all_durable);
+                }
+                PinOp::ReaderFails(l) => {
+                    struct Fails;
+                    impl Read for Fails {
+                        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                            Err(std::io::Error::other("the reader failed"))
+                        }
+                    }
+                    let blob = Blob::from_reader(Fails);
+                    let e = db.put("c", &doc("x"), blob, level_of(*l)).unwrap_err();
+                    proptest::prop_assert!(matches!(e, Error::Blob(_)), "{}: {}", ctx, e);
+                    release(&mut held, &mut all_durable);
+                }
+                PinOp::Commit => {
+                    db.commit().unwrap();
+                    pending.clear();
+                    held = 0;
+                    all_durable = false;
+                }
+                PinOp::DeleteFsync(then_release) => {
+                    db.log_mut().delete("c", "d0", Durability::Fsync).unwrap();
+                    pending.clear();
+                    all_durable = held > 0;
+                    if *then_release {
+                        db.release_durable();
+                        release(&mut held, &mut all_durable);
+                    }
+                }
+                PinOp::PutBlobKept(seed) => {
+                    let (r, pins) = db.put_blob(&blob_bytes(*seed, false)[..], &options()).unwrap();
+                    stored.push((r, blob_bytes(*seed, false)));
+                    guards.push_back(pins);
+                }
+                PinOp::DropGuard => {
+                    guards.pop_front();
+                }
+            }
+            let set = db.blobs().pin_set();
+            for r in &pending {
+                let upload = db.blobs().store().manifest(r.blob_id()).unwrap().unwrap().upload_id();
+                proptest::prop_assert!(set.is_pinned(Pinned::Blob(r.blob_id())), "{}: blob unpinned", ctx);
+                proptest::prop_assert!(set.is_pinned(Pinned::Upload(upload)), "{}: upload unpinned", ctx);
+            }
+            for g in &guards {
+                for id in g.ids() {
+                    proptest::prop_assert!(set.is_pinned(*id), "{}: a live guard's {:?}", ctx, id);
+                }
+            }
+            proptest::prop_assert_eq!(db.held(), held, "{}", ctx);
+            if held == 0 && guards.is_empty() {
+                proptest::prop_assert!(set.pinned().is_empty(), "{}: leaked {:?}", ctx, set.pinned());
+            }
+        }
+    }
+}

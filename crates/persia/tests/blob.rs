@@ -492,3 +492,336 @@ fn a_pin_waits_for_a_delete_under_the_lock() {
     assert!(set.is_pinned(id));
     drop(pins);
 }
+
+// --- Boundaries of put_blob (ROADMAP 9.4.2; SPEC §9.2: small blobs up to 64 KiB, fixed-size chunks) ---------------
+
+/// The `StageMany` sizes, the bind kind, and the stored manifest of one `put_blob` of `len` bytes at `chunk`.
+struct Stored {
+    windows: Vec<usize>,
+    small: bool,
+    chunk_lens: Vec<usize>,
+    crcs: usize,
+}
+
+fn store_and_inspect(data: &[u8], chunk: u32, reader: impl Read) -> Stored {
+    let (store, blobs) = faulty(Faults::default());
+    let (r, pins) = blobs.put_blob(reader, &options(chunk)).unwrap();
+    assert_eq!(r.blob_id(), blob_id_of(data), "len {}", data.len());
+    assert_eq!(r.size(), data.len() as u64);
+    let calls = store.calls();
+    let windows = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::StageMany { count, .. } => Some(*count),
+            _ => None,
+        })
+        .collect();
+    let binds: Vec<bool> = calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Bind { small, .. } => Some(*small),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(binds.len(), 1, "len {}: one bind", data.len());
+    let manifest = store.inner.manifest(r.blob_id()).unwrap().unwrap();
+    let chunk_lens = (0..manifest.chunk_count())
+        .map(|i| store.inner.read_chunk(&manifest, i).unwrap().len())
+        .collect();
+    assert_eq!(
+        blobs.get_blob_range(&r, 0..data.len() as u64).unwrap(),
+        data
+    );
+    assert_eq!(streamed(&blobs, &r, 4096), data);
+    drop(pins);
+    assert!(blobs.pin_set().pinned().is_empty());
+    Stored {
+        windows,
+        small: binds[0],
+        chunk_lens,
+        crcs: manifest.chunk_crcs().len(),
+    }
+}
+
+/// The boundaries of the small path (exactly 64 KiB is small, one byte more is staged) and of chunking (an exact
+/// multiple of the chunk size has no empty last chunk, an exact multiple of the window stages no empty window).
+#[test]
+fn put_blob_boundaries_take_the_right_path_and_chunk_exactly() {
+    let min = MIN as usize;
+    let w = WINDOW_MAX_CHUNKS as usize;
+    // (len, chunk size, small, chunk lengths as (count, len) runs, staged windows)
+    #[allow(clippy::type_complexity)]
+    let cases: &[(usize, u32, bool, &[(usize, usize)], &[usize])] = &[
+        (0, MIN, true, &[], &[]),
+        (1, MIN, true, &[(1, 1)], &[]),
+        (min - 1, MIN, true, &[(1, min - 1)], &[]),
+        (min, MIN, true, &[(1, min)], &[]),
+        (min, 4 << 20, true, &[(1, min)], &[]),
+        (min + 1, MIN, false, &[(1, min), (1, 1)], &[2]),
+        (min + 1, 4 << 20, false, &[(1, min + 1)], &[1]),
+        (2 * min, MIN, false, &[(2, min)], &[2]),
+        (3 * min - 1, MIN, false, &[(2, min), (1, min - 1)], &[3]),
+        (3 * min, MIN, false, &[(3, min)], &[3]),
+        (3 * min + 1, MIN, false, &[(3, min), (1, 1)], &[4]),
+        (2 * 70_000, 70_000, false, &[(2, 70_000)], &[2]),
+        (w * min, MIN, false, &[(w, min)], &[w]),
+        (w * min + 1, MIN, false, &[(w, min), (1, 1)], &[w, 1]),
+        (2 * w * min, MIN, false, &[(2 * w, min)], &[w, w]),
+    ];
+    for &(len, chunk, small, runs, windows) in cases {
+        let data = bytes(len, 5);
+        let got = store_and_inspect(&data, chunk, &data[..]);
+        let lens: Vec<usize> = runs
+            .iter()
+            .flat_map(|&(n, l)| std::iter::repeat_n(l, n))
+            .collect();
+        assert_eq!(got.small, small, "len {len}, chunk {chunk}: small path");
+        assert_eq!(got.chunk_lens, lens, "len {len}, chunk {chunk}: chunks");
+        assert_eq!(
+            got.crcs,
+            lens.len(),
+            "len {len}, chunk {chunk}: one CRC per chunk"
+        );
+        assert_eq!(got.windows, windows, "len {len}, chunk {chunk}: windows");
+    }
+}
+
+/// The empty blob: small, no chunk, its id the SHA-256 of nothing; it reads back empty, and any non-empty range is
+/// out of bounds.
+#[test]
+fn the_empty_blob_is_stored_and_reads_back_empty() {
+    let blobs = Blobs::new(Arc::new(MemoryBlobStore::new()));
+    let (r, _pins) = blobs.put_blob(std::io::empty(), &options(MIN)).unwrap();
+    assert_eq!(r.blob_id(), blob_id_of(&[]));
+    assert_eq!(r.size(), 0);
+    assert!(blobs.store().contains(&r).unwrap());
+    assert_eq!(blobs.get_blob_range(&r, 0..0).unwrap(), Vec::<u8>::new());
+    assert!(matches!(
+        blobs.get_blob_range(&r, 0..1),
+        Err(Error::RangeOutOfBounds { .. })
+    ));
+    let mut out = Vec::new();
+    blobs.get_blob(&r).unwrap().read_to_end(&mut out).unwrap();
+    assert!(out.is_empty());
+    // A second empty blob is the same blob.
+    let (again, _p) = blobs.put_blob(&b""[..], &options(4 << 20)).unwrap();
+    assert_eq!(again, r);
+}
+
+/// A reader that hands out its bytes in the given piece lengths, cycled; 0 is an `Interrupted` error (which a reader
+/// may return at any call, `std::io::Read`), like a socket or a pipe.
+struct Trickle {
+    data: Vec<u8>,
+    at: usize,
+    pieces: &'static [usize],
+    call: usize,
+}
+
+impl Read for Trickle {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let piece = self.pieces[self.call % self.pieces.len()];
+        self.call += 1;
+        if piece == 0 {
+            return Err(std::io::ErrorKind::Interrupted.into());
+        }
+        let n = piece.min(buf.len()).min(self.data.len() - self.at);
+        buf[..n].copy_from_slice(&self.data[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// Short reads and `Interrupted` errors, also at the first call and around the 64 KiB boundary, store the same blob
+/// with the same chunks as one whole read.
+#[test]
+fn short_reads_and_interruptions_store_the_same_blob() {
+    let min = MIN as usize;
+    let patterns: [&'static [usize]; 4] = [
+        &[1],
+        &[0, 7, 0, 0, 4096, 1],
+        &[65_535, 0, 2, 65_539],
+        &[0, 100_000, 3, 0, 65_535],
+    ];
+    for len in [0, 1, min - 1, min, min + 1, 3 * min, 3 * min + 5] {
+        let data = bytes(len, 7);
+        let whole = store_and_inspect(&data, MIN, &data[..]);
+        for pieces in patterns {
+            if pieces == [1] && len > 3 * min {
+                continue; // A byte at a time is slow in debug builds; the other lengths cover it.
+            }
+            let trickle = Trickle {
+                data: data.clone(),
+                at: 0,
+                pieces,
+                call: 0,
+            };
+            let got = store_and_inspect(&data, MIN, trickle);
+            let ctx = format!("len {len}, pieces {pieces:?}");
+            assert_eq!(got.small, whole.small, "{ctx}");
+            assert_eq!(got.chunk_lens, whole.chunk_lens, "{ctx}");
+            assert_eq!(got.windows, whole.windows, "{ctx}");
+        }
+    }
+}
+
+/// An `expected_id` mismatch while the bytes' blob (or the expected one) is already bound binds nothing, discards
+/// only the new upload, and leaves the bound blob, its upload's chunks and its pins as they were.
+#[test]
+fn an_expected_id_mismatch_with_a_duplicate_present_leaves_the_bound_blob() {
+    for len in [10, 200_000] {
+        let data = bytes(len, 1);
+        let other = bytes(len, 2);
+        let (store, blobs) = faulty(Faults::default());
+        let (bound, pins) = blobs.put_blob(&data[..], &options(MIN)).unwrap();
+        let bound_upload = upload_of(&pins);
+        let bound_chunks = store.inner.staged_chunk_count(bound_upload);
+        let pinned = blobs.pin_set().pinned();
+        // The same bytes expected to be others, and other bytes expected to be the bound ones.
+        for (bytes, expected) in [(&data, blob_id_of(&other)), (&other, bound.blob_id())] {
+            let ctx = format!("len {len}, expected {expected}");
+            let before = store.calls().len();
+            let opts = PutBlobOptions {
+                expected_id: Some(expected),
+                ..options(MIN)
+            };
+            let Err(Error::BlobIdMismatch {
+                expected: e,
+                actual,
+            }) = blobs.put_blob(&bytes[..], &opts)
+            else {
+                panic!("{ctx}: no mismatch");
+            };
+            assert_eq!((e, actual), (expected, blob_id_of(bytes)), "{ctx}");
+            let calls = &store.calls()[before..];
+            assert!(
+                !calls.iter().any(|c| matches!(c, Call::Bind { .. })),
+                "{ctx}: bound"
+            );
+            let discarded: Vec<_> = calls
+                .iter()
+                .filter_map(|c| match c {
+                    Call::Discard(u) => Some(*u),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(discarded.len(), 1, "{ctx}: {calls:?}");
+            assert_ne!(
+                discarded[0], bound_upload,
+                "{ctx}: discarded the bound upload"
+            );
+            assert_eq!(store.inner.staged_chunk_count(discarded[0]), 0, "{ctx}");
+            assert_eq!(store.inner.bound_ids(), [bound.blob_id()], "{ctx}");
+            assert_eq!(
+                store.inner.staged_chunk_count(bound_upload),
+                bound_chunks,
+                "{ctx}"
+            );
+            assert_eq!(blobs.pin_set().pinned(), pinned, "{ctx}: pins changed");
+            assert_eq!(
+                blobs.get_blob_range(&bound, 0..len as u64).unwrap(),
+                data,
+                "{ctx}"
+            );
+        }
+        drop(pins);
+        assert!(blobs.pin_set().pinned().is_empty());
+    }
+}
+
+/// An unknown bind outcome, then a plain store error on the retry: `put_blob` fails with that error and discards
+/// nothing, since the first attempt may have bound the manifest (SPEC §9.4, ADR-0051 item 3).
+#[test]
+fn an_unknown_outcome_then_a_store_error_discards_nothing() {
+    for lands in [false, true] {
+        for len in [10_usize, 200_000] {
+            let ctx = format!("lands {lands}, len {len}");
+            // Store steps are the chunk writes, then the binds: the retry is the step after the first bind.
+            let stages = if len as u64 <= SMALL_BLOB_MAX {
+                0
+            } else {
+                len.div_ceil(MIN as usize)
+            };
+            let (store, blobs) = faulty(Faults {
+                unknown_binds: 1,
+                unknown_lands: lands,
+                crash_at: Some(stages + 1),
+                ..Faults::default()
+            });
+            let data = bytes(len, 12);
+            let error = blobs.put_blob(&data[..], &options(MIN)).unwrap_err();
+            assert!(!error.is_bind_outcome_unknown(), "{ctx}: {error}");
+            assert!(matches!(error, Error::Read(_)), "{ctx}: {error}");
+            let calls = store.calls();
+            let binds: Vec<_> = calls
+                .iter()
+                .filter_map(|c| match c {
+                    Call::Bind { upload, .. } => Some(*upload),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(binds.len(), 2, "{ctx}: {calls:?}");
+            assert!(
+                !calls.iter().any(|c| matches!(c, Call::Discard(_))),
+                "{ctx}: {calls:?}"
+            );
+            if stages > 0 {
+                assert_eq!(store.inner.staged_chunk_count(binds[0]), stages, "{ctx}");
+            }
+            // The first attempt's write landed or not: either way the store holds what it held.
+            let bound = store.inner.bound_ids();
+            assert_eq!(bound.contains(&blob_id_of(&data)), lands, "{ctx}");
+            assert!(blobs.pin_set().pinned().is_empty(), "{ctx}");
+        }
+    }
+}
+
+/// `get_blob` of a blob stored with a chunk size of 1 (the encoding allows it, a writer does not, SPEC §9.1): it
+/// reads back, a window of `WINDOW_MAX_CHUNKS` one-byte chunks at a time, and each window looks the manifest up
+/// again (ADR-0051 item 4): 1 + ceil(size / 64) lookups. This pins the current count; a fix that reuses the
+/// manifest across windows changes it on purpose.
+#[test]
+fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
+    use persia_blob::{BlobManifest, BlobRef};
+    let len = 6400_usize;
+    let data = bytes(len, 13);
+    let store = FaultyStore::new(Faults::default());
+    let upload = UploadId::new(99);
+    let one = ChunkSize::from_encoding(1).unwrap();
+    let mut crcs = Vec::new();
+    let mut index = 0;
+    persia_blob::chunk_all(&data[..], one, |chunk| {
+        crcs.push(chunk.crc32c());
+        store.inner.stage_chunk(upload, index, chunk.bytes())?;
+        index += 1;
+        Ok(())
+    })
+    .unwrap();
+    let id = blob_id_of(&data);
+    let manifest = BlobManifest::new(id, len as u64, one, upload, crcs).unwrap();
+    assert!(matches!(
+        store.inner.bind(&manifest).unwrap(),
+        persia_blob::BindOutcome::Bound
+    ));
+    let r = BlobRef::new(
+        id,
+        len as u64,
+        "application/octet-stream",
+        1,
+        std::collections::BTreeMap::default(),
+    )
+    .unwrap();
+    let blobs = Blobs::new(Arc::clone(&store));
+    assert_eq!(streamed(&blobs, &r, 1 << 16), data);
+    let calls = store.calls();
+    let lookups = calls
+        .iter()
+        .filter(|c| matches!(c, Call::Manifest(_)))
+        .count();
+    let windows = calls
+        .iter()
+        .filter(|c| matches!(c, Call::ReadChunks(..)))
+        .count();
+    let window = WINDOW_MAX_CHUNKS as usize;
+    assert_eq!(windows, len.div_ceil(window));
+    assert_eq!(lookups, 1 + len.div_ceil(window), "manifest lookups");
+}
