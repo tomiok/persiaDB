@@ -71,4 +71,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |
 | [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed (amended by 0048) |
 | [0048](./0048-request-filter-kept-beside-the-compilation.md) | The request filter is kept beside the compiled query, which is replaced only through it | proposed |
-| [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | accepted |
+| [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | proposed |

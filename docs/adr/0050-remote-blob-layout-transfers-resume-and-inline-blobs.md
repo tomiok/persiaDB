@@ -1,6 +1,6 @@
 # ADR-0050: Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-18
 - Related: SPEC §9.1.1, §9.2, §9.4, §9.5, §10.1, §17; ROADMAP 9.3.1, 9.3.2, 9.3.3, 9.5.2, 9.5.5; ADR-0002,
   ADR-0034, ADR-0035, ADR-0041, ADR-0012

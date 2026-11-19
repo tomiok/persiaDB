@@ -13,8 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   ADR-0050): blob manifests at `blobs/<xx>/<id>`, staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>`, parallel
   chunk transfers (`with_parallelism`, default 8) and resumable uploads (`resume`, `restage`, `Chunker::resume`)
   (ROADMAP 9.3.1, 9.3.2).
-- `persia-blob`: blobs of at most 64 KiB are stored inline in their blob manifest, one object and one request
-  (ROADMAP 9.3.3).
+- `persia-blob`: non-empty blobs of at most 64 KiB are stored inline in their blob manifest, one object and one
+  request; the empty blob is its plain manifest, also one object (ROADMAP 9.3.3).
 - `persia-storage`: `ObjectMeta::last_modified`, `Clock::now`, `ManualClock`, `MemoryStorage::with_clock` (ROADMAP
   9.5.5; SPEC §10.1).
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
@@ -303,8 +303,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
 
 ### Format
-- Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, assigned: a one-chunk blob's bytes inside its manifest,
-  `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). A reader without it reports `UnsupportedFlags`.
+- Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, is now set on an inline blob's manifest, which holds the
+  one-chunk blob's bytes: `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). Readers built before this
+  change reject such a manifest with `UnsupportedFlags`.
 
 ### Fixed
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected

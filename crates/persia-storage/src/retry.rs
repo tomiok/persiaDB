@@ -70,7 +70,8 @@ impl ManualClock {
         }
     }
 
-    /// Moves the clock forward by `by` (saturating at the latest time the platform represents).
+    /// Moves the clock forward by `by`; a move past the latest time the platform represents leaves the clock where
+    /// it is (so does a `sleep` that long).
     pub fn advance(&self, by: Duration) {
         let mut now = self
             .now

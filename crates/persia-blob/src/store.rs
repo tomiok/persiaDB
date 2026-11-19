@@ -449,24 +449,41 @@ mod tests {
     fn a_chunk_that_differs_from_the_manifest_is_corrupt() {
         let store = MemoryBlobStore::new();
         let data = b"0123456789";
-        // Staged with other bytes than the manifest's CRCs and length describe.
-        let m = manifest_of(data, 4, 1);
-        store.stage_chunk(m.upload_id(), 0, b"0123").unwrap();
-        store.stage_chunk(m.upload_id(), 1, b"4567").unwrap();
-        store.stage_chunk(m.upload_id(), 2, b"8").unwrap();
-        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+        // Bound as staged, then damaged in storage: a short chunk, then a chunk of the right length and wrong bytes.
+        let m = stored(&store, data, 4, 1);
+        store.damage_staged_chunk(m.upload_id(), 2, b"8");
         let r = reference(&m);
         assert_eq!(read_range(&store, &r, 0..8).unwrap(), b"01234567");
         assert!(read_range(&store, &r, 8..10).unwrap_err().is_corruption());
-        let m2 = manifest_of(b"abcdefgh", 4, 2);
-        store.stage_chunk(m2.upload_id(), 0, b"abcd").unwrap();
-        store.stage_chunk(m2.upload_id(), 1, b"abcX").unwrap();
-        assert_eq!(store.bind(&m2).unwrap(), BindOutcome::Bound);
+        let m2 = stored(&store, b"abcdefgh", 4, 2);
+        store.damage_staged_chunk(m2.upload_id(), 1, b"abcX");
         assert!(
             read_range(&store, &reference(&m2), 4..5)
                 .unwrap_err()
                 .is_corruption()
         );
+    }
+
+    #[test]
+    fn a_manifest_whose_chunks_were_not_staged_as_it_describes_is_refused() {
+        let store = MemoryBlobStore::new();
+        let m = manifest_of(b"0123456789", 4, 1);
+        store.stage_chunk(m.upload_id(), 0, b"0123").unwrap();
+        store.stage_chunk(m.upload_id(), 2, b"89").unwrap();
+        // Chunk 1 missing, then staged with other bytes, then right.
+        assert!(matches!(store.bind(&m), Err(Error::InvalidManifest { .. })));
+        let other = UploadId::new(2);
+        store.stage_chunk(other, 0, b"0123").unwrap();
+        store.stage_chunk(other, 1, b"4568").unwrap();
+        store.stage_chunk(other, 2, b"89").unwrap();
+        let wrong = manifest_of(b"0123456789", 4, 2);
+        assert!(matches!(
+            store.bind(&wrong),
+            Err(Error::InvalidManifest { .. })
+        ));
+        assert_eq!(store.bound_ids(), Vec::new());
+        store.stage_chunk(m.upload_id(), 1, b"4567").unwrap();
+        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
     }
 
     #[test]

@@ -249,18 +249,34 @@ mod tests {
             }
         }
 
-        /// A parsed key is exactly the key it was parsed from (one text per key).
+        /// A parsed key is exactly the key it was parsed from (one text per key). The texts are real keys, half of
+        /// them with one character replaced by a near miss (another hex digit, its uppercase form, a sign, a letter
+        /// past `f`), so the assertion runs on every unedited key and on every edit that still parses.
         #[test]
         fn a_parsed_key_is_canonical(
-            second in prop_oneof![Just("uploads".to_owned()), "[0-9a-fA-F]{1,3}"],
-            third in "[0-9a-fA-F]{30,66}",
-            fourth in proptest::option::of("[0-9+a]{9,11}"),
+            bytes in any::<[u8; 32]>(),
+            upload in any::<u128>(),
+            index in any::<u32>(),
+            manifest in any::<bool>(),
+            edit in proptest::option::of((any::<prop::sample::Index>(), prop::sample::select(vec!['0', '9', 'a', 'f', 'A', 'F', '+', 'g']))),
         ) {
-            let text = match &fourth {
-                Some(f) => format!("blobs/{second}/{third}/{f}"),
-                None => format!("blobs/{second}/{third}"),
+            let k = if manifest {
+                RemoteKey::Manifest(BlobId::from_bytes(bytes))
+            } else {
+                RemoteKey::Chunk { upload_id: UploadId::new(upload), index }
             };
-            if let Some(parsed) = RemoteKey::parse(&key(&text)) {
+            let mut text = k.key().unwrap().as_str().to_owned();
+            if let Some((at, c)) = edit {
+                let mut chars: Vec<char> = text.chars().collect();
+                let i = at.index(chars.len());
+                chars[i] = c;
+                text = chars.into_iter().collect();
+            }
+            let parsed = RemoteKey::parse(&key(&text));
+            if edit.is_none() {
+                prop_assert_eq!(parsed, Some(k));
+            }
+            if let Some(parsed) = parsed {
                 let back = parsed.key().unwrap();
                 prop_assert_eq!(back.as_str(), text.as_str());
             }

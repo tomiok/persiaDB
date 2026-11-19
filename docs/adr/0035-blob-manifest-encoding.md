@@ -1,6 +1,6 @@
 # ADR-0035: Blob manifest encoding
 
-- Status: accepted (amended by ADR-0041)
+- Status: accepted (amended by ADR-0041, ADR-0050)
 - Date: 2026-11-07
 - Related: SPEC §9.1.1, §9.2, §9.3, §9.4, §15; ROADMAP 9.1.3, 9.2.1, 9.3.1, 9.3.3; ADR-0002, ADR-0024, ADR-0030, ADR-0034
 
@@ -26,8 +26,7 @@ remotely as the object `blobs/<xx>/<id>`, which is not inside a frame. It is rea
    redundant, as for manifests and sidecars.
 4. **Version and flags.** The `version` field versions this encoding alone (SPEC §15: encodings inside frames or
    objects); 0 is corruption, above 1 unsupported. `flags` is reserved for ROADMAP 9.3.3's inline small-blob form
-   (ADR-0034 item 8): no bit is assigned (ADR-0050 assigns bit 0, INLINE), and a bit this build does not know is
-   *unsupported*, not corruption,
+   (ADR-0034 item 8): no bit is assigned, and a bit this build does not know is *unsupported*, not corruption,
    because it means a newer writer's layout. Assigning one is a SPEC change. The container format version does not
    change: no existing structure changes, and the pack file (ROADMAP 9.2.1) is new.
 5. **Validation order:** length ≥ 76, magic, trailer, version (0 is corruption, above 1 unsupported), flags (a bit

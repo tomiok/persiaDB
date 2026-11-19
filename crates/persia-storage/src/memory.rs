@@ -120,8 +120,11 @@ impl Storage for MemoryStorage {
     }
 
     fn put(&self, key: &Key, data: Bytes) -> Result<()> {
+        // Stamp the object under the lock: stamped before it, a put could insert after a newer one and move the
+        // object's time back.
+        let mut objects = self.write();
         let object = self.object(data);
-        self.write().insert(key.clone(), object);
+        objects.insert(key.clone(), object);
         Ok(())
     }
 

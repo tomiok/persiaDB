@@ -621,8 +621,7 @@ Deps: M1, M2.
 - [x] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check (SPEC §9.4: the resume token is `upload_id` + `chunk_size`; a `Chunker` that starts at chunk k with a hasher fed the stored chunks; `AlreadyExists` on a chunk restarts under a new upload id)
 - [x] 9.3.3 Small-blob single-object optimization (threshold)
 - [ ] 9.3.4 `put_blob` resumes a remote upload: `PutBlobOptions::resume: Option<ResumeToken>` drives `RemoteBlobStore::resume`, `Chunker::resume` and `restage`, pinning the old upload id before listing and the new one before `restage`, and rejecting a token chunk size below the floor (SPEC §9.4, §9.5; found in 9.3.2)
-- [ ] 9.3.5 Fuzz `RemoteKey::parse` over arbitrary listing keys (SPEC §9.4: a key Persia did not write never parses; found in 9.3.1)
-- [ ] 9.3.6 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
+- [ ] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
 
 ## 9.4 Integration with documents
 - [ ] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)

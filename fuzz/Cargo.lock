@@ -228,6 +228,7 @@ dependencies = [
 name = "persia-blob"
 version = "0.0.0"
 dependencies = [
+ "bytes",
  "persia-format",
  "persia-storage",
  "sha2",

@@ -141,7 +141,7 @@ fn set_mtime(root: &std::path::Path, path: &str, secs: u64) {
 }
 
 #[test]
-fn local_keeps_the_time_unless_new_bytes_are_written() {
+fn local_keeps_the_time_on_put_if_absent_and_moves_it_on_put() {
     // A sweep ages objects by this time (SPEC §9.5): a retried `put_if_absent` must not make an object look new, and
     // a replacing `put` must (its bytes are new).
     let dir = tempfile::tempdir().unwrap();

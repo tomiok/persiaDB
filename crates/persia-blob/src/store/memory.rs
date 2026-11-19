@@ -40,6 +40,14 @@ impl MemoryBlobStore {
             .count()
     }
 
+    /// Replaces the bytes staged as chunk `index` of `upload_id`, which no [`BlobStore`] method does: how a test
+    /// stands for storage that damaged a chunk after it was bound, to exercise the read-side checks.
+    pub fn damage_staged_chunk(&self, upload_id: UploadId, index: u32, bytes: &[u8]) {
+        self.lock()
+            .chunks
+            .insert((upload_id, index), bytes.to_vec());
+    }
+
     /// The ids bound so far, in id order.
     pub fn bound_ids(&self) -> Vec<BlobId> {
         self.lock().manifests.keys().copied().collect()
@@ -70,6 +78,29 @@ impl BlobStore for MemoryBlobStore {
             let bound = BlobManifest::decode(bound)?;
             bound.check_blob_id(manifest.blob_id())?;
             return Ok(BindOutcome::AlreadyBound(bound));
+        }
+        // As the pack and the remote layout do (SPEC §9.2: a manifest is written only after every chunk it names was
+        // staged), so code above the trait cannot pass here by binding what it never staged.
+        for index in 0..manifest.chunk_count() {
+            let staged = inner.chunks.get(&(manifest.upload_id(), index));
+            let expected = manifest.chunk_range(index).zip(
+                manifest
+                    .chunk_crcs()
+                    .get(persia_format::widen::usize_from_u32(index)),
+            );
+            let matches = match (staged, expected) {
+                (Some(bytes), Some((range, &crc))) => {
+                    range.end.checked_sub(range.start)
+                        == Some(persia_format::widen::u64_from_usize(bytes.len()))
+                        && persia_format::checksum::crc32c(bytes) == crc
+                }
+                _ => false,
+            };
+            if !matches {
+                return Err(Error::InvalidManifest {
+                    what: "a chunk the manifest names is not staged as it describes",
+                });
+            }
         }
         inner
             .manifests

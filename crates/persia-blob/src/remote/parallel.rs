@@ -8,8 +8,9 @@ use std::sync::{Mutex, PoisonError};
 use crate::error::{Error, Result};
 
 /// Runs `job(0..count)` on at most `parallelism` threads (the caller's included) and returns the results in index
-/// order, or the error of the lowest failing index. After a failure no new index starts; every index below a failure
-/// was started before it, so the error reported does not depend on scheduling.
+/// order, or the error of the lowest failing index. Once a thread sees a failure it starts no new index (a thread
+/// that checked just before the failure was recorded may start one more, whose result is dropped); every index below
+/// a failure was started before it, so the error reported does not depend on scheduling.
 pub(crate) fn run<T, F>(count: usize, parallelism: NonZeroUsize, job: F) -> Result<Vec<T>>
 where
     T: Send,

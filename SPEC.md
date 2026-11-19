@@ -2615,7 +2615,9 @@ since, each checked against its CRC32C) under the new `upload_id` and continues 
 **Small blobs** (ROADMAP 9.3.3). A blob of at most 64 KiB (the chunk size floor, §9.2) is buffered and hashed before
 any write and stored in its blob manifest (`INLINE`, §9.1.1) at `blobs/<xx>/<id>`: one `put_if_absent`, nothing
 staged, and a read is the one `get` of the manifest; the empty blob writes its plain manifest the same way. Its
-`upload_id` is 0, so two writers of the same small blob write equal bytes and both get `Created` (§10.1), and the
+`upload_id` is 0, so two writers of the same small blob at the same `chunk_size` (the inline manifest records it)
+write equal bytes and both get `Created` (§10.1); at different chunk sizes the second gets `AlreadyExists` and is a
+duplicate (§9.2). The
 mark takes no upload id from it (§9.5). An unknown outcome of a small blob's write is retried as the same single
 object, never as a staged blob (a plain manifest with no chunk behind it).
 

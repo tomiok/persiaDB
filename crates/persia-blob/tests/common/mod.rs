@@ -309,9 +309,12 @@ impl<S: Storage> Storage for Scripted<S> {
     }
     fn get(&self, key: &Key) -> Result<Bytes> {
         use std::sync::atomic::Ordering::SeqCst;
-        let left = self.gets_not_found.load(SeqCst);
-        if left > 0 {
-            self.gets_not_found.store(left - 1, SeqCst);
+        // One atomic step, so two concurrent gets never both take the same scripted answer.
+        if self
+            .gets_not_found
+            .try_update(SeqCst, SeqCst, |left| left.checked_sub(1))
+            .is_ok()
+        {
             return Err(persia_storage::Error::NotFound { key: key.clone() });
         }
         self.inner.get(key)
