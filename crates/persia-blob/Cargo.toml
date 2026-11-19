@@ -14,9 +14,13 @@ thiserror.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+persia-testutil.workspace = true
 proptest.workspace = true
+tempfile.workspace = true
 
 [features]
+# The in-memory `MemoryBlobStore`, for tests of code above the `BlobStore` trait (crates/persia).
+testing = []
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.
 slow = []
 

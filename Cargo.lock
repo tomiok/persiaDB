@@ -618,8 +618,10 @@ dependencies = [
  "criterion",
  "persia-format",
  "persia-storage",
+ "persia-testutil",
  "proptest",
  "sha2",
+ "tempfile",
  "thiserror",
 ]
 

@@ -1106,11 +1106,49 @@ fn is_corruption_is_true_for_corrupt_only() {
             },
             false,
         ),
+        // The `BlobStore` contract.
+        (
+            Error::BlobNotFound {
+                blob_id: blob_id_of(b""),
+            },
+            false,
+        ),
+        (
+            Error::RangeOutOfBounds {
+                start: 0,
+                end: 1,
+                size: 0,
+            },
+            false,
+        ),
+        (
+            Error::StagedChunkConflict {
+                upload_id: UploadId::new(1),
+                index: 0,
+            },
+            false,
+        ),
+        (Error::BindOutcomeUnknown("x".into()), false),
+        // -- pack (9.2) --
+        // One case per pack variant, here and only here.
+        //
+        //
+
+        // -- remote (9.3) --
+        // One case per remote variant, here and only here.
+        //
+        //
+
+        // -- documents (9.4) --
+        // One case per documents variant, here and only here.
+        //
+        //
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
-        // No wildcard: a new variant must be added to the table above.
-        match e {
+        // No wildcard: a new variant must be added to the table above. Each block names its own group, so a block
+        // adds one arm of its own instead of a line in another block's.
+        let group = match e {
             Error::Corrupt { .. }
             | Error::UnsupportedVersion { .. }
             | Error::UnsupportedFlags { .. }
@@ -1118,8 +1156,25 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::InvalidChunking(_)
             | Error::Read(_)
             | Error::ChunkerFailed
-            | Error::ChunkSizeBelowMin { .. } => {}
-        }
+            | Error::ChunkSizeBelowMin { .. } => "manifest and chunking",
+            // -- pack (9.2) --
+            // One arm for the pack's variants, `=> "pack"`, here and only here.
+            //
+            //
+            // -- remote (9.3) --
+            // One arm for the remote layout's variants, `=> "remote"`, here and only here.
+            //
+            //
+            // -- documents (9.4) --
+            // One arm for the documents variants, `=> "documents"`, here and only here.
+            //
+            //
+            Error::BlobNotFound { .. }
+            | Error::RangeOutOfBounds { .. }
+            | Error::StagedChunkConflict { .. }
+            | Error::BindOutcomeUnknown(_) => "store",
+        };
+        assert_ne!(group, "");
     }
 }
 
