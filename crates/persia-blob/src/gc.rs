@@ -193,10 +193,10 @@ impl Mark {
     /// let store = RemoteBlobStore::new(MemoryStorage::with_clock(std::sync::Arc::new(ManualClock::new(
     ///     std::time::UNIX_EPOCH,
     /// ))));
-    /// let data = vec![7; 70 << 10];
+    /// let data = vec![7; 300];
     /// let upload = UploadId::new(5);
     /// store.stage_chunk(upload, 0, &data)?;
-    /// let m = BlobManifest::new(blob_id_of(&data), 70 << 10, ChunkSize::DEFAULT, upload, vec![crc32c(&data)])?;
+    /// let m = BlobManifest::new(blob_id_of(&data), 300, ChunkSize::DEFAULT, upload, vec![crc32c(&data)])?;
     /// store.bind(&m)?;
     /// let gone = blob_id_of(b"never stored");
     /// let mut mark = Mark::new([m.blob_id(), gone], []);
@@ -258,7 +258,7 @@ mod tests {
         ))))
     }
 
-    /// Binds `data` (over 64 KiB: staged) under `upload`.
+    /// Stages `data` as one chunk under `upload` and binds its plain manifest.
     fn staged(store: &RemoteBlobStore<MemoryStorage>, data: &[u8], upload: u128) -> BlobManifest {
         let upload = UploadId::new(upload);
         store.stage_chunk(upload, 0, data).unwrap();
@@ -285,8 +285,8 @@ mod tests {
     #[test]
     fn marked_manifests_add_their_uploads_except_inline_ones() {
         let store = remote();
-        let big = staged(&store, &vec![1; 70 << 10], 11);
-        let unmarked = staged(&store, &vec![2; 70 << 10], 12);
+        let big = staged(&store, &vec![1; 300], 11);
+        let unmarked = staged(&store, &vec![2; 300], 12);
         let small = BlobManifest::new(
             blob_id_of(b"tiny"),
             4,
@@ -310,7 +310,7 @@ mod tests {
     #[test]
     fn a_missing_or_unreadable_manifest_is_listed_and_a_failing_store_fails_the_mark() {
         let store = remote();
-        let damaged = staged(&store, &vec![3; 70 << 10], 21);
+        let damaged = staged(&store, &vec![3; 300], 21);
         let key = RemoteKey::Manifest(damaged.blob_id()).key().unwrap();
         persia_storage::Storage::put(store.storage(), &key, Bytes::from_static(b"not a manifest"))
             .unwrap();
