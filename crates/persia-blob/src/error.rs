@@ -98,9 +98,52 @@ pub enum Error {
     BindOutcomeUnknown(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     // -- pack (9.2) --
     // Variants of the local pack file (crate::pack, SPEC §9.3) go here, and only here.
-    //
-    //
-
+    /// A read, write, sync or file-system call on the blob pack failed. After a failed write or sync the pack is
+    /// poisoned ([`Error::PackPoisoned`]): what reached the disk is unknown until it is reopened (SPEC §4.5).
+    #[error("blob pack {op} failed")]
+    PackIo {
+        /// What was being done.
+        op: &'static str,
+        /// The OS error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// An earlier write or sync of this pack handle failed, so it writes nothing more (SPEC §4.5): reopen it, and its
+    /// recovery decides what survived.
+    #[error("the blob pack stopped writing after a failed write or sync: reopen it")]
+    PackPoisoned,
+    /// The pack was opened read-only.
+    #[error("the blob pack is open read-only")]
+    PackReadOnly,
+    /// The pack uses a format version or feature this build does not read (SPEC §4.2 rules, §9.3): upgrade, do not
+    /// repair.
+    #[error("the blob pack's format is newer than this build reads")]
+    PackUnsupported(#[source] persia_format::Error),
+    /// [`PackStore::refresh`](crate::PackStore::refresh) found another pack at the path than the one this handle
+    /// opened: a pack rewrite (SPEC §9.5) replaced it, so the handle must be reopened (SPEC §18.10).
+    #[error("the blob pack was replaced (generation {opened}, now {found}): reopen it")]
+    PackReplaced {
+        /// The generation this handle opened.
+        opened: u64,
+        /// The generation the path holds now.
+        found: u64,
+    },
+    /// The pack's header names another database than the one opening it (its `db_uuid` differs from the
+    /// container's): a pack copied beside another database's container. Its blobs are not this database's.
+    #[error("the blob pack belongs to another database")]
+    PackOfAnotherDatabase {
+        /// The `db_uuid` the pack's header holds.
+        found: [u8; 16],
+    },
+    /// `bind` names a chunk this pack handle has not staged with the manifest's length and CRC32C (a caller's error:
+    /// binding it would publish a blob that cannot be read back). Nothing was written.
+    #[error("chunk {index} of upload {upload_id} is not staged as the manifest describes it")]
+    ChunkNotStaged {
+        /// The upload.
+        upload_id: UploadId,
+        /// The chunk's index.
+        index: u32,
+    },
     // -- remote (9.3) --
     // Variants of the remote layout (crate::remote, SPEC §9.4) go here, and only here.
     /// A storage operation of the remote layout failed (SPEC §9.4, §10.1). Corruption a backend reports is

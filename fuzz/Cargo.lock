@@ -233,6 +233,7 @@ dependencies = [
  "persia-storage",
  "sha2",
  "thiserror",
+ "tracing",
 ]
 
 [[package]]

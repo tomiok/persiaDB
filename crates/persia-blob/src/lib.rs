@@ -31,8 +31,8 @@ pub use store::{
 
 // -- pack (9.2) --
 // The local pack file (SPEC §9.3): its `mod` and `pub use` lines go here, and only here.
-//
-//
+pub mod pack;
+pub use pack::{PackMode, PackStore, pack_path};
 
 // -- remote (9.3) --
 // The remote layout (SPEC §9.4): its `mod` and `pub use` lines go here, and only here.

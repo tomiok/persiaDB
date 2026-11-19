@@ -205,6 +205,8 @@ fn kind_name(kind: FrameKind) -> String {
         FrameKind::Manifest => "manifest".to_owned(),
         FrameKind::Padding => "padding".to_owned(),
         FrameKind::TombstoneSidecar => "tombstones".to_owned(),
+        FrameKind::BlobChunk => "blob-chunk".to_owned(),
+        FrameKind::BlobIndex => "blob-index".to_owned(),
         FrameKind::Unknown(k) => format!("{:#04x}", k.get()),
     }
 }

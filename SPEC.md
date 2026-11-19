@@ -178,7 +178,7 @@ commit writes the slot that is not active.
 From byte 12288 (after slot B) the file is an append-only sequence of frames:
 ```
 0   4  frame_magic   bytes "PFR1" (0x50 0x46 0x52 0x31)
-4   1  kind          1=WalChunk 2=Segment 3=Manifest 4=Padding 5=TombstoneSidecar
+4   1  kind          1=WalChunk 2=Segment 3=Manifest 4=Padding 5=TombstoneSidecar 6=BlobChunk 7=BlobIndex
 5   3  flags         (bit0: zstd-compressed payload)
 8   8  payload_len   u64  (unpadded length)
 16  8  frame_seq     u64
@@ -215,7 +215,9 @@ total length by the end `E` of the container or object (validation rule 2 above)
 trusted until the whole frame passes the validation checks above (ADR-0009).
 
 **Kinds.** Unknown `kind` values (including 0) with a valid frame are skipped (forward compatibility); a reader
-MUST NOT interpret them. Padding frames carry no meaning: their payload exists to align what follows.
+MUST NOT interpret them. Padding frames carry no meaning: their payload exists to align what follows. Kinds 6 and 7 belong
+to the blob pack (§9.3): a container reader skips them like unknown kinds, and a pack reader treats every other kind
+as corruption.
 
 **Compressed payload** (flags bit0). The stored payload is `uncompressed_len u64` followed by exactly one zstd
 frame with the same rules as a `Zstd` block (SPEC §5.2): it declares a content size equal to `uncompressed_len`,
@@ -2575,18 +2577,30 @@ names another blob is `Corrupt`, never silently reused, and `verify` reports it 
 reading the bytes.
 
 ### 9.3 Local layout (`.persia.blobs`)
-Pack file: header + append-only `BlobChunk` frames `{upload_id, chunk_idx, len, crc, bytes}` + `BlobIndex` frames
-holding blob manifests (with the chunk frames' offsets) + superblock like SPEC §4.3. A blob is visible once the
-superblock commit that covers its `BlobIndex` frame is durable; chunk frames no committed `BlobIndex` names are staging
-or orphans. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
+Pack file (ADR-0049): a header with the layout and rules of §4.2 and the magic `"PERSIAB\x01"`, in its own flag
+namespace (no bit assigned); its `db_uuid` is the database's, and an open by another database fails. Two superblock
+slots at 4096 and 8192, chosen as in §4.3: `seq, index_off, index_len, log_end, generation, blob_count,
+next_frame_seq u64; pack_id u128; reserved zero; crc32c at 4092`. A new pack has `seq 0`, `log_end 12288`,
+`generation 1`, `blob_count 0`, `next_frame_seq 1` and a random `pack_id`. A committed slot has
+`1 ≤ blob_count ≤ (log_end − 12288)/120` and its last `BlobIndex` frame ending at `log_end`. Frames (§4.4, never
+compressed) from 12288: `BlobChunk` (kind 6) `{upload_id u128, chunk_idx u32, len u32, crc u32, reserved u32, bytes}`
+and `BlobIndex` (kind 7) `{manifest_len u32, reserved u32, blob manifest padded to 8, one u64 BlobChunk frame offset
+per chunk}`. `bind` appends the `BlobIndex` frame after the chunks staged before it, syncs the pack's data, writes
+and syncs the inactive slot, and only then returns `Bound` (§18.9); it refuses a manifest whose upload is already
+bound to another blob (the same manifest again, a retry after an unknown outcome, is `AlreadyBound`). A blob is
+visible once a durable slot covers its `BlobIndex` frame; the writer shows a binding (dedup,
+lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex` names are staging or orphans. The
+open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
+valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
+bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
 size), then each chunk's length and CRC32C. GC rewrites live blobs into a new pack (like container compaction).
 
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
 references one is dangling, which `verify` reports, §9.5). Creating it is durable before the first blob is bound: the
-file with its header and superblock synced, then its directory synced (§4.5.2). When a blob is durable relative to
-the container commit that references it, and how a GC rewrite replaces the pack under readers (Windows included), are
-open questions (§18.9, §18.10). A copy of the database takes both files (§4.8).
+file with its header and superblock synced, then its directory synced (§4.5.2). A blob is durable per bind, before any
+document that references it is logged (§18.9). A reader learns that the pack was replaced from its
+`(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8).
 
 ### 9.4 Remote layout
 ```
@@ -3073,20 +3087,13 @@ Comparison against other engines is reported with methodology, never cherry-pick
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.
 7. Language analyzers scope for v1 (en, es, pt first).
 8. ~~Blob upload staging and expected id~~: resolved by ADR-0034, upload-id staging bound by a blob manifest (§9.2–§9.6).
-9. **Pack durability order** (ROADMAP 9.2.2). §9.5 fixes the order (the blob durable, then the document that
-   references it), not the calls. Proposed: `put_blob` appends the `BlobChunk` frames and the `BlobIndex` frame,
-   syncs the pack's data, then writes and syncs its superblock slot (as the container's commit, §4.5); the first
-   `put_blob` of a database also syncs the directory after creating the pack (§9.3), since a new name is durable only
-   then (§4.5.2). Only then does `put_blob` return, and only then may the WAL record or commit of a document that
-   references the blob be acknowledged. Open: (a) whether a pack slot sync per blob is required, or whether
-   `put_blob` may return at "frames written" and the next container commit, or the WAL sync of the first document
-   referencing it, syncs the pack first (one pack sync per batch instead of one per blob); that needs the
-   container's commit (§4.5 step 1) and the WAL's `Fsync` (§8.2) to sync the pack before their own sync, so that a
-   crash between the two syncs may orphan the blob but never leaves a reference without it; (b) what a document logged
-   `Buffered` or `Async` with a blob promises when the pack sync fails afterwards (today a failed sync poisons the
-   writer, §4.5); (c) whether the pack's directory sync can share the container's when both files are created
-   together. Any answer keeps the pack's index covering a blob written before any container byte that references
-   it, which a live copy relies on (§4.8). A crash test (ROADMAP 9.5.4) covers each answer.
+9. ~~Pack durability order~~: resolved by ADR-0049 (ROADMAP 9.2.2): one sync per blob. `bind` appends the
+   `BlobIndex` frame after the chunks staged before it, syncs the pack's data, writes and syncs its inactive slot, and
+   only then returns `Bound`; the first blob also creates the pack durably (§9.3: file with header and superblock
+   synced, then its own directory sync, not shared with the container's). The blob is therefore durable before any
+   document that references it is logged, at every WAL durability (§9.5, §9.6), so a `Buffered` or `Async` document
+   promises nothing more about its blob, and the pack's index covers a blob before any container byte references it
+   (which a live copy relies on, §4.8). A crash test (ROADMAP 9.5.4) covers it.
 10. **Pack rewrite (GC) under readers, Windows included** (ROADMAP 9.5.2). Proposed: the same reader-safe replace
     as the container's compaction (§4.6), never a rewrite in place. The writer copies the live blobs into
     `<name>.persia.blobs.compact.<nonce>.<n>` beside the pack, syncs it, renames it over the pack, then syncs the
@@ -3095,9 +3102,9 @@ Comparison against other engines is reported with methodology, never cherry-pick
     those readers keep the old bytes; where it fails (another file system) the rewrite fails without harm, as
     compaction does. The pack takes no lock of its own: only the container's writer, the holder of its writer lock
     (`<name>.lock` beside the container on Windows, ADR-0016 item 3), writes or rewrites it, so the sibling lock
-    covers the pack too. Open: (a) how a reader that opened the old pack learns to reopen the new one, since Windows
-    has no file identity to compare (ADR-0016 item 5): a generation in the pack's superblock, or the container's
-    manifest recording the pack generation it references; (b) blobs bound into the new pack before its directory sync:
+    covers the pack too. Open: (a) answered by ADR-0049: the pack's superblock carries `generation` (1 for a new pack,
+    +1 per rewrite) and a random `pack_id` per file, and a reader compares `(pack_id, generation)` and reopens on a
+    change; (b) blobs bound into the new pack before its directory sync:
     a crash that reverts the rename would lose them while the container may already reference them, so the proposal
     is that the writer binds nothing into the new pack until that sync succeeds, and stops writing if it fails, as
     after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) whether a

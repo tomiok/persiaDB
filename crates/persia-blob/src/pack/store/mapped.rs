@@ -1,0 +1,274 @@
+//! Mapped reads of the committed frames (SPEC §4.7, ADR-0049 item 12).
+
+use super::{
+    ByteSource, ContainerFile, FIRST_FRAME_OFFSET, File, MapPermit, Pack, PackStore, Range, io,
+};
+#[cfg(test)]
+use std::sync::{Arc, atomic::Ordering};
+
+/// Maps `range` of a pack's file: the real mapping for a [`File`], a copy in tests.
+pub(super) type MapFn<F> = Box<dyn Fn(&F, Range<u64>) -> io::Result<ByteSource> + Send + Sync>;
+
+/// Mapped reads of the committed frames (SPEC §4.7, ADR-0049 item 12).
+pub(super) struct Mapper<F> {
+    map: MapFn<F>,
+    /// Remaps that failed since mapped reads were enabled.
+    failures: u64,
+}
+
+impl<F> std::fmt::Debug for Mapper<F> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Mapper")
+            .field("failures", &self.failures)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<F> Mapper<F> {
+    /// Maps `12288..log_end` of the committed superblock again, unless the mapping already ends there. If that fails
+    /// the previous mapping stays: it is still valid for the frames it covers, and newer ones are read.
+    pub(super) fn remap(&mut self, pack: &mut Pack<F>) {
+        let log_end = pack.sb.log_end;
+        if pack.window.as_ref().map(ByteSource::end_offset) == Some(log_end) {
+            return;
+        }
+        match (self.map)(&pack.file, FIRST_FRAME_OFFSET..log_end) {
+            Ok(window) => pack.window = Some(window),
+            Err(e) => {
+                self.failures = self.failures.saturating_add(1);
+                // SPEC §4.7: the fallback to pread is logged and counted, as for the container.
+                tracing::warn!(
+                    error = %e,
+                    log_end,
+                    "blob pack remap failed; frames past the previous mapping are read with pread"
+                );
+            }
+        }
+    }
+}
+
+impl<F: ContainerFile + 'static> PackStore<F> {
+    /// Turns mapped reads on with `map` (see [`PackStore::enable_mapped_reads`]); maps now if the pack exists.
+    fn enable_mapper(&self, map: MapFn<F>) {
+        let mut guard = self.write();
+        let inner = &mut *guard;
+        let mut mapper = Mapper { map, failures: 0 };
+        if let Some(pack) = &mut inner.pack {
+            pack.window = None;
+            mapper.remap(pack);
+        }
+        inner.mapper = Some(mapper);
+    }
+
+    /// The absolute range of the file that frames are read from the mapping, if one is live.
+    pub fn mapped_range(&self) -> Option<Range<u64>> {
+        let inner = self.read();
+        let window = inner.pack.as_ref()?.window.as_ref()?;
+        Some(window.base_offset()..window.end_offset())
+    }
+
+    /// How many times mapping the committed frames failed since mapped reads were turned on. Reads stay correct
+    /// (the frames past the last mapping are read with `pread`), only slower.
+    pub fn mapping_failures(&self) -> u64 {
+        self.read().mapper.as_ref().map_or(0, |m| m.failures)
+    }
+
+    /// Mapped reads over a copy of the file, for tests of the window logic on simulated files.
+    #[cfg(test)]
+    fn enable_copied_reads(&self, fail: Arc<std::sync::atomic::AtomicBool>) {
+        self.enable_mapper(Box::new(move |file: &F, range: Range<u64>| {
+            if fail.load(Ordering::Relaxed) {
+                return Err(io::Error::other("simulated map failure"));
+            }
+            let len =
+                usize::try_from(range.end.saturating_sub(range.start)).map_err(io::Error::other)?;
+            let mut buf = vec![0; len];
+            file.read_exact_at(&mut buf, range.start)?;
+            Ok(ByteSource::with_base_offset(buf.into(), range.start))
+        }));
+    }
+}
+
+impl PackStore<File> {
+    /// Reads committed frames through a memory mapping from now on, instead of with `pread` (SPEC §4.7, ADR-0049
+    /// item 12): `12288..log_end` is mapped now (if the pack exists) and again after each bind. Chunks the mapping
+    /// covers are read from it ([`PackStore::read_chunk_source`] then copies nothing); the others with `pread`. A
+    /// failed remap keeps the previous mapping and is counted ([`PackStore::mapping_failures`]).
+    ///
+    /// Map only a pack on a local disk file system: a read error on a mapped page ends the process (`SIGBUS`), where
+    /// `pread` would return an error (SPEC §4.7). On Windows a live mapping keeps the file from being shrunk: a
+    /// read-write open of the pack that must truncate a tail fails with an I/O error while a reader maps it
+    /// (ADR-0049, Consequences). `permit`'s contract includes at most one read-write `PackStore` of the pack at a
+    /// time, anywhere ([`MapPermit::new`]).
+    ///
+    /// ```
+    /// use persia_blob::pack::{PackMode, PackStore};
+    /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of};
+    /// use persia_storage::container::MapPermit;
+    ///
+    /// # let dir = tempfile::tempdir()?;
+    /// let store = PackStore::open(dir.path().join("app.persia.blobs"), PackMode::ReadWrite, [0; 16])?;
+    /// // SAFETY: nothing but this store writes the pack while it is mapped (MapPermit::new's contract).
+    /// store.enable_mapped_reads(unsafe { MapPermit::new() });
+    /// let m = BlobManifest::new(blob_id_of(b"mapped"), 6, ChunkSize::from_encoding(6)?, UploadId::new(1),
+    ///     vec![persia_format::checksum::crc32c(b"mapped")])?;
+    /// store.stage_chunk(m.upload_id(), 0, b"mapped")?;
+    /// assert_eq!(store.bind(&m)?, BindOutcome::Bound);
+    /// # if !cfg!(miri) {
+    /// assert!(store.mapped_range().is_some());
+    /// assert_eq!(&*store.read_chunk_source(&m, 0)?, b"mapped");
+    /// # }
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn enable_mapped_reads(&self, permit: MapPermit) {
+        self.enable_mapper(Box::new(move |file: &File, range: Range<u64>| {
+            permit.map(file, range)
+        }));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::cast_possible_truncation)]
+mod tests {
+    use std::sync::atomic::AtomicBool;
+
+    use persia_storage::vfs::sim::{SimFs, SimFsFile};
+
+    use super::*;
+    use crate::pack::PackMode;
+    use crate::store::BlobStore;
+    use crate::{BindOutcome, BlobManifest, ChunkSize, UploadId, blob_id_of, read_chunk_checked};
+    use persia_format::checksum::crc32c;
+
+    fn manifest_of(data: &[u8], chunk: u32, upload: u128) -> BlobManifest {
+        let crcs = data.chunks(chunk as usize).map(crc32c).collect();
+        BlobManifest::new(
+            blob_id_of(data),
+            data.len() as u64,
+            ChunkSize::from_encoding(chunk).unwrap(),
+            UploadId::new(upload),
+            crcs,
+        )
+        .unwrap()
+    }
+
+    fn store() -> (SimFs, PackStore<SimFsFile>) {
+        let fs = SimFs::new();
+        let store = PackStore::open_in(
+            Arc::new(fs.clone()),
+            "/p.blobs",
+            PackMode::ReadWrite,
+            [0; 16],
+        )
+        .unwrap();
+        (fs, store)
+    }
+
+    fn put(store: &PackStore<SimFsFile>, data: &[u8], chunk: u32, upload: u128) -> BlobManifest {
+        let m = manifest_of(data, chunk, upload);
+        for (i, c) in data.chunks(chunk as usize).enumerate() {
+            store.stage_chunk(m.upload_id(), i as u32, c).unwrap();
+        }
+        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+        m
+    }
+
+    #[test]
+    fn mapped_reads_follow_each_bind_and_serve_committed_chunks_from_the_window() {
+        let (_fs, store) = store();
+        let fail = Arc::new(AtomicBool::new(false));
+        store.enable_copied_reads(fail.clone());
+        assert_eq!(store.mapped_range(), None); // no pack yet
+        let a = put(&store, b"0123456789", 4, 1);
+        let range = store.mapped_range().unwrap();
+        assert_eq!(
+            range,
+            FIRST_FRAME_OFFSET..store.superblock().unwrap().log_end
+        );
+        let chunk = store.read_chunk_source(&a, 1).unwrap();
+        assert_eq!(&*chunk, b"4567");
+        assert!(
+            range.contains(&chunk.base_offset()),
+            "served from the window"
+        );
+        // A failed remap keeps the old window; the new blob's chunks are read with pread.
+        fail.store(true, Ordering::Relaxed);
+        let b = put(&store, b"abcdef", 4, 2);
+        assert_eq!(store.mapping_failures(), 1);
+        assert_eq!(store.mapped_range(), Some(range.clone()));
+        assert_eq!(read_chunk_checked(&store, &b, 1).unwrap(), b"ef");
+        fail.store(false, Ordering::Relaxed);
+        let c = put(&store, b"xyz", 4, 3);
+        assert_eq!(
+            store.mapped_range().unwrap().end,
+            store.superblock().unwrap().log_end
+        );
+        for (m, i, want) in [(&a, 2, &b"89"[..]), (&b, 0, b"abcd"), (&c, 0, b"xyz")] {
+            assert_eq!(read_chunk_checked(&store, m, i).unwrap(), want);
+        }
+    }
+
+    /// An error found before anything is written (here the `frame_seq` run exhausted) leaves the handle usable.
+    #[test]
+    fn an_error_before_any_write_does_not_poison() {
+        let (_fs, store) = store();
+        put(&store, b"first", 8, 1);
+        let m = manifest_of(b"", 8, 2);
+        let saved = {
+            let mut inner = store.write();
+            let pack = inner.pack.as_mut().unwrap();
+            std::mem::replace(&mut pack.next_frame_seq, u64::MAX)
+        };
+        assert!(matches!(
+            store.bind(&m),
+            Err(crate::Error::InvalidManifest { .. })
+        ));
+        assert!(store.stage_chunk(UploadId::new(3), 0, b"x").is_err());
+        assert!(!store.is_poisoned());
+        store.write().pack.as_mut().unwrap().next_frame_seq = saved;
+        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+    }
+
+    #[test]
+    fn a_range_that_crosses_the_end_of_the_window_is_read_with_pread() {
+        let (_fs, store) = store();
+        store.enable_copied_reads(Arc::new(AtomicBool::new(false)));
+        put(&store, b"first", 8, 1);
+        let m = manifest_of(b"later", 8, 2);
+        store.stage_chunk(m.upload_id(), 0, b"later").unwrap();
+        let inner = store.read();
+        let pack = inner.pack.as_ref().unwrap();
+        let end = store.mapped_range().unwrap().end;
+        let bytes = pack.bytes_at(end - 8, 16).unwrap();
+        assert_eq!(bytes.base_offset(), end - 8);
+        assert_eq!(bytes.as_slice().len(), 16);
+    }
+
+    #[test]
+    fn a_staged_chunk_past_the_window_is_read_with_pread() {
+        let (_fs, store) = store();
+        store.enable_copied_reads(Arc::new(AtomicBool::new(false)));
+        put(&store, b"first", 8, 1);
+        let m = manifest_of(b"later", 8, 2);
+        store.stage_chunk(m.upload_id(), 0, b"later").unwrap();
+        let chunk = store.read_chunk_source(&m, 0).unwrap();
+        assert!(chunk.base_offset() >= store.mapped_range().unwrap().end);
+        assert_eq!(&*chunk, b"later");
+    }
+
+    #[test]
+    fn a_chunk_frame_that_does_not_match_its_manifest_is_corrupt() {
+        let (_fs, store) = store();
+        let a = put(&store, b"0123456789", 4, 1);
+        // Same id and chunks, another upload: the index does not name it, and nothing is staged under it.
+        let other = manifest_of(b"0123456789", 4, 2);
+        assert!(store.read_chunk(&other, 0).unwrap_err().is_corruption());
+        // Another CRC than the stored chunk's.
+        let mut crcs = a.chunk_crcs().to_vec();
+        crcs[0] ^= 1;
+        let wrong =
+            BlobManifest::new(a.blob_id(), a.size(), a.chunk_size(), a.upload_id(), crcs).unwrap();
+        assert!(store.read_chunk(&wrong, 0).unwrap_err().is_corruption());
+        assert!(store.read_chunk(&a, 3).unwrap_err().is_corruption());
+    }
+}

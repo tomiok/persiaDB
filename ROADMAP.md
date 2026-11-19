@@ -610,11 +610,15 @@ Deps: M1, M2.
 - [x] 9.1.3 Blob manifest (chunk list) encode/decode
 
 ## 9.2 Local pack file
-- [ ] 9.2.1 Pack header/superblock + `BlobChunk`/`BlobIndex` frames (SPEC §9.3)
-- [ ] 9.2.2 Append blob (dedup check by id), fsync policy
-- [ ] 9.2.3 Read full / range via chunk index (mmap-backed)
-- [ ] 9.2.4 Recovery: torn tail truncation, index rebuild by scan
-- [ ] 9.2.5 Fuzz pack reader
+- [x] 9.2.1 Pack header/superblock + `BlobChunk`/`BlobIndex` frames (SPEC §9.3)
+- [x] 9.2.2 Append blob (dedup check by id), fsync policy
+- [x] 9.2.3 Read full / range via chunk index (mmap-backed)
+- [x] 9.2.4 Recovery: torn tail truncation, index rebuild by scan
+- [x] 9.2.5 Fuzz pack reader
+- [ ] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` with the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2)
+- [ ] 9.2.7 Enforce one pack writer: open the pack read-write only with a proof of the container's writer lock, so two read-write `PackStore`s of one file cannot exist (ADR-0049; found in the 9.2.1 review)
+- [ ] 9.2.8 Pack corruption errors carry the offset of the bad slot or frame (found in the 9.2.1 review)
+- [ ] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review)
 
 ## 9.3 Remote layout
 - [x] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)

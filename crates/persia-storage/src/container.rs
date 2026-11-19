@@ -42,6 +42,7 @@ use persia_format::{Corruption, Reader, Writer};
 use crate::vfs::Vfs;
 pub use error::{Error, ReadOnlyReason, Result};
 pub use file::ContainerFile;
+pub use mapped::MapPermit;
 pub use stream::FrameWriter;
 pub use tail::Repair;
 use tail::TailContents;
