@@ -9,12 +9,102 @@
 //!   pin taken after the mark still protects what it names.
 
 use std::collections::HashSet;
+use std::time::{Duration, SystemTime};
 
 use persia_format::BlobId;
 
 use crate::error::{Error, Result};
 use crate::manifest::UploadId;
 use crate::store::BlobStore;
+
+mod pack;
+mod remote;
+
+/// How a sweep runs (SPEC §9.5).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SweepOptions {
+    /// How long an unmarked remote object is kept after it was written (SPEC §9.5: 24 h by default; staged chunks
+    /// counted from their upload's newest chunk). It must stay far above the bind budget (SPEC §9.4): a conditional
+    /// write still in flight may bind an upload that long after it was last touched. The pack has none.
+    pub grace: Duration,
+    /// The time ages are measured at, by the backend's clock: objects' `last_modified` come from it (SPEC §10.1).
+    pub now: SystemTime,
+    /// The pack is rewritten only when the bytes it would drop reach this share of its frames' bytes (0 forces the
+    /// rewrite; above 1 it never runs). The remote layout deletes objects one by one and ignores it.
+    pub rewrite_ratio: f64,
+}
+
+/// What a sweep did (SPEC §9.5). Counts are of objects: remotely, blob manifests and staged chunk objects; in the
+/// pack, blobs and chunk frames the rewrite dropped.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SweepReport {
+    /// Unmarked blobs deleted: their manifests (remote) or their index and chunk frames (pack).
+    pub blobs_deleted: u64,
+    /// Uploads whose staged chunks were deleted: unbound uploads, and (remote) those of blobs deleted by this or an
+    /// earlier sweep.
+    pub uploads_deleted: u64,
+    /// Staged chunk objects (remote) or chunk frames (pack) deleted.
+    pub chunks_deleted: u64,
+    /// Unmarked remote objects kept because a pin named them at their check (or, for chunks, a pinned blob's
+    /// manifest names their upload, ADR-0051 item 5).
+    pub pinned: u64,
+    /// Unmarked remote objects kept because they are younger than the grace period (an upload counts once).
+    pub young: u64,
+    /// Unmarked remote objects kept because the backend cannot tell their age (`last_modified` is `None`, SPEC
+    /// §10.1): never taken for expired (an upload counts once).
+    pub unknown_age: u64,
+    /// Remote manifests kept that could not be read: the upload each names is unknown.
+    pub unreadable: u64,
+    /// Whether the staged chunks were left alone because a marked or kept manifest could not be read (the upload it
+    /// names is unknown): GC deletes less, never more.
+    pub uploads_skipped: bool,
+    /// What became of the pack rewrite; `None` for the remote layout.
+    pub rewrite: Option<Rewrite>,
+}
+
+/// What became of a pack rewrite (SPEC §9.3, §18.10; ADR-0052).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rewrite {
+    /// The database has no pack: nothing to collect.
+    NoPack,
+    /// The bytes to drop are below [`SweepOptions::rewrite_ratio`] of the frames' bytes: nothing changed.
+    BelowRatio {
+        /// Bytes of frames nothing keeps.
+        dead_bytes: u64,
+        /// Bytes of all frames (`12288..` the end of the file).
+        frame_bytes: u64,
+    },
+    /// A pin taken after the plan names something the rewrite drops: the new file was discarded and the pack is
+    /// unchanged. The next sweep tries again.
+    Deferred,
+    /// The pack was replaced by a new file.
+    Done {
+        /// Its generation (the old one plus one, SPEC §18.10).
+        generation: u64,
+        /// Bytes of frames before.
+        frame_bytes_before: u64,
+        /// Bytes of frames after.
+        frame_bytes_after: u64,
+    },
+}
+
+/// The sweep of a blob store (SPEC §9.5): deletes what a [`Mark`] does not keep, each pin check and delete one step
+/// under the pin set's lock.
+pub trait Sweep {
+    /// Deletes every unmarked blob manifest, then the staged chunks of every upload no kept manifest names (SPEC
+    /// §9.5), skipping whatever a pin names at its check. Remotely, an object is deleted only once older than
+    /// [`SweepOptions::grace`]; an object of unknown age never is. The pack drops them at once, by rewriting itself
+    /// when enough is dropped ([`SweepOptions::rewrite_ratio`]).
+    ///
+    /// # Errors
+    /// The store's errors: the sweep stops at the first, and what it deleted before was unmarked.
+    fn sweep<P: PinGate>(
+        &self,
+        mark: &Mark,
+        pins: &P,
+        options: &SweepOptions,
+    ) -> Result<SweepReport>;
+}
 
 /// What a pin protects from GC (SPEC §9.5): the writer's `Pinned`, as this crate names it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

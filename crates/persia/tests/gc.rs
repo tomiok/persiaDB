@@ -15,15 +15,19 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
+use persia::internal::blob::DEFAULT_BIND_BUDGET;
 use persia::internal::blob::{Blobs, PutBlobOptions};
 use persia::internal::documents::{Blob, BlobDatabase};
+use persia::internal::gc::{BlobReferences, GcError, GcOptions};
 use persia::internal::pins::Pinned;
-use persia_blob::{BlobId, BlobStore, ChunkSize, MemoryBlobStore, UploadId};
-use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
+use persia_blob::gc::Rewrite;
+use persia_blob::{BlobId, BlobStore, ChunkSize, MemoryBlobStore, PackMode, PackStore, UploadId};
+use persia_engine::db::{Database, DatabaseError, DatabaseOptions, SegmentIds};
 use persia_engine::document::Document;
 use persia_engine::schema::SchemaBuilder;
-use persia_engine::wal::Durability;
+use persia_engine::wal::{Durability, WalMark};
 
 fn bytes(len: usize, seed: u8) -> Vec<u8> {
     (0..len)
@@ -110,4 +114,154 @@ fn the_mark_holds_referenced_and_pinned_ids_and_the_uploads_their_manifests_name
     uploads.insert(upload(&small));
     assert_eq!(mark.uploads, uploads);
     assert!(mark.missing.is_empty() && mark.unreadable.is_empty());
+}
+
+/// Default options, the pack rewritten whatever it drops.
+const FORCE: GcOptions = GcOptions {
+    grace: persia::internal::gc::DEFAULT_GRACE,
+    rewrite_ratio: 0.0,
+    now: None,
+};
+
+fn pack_database(dir: &Path) -> BlobDatabase<PackStore> {
+    let pack = PackStore::open(dir.join("app.persia.blobs"), PackMode::ReadWrite, [0; 16]).unwrap();
+    let blobs = Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(5));
+    BlobDatabase::new(database(&dir.join("app.persia")), blobs)
+}
+
+fn put_doc(db: &mut BlobDatabase<PackStore>, id: &str, seed: u8) -> persia_blob::BlobRef {
+    db.put(
+        "c",
+        &Document::new(id),
+        Blob::from_reader(&bytes(70 << 10, seed)[..]).with_options(options()),
+        Durability::Fsync,
+    )
+    .unwrap()
+}
+
+#[test]
+fn gc_drops_the_blobs_of_deleted_documents_and_released_pins_and_keeps_the_rest() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = pack_database(dir.path());
+    let kept = put_doc(&mut db, "kept", 1);
+    let deleted = put_doc(&mut db, "deleted", 2);
+    let replaced = put_doc(&mut db, "replaced", 3);
+    db.commit().unwrap();
+    let replacement = put_doc(&mut db, "replaced", 4);
+    db.log_mut()
+        .delete("c", "deleted", Durability::Fsync)
+        .unwrap();
+    let (held, pins) = db.put_blob(&bytes(80 << 10, 5)[..], &options()).unwrap();
+    let (released, gone) = db.put_blob(&bytes(90 << 10, 6)[..], &options()).unwrap();
+    drop(gone);
+    // Before the commit, the memtable still holds the replaced and deleted documents' puts: GC keeps their blobs.
+    let report = db.gc(&FORCE).unwrap();
+    assert_eq!(report.sweep.blobs_deleted, 1, "{report:?}");
+    let store = Arc::clone(db.blobs().store());
+    assert!(!store.contains(&released).unwrap());
+    for r in [&kept, &deleted, &replaced, &replacement, &held] {
+        assert!(store.contains(r).unwrap());
+    }
+    db.commit().unwrap();
+    let report = db.gc(&FORCE).unwrap();
+    assert_eq!(report.sweep.blobs_deleted, 2, "{report:?}");
+    for r in [&deleted, &replaced] {
+        assert!(!store.contains(r).unwrap());
+    }
+    for r in [&kept, &replacement, &held] {
+        assert_eq!(
+            db.get_blob_range(r, 0..r.size()).unwrap().len() as u64,
+            r.size()
+        );
+    }
+    drop(pins);
+    let report = db.gc(&FORCE).unwrap();
+    assert_eq!(report.sweep.blobs_deleted, 1);
+    assert!(!store.contains(&held).unwrap());
+    assert!(matches!(report.sweep.rewrite, Some(Rewrite::Done { .. })));
+}
+
+#[test]
+fn gc_rejects_a_grace_below_the_bind_budget_and_a_bad_ratio() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = pack_database(dir.path());
+    let short = GcOptions {
+        grace: DEFAULT_BIND_BUDGET
+            .checked_sub(Duration::from_secs(1))
+            .unwrap(),
+        ..GcOptions::default()
+    };
+    assert!(matches!(
+        db.gc(&short),
+        Err(GcError::GraceBelowBindBudget { .. })
+    ));
+    let at_budget = GcOptions {
+        grace: DEFAULT_BIND_BUDGET,
+        ..GcOptions::default()
+    };
+    db.gc(&at_budget).unwrap();
+    for ratio in [f64::NAN, -0.1] {
+        let bad = GcOptions {
+            rewrite_ratio: ratio,
+            ..GcOptions::default()
+        };
+        assert!(matches!(db.gc(&bad), Err(GcError::InvalidRewriteRatio(_))));
+    }
+    assert_eq!(GcOptions::default().grace, Duration::from_hours(24));
+    assert!((GcOptions::default().rewrite_ratio - 0.5).abs() < f64::EPSILON);
+}
+
+/// A log that refuses to list its references, as a poisoned database does.
+struct Poisoned(Database);
+
+impl persia::internal::documents::DocumentLog for Poisoned {
+    fn put(&mut self, _: &str, _: &Document, _: Durability) -> Result<(), DatabaseError> {
+        Err(DatabaseError::Poisoned)
+    }
+    fn wal_mark(&self) -> WalMark {
+        self.0.wal_mark()
+    }
+    fn durable_mark(&self) -> WalMark {
+        self.0.durable_mark()
+    }
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        Err(DatabaseError::Poisoned)
+    }
+}
+
+impl BlobReferences for Poisoned {
+    fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
+        Err(DatabaseError::Poisoned)
+    }
+}
+
+#[test]
+fn gc_stops_when_the_log_or_the_store_refuses() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = pack_database(dir.path());
+    let blob = put_doc(&mut db, "a", 1);
+    // A poisoned log: nothing is swept, whatever the pins say.
+    let store = Arc::clone(db.blobs().store());
+    let log = Poisoned(database(&dir.path().join("poisoned.persia")));
+    let poisoned = BlobDatabase::new(log, Blobs::new(Arc::clone(&store)));
+    assert!(matches!(
+        poisoned.gc(&FORCE),
+        Err(GcError::Database(e)) if matches!(*e, DatabaseError::Poisoned)
+    ));
+    assert!(store.contains(&blob).unwrap());
+    // A read-only pack cannot be swept.
+    let ro = PackStore::open(
+        dir.path().join("app.persia.blobs"),
+        PackMode::ReadOnly,
+        [0; 16],
+    )
+    .unwrap();
+    let ro_db = BlobDatabase::new(
+        database(&dir.path().join("other.persia")),
+        Blobs::new(Arc::new(ro)),
+    );
+    assert!(matches!(
+        ro_db.gc(&FORCE),
+        Err(GcError::Blob(persia_blob::Error::PackReadOnly))
+    ));
 }
