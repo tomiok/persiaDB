@@ -7,6 +7,8 @@
 //! 2. Local: the object file's modification time, exactly (set here with `File::set_modified`).
 //! 3. A backend that keeps no times reports `None`: the local backend on `SimFs`.
 //! 4. `FaultyStorage` passes the inner backend's times through.
+//! 5. Local, on real files: a `put_if_absent` that finds equal or other bytes keeps the time; a `put` (even of equal
+//!    bytes) and a re-create after a delete move it to now; times survive a reopen.
 
 #![allow(clippy::unwrap_used, clippy::unnecessary_wraps, missing_docs)]
 
@@ -126,4 +128,71 @@ fn faulty_storage_passes_the_times_through() {
     let faulty = FaultyStorage::new(MemoryStorage::with_clock(clock), 1);
     faulty.put(&key("a"), Bytes::from_static(b"1")).unwrap();
     assert_eq!(times(&faulty), [("a".into(), at(7))]);
+}
+
+/// Sets the modification time of the local object file at `path` (relative to the store root).
+fn set_mtime(root: &std::path::Path, path: &str, secs: u64) {
+    std::fs::File::options()
+        .write(true)
+        .open(root.join(path))
+        .unwrap()
+        .set_modified(UNIX_EPOCH + Duration::from_secs(secs))
+        .unwrap();
+}
+
+#[test]
+fn local_keeps_the_time_unless_new_bytes_are_written() {
+    // A sweep ages objects by this time (SPEC §9.5): a retried `put_if_absent` must not make an object look new, and
+    // a replacing `put` must (its bytes are new).
+    let dir = tempfile::tempdir().unwrap();
+    let s = LocalStorage::open(dir.path()).unwrap();
+    let k = key("blobs/uploads/x");
+    assert_eq!(
+        s.put_if_absent(&k, Bytes::from_static(b"one")).unwrap(),
+        PutOutcome::Created
+    );
+    set_mtime(dir.path(), "blobs@/uploads@/x", 1_000_000);
+    // Equal bytes (the caller's own earlier attempt) and other bytes leave the file alone.
+    assert_eq!(
+        s.put_if_absent(&k, Bytes::from_static(b"one")).unwrap(),
+        PutOutcome::Created
+    );
+    assert_eq!(
+        s.put_if_absent(&k, Bytes::from_static(b"two")).unwrap(),
+        PutOutcome::AlreadyExists
+    );
+    assert_eq!(times(&s), [("blobs/uploads/x".into(), at(1_000_000))]);
+    assert_eq!(&s.get(&k).unwrap()[..], b"one");
+
+    // A `put`, even of equal bytes, writes a new file: its time is now, by the file system's (coarser) clock.
+    let before = SystemTime::now() - Duration::from_secs(2);
+    for bytes in [&b"one"[..], b"three"] {
+        set_mtime(dir.path(), "blobs@/uploads@/x", 1_000_000);
+        s.put(&k, Bytes::copy_from_slice(bytes)).unwrap();
+        let t = times(&s)[0].1.unwrap();
+        assert!(
+            t >= before && t <= SystemTime::now() + Duration::from_secs(2),
+            "{t:?}"
+        );
+    }
+    // A delete and a re-create is a new object with a new time.
+    s.delete(&k).unwrap();
+    assert_eq!(times(&s), []);
+    assert_eq!(
+        s.put_if_absent(&k, Bytes::from_static(b"one")).unwrap(),
+        PutOutcome::Created
+    );
+    assert!(times(&s)[0].1.unwrap() >= before);
+}
+
+#[test]
+fn local_times_survive_a_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let s = LocalStorage::open(dir.path()).unwrap();
+        s.put(&key("a"), Bytes::from_static(b"1")).unwrap();
+    }
+    set_mtime(dir.path(), "a", 3_000_000);
+    let s = LocalStorage::open(dir.path()).unwrap();
+    assert_eq!(times(&s), [("a".into(), at(3_000_000))]);
 }
