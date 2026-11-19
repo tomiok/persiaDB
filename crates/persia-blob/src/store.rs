@@ -35,6 +35,11 @@ pub enum BindOutcome {
     /// Another upload bound the id first, so this one is a duplicate (SPEC §9.2). Holds the bound manifest, already
     /// checked to name the id ([`BlobManifest::check_blob_id`]); its chunk size is the one the returned `BlobRef`
     /// carries. The duplicate's staged chunks are the caller's to discard ([`BlobStore::discard_upload`]).
+    ///
+    /// The bound manifest is **durable**: a store never answers `AlreadyBound` (nor shows a manifest through
+    /// [`BlobStore::manifest`] or [`BlobStore::contains`]) for a binding whose own durable write has not finished,
+    /// e.g. a pack commit still syncing on another thread, so a document logged on this answer never references a
+    /// blob a crash could lose (SPEC §9.5).
     AlreadyBound(BlobManifest),
 }
 
@@ -80,8 +85,9 @@ pub trait BlobStore: Send + Sync {
     ///
     /// # Errors
     /// - [`Error::is_bind_outcome_unknown`]: the manifest may or may not have been bound (SPEC §9.4: a conditional
-    ///   write still in flight may land later). The caller calls `bind` again with the same manifest until it gets
-    ///   an answer, and never discards this upload's chunks;
+    ///   write still in flight may land later). The caller calls `bind` again with the same manifest, with backoff,
+    ///   until it gets an answer or its time budget runs out (SPEC §9.4: then `put_blob` fails, binds nothing it
+    ///   knows of, and leaves the upload to GC), and never discards this upload's chunks;
     /// - [`Error::Corrupt`] when the bound manifest found does not decode or names another blob;
     /// - the store's own errors, after which the blob is not bound.
     fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome>;
@@ -91,6 +97,9 @@ pub trait BlobStore: Send + Sync {
     /// (ADR-0034 item 8, ROADMAP 9.3.3). The outcomes and errors are [`BlobStore::bind`]'s. A store with a
     /// single-object form (the remote layout's inline manifest) writes one object; the default stages the chunk under
     /// the manifest's upload id, then binds, so the caller pins that upload id first either way (SPEC §9.5).
+    ///
+    /// After an unknown outcome the caller retries with `bind_small` and the same bytes, never with [`BlobStore::bind`]:
+    /// a store's single-object form stages nothing, so a plain `bind` could bind a manifest with no chunk behind it.
     ///
     /// # Errors
     /// [`BlobStore::bind`]'s, and [`Error::InvalidManifest`] when `bytes` is over [`SMALL_BLOB_MAX`] or is not the
@@ -191,6 +200,24 @@ pub fn read_range<S: BlobStore + ?Sized>(
         });
     };
     manifest.check_ref(blob_ref)?;
+    read_manifest_range(store, &manifest, range)
+}
+
+/// Bytes `range` of the blob `manifest` describes, a manifest the caller already looked up and checked against the
+/// `BlobRef` it reads by (as [`read_range`] does): a streaming reader keeps it and reads window after window with no
+/// further lookup, so a blob of many small chunks costs one manifest read, not one per window (a manifest is
+/// `76 + 4·n` bytes, SPEC §9.1.1). Reads every chunk the range touches whole, in one [`BlobStore::read_chunks`], and
+/// checks each as [`read_chunk_checked`] does. An empty range in bounds reads nothing.
+///
+/// # Errors
+/// - [`Error::RangeOutOfBounds`] when `range` is inverted or ends past the blob;
+/// - [`Error::Corrupt`] when a chunk does not match the manifest;
+/// - the store's errors.
+pub fn read_manifest_range<S: BlobStore + ?Sized>(
+    store: &S,
+    manifest: &BlobManifest,
+    range: Range<u64>,
+) -> Result<Vec<u8>> {
     if range.start > range.end || range.end > manifest.size() {
         return Err(Error::RangeOutOfBounds {
             start: range.start,
@@ -213,16 +240,16 @@ pub fn read_range<S: BlobStore + ?Sized>(
         .checked_add(1)
         .ok_or_else(|| corrupt("a chunk index does not fit in a u32"))?;
     for index in first..end {
-        expected_chunk(&manifest, index)?;
+        expected_chunk(manifest, index)?;
     }
-    let chunks = store.read_chunks(&manifest, first..end)?;
+    let chunks = store.read_chunks(manifest, first..end)?;
     if chunks.len() != usize_from_u32(end.abs_diff(first)) {
         return Err(corrupt(
             "a store returned another number of chunks than asked for",
         ));
     }
     for (index, bytes) in (first..end).zip(&chunks) {
-        let chunk = check_chunk(&manifest, index, bytes)?;
+        let chunk = check_chunk(manifest, index, bytes)?;
         let from = range.start.max(chunk.start).saturating_sub(chunk.start);
         let to = range.end.min(chunk.end).saturating_sub(chunk.start);
         let part = usize::try_from(from)
@@ -259,7 +286,7 @@ fn check_chunk(manifest: &BlobManifest, index: u32, bytes: &[u8]) -> Result<Rang
 }
 
 /// [`BlobStore::bind_small`]'s precondition: `bytes` is the whole blob `manifest` describes, and small.
-fn check_small(manifest: &BlobManifest, bytes: &[u8]) -> Result<()> {
+pub(crate) fn check_small(manifest: &BlobManifest, bytes: &[u8]) -> Result<()> {
     let len = u64_from_usize(bytes.len());
     let invalid = |what| Err(Error::InvalidManifest { what });
     if len > SMALL_BLOB_MAX {

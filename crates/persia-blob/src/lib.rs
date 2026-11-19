@@ -25,7 +25,9 @@ pub use manifest::{BlobManifest, UploadId};
 pub use persia_format::BlobId;
 #[cfg(any(test, feature = "testing"))]
 pub use store::MemoryBlobStore;
-pub use store::{BindOutcome, BlobStore, SMALL_BLOB_MAX, read_chunk_checked, read_range};
+pub use store::{
+    BindOutcome, BlobStore, SMALL_BLOB_MAX, read_chunk_checked, read_manifest_range, read_range,
+};
 
 // -- pack (9.2) --
 // The local pack file (SPEC §9.3): its `mod` and `pub use` lines go here, and only here.
