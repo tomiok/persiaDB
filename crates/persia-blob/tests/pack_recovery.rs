@@ -10,6 +10,7 @@
 //! 3. After a crash anywhere in a random session, the index the scan rebuilds holds every `Bound` blob, and nothing
 //!    but blobs whose bind was attempted, each wholly readable.
 //! 4. `refresh` finds what the writer committed since, and reports a replaced pack (another generation).
+//! 5. Every flipped bit of a committed chunk frame fails the open or the read with `Corrupt` (ROADMAP 9.2.9).
 //!
 //! Seeds: fixed (`RngSeed::Fixed`), printed by proptest on failure.
 #![allow(
@@ -702,4 +703,96 @@ fn refresh_rejects_a_newer_seq_that_does_not_move_log_end() {
     let f = fs.open(Path::new(PACK), true).unwrap();
     f.write_all_at(&sb.encode(), at).unwrap();
     assert!(reader.refresh().unwrap_err().is_corruption());
+}
+
+// --- The read path (ROADMAP 9.2.9) ---
+
+/// Every flipped bit of a committed chunk frame, header, chunk head, bytes, padding or trailer, is found: the open's
+/// walk of the frame headers fails `Corrupt`, or the read of the blob does, through `read_range` (one read per chunk,
+/// one CRC pass) and `read_chunk_source` alike. Never a wrong byte served, never a panic.
+#[test]
+fn every_flipped_bit_of_a_chunk_frame_is_corrupt_at_the_open_or_the_read() {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    // 8 + 4 bytes: a full chunk frame and a padded one.
+    let data = b"0123456789ab";
+    let m = put(&store, data, 8, 1);
+    drop(store);
+    let bytes = fs.read(Path::new(PACK)).unwrap();
+    let frames = persia_blob::pack::layout::chunk_frame_len(8)
+        + persia_blob::pack::layout::chunk_frame_len(4);
+    let mut found_at_open = 0;
+    for at in FIRST_FRAME..FIRST_FRAME + frames {
+        for bit in 0..8 {
+            let mut damaged = bytes.clone();
+            damaged[at as usize] ^= 1 << bit;
+            let what = format!("byte {at} bit {bit}");
+            let store = match open(&with_pack(&damaged), PackMode::ReadOnly) {
+                Ok(store) => store,
+                Err(e) => {
+                    assert!(e.is_corruption(), "{what}: {e}");
+                    found_at_open += 1;
+                    continue;
+                }
+            };
+            let e = read_all(&store, &m).unwrap_err();
+            assert!(e.is_corruption(), "{what}: {e}");
+            let chunk =
+                u32::from(at >= FIRST_FRAME + persia_blob::pack::layout::chunk_frame_len(8));
+            let e = store.read_chunk_source(&m, chunk).unwrap_err();
+            assert!(e.is_corruption(), "{what}: {e}");
+        }
+    }
+    // The headers' magic, kind, length and frame_seq are the open's; the rest is the read's.
+    assert!(
+        found_at_open > 0 && found_at_open < frames * 8,
+        "{found_at_open}"
+    );
+}
+
+/// A crafted pack whose committed manifest gives its only chunk 1 MiB while the frame the index names holds 4 bytes:
+/// the read sized by the manifest would run past the committed frames, and is `Corrupt` before any byte past them is
+/// read (not an I/O error at the end of the file, nor uncommitted bytes).
+#[test]
+fn a_chunk_read_sized_past_the_committed_frames_is_corrupt() {
+    use persia_blob::pack::layout::{encode_chunk_frame, encode_index_frame, new_pack_prefix};
+    let chunk = encode_chunk_frame(1, UploadId::new(1), 0, b"abcd").unwrap();
+    let claimed = BlobManifest::new(
+        blob_id_of(b"claimed"),
+        1 << 20,
+        ChunkSize::from_encoding(1 << 20).unwrap(),
+        UploadId::new(1),
+        vec![crc32c(b"abcd")],
+    )
+    .unwrap();
+    let index_off = FIRST_FRAME + chunk.len() as u64;
+    let index = encode_index_frame(2, &claimed, &[FIRST_FRAME]).unwrap();
+    let mut bytes = new_pack_prefix([9; 16], 7).unwrap();
+    let committed = PackSuperblock {
+        seq: 1,
+        index_off,
+        index_len: index.len() as u64,
+        log_end: index_off + index.len() as u64,
+        blob_count: 1,
+        next_frame_seq: 3,
+        ..PackSuperblock::new_pack(7)
+    };
+    bytes[4096..8192].copy_from_slice(&committed.encode());
+    bytes.extend(&chunk);
+    bytes.extend(&index);
+    for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
+        let store = open(&with_pack(&bytes), mode).unwrap();
+        assert_eq!(
+            store.manifest(claimed.blob_id()).unwrap(),
+            Some(claimed.clone())
+        );
+        let e = read_range(&store, &reference(&claimed), 0..16).unwrap_err();
+        assert!(e.is_corruption(), "{mode:?}: {e}");
+        assert!(
+            store
+                .read_chunk_source(&claimed, 0)
+                .unwrap_err()
+                .is_corruption()
+        );
+    }
 }

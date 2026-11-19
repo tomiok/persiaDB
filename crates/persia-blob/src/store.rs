@@ -142,6 +142,40 @@ pub trait BlobStore: Send + Sync {
             .collect()
     }
 
+    /// Chunks `indices` of the blob `manifest` describes, in index order, each checked against it as
+    /// [`read_chunk_checked`] checks one (its length and its CRC32C), and handed to `sink` with its index; `sink`'s
+    /// error ends the read. [`read_range`] and [`read_manifest_range`] read through it, once per range.
+    ///
+    /// The default reads them with one [`BlobStore::read_chunks`] and checks each. A store that checks its stored
+    /// chunks as it reads them may override it to read and check each byte once (the pack, ROADMAP 9.2.9), and lend
+    /// `sink` bytes it does not own (a mapping). An override must hand `sink` only bytes whose length and CRC32C it
+    /// checked against `manifest`: the reads above it serve what `sink` gets as checked.
+    ///
+    /// # Errors
+    /// [`Error::Corrupt`] when an index is past the last chunk or a chunk does not match `manifest`, the store's
+    /// errors, or `sink`'s.
+    fn read_chunks_checked(
+        &self,
+        manifest: &BlobManifest,
+        indices: Range<u32>,
+        sink: &mut dyn FnMut(u32, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        for index in indices.clone() {
+            expected_chunk(manifest, index)?;
+        }
+        let chunks = self.read_chunks(manifest, indices.clone())?;
+        if chunks.len() != usize_from_u32(indices.end.saturating_sub(indices.start)) {
+            return Err(corrupt(
+                "a store returned another number of chunks than asked for",
+            ));
+        }
+        for (index, bytes) in indices.zip(&chunks) {
+            check_chunk(manifest, index, bytes)?;
+            sink(index, bytes)?;
+        }
+        Ok(())
+    }
+
     /// Drops the chunks staged under `upload_id`, best-effort (SPEC §9.2: a duplicate's or a mismatched upload's
     /// chunks are deleted remotely, GC is the backstop, and left to the pack rewrite locally, where this does
     /// nothing). Never called for an upload whose binding outcome was once unknown.
@@ -186,7 +220,8 @@ pub fn read_chunk_checked<S: BlobStore + ?Sized>(
 
 /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6 `get_blob_range`). Looks the manifest up, checks it
 /// against `blob_ref` ([`BlobManifest::check_ref`]), then reads every chunk the range touches whole, in one
-/// [`BlobStore::read_chunks`], and checks each as [`read_chunk_checked`] does. An empty range in bounds reads nothing.
+/// [`BlobStore::read_chunks_checked`], which checks each as [`read_chunk_checked`] does. An empty range in bounds
+/// reads nothing.
 ///
 /// # Errors
 /// - [`Error::BlobNotFound`] when the id is not bound;
@@ -210,8 +245,9 @@ pub fn read_range<S: BlobStore + ?Sized>(
 /// Bytes `range` of the blob `manifest` describes, a manifest the caller already looked up and checked against the
 /// `BlobRef` it reads by (as [`read_range`] does): a streaming reader keeps it and reads window after window with no
 /// further lookup, so a blob of many small chunks costs one manifest read, not one per window (a manifest is
-/// `76 + 4·n` bytes, SPEC §9.1.1). Reads every chunk the range touches whole, in one [`BlobStore::read_chunks`], and
-/// checks each as [`read_chunk_checked`] does. An empty range in bounds reads nothing.
+/// `76 + 4·n` bytes, SPEC §9.1.1). Reads every chunk the range touches whole, in one
+/// [`BlobStore::read_chunks_checked`], which checks each as [`read_chunk_checked`] does. An empty range in bounds
+/// reads nothing.
 ///
 /// # Errors
 /// - [`Error::RangeOutOfBounds`] when `range` is inverted or ends past the blob;
@@ -243,17 +279,10 @@ pub fn read_manifest_range<S: BlobStore + ?Sized>(
     let end = last
         .checked_add(1)
         .ok_or_else(|| corrupt("a chunk index does not fit in a u32"))?;
-    for index in first..end {
-        expected_chunk(manifest, index)?;
-    }
-    let chunks = store.read_chunks(manifest, first..end)?;
-    if chunks.len() != usize_from_u32(end.abs_diff(first)) {
-        return Err(corrupt(
-            "a store returned another number of chunks than asked for",
-        ));
-    }
-    for (index, bytes) in (first..end).zip(&chunks) {
-        let chunk = check_chunk(manifest, index, bytes)?;
+    // Every chunk the range touches, read whole and checked by the store's `read_chunks_checked` (ROADMAP 9.2.9):
+    // only the part in the range is copied out.
+    store.read_chunks_checked(manifest, first..end, &mut |index, bytes| {
+        let (chunk, _) = expected_chunk(manifest, index)?;
         let from = range.start.max(chunk.start).saturating_sub(chunk.start);
         let to = range.end.min(chunk.end).saturating_sub(chunk.start);
         let part = usize::try_from(from)
@@ -262,6 +291,12 @@ pub fn read_manifest_range<S: BlobStore + ?Sized>(
             .and_then(|(from, to)| bytes.get(from..to))
             .ok_or_else(|| corrupt("a chunk is shorter than its range"))?;
         out.extend_from_slice(part);
+        Ok(())
+    })?;
+    if u64_from_usize(out.len()) != range.end.abs_diff(range.start) {
+        return Err(corrupt(
+            "a store returned another number of chunks than asked for",
+        ));
     }
     Ok(out)
 }

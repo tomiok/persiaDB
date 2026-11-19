@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
+use bytes::Bytes;
 use persia_format::frame::{
     FRAME_HEADER_LEN, FrameHeader, FrameKind, MIN_FRAME_LEN, StreamScanner,
 };
@@ -22,8 +23,9 @@ use persia_storage::container::{ContainerFile, MapPermit};
 use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
-    self, PackSuperblock, corrupt, decode_chunk_payload, decode_frame, decode_index_payload,
-    decode_prefix, encode_chunk, encode_index_frame, from_format,
+    self, ChunkHead, PackSuperblock, check_chunk_frame, corrupt, decode_chunk_payload,
+    decode_frame, decode_index_payload, decode_prefix, encode_chunk, encode_index_frame,
+    from_format,
 };
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
@@ -62,6 +64,22 @@ struct Entry {
     upload_id: UploadId,
     /// The offset of each chunk's `BlobChunk` frame, in chunk order.
     chunks: Box<[u64]>,
+}
+
+/// A chunk frame as [`Pack::chunk_frame`] read it: a slice of the mapping, or the start of the caller's buffer.
+#[derive(Debug)]
+enum FrameBytes<'s> {
+    Mapped(ByteSource),
+    Read(&'s [u8]),
+}
+
+impl FrameBytes<'_> {
+    fn as_slice(&self) -> &[u8] {
+        match self {
+            Self::Mapped(source) => source.as_slice(),
+            Self::Read(bytes) => bytes,
+        }
+    }
 }
 
 /// A chunk this handle staged and no bind has claimed yet.
@@ -479,33 +497,47 @@ impl<F: ContainerFile> Pack<F> {
         Ok(manifest)
     }
 
-    /// The chunk of the `BlobChunk` frame at `offset`, checked to be chunk `index` of `upload_id` with `crc`.
-    fn chunk_at(
+    /// The whole `BlobChunk` frame at `offset` of a chunk of `len` bytes, in one read of the length the blob manifest
+    /// gives (ROADMAP 9.2.9), bounded by the frames written: a slice of the mapping when it covers the frame (no
+    /// copy), otherwise read into `scratch`, which only grows (zero-filled as it grows, so a caller reading many
+    /// chunks with one buffer fills it once). Nothing is checked but the bounds: see [`layout::check_chunk_frame`].
+    fn chunk_frame<'s>(
         &self,
         offset: u64,
-        upload_id: UploadId,
-        index: u32,
-        crc: u32,
-    ) -> Result<ByteSource> {
-        let frame = self.frame_at(offset, self.end)?;
-        let (_, payload) = decode_frame(&frame, offset, FrameKind::BlobChunk)?;
-        let (head, bytes) = decode_chunk_payload(payload)?;
-        if head.upload_id != upload_id || head.index != index {
-            return Err(corrupt(
-                "a chunk frame of another upload or index than its index names",
-            ));
+        len: u32,
+        scratch: &'s mut Vec<u8>,
+    ) -> Result<FrameBytes<'s>> {
+        let total = layout::chunk_frame_len(len);
+        let end = offset
+            .checked_add(total)
+            .filter(|&end| offset >= FIRST_FRAME_OFFSET && end <= self.end)
+            .ok_or_else(|| corrupt("a chunk frame outside the pack's frames"))?;
+        if let Some(w) = &self.window
+            && offset >= w.base_offset()
+            && end <= w.end_offset()
+        {
+            return w
+                .slice(offset..end)
+                .map(FrameBytes::Mapped)
+                .map_err(from_format);
         }
-        if head.crc != crc {
-            return Err(corrupt(
-                "a chunk frame's CRC32C differs from its manifest's",
-            ));
+        let n = usize::try_from(total).map_err(|_| corrupt("a frame too large to read"))?;
+        if scratch.len() < n {
+            scratch
+                .try_reserve_exact(n.saturating_sub(scratch.len()))
+                .map_err(|_| Error::PackIo {
+                    op: "allocate",
+                    source: io::ErrorKind::OutOfMemory.into(),
+                })?;
+            scratch.resize(n, 0);
         }
-        let start = offset
-            .saturating_add(u64_from_usize(FRAME_HEADER_LEN))
-            .saturating_add(u64_from_usize(layout::CHUNK_HEAD_LEN));
-        frame
-            .slice(start..start.saturating_add(u64_from_usize(bytes.len())))
-            .map_err(from_format)
+        let buf = scratch
+            .get_mut(..n)
+            .ok_or_else(|| corrupt("a frame too large to read"))?;
+        self.file
+            .read_exact_at(buf, offset)
+            .map_err(io_err("read"))?;
+        Ok(FrameBytes::Read(buf))
     }
 
     /// The `frame_seq` of the next frame; never `u64::MAX` (SPEC §4.4).
@@ -661,6 +693,35 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
             .map(|bytes| bytes.as_slice().to_vec())
     }
 
+    /// Each chunk in one read of its frame, sized by the manifest, and one CRC pass over its bytes that checks both
+    /// the frame's CRC and the manifest's ([`layout::check_chunk_frame`], ROADMAP 9.2.9); `sink` gets a slice of the
+    /// mapping, or of one buffer reused for every chunk read with `pread`, never a copy.
+    fn read_chunks_checked(
+        &self,
+        manifest: &BlobManifest,
+        indices: Range<u32>,
+        sink: &mut dyn FnMut(u32, &[u8]) -> Result<()>,
+    ) -> Result<()> {
+        let mut scratch = Vec::new();
+        for index in indices {
+            let expected = expected_chunk(manifest, index)?;
+            // Read under the read side only: a bind's publish waits for one chunk's read, not for the whole range.
+            let (offset, frame) = {
+                let inner = self.read();
+                let (pack, offset) = locate(&inner, manifest, index)?;
+                (
+                    offset,
+                    pack.chunk_frame(offset, expected.len, &mut scratch)?,
+                )
+            };
+            sink(
+                index,
+                check_chunk_frame(frame.as_slice(), offset, expected)?,
+            )?;
+        }
+        Ok(())
+    }
+
     /// Does nothing: a duplicate's chunks stay in the pack until the pack rewrite (SPEC §9.2). This handle forgets
     /// them, so they cannot be bound any more.
     fn discard_upload(&self, upload_id: UploadId) -> Result<()> {
@@ -673,31 +734,77 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
 }
 
 impl<F: ContainerFile + 'static> PackStore<F> {
-    /// [`BlobStore::read_chunk`] without a copy when mapped reads are on: the chunk's bytes as a slice of the
-    /// mapping (SPEC §4.7), or of the buffer they were read into. Checked against `manifest` as `read_chunk` is:
-    /// the frame's CRC, its upload id and chunk index, and its stored CRC32C equal to the manifest's;
-    /// [`read_chunk_checked`](crate::read_chunk_checked) also checks the length and the bytes' CRC32C.
+    /// Chunk `index` of the blob `manifest` describes, without a copy when mapped reads are on: the chunk's bytes as a
+    /// slice of the mapping (SPEC §4.7), or of the buffer its frame was read into, in one read. Checked against
+    /// `manifest` as [`BlobStore::read_chunks_checked`] checks it, which includes every check of
+    /// [`read_chunk_checked`](crate::read_chunk_checked): the frame (its CRC among them), its upload id, chunk index,
+    /// length and stored CRC32C, and the bytes' CRC32C, all against the manifest ([`layout::check_chunk_frame`]).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when the chunk is not in the pack or its frame is damaged, or [`Error::PackIo`].
+    /// [`Error::Corrupt`] when the chunk is not in the pack, is past the blob's last one, or its frame is damaged or
+    /// does not match `manifest`; [`Error::PackUnsupported`] for unknown frame flags; [`Error::PackIo`].
     pub fn read_chunk_source(&self, manifest: &BlobManifest, index: u32) -> Result<ByteSource> {
-        let inner = self.read();
-        let missing = || corrupt("a chunk the manifest names is not in the pack");
-        let pack = inner.pack.as_ref().ok_or_else(missing)?;
-        let upload_id = manifest.upload_id();
-        let offset = pack
-            .index
-            .get(&manifest.blob_id())
-            .filter(|e| e.upload_id == upload_id)
-            .and_then(|e| e.chunks.get(usize_from_u32(index)).copied())
-            .or_else(|| inner.staged.get(&(upload_id, index)).map(|s| s.offset))
-            .ok_or_else(missing)?;
-        let crc = *manifest
-            .chunk_crcs()
-            .get(usize_from_u32(index))
-            .ok_or_else(|| corrupt("a chunk past the blob's last one was asked for"))?;
-        pack.chunk_at(offset, upload_id, index, crc)
+        let expected = expected_chunk(manifest, index)?;
+        let mut scratch = Vec::new();
+        let (offset, frame) = {
+            let inner = self.read();
+            let (pack, offset) = locate(&inner, manifest, index)?;
+            let frame = match pack.chunk_frame(offset, expected.len, &mut scratch)? {
+                FrameBytes::Mapped(source) => Some(source),
+                FrameBytes::Read(_) => None,
+            };
+            (offset, frame)
+        };
+        let frame = match frame {
+            Some(source) => source,
+            None => ByteSource::with_base_offset(Bytes::from(scratch), offset),
+        };
+        let len = u64_from_usize(check_chunk_frame(frame.as_slice(), offset, expected)?.len());
+        let start = offset.saturating_add(u64_from_usize(layout::CHUNK_BYTES_OFFSET));
+        frame
+            .slice(start..start.saturating_add(len))
+            .map_err(from_format)
     }
+}
+
+/// What chunk `index` of the blob `manifest` describes must be: its upload, index, length and CRC32C.
+fn expected_chunk(manifest: &BlobManifest, index: u32) -> Result<ChunkHead> {
+    let past = || corrupt("a chunk past the blob's last one was asked for");
+    let len = manifest
+        .chunk_range(index)
+        .and_then(|r| r.end.checked_sub(r.start))
+        .and_then(|len| u32::try_from(len).ok())
+        .ok_or_else(past)?;
+    let crc = *manifest
+        .chunk_crcs()
+        .get(usize_from_u32(index))
+        .ok_or_else(past)?;
+    Ok(ChunkHead {
+        upload_id: manifest.upload_id(),
+        index,
+        len,
+        crc,
+    })
+}
+
+/// The pack and the offset of the `BlobChunk` frame of chunk `index` of the blob `manifest` describes: from the
+/// bound blob's index entry when it is bound under the manifest's upload, else from this handle's staged chunks.
+fn locate<'a, F>(
+    inner: &'a Inner<F>,
+    manifest: &BlobManifest,
+    index: u32,
+) -> Result<(&'a Pack<F>, u64)> {
+    let missing = || corrupt("a chunk the manifest names is not in the pack");
+    let pack = inner.pack.as_ref().ok_or_else(missing)?;
+    let upload_id = manifest.upload_id();
+    let offset = pack
+        .index
+        .get(&manifest.blob_id())
+        .filter(|e| e.upload_id == upload_id)
+        .and_then(|e| e.chunks.get(usize_from_u32(index)).copied())
+        .or_else(|| inner.staged.get(&(upload_id, index)).map(|s| s.offset))
+        .ok_or_else(missing)?;
+    Ok((pack, offset))
 }
 
 /// The bytes already staged or bound as chunk `index` of `upload_id`, if any.

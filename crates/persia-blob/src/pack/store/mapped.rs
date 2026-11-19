@@ -270,4 +270,46 @@ mod tests {
         assert!(store.read_chunk(&wrong, 0).unwrap_err().is_corruption());
         assert!(store.read_chunk(&a, 3).unwrap_err().is_corruption());
     }
+
+    /// ROADMAP 9.2.9 over the mapping: a damaged byte anywhere in a committed chunk frame is `Corrupt`, at the open
+    /// (its header) or at the read from the window, as with `pread`.
+    #[test]
+    fn a_damaged_chunk_frame_read_from_the_window_is_corrupt() {
+        let (fs, store) = store();
+        let m = put(&store, b"0123456789ab", 8, 1);
+        drop(store);
+        let bytes = fs.read(std::path::Path::new("/p.blobs")).unwrap();
+        let frames =
+            crate::pack::layout::chunk_frame_len(8) + crate::pack::layout::chunk_frame_len(4);
+        for at in FIRST_FRAME_OFFSET..FIRST_FRAME_OFFSET + frames {
+            let mut damaged = bytes.clone();
+            damaged[at as usize] ^= 0xff;
+            let fs = SimFs::new();
+            let file = persia_storage::vfs::Vfs::create_new(&fs, std::path::Path::new("/p.blobs"))
+                .unwrap();
+            file.write_all_at(&damaged, 0).unwrap();
+            file.sync_data().unwrap();
+            let opened = PackStore::open_in(Arc::new(fs), "/p.blobs", PackMode::ReadOnly, [0; 16]);
+            let Ok(store) = opened else {
+                assert!(opened.unwrap_err().is_corruption(), "byte {at}");
+                continue;
+            };
+            store.enable_copied_reads(Arc::new(AtomicBool::new(false)));
+            assert!(store.mapped_range().is_some());
+            let e = crate::read_range(
+                &store,
+                &crate::BlobRef::new(
+                    m.blob_id(),
+                    m.size(),
+                    "a/b",
+                    8,
+                    std::collections::BTreeMap::default(),
+                )
+                .unwrap(),
+                0..m.size(),
+            )
+            .unwrap_err();
+            assert!(e.is_corruption(), "byte {at}: {e}");
+        }
+    }
 }
