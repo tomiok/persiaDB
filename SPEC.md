@@ -2587,7 +2587,8 @@ compressed) from 12288: `BlobChunk` (kind 6) `{upload_id u128, chunk_idx u32, le
 and `BlobIndex` (kind 7) `{manifest_len u32, reserved u32, blob manifest padded to 8, one u64 BlobChunk frame offset
 per chunk}`. `bind` appends the `BlobIndex` frame after the chunks staged before it, syncs the pack's data, writes
 and syncs the inactive slot, and only then returns `Bound` (§18.9); it refuses a manifest whose upload is already
-bound. A blob is visible once a durable slot covers its `BlobIndex` frame; the writer shows a binding (dedup,
+bound to another blob (the same manifest again, a retry after an unknown outcome, is `AlreadyBound`). A blob is
+visible once a durable slot covers its `BlobIndex` frame; the writer shows a binding (dedup,
 lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex` names are staging or orphans. The
 open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
 valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
@@ -3086,24 +3087,13 @@ Comparison against other engines is reported with methodology, never cherry-pick
 6. Vector search layout (IVF-style clusters in segments) — reserve `incompat_flags` bit.
 7. Language analyzers scope for v1 (en, es, pt first).
 8. ~~Blob upload staging and expected id~~: resolved by ADR-0034, upload-id staging bound by a blob manifest (§9.2–§9.6).
-9. ~~**Pack durability order**~~: resolved by ADR-0049. `bind` appends the `BlobIndex` frame after the chunks staged
-   before it, syncs the pack's data, writes and syncs its inactive slot, and only then returns `Bound`; the first blob
-   also creates the pack durably (file with header and superblock synced, then its own directory sync). (a) one sync
-   per blob; (b) moot, since the blob is durable before any document is logged; (c) the pack's directory sync is its
-   own. The original question (ROADMAP 9.2.2): §9.5 fixes the order (the blob durable, then the document that
-   references it), not the calls. Proposed: `put_blob` appends the `BlobChunk` frames and the `BlobIndex` frame,
-   syncs the pack's data, then writes and syncs its superblock slot (as the container's commit, §4.5); the first
-   `put_blob` of a database also syncs the directory after creating the pack (§9.3), since a new name is durable only
-   then (§4.5.2). Only then does `put_blob` return, and only then may the WAL record or commit of a document that
-   references the blob be acknowledged. Open: (a) whether a pack slot sync per blob is required, or whether
-   `put_blob` may return at "frames written" and the next container commit, or the WAL sync of the first document
-   referencing it, syncs the pack first (one pack sync per batch instead of one per blob); that needs the
-   container's commit (§4.5 step 1) and the WAL's `Fsync` (§8.2) to sync the pack before their own sync, so that a
-   crash between the two syncs may orphan the blob but never leaves a reference without it; (b) what a document logged
-   `Buffered` or `Async` with a blob promises when the pack sync fails afterwards (today a failed sync poisons the
-   writer, §4.5); (c) whether the pack's directory sync can share the container's when both files are created
-   together. Any answer keeps the pack's index covering a blob written before any container byte that references
-   it, which a live copy relies on (§4.8). A crash test (ROADMAP 9.5.4) covers each answer.
+9. ~~Pack durability order~~: resolved by ADR-0049 (ROADMAP 9.2.2): one sync per blob. `bind` appends the
+   `BlobIndex` frame after the chunks staged before it, syncs the pack's data, writes and syncs its inactive slot, and
+   only then returns `Bound`; the first blob also creates the pack durably (§9.3: file with header and superblock
+   synced, then its own directory sync, not shared with the container's). The blob is therefore durable before any
+   document that references it is logged, at every WAL durability (§9.5, §9.6), so a `Buffered` or `Async` document
+   promises nothing more about its blob, and the pack's index covers a blob before any container byte references it
+   (which a live copy relies on, §4.8). A crash test (ROADMAP 9.5.4) covers it.
 10. **Pack rewrite (GC) under readers, Windows included** (ROADMAP 9.5.2). Proposed: the same reader-safe replace
     as the container's compaction (§4.6), never a rewrite in place. The writer copies the live blobs into
     `<name>.persia.blobs.compact.<nonce>.<n>` beside the pack, syncs it, renames it over the pack, then syncs the

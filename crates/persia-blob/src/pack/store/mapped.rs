@@ -210,10 +210,6 @@ mod tests {
 
     /// An error found before anything is written (here the `frame_seq` run exhausted) leaves the handle usable.
     #[test]
-    #[cfg_attr(
-        miri,
-        ignore = "PackStore draws its pack id from SystemTime, which Miri's isolation lacks"
-    )]
     fn an_error_before_any_write_does_not_poison() {
         let (_fs, store) = store();
         put(&store, b"first", 8, 1);
