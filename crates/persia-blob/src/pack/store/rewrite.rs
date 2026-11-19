@@ -14,6 +14,11 @@
 //! (only if the path still names this handle's file), and the directory synced. The pin check of everything dropped
 //! and the rename, directory sync and swap are one step under the pin set's lock (SPEC §9.5), so a pin taken after
 //! the plan defers the rewrite instead of losing what it names.
+//!
+//! ROADMAP 9.5.8 holds locally by construction: a bound blob's chunks are kept or dropped with it, and kept when
+//! its blob or its upload is pinned, while a staged upload is one no manifest in the pack names yet (a bind takes
+//! its chunks out of the staged ones). So no pinned blob's manifest can name an upload whose chunks the rewrite
+//! drops.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};

@@ -8,13 +8,13 @@
 //! manifest, never a manifest without chunks. Every key is parsed (`RemoteKey::parse`); one that does not parse was
 //! not written by Persia and is ignored, never deleted.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::SystemTime;
 
 use persia_format::BlobId;
 use persia_storage::{Key, Storage};
 
-use super::{GcObject, Mark, PinGate, Sweep, SweepOptions, SweepReport, is_unreadable};
+use super::{GcObject, Mark, PinCheck, PinGate, Sweep, SweepOptions, SweepReport, is_unreadable};
 use crate::error::{Error, Result};
 use crate::manifest::UploadId;
 use crate::remote::RemoteBlobStore;
@@ -59,6 +59,8 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
     ) -> Result<SweepReport> {
         let mut report = SweepReport::default();
         let mut keep = mark.uploads.clone();
+        // The upload each kept, unmarked manifest names (`None`: inline), for the check of pinned blobs below.
+        let mut named: HashMap<BlobId, Option<UploadId>> = HashMap::new();
         let mut unreadable = !mark.unreadable.is_empty();
         for first in 0..=u8::MAX {
             let listed = self
@@ -85,10 +87,12 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
                 }
                 // Kept: the chunks of the upload it names stay too.
                 match self.manifest(id) {
-                    Ok(Some(m)) if !m.is_inline() => {
-                        keep.insert(m.upload_id());
+                    Ok(Some(m)) => {
+                        let upload = (!m.is_inline()).then(|| m.upload_id());
+                        keep.extend(upload);
+                        named.insert(id, upload);
                     }
-                    Ok(_) => {}
+                    Ok(None) => {}
                     Err(e) if is_unreadable(&e) => {
                         report.unreadable = report.unreadable.saturating_add(1);
                         unreadable = true;
@@ -107,13 +111,18 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
                 Age::Unknown => report.unknown_age = report.unknown_age.saturating_add(1),
                 Age::Young => report.young = report.young.saturating_add(1),
                 Age::Expired => {
-                    let deleted = pins.unless_pinned(GcObject::Upload(upload_id), |_| {
-                        self.delete_chunks(upload_id, &upload.indices)
+                    let swept = pins.unless_pinned(GcObject::Upload(upload_id), |view| {
+                        // ADR-0051 item 5: a blob is pinned before the manifest naming this upload is read, and the
+                        // upload right after, so between the two only the blob's pin protects these chunks.
+                        if self.named_by_pinned_blob(upload_id, view, mark, &mut named)? {
+                            return Ok(None);
+                        }
+                        self.delete_chunks(upload_id, &upload.indices).map(Some)
                     });
-                    match deleted {
+                    match swept.transpose()?.flatten() {
                         None => report.pinned = report.pinned.saturating_add(1),
                         Some(deleted) => {
-                            report.chunks_deleted = report.chunks_deleted.saturating_add(deleted?);
+                            report.chunks_deleted = report.chunks_deleted.saturating_add(deleted);
                             report.uploads_deleted = report.uploads_deleted.saturating_add(1);
                         }
                     }
@@ -125,6 +134,40 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
 }
 
 impl<S: Storage> RemoteBlobStore<S> {
+    /// Whether a blob pinned now has a manifest that names `upload_id` (SPEC §9.5, ADR-0051 item 5), read through the
+    /// locked pins `view`. A marked blob's upload is kept already; a kept manifest's upload was learned by the
+    /// listing (`named`); any other pinned blob's manifest is read now (it may have been bound after the listing),
+    /// and one that cannot be read counts as naming the upload: GC deletes less, never more.
+    fn named_by_pinned_blob(
+        &self,
+        upload_id: UploadId,
+        view: &dyn PinCheck,
+        mark: &Mark,
+        named: &mut HashMap<BlobId, Option<UploadId>>,
+    ) -> Result<bool> {
+        for blob in view.pinned_blobs() {
+            if mark.blobs.contains(&blob) {
+                continue;
+            }
+            let upload = if let Some(upload) = named.get(&blob) {
+                *upload
+            } else {
+                let upload = match self.manifest(blob) {
+                    Ok(Some(m)) => (!m.is_inline()).then(|| m.upload_id()),
+                    Ok(None) => None,
+                    Err(e) if is_unreadable(&e) => Some(upload_id),
+                    Err(e) => return Err(e),
+                };
+                named.insert(blob, upload);
+                upload
+            };
+            if upload == Some(upload_id) {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Deletes the unmarked manifest `id` at `key` if it is old enough and unpinned at its check; returns whether it
     /// did.
     fn sweep_manifest<P: PinGate>(

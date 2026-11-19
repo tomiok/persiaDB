@@ -425,6 +425,82 @@ fn a_kept_manifest_keeps_its_uploads_chunks_whatever_their_age() {
     assert_eq!(read_all(&store, &pinned).unwrap(), b"pinned at the check");
 }
 
+/// ROADMAP 9.5.8 (ADR-0051 item 5): a blob is pinned before the manifest naming an upload is read, and that upload
+/// only after; between the two, the sweep must find the pinned blob's manifest under the pin set's lock and keep the
+/// upload's chunks. Here the blob is bound and pinned while the sweep runs, after its listing: an upload whose chunks
+/// are old (a resumed one), bound late, with its upload pin not taken yet.
+#[test]
+fn an_uploads_chunks_stay_while_a_pinned_blobs_manifest_names_it() {
+    // What the hook does at the upload's check: nothing, bind and pin the blob, pin a blob whose manifest is
+    // unreadable, or pin a blob that has no manifest yet.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Late {
+        Nothing,
+        BindAndPin,
+        PinUnreadable,
+        PinUnbound,
+    }
+    for late in [
+        Late::Nothing,
+        Late::BindAndPin,
+        Late::PinUnreadable,
+        Late::PinUnbound,
+    ] {
+        let clock = Arc::new(ManualClock::new(at(0)));
+        let store = Arc::new(RemoteBlobStore::new(MemoryStorage::with_clock(
+            Arc::clone(&clock) as Arc<dyn Clock>,
+        )));
+        let resumed = stage(&*store, b"staged long ago", 4, 1);
+        clock.set(at(100));
+        let pins = Pins::default();
+        let hooked = Arc::clone(&store);
+        let m = resumed.clone();
+        let mut done = false;
+        pins.on_check(move |pinned| {
+            if std::mem::replace(&mut done, true) {
+                return;
+            }
+            match late {
+                Late::Nothing => {}
+                Late::BindAndPin => {
+                    assert_eq!(hooked.bind(&m).unwrap(), BindOutcome::Bound);
+                    pinned.insert(GcObject::Blob(m.blob_id()));
+                }
+                Late::PinUnreadable => {
+                    let other = persia_blob::blob_id_of(b"unreadable");
+                    let key = RemoteKey::Manifest(other).key().unwrap();
+                    hooked
+                        .storage()
+                        .put(&key, Bytes::from_static(b"garbage"))
+                        .unwrap();
+                    pinned.insert(GcObject::Blob(other));
+                }
+                Late::PinUnbound => {
+                    pinned.insert(GcObject::Blob(persia_blob::blob_id_of(b"not bound yet")));
+                }
+            }
+        });
+        let mut mark = Mark::default();
+        mark.add_manifest_uploads(&*store).unwrap();
+        let report = store.sweep(&mark, &pins, &options(at(100))).unwrap();
+        let kept = matches!(late, Late::BindAndPin | Late::PinUnreadable);
+        assert_eq!(
+            report.uploads_deleted,
+            u64::from(!kept),
+            "{late:?}: {report:?}"
+        );
+        assert_eq!(report.pinned, u64::from(kept), "{late:?}: {report:?}");
+        assert_eq!(
+            store.staged_chunks(resumed.upload_id()).unwrap().len(),
+            if kept { 4 } else { 0 },
+            "{late:?}"
+        );
+        if late == Late::BindAndPin {
+            assert_eq!(read_all(&*store, &resumed).unwrap(), b"staged long ago");
+        }
+    }
+}
+
 #[test]
 fn manifests_are_listed_per_prefix_and_uploads_once() {
     let clock = Arc::new(ManualClock::new(at(0)));
