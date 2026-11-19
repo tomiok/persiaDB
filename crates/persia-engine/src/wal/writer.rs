@@ -145,6 +145,8 @@ pub struct WalWriter<L> {
     unsynced: bool,
     /// Records appended so far; records are numbered from 1.
     appended: u64,
+    /// Records durable so far: every record numbered up to it was in a chunk the last successful sync covered.
+    durable: u64,
     /// Per collection with unflushed records, the chunks holding them, oldest first. Only the last can be buffered.
     held: BTreeMap<String, VecDeque<Held>>,
     poisoned: bool,
@@ -173,6 +175,7 @@ impl<L: WalLog> WalWriter<L> {
             target: DEFAULT_CHUNK_TARGET,
             unsynced: false,
             appended: 0,
+            durable: 0,
             held: pending
                 .into_iter()
                 .map(|(c, at)| {
@@ -302,13 +305,25 @@ impl<L: WalLog> WalWriter<L> {
             self.log.sync().map_err(|e| self.poison(e))?;
             self.unsynced = false;
         }
+        // Every record appended is in a written chunk (`write_out` emptied the buffer), and every written chunk is
+        // synced: by the sync above, or by an earlier one when nothing was written since.
+        self.durable = self.appended;
         Ok(())
     }
 
     /// The point a flush starts from: take it when the memtable to flush stops taking writes, and pass it to
-    /// [`WalWriter::flushed`] once the segment holds that memtable.
+    /// [`WalWriter::flushed`] once the segment holds that memtable. Also the mark of the last record appended, which
+    /// is durable once [`WalWriter::durable_mark`] reaches it.
     pub fn mark(&self) -> WalMark {
         WalMark(self.appended)
+    }
+
+    /// The records durable so far (SPEC §8.2.1): every record whose [`WalWriter::mark`], taken right after it was
+    /// appended, is at most this one was synced, by an `Fsync` append, a [`WalWriter::sync`] or a
+    /// [`WalWriter::commit_point`]. What a caller holding something until a record is durable (the blob pins of
+    /// SPEC §9.5) compares with. It only grows; a sync that fails poisons the writer and leaves it where it was.
+    pub fn durable_mark(&self) -> WalMark {
+        WalMark(self.durable)
     }
 
     /// Records that a flush of `collection` from `mark` is in a segment (SPEC §8.2.1): its records appended before

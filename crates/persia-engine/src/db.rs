@@ -631,6 +631,21 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.manifest.seq()
     }
 
+    /// The mark of the last operation logged to the WAL since this database was opened. Taken right after a
+    /// [`Database::put`] or [`Database::delete`] returns `Ok`, it is that operation's: the operation is durable once
+    /// [`Database::durable_mark`] reaches it.
+    pub fn wal_mark(&self) -> WalMark {
+        self.wal.mark()
+    }
+
+    /// The mark of the last operation known durable (SPEC §8.2.1): logged at [`Durability::Fsync`], or made durable
+    /// by a later `Fsync` operation or a commit, which syncs the WAL first (SPEC §4.5 step 1). What holds something
+    /// until the operation that needs it is durable compares with it, as the blob pin set does (SPEC §9.5). An
+    /// operation logged `Buffered` or `Async` stays above it until then. It never goes down.
+    pub fn durable_mark(&self) -> WalMark {
+        self.wal.durable_mark()
+    }
+
     /// The container (read-only).
     pub fn container(&self) -> &Container<F> {
         self.wal.log()

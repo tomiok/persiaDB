@@ -28,13 +28,17 @@ const CHUNK: &str = "blob chunk";
 
 /// What [`BlobStore::bind`] found (SPEC §9.2, §9.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[must_use = "AlreadyBound means the blob is another upload's: return a BlobRef with its chunk size"]
+#[must_use = "AlreadyBound means the id was bound before: return a BlobRef with the bound chunk size"]
 pub enum BindOutcome {
     /// The manifest is durable and binds its id: the upload's staged chunks are now the blob's.
     Bound,
-    /// Another upload bound the id first, so this one is a duplicate (SPEC §9.2). Holds the bound manifest, already
-    /// checked to name the id ([`BlobManifest::check_blob_id`]); its chunk size is the one the returned `BlobRef`
-    /// carries. The duplicate's staged chunks are the caller's to discard ([`BlobStore::discard_upload`]).
+    /// The id was already bound, so nothing was written. Holds the bound manifest, already checked to name the id
+    /// ([`BlobManifest::check_blob_id`]); its chunk size is the one the returned `BlobRef` carries.
+    ///
+    /// That binding may be this upload's own: a retry after an unknown outcome (SPEC §9.4) finds the earlier attempt's
+    /// write if it landed, so the bound manifest names this upload id. Only when it names another upload is this one a
+    /// duplicate (SPEC §9.2) whose staged chunks the caller may discard ([`BlobStore::discard_upload`]), and never
+    /// after an unknown outcome of this upload, whose write may still land.
     ///
     /// The bound manifest is **durable**: a store never answers `AlreadyBound` (nor shows a manifest through
     /// [`BlobStore::manifest`] or [`BlobStore::contains`]) for a binding whose own durable write has not finished,

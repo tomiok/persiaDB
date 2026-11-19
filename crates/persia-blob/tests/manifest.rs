@@ -1239,8 +1239,19 @@ fn is_corruption_is_true_for_corrupt_only() {
 
         // -- documents (9.4) --
         // One case per documents variant, here and only here.
-        //
-        //
+        (
+            Error::BlobIdMismatch {
+                expected: blob_id_of(b"a"),
+                actual: blob_id_of(b"b"),
+            },
+            false,
+        ),
+        (
+            Error::InvalidBlobRef(persia_format::EncodeError::InvalidBlobRef {
+                defect: BlobRefDefect::MimeLen { len: 0 },
+            }),
+            false,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1268,8 +1279,7 @@ fn is_corruption_is_true_for_corrupt_only() {
             //
             // -- documents (9.4) --
             // One arm for the documents variants, `=> "documents"`, here and only here.
-            //
-            //
+            Error::BlobIdMismatch { .. } | Error::InvalidBlobRef(_) => "documents",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }

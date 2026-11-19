@@ -56,7 +56,7 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0031](./0031-tiered-merge-policy-and-merger.md) | Tiered merge policy, and a merger that fills a segment builder | proposed |
 | [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |
 | [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |
-| [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted |
+| [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted (amended by 0051) |
 | [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041, 0050) |
 | [0036](./0036-term-proximity-scoring.md) | Term proximity scoring: pair distance of adjacent required words, bound-safe, off by default | accepted |
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
@@ -71,4 +71,5 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |
 | [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed (amended by 0048) |
 | [0048](./0048-request-filter-kept-beside-the-compilation.md) | The request filter is kept beside the compiled query, which is replaced only through it | proposed |
-| [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | proposed |
+| [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | accepted |
+| [0051](./0051-blobs-with-documents-internal-api-pins-and-ordering.md) | Blobs with documents: the internal put_blob/put API, the pin set, and the blob-before-document order | proposed |

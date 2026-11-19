@@ -9,6 +9,13 @@ publish.workspace = true
 [dependencies]
 persia-engine.workspace = true
 persia-blob.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+persia-blob = { workspace = true, features = ["testing"] }
+proptest.workspace = true
+tempfile.workspace = true
 
 [features]
 # Extended property tests: gate them with #[cfg(feature = "slow")]; nightly CI runs them.

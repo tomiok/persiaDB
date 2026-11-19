@@ -1,7 +1,8 @@
 # ADR-0034: Blob upload staging, binding, and the expected-id API
 
 - Status: accepted; amended 2026-11-07 after review (items 2–4, 6, 7: chunks never overwritten, unknown binding
-  outcomes, read checks, GC pins)
+  outcomes, read checks, GC pins); amended by ADR-0051 (item 3: an unknown binding outcome is retried within a time
+  budget, then `put_blob` fails)
 - Date: 2026-11-07
 - Related: SPEC §9.1–§9.6, §10.1, §10.4, §18.8; ROADMAP 9.1.0–9.1.3, 9.2, 9.3, 9.5; ADR-0002, ADR-0011, ADR-0024, ADR-0035
 
@@ -39,7 +40,7 @@ only atomic primitive; a blob can be larger than memory; uploads from servers ca
    - remotely as `blobs/<hex[0..2]>/<hex(blob_id)>`, written with `put_if_absent`. `Created` binds it. `AlreadyExists`
      (already resolved against our own bytes, §10.1) means another upload bound the id first: the blob is
      deduplicated, our staged chunks are orphans. An error leaves the outcome unknown: retry the same `put_if_absent`
-     until it answers, and never delete the chunks of an upload whose outcome was once unknown (a conditional write
+     until it answers (within a time budget, ADR-0051), and never delete the chunks of an upload whose outcome was once unknown (a conditional write
      still in flight may land later); GC reclaims them. A backend without `conditional_put` cannot store blobs
      (`Unsupported`), the same requirement as commits.
    A reader checks the manifest against what it looked it up by (`check_ref`: id, size, chunk size) before serving

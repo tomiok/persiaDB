@@ -624,10 +624,13 @@ Deps: M1, M2.
 - [ ] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
 
 ## 9.4 Integration with documents
-- [ ] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
-- [ ] 9.4.2 Streaming API: `put_blob(reader)`, `get_blob_range(id, range)`
-- [ ] 9.4.3 Document `blob_ref` stored in `BlobRefs` section; included in hits
+- [x] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
+- [x] 9.4.2 Streaming API: `put_blob(reader)`, `get_blob_range(id, range)`
+- [x] 9.4.3 Document `blob_ref` stored in `BlobRefs` section; included in hits
 - [x] 9.4.4 Decide, before the blob manifest encoding is released (SPEC §15), whether `put_blob`'s chunk size has a floor or the blob manifest a size cap: `chunk_size` 1 lets a 4 GiB blob need a 16 GiB manifest (ADR-0035 Consequences)
+- [ ] 9.4.5 Wire `PackStore` into the database open: `<name>.persia.blobs` beside the container, created lazily by the first `put_blob` (SPEC §9.3), and `BlobDatabase` over `Database` plus the pack, passing the container's `db_uuid` (found in 9.4.1)
+- [ ] 9.4.6 [T] Crash-order test of `put(doc, blob)` through `SimFile` at every container write: needs a `persia` dev-dependency on `persia-storage` in `xtask` `ALLOWED` (found in 9.4.1)
+- [ ] 9.4.7 A store that refuses every write until reopened (the pack after a failed sync, `PackPoisoned`) ends `put_blob`'s bind retries at once instead of at the end of `bind_budget`: an `Error::is_store_poisoned` predicate in the contract (found in 9.4.1 review)
 
 ## 9.5 Garbage collection
 - [ ] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name
@@ -637,6 +640,7 @@ Deps: M1, M2.
 - [x] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 - [ ] 9.5.6 (v1.0) [T] No dangling blob reference (SPEC §9.5, §9.6): a document committed with a `BlobRef` that has no blob behind it (set below the public API with `Document::set_blob_ref`, or after copying only the container, §4.8) is reported by `verify` as an error naming the collection, document id and `blob_id`, in a segment and in the WAL; the public `put(doc, blob)` given a `BlobRef` its database never bound is rejected and logs nothing
 - [ ] 9.5.7 `SimFs` file modification times from an injectable clock, so sweep crash tests on `LocalStorage<SimFs>` can age objects (SPEC §10.1; found in 9.5.5)
+- [ ] 9.5.8 Sweep (9.5.2): an upload's staged chunks are not deleted while a pinned blob's manifest names it, checked under the pin set's lock (`PinSet::unless_pinned`, ADR-0051; found in the 9.4.1 review)
 
 ---
 
