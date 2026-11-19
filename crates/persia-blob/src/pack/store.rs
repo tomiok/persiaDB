@@ -818,5 +818,13 @@ mod mapped;
 mod recover;
 mod refresh;
 
+// -- gc (9.5) --
+// The pack rewrite (ROADMAP 9.5.2): a child module, so it can swap the handle's file and index under its locks.
+mod rewrite;
+
+// -- followups (9.2) --
+// Child modules of the pack follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9), if any, go here.
+//
+
 use mapped::Mapper;
 use recover::{check_scan, read_prefix, recover, scan_committed};

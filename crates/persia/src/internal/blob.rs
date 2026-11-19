@@ -210,29 +210,37 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Ok(Some(pins))
     }
 
-    /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6), every chunk read checked ([`read_range`]).
+    /// Bytes `range` of the blob `blob_ref` refers to (SPEC §9.6), every chunk read checked ([`read_range`]). The
+    /// blob is pinned while it is read, so a GC sweep cannot take it halfway (SPEC §9.5).
     ///
     /// # Errors
     /// As [`read_range`]: [`Error::BlobNotFound`], [`Error::RangeOutOfBounds`], [`Error::Corrupt`], the store's.
     pub fn get_blob_range(&self, blob_ref: &BlobRef, range: Range<u64>) -> Result<Vec<u8>> {
+        // A blob pin alone protects its chunks too: the sweep keeps an upload a pinned blob's manifest names
+        // (ADR-0051 item 5).
+        let _pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
         read_range(&*self.store, blob_ref, range)
     }
 
     /// A reader of the whole blob `blob_ref` refers to (SPEC §9.6 `get_blob`), which reads it a window of chunks at
     /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once. The manifest is looked up and checked
-    /// once, here; every window reads by it ([`read_manifest_range`]).
+    /// once, here; every window reads by it ([`read_manifest_range`]). The reader pins the blob and its upload until
+    /// it is dropped, so a GC sweep never takes a blob mid-stream (SPEC §9.5).
     ///
     /// # Errors
     /// [`Error::BlobNotFound`] when the id is not bound, [`Error::Corrupt`] when its manifest does not match
     /// `blob_ref`, or the store's errors. Errors while reading come from [`Read::read`] as [`io::Error`]s whose
     /// inner error is the [`Error`].
     pub fn get_blob(&self, blob_ref: &BlobRef) -> Result<BlobReader<'_, S>> {
+        // Pinned before the lookup, and its upload after it, as `pin_contained` does (ADR-0051 item 5).
+        let mut pins = self.pins.pin([Pinned::Blob(blob_ref.blob_id())]);
         let Some(manifest) = self.store.manifest(blob_ref.blob_id())? else {
             return Err(Error::BlobNotFound {
                 blob_id: blob_ref.blob_id(),
             });
         };
         manifest.check_ref(blob_ref)?;
+        pins.add(Pinned::Upload(manifest.upload_id()));
         let chunk = u64::from(manifest.chunk_size().get());
         let window = chunk.saturating_mul(u64::from(window_chunk_count(manifest.chunk_size())));
         Ok(BlobReader {
@@ -243,6 +251,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             offset: 0,
             buf: Vec::new(),
             pos: 0,
+            _pins: pins,
         })
     }
 
@@ -440,6 +449,8 @@ pub struct BlobReader<'a, S: ?Sized> {
     offset: u64,
     buf: Vec<u8>,
     pos: usize,
+    /// The blob and its upload, pinned while the stream lives (SPEC §9.5).
+    _pins: Pins,
 }
 
 impl<S: ?Sized> BlobReader<'_, S> {

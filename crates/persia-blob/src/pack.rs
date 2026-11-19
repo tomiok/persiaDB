@@ -25,3 +25,8 @@ pub fn pack_path(container: &Path) -> PathBuf {
     name.push(PACK_SUFFIX);
     PathBuf::from(name)
 }
+
+// -- gc (9.5) --
+// What the pack rewrite (`store/rewrite.rs`, ROADMAP 9.5.2) exports: its `pub use` lines go here, and only here.
+//
+//

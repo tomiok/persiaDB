@@ -178,9 +178,34 @@ pub enum Error {
     /// read.
     #[error("the blob reference put_blob's mime and user_meta describe is invalid")]
     InvalidBlobRef(#[source] persia_format::EncodeError),
+    //
+    //
+
+    // -- followups (9.2, 9.4) --
+    // Variants of wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7) go here, and only here.
+    //
+    //
+
+    // -- gc (9.5) --
+    // Variants of the mark, the sweep and the pack rewrite (SPEC §9.5; ROADMAP 9.5.1, 9.5.2) go here, and only here.
+    //
+    //
 }
 
 impl Error {
+    /// Whether the store refuses every write until it is reopened (the pack after a failed write or sync,
+    /// [`Error::PackPoisoned`], SPEC §4.5), also when it is the source of an unknown outcome
+    /// ([`Error::BindOutcomeUnknown`]): retrying on this handle cannot answer anything (ROADMAP 9.4.7).
+    pub fn is_store_poisoned(&self) -> bool {
+        match self {
+            Self::PackPoisoned => true,
+            Self::BindOutcomeUnknown(source) => source
+                .downcast_ref::<Self>()
+                .is_some_and(Self::is_store_poisoned),
+            _ => false,
+        }
+    }
+
     /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error.
     pub const fn is_corruption(&self) -> bool {
         matches!(self, Self::Corrupt { .. })
@@ -190,5 +215,23 @@ impl Error {
     /// manifest (SPEC §9.4): the caller binds again and never discards the upload.
     pub const fn is_bind_outcome_unknown(&self) -> bool {
         matches!(self, Self::BindOutcomeUnknown(_))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_poisoned_pack_is_a_poisoned_store_also_behind_an_unknown_outcome() {
+        assert!(Error::PackPoisoned.is_store_poisoned());
+        assert!(Error::BindOutcomeUnknown(Box::new(Error::PackPoisoned)).is_store_poisoned());
+        let nested = Error::BindOutcomeUnknown(Box::new(Error::BindOutcomeUnknown(Box::new(
+            Error::PackPoisoned,
+        ))));
+        assert!(nested.is_store_poisoned());
+        assert!(!Error::PackReadOnly.is_store_poisoned());
+        let io = std::io::Error::other("timeout");
+        assert!(!Error::BindOutcomeUnknown(Box::new(io)).is_store_poisoned());
     }
 }

@@ -2652,6 +2652,9 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   and a poisoned writer keeps its pins until it is dropped: GC deletes less, never more. A duplicate, and a
   `put(doc, blob)` given a `BlobRef`, also pin the upload the bound manifest names, after reading it; the sweep does
   not delete an upload's chunks while a pinned blob's manifest names it (ADR-0051).
+  A read pins too: a `get_blob` stream pins its `blob_id` before it looks the manifest up and the upload the manifest
+  names right after, until the stream is dropped, and `get_blob_range` pins the `blob_id` for the call, so a sweep
+  never takes a blob mid-read (§18.10 (c)).
 - Mark: the `blob_id`s referenced by live manifests and snapshots and by WAL records from `wal_start` on (§8.2),
   pinned ids, then the upload ids their blob manifests name, and pinned upload ids.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
@@ -3107,7 +3110,9 @@ Comparison against other engines is reported with methodology, never cherry-pick
     change; (b) blobs bound into the new pack before its directory sync:
     a crash that reverts the rename would lose them while the container may already reference them, so the proposal
     is that the writer binds nothing into the new pack until that sync succeeds, and stops writing if it fails, as
-    after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) whether a
-    `get_blob` stream that started on the old pack reads on from its open handle after the rename, as segments do
-    from the old container (§4.7), or must finish first. The mark already keeps every blob a live manifest, snapshot
-    or pin references (§9.5), so a rewrite never drops a blob a reader can still name.
+    after a compaction (§4.6), to be confirmed by a crash test (ROADMAP 9.5.4); (c) answered
+    (2026-11-19): a `get_blob` stream in the writer reads on, because the writer's handle swaps file and index at
+    once and looks every chunk up by id, and it pins its blob (§9.5), so the rewrite keeps it; a reader in another
+    process keeps reading the old file until its `refresh` reports `PackReplaced`.
+    The mark already keeps every blob a live manifest, snapshot or pin references (§9.5), so a rewrite never drops a
+    blob a reader can still name.

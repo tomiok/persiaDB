@@ -9,6 +9,7 @@
 //! 5. A store error while staging binds nothing; a chunk size below the floor or an invalid `mime` reads nothing.
 //! 6. The upload id is pinned at every chunk write, and the blob id at the bind; both until the guard drops.
 //! 7. A small blob (≤ 64 KiB) goes through `bind_small`; a larger one is staged in bounded windows.
+//! 8. A `get_blob` stream pins its blob and upload until it is dropped, so a GC sweep never takes it mid-stream.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -976,4 +977,42 @@ fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
     let window = WINDOW_MAX_CHUNKS as usize;
     assert_eq!(windows, len.div_ceil(window));
     assert_eq!(lookups, 1, "manifest lookups");
+}
+
+/// Invariant 8: a stream pins its blob and the upload its manifest names while it lives (SPEC §9.5); a range read
+/// holds no pin once it returns.
+#[test]
+fn a_blob_stream_pins_its_blob_and_upload_until_dropped() {
+    let data = bytes(2 * MIN as usize + 5, 4);
+    let blobs = Blobs::new(Arc::new(MemoryBlobStore::new()));
+    let (r, pins) = blobs.put_blob(&data[..], &options(MIN)).unwrap();
+    let upload = upload_of(&pins);
+    drop(pins);
+    let set = blobs.pin_set();
+    assert!(set.pinned().is_empty());
+
+    let mut reader = blobs.get_blob(&r).unwrap();
+    assert!(set.is_pinned(Pinned::Blob(r.blob_id())));
+    assert!(set.is_pinned(Pinned::Upload(upload)));
+    let mut first = [0; 10];
+    reader.read_exact(&mut first).unwrap();
+    assert!(set.is_pinned(Pinned::Blob(r.blob_id())));
+    drop(reader);
+    assert!(set.pinned().is_empty());
+
+    assert_eq!(blobs.get_blob_range(&r, 3..9).unwrap(), &data[3..9]);
+    assert!(set.pinned().is_empty());
+    let missing = persia_blob::BlobRef::new(
+        blob_id_of(b"absent"),
+        6,
+        r.mime(),
+        r.chunk_size(),
+        std::collections::BTreeMap::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        blobs.get_blob(&missing),
+        Err(Error::BlobNotFound { .. })
+    ));
+    assert!(set.pinned().is_empty(), "a failed open releases its pin");
 }

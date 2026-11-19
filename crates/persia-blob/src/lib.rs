@@ -46,3 +46,13 @@ pub use remote::RemoteBlobStore;
 // `persia::internal::blob` (ADR-0051), so only this re-export is here.
 // The value type `put_blob` returns (it lives in `persia-format`, which `persia` reaches only through this crate).
 pub use persia_format::BlobRef;
+
+// -- gc (9.5) --
+// Garbage collection (SPEC §9.5; ROADMAP 9.5.1, 9.5.2, 9.5.8): its `mod` and `pub use` lines go here, and only here.
+//
+//
+
+// -- followups (9.2, 9.3, 9.4) --
+// Wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7): their `mod` and `pub use` lines, if any.
+//
+//
