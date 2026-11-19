@@ -142,34 +142,48 @@ impl Superblock {
         let a = Self::decode(&mut slots.sub_reader(SLOT_LEN)?);
         let b_offset = slots.offset();
         let b = Self::decode(&mut slots.sub_reader(SLOT_LEN)?);
-        let active = match (a, b) {
-            (Ok(a), Ok(b)) if a.seq == b.seq && a != b => {
-                return Err(Error::Corrupt {
-                    offset: b_offset,
-                    reason: Corruption::SuperblockConflict { seq: a.seq },
-                });
-            }
-            (Ok(a), Ok(b)) if b.seq > a.seq => ActiveSuperblock {
-                slot: Slot::B,
-                superblock: b,
-            },
-            (Ok(a), _) => ActiveSuperblock {
-                slot: Slot::A,
-                superblock: a,
-            },
-            (Err(_), Ok(b)) => ActiveSuperblock {
-                slot: Slot::B,
-                superblock: b,
-            },
-            (Err(_), Err(_)) => {
-                return Err(Error::Corrupt {
-                    offset: a_offset,
-                    reason: Corruption::NoValidSuperblock,
-                });
-            }
-        };
+        let (slot, superblock) = pick_active(a, b, |sb| sb.seq, a_offset, b_offset)?;
         *r = ahead;
-        Ok(active)
+        Ok(ActiveSuperblock { slot, superblock })
+    }
+}
+
+/// The selection table of SPEC §4.3 over two decoded slots, `a` at `a_offset` and `b` at `b_offset`, whose commit
+/// counter is `seq`: the higher valid `seq` wins, equal `seq` with equal contents is A, equal `seq` with different
+/// contents and two invalid slots are corruption. Shared by the container's slots and the blob pack's (SPEC §9.3), which
+/// have different fields but the same double-buffering.
+///
+/// ```
+/// use persia_format::superblock::{Slot, pick_active};
+///
+/// let invalid = || Err(persia_format::Error::OutOfMemory { bytes: None });
+/// assert_eq!(pick_active(Ok(4_u64), Ok(5), |s| *s, 4096, 8192)?, (Slot::B, 5));
+/// assert_eq!(pick_active(Ok(4_u64), invalid(), |s| *s, 4096, 8192)?, (Slot::A, 4));
+/// assert!(pick_active::<u64>(invalid(), invalid(), |s| *s, 4096, 8192).is_err());
+/// # Ok::<(), persia_format::Error>(())
+/// ```
+///
+/// # Errors
+/// [`Corruption::SuperblockConflict`] at `b_offset`, or [`Corruption::NoValidSuperblock`] at `a_offset`.
+pub fn pick_active<T: PartialEq>(
+    a: Result<T>,
+    b: Result<T>,
+    seq: impl Fn(&T) -> u64,
+    a_offset: u64,
+    b_offset: u64,
+) -> Result<(Slot, T)> {
+    match (a, b) {
+        (Ok(a), Ok(b)) if seq(&a) == seq(&b) && a != b => Err(Error::Corrupt {
+            offset: b_offset,
+            reason: Corruption::SuperblockConflict { seq: seq(&a) },
+        }),
+        (Ok(a), Ok(b)) if seq(&b) > seq(&a) => Ok((Slot::B, b)),
+        (Ok(a), _) => Ok((Slot::A, a)),
+        (Err(_), Ok(b)) => Ok((Slot::B, b)),
+        (Err(_), Err(_)) => Err(Error::Corrupt {
+            offset: a_offset,
+            reason: Corruption::NoValidSuperblock,
+        }),
     }
 }
 

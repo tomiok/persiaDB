@@ -14,6 +14,36 @@ use crate::writer::Writer;
 
 /// The first 8 bytes of every container.
 pub const MAGIC: [u8; 8] = *b"PERSIA\0\x01";
+/// The first 8 bytes of every blob pack file (`<name>.persia.blobs`, SPEC §9.3; ADR-0049). The pack's header has the
+/// container header's layout and rules (SPEC §4.2) with this magic, so neither file opens as the other.
+pub const BLOB_PACK_MAGIC: [u8; 8] = *b"PERSIAB\x01";
+
+/// What tells one kind of file with the header layout of SPEC §4.2 from another: its magic, and the `incompat_flags`
+/// and `rocompat_flags` bits this build knows for it. Each kind has its own flag namespace (ADR-0049 item 1): a bit
+/// assigned for one never counts as known for the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HeaderRules {
+    /// The first 8 bytes.
+    pub magic: [u8; 8],
+    /// The `incompat_flags` bits this build knows.
+    pub known_incompat: u64,
+    /// The `rocompat_flags` bits this build knows.
+    pub known_rocompat: u64,
+}
+
+/// The container's rules (SPEC §4.2).
+pub const CONTAINER: HeaderRules = HeaderRules {
+    magic: MAGIC,
+    known_incompat: KNOWN_INCOMPAT_FLAGS,
+    known_rocompat: KNOWN_ROCOMPAT_FLAGS,
+};
+
+/// The blob pack's rules (SPEC §9.3): its own magic, and no flag bit assigned yet.
+pub const BLOB_PACK: HeaderRules = HeaderRules {
+    magic: BLOB_PACK_MAGIC,
+    known_incompat: 0,
+    known_rocompat: 0,
+};
 /// The only `format_major` this build reads and writes.
 pub const FORMAT_MAJOR: u16 = 1;
 /// The `format_minor` this build writes; any minor of [`FORMAT_MAJOR`] is read.
@@ -34,6 +64,7 @@ pub const KNOWN_ROCOMPAT_FLAGS: u64 = 0;
 // SPEC §4.2 field offsets within the header.
 const MINOR_OFFSET: usize = 10;
 const CRC_OFFSET: usize = 12;
+const INCOMPAT_OFFSET: usize = 16;
 /// Bytes 52..4096.
 const RESERVED_LEN: usize = HEADER_LEN - 52;
 
@@ -109,7 +140,12 @@ impl Header {
 
     /// Whether the container may be written, judging by its `rocompat_flags`.
     pub const fn access(&self) -> Access {
-        if self.rocompat_flags & !KNOWN_ROCOMPAT_FLAGS == 0 {
+        self.access_with(&CONTAINER)
+    }
+
+    /// [`Header::access`] under another file kind's `rules`.
+    pub const fn access_with(&self, rules: &HeaderRules) -> Access {
+        if self.rocompat_flags & !rules.known_rocompat == 0 {
             Access::ReadWrite
         } else {
             Access::ReadOnly
@@ -122,6 +158,14 @@ impl Header {
     /// [`EncodeError::InvalidPageSize`] for a page size the format forbids, [`EncodeError::UnknownFlags`] if any
     /// flag bit is unknown to this build (a writer sets only bits it knows). Nothing is appended then.
     pub fn encode(&self, w: &mut Writer) -> Result<(), EncodeError> {
+        self.encode_with(w, &CONTAINER)
+    }
+
+    /// [`Header::encode`] under another file kind's `rules`: [`BLOB_PACK`] for a blob pack (SPEC §9.3).
+    ///
+    /// # Errors
+    /// As [`Header::encode`], with the flags `rules` knows.
+    pub fn encode_with(&self, w: &mut Writer, rules: &HeaderRules) -> Result<(), EncodeError> {
         if !is_valid_page_size(self.page_size) {
             return Err(EncodeError::InvalidPageSize {
                 size: self.page_size,
@@ -129,12 +173,17 @@ impl Header {
                 max: MAX_PAGE_SIZE,
             });
         }
-        let unknown = (self.incompat_flags & !KNOWN_INCOMPAT_FLAGS)
-            | (self.rocompat_flags & !KNOWN_ROCOMPAT_FLAGS);
+        let unknown = (self.incompat_flags & !rules.known_incompat)
+            | (self.rocompat_flags & !rules.known_rocompat);
         if unknown != 0 {
             return Err(EncodeError::UnknownFlags { flags: unknown });
         }
-        Checksummed(Layout(*self)).encode(w)
+        Checksummed(Layout {
+            header: *self,
+            magic: rules.magic,
+            deferred: None,
+        })
+        .encode(w)
     }
 
     /// Reads and validates the next [`HEADER_LEN`] bytes, in the order of SPEC §4.2: magic, `format_major`, CRC,
@@ -145,17 +194,41 @@ impl Header {
     /// reserved bytes; [`Error::Unsupported`] for an unknown `format_major` or unknown `incompat_flags` bits. On
     /// error the position is unchanged.
     pub fn decode(r: &mut Reader<'_>) -> Result<Self> {
+        Self::decode_with(r, &CONTAINER)
+    }
+
+    /// [`Header::decode`] under another file kind's `rules`: [`BLOB_PACK`] for a blob pack (SPEC §9.3). Another magic,
+    /// the container's included, is corruption; an `incompat_flags` bit `rules` does not know is unsupported.
+    ///
+    /// # Errors
+    /// As [`Header::decode`].
+    pub fn decode_with(r: &mut Reader<'_>, rules: &HeaderRules) -> Result<Self> {
         let mut peek = r.clone();
         let magic_offset = peek.offset();
-        if peek.read_array::<{ MAGIC.len() }>()? != MAGIC {
+        if peek.read_array::<{ MAGIC.len() }>()? != rules.magic {
             return Err(Error::Corrupt {
                 offset: magic_offset,
                 reason: Corruption::BadMagic,
             });
         }
         check_major(&mut peek)?;
-        let Checksummed(Layout(header)) = Checksummed::<Layout>::decode(r)?;
-        Ok(header)
+        let mut ahead = r.clone();
+        let Checksummed(layout) = Checksummed::<Layout>::decode(&mut ahead)?;
+        // SPEC §4.2 order: the CRC (checked above), then `incompat_flags`, then `page_size` and reserved bytes.
+        let unknown = layout.header.incompat_flags & !rules.known_incompat;
+        if unknown != 0 {
+            return Err(Error::Unsupported {
+                offset: ahead
+                    .offset()
+                    .saturating_sub(crate::widen::u64_from_usize(HEADER_LEN - INCOMPAT_OFFSET)),
+                reason: Unsupported::IncompatFlags { flags: unknown },
+            });
+        }
+        if let Some(e) = layout.deferred {
+            return Err(e);
+        }
+        *r = ahead;
+        Ok(layout.header)
     }
 }
 
@@ -188,15 +261,22 @@ fn check_major(r: &mut Reader<'_>) -> Result<()> {
 }
 
 /// The checksummed layout, private so that every decode goes through [`Header::decode`]'s magic and major checks.
-struct Layout(Header);
+struct Layout {
+    header: Header,
+    /// Written by `encode_fields`; on decode, `Header::decode_with` checked it before the CRC.
+    magic: [u8; 8],
+    /// On decode: the first field error after `incompat_flags` (page size, reserved bytes), reported by
+    /// `Header::decode_with` after the flags it checks first.
+    deferred: Option<Error>,
+}
 
 impl ChecksummedLayout for Layout {
     const LEN: usize = HEADER_LEN;
     const CRC_OFFSET: usize = CRC_OFFSET;
 
     fn encode_fields(&self, w: &mut Writer) {
-        let h = &self.0;
-        w.write_bytes(&MAGIC);
+        let h = &self.header;
+        w.write_bytes(&self.magic);
         w.write_u16(FORMAT_MAJOR);
         w.write_u16(h.format_minor);
         w.write_u32(0); // CRC placeholder
@@ -212,21 +292,15 @@ impl ChecksummedLayout for Layout {
         r.skip(MINOR_OFFSET)?;
         let format_minor = r.read_u16()?;
         r.skip(4)?; // CRC
-        let incompat_offset = r.offset();
+        // Unknown bits are checked by `Header::decode_with`, which knows the file kind.
         let incompat_flags = r.read_u64()?;
-        let unknown = incompat_flags & !KNOWN_INCOMPAT_FLAGS;
-        if unknown != 0 {
-            return Err(Error::Unsupported {
-                offset: incompat_offset,
-                reason: Unsupported::IncompatFlags { flags: unknown },
-            });
-        }
         let rocompat_flags = r.read_u64()?;
         let db_uuid = r.read_array::<16>()?;
         let page_size_offset = r.offset();
         let page_size = r.read_u32()?;
+        let mut deferred = None;
         if !is_valid_page_size(page_size) {
-            return Err(Error::Corrupt {
+            deferred = Some(Error::Corrupt {
                 offset: page_size_offset,
                 reason: Corruption::InvalidPageSize {
                     size: page_size,
@@ -235,14 +309,21 @@ impl ChecksummedLayout for Layout {
                 },
             });
         }
-        r.expect_zeros(RESERVED_LEN)?;
-        Ok(Self(Header {
-            format_minor,
-            incompat_flags,
-            rocompat_flags,
-            db_uuid,
-            page_size,
-        }))
+        if let Err(e) = r.expect_zeros(RESERVED_LEN) {
+            deferred = deferred.or(Some(e));
+        }
+        Ok(Self {
+            header: Header {
+                format_minor,
+                incompat_flags,
+                rocompat_flags,
+                db_uuid,
+                page_size,
+            },
+            // `Header::decode_with` checked the magic before the CRC.
+            magic: MAGIC,
+            deferred,
+        })
     }
 }
 
@@ -542,5 +623,44 @@ mod tests {
         let mut r = Reader::new(&bytes);
         assert_eq!(Header::decode(&mut r), Ok(sample()));
         assert_eq!(r.rest(), b"slots");
+    }
+
+    #[test]
+    fn each_file_kind_knows_its_own_flags() {
+        // A bit one kind knows is unknown to another (ADR-0049 item 1).
+        let rules = HeaderRules {
+            known_incompat: 1,
+            known_rocompat: 2,
+            ..BLOB_PACK
+        };
+        let h = Header {
+            incompat_flags: 1,
+            rocompat_flags: 2,
+            ..Header::new([5; 16])
+        };
+        let mut w = Writer::new();
+        h.encode_with(&mut w, &rules).unwrap();
+        assert!(h.encode_with(&mut Writer::new(), &BLOB_PACK).is_err());
+        let bytes = w.into_inner();
+        assert_eq!(
+            Header::decode_with(&mut Reader::new(&bytes), &rules).unwrap(),
+            h
+        );
+        assert_eq!(h.access_with(&rules), Access::ReadWrite);
+        assert_eq!(h.access_with(&BLOB_PACK), Access::ReadOnly);
+        let err = Header::decode_with(&mut Reader::new(&bytes), &BLOB_PACK).unwrap_err();
+        assert!(
+            matches!(err, Error::Unsupported { offset: 16, .. }),
+            "{err:?}"
+        );
+        // The magic tells the kinds apart before anything else.
+        let err = Header::decode_with(&mut Reader::new(&bytes), &CONTAINER).unwrap_err();
+        assert!(matches!(
+            err,
+            Error::Corrupt {
+                reason: Corruption::BadMagic,
+                ..
+            }
+        ));
     }
 }

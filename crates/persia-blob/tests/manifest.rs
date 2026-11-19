@@ -1221,9 +1221,34 @@ fn is_corruption_is_true_for_corrupt_only() {
         (Error::BindOutcomeUnknown("x".into()), false),
         // -- pack (9.2) --
         // One case per pack variant, here and only here.
-        //
-        //
-
+        (
+            Error::PackIo {
+                op: "x",
+                source: std::io::Error::other("x"),
+            },
+            false,
+        ),
+        (Error::PackPoisoned, false),
+        (Error::PackReadOnly, false),
+        (
+            Error::PackUnsupported(persia_format::Error::OutOfMemory { bytes: None }),
+            false,
+        ),
+        (
+            Error::PackReplaced {
+                opened: 1,
+                found: 2,
+            },
+            false,
+        ),
+        (Error::PackOfAnotherDatabase { found: [0; 16] }, false),
+        (
+            Error::ChunkNotStaged {
+                upload_id: UploadId::new(1),
+                index: 0,
+            },
+            false,
+        ),
         // -- remote (9.3) --
         // One case per remote variant, here and only here.
         (
@@ -1268,8 +1293,13 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::ChunkSizeBelowMin { .. } => "manifest and chunking",
             // -- pack (9.2) --
             // One arm for the pack's variants, `=> "pack"`, here and only here.
-            //
-            //
+            Error::PackIo { .. }
+            | Error::PackPoisoned
+            | Error::PackReadOnly
+            | Error::PackUnsupported(_)
+            | Error::PackReplaced { .. }
+            | Error::PackOfAnotherDatabase { .. }
+            | Error::ChunkNotStaged { .. } => "pack",
             // -- remote (9.3) --
             // One arm for the remote layout's variants, `=> "remote"`, here and only here.
             Error::Storage(_) | Error::ConditionalPutUnsupported | Error::InvalidResume { .. } => {

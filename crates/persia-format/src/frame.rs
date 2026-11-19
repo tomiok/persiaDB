@@ -58,6 +58,11 @@ pub enum FrameKind {
     Padding,
     /// A segment's deleted docids (SPEC §8.3).
     TombstoneSidecar,
+    /// A staged blob chunk of a blob pack file (SPEC §9.3). Never written to a container, whose readers skip it.
+    BlobChunk,
+    /// A blob manifest and its chunk frames' offsets, in a blob pack file (SPEC §9.3). Never written to a container,
+    /// whose readers skip it.
+    BlobIndex,
     /// A kind this build does not know, written by a newer one. Readers skip it and MUST NOT interpret it.
     Unknown(UnknownKind),
 }
@@ -90,6 +95,8 @@ impl FrameKind {
             3 => Self::Manifest,
             4 => Self::Padding,
             5 => Self::TombstoneSidecar,
+            6 => Self::BlobChunk,
+            7 => Self::BlobIndex,
             other => Self::Unknown(UnknownKind(other)),
         }
     }
@@ -102,6 +109,8 @@ impl FrameKind {
             Self::Manifest => 3,
             Self::Padding => 4,
             Self::TombstoneSidecar => 5,
+            Self::BlobChunk => 6,
+            Self::BlobIndex => 7,
             Self::Unknown(kind) => kind.0,
         }
     }
@@ -1028,7 +1037,7 @@ mod tests {
         for byte in 0..=u8::MAX {
             let kind = FrameKind::from_u8(byte);
             assert_eq!(kind.to_u8(), byte);
-            assert_eq!(kind.is_known(), (1..=5).contains(&byte), "{byte}");
+            assert_eq!(kind.is_known(), (1..=7).contains(&byte), "{byte}");
         }
     }
 
