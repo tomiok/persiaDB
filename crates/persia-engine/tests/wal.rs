@@ -31,6 +31,8 @@
 //!     offset; records before the error stay applied.
 //! 11. A flush covers only the records before its `WalMark`; a commit that takes `wal_start` from `commit_point` keeps
 //!     buffered records of a collection it drops out of replay (SPEC §8.2.1).
+//! 12. `durable_mark` reaches a record's mark once a sync covers it (`Fsync`, `sync`, `commit_point`), never on
+//!     `Buffered` or `Async` alone, and a failed sync leaves it (SPEC §8.2.1, §9.5).
 
 #![allow(
     clippy::unwrap_used,
@@ -1688,4 +1690,38 @@ fn buffered_len_counts_record_bytes_only() {
     )
     .unwrap();
     assert_eq!(wal.buffered_len(), 4 + 1 + 1 + 5 + 2 + 4);
+}
+
+/// `durable_mark` (the hook the blob pin set waits on, SPEC §9.5): a record is durable once a sync covers it, by an
+/// `Fsync` append, `sync` or `commit_point`; `Buffered` and `Async` leave it above; a failed sync never advances it.
+#[test]
+fn durable_mark_follows_the_syncs_that_cover_each_record() {
+    let file = SimFile::new();
+    let container = Container::create_on(file.clone(), [7; 16]).unwrap();
+    let mut wal = WalWriter::new(container).unwrap();
+    let record = WalRecord::delete("notes", "n").unwrap();
+    assert_eq!(wal.durable_mark(), wal.mark());
+    wal.append(&record, Durability::Buffered).unwrap();
+    let buffered = wal.mark();
+    assert!(wal.durable_mark() < buffered);
+    wal.append(&record, Durability::Async).unwrap();
+    let written = wal.mark();
+    assert!(wal.durable_mark() < buffered);
+    wal.append(&record, Durability::Fsync).unwrap();
+    assert_eq!(wal.durable_mark(), wal.mark());
+    assert!(wal.durable_mark() > written);
+    wal.append(&record, Durability::Buffered).unwrap();
+    assert!(wal.durable_mark() < wal.mark());
+    wal.sync().unwrap();
+    assert_eq!(wal.durable_mark(), wal.mark());
+    wal.append(&record, Durability::Async).unwrap();
+    assert!(wal.durable_mark() < wal.mark());
+    wal.commit_point().unwrap();
+    assert_eq!(wal.durable_mark(), wal.mark());
+    // A sync that fails leaves the mark where it was.
+    let durable = wal.durable_mark();
+    wal.append(&record, Durability::Buffered).unwrap();
+    file.set_fault(Some(SimFault::FailAt(file.mutations() + 1)));
+    assert!(wal.sync().is_err());
+    assert_eq!(wal.durable_mark(), durable);
 }

@@ -225,3 +225,26 @@ fn a_segment_without_blobs_reads_none() {
     check_sections(&db, "no blobs");
     check_hits(&db, &expected, "no blobs");
 }
+
+/// `Database::durable_mark` reaches an operation's `wal_mark` once it is durable: at once for `Fsync`, at the next
+/// commit or `Fsync` operation for `Buffered` and `Async` (the hook `put(doc, blob)` releases its pins on, SPEC §9.5).
+#[test]
+fn an_operation_is_durable_once_the_durable_mark_reaches_its_wal_mark() {
+    let mut db = Database::create_on(SimFile::new(), [5; 16], options()).unwrap();
+    db.create_collection(schema()).unwrap();
+    for level in [Durability::Buffered, Durability::Async] {
+        db.put("c", &doc("x", "red", Some(blob(1))), level).unwrap();
+        let mark = db.wal_mark();
+        assert!(db.durable_mark() < mark, "{level:?}");
+        db.commit().unwrap();
+        assert!(db.durable_mark() >= mark, "{level:?}");
+        db.put("c", &doc("y", "red", None), level).unwrap();
+        let mark = db.wal_mark();
+        assert!(db.durable_mark() < mark, "{level:?}");
+        db.delete("c", "nothing", Durability::Fsync).unwrap();
+        assert!(db.durable_mark() >= mark, "{level:?}");
+    }
+    db.put("c", &doc("z", "red", None), Durability::Fsync)
+        .unwrap();
+    assert_eq!(db.durable_mark(), db.wal_mark());
+}
