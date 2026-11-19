@@ -5,7 +5,8 @@
 
 use core::ops::Range;
 use std::collections::BTreeMap;
-use std::sync::{PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, PoisonError, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use persia_format::ByteSource;
@@ -13,12 +14,15 @@ use persia_format::ByteSource;
 use crate::error::{Error, Result};
 use crate::key::{Key, KeyPrefix};
 use crate::meta::{Capabilities, ObjectMeta, PutOutcome};
+use crate::retry::{Clock, SystemClock};
 use crate::storage::{Storage, check_range, range_source};
 
 /// Objects held in a map in memory; dropped with the value.
 ///
 /// Every operation is atomic (one lock), so `put_if_absent` is a true compare-and-set and `list` sees every
-/// completed `put`.
+/// completed `put`. Each object keeps the time its bytes were written, read from the store's [`Clock`]
+/// ([`MemoryStorage::with_clock`]; the system clock by default), as `list` reports it
+/// ([`ObjectMeta::last_modified`]).
 ///
 /// ```
 /// use bytes::Bytes;
@@ -32,9 +36,30 @@ use crate::storage::{Storage, check_range, range_source};
 /// assert_eq!(&*storage.get_range(&key, 1..2)?, b"1");
 /// # Ok::<(), persia_storage::Error>(())
 /// ```
-#[derive(Debug, Default)]
 pub struct MemoryStorage {
-    objects: RwLock<BTreeMap<Key, Bytes>>,
+    objects: RwLock<BTreeMap<Key, Object>>,
+    clock: Arc<dyn Clock>,
+}
+
+/// An object's bytes and when they were written.
+#[derive(Debug, Clone)]
+struct Object {
+    data: Bytes,
+    written: SystemTime,
+}
+
+impl Default for MemoryStorage {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(SystemClock))
+    }
+}
+
+impl core::fmt::Debug for MemoryStorage {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MemoryStorage")
+            .field("objects", &self.read().len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl MemoryStorage {
@@ -43,13 +68,28 @@ impl MemoryStorage {
         Self::default()
     }
 
+    /// An empty store whose objects' times come from `clock` (a [`ManualClock`](crate::retry::ManualClock) in tests).
+    pub fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            objects: RwLock::default(),
+            clock,
+        }
+    }
+
+    fn object(&self, data: Bytes) -> Object {
+        Object {
+            data,
+            written: self.clock.now(),
+        }
+    }
+
     // Every mutation is a single map insert or remove, so a panic in another thread cannot leave the map
     // half-updated: a poisoned lock is safe to keep using.
-    fn read(&self) -> RwLockReadGuard<'_, BTreeMap<Key, Bytes>> {
+    fn read(&self) -> RwLockReadGuard<'_, BTreeMap<Key, Object>> {
         self.objects.read().unwrap_or_else(PoisonError::into_inner)
     }
 
-    fn write(&self) -> RwLockWriteGuard<'_, BTreeMap<Key, Bytes>> {
+    fn write(&self) -> RwLockWriteGuard<'_, BTreeMap<Key, Object>> {
         self.objects.write().unwrap_or_else(PoisonError::into_inner)
     }
 }
@@ -75,12 +115,16 @@ impl Storage for MemoryStorage {
     fn get(&self, key: &Key) -> Result<Bytes> {
         self.read()
             .get(key)
-            .cloned()
+            .map(|object| object.data.clone())
             .ok_or_else(|| Error::NotFound { key: key.clone() })
     }
 
     fn put(&self, key: &Key, data: Bytes) -> Result<()> {
-        self.write().insert(key.clone(), data);
+        // Stamp the object under the lock: stamped before it, a put could insert after a newer one and move the
+        // object's time back.
+        let mut objects = self.write();
+        let object = self.object(data);
+        objects.insert(key.clone(), object);
         Ok(())
     }
 
@@ -88,10 +132,11 @@ impl Storage for MemoryStorage {
         let mut objects = self.write();
         match objects.get(key) {
             // SPEC §10.1: an existing object equal to `data` may be this caller's own earlier attempt.
-            Some(existing) if *existing == data => Ok(PutOutcome::Created),
+            Some(existing) if existing.data == data => Ok(PutOutcome::Created),
             Some(_) => Ok(PutOutcome::AlreadyExists),
             None => {
-                objects.insert(key.clone(), data);
+                let object = self.object(data);
+                objects.insert(key.clone(), object);
                 Ok(PutOutcome::Created)
             }
         }
@@ -106,9 +151,10 @@ impl Storage for MemoryStorage {
                 core::ops::Bound::Unbounded,
             ))
             .take_while(|(key, _)| prefix.matches(key))
-            .map(|(key, data)| ObjectMeta {
+            .map(|(key, object)| ObjectMeta {
                 key: key.clone(),
-                size: u64::try_from(data.len()).unwrap_or(u64::MAX),
+                size: u64::try_from(object.data.len()).unwrap_or(u64::MAX),
+                last_modified: Some(object.written),
             })
             .collect())
     }

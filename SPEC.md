@@ -2518,7 +2518,7 @@ The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034), en
 ```
 0   4    magic       bytes "PBLM" (0x50 0x42 0x4C 0x4D)
 4   4    version     u32 = 1 (the encoding)
-8   4    flags       u32, all bits reserved: 0 in v1
+8   4    flags       u32: 0, or bit 0 INLINE (ROADMAP 9.3.3, ADR-0050); other bits reserved
 12  32   blob_id     SHA-256 bytes
 44  8    size        u64
 52  4    chunk_size  u32, 1..=64 MiB
@@ -2526,14 +2526,19 @@ The chunk list that binds a `blob_id` to its staged chunks (§9.2, ADR-0034), en
 72  4·n  chunk_crc   u32 per chunk, the CRC32C of its bytes, in chunk order; n = ceil(size / chunk_size)
 ..  4    crc32c      u32 over every byte before it
 ```
-Version 1 without flags is `76 + 4·n` bytes long. A reader fetches the whole object and may use that length, once it has
-read `version` and `flags`, as a sanity bound (a later flag's layout, ROADMAP 9.3.3, may be longer). The magic starts
+With `INLINE` the blob is exactly one chunk (`1 ≤ size ≤ chunk_size`), `upload_id` is 0, the CRC list is its one
+chunk's CRC32C, and the blob's `size` bytes follow it, before the trailer; nothing is staged. An empty blob is never
+inline (its plain manifest is already one object), so each value keeps one encoding. A writer inlines blobs of at
+most 64 KiB (§9.4); the encoding allows any one-chunk blob, so the threshold can move without a format change.
+Version 1 without flags is `76 + 4·n` bytes long, with `INLINE` `80 + size`. A reader fetches the whole object and may
+use that length, once it has read `version` and `flags`, as a sanity bound. The magic starts
 and the CRC32C trailer ends every version and flag layout, so a damaged `version` or `flags` reads as corruption. The trailer is
 redundant inside a `BlobIndex` frame but not in a remote object, like the manifest's (§8.7) and the tombstone
 sidecars' (§8.3). Reading checks, in this order: at least 76 bytes, the magic, the CRC32C trailer, then `version` (0 is
-corruption, above 1 is unsupported), then `flags` (a bit this build does not know is unsupported: a newer writer's
-layout, ROADMAP 9.3.3), then: `chunk_size` in range, `n` fits in a `u32`, exactly `4·n` bytes of CRCs before the
-trailer, and `size` 0 only with the SHA-256 of no bytes as `blob_id`. Anything else that does not hold is corruption.
+corruption, above 1 is unsupported), then `flags` (a bit other than `INLINE` is unsupported: a newer writer's
+layout), then `chunk_size` in range and `n` fits in a `u32`; then without `INLINE` exactly `4·n` bytes of CRCs before
+the trailer and `size` 0 only with the SHA-256 of no bytes as `blob_id`; with `INLINE` `n` is 1, `upload_id` is 0,
+exactly `4 + size` bytes before the trailer (checked before allocating), and the chunk CRC is the CRC32C of the bytes. Anything else that does not hold is corruption.
 Decoding allocates at most its input's length. Each value has exactly one encoding.
 
 ### 9.2 Properties
@@ -2589,6 +2594,8 @@ blobs/<hex[0..2]>/<hex(blob_id)>              blob manifest, created with put_if
 blobs/uploads/<upload_id:032x>/<chunk_idx:010> staged chunk: the chunk's raw bytes, created with put_if_absent
 ```
 `hex(blob_id)` is 64 lowercase hex characters (`uploads` is not two hex digits, so the two kinds of key never meet).
+A key under `blobs/` that is not exactly of these forms (lowercase hex, `<xx>` the id's first byte, a 10-digit index
+≤ `u32::MAX`) was not written by Persia and is ignored by every listing, the sweep's included.
 Binding: `Created` binds the id; `AlreadyExists` (resolved against the writer's own bytes, §10.1) means another upload
 bound it first, so this one is a duplicate (§9.2); an error leaves the outcome unknown: the writer retries the same
 `put_if_absent` (same bytes) until it gets an answer, and never deletes the chunks of an upload whose binding outcome
@@ -2601,8 +2608,18 @@ objects do not record it). The writer lists the staged chunks, keeps the run of 
 re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
 a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
 bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
-resuming client should pass `expected_id` (§9.6). Blobs below a size threshold may be stored as one object (ROADMAP
-9.3.3).
+resuming client should pass `expected_id` (§9.6). A chunk listed full but read back at another length, or gone, ends
+the kept run. After an `AlreadyExists` on a chunk, the writer copies the chunks it has (the kept run and those staged
+since, each checked against its CRC32C) under the new `upload_id` and continues there, so the client never rewinds
+(ADR-0050). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
+**Small blobs** (ROADMAP 9.3.3). A blob of at most 64 KiB (the chunk size floor, §9.2) is buffered and hashed before
+any write and stored in its blob manifest (`INLINE`, §9.1.1) at `blobs/<xx>/<id>`: one `put_if_absent`, nothing
+staged, and a read is the one `get` of the manifest; the empty blob writes its plain manifest the same way. Its
+`upload_id` is 0, so two writers of the same small blob at the same `chunk_size` (the inline manifest records it)
+write equal bytes and both get `Created` (§10.1); at different chunk sizes the second gets `AlreadyExists` and is a
+duplicate (§9.2). The
+mark takes no upload id from it (§9.5). An unknown outcome of a small blob's write is retried as the same single
+object, never as a staged blob (a plain manifest with no chunk behind it).
 
 ### 9.5 Write ordering and GC
 1. Write blob chunks; once every chunk write is acknowledged, write the blob manifest (binding). Durable.
@@ -2617,7 +2634,8 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   pinned ids, then the upload ids their blob manifests name, and pinned upload ids.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h; for staged chunks counted from the upload's newest chunk, so an idle upload stays
-  resumable that long). A blob manifest is deleted before its upload's chunks, so a crash mid-sweep leaves chunks
+  resumable that long). Ages are objects' `last_modified` (§10.1); an object whose age is unknown is never taken
+  as older than the grace period. A blob manifest is deleted before its upload's chunks, so a crash mid-sweep leaves chunks
   without a manifest, never a manifest without chunks. Checking an object against the pin set and deleting it is one
   step under the pin set's lock, so a pin taken after the mark still protects it. Remotely the sweep lists
   `blobs/<xx>/` per hex prefix and `blobs/uploads/` apart (a `list` is recursive, §10.1).
@@ -2703,12 +2721,17 @@ names, and no case folding).
   may have been applied (including a retry inside the backend's SDK, invisible to Persia), so the object found may be
   this writer's own. The backend resolves it before answering: on every `AlreadyExists` it reads the object and
   returns `Created` if the bytes equal `data`, `AlreadyExists` otherwise (manifests embed their writer's fence token,
-  SPEC §11.3, so two writers never produce equal bytes). It never reports an unresolved `AlreadyExists`, which the
+  SPEC §11.3, so two writers never produce equal container manifests; equal blob manifests, such as two writers'
+  inline small blob, §9.4, resolving to `Created` for both is intended: they bind the same bytes). It never reports an unresolved `AlreadyExists`, which the
   commit protocol (§10.4) would take as a lost commit. An **error** from `put_if_absent` (retries exhausted) leaves
   the outcome unknown: the write may have been applied.
 - `list` returns every object whose key starts with the prefix, sorted by key bytes. Without `strong_list` a
   just-written object may be missing from it. Names under the prefix that are not valid keys were not written by
-  Persia (e.g. a shared bucket) and are skipped.
+  Persia (e.g. a shared bucket) and are skipped. Each `ObjectMeta` holds `key`, `size` and
+  `last_modified: Option<SystemTime>`: when the object's current bytes were written, by the backend's clock (memory:
+  its injectable clock; local: the file's modification time; object stores: `Last-Modified`). A `put_if_absent` that
+  finds equal bytes does not change it. `None` means the backend cannot tell (the container adapter, simulated file
+  systems); a sweep never takes an unknown age for an expired one (§9.5).
 - `delete` of a missing key succeeds (idempotent).
 
 **Errors.** Every error has one kind: `NotFound`, `Conflict` (a compare-and-swap update lost a race, e.g. renewing

@@ -9,6 +9,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+- `persia-blob`: `RemoteBlobStore`, the remote blob layout over any `Storage` with conditional put (SPEC §9.4,
+  ADR-0050): blob manifests at `blobs/<xx>/<id>`, staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>`, parallel
+  chunk transfers (`with_parallelism`, default 8) and resumable uploads (`resume`, `restage`, `Chunker::resume`)
+  (ROADMAP 9.3.1, 9.3.2).
+- `persia-blob`: non-empty blobs of at most 64 KiB are stored inline in their blob manifest, one object and one
+  request; the empty blob is its plain manifest, also one object (ROADMAP 9.3.3).
+- `persia-storage`: `ObjectMeta::last_modified`, `Clock::now`, `ManualClock`, `MemoryStorage::with_clock` (ROADMAP
+  9.5.5; SPEC §10.1).
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
   last word level with `fallback: "none"`). Its step is L0's query with the filters of its root `bool` dropped (a
@@ -115,6 +123,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-storage` (breaking): `ObjectMeta` gained `last_modified` and `vfs::EntryKind::File` gained `modified`, so
+  struct literals of either must name the new field (ROADMAP 9.5.5).
 - `persia-engine` (breaking): `Compiled::query` is private, and a compiled query keeps the request filter beside it
   (ROADMAP 8.2.14; SPEC §7.1.1, §7.6; ADR-0048). Read the query with `Compiled::query()`, take it with
   `into_query()`, and replace it with the new `Compiled::with_query`, which joins the request filter (`Compiled::filter`)
@@ -291,6 +301,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a `MemtableView` copies a field's keyword column and column keys once and shares the copy, as its norms. New
   benchmark `keyword_columns`: a sort and a facet over a 10 000-value `keyword` field in 4 segments and a memtable,
   7.67 ms → 5.84 ms on the calling thread (ROADMAP 7.5.5). Results are unchanged.
+
+### Format
+- Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, is now set on an inline blob's manifest, which holds the
+  one-chunk blob's bytes: `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). Readers built before this
+  change reject such a manifest with `UnsupportedFlags`.
 
 ### Fixed
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected

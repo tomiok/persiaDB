@@ -1,5 +1,7 @@
 //! Values returned by [`Storage`](crate::Storage) operations (SPEC §10.1).
 
+use std::time::SystemTime;
+
 use crate::key::Key;
 
 /// One object found by [`Storage::list`](crate::Storage::list).
@@ -9,6 +11,11 @@ pub struct ObjectMeta {
     pub key: Key,
     /// The object's length in bytes.
     pub size: u64,
+    /// When the object's current bytes were written, by the backend's clock (SPEC §10.1): what a sweep measures a grace
+    /// period from (SPEC §9.5, ROADMAP 9.5.2). `None` when the backend cannot tell; a sweep never takes an unknown age
+    /// for an expired one. Memory: the time of the write that created the bytes, from its [`Clock`](crate::retry::Clock);
+    /// local: the file's modification time; object stores: their `Last-Modified`.
+    pub last_modified: Option<SystemTime>,
 }
 
 /// Result of [`Storage::put_if_absent`](crate::Storage::put_if_absent), the commit primitive (SPEC §10.4).

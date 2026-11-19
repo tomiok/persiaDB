@@ -229,3 +229,10 @@ path = "fuzz_targets/fuzzy_automaton.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "remote_key"
+path = "fuzz_targets/remote_key.rs"
+test = false
+doc = false
+bench = false

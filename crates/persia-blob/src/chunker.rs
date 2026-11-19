@@ -118,6 +118,46 @@ impl<R: Read> Chunker<R> {
         Self::with_max_chunks(reader, chunk_size, u32::MAX)
     }
 
+    /// A chunker that continues a blob at chunk `next_index` (SPEC §9.4 resume, ADR-0050): `reader` yields the blob's bytes
+    /// from offset `next_index · chunk_size` on, and `hasher` has been fed exactly the bytes before it, which are
+    /// `next_index` full chunks. The chunks it cuts, their indices and offsets, and the summary are those of a
+    /// [`Chunker::new`] over the whole blob.
+    ///
+    /// ```
+    /// use persia_blob::{ChunkSize, Chunker, ContentHasher, blob_id_of};
+    ///
+    /// let data = b"hello, chunks";
+    /// let mut hasher = ContentHasher::new();
+    /// hasher.update(&data[..10]); // chunks 0 and 1, already stored
+    /// let mut chunker = Chunker::resume(&data[10..], ChunkSize::from_encoding(5)?, hasher, 2)?;
+    /// let last = chunker.next_chunk()?.unwrap();
+    /// assert_eq!((last.index(), last.offset(), last.bytes()), (2, 10, &b"nks"[..]));
+    /// assert_eq!(chunker.next_chunk()?, None);
+    /// assert_eq!(chunker.summary().unwrap().blob_id, blob_id_of(data));
+    /// # Ok::<(), persia_blob::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::InvalidResume`] when `hasher` has not seen exactly `next_index · chunk_size` bytes.
+    pub fn resume(
+        reader: R,
+        chunk_size: ChunkSize,
+        hasher: ContentHasher,
+        next_index: u32,
+    ) -> Result<Self> {
+        let offset = u64::from(next_index).checked_mul(u64::from(chunk_size.get()));
+        if offset != Some(hasher.len()) {
+            return Err(Error::InvalidResume {
+                what: "the hasher has not seen exactly the full chunks before the resume point",
+            });
+        }
+        let mut chunker = Self::new(reader, chunk_size);
+        chunker.offset = hasher.len();
+        chunker.hasher = hasher;
+        chunker.next_index = next_index;
+        Ok(chunker)
+    }
+
     fn with_max_chunks(reader: R, chunk_size: ChunkSize, max_chunks: u32) -> Self {
         Self {
             reader,
@@ -576,6 +616,57 @@ mod tests {
             let (pieced, pieced_blob) = collect(Chunker::new(reader, cs));
             prop_assert_eq!(pieced, whole);
             prop_assert_eq!(pieced_blob, whole_blob);
+        }
+    }
+    #[test]
+    fn resume_needs_a_hasher_of_exactly_the_chunks_before() {
+        let cs = ChunkSize::from_encoding(4).unwrap();
+        let mut hasher = ContentHasher::new();
+        hasher.update(b"abcd");
+        for k in [0, 2] {
+            assert!(matches!(
+                Chunker::resume(&b""[..], cs, hasher.clone(), k),
+                Err(Error::InvalidResume { .. })
+            ));
+        }
+        let mut short = ContentHasher::new();
+        short.update(b"abc");
+        assert!(matches!(
+            Chunker::resume(&b""[..], cs, short, 1),
+            Err(Error::InvalidResume { .. })
+        ));
+        // The offset overflows u64 for no hasher.
+        assert!(matches!(
+            Chunker::resume(
+                &b""[..],
+                ChunkSize::from_encoding(ChunkSize::MAX).unwrap(),
+                ContentHasher::new(),
+                u32::MAX
+            ),
+            Err(Error::InvalidResume { .. })
+        ));
+        assert!(Chunker::resume(&b""[..], cs, ContentHasher::new(), 0).is_ok());
+    }
+
+    proptest! {
+        /// Resumed at any full-chunk boundary with a hasher fed the chunks before it, a chunker cuts the same chunks and
+        /// gives the same summary as one over the whole blob (SPEC §9.4).
+        #[test]
+        fn resuming_at_any_boundary_matches_the_whole(
+            data in proptest::collection::vec(any::<u8>(), 0..1024),
+            chunk in 1_u32..=100,
+            at in any::<prop::sample::Index>(),
+        ) {
+            let cs = ChunkSize::from_encoding(chunk).unwrap();
+            let (whole, whole_blob) = collect(Chunker::new(&data[..], cs));
+            let full = data.len() / chunk as usize;
+            let k = at.index(full + 1);
+            let mut hasher = ContentHasher::new();
+            hasher.update(&data[..k * chunk as usize]);
+            let resumed = Chunker::resume(&data[k * chunk as usize..], cs, hasher, u32::try_from(k).unwrap()).unwrap();
+            let (rest, blob) = collect(resumed);
+            prop_assert_eq!(&rest[..], &whole[k..]);
+            prop_assert_eq!(blob, whole_blob);
         }
     }
 }

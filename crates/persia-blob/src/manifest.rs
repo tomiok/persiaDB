@@ -4,7 +4,7 @@
 //! ```text
 //! 0   4    magic       bytes "PBLM"
 //! 4   4    version     u32 = 1 (the encoding)
-//! 8   4    flags       u32, all bits reserved (0)
+//! 8   4    flags       u32: 0, or INLINE (bit 0) for a small blob stored inside its manifest
 //! 12  32   blob_id     SHA-256 of the blob's bytes
 //! 44  8    size        u64, the blob's length in bytes
 //! 52  4    chunk_size  u32, 1..=64 MiB
@@ -12,6 +12,9 @@
 //! 72  4·n  chunk_crc   u32 per chunk, n = ceil(size / chunk_size)
 //! ..  4    crc32c      u32 over every byte before it
 //! ```
+//!
+//! With [`INLINE`] (ROADMAP 9.3.3, ADR-0050) the blob is exactly one chunk (`1..=chunk_size` bytes), `upload_id` is 0,
+//! and the `size` bytes of the blob follow its one chunk CRC, before the trailer: `80 + size` bytes, nothing staged.
 //!
 //! ```
 //! use persia_blob::{BlobManifest, ChunkSize, UploadId, blob_id_of};
@@ -44,8 +47,10 @@ pub const MAGIC: [u8; 4] = *b"PBLM";
 pub const VERSION: u32 = 1;
 /// The name errors give the encoding.
 const ENCODING: &str = "blob manifest";
-/// The `flags` bits this build knows: none (ADR-0034 item 8 reserves the field for ROADMAP 9.3.3).
-pub const KNOWN_FLAGS: u32 = 0;
+/// The `flags` bit of an inline blob (ROADMAP 9.3.3, ADR-0050): its bytes follow the CRC list, nothing is staged.
+pub const INLINE: u32 = 1;
+/// The `flags` bits this build knows (ADR-0034 item 8 reserves the field; ADR-0050 assigns bit 0).
+pub const KNOWN_FLAGS: u32 = INLINE;
 
 /// Magic, version, flags, blob id, size, chunk size, upload id.
 const HEAD_LEN: usize = 72;
@@ -83,13 +88,29 @@ impl fmt::Display for UploadId {
 
 /// A blob's chunk list (see the module docs). Every value satisfies the rules of SPEC §9.1.1, checked by
 /// [`BlobManifest::new`] and [`BlobManifest::decode`], so each has exactly one encoding.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Clone, PartialEq, Eq, Hash)]
 pub struct BlobManifest {
     blob_id: BlobId,
     size: u64,
     chunk_size: ChunkSize,
     upload_id: UploadId,
     chunk_crcs: Vec<u32>,
+    /// The blob's bytes when it is stored inline ([`INLINE`]).
+    inline: Option<Vec<u8>>,
+}
+
+impl fmt::Debug for BlobManifest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Inline bytes are up to a chunk long: their length says enough.
+        f.debug_struct("BlobManifest")
+            .field("blob_id", &self.blob_id)
+            .field("size", &self.size)
+            .field("chunk_size", &self.chunk_size)
+            .field("upload_id", &self.upload_id)
+            .field("chunk_crcs", &self.chunk_crcs)
+            .field("inline_len", &self.inline.as_ref().map(Vec::len))
+            .finish()
+    }
 }
 
 impl BlobManifest {
@@ -124,7 +145,53 @@ impl BlobManifest {
             chunk_size,
             upload_id,
             chunk_crcs,
+            inline: None,
         })
+    }
+
+    /// The inline manifest of the blob `blob_id` whose bytes are `bytes`, stored in chunks of `chunk_size` (ROADMAP
+    /// 9.3.3, ADR-0050): one object, nothing staged, `upload_id` 0, one chunk whose CRC32C is computed here. The
+    /// caller has hashed `bytes` to `blob_id`; this does not.
+    ///
+    /// ```
+    /// use persia_blob::{BlobManifest, ChunkSize, UploadId, blob_id_of};
+    ///
+    /// let m = BlobManifest::new_inline(blob_id_of(b"tiny"), ChunkSize::DEFAULT, b"tiny".to_vec())?;
+    /// assert!(m.is_inline());
+    /// assert_eq!((m.size(), m.chunk_count(), m.upload_id()), (4, 1, UploadId::new(0)));
+    /// assert_eq!(m.encoded_len(), 80 + 4);
+    /// assert_eq!(BlobManifest::decode(&m.encode())?.inline_bytes(), Some(&b"tiny"[..]));
+    /// # Ok::<(), persia_blob::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`Error::InvalidManifest`] when `bytes` is empty (the empty blob has no chunk: its plain manifest is already one
+    /// object) or longer than `chunk_size` (not exactly one chunk).
+    pub fn new_inline(blob_id: BlobId, chunk_size: ChunkSize, bytes: Vec<u8>) -> Result<Self> {
+        let size = u64_from_usize(bytes.len());
+        if size == 0 || size > u64::from(chunk_size.get()) {
+            return Err(Error::InvalidManifest {
+                what: "an inline blob that is not exactly one chunk",
+            });
+        }
+        Ok(Self {
+            blob_id,
+            size,
+            chunk_size,
+            upload_id: UploadId::new(0),
+            chunk_crcs: vec![crc32c(&bytes)],
+            inline: Some(bytes),
+        })
+    }
+
+    /// Whether the blob's bytes are inside this manifest ([`INLINE`]).
+    pub const fn is_inline(&self) -> bool {
+        self.inline.is_some()
+    }
+
+    /// The blob's bytes when it is stored inline: its one chunk.
+    pub fn inline_bytes(&self) -> Option<&[u8]> {
+        self.inline.as_deref()
     }
 
     /// The blob's id.
@@ -203,7 +270,7 @@ impl BlobManifest {
 
     /// The length of the version-1, no-flags encoding of the manifest of a blob of `size` bytes in chunks of
     /// `chunk_size`: `76 + 4·n`. A reader fetches the whole object; once it has read the version and flags it can use
-    /// this as a sanity bound (a later layout, ROADMAP 9.3.3, may be longer).
+    /// this as a sanity bound (an inline manifest, [`INLINE`], is `80 + size` bytes instead).
     ///
     /// # Errors
     /// - [`Error::InvalidChunking`] when the blob needs more than `u32::MAX` chunks;
@@ -225,20 +292,24 @@ impl BlobManifest {
             .len()
             .saturating_mul(CRC_LEN)
             .saturating_add(HEAD_LEN + TRAILER_LEN)
+            .saturating_add(self.inline.as_ref().map_or(0, Vec::len))
     }
 
-    /// The encoding of SPEC §9.1.1.
+    /// The encoding of SPEC §9.1.1 (with [`INLINE`] for an inline manifest).
     pub fn encode(&self) -> Vec<u8> {
         let mut w = Writer::new();
         w.write_bytes(&MAGIC);
         w.write_u32(VERSION);
-        w.write_u32(KNOWN_FLAGS);
+        w.write_u32(if self.inline.is_some() { INLINE } else { 0 });
         w.write_bytes(self.blob_id.as_bytes());
         w.write_u64(self.size);
         w.write_u32(self.chunk_size.get());
         w.write_u128(self.upload_id.get());
         for &crc in &self.chunk_crcs {
             w.write_u32(crc);
+        }
+        if let Some(bytes) = &self.inline {
+            w.write_bytes(bytes);
         }
         let crc = crc32c(w.as_slice());
         w.write_u32(crc);
@@ -299,6 +370,9 @@ impl BlobManifest {
             .chunk_count(size)
             .map_err(|_| corrupt("more than u32::MAX chunks"))?;
         let rest = r.rest();
+        if flags & INLINE != 0 {
+            return Self::decode_inline(blob_id, size, chunk_size, upload_id, count, rest);
+        }
         // Checked before allocating: the CRC list is exactly what is left.
         if u64_from_usize(rest.len()) != u64::from(count).saturating_mul(u64_from_usize(CRC_LEN)) {
             return Err(corrupt("the chunk CRCs do not match the chunk count"));
@@ -321,6 +395,48 @@ impl BlobManifest {
             chunk_size,
             upload_id,
             chunk_crcs,
+            inline: None,
+        })
+    }
+
+    /// The rest of an [`INLINE`] manifest after its header (ADR-0050): exactly one chunk, no upload, the chunk CRC
+    /// and then exactly `size` bytes whose CRC32C it is.
+    fn decode_inline(
+        blob_id: BlobId,
+        size: u64,
+        chunk_size: ChunkSize,
+        upload_id: UploadId,
+        count: u32,
+        rest: &[u8],
+    ) -> Result<Self> {
+        let corrupt = |what| Error::Corrupt {
+            encoding: ENCODING,
+            what,
+        };
+        if count != 1 {
+            return Err(corrupt("an inline blob that is not exactly one chunk"));
+        }
+        if upload_id.get() != 0 {
+            return Err(corrupt("an inline blob with an upload id"));
+        }
+        // Checked before allocating: one CRC and the bytes are exactly what is left (`size` ≤ 64 MiB here).
+        if u64_from_usize(rest.len()) != size.saturating_add(u64_from_usize(CRC_LEN)) {
+            return Err(corrupt("the inline bytes do not match the size"));
+        }
+        let (crc, bytes) = rest
+            .split_first_chunk::<CRC_LEN>()
+            .ok_or_else(|| corrupt("the inline bytes do not match the size"))?;
+        let crc = u32::from_le_bytes(*crc);
+        if crc != crc32c(bytes) {
+            return Err(corrupt("an inline blob's CRC32C differs from its bytes"));
+        }
+        Ok(Self {
+            blob_id,
+            size,
+            chunk_size,
+            upload_id,
+            chunk_crcs: vec![crc],
+            inline: Some(bytes.to_vec()),
         })
     }
 }

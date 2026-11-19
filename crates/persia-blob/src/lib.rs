@@ -15,6 +15,7 @@ pub mod chunking;
 pub mod error;
 pub mod hash;
 pub mod manifest;
+pub mod store;
 
 pub use chunker::{Chunk, ChunkedBlob, Chunker, chunk_all};
 pub use chunking::ChunkSize;
@@ -22,3 +23,25 @@ pub use error::{Error, Result};
 pub use hash::{ContentHasher, blob_id_of};
 pub use manifest::{BlobManifest, UploadId};
 pub use persia_format::BlobId;
+#[cfg(any(test, feature = "testing"))]
+pub use store::MemoryBlobStore;
+pub use store::{
+    BindOutcome, BlobStore, SMALL_BLOB_MAX, read_chunk_checked, read_manifest_range, read_range,
+};
+
+// -- pack (9.2) --
+// The local pack file (SPEC §9.3): its `mod` and `pub use` lines go here, and only here.
+//
+//
+
+// -- remote (9.3) --
+// The remote layout (SPEC §9.4): its `mod` and `pub use` lines go here, and only here.
+pub mod remote;
+pub use remote::RemoteBlobStore;
+//
+//
+
+// -- documents (9.4) --
+// put_blob and get_blob_range helpers that belong in this crate (SPEC §9.6): their lines go here, and only here.
+//
+//

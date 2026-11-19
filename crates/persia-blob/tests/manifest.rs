@@ -9,7 +9,7 @@
 //!    accessors agree with the chunking (SPEC §9.2). `encoded_len_for` is `76 + 4·n`, and refuses `n > u32::MAX`.
 //! 3. Corruption: any truncation or extension of a valid encoding, re-sealed or not, is `Corrupt`, never a panic.
 //! 4. `decode` never panics and fails only with `Corrupt`, `UnsupportedVersion` (version > 1) or `UnsupportedFlags`
-//!    (a flag bit this build does not know): every single bit flip of a valid encoding is `Corrupt`; every header
+//!    (a flag bit other than INLINE): every single bit flip of a valid encoding is `Corrupt`; every header
 //!    field rewritten and re-sealed (magic, version, flags, blob id, size, chunk size, upload id, CRC list) is
 //!    rejected with the kind SPEC §9.1.1 gives it, or decodes when the rules allow it; any byte rewritten (re-sealed
 //!    or not) either fails that way or decodes to a manifest that re-encodes to exactly those bytes (one encoding
@@ -23,6 +23,10 @@
 //! 8. `Error::is_corruption` is true for `Corrupt` only.
 //! 9. A manifest checks against what it was looked up by (SPEC §9.4): another `blob_id`, or a `BlobRef` with another
 //!    id, size or chunk size, is `Corrupt`.
+//! 10. Inline manifests (flag bit 0, ROADMAP 9.3.3, ADR-0050): golden files `inline-one.blm` and `inline-max.blm`; any
+//!     inline manifest round-trips at `80 + size` bytes; after the flags, the chunk size, then exactly one chunk, no upload
+//!     id, `4 + size` bytes after the header and the bytes' CRC are checked, in that order, each a `Corrupt` rule. Every
+//!     other flag bit stays `UnsupportedFlags`.
 //!
 //! The order tests tell `Corrupt` rules apart by their `what` text (`rule_of`): that is the only place the rule
 //! shows. A reworded message fails `rule_of` loudly; update its table, not the assertion.
@@ -83,6 +87,22 @@ fn golden_default() -> BlobManifest {
     manifest_of(&data, 4 << 20, 1)
 }
 
+/// The smallest inline blob: one byte (ADR-0050).
+fn golden_inline_one() -> BlobManifest {
+    BlobManifest::new_inline(blob_id_of(b"P"), ChunkSize::DEFAULT, b"P".to_vec()).unwrap()
+}
+
+/// The largest inline blob a writer stores: 64 KiB (`SMALL_BLOB_MAX`) in 64 KiB chunks.
+fn golden_inline_max() -> BlobManifest {
+    let data: Vec<u8> = (0..64_u32 << 10).map(|i| (i % 253) as u8).collect();
+    BlobManifest::new_inline(
+        blob_id_of(&data),
+        ChunkSize::from_encoding(64 << 10).unwrap(),
+        data,
+    )
+    .unwrap()
+}
+
 #[test]
 fn golden_fixtures_decode_and_reencode_byte_for_byte() {
     let write = std::env::var_os("PERSIA_WRITE_BLOB_MANIFEST_FIXTURES").is_some();
@@ -90,6 +110,8 @@ fn golden_fixtures_decode_and_reencode_byte_for_byte() {
         ("empty.blm", golden_empty()),
         ("three.blm", golden_three()),
         ("default.blm", golden_default()),
+        ("inline-one.blm", golden_inline_one()),
+        ("inline-max.blm", golden_inline_max()),
     ] {
         let path = fixture_dir().join(name);
         let encoded = manifest.encode();
@@ -154,7 +176,7 @@ fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(fixture_dir().join(name)).unwrap()
 }
 
-const GOLDEN_FILES: [&str; 3] = ["empty.blm", "three.blm", "default.blm"];
+const GOLDEN_FILES: [&str; 4] = ["empty.blm", "three.blm", "default.blm", "inline-one.blm"];
 
 /// SHA-256 of no bytes, written out so the reference below does not lean on `blob_id_of`.
 const SHA256_EMPTY: [u8; 32] = [
@@ -162,9 +184,39 @@ const SHA256_EMPTY: [u8; 32] = [
     0x27, 0xae, 0x41, 0xe4, 0x64, 0x9b, 0x93, 0x4c, 0xa4, 0x95, 0x99, 0x1b, 0x78, 0x52, 0xb8, 0x55,
 ];
 
-/// Any valid manifest: chunk sizes from 1 byte to 64 MiB, 0..=80 chunks (so blobs past 4 GiB: 80 × 64 MiB is 5 GiB), a last chunk of any
-/// length, any blob id (the codec cannot check it against bytes it does not hold) and upload ids at the edges.
+/// Any valid manifest: plain ones (`plain_manifest`) and, one time in five, inline ones (`inline_manifest`).
 fn manifest() -> impl Strategy<Value = BlobManifest> {
+    prop_oneof![4 => plain_manifest(), 1 => inline_manifest()]
+}
+
+/// An inline manifest (ADR-0050): 1..=300 bytes (at most the chunk size) in chunk sizes from 1 byte to 64 MiB, any id.
+fn inline_manifest() -> impl Strategy<Value = BlobManifest> {
+    let chunk = prop_oneof![
+        1..=300_u32,
+        Just(ChunkSize::MIN),
+        Just(ChunkSize::MAX),
+        1..=ChunkSize::MAX
+    ];
+    (
+        chunk,
+        prop::collection::vec(any::<u8>(), 1..=300),
+        any::<[u8; 32]>(),
+    )
+        .prop_map(|(chunk, mut bytes, id)| {
+            bytes.truncate(usize::try_from(chunk).unwrap());
+            BlobManifest::new_inline(
+                BlobId::from_bytes(id),
+                ChunkSize::from_encoding(chunk).unwrap(),
+                bytes,
+            )
+            .unwrap()
+        })
+}
+
+/// Plain manifests: chunk sizes from 1 byte to 64 MiB, 0..=80 chunks (so blobs past 4 GiB: 80 × 64 MiB is 5 GiB), a last
+/// chunk of any length, any blob id (the codec cannot check it against bytes it does not hold) and upload ids at the
+/// edges.
+fn plain_manifest() -> impl Strategy<Value = BlobManifest> {
     let chunk = prop_oneof![
         1..=64_u32,
         Just(ChunkSize::DEFAULT.get()),
@@ -225,6 +277,8 @@ struct Head {
     chunk_size: u32,
     upload_id: u128,
     crcs: Vec<u32>,
+    /// Bytes between the CRC list and the trailer: an inline blob's bytes.
+    tail: Vec<u8>,
 }
 
 impl Head {
@@ -232,12 +286,13 @@ impl Head {
         Self {
             magic: *b"PBLM",
             version: 1,
-            flags: 0,
+            flags: u32::from(m.is_inline()),
             blob_id: *m.blob_id().as_bytes(),
             size: m.size(),
             chunk_size: m.chunk_size().get(),
             upload_id: m.upload_id().get(),
             crcs: m.chunk_crcs().to_vec(),
+            tail: m.inline_bytes().unwrap_or_default().to_vec(),
         }
     }
 
@@ -253,6 +308,7 @@ impl Head {
         for crc in &self.crcs {
             b.extend(crc.to_le_bytes());
         }
+        b.extend(&self.tail);
         let crc = crc32c(&b);
         b.extend(crc.to_le_bytes());
         b
@@ -289,6 +345,10 @@ enum Rule {
     TooManyChunks,
     CrcCount,
     EmptyId,
+    InlineCount,
+    InlineUpload,
+    InlineLen,
+    InlineCrc,
 }
 
 /// A decode outcome, by kind (and rule, for `Corrupt`).
@@ -311,6 +371,10 @@ fn rule_of(what: &str) -> Rule {
         "more than u32::MAX chunks" => Rule::TooManyChunks,
         "the chunk CRCs do not match the chunk count" => Rule::CrcCount,
         "an empty blob whose id is not the SHA-256 of no bytes" => Rule::EmptyId,
+        "an inline blob that is not exactly one chunk" => Rule::InlineCount,
+        "an inline blob with an upload id" => Rule::InlineUpload,
+        "the inline bytes do not match the size" => Rule::InlineLen,
+        "an inline blob's CRC32C differs from its bytes" => Rule::InlineCrc,
         other => panic!("unknown Corrupt text {other:?}: add it to rule_of"),
     }
 }
@@ -352,7 +416,8 @@ fn spec_verdict(b: &[u8]) -> Verdict {
         v => return Verdict::Version(v),
     }
     let flags = le32(b, 8);
-    if flags != 0 {
+    // Bit 0 is INLINE (ADR-0050); every other bit is unknown.
+    if flags & !1 != 0 {
         return Verdict::Flags(flags);
     }
     let size = le64(b, 44);
@@ -363,6 +428,21 @@ fn spec_verdict(b: &[u8]) -> Verdict {
     let n = size.div_ceil(u64::from(chunk));
     if n > u64::from(u32::MAX) {
         return Verdict::Corrupt(Rule::TooManyChunks);
+    }
+    if flags == 1 {
+        if n != 1 {
+            return Verdict::Corrupt(Rule::InlineCount);
+        }
+        if b[56..72] != [0; 16] {
+            return Verdict::Corrupt(Rule::InlineUpload);
+        }
+        if u64::try_from(end - 72).unwrap() != 4 + size {
+            return Verdict::Corrupt(Rule::InlineLen);
+        }
+        if le32(b, 72) != crc32c(&b[76..end]) {
+            return Verdict::Corrupt(Rule::InlineCrc);
+        }
+        return Verdict::Valid;
     }
     if u64::try_from(end - 72).unwrap() != 4 * n {
         return Verdict::Corrupt(Rule::CrcCount);
@@ -400,14 +480,23 @@ fn check_decode(bytes: &[u8]) -> Result<Verdict, String> {
                 && m.chunk_crcs()
                     .iter()
                     .enumerate()
-                    .all(|(i, &crc)| crc == le32(bytes, 72 + 4 * i));
+                    .all(|(i, &crc)| crc == le32(bytes, 72 + 4 * i))
+                && m.is_inline() == (le32(bytes, 8) == 1)
+                && m.inline_bytes()
+                    .is_none_or(|b| b == &bytes[76..bytes.len() - 4]);
             if !fields_match {
                 return Err(format!("decoded fields differ from the bytes: {m:?}"));
             }
             if m.encode() != bytes || m.encoded_len() != bytes.len() {
                 return Err(format!("{m:?} does not re-encode to its input"));
             }
-            if BlobManifest::encoded_len_for(m.size(), m.chunk_size()).unwrap() != bytes.len() {
+            let plain_len = BlobManifest::encoded_len_for(m.size(), m.chunk_size()).unwrap();
+            let want_len = if m.is_inline() {
+                80 + m.size() as usize
+            } else {
+                plain_len
+            };
+            if want_len != bytes.len() {
                 return Err(format!("encoded_len_for disagrees for {m:?}"));
             }
         }
@@ -489,6 +578,12 @@ fn encoded_len_for_is_76_plus_4_per_chunk_up_to_u32_max_chunks() {
 fn every_truncation_and_extension_of_the_goldens_is_corruption() {
     for name in GOLDEN_FILES {
         let b = fixture(name);
+        // Re-sealed, a wrong length is a CRC list of the wrong length, or inline bytes of the wrong length.
+        let length_rule = if b[8] == 1 {
+            Rule::InlineLen
+        } else {
+            Rule::CrcCount
+        };
         for cut in 0..b.len() {
             let short = &b[..cut];
             let want = if cut < 76 {
@@ -501,12 +596,7 @@ fn every_truncation_and_extension_of_the_goldens_is_corruption() {
                 Verdict::Corrupt(want),
                 "{name}: cut at {cut}"
             );
-            // Re-sealed, a cut past the header is a CRC list of the wrong length.
-            let want = if cut < 76 {
-                Rule::Short
-            } else {
-                Rule::CrcCount
-            };
+            let want = if cut < 76 { Rule::Short } else { length_rule };
             assert_eq!(
                 decode_verdict(&reseal(short.to_vec()), name),
                 Verdict::Corrupt(want),
@@ -523,7 +613,7 @@ fn every_truncation_and_extension_of_the_goldens_is_corruption() {
                 );
                 assert_eq!(
                     decode_verdict(&reseal(long), name),
-                    Verdict::Corrupt(Rule::CrcCount),
+                    Verdict::Corrupt(length_rule),
                     "{name}: {extra} bytes of {fill:#x} appended, re-sealed"
                 );
             }
@@ -614,8 +704,8 @@ fn every_header_field_rewritten_and_resealed_is_rejected() {
         );
     }
 
-    // Flags: every bit is unknown in v1, and so is any combination.
-    for flags in (0..32).map(|bit| 1_u32 << bit).chain([3, u32::MAX]) {
+    // Flags: bit 0 is INLINE (ADR-0050); every other bit is unknown, and so is any combination with one.
+    for flags in (1..32).map(|bit| 1_u32 << bit).chain([3, u32::MAX]) {
         expect(
             &Head { flags, ..three() },
             Verdict::Flags(flags),
@@ -884,28 +974,28 @@ fn rules_are_checked_in_spec_order() {
     // Flags before every layout rule.
     for h in [
         Head {
-            flags: 1,
+            flags: 2,
             crcs: vec![],
             ..three()
         },
         Head {
-            flags: 1,
+            flags: 2,
             chunk_size: 0,
             ..three()
         },
         Head {
-            flags: 1,
+            flags: 2,
             size: u64::MAX,
             chunk_size: 1,
             ..three()
         },
         Head {
-            flags: 1,
+            flags: 2,
             blob_id: [0; 32],
             ..empty()
         },
     ] {
-        assert_eq!(v(&h.seal(), "flags + rule"), Verdict::Flags(1), "{h:?}");
+        assert_eq!(v(&h.seal(), "flags + rule"), Verdict::Flags(2), "{h:?}");
     }
 
     // Chunk size before the count, the count before the CRC list, the list before the empty-blob id.
@@ -1106,11 +1196,57 @@ fn is_corruption_is_true_for_corrupt_only() {
             },
             false,
         ),
+        // The `BlobStore` contract.
+        (
+            Error::BlobNotFound {
+                blob_id: blob_id_of(b""),
+            },
+            false,
+        ),
+        (
+            Error::RangeOutOfBounds {
+                start: 0,
+                end: 1,
+                size: 0,
+            },
+            false,
+        ),
+        (
+            Error::StagedChunkConflict {
+                upload_id: UploadId::new(1),
+                index: 0,
+            },
+            false,
+        ),
+        (Error::BindOutcomeUnknown("x".into()), false),
+        // -- pack (9.2) --
+        // One case per pack variant, here and only here.
+        //
+        //
+
+        // -- remote (9.3) --
+        // One case per remote variant, here and only here.
+        (
+            Error::Storage(persia_storage::Error::Unsupported {
+                op: persia_storage::Op::Get,
+            }),
+            false,
+        ),
+        (Error::ConditionalPutUnsupported, false),
+        (Error::InvalidResume { what: "x" }, false),
+        //
+        //
+
+        // -- documents (9.4) --
+        // One case per documents variant, here and only here.
+        //
+        //
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
-        // No wildcard: a new variant must be added to the table above.
-        match e {
+        // No wildcard: a new variant must be added to the table above. Each block names its own group, so a block
+        // adds one arm of its own instead of a line in another block's.
+        let group = match e {
             Error::Corrupt { .. }
             | Error::UnsupportedVersion { .. }
             | Error::UnsupportedFlags { .. }
@@ -1118,8 +1254,28 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::InvalidChunking(_)
             | Error::Read(_)
             | Error::ChunkerFailed
-            | Error::ChunkSizeBelowMin { .. } => {}
-        }
+            | Error::ChunkSizeBelowMin { .. } => "manifest and chunking",
+            // -- pack (9.2) --
+            // One arm for the pack's variants, `=> "pack"`, here and only here.
+            //
+            //
+            // -- remote (9.3) --
+            // One arm for the remote layout's variants, `=> "remote"`, here and only here.
+            Error::Storage(_) | Error::ConditionalPutUnsupported | Error::InvalidResume { .. } => {
+                "remote"
+            }
+            //
+            //
+            // -- documents (9.4) --
+            // One arm for the documents variants, `=> "documents"`, here and only here.
+            //
+            //
+            Error::BlobNotFound { .. }
+            | Error::RangeOutOfBounds { .. }
+            | Error::StagedChunkConflict { .. }
+            | Error::BindOutcomeUnknown(_) => "store",
+        };
+        assert_ne!(group, "");
     }
 }
 
@@ -1128,8 +1284,12 @@ fn is_corruption_is_true_for_corrupt_only() {
 fn head() -> impl Strategy<Value = (Head, bool)> {
     let magic = prop_oneof![8 => Just(*b"PBLM"), 1 => any::<[u8; 4]>()];
     let version = prop_oneof![6 => Just(1_u32), 1 => Just(0), 1 => Just(2), 1 => Just(u32::MAX), 1 => any::<u32>()];
-    let flags =
-        prop_oneof![6 => Just(0_u32), 1 => (0..32_u32).prop_map(|b| 1 << b), 1 => any::<u32>()];
+    let flags = prop_oneof![
+        6 => Just(0_u32),
+        3 => Just(1),
+        1 => (0..32_u32).prop_map(|b| 1 << b),
+        1 => any::<u32>()
+    ];
     let chunk = prop_oneof![
         6 => 1..=8_u32,
         1 => Just(0),
@@ -1165,7 +1325,19 @@ fn head() -> impl Strategy<Value = (Head, bool)> {
                     Ok(c) if fit > 0 && c <= 64 => c,
                     _ => n,
                 };
-                let crcs = (0..n).map(|i| seed.wrapping_add(i as u32)).collect();
+                let mut crcs: Vec<u32> = (0..n).map(|i| seed.wrapping_add(i as u32)).collect();
+                let mut tail = Vec::new();
+                let mut upload_id = upload_id;
+                // An inline header: usually its bytes, its CRC and no upload id, each broken now and then.
+                if flags == 1 && size <= 64 && fit > 0 {
+                    tail = (0..size)
+                        .map(|i| (seed as u8).wrapping_add(i as u8))
+                        .collect();
+                    crcs = vec![if fit > 1 { crc32c(&tail) } else { seed }];
+                    if fit > 1 {
+                        upload_id = 0;
+                    }
+                }
                 let h = Head {
                     magic,
                     version,
@@ -1175,6 +1347,7 @@ fn head() -> impl Strategy<Value = (Head, bool)> {
                     chunk_size,
                     upload_id,
                     crcs,
+                    tail,
                 };
                 (h, sealed)
             },
@@ -1193,8 +1366,13 @@ proptest! {
     fn round_trips_across_chunk_sizes_and_ids(m in manifest()) {
         let bytes = m.encode();
         prop_assert_eq!(bytes.len(), m.encoded_len());
-        prop_assert_eq!(bytes.len(), BlobManifest::encoded_len_for(m.size(), m.chunk_size()).unwrap());
-        prop_assert_eq!(bytes.len(), 76 + 4 * m.chunk_crcs().len());
+        if m.is_inline() {
+            prop_assert_eq!(bytes.len(), 80 + m.size() as usize);
+            prop_assert_eq!(m.chunk_crcs(), &[crc32c(m.inline_bytes().unwrap())]);
+        } else {
+            prop_assert_eq!(bytes.len(), BlobManifest::encoded_len_for(m.size(), m.chunk_size()).unwrap());
+            prop_assert_eq!(bytes.len(), 76 + 4 * m.chunk_crcs().len());
+        }
         let back = BlobManifest::decode(&bytes).unwrap();
         prop_assert_eq!(&back, &m);
         prop_assert_eq!(back.encode(), bytes.clone());
@@ -1327,5 +1505,219 @@ fn checks_against_the_lookup() {
             }
             other => panic!("expected Corrupt for {what}, got {other:?}"),
         }
+    }
+}
+
+// -- Inline manifests (ROADMAP 9.3.3, ADR-0050): flag bit 0, the blob's bytes after its one CRC. --
+
+/// `golden_inline_one` as a `Head`: the base the inline rules break.
+fn inline_one() -> Head {
+    Head::of(&golden_inline_one())
+}
+
+#[test]
+fn golden_inline_layout() {
+    let m = golden_inline_one();
+    let bytes = m.encode();
+    assert_eq!(bytes.len(), 80 + 1);
+    assert_eq!(&bytes[..4], b"PBLM");
+    assert_eq!(&bytes[4..8], &1_u32.to_le_bytes());
+    assert_eq!(&bytes[8..12], &1_u32.to_le_bytes(), "INLINE is bit 0");
+    assert_eq!(&bytes[12..44], blob_id_of(b"P").as_bytes());
+    assert_eq!(&bytes[44..52], &1_u64.to_le_bytes());
+    assert_eq!(&bytes[52..56], &ChunkSize::DEFAULT.get().to_le_bytes());
+    assert_eq!(&bytes[56..72], &[0; 16], "no upload");
+    assert_eq!(&bytes[72..76], &crc32c(b"P").to_le_bytes());
+    assert_eq!(&bytes[76..77], b"P");
+    assert_eq!(&bytes[77..], &crc32c(&bytes[..77]).to_le_bytes());
+    assert_eq!((m.chunk_count(), m.chunk_range(0)), (1, Some(0..1)));
+    assert_eq!(inline_one().seal(), bytes);
+    let max = BlobManifest::decode(&fixture("inline-max.blm")).unwrap();
+    assert_eq!((max.size(), max.encoded_len()), (64 << 10, 80 + (64 << 10)));
+    assert_eq!(max, golden_inline_max());
+}
+
+#[test]
+fn inline_rules_are_checked_in_spec_order() {
+    let corrupt = |h: &Head, rule, case: &str| expect(h, Verdict::Corrupt(rule), case);
+    expect(&inline_one(), Verdict::Valid, "inline base");
+
+    // Exactly one chunk: an empty blob, or more bytes than a chunk (the bytes and CRC match, so only the count breaks).
+    corrupt(
+        &Head {
+            size: 0,
+            crcs: vec![],
+            tail: vec![],
+            blob_id: SHA256_EMPTY,
+            ..inline_one()
+        },
+        Rule::InlineCount,
+        "empty inline",
+    );
+    let six = b"sixsix".to_vec();
+    for chunk_size in [1, 5] {
+        corrupt(
+            &Head {
+                size: 6,
+                chunk_size,
+                crcs: vec![crc32c(&six)],
+                tail: six.clone(),
+                ..inline_one()
+            },
+            Rule::InlineCount,
+            &format!("6 bytes in chunks of {chunk_size}"),
+        );
+    }
+    expect(
+        &Head {
+            size: 6,
+            chunk_size: 6,
+            crcs: vec![crc32c(&six)],
+            tail: six.clone(),
+            ..inline_one()
+        },
+        Verdict::Valid,
+        "6 bytes in chunks of 6",
+    );
+    // No upload id.
+    for upload_id in [1, 1 << 127, u128::MAX] {
+        corrupt(
+            &Head {
+                upload_id,
+                ..inline_one()
+            },
+            Rule::InlineUpload,
+            "upload id",
+        );
+    }
+    // Exactly `4 + size` bytes after the header, one CRC included.
+    for (crcs, tail) in [
+        (vec![crc32c(b"P")], vec![]),
+        (vec![crc32c(b"P")], b"PP".to_vec()),
+        (vec![], b"P".to_vec()),
+        (vec![crc32c(b"P"), 0], b"P".to_vec()),
+    ] {
+        corrupt(
+            &Head {
+                crcs,
+                tail,
+                ..inline_one()
+            },
+            Rule::InlineLen,
+            "length",
+        );
+    }
+    // The CRC is the bytes'.
+    for (crc, tail) in [(0, b"P".to_vec()), (crc32c(b"P"), b"Q".to_vec())] {
+        corrupt(
+            &Head {
+                crcs: vec![crc],
+                tail,
+                ..inline_one()
+            },
+            Rule::InlineCrc,
+            "crc",
+        );
+    }
+
+    // Order: unknown flags, chunk size, count, upload id, length, CRC.
+    let all_wrong = Head {
+        size: 0,
+        upload_id: 9,
+        crcs: vec![1, 2],
+        tail: b"zz".to_vec(),
+        ..inline_one()
+    };
+    expect(
+        &Head {
+            flags: 3,
+            ..all_wrong.clone()
+        },
+        Verdict::Flags(3),
+        "unknown bit first",
+    );
+    corrupt(
+        &Head {
+            chunk_size: 0,
+            ..all_wrong.clone()
+        },
+        Rule::ChunkSize,
+        "chunk size",
+    );
+    corrupt(&all_wrong, Rule::InlineCount, "count");
+    let h = Head {
+        upload_id: 9,
+        crcs: vec![1, 2],
+        tail: b"zz".to_vec(),
+        ..inline_one()
+    };
+    corrupt(&h, Rule::InlineUpload, "upload id");
+    corrupt(&Head { upload_id: 0, ..h }, Rule::InlineLen, "length");
+    // A plain manifest's layout with the flag set is an inline one of the wrong length.
+    corrupt(
+        &Head {
+            flags: 1,
+            upload_id: 0,
+            size: 4,
+            chunk_size: 4,
+            crcs: vec![crc32c(b"abcd")],
+            tail: vec![],
+            ..inline_one()
+        },
+        Rule::InlineLen,
+        "plain layout, inline flag",
+    );
+    // An inline layout without the flag is a plain one with stray bytes.
+    corrupt(
+        &Head {
+            flags: 0,
+            ..inline_one()
+        },
+        Rule::CrcCount,
+        "inline layout, no flag",
+    );
+}
+
+#[test]
+fn new_inline_takes_exactly_one_chunk() {
+    let cs = ChunkSize::from_encoding(4).unwrap();
+    for bytes in [vec![], vec![0; 5]] {
+        match BlobManifest::new_inline(blob_id_of(&bytes), cs, bytes.clone()) {
+            Err(e @ Error::InvalidManifest { .. }) => assert!(!e.is_corruption()),
+            other => panic!("{} bytes: {other:?}", bytes.len()),
+        }
+    }
+    let m = BlobManifest::new_inline(blob_id_of(b"abcd"), cs, b"abcd".to_vec()).unwrap();
+    assert_eq!(
+        (m.size(), m.chunk_crcs(), m.inline_bytes()),
+        (4, &[crc32c(b"abcd")][..], Some(&b"abcd"[..]))
+    );
+    assert!(!golden_three().is_inline());
+    assert_eq!(golden_three().inline_bytes(), None);
+    // Debug shows the inline length, not the bytes.
+    assert!(format!("{:?}", golden_inline_max()).contains("inline_len: Some(65536)"));
+}
+
+#[test]
+fn sampled_bit_flips_of_the_largest_inline_golden_are_corruption() {
+    let mut b = fixture("inline-max.blm");
+    for i in (0..b.len()).step_by(97).chain([b.len() - 1]) {
+        let bit = i % 8;
+        b[i] ^= 1 << bit;
+        let want = if i < 4 { Rule::Magic } else { Rule::Checksum };
+        assert_eq!(
+            decode_verdict(&b, "inline-max"),
+            Verdict::Corrupt(want),
+            "byte {i}"
+        );
+        // Re-sealed, a flip in the bytes breaks their CRC, one in the CRC itself too.
+        if (72..b.len() - 4).contains(&i) {
+            assert_eq!(
+                decode_verdict(&reseal(b.clone()), "inline-max"),
+                Verdict::Corrupt(Rule::InlineCrc),
+                "byte {i}, re-sealed"
+            );
+        }
+        b[i] ^= 1 << bit;
     }
 }

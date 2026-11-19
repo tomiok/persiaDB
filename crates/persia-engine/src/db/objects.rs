@@ -266,7 +266,12 @@ impl<F: ContainerFile + Sync> Storage for ContainerObjects<'_, F> {
                 // The payload length is in the frame header; reading the frame also checks it.
                 _ => u64::try_from(self.payload(&key, Op::List)?.len()).unwrap_or(u64::MAX),
             };
-            out.push(ObjectMeta { key, size });
+            // Frames of one file have no times of their own (ADR-0050 item 6).
+            out.push(ObjectMeta {
+                key,
+                size,
+                last_modified: None,
+            });
         }
         Ok(out)
     }

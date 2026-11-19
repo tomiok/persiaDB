@@ -6,6 +6,7 @@
 use core::time::Duration;
 use std::hash::{BuildHasher, RandomState};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::SystemTime;
 
 use bytes::Bytes;
 
@@ -19,19 +20,87 @@ impl Error {
     }
 }
 
-/// Where a retry loop sleeps. Tests inject one that records the delays instead.
+/// Where a retry loop sleeps, and what a backend that keeps its own times reads them from (the memory backend's
+/// [`ObjectMeta::last_modified`](crate::ObjectMeta::last_modified)). Tests inject one that records the delays or that
+/// a test moves by hand ([`ManualClock`]).
 pub trait Clock: Send + Sync {
     /// Blocks the calling thread for `duration`.
     fn sleep(&self, duration: Duration);
+
+    /// The current wall-clock time. The default is [`SystemTime::now`], so a clock given to
+    /// [`MemoryStorage::with_clock`](crate::MemoryStorage::with_clock) to control its objects' times must implement
+    /// `now` itself (as [`ManualClock`] does): one that only implements `sleep` stamps objects with the system time.
+    fn now(&self) -> SystemTime {
+        SystemTime::now()
+    }
 }
 
-/// The real clock: [`std::thread::sleep`].
+/// The real clock: [`std::thread::sleep`] and [`SystemTime::now`].
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn sleep(&self, duration: Duration) {
         std::thread::sleep(duration);
+    }
+}
+
+/// A clock that only moves when told to: [`Clock::sleep`] and [`ManualClock::advance`] add to its time, so a test of
+/// anything that reads [`Clock::now`] is deterministic.
+///
+/// ```
+/// use std::time::{Duration, UNIX_EPOCH};
+/// use persia_storage::retry::{Clock, ManualClock};
+///
+/// let clock = ManualClock::new(UNIX_EPOCH);
+/// clock.advance(Duration::from_secs(60));
+/// clock.sleep(Duration::from_secs(1));
+/// assert_eq!(clock.now(), UNIX_EPOCH + Duration::from_secs(61));
+/// ```
+#[derive(Debug)]
+pub struct ManualClock {
+    now: std::sync::Mutex<SystemTime>,
+}
+
+impl ManualClock {
+    /// A clock that reads `start` until it is moved.
+    pub const fn new(start: SystemTime) -> Self {
+        Self {
+            now: std::sync::Mutex::new(start),
+        }
+    }
+
+    /// Moves the clock forward by `by`; a move past the latest time the platform represents leaves the clock where
+    /// it is (so does a `sleep` that long).
+    pub fn advance(&self, by: Duration) {
+        let mut now = self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(later) = now.checked_add(by) {
+            *now = later;
+        }
+    }
+
+    /// Sets the clock to `to`, forward or back.
+    pub fn set(&self, to: SystemTime) {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = to;
+    }
+}
+
+impl Clock for ManualClock {
+    fn sleep(&self, duration: Duration) {
+        self.advance(duration);
+    }
+
+    fn now(&self) -> SystemTime {
+        *self
+            .now
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

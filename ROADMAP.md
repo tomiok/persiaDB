@@ -617,9 +617,11 @@ Deps: M1, M2.
 - [ ] 9.2.5 Fuzz pack reader
 
 ## 9.3 Remote layout
-- [ ] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)
-- [ ] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check (SPEC §9.4: the resume token is `upload_id` + `chunk_size`; a `Chunker` that starts at chunk k with a hasher fed the stored chunks; `AlreadyExists` on a chunk restarts under a new upload id)
-- [ ] 9.3.3 Small-blob single-object optimization (threshold)
+- [x] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)
+- [x] 9.3.2 Parallel chunk upload/download, resumable upload by chunk existence check (SPEC §9.4: the resume token is `upload_id` + `chunk_size`; a `Chunker` that starts at chunk k with a hasher fed the stored chunks; `AlreadyExists` on a chunk restarts under a new upload id)
+- [x] 9.3.3 Small-blob single-object optimization (threshold)
+- [ ] 9.3.4 `put_blob` resumes a remote upload: `PutBlobOptions::resume: Option<ResumeToken>` drives `RemoteBlobStore::resume`, `Chunker::resume` and `restage`, pinning the old upload id before listing and the new one before `restage`, and rejecting a token chunk size below the floor (SPEC §9.4, §9.5; found in 9.3.2)
+- [ ] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
 
 ## 9.4 Integration with documents
 - [ ] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
@@ -632,8 +634,9 @@ Deps: M1, M2.
 - [ ] 9.5.2 Sweep (SPEC §9.5): unmarked blob manifests before their upload's staged chunks, older than the grace period, each pin check and delete under the pin set's lock; remote listing per `blobs/<xx>/` prefix and `blobs/uploads/`; pack-file rewrite for local
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
 - [ ] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
-- [ ] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
+- [x] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 - [ ] 9.5.6 (v1.0) [T] No dangling blob reference (SPEC §9.5, §9.6): a document committed with a `BlobRef` that has no blob behind it (set below the public API with `Document::set_blob_ref`, or after copying only the container, §4.8) is reported by `verify` as an error naming the collection, document id and `blob_id`, in a segment and in the WAL; the public `put(doc, blob)` given a `BlobRef` its database never bound is rejected and logs nothing
+- [ ] 9.5.7 `SimFs` file modification times from an injectable clock, so sweep crash tests on `LocalStorage<SimFs>` can age objects (SPEC §10.1; found in 9.5.5)
 
 ---
 

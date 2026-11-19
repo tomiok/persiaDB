@@ -57,7 +57,7 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0032](./0032-background-merges-and-obsolete-objects.md) | Background merges, and obsolete objects freed by reference counting | proposed |
 | [0033](./0033-open-sequence-read-only-opens-and-flushes-during-replay.md) | Open sequence, read-only opens, and flushes during replay | proposed |
 | [0034](./0034-blob-upload-staging-and-expected-id.md) | Blob upload staging, binding, and the expected-id API | accepted |
-| [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041) |
+| [0035](./0035-blob-manifest-encoding.md) | Blob manifest encoding | accepted (amended by 0041, 0050) |
 | [0036](./0036-term-proximity-scoring.md) | Term proximity scoring: pair distance of adjacent required words, bound-safe, off by default | accepted |
 | [0037](./0037-relaxation-cascade-and-level-rank-key.md) | The relaxation cascade, and a rank key led by the level | proposed |
 | [0038](./0038-l2-drop-terms-ladder-and-term-importance.md) | L2 `drop_terms`: a `minimum_should_match` ladder ordered by term importance | proposed |
@@ -71,3 +71,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |
 | [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed (amended by 0048) |
 | [0048](./0048-request-filter-kept-beside-the-compilation.md) | The request filter is kept beside the compiled query, which is replaced only through it | proposed |
+| [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | proposed |
