@@ -103,6 +103,13 @@ pub enum Error {
 
     // -- remote (9.3) --
     // Variants of the remote layout (crate::remote, SPEC §9.4) go here, and only here.
+    /// A storage operation of the remote layout failed (SPEC §9.4, §10.1). Corruption a backend reports is
+    /// [`Error::Corrupt`] instead.
+    #[error("blob storage failed")]
+    Storage(#[source] persia_storage::Error),
+    /// The backend has no conditional `put_if_absent`, so it cannot stage or bind blobs (SPEC §9.4: `Unsupported`).
+    #[error("the storage backend has no conditional put, so it cannot store blobs")]
+    ConditionalPutUnsupported,
     //
     //
 

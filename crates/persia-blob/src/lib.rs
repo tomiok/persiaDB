@@ -34,6 +34,8 @@ pub use store::{BindOutcome, BlobStore, SMALL_BLOB_MAX, read_chunk_checked, read
 
 // -- remote (9.3) --
 // The remote layout (SPEC §9.4): its `mod` and `pub use` lines go here, and only here.
+pub mod remote;
+pub use remote::RemoteBlobStore;
 //
 //
 

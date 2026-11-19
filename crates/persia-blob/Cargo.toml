@@ -9,6 +9,7 @@ publish.workspace = true
 [dependencies]
 persia-format.workspace = true
 persia-storage.workspace = true
+bytes.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
