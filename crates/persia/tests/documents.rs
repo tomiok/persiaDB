@@ -23,10 +23,12 @@ mod store;
 use std::io::Read;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
 use persia::internal::documents::{Blob, BlobDatabase, DocumentLog, Error};
 use persia::internal::pins::Pinned;
+use persia::internal::retry::ManualRetryClock;
 use persia_blob::{BlobRef, BlobStore, ChunkSize, MemoryBlobStore, blob_id_of};
 use persia_engine::db::{Database, DatabaseError, DatabaseOptions, SearchRequest, SegmentIds};
 use persia_engine::document::{Document, Value};
@@ -531,11 +533,13 @@ fn a_put_whose_bind_stays_unknown_logs_nothing() {
             unknown_lands: lands,
             ..Faults::default()
         });
-        let mut db = BlobDatabase::new(database(&path), Blobs::new(Arc::clone(&store)));
+        let clock = Arc::new(ManualRetryClock::new());
+        let blobs = Blobs::new(Arc::clone(&store)).with_retry_clock(Arc::clone(&clock) as _);
+        let mut db = BlobDatabase::new(database(&path), blobs);
         let before = db.log().wal_mark();
         let data = bytes(200_000, 8);
         let blob = Blob::from_reader(&data[..]).with_options(PutBlobOptions {
-            bind_attempts: 3,
+            bind_budget: Duration::from_secs(10),
             ..options()
         });
         let Err(Error::Blob(e)) = db.put("c", &doc("x"), blob, Durability::Fsync) else {
@@ -543,6 +547,11 @@ fn a_put_whose_bind_stays_unknown_logs_nothing() {
         };
         assert!(e.is_bind_outcome_unknown());
         assert_eq!(db.log().wal_mark(), before);
+        // The whole budget was spent retrying, on the manual clock.
+        assert_eq!(
+            clock.sleeps().iter().sum::<Duration>(),
+            Duration::from_secs(10)
+        );
         assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
         drop(db);
         assert!(documents(&Database::open(&path, DatabaseOptions::default()).unwrap()).is_empty());

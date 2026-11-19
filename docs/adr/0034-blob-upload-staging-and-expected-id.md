@@ -39,7 +39,7 @@ only atomic primitive; a blob can be larger than memory; uploads from servers ca
    - remotely as `blobs/<hex[0..2]>/<hex(blob_id)>`, written with `put_if_absent`. `Created` binds it. `AlreadyExists`
      (already resolved against our own bytes, §10.1) means another upload bound the id first: the blob is
      deduplicated, our staged chunks are orphans. An error leaves the outcome unknown: retry the same `put_if_absent`
-     until it answers, and never delete the chunks of an upload whose outcome was once unknown (a conditional write
+     until it answers (within a time budget, ADR-0051), and never delete the chunks of an upload whose outcome was once unknown (a conditional write
      still in flight may land later); GC reclaims them. A backend without `conditional_put` cannot store blobs
      (`Unsupported`), the same requirement as commits.
    A reader checks the manifest against what it looked it up by (`check_ref`: id, size, chunk size) before serving

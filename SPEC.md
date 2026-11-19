@@ -2598,8 +2598,12 @@ A key under `blobs/` that is not exactly of these forms (lowercase hex, `<xx>` t
 ≤ `u32::MAX`) was not written by Persia and is ignored by every listing, the sweep's included.
 Binding: `Created` binds the id; `AlreadyExists` (resolved against the writer's own bytes, §10.1) means another upload
 bound it first, so this one is a duplicate (§9.2); an error leaves the outcome unknown: the writer retries the same
-`put_if_absent` (same bytes) until it gets an answer, and never deletes the chunks of an upload whose binding outcome
-was once unknown (an S3 conditional write still in flight may land later), leaving them to GC. A backend without
+`put_if_absent` (same bytes) until it gets an answer, with jittered exponential backoff (50 ms doubling to 5 s), for
+at most a time budget (`bind_budget`, default 60 s; ADR-0051); a plain error after an unknown outcome answers nothing
+and is retried too. When the budget runs out, `put_blob` fails with the unknown outcome, returns no `BlobRef`, and
+the document is not logged. The writer never deletes the chunks of an upload whose binding outcome was once unknown
+(an S3 conditional write still in flight may land later), leaving them to GC, whose grace period (§9.5) must stay far
+above the budget. A backend without
 `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
 (`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
 gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
@@ -2629,7 +2633,11 @@ GC runs only in the writer (the process holding the container's writer lock, or 
 the same process that runs `put_blob`, and keeps a **pin set** with it:
 - `put_blob` pins its `upload_id` before its first chunk write (or, on resume, before listing), and the `blob_id` it
   returns (bound or deduplicated) before it binds or looks it up; both stay pinned until the document referencing the
-  blob is durable (an acknowledged WAL record or a commit), or the caller drops the upload.
+  blob is durable (its WAL record covered by a sync: logged `Fsync`, or followed by an `Fsync` operation or a commit,
+  §8.2.1), or the caller drops the upload. A document logged `Buffered` or `Async` keeps its pins until such a sync,
+  and a poisoned writer keeps its pins until it is dropped: GC deletes less, never more. A duplicate, and a
+  `put(doc, blob)` given a `BlobRef`, also pin the upload the bound manifest names, after reading it; the sweep does
+  not delete an upload's chunks while a pinned blob's manifest names it (ADR-0051).
 - Mark: the `blob_id`s referenced by live manifests and snapshots and by WAL records from `wal_start` on (§8.2),
   pinned ids, then the upload ids their blob manifests name, and pinned upload ids.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
@@ -2648,13 +2656,16 @@ it logs or commits a document (it does not depend on `persia-blob`); the public 
 (§9.6).
 
 ### 9.6 API
-`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id }) -> BlobRef`, `get_blob(id) -> Stream`,
-`get_blob_range(id, range)`, `delete` via document delete + GC.
+`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, chunk_size, bind_budget }) -> BlobRef`,
+`get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
+`check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is
 `BlobIdMismatch { expected, actual }` (a caller error, not corruption) and binds nothing (ADR-0034). Over gRPC it is
 `expected_blob_id` (32 bytes) in the first message of the `PutBlob` stream; over HTTP the `Repr-Digest:
 sha-256=:<base64>:` header (RFC 9530).
-Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order.
+Convenience: `put(doc, blob: Blob::from_path(..))` performs both steps in the right order: it logs the document only
+after the blob is durable (`put_blob` returned) or, for a given `BlobRef`, pinned and found bound, at every WAL
+durability (ADR-0051).
 
 **No dangling references** (ROADMAP 9.5.6). The engine's `Document::set_blob_ref` takes any `BlobRef`, and
 `persia-engine` commits it without looking it up (§9.5), so a reference with no bytes behind it can be committed

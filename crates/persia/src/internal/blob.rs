@@ -9,14 +9,16 @@ use core::ops::Range;
 use std::collections::BTreeMap;
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, Chunk, ChunkSize, Error, Result,
-    SMALL_BLOB_MAX, UploadId, blob_id_of, read_range,
+    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range, read_range,
 };
 use persia_engine::db::SegmentIds;
 
 use super::pins::{PinSet, Pinned, Pins};
+use super::retry::{RetryClock, SystemRetryClock, backoff};
 
 /// The MIME type of a blob whose caller names none.
 pub const DEFAULT_MIME: &str = "application/octet-stream";
@@ -28,8 +30,8 @@ pub const WINDOW_BYTES: u64 = 32 << 20;
 /// The most chunks in one window, whatever their size.
 pub const WINDOW_MAX_CHUNKS: u32 = 64;
 
-/// How many times `put_blob` calls `bind` with the same manifest while the outcome is unknown, by default (ADR-0051).
-pub const DEFAULT_BIND_ATTEMPTS: u32 = 16;
+/// How long `put_blob` keeps retrying a bind whose outcome is unknown, by default (SPEC §9.4, ADR-0051).
+pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 
 /// What `put_blob` stores beside the bytes (SPEC §9.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,8 +45,9 @@ pub struct PutBlobOptions {
     /// The chunk size to store a new blob with, at least [`ChunkSize::MIN`] (SPEC §9.2); 4 MiB by default. A
     /// duplicate keeps the bound blob's.
     pub chunk_size: ChunkSize,
-    /// How many times `bind` is called while its outcome is unknown before `put_blob` gives up (at least once).
-    pub bind_attempts: u32,
+    /// How long a bind whose outcome is unknown is retried, with backoff ([`super::retry::backoff`]), before
+    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default.
+    pub bind_budget: Duration,
 }
 
 impl Default for PutBlobOptions {
@@ -54,7 +57,7 @@ impl Default for PutBlobOptions {
             user_meta: BTreeMap::new(),
             expected_id: None,
             chunk_size: ChunkSize::DEFAULT,
-            bind_attempts: DEFAULT_BIND_ATTEMPTS,
+            bind_budget: DEFAULT_BIND_BUDGET,
         }
     }
 }
@@ -78,6 +81,7 @@ impl Default for PutBlobOptions {
 pub struct Blobs<S: ?Sized> {
     pins: Arc<PinSet>,
     ids: Mutex<SegmentIds>,
+    clock: Arc<dyn RetryClock>,
     store: Arc<S>,
 }
 
@@ -92,8 +96,17 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Self {
             pins: Arc::new(PinSet::new()),
             ids: Mutex::new(ids),
+            clock: Arc::new(SystemRetryClock::new()),
             store,
         }
+    }
+
+    /// The same handle, with bind retries timed and waited through `clock`
+    /// ([`ManualRetryClock`](super::retry::ManualRetryClock) in tests).
+    #[must_use]
+    pub fn with_retry_clock(mut self, clock: Arc<dyn RetryClock>) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// The store.
@@ -112,15 +125,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// The upload id is pinned before any byte is read. A blob of at most [`SMALL_BLOB_MAX`] bytes is hashed whole,
     /// then stored and bound by [`BlobStore::bind_small`]; a larger one is cut by a [`Chunker`](persia_blob::Chunker) and staged a window
     /// at a time ([`WINDOW_BYTES`]). Once the reader ends the id is checked against `expected_id`, pinned, and bound;
-    /// a bind whose outcome is unknown is retried with the same manifest up to `bind_attempts` times, and its upload
-    /// is never discarded. A duplicate's chunks, and a mismatched upload's, are discarded best-effort.
+    /// a bind whose outcome is unknown is retried with the same manifest (with `bind_small` for a small blob), with
+    /// backoff, within `bind_budget`, and its upload is never discarded. A duplicate's chunks, and a mismatched upload's, are discarded best-effort.
     ///
     /// # Errors
     /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built, and
     ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, before any byte is read;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
-    /// - an error with [`Error::is_bind_outcome_unknown`] when every attempt left the outcome unknown: the blob may be
+    /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
     ///   bound later, and nothing references it (its upload is left to GC);
     /// - [`Error::Corrupt`] when the manifest bound under the id does not name it or another size;
     /// - the store's errors, after which nothing this call returned references the blob.
@@ -150,9 +163,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         let small = u64::try_from(head.len()).is_ok_and(|len| len <= SMALL_BLOB_MAX);
         let (manifest, outcome) = if small {
             let (crcs, blob) = chunk_crcs(&head[..], chunk_size, |_| Ok(()))?;
-            let manifest = self.checked_manifest(blob, upload_id, crcs, options)?;
+            let manifest = self.checked_manifest(blob, upload_id, crcs, options, false)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
-            let outcome = Self::bind(options, || self.store.bind_small(&manifest, &head));
+            // An unknown outcome is retried with `bind_small` and the same bytes, never `bind` (the contract).
+            let outcome = self.bind(upload_id, options, || {
+                self.store.bind_small(&manifest, &head)
+            });
             (manifest, outcome)
         } else {
             let window = window_chunks(chunk_size);
@@ -166,9 +182,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 Ok(())
             })?;
             self.stage(upload_id, &mut staged)?;
-            let manifest = self.checked_manifest(blob, upload_id, crcs, options)?;
+            let manifest = self.checked_manifest(blob, upload_id, crcs, options, true)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
-            let outcome = Self::bind(options, || self.store.bind(&manifest));
+            let outcome = self.bind(upload_id, options, || self.store.bind(&manifest));
             (manifest, outcome)
         };
         let blob_ref = self.bound(&manifest, outcome, options, &mut pins)?;
@@ -203,7 +219,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 
     /// A reader of the whole blob `blob_ref` refers to (SPEC §9.6 `get_blob`), which reads it a window of chunks at
-    /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once.
+    /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once. The manifest is looked up and checked
+    /// once, here; every window reads by it ([`read_manifest_range`]).
     ///
     /// # Errors
     /// [`Error::BlobNotFound`] when the id is not bound, [`Error::Corrupt`] when its manifest does not match
@@ -221,6 +238,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Ok(BlobReader {
             store: &*self.store,
             blob_ref: blob_ref.clone(),
+            manifest,
             window,
             offset: 0,
             buf: Vec::new(),
@@ -248,18 +266,22 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         Ok(())
     }
 
-    /// The blob's manifest once its id is checked against `expected_id`; a mismatch discards the upload.
+    /// The blob's manifest once its id is checked against `expected_id`; a mismatch discards the upload when it
+    /// `staged` chunks (the small path stages nothing before `bind_small`).
     fn checked_manifest(
         &self,
         blob: persia_blob::ChunkedBlob,
         upload_id: UploadId,
         crcs: Vec<u32>,
         options: &PutBlobOptions,
+        staged: bool,
     ) -> Result<BlobManifest> {
         if let Some(expected) = options.expected_id
             && expected != blob.blob_id
         {
-            self.discard(upload_id);
+            if staged {
+                self.discard(upload_id);
+            }
             return Err(Error::BlobIdMismatch {
                 expected,
                 actual: blob.blob_id,
@@ -268,25 +290,41 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         BlobManifest::new(blob.blob_id, blob.size, blob.chunk_size, upload_id, crcs)
     }
 
-    /// `bind` called until its outcome is known, at most `options.bind_attempts` times; with whether an outcome was
-    /// ever unknown, after which the upload is never discarded (SPEC §9.4).
+    /// `bind` called until its outcome is known (SPEC §9.4, ADR-0051 item 3), with whether an outcome was ever
+    /// unknown, after which the upload is never discarded. A plain error ends the loop only while no attempt was
+    /// unknown; after one, an error is no answer (the earlier write may still land), so the loop goes on. Attempts
+    /// are spaced by [`backoff`] and stop once `options.bind_budget` has passed since the first: the unknown error is
+    /// returned then. At least one attempt is made.
     fn bind(
+        &self,
+        upload_id: UploadId,
         options: &PutBlobOptions,
         bind: impl Fn() -> Result<BindOutcome>,
     ) -> (Result<BindOutcome>, bool) {
-        let mut unknown = false;
-        let mut attempts = options.bind_attempts.max(1);
+        let start = self.clock.now();
+        let mut unknown: Option<Error> = None;
+        let mut attempt = 0_u32;
         loop {
             match bind() {
-                Err(e) if e.is_bind_outcome_unknown() => {
-                    unknown = true;
-                    attempts = attempts.saturating_sub(1);
-                    if attempts == 0 {
-                        return (Err(e), true);
-                    }
-                }
-                other => return (other, unknown),
+                Ok(outcome) => return (Ok(outcome), unknown.is_some()),
+                Err(e) if e.is_bind_outcome_unknown() => unknown = Some(e),
+                Err(e) if unknown.is_none() => return (Err(e), false),
+                // Still unknown: this answer says nothing of the earlier attempt's write.
+                Err(_) => {}
             }
+            let elapsed = self.clock.now().saturating_sub(start);
+            let Some(left) = options
+                .bind_budget
+                .checked_sub(elapsed)
+                .filter(|l| !l.is_zero())
+            else {
+                let unknown = unknown
+                    .unwrap_or_else(|| Error::BindOutcomeUnknown("no attempt answered".into()));
+                return (Err(unknown), true);
+            };
+            self.clock
+                .sleep(backoff(upload_id.get(), attempt).min(left));
+            attempt = attempt.saturating_add(1);
         }
     }
 
@@ -383,6 +421,8 @@ fn window_chunks(chunk_size: ChunkSize) -> usize {
 pub struct BlobReader<'a, S: ?Sized> {
     store: &'a S,
     blob_ref: BlobRef,
+    /// Its manifest, looked up and checked against `blob_ref` once, at open: every window reads by it.
+    manifest: BlobManifest,
     /// Bytes per window: a whole number of chunks.
     window: u64,
     /// Where the next window starts.
@@ -406,7 +446,7 @@ impl<S: BlobStore + ?Sized> Read for BlobReader<'_, S> {
                 return Ok(0);
             }
             let end = self.offset.saturating_add(self.window).min(size);
-            self.buf = read_range(self.store, &self.blob_ref, self.offset..end)
+            self.buf = read_manifest_range(self.store, &self.manifest, self.offset..end)
                 .map_err(io::Error::other)?;
             self.offset = end;
             self.pos = 0;

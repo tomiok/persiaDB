@@ -27,6 +27,7 @@ use std::time::Duration;
 
 use persia::internal::blob::{Blobs, PutBlobOptions, WINDOW_MAX_CHUNKS};
 use persia::internal::pins::{PinSet, Pinned};
+use persia::internal::retry::{MAX_BACKOFF, ManualRetryClock};
 use persia_blob::{
     BlobId, BlobStore, ChunkSize, Error, MemoryBlobStore, SMALL_BLOB_MAX, UploadId, blob_id_of,
 };
@@ -51,7 +52,8 @@ fn options(chunk: u32) -> PutBlobOptions {
 
 fn faulty(faults: Faults) -> (Arc<FaultyStore>, Blobs<FaultyStore>) {
     let store = FaultyStore::new(faults);
-    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(11));
+    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(11))
+        .with_retry_clock(Arc::new(ManualRetryClock::new()));
     store.watch(blobs.pin_set());
     (store, blobs)
 }
@@ -105,7 +107,9 @@ proptest! {
             let mismatch = matches!(result, Err(Error::BlobIdMismatch { expected, actual }) if expected == wrong && actual == id);
             prop_assert!(mismatch);
             prop_assert!(store.inner.bound_ids().is_empty());
-            prop_assert!(store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
+            // A large blob staged chunks, which are discarded; a small one staged nothing to discard.
+            let discarded = store.calls().iter().any(|c| matches!(c, Call::Discard(_)));
+            prop_assert_eq!(discarded, len as u64 > SMALL_BLOB_MAX);
             prop_assert!(blobs.pin_set().pinned().is_empty());
             return Ok(());
         }
@@ -268,12 +272,18 @@ fn an_unknown_bind_outcome_is_retried_and_never_discarded() {
             let binds: Vec<_> = calls
                 .iter()
                 .filter_map(|c| match c {
-                    Call::Bind { upload, blob, .. } => Some((*upload, *blob)),
+                    Call::Bind {
+                        upload,
+                        blob,
+                        small,
+                        ..
+                    } => Some((*upload, *blob, *small)),
                     _ => None,
                 })
                 .collect();
-            // The same manifest each time: same upload, same id.
-            assert_eq!(binds, vec![(upload, r.blob_id()); 4]);
+            // The same manifest each time: same upload, same id, and a small blob always through `bind_small`.
+            let small = len as u64 <= SMALL_BLOB_MAX;
+            assert_eq!(binds, vec![(upload, r.blob_id(), small); 4]);
             assert!(
                 !calls.iter().any(|c| matches!(c, Call::Discard(_))),
                 "{calls:?}"
@@ -297,28 +307,69 @@ fn an_unknown_outcome_before_a_duplicate_discards_nothing() {
     assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
 }
 
+/// The retry runs for its time budget, waiting a growing, jittered backoff between attempts, then fails with the
+/// unknown outcome and discards nothing (SPEC §9.4, ADR-0051 item 3).
 #[test]
-fn bind_attempts_that_all_stay_unknown_fail_and_discard_nothing() {
-    let (store, blobs) = faulty(Faults {
+fn a_bind_that_stays_unknown_for_its_budget_fails_and_discards_nothing() {
+    for len in [10, 200_000] {
+        let store = FaultyStore::new(Faults {
+            unknown_binds: u32::MAX,
+            ..Faults::default()
+        });
+        let clock = Arc::new(ManualRetryClock::new());
+        let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(11))
+            .with_retry_clock(Arc::clone(&clock) as _);
+        let budget = Duration::from_secs(30);
+        let opts = PutBlobOptions {
+            bind_budget: budget,
+            ..options(MIN)
+        };
+        let error = blobs.put_blob(&bytes(len, 6)[..], &opts).unwrap_err();
+        assert!(error.is_bind_outcome_unknown());
+        let calls = store.calls();
+        let binds = calls
+            .iter()
+            .filter(|c| matches!(c, Call::Bind { .. }))
+            .count();
+        let sleeps = clock.sleeps();
+        // One wait between two attempts, the whole budget waited, none longer than the cap.
+        assert_eq!(binds, sleeps.len() + 1);
+        assert_eq!(sleeps.iter().sum::<Duration>(), budget);
+        assert!(sleeps.iter().all(|s| *s <= MAX_BACKOFF));
+        // Growing: each full wait at least the half of the next's (equal jitter), until the cap.
+        assert!(sleeps[1] >= sleeps[0] / 2 && sleeps[4] > sleeps[0]);
+        assert!(!calls.iter().any(|c| matches!(c, Call::Discard(_))));
+        assert!(blobs.pin_set().pinned().is_empty());
+    }
+}
+
+/// A zero budget still makes one attempt.
+#[test]
+fn a_zero_budget_binds_once() {
+    let (store, blobs) = faulty(Faults::default());
+    let opts = PutBlobOptions {
+        bind_budget: Duration::ZERO,
+        ..options(MIN)
+    };
+    let (_blob, _pins) = blobs.put_blob(&bytes(10, 1)[..], &opts).unwrap();
+    let (store2, blobs2) = faulty(Faults {
         unknown_binds: u32::MAX,
         ..Faults::default()
     });
-    let opts = PutBlobOptions {
-        bind_attempts: 5,
-        ..options(MIN)
-    };
-    let error = blobs.put_blob(&bytes(200_000, 6)[..], &opts).unwrap_err();
-    assert!(error.is_bind_outcome_unknown());
-    let calls = store.calls();
-    assert_eq!(
-        calls
+    assert!(
+        blobs2
+            .put_blob(&bytes(10, 1)[..], &opts)
+            .unwrap_err()
+            .is_bind_outcome_unknown()
+    );
+    for s in [store, store2] {
+        let binds = s
+            .calls()
             .iter()
             .filter(|c| matches!(c, Call::Bind { .. }))
-            .count(),
-        5
-    );
-    assert!(!calls.iter().any(|c| matches!(c, Call::Discard(_))));
-    assert!(blobs.pin_set().pinned().is_empty());
+            .count();
+        assert_eq!(binds, 1);
+    }
 }
 
 /// Invariant 5.
@@ -704,12 +755,16 @@ fn an_expected_id_mismatch_with_a_duplicate_present_leaves_the_bound_blob() {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(discarded.len(), 1, "{ctx}: {calls:?}");
-            assert_ne!(
-                discarded[0], bound_upload,
+            // A small blob staged nothing, so it discards nothing; a large one discards its own upload.
+            let staged = bytes.len() as u64 > SMALL_BLOB_MAX;
+            assert_eq!(discarded.len(), usize::from(staged), "{ctx}: {calls:?}");
+            assert!(
+                !discarded.contains(&bound_upload),
                 "{ctx}: discarded the bound upload"
             );
-            assert_eq!(store.inner.staged_chunk_count(discarded[0]), 0, "{ctx}");
+            for u in &discarded {
+                assert_eq!(store.inner.staged_chunk_count(*u), 0, "{ctx}");
+            }
             assert_eq!(store.inner.bound_ids(), [bound.blob_id()], "{ctx}");
             assert_eq!(
                 store.inner.staged_chunk_count(bound_upload),
@@ -728,8 +783,9 @@ fn an_expected_id_mismatch_with_a_duplicate_present_leaves_the_bound_blob() {
     }
 }
 
-/// An unknown bind outcome, then a plain store error on the retry: `put_blob` fails with that error and discards
-/// nothing, since the first attempt may have bound the manifest (SPEC §9.4, ADR-0051 item 3).
+/// An unknown bind outcome, then plain store errors on every retry: a plain error after an unknown outcome is no
+/// answer (the first write may still land), so the retry goes on for its whole budget, then fails with the unknown
+/// outcome and discards nothing (SPEC §9.4, ADR-0051 item 3).
 #[test]
 fn an_unknown_outcome_then_a_store_error_discards_nothing() {
     for lands in [false, true] {
@@ -749,8 +805,7 @@ fn an_unknown_outcome_then_a_store_error_discards_nothing() {
             });
             let data = bytes(len, 12);
             let error = blobs.put_blob(&data[..], &options(MIN)).unwrap_err();
-            assert!(!error.is_bind_outcome_unknown(), "{ctx}: {error}");
-            assert!(matches!(error, Error::Read(_)), "{ctx}: {error}");
+            assert!(error.is_bind_outcome_unknown(), "{ctx}: {error}");
             let calls = store.calls();
             let binds: Vec<_> = calls
                 .iter()
@@ -759,7 +814,9 @@ fn an_unknown_outcome_then_a_store_error_discards_nothing() {
                     _ => None,
                 })
                 .collect();
-            assert_eq!(binds.len(), 2, "{ctx}: {calls:?}");
+            // The retry went on past the store error, the same manifest each time.
+            assert!(binds.len() > 2, "{ctx}: {calls:?}");
+            assert!(binds.iter().all(|u| *u == binds[0]), "{ctx}");
             assert!(
                 !calls.iter().any(|c| matches!(c, Call::Discard(_))),
                 "{ctx}: {calls:?}"
@@ -776,9 +833,8 @@ fn an_unknown_outcome_then_a_store_error_discards_nothing() {
 }
 
 /// `get_blob` of a blob stored with a chunk size of 1 (the encoding allows it, a writer does not, SPEC §9.1): it
-/// reads back, a window of `WINDOW_MAX_CHUNKS` one-byte chunks at a time, and each window looks the manifest up
-/// again (ADR-0051 item 4): 1 + ceil(size / 64) lookups. This pins the current count; a fix that reuses the
-/// manifest across windows changes it on purpose.
+/// reads back, a window of `WINDOW_MAX_CHUNKS` one-byte chunks at a time, and the manifest is looked up once, when
+/// the reader opens (ADR-0051 item 4): every window reads by the manifest it keeps.
 #[test]
 fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
     use persia_blob::{BlobManifest, BlobRef};
@@ -823,5 +879,5 @@ fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
         .count();
     let window = WINDOW_MAX_CHUNKS as usize;
     assert_eq!(windows, len.div_ceil(window));
-    assert_eq!(lookups, 1 + len.div_ceil(window), "manifest lookups");
+    assert_eq!(lookups, 1, "manifest lookups");
 }

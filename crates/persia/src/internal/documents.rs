@@ -158,6 +158,11 @@ impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {
 
     /// The document log, for the operations this layer does not wrap (commit, delete, search). Call
     /// [`BlobDatabase::release_durable`] after one that may make records durable, or let the next `put` do it.
+    ///
+    /// Replacing the log through it (e.g. with the database reopened) restarts its marks at 0: the pins still held
+    /// wait for the new log's `durable_mark` to reach marks of the old one, so they are held longer, never released
+    /// early (safe; the reopened database's WAL records are on disk and GC's mark finds them). Its `put` takes a
+    /// document with any blob reference: M10 must not expose it (SPEC §9.6).
     pub fn log_mut(&mut self) -> &mut L {
         &mut self.log
     }

@@ -1,6 +1,6 @@
 # ADR-0051: Blobs with documents: the internal API, the pin set, and the order of `put(doc, blob)`
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-18
 - Related: SPEC §7.5.1, §8.2.1, §9.2, §9.5, §9.6, §18.9; ROADMAP 9.4.1–9.4.3, 9.5.1, 9.5.2, 9.5.6; ADR-0034, ADR-0041
 
@@ -30,18 +30,27 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
    from the engine's `SegmentIds` (SPEC §8.7.1's keyed PRF) and pins it first. It reads up to 64 KiB + 1 byte: a
    blob that ends within 64 KiB is hashed whole and goes to `bind_small`; a larger one is chunked by `Chunker` and
    staged with `stage_chunks` a window at a time (32 MiB of chunks, 1..=64 chunks), which bounds memory. Then
-   `expected_id` is checked (mismatch: `BlobIdMismatch`, upload discarded best-effort), the blob id is pinned, and
+   `expected_id` is checked (mismatch: `BlobIdMismatch`; the upload is discarded best-effort when chunks were staged, never on the small path,
+   which staged none), the blob id is pinned, and
    the manifest bound. Default `mime` is `application/octet-stream`, default chunk size 4 MiB.
-3. **Binding outcomes.** An unknown outcome is retried with the same manifest up to `bind_attempts` times
-   (default 16), then `put_blob` fails with that error; an upload whose outcome was once unknown is never
-   discarded. `AlreadyBound` returns a `BlobRef` with the bound manifest's chunk size, after checking it names the
+3. **Binding outcomes.** An unknown outcome is retried with the same manifest, and a small blob's with
+   `bind_small` and the same bytes (never `bind`: a single-object store stages nothing), within a **time budget**,
+   `PutBlobOptions::bind_budget` (default 60 s; at least one attempt). Attempts are spaced by jittered exponential
+   backoff (50 ms doubling to a 5 s cap, a random half of it kept, seeded by the upload id), read and waited through
+   an injected `RetryClock` (a `ManualRetryClock` in tests). After an unknown outcome a plain error from a later
+   attempt is no answer (the earlier write may still land): the retry goes on; a plain error ends the loop only when
+   no attempt was unknown. When the budget runs out `put_blob` fails with the unknown error, binds nothing it knows
+   of, discards nothing and logs nothing; an upload whose outcome was once unknown is never discarded. A store that
+   refuses every write once poisoned (the pack's `PackPoisoned` after an unknown sync) should end the retry at once
+   as still unknown; that needs an error predicate in the contract (`Error::is_store_poisoned`), until which such
+   a store is retried, harmlessly, to the end of the budget. `AlreadyBound` returns a `BlobRef` with the bound manifest's chunk size, after checking it names the
    id and the size; its chunks are discarded only when the bound manifest names another upload and no outcome was
    unknown (a retry may find its own earlier write). A staging or reader error discards nothing: a resume
    (ROADMAP 9.3.2) or GC takes the chunks. Discard failures are logged (`tracing::warn!`) and ignored (GC is the
    backstop).
 4. **`get_blob`** looks the manifest up and checks it against the `BlobRef` once (`BlobNotFound` or `Corrupt` at
-   open), then reads one window at a time through `read_range`, so every chunk's length and CRC32C is checked and at
-   most one window is in memory. Each window looks the manifest up again (one small read per 32 MiB).
+   open), then keeps that manifest and reads one window at a time through `read_manifest_range`, so every chunk's length
+   and CRC32C is checked, at most one window is in memory, and the manifest is read once per stream.
 5. **The pin set** maps each pinned `Pinned::{Upload, Blob}` to a count of live guards, behind one mutex. A `Pins`
    guard releases its ids on drop. GC uses `pinned()` for its mark and `unless_pinned(id, delete)` for each sweep
    delete: the check and the delete run under the lock, so a pin taken after the mark waits and still protects its
@@ -73,12 +82,13 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
   each document is logged.
 - Pins of documents logged `Buffered`/`Async` live until the next commit or `Fsync` operation; a writer that never
   commits holds them. GC therefore never sweeps a blob such a document references.
-- `bind_attempts` bounds the retry SPEC §9.4 states as "until it answers": a caller sees an error instead of a hang;
+- `bind_budget` bounds in time the retry SPEC §9.4 states as "until it answers": a caller sees an error instead of a hang;
   the upload stays for GC, and nothing references the blob. Its pins are dropped then, so only the grace period (24 h) keeps
   the upload's chunks from a sweep while a late conditional write may still bind them: the grace period must stay far
   above any such delay.
 - `BlobDatabase::log_mut` exposes the engine's `Database::put`, which takes any `set_blob_ref`; M10's `Db` must not
-  re-expose it (SPEC §9.6).
+  re-expose it (SPEC §9.6). Replacing the log through it restarts its marks at 0: pins held from the old log
+  wait for the new one's marks, so they are held longer, never released early (safe).
 - Pins of a poisoned database's appended records stay while the `BlobDatabase` lives; M10 drops it on poison.
 
 ## Alternatives considered
@@ -89,3 +99,5 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
 - **Release pins when `put` returns.** Wrong for `Buffered`/`Async`: the record is not durable, and a GC between
   would see neither the WAL record (not on disk) nor a pin.
 - **Infinite bind retry.** Literal SPEC §9.4, but a remote store that keeps failing would hang the writer.
+- **A cap on attempts.** Simpler, but its wall time depends on how fast each attempt fails; the budget bounds what
+  the caller waits, and backoff spares a struggling store.
