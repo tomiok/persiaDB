@@ -188,3 +188,106 @@ impl<S: Storage> Storage for ListsEverything<S> {
         self.0.capabilities()
     }
 }
+
+/// A backend that fails chosen calls by key, whatever order parallel workers reach it in, and counts the requests in
+/// flight at once.
+#[derive(Debug, Default)]
+pub struct KeyFaults<S> {
+    pub inner: S,
+    /// `(op, key)` → how many more calls fail, and with a transient (`true`) or an I/O (`false`) error.
+    pub faults: std::sync::Mutex<BTreeMap<(String, String), (u32, bool)>>,
+    pub in_flight: std::sync::atomic::AtomicUsize,
+    pub max_in_flight: std::sync::atomic::AtomicUsize,
+    /// `list` reports this length for every object instead of its own (a stale or lying listing).
+    pub list_size: Option<u64>,
+}
+
+impl<S: Storage> KeyFaults<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            faults: std::sync::Mutex::default(),
+            in_flight: std::sync::atomic::AtomicUsize::new(0),
+            max_in_flight: std::sync::atomic::AtomicUsize::new(0),
+            list_size: None,
+        }
+    }
+
+    pub fn fail(&self, op: Op, key: &str, times: u32, transient: bool) {
+        self.faults
+            .lock()
+            .unwrap()
+            .insert((op.to_string(), key.to_owned()), (times, transient));
+    }
+
+    pub fn max_in_flight(&self) -> usize {
+        self.max_in_flight.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn call<T>(&self, op: Op, key: &str, f: impl FnOnce() -> Result<T>) -> Result<T> {
+        use std::sync::atomic::Ordering::SeqCst;
+        let now = self.in_flight.fetch_add(1, SeqCst) + 1;
+        self.max_in_flight.fetch_max(now, SeqCst);
+        // Give other workers a chance to overlap with this request.
+        std::thread::yield_now();
+        let fault = {
+            let mut faults = self.faults.lock().unwrap();
+            match faults.get_mut(&(op.to_string(), key.to_owned())) {
+                Some((n, transient)) if *n > 0 => {
+                    *n -= 1;
+                    Some(*transient)
+                }
+                _ => None,
+            }
+        };
+        let out = match fault {
+            Some(true) => Err(persia_storage::Error::Transient {
+                op,
+                target: key.to_owned(),
+                source: "injected".into(),
+            }),
+            Some(false) => Err(persia_storage::Error::Io {
+                op,
+                target: key.to_owned(),
+                source: std::io::Error::other("injected"),
+            }),
+            None => f(),
+        };
+        self.in_flight.fetch_sub(1, SeqCst);
+        out
+    }
+}
+
+impl<S: Storage> Storage for KeyFaults<S> {
+    fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource> {
+        self.call(Op::GetRange, key.as_str(), || {
+            self.inner.get_range(key, range)
+        })
+    }
+    fn get(&self, key: &Key) -> Result<Bytes> {
+        self.call(Op::Get, key.as_str(), || self.inner.get(key))
+    }
+    fn put(&self, key: &Key, data: Bytes) -> Result<()> {
+        self.call(Op::Put, key.as_str(), || self.inner.put(key, data))
+    }
+    fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
+        self.call(Op::PutIfAbsent, key.as_str(), || {
+            self.inner.put_if_absent(key, data)
+        })
+    }
+    fn list(&self, prefix: &KeyPrefix) -> Result<Vec<ObjectMeta>> {
+        let mut listed = self.call(Op::List, prefix.as_str(), || self.inner.list(prefix))?;
+        if let Some(size) = self.list_size {
+            for meta in &mut listed {
+                meta.size = size;
+            }
+        }
+        Ok(listed)
+    }
+    fn delete(&self, key: &Key) -> Result<()> {
+        self.call(Op::Delete, key.as_str(), || self.inner.delete(key))
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+}

@@ -26,11 +26,16 @@
 //! ```
 
 pub mod keys;
+mod parallel;
+mod resume;
 
+use core::num::NonZeroUsize;
+use core::ops::Range;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use persia_format::BlobId;
+use persia_format::widen::usize_from_u32;
 use persia_storage::{ErrorKind, Key, PutOutcome, Storage};
 
 use crate::error::{Error, Result};
@@ -38,6 +43,7 @@ use crate::manifest::{BlobManifest, UploadId};
 use crate::store::{BindOutcome, BlobStore};
 
 pub use keys::RemoteKey;
+pub use resume::{ResumeToken, ResumedUpload};
 
 /// The encoding named by errors about a chunk object.
 const CHUNK: &str = "blob chunk";
@@ -46,15 +52,23 @@ const OBJECT: &str = "blob storage object";
 /// How often `bind` writes the manifest again when the bound manifest it was told about is gone before it reads it
 /// (deleted by a sweep in between): the outcome is then known (not bound by us), so this is not a blind retry.
 const BIND_ATTEMPTS: u32 = 3;
+/// Requests a store keeps in flight in a parallel transfer unless told otherwise ([`RemoteBlobStore::with_parallelism`]).
+pub const DEFAULT_PARALLELISM: NonZeroUsize = match NonZeroUsize::new(8) {
+    Some(n) => n,
+    None => NonZeroUsize::MIN,
+};
 
 /// A [`BlobStore`] in the remote layout over a [`Storage`] (see the module docs).
 pub struct RemoteBlobStore<S = Arc<dyn Storage>> {
     storage: S,
+    parallelism: NonZeroUsize,
 }
 
 impl<S> core::fmt::Debug for RemoteBlobStore<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("RemoteBlobStore").finish_non_exhaustive()
+        f.debug_struct("RemoteBlobStore")
+            .field("parallelism", &self.parallelism)
+            .finish_non_exhaustive()
     }
 }
 
@@ -62,7 +76,24 @@ impl<S: Storage> RemoteBlobStore<S> {
     /// A store over `storage`, whose root holds `blobs/` (SPEC §10.4). Reads work on any backend; staging and binding
     /// need [`Capabilities::conditional_put`](persia_storage::Capabilities::conditional_put).
     pub fn new(storage: S) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            parallelism: DEFAULT_PARALLELISM,
+        }
+    }
+
+    /// The same store with at most `parallelism` requests in flight in [`BlobStore::stage_chunks`],
+    /// [`BlobStore::read_chunks`], [`RemoteBlobStore::resume`] and [`RemoteBlobStore::restage`] (ROADMAP 9.3.2), one
+    /// per thread; 1 runs them in the caller's thread, one at a time.
+    #[must_use]
+    pub fn with_parallelism(mut self, parallelism: NonZeroUsize) -> Self {
+        self.parallelism = parallelism;
+        self
+    }
+
+    /// The most requests a parallel transfer keeps in flight.
+    pub const fn parallelism(&self) -> NonZeroUsize {
+        self.parallelism
     }
 
     /// The backend.
@@ -136,6 +167,31 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
             Err(e) if e.kind() == ErrorKind::Unsupported => Err(Error::ConditionalPutUnsupported),
             Err(e) => Err(storage(e)),
         }
+    }
+
+    fn stage_chunks(&self, upload_id: UploadId, first_index: u32, chunks: &[&[u8]]) -> Result<()> {
+        parallel::run(chunks.len(), self.parallelism, |i| {
+            let index = u32::try_from(i)
+                .ok()
+                .and_then(|i| first_index.checked_add(i))
+                .ok_or(Error::InvalidManifest {
+                    what: "more than u32::MAX chunks",
+                })?;
+            let bytes = chunks.get(i).copied().unwrap_or_default();
+            self.stage_chunk(upload_id, index, bytes)
+        })
+        .map(drop)
+    }
+
+    fn read_chunks(&self, manifest: &BlobManifest, indices: Range<u32>) -> Result<Vec<Vec<u8>>> {
+        let count = usize_from_u32(indices.end.saturating_sub(indices.start));
+        parallel::run(count, self.parallelism, |i| {
+            let index = u32::try_from(i)
+                .ok()
+                .and_then(|i| indices.start.checked_add(i))
+                .ok_or_else(|| corrupt("a chunk index does not fit in a u32"))?;
+            self.read_chunk(manifest, index)
+        })
     }
 
     fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome> {

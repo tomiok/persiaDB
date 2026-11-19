@@ -1143,6 +1143,7 @@ fn is_corruption_is_true_for_corrupt_only() {
             false,
         ),
         (Error::ConditionalPutUnsupported, false),
+        (Error::InvalidResume { what: "x" }, false),
         //
         //
 
@@ -1170,7 +1171,9 @@ fn is_corruption_is_true_for_corrupt_only() {
             //
             // -- remote (9.3) --
             // One arm for the remote layout's variants, `=> "remote"`, here and only here.
-            Error::Storage(_) | Error::ConditionalPutUnsupported => "remote",
+            Error::Storage(_) | Error::ConditionalPutUnsupported | Error::InvalidResume { .. } => {
+                "remote"
+            }
             //
             //
             // -- documents (9.4) --

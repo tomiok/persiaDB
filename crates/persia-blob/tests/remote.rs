@@ -98,11 +98,11 @@ proptest! {
 }
 
 proptest! {
-    // Every object is fsynced with its directory: few cases, each a fresh tempdir.
+    // Every object is fsynced with its directory: few cases and at most 25 chunks, each case a fresh tempdir.
     #![proptest_config(ProptestConfig::with_cases(16))]
 
     #[test]
-    fn any_blob_round_trips_on_the_local_backend(len in 0_usize..300, chunk in 1_u32..=70, seed in any::<u8>()) {
+    fn any_blob_round_trips_on_the_local_backend(len in 0_usize..200, chunk in 8_u32..=70, seed in any::<u8>()) {
         let dir = tempfile::tempdir().unwrap();
         let store = RemoteBlobStore::new(LocalStorage::open(dir.path()).unwrap());
         check_round_trip(&store, &data_of(len, seed), chunk, 7);
