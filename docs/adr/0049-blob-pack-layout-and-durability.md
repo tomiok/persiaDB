@@ -1,6 +1,6 @@
 # ADR-0049: The blob pack file: layout, per-blob durability, recovery and reads
 
-- Status: accepted
+- Status: proposed
 - Date: 2026-11-18
 - Related: SPEC §4.2–§4.8, §9.2, §9.3, §9.5, §17, §18.9, §18.10; ROADMAP 9.2.1–9.2.5, 9.5.2, 9.5.3; ADR-0007,
   ADR-0008, ADR-0009, ADR-0010, ADR-0013, ADR-0016, ADR-0017, ADR-0034, ADR-0035
