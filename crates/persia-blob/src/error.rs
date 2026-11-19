@@ -122,8 +122,19 @@ pub enum Error {
 
     // -- documents (9.4) --
     // Variants of put_blob and get_blob_range (SPEC §9.6) go here, and only here.
-    //
-    //
+    /// The id computed from a blob's bytes is not the `expected_id` the caller passed (SPEC §9.6, ADR-0034 item 5):
+    /// a caller's error, not corruption. Nothing was bound.
+    #[error("the blob's bytes hash to {actual}, not the expected {expected}")]
+    BlobIdMismatch {
+        /// The id the caller expected.
+        expected: BlobId,
+        /// The SHA-256 of the bytes read.
+        actual: BlobId,
+    },
+    /// A `put_blob`'s `mime` or `user_meta` breaks a rule of SPEC §9.1 (a caller's error), found before any byte is
+    /// read.
+    #[error("invalid blob reference")]
+    InvalidBlobRef(#[source] persia_format::EncodeError),
 }
 
 impl Error {

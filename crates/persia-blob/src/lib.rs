@@ -43,5 +43,5 @@ pub use remote::RemoteBlobStore;
 
 // -- documents (9.4) --
 // put_blob and get_blob_range helpers that belong in this crate (SPEC §9.6): their lines go here, and only here.
-//
-//
+// The value type `put_blob` returns (it lives in `persia-format`, which `persia` reaches only through this crate).
+pub use persia_format::BlobRef;
