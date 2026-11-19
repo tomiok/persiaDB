@@ -321,25 +321,71 @@ pub fn encode_chunk_frame(
     index: u32,
     bytes: &[u8],
 ) -> Result<Vec<u8>> {
+    encode_chunk(frame_seq, upload_id, index, bytes).map(|(frame, _)| frame)
+}
+
+/// [`encode_chunk_frame`], and the head it wrote (the chunk's length and CRC32C, which a writer records).
+///
+/// # Errors
+/// As [`encode_chunk_frame`].
+pub fn encode_chunk(
+    frame_seq: u64,
+    upload_id: UploadId,
+    index: u32,
+    bytes: &[u8],
+) -> Result<(Vec<u8>, ChunkHead)> {
     let len = u32::try_from(bytes.len())
         .ok()
         .filter(|len| (1..=MAX_CHUNK_LEN).contains(len))
         .ok_or(Error::InvalidManifest {
             what: "a chunk that is empty or over 64 MiB",
         })?;
+    let chunk = ChunkHead {
+        upload_id,
+        index,
+        len,
+        crc: crc32c(bytes),
+    };
     let mut head = Writer::new();
     head.write_u128(upload_id.get());
     head.write_u32(index);
     head.write_u32(len);
-    head.write_u32(crc32c(bytes));
+    head.write_u32(chunk.crc);
     head.write_u32(0);
     let payload_len = u64_from_usize(CHUNK_HEAD_LEN).saturating_add(u64::from(len));
-    frame_bytes(
+    let frame = frame_bytes(
         FrameKind::BlobChunk,
         frame_seq,
         &[head.as_slice(), bytes],
         payload_len,
-    )
+    )?;
+    Ok((frame, chunk))
+}
+
+/// Decodes the [`CHUNK_HEAD_LEN`]-byte head of a `BlobChunk` payload, without the chunk's bytes: what a reader that
+/// only checks a chunk frame against a manifest reads (ADR-0049 item 9).
+///
+/// # Errors
+/// [`Error::Corrupt`] for fewer than [`CHUNK_HEAD_LEN`] bytes, a `len` of 0 or over 64 MiB, or non-zero reserved bytes.
+pub fn decode_chunk_head(head: &[u8]) -> Result<ChunkHead> {
+    let short = || corrupt("a chunk frame shorter than its head");
+    let mut r = Reader::new(head);
+    let upload_id = UploadId::new(r.read_u128().map_err(|_| short())?);
+    let index = r.read_u32().map_err(|_| short())?;
+    let len = r.read_u32().map_err(|_| short())?;
+    let crc = r.read_u32().map_err(|_| short())?;
+    if r.read_u32().map_err(|_| short())? != 0 {
+        return Err(corrupt("non-zero reserved bytes in a chunk frame"));
+    }
+    if !(1..=MAX_CHUNK_LEN).contains(&len) {
+        return Err(corrupt("a chunk frame's len is 0 or over 64 MiB"));
+    }
+    Ok(ChunkHead {
+        upload_id,
+        index,
+        len,
+        crc,
+    })
 }
 
 /// Decodes a `BlobChunk` payload: its head and the chunk's bytes. Does not recompute the CRC32C (the frame's CRC
@@ -349,30 +395,14 @@ pub fn encode_chunk_frame(
 /// [`Error::Corrupt`] for a payload shorter than its head, a `len` of 0 or over 64 MiB or that is not the rest of
 /// the payload, or non-zero reserved bytes.
 pub fn decode_chunk_payload(payload: &[u8]) -> Result<(ChunkHead, &[u8])> {
-    let short = || corrupt("a chunk frame shorter than its head");
-    let mut r = Reader::new(payload);
-    let upload_id = UploadId::new(r.read_u128().map_err(|_| short())?);
-    let index = r.read_u32().map_err(|_| short())?;
-    let len = r.read_u32().map_err(|_| short())?;
-    let crc = r.read_u32().map_err(|_| short())?;
-    if r.read_u32().map_err(|_| short())? != 0 {
-        return Err(corrupt("non-zero reserved bytes in a chunk frame"));
-    }
-    let bytes = r.rest();
-    if !(1..=MAX_CHUNK_LEN).contains(&len) || u64_from_usize(bytes.len()) != u64::from(len) {
+    let head = decode_chunk_head(payload)?;
+    let bytes = payload.get(CHUNK_HEAD_LEN..).unwrap_or_default();
+    if u64_from_usize(bytes.len()) != u64::from(head.len) {
         return Err(corrupt(
             "a chunk frame's len is not the length of its bytes",
         ));
     }
-    Ok((
-        ChunkHead {
-            upload_id,
-            index,
-            len,
-            crc,
-        },
-        bytes,
-    ))
+    Ok((head, bytes))
 }
 
 /// One whole `BlobIndex` frame numbered `frame_seq`: the blob manifest (SPEC §9.1.1) and, per chunk, the offset of

@@ -460,15 +460,13 @@ fn a_concurrent_bind_never_dedups_onto_a_blob_whose_commit_failed() {
             deduped, 0,
             "round {round}: AlreadyBound onto a commit that never synced: {results:?}"
         );
+        // Both read as outcome-unknown: the second ran on a handle poisoned by the first's unknown commit of the same
+        // id, which only a reopen settles (ADR-0049 item 6). Neither may read as "not bound".
         assert!(
             results
                 .iter()
-                .any(|r| r.as_ref().is_err_and(Error::is_bind_outcome_unknown))
-        );
-        assert!(
-            results
-                .iter()
-                .any(|r| matches!(r, Err(Error::PackPoisoned)))
+                .all(|r| r.as_ref().is_err_and(Error::is_bind_outcome_unknown)),
+            "{results:?}"
         );
         drop(store);
         // Whatever the crash keeps, the reopened pack holds the blob whole or not at all.
@@ -479,4 +477,87 @@ fn a_concurrent_bind_never_dedups_onto_a_blob_whose_commit_failed() {
             }
         }
     }
+}
+
+/// Review blocker: an upload binds one blob. Binding a second manifest under a bound upload (the empty blob needs no
+/// staged chunk, so nothing else stops it) must be refused, or the pack would hold two index frames of one upload
+/// and fail every later open.
+#[test]
+fn a_bound_upload_cannot_bind_another_blob() {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    let first = store_blob(&store, b"first blob", 4, 7);
+    let empty = manifest_of(b"", 4, 7);
+    assert!(matches!(
+        store.bind(&empty),
+        Err(Error::InvalidManifest { .. })
+    ));
+    assert!(matches!(
+        store.bind_small(&empty, b""),
+        Err(Error::InvalidManifest { .. })
+    ));
+    let small = manifest_of(b"tiny", 4, 7);
+    assert!(store.bind_small(&small, b"tiny").is_err());
+    assert!(!store.is_poisoned());
+    drop(store);
+    let store = open(&fs.crash(CrashLoss::Nothing), PackMode::ReadWrite).unwrap();
+    assert_eq!(store.blob_ids(), [first.blob_id()]);
+    assert_eq!(read_all(&store, &first).unwrap(), b"first blob");
+    // The empty blob binds under its own upload.
+    assert_eq!(
+        store.bind(&manifest_of(b"", 4, 8)).unwrap(),
+        BindOutcome::Bound
+    );
+}
+
+/// A fault at each step of the pack's creation (create, header write, sync, link, removal of the temporary name,
+/// directory sync), applied or not: no temporary name is left behind once the process survives the failure, and a
+/// retry on a fresh handle (or the same one, when nothing was linked) creates or finds a working pack.
+#[test]
+fn a_failed_creation_leaves_no_temporary_file_and_can_be_retried() {
+    for k in 0..6_u64 {
+        for apply in [false, true] {
+            let fs = sim();
+            let store = open(&fs, PackMode::ReadWrite).unwrap();
+            let at = fs.mutations() + k;
+            fs.set_fault(Some(if apply {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            let failed = store.stage_chunk(UploadId::new(1), 0, b"x");
+            fs.set_fault(None);
+            let what = format!("call {k}, applied {apply}: {failed:?}");
+            let crashed = fs.crash(CrashLoss::Nothing);
+            // The SimFs fault ends the "process" at the first failing call, so later calls of the cleanup fail too:
+            // what a restart sees is checked, the live view is not.
+            let names: Vec<_> = crashed.files().into_iter().map(|(p, _)| p).collect();
+            assert!(
+                names
+                    .iter()
+                    .all(|p| p == Path::new(PACK) || p.to_string_lossy().contains(".tmp.")),
+                "{what}: {names:?}"
+            );
+            let reopened = open(&crashed, PackMode::ReadWrite).unwrap();
+            let m = manifest_of(b"retry", 4, 2);
+            stage_all(&reopened, &m, b"retry").unwrap();
+            assert_eq!(reopened.bind(&m).unwrap(), BindOutcome::Bound, "{what}");
+        }
+    }
+}
+
+/// The cleanup of a creation the process survives: a link that finds the name taken (a second writer created a pack
+/// there, outside the contract) removes its temporary file and stops the handle; a reopen finds the other pack.
+#[test]
+fn a_failed_link_removes_its_temporary_file_and_poisons() {
+    let fs = sim();
+    let late = open(&fs, PackMode::ReadWrite).unwrap();
+    let early = open(&fs, PackMode::ReadWrite).unwrap();
+    early.stage_chunk(UploadId::new(1), 0, b"first").unwrap();
+    let err = late.stage_chunk(UploadId::new(2), 0, b"x").unwrap_err();
+    assert!(matches!(err, Error::PackIo { .. }), "{err:?}");
+    assert!(late.is_poisoned());
+    let names: Vec<_> = fs.files().into_iter().map(|(p, _)| p).collect();
+    assert_eq!(names, [Path::new(PACK)], "no temporary file left");
+    assert!(open(&fs, PackMode::ReadWrite).unwrap().exists());
 }

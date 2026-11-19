@@ -538,3 +538,120 @@ fn refresh_reports_a_recreated_pack_of_the_same_generation() {
         })
     ));
 }
+
+// --- Review fix-ups: crashes during recovery, partial roll-forward, refresh after a roll-forward ---
+
+/// A pack whose tail holds a staged chunk, then the whole of a bind cut at its slot write (blob `b"cut"`), then
+/// garbage: a read-write open rolls the bind forward and truncates the garbage. Returns the bytes and the two blobs.
+fn pack_with_a_cut_bind() -> (Vec<u8>, BlobManifest, BlobManifest) {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    let a = put(&store, b"committed", 4, 1);
+    store
+        .stage_chunk(UploadId::new(9), 0, b"never bound")
+        .unwrap();
+    let b = manifest_of(b"cut bind", 4, 2);
+    stage(&store, &b, b"cut bind").unwrap();
+    // A bind's calls: index append, sync, slot write, slot sync.
+    fs.set_fault(Some(SimFault::FailAt(fs.mutations() + 2)));
+    assert!(store.bind(&b).unwrap_err().is_bind_outcome_unknown());
+    drop(store);
+    let mut bytes = fs.crash(CrashLoss::Nothing).read(Path::new(PACK)).unwrap();
+    bytes.extend([0xA5; 40]);
+    (bytes, a, b)
+}
+
+/// The `frame_seq` a frame appended after every valid frame of `bytes` from its committed `log_end` would take.
+fn next_tail_seq(bytes: &[u8]) -> (u64, u64) {
+    use persia_format::frame::FrameScanner;
+    let sb = decode_prefix(bytes).unwrap().superblock;
+    let mut scanner = FrameScanner::new(&bytes[sb.log_end as usize..], sb.log_end)
+        .expect_frame_seq(sb.next_frame_seq);
+    let mut end = sb.log_end;
+    for frame in scanner.by_ref() {
+        end = frame.end();
+    }
+    (scanner.next_frame_seq().unwrap(), end)
+}
+
+#[test]
+fn a_crash_during_recovery_recovers_the_same_blobs_idempotently() {
+    let (bytes, a, b) = pack_with_a_cut_bind();
+    // Recovery's mutating calls: truncate, sync, roll-forward slot write, its sync.
+    for k in 0..4_u64 {
+        for apply in [false, true] {
+            let fs = with_pack(&bytes);
+            let at = fs.mutations() + k;
+            fs.set_fault(Some(if apply {
+                SimFault::ApplyThenFail(at)
+            } else {
+                SimFault::FailAt(at)
+            }));
+            let first = open(&fs, PackMode::ReadWrite);
+            fs.set_fault(None);
+            assert!(first.is_err(), "call {k}: the open sees its own fault");
+            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(k)] {
+                let what = format!("call {k}, applied {apply}, {loss:?}");
+                let crashed = fs.crash(loss);
+                let store =
+                    open(&crashed, PackMode::ReadWrite).unwrap_or_else(|e| panic!("{what}: {e}"));
+                for (m, data) in [(&a, &b"committed"[..]), (&b, b"cut bind")] {
+                    assert_eq!(read_all(&store, m).unwrap(), data, "{what}");
+                }
+                drop(store);
+                let again = open(&crashed, PackMode::ReadWrite).unwrap();
+                assert_eq!(again.recovery().rolled_forward, 0, "{what}: idempotent");
+                assert_eq!(again.blob_ids().len(), 2, "{what}");
+            }
+        }
+    }
+}
+
+#[test]
+fn roll_forward_keeps_the_earlier_of_two_tail_binds_when_the_second_is_incomplete() {
+    let (bytes, a, b) = pack_with_a_cut_bind();
+    let (seq, end) = next_tail_seq(&bytes);
+    let mut file = bytes[..end as usize].to_vec();
+    // A second index frame after the cut bind, CRC-valid, whose chunk is not its own: the committed blob's first
+    // chunk frame, of another upload.
+    let c = manifest_of(b"none", 4, 3);
+    file.extend(persia_blob::pack::layout::encode_index_frame(seq, &c, &[FIRST_FRAME]).unwrap());
+    let fs = with_pack(&file);
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    assert_eq!(store.recovery().rolled_forward, 1);
+    assert_eq!(store.recovery().truncated_from, Some(file.len() as u64));
+    assert_eq!(store.manifest(c.blob_id()).unwrap(), None);
+    assert_eq!(read_all(&store, &a).unwrap(), b"committed");
+    assert_eq!(read_all(&store, &b).unwrap(), b"cut bind");
+    assert_eq!(fs.read(Path::new(PACK)).unwrap().len() as u64, end);
+}
+
+#[test]
+fn refresh_finds_what_a_writer_rolled_forward_after_a_damaged_newest_slot() {
+    let (bytes, a, b) = two_blobs();
+    let mut rotted = bytes.clone();
+    rotted[4096 + 100] ^= 1;
+    let fs = with_pack(&rotted);
+    let reader = open(&fs, PackMode::ReadOnly).unwrap();
+    assert_eq!(reader.blob_ids(), [a.blob_id()]);
+    let writer = open(&fs, PackMode::ReadWrite).unwrap();
+    assert_eq!(writer.recovery().rolled_forward, 1);
+    assert!(reader.refresh().unwrap());
+    assert_eq!(read_all(&reader, &b).unwrap(), b"second");
+    assert_eq!(read_all(&reader, &a).unwrap(), b"0123456789abcdef");
+}
+
+#[test]
+fn refresh_rejects_the_same_seq_with_other_contents() {
+    let (bytes, _, _) = two_blobs();
+    let fs = with_pack(&bytes);
+    let reader = open(&fs, PackMode::ReadOnly).unwrap();
+    let p = decode_prefix(&bytes).unwrap();
+    // The active slot rewritten with its own seq and another blob_count: two commits never share a seq.
+    let mut sb = p.superblock;
+    sb.blob_count -= 1;
+    let at = if p.slot == persia_format::superblock::Slot::A { 4096 } else { 8192 };
+    let f = fs.open(Path::new(PACK), true).unwrap();
+    f.write_all_at(&sb.encode(), at).unwrap();
+    assert!(reader.refresh().unwrap_err().is_corruption());
+}

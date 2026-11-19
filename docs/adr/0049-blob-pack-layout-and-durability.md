@@ -54,24 +54,38 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
    A container reader skips kinds 6 and 7 as it skipped unknown kinds (its replay and recovery look only at
    `WalChunk` and `Manifest` frames), so no container changes behavior; `persia container` names them.
 5. **Visibility.** A blob is bound when its `BlobIndex` frame lies in `12288..log_end` of the active slot. Chunk
-   frames that no committed index names are staging or orphans (SPEC §9.3). Nothing after the `log_end` of the newest slot
-   written was ever acknowledged: `stage_chunk` promises nothing durable, and `bind` answers `Bound` only after the slot that covers
-   the index frame is synced.
-6. **Bind is synced per blob** (§18.9 (a)). Under the writer's lock, `bind` checks the id is not bound
-   (`AlreadyBound` otherwise, nothing written), checks that this handle staged every chunk the manifest names with
-   its length and CRC32C (`ChunkNotStaged` otherwise), appends the `BlobIndex` frame after them, syncs the file's
-   data, writes the inactive slot (`seq + 1`, the new index frame, `log_end` = the end of the file's frames,
-   `blob_count + 1`, the same generation) and syncs again, then publishes. A blob is therefore durable before any
-   document referencing it can be logged, whatever the WAL's durability (§18.9 (b) is moot), and the pack's index
-   covers a blob before any container byte references it (the order a live copy relies on, §4.8). A failed write or
-   sync poisons the handle (SPEC §4.5): before the slot write the blob is not bound (an I/O error); from the slot
-   write on its outcome is unknown (`BindOutcomeUnknown`), and the next read-write open rolls the bind forward (item 9). Either way no document was
-   logged, so the worst case is an orphan.
+   frames that no committed index names are staging or orphans (SPEC §9.3). Nothing after the `log_end` of the
+   newest slot written was ever acknowledged: `stage_chunk` promises nothing durable, and `bind` answers `Bound` only
+   after the slot that covers the index frame is synced. The rule that a binding is shown only once durable
+   (`AlreadyBound`, `manifest`, `contains`; the `BlobStore` contract) binds the **writer handle**, which publishes an
+   entry only after its slot sync returns. A read-only handle in another process reads the slots from the file and may
+   see a binding between the slot write and its sync; that is harmless, because a read-only handle logs no document,
+   and a crash that reverts the slot only makes it see less after a reopen.
+6. **Bind is synced per blob** (§18.9 (a)). A writer mutex serializes every write; `bind` holds it from start to
+   publish. It checks the id is not bound (`AlreadyBound` otherwise, nothing written) and that the upload has bound no
+   other blob (`InvalidManifest`: an upload binds one blob, and a second index naming it would make every later open
+   fail), checks that this handle staged every chunk the manifest names with its length and CRC32C
+   (`ChunkNotStaged` otherwise), appends the `BlobIndex` frame after them, syncs the file's data, writes the inactive
+   slot (`seq + 1`, the new index frame, `log_end` = the end of the file's frames, `blob_count + 1`, the same
+   generation and pack id) and syncs again, then publishes under the `RwLock`'s write side. The syncs run under its
+   read side only, so readers are not blocked by them. A blob is therefore durable before any document referencing
+   it can be logged, whatever the WAL's durability (§18.9 (b) is moot), and the pack's index covers a blob before
+   any container byte references it (the order a live copy relies on, §4.8). A failed write or sync poisons the
+   handle (SPEC §4.5): before the slot write the blob is not bound (an I/O error, then `PackPoisoned`); from the slot
+   write on its outcome is unknown (`BindOutcomeUnknown`), and every later `bind` of that id on the handle answers
+   `BindOutcomeUnknown` too, never "not bound". The outcome is learned by **reopening** the pack: the next
+   read-write open rolls the bind forward (item 9) or finds it never reached the disk. Either way no document was
+   logged, so the worst case is an orphan. Like the container, the pack relies on a failed `fdatasync` being reported
+   to the handle that wrote (an error reported to another descriptor of the file, as Linux's errseq allows, is not
+   seen): the same limit as SPEC §4.5.2.
 7. **Lazy, durable creation** (§9.3, §18.9 (c)). The first `stage_chunk` or `bind` of a database creates the pack:
    header and both new-pack slots written to `<name>.persia.blobs.tmp.<nonce>.<n>`, synced, hard-linked to the pack
-   name (which fails if it exists), the temporary name removed, then the directory synced, all before the first
-   chunk is appended. A crash leaves no pack or a complete empty one (and possibly a stale temporary file). The
-   pack's directory sync is its own: the pack is not created with the container.
+   name (which fails if it exists), then, whatever happened since the temporary file was created, the temporary name
+   removed and the directory synced (as `Container::create_in` does), all before the first chunk is appended. A crash
+   leaves no pack or a complete empty one (and possibly a stale temporary file); a failure the process survives leaves
+   no temporary name. A failure after the link, or a link that finds the name taken (a second writer), stops the
+   handle; a reopen finds what the path holds. The pack's directory sync is its own: the pack is not created with the
+   container.
 8. **Locking.** The pack takes no lock: only the container's writer, holding the container's writer lock (or, on
    Windows, `<name>.lock`), opens it read-write (SPEC §9.5: GC and `put_blob` run in that process). Opening the pack
    read-write without holding the container's lock is outside the contract: a second writer would truncate the
@@ -98,7 +112,9 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
    slot (`PackRecovery::rolled_forward`). Everything after them (a torn frame, staged chunks of a process that died,
    garbage) was never acknowledged (item 5) and is truncated, then synced, so the next append can never land behind
    stale frames (SPEC §4.4). A read-only open never writes, and ignores the tail; it sees a rolled-forward blob once
-   the writer has opened. No quarantine copy: nothing acknowledged is ever truncated.
+   the writer has opened. No quarantine copy: what is truncated was never acknowledged, unless both the newest slot
+   and the frames of its bind are damaged, a double fault a single-copy file cannot survive (the blob is then lost, and
+   `verify` reports the documents that reference it).
 10. **Readers and the writer share the file as the container does** (SPEC §4.5.1, §4.7). The writer appends only
     after its `log_end` and writes slots in place; recovery truncates only after `log_end`; a rewrite (9.5.2) will
     write a new file and rename it over the pack. A read-only handle holds the snapshot of its open and reads frames
@@ -110,7 +126,9 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
     manifest; `read_chunk_checked` then checks length and CRC32C (SPEC §9.3). Chunks of this handle's staged,
     unbound uploads are found by `(upload_id, chunk_idx)`.
 12. **Mapped reads** (SPEC §4.7, ADR-0017) are opt-in through a `persia_storage::container::MapPermit`, which only an
-    `unsafe` call creates (its contract: SPEC §4.7's, for the pack file), because `persia-blob` forbids `unsafe`.
+    `unsafe` call creates, because `persia-blob` forbids `unsafe`. Its contract is SPEC §4.7's for the pack, plus: at
+    most one read-write `PackStore` of the pack open at a time, anywhere, until the pack enforces a single writer
+    (item 8). `MapPermit::map` refuses a range starting below 12288 (the header and slots are rewritten in place).
     The pack then maps `12288..log_end` once and again after each bind, and reads committed frames from the mapping;
     others are read with `pread`. A failed remap keeps the previous mapping. Tests and benches cannot create a permit
     outside xtask's `UNSAFE_ALLOWED` files, so the real mapping is covered by a doctest and the window logic by unit
@@ -118,6 +136,8 @@ named by the slot, a WAL range, frames after `log_end` that may hold acknowledge
 
 ## Consequences
 
+- On Windows a live mapping keeps a file from being shrunk (SPEC §4.7): a read-write open that must truncate a
+  pack tail fails with an I/O error while a reader maps the pack, as for the container.
 - One `fdatasync` pair per blob: a database ingesting many tiny blobs is bounded by sync latency (milliseconds on
   macOS). Batching syncs would need the WAL and the container commit to sync the pack first (§18.9's alternative);
   not now.

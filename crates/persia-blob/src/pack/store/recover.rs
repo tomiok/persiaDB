@@ -2,10 +2,10 @@
 //! and the truncation of the rest (SPEC §9.3, ADR-0049 item 9).
 
 use super::{
-    Access, BLOB_PACK, BlobId, ContainerFile, Entry, Error, FIRST_FRAME_OFFSET, FRAME_HEADER_LEN,
-    FrameHeader, FrameKind, HashMap, MIN_FRAME_LEN, Pack, PackMode, PackRecovery, Reader, Result,
-    StreamScanner, commit_slot, corrupt, decode_frame, decode_index_payload, decode_prefix,
-    from_format, io, io_err, layout, u64_from_usize,
+    Access, BLOB_PACK, BlobId, BlobManifest, ContainerFile, Entry, Error, FIRST_FRAME_OFFSET,
+    FRAME_HEADER_LEN, FrameHeader, FrameKind, HashMap, MIN_FRAME_LEN, Pack, PackMode, PackRecovery,
+    Reader, Result, StreamScanner, commit_slot, corrupt, decode_frame, decode_index_payload,
+    decode_prefix, from_format, io, io_err, layout, u64_from_usize, usize_from_u32,
 };
 
 /// The prefix of the pack in `file`: header and active slot.
@@ -122,8 +122,10 @@ fn roll_forward<F: ContainerFile>(
                 let known = |o: &u64| pack.chunk_frames.binary_search(o).is_ok();
                 let fresh = !pack.index.contains_key(&id)
                     && !pack.uploads.contains_key(&manifest.upload_id())
-                    && entries.iter().all(|(e, _): &(BlobId, Entry)| *e != id);
-                if !fresh || !chunks.iter().all(known) {
+                    && entries.iter().all(|(e, entry): &(BlobId, Entry)| {
+                        *e != id && entry.upload_id != manifest.upload_id()
+                    });
+                if !fresh || !chunks.iter().all(known) || !chunks_match(pack, &manifest, &chunks) {
                     break;
                 }
                 entries.push((
@@ -209,7 +211,13 @@ pub(super) fn scan_committed<F: ContainerFile>(
             return Err(corrupt("a committed frame out of the frame_seq run"));
         }
         match header.kind() {
-            FrameKind::BlobChunk => pack.chunk_frames.push(offset),
+            FrameKind::BlobChunk => {
+                // A chunk frame holds its 32-byte head and at least one byte (SPEC §9.3).
+                if header.payload_len() <= u64_from_usize(layout::CHUNK_HEAD_LEN) {
+                    return Err(corrupt("a committed chunk frame shorter than a chunk"));
+                }
+                pack.chunk_frames.push(offset);
+            }
             FrameKind::BlobIndex => {
                 added.push(index_frame(pack, offset, header.total_len())?);
                 *last_index = Some((offset, header.total_len()));
@@ -253,4 +261,39 @@ fn index_frame<F: ContainerFile>(pack: &mut Pack<F>, offset: u64, len: u64) -> R
         },
     );
     Ok(blob_id)
+}
+
+/// Whether every chunk frame `chunks` names is chunk `i` of `manifest`: its frame holds exactly `32 + len` payload
+/// bytes, and its head names the manifest's upload, index `i`, the chunk's length and the manifest's CRC32C. What a
+/// roll-forward checks before it commits an index it found after `log_end` (ADR-0049 item 9); the frames' CRCs were
+/// checked by the scan, or are committed.
+fn chunks_match<F: ContainerFile>(pack: &Pack<F>, manifest: &BlobManifest, chunks: &[u64]) -> bool {
+    let head_len = FRAME_HEADER_LEN.saturating_add(layout::CHUNK_HEAD_LEN);
+    chunks.iter().zip(0_u32..).all(|(&offset, index)| {
+        let expected = manifest
+            .chunk_range(index)
+            .and_then(|r| r.end.checked_sub(r.start))
+            .zip(manifest.chunk_crcs().get(usize_from_u32(index)).copied());
+        let Some((len, crc)) = expected else {
+            return false;
+        };
+        let Ok(bytes) = pack.bytes_at(offset, u64_from_usize(head_len)) else {
+            return false;
+        };
+        let Ok(frame) = FrameHeader::decode(&mut bytes.reader()) else {
+            return false;
+        };
+        let head = bytes
+            .as_slice()
+            .get(FRAME_HEADER_LEN..)
+            .and_then(|h| layout::decode_chunk_head(h).ok());
+        frame.kind() == FrameKind::BlobChunk
+            && frame.payload_len() == u64_from_usize(layout::CHUNK_HEAD_LEN).saturating_add(len)
+            && head.is_some_and(|h| {
+                h.upload_id == manifest.upload_id()
+                    && h.index == index
+                    && u64::from(h.len) == len
+                    && h.crc == crc
+            })
+    })
 }

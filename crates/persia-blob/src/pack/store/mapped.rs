@@ -88,7 +88,10 @@ impl PackStore<File> {
     /// failed remap keeps the previous mapping and is counted ([`PackStore::mapping_failures`]).
     ///
     /// Map only a pack on a local disk file system: a read error on a mapped page ends the process (`SIGBUS`), where
-    /// `pread` would return an error (SPEC §4.7).
+    /// `pread` would return an error (SPEC §4.7). On Windows a live mapping keeps the file from being shrunk: a
+    /// read-write open of the pack that must truncate a tail fails with an I/O error while a reader maps it
+    /// (ADR-0049, Consequences). `permit`'s contract includes at most one read-write `PackStore` of the pack at a
+    /// time, anywhere ([`MapPermit::new`]).
     ///
     /// ```
     /// use persia_blob::pack::{PackMode, PackStore};

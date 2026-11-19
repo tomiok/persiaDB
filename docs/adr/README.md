@@ -71,5 +71,6 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0046](./0046-typo-and-exactness-tiers-as-cascade-steps.md) | Typo and exactness tiers are steps of the cascade, by the most edits any one word needs | proposed |
 | [0047](./0047-filter-relaxation-as-a-last-step.md) | Filter relaxation (`filters: "last_resort"`) is one last step, L0 without its root filters | proposed (amended by 0048) |
 | [0048](./0048-request-filter-kept-beside-the-compilation.md) | The request filter is kept beside the compiled query, which is replaced only through it | proposed |
+| [0049](./0049-blob-pack-layout-and-durability.md) | Blob pack: layout, per-blob durable bind, recovery with roll-forward, pack generation | proposed |
 | [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | accepted |
-| [0051](./0051-blobs-with-documents-internal-api-pins-and-ordering.md) | Blobs with documents: the internal put_blob/put API, the pin set, and the blob-before-document order | proposed |
+| [0051](./0051-blobs-with-documents-internal-api-pins-and-ordering.md) | Blobs with documents: the internal put_blob/put API, the pin set, and the blob-before-document order | accepted |

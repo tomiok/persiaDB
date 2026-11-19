@@ -26,6 +26,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   is logged and of what a sync covers. An operation is durable once `durable_mark` reaches the `wal_mark` read after
   it (ROADMAP 9.4.1).
 - `persia-blob`: errors `BlobIdMismatch` and `InvalidBlobRef`; `read_manifest_range` (ROADMAP 9.4.2).
+- `persia-blob`: the local blob pack `<name>.persia.blobs` (`PackStore`, SPEC §9.3, ADR-0049): created lazily by the
+  first blob, a sync per blob (`bind` returns only once the blob is durable), recovery that rebuilds the index by scan
+  and rolls a cut bind forward, `refresh` for read-only handles, and opt-in mapped reads (`MapPermit`) (ROADMAP
+  9.2.1–9.2.4); fuzz target `pack_reader` (9.2.5).
 - `persia-engine`: filter relaxation, `relax.filters: "last_resort"` (ROADMAP 8.2.6; SPEC §6.2.3, §7.5, §7.6, §7.7;
   ADR-0047). The explicit opt-in plans one last level, L6 `filters` (`RelaxLevel::Filters`), after L5 (or after the
   last word level with `fallback: "none"`). Its step is L0's query with the filters of its root `bool` dropped (a
@@ -315,6 +319,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Blob manifest (SPEC §9.1.1): `flags` bit 0, `INLINE`, is now set on an inline blob's manifest, which holds the
   one-chunk blob's bytes: `80 + size` bytes, `upload_id` 0 (ROADMAP 9.3.3, ADR-0050). Readers built before this
   change reject such a manifest with `UnsupportedFlags`.
+- Blob pack file `<name>.persia.blobs` v1 (SPEC §9.3, ADR-0049): magic `"PERSIAB\x01"`, superblock slots with a pack
+  `generation` and `pack_id`, and frame kinds 6 `BlobChunk` and 7 `BlobIndex` (SPEC §4.4), which container readers
+  skip like unknown kinds. Golden files in `tests/fixtures/blob-pack/v1/`.
 
 ### Fixed
 - `persia-engine` (breaking: a new `DatabaseError` variant): a `put_batch` (or `put`) that ends early (a rejected

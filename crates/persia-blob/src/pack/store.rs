@@ -8,9 +8,8 @@ use std::io;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, Mutex, MutexGuard, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use persia_format::checksum::crc32c;
 use persia_format::frame::{
     FRAME_HEADER_LEN, FrameHeader, FrameKind, MIN_FRAME_LEN, StreamScanner,
 };
@@ -24,7 +23,7 @@ use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
     self, PackSuperblock, corrupt, decode_chunk_payload, decode_frame, decode_index_payload,
-    decode_prefix, encode_chunk_frame, encode_index_frame, from_format,
+    decode_prefix, encode_chunk, encode_index_frame, from_format,
 };
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
@@ -89,14 +88,32 @@ struct Pack<F> {
     window: Option<ByteSource>,
 }
 
+/// What readers share with the writer, behind the `RwLock`. Only a writer holding [`PackStore`]'s writer mutex
+/// changes it, and only to publish what is already written (and, for a bind, synced).
 #[derive(Debug)]
 struct Inner<F> {
     /// `None` while there is no pack file (SPEC §9.3: created by the first write).
     pack: Option<Pack<F>>,
     staged: HashMap<(UploadId, u32), Staged>,
-    poisoned: bool,
     /// Set by [`PackStore::enable_mapped_reads`].
     mapper: Option<Mapper<F>>,
+}
+
+/// Why a handle stopped writing (SPEC §4.5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Poison {
+    /// A write or sync failed where nothing could have been bound.
+    NotBound,
+    /// The slot write or sync of the bind of this id failed: it may be bound, and only a reopen tells (ADR-0049
+    /// item 6). A later `bind` of the id answers [`Error::BindOutcomeUnknown`], never a plain "not bound".
+    Unknown(BlobId),
+}
+
+/// The writer's own state, behind the writer mutex that serializes every write: held across a bind's appends and
+/// syncs, while readers go on under the `RwLock`'s read side.
+#[derive(Debug, Default)]
+struct WriterState {
+    poison: Option<Poison>,
 }
 
 /// The local blob store: the pack file `<name>.persia.blobs` (SPEC §9.3, ADR-0049).
@@ -137,6 +154,7 @@ pub struct PackStore<F: ContainerFile = File> {
     mode: PackMode,
     db_uuid: [u8; 16],
     recovery: PackRecovery,
+    writer: Mutex<WriterState>,
     inner: RwLock<Inner<F>>,
 }
 
@@ -183,10 +201,10 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             mode,
             db_uuid,
             recovery,
+            writer: Mutex::new(WriterState::default()),
             inner: RwLock::new(Inner {
                 pack,
                 staged: HashMap::new(),
-                poisoned: false,
                 mapper: None,
             }),
         })
@@ -233,7 +251,14 @@ impl<F: ContainerFile + 'static> PackStore<F> {
 
     /// Whether a failed write or sync stopped this handle from writing (SPEC §4.5): reopen to recover.
     pub fn is_poisoned(&self) -> bool {
-        self.read().poisoned
+        self.lock_writer().poison.is_some()
+    }
+
+    fn lock_writer(&self) -> MutexGuard<'_, WriterState> {
+        // The state is one assignment: consistent across a panic.
+        self.writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn read(&self) -> RwLockReadGuard<'_, Inner<F>> {
@@ -249,38 +274,51 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
-    /// The write lock, for a handle that may write.
-    fn writer(&self) -> Result<RwLockWriteGuard<'_, Inner<F>>> {
+    /// The writer mutex, for a handle that may write. `blob_id` names the bind asking (if any): after an unknown
+    /// commit of that id, the answer is outcome-unknown, never "not bound" (ADR-0049 item 6).
+    fn writer(&self, blob_id: Option<BlobId>) -> Result<MutexGuard<'_, WriterState>> {
         if self.mode == PackMode::ReadOnly {
             return Err(Error::PackReadOnly);
         }
-        let inner = self.write();
-        if inner.poisoned {
-            return Err(Error::PackPoisoned);
+        let w = self.lock_writer();
+        match w.poison {
+            None => Ok(w),
+            Some(Poison::Unknown(id)) if Some(id) == blob_id => {
+                Err(Error::BindOutcomeUnknown(Box::new(Error::PackPoisoned)))
+            }
+            Some(_) => Err(Error::PackPoisoned),
         }
-        Ok(inner)
     }
 
-    /// The pack file, created first if there is none (SPEC §9.3): written to a temporary file, synced, hard-linked
-    /// to the pack's name (which fails if it exists), the temporary name removed and the directory synced, before
-    /// anything is appended. A failure from the link on poisons the handle: the pack may exist, its name maybe not
-    /// durably.
-    fn ensure_pack(&self, inner: &mut Inner<F>) -> Result<()> {
-        if inner.pack.is_none() {
-            let file = create_pack(&*self.vfs, &self.path, self.db_uuid).inspect_err(|e| {
-                if matches!(e, Error::PackIo { op, .. } if LINKED_OPS.contains(op)) {
-                    inner.poisoned = true;
-                }
-            })?;
-            let (file, pack_id) = file;
-            inner.pack = Some(Pack::new(file, self.db_uuid, pack_id));
+    /// Creates the pack if there is none (SPEC §9.3), with the writer mutex held and no `RwLock` guard: the
+    /// creation syncs a file and a directory. See [`create_pack`].
+    fn ensure_pack(&self, w: &mut WriterState) -> Result<()> {
+        if self.read().pack.is_some() {
+            return Ok(());
         }
-        Ok(())
+        match create_pack(&*self.vfs, &self.path, self.db_uuid) {
+            Ok((file, pack_id)) => {
+                self.write().pack = Some(Pack::new(file, self.db_uuid, pack_id));
+                Ok(())
+            }
+            Err(Created::NoPack(e)) => Err(e),
+            Err(Created::MaybePack(e)) => {
+                w.poison = Some(Poison::NotBound);
+                Err(e)
+            }
+        }
     }
 }
 
-/// The steps of [`create_pack`] after which the pack may exist at its name.
-const LINKED_OPS: [&str; 2] = ["remove temporary file", "sync directory"];
+/// Why [`create_pack`] failed: before any pack existed at the name, or after (or beside) one.
+#[derive(Debug)]
+enum Created {
+    /// No pack was linked to the name, and the temporary name was removed (or its removal reported).
+    NoPack(Error),
+    /// The link succeeded and a later step failed, or another pack already held the name: the handle stops writing,
+    /// and a reopen finds what the path holds.
+    MaybePack(Error),
+}
 
 /// Distinguishes the temporary files of one process's pack creations.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -302,25 +340,47 @@ fn parent_of(path: &Path) -> &Path {
     }
 }
 
-/// Creates a new, empty pack at `path` durably (SPEC §9.3, §4.5.2) and returns it open read-write.
+/// Creates a new, empty pack at `path` durably (SPEC §9.3, §4.5.2) and returns it open read-write: header and slots
+/// written to a temporary file and synced, the file hard-linked to `path` (which fails if the name exists), then the
+/// temporary name removed and the directory synced whatever happened, as `Container::create_in` does, so no
+/// temporary name is left behind by a failure the process survives.
 fn create_pack<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
     db_uuid: [u8; 16],
-) -> Result<(F, u128)> {
+) -> core::result::Result<(F, u128), Created> {
     let pack_id = random_u128();
-    let prefix = layout::new_pack_prefix(db_uuid, pack_id)?;
+    let prefix = layout::new_pack_prefix(db_uuid, pack_id).map_err(Created::NoPack)?;
     let temp = temp_path(path);
-    let file = vfs.create_new(&temp).map_err(io_err("create"))?;
-    file.write_all_at(&prefix, 0)
-        .map_err(io_err("write header"))?;
-    file.sync_data().map_err(io_err("sync"))?;
+    let file = vfs
+        .create_new(&temp)
+        .map_err(|e| Created::NoPack(io_err("create")(e)))?;
+    let written = file
+        .write_all_at(&prefix, 0)
+        .map_err(io_err("write header"))
+        .and_then(|()| file.sync_data().map_err(io_err("sync")))
+        .map_err(Created::NoPack);
     // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
-    vfs.hard_link(&temp, path).map_err(io_err("link"))?;
-    vfs.remove_file(&temp)
-        .map_err(io_err("remove temporary file"))?;
-    vfs.sync_dir(parent_of(path))
-        .map_err(io_err("sync directory"))?;
+    let linked = written.and_then(|()| {
+        vfs.hard_link(&temp, path).map_err(|e| {
+            if e.kind() == io::ErrorKind::AlreadyExists {
+                // Another writer created a pack there: a second writer, outside the contract (ADR-0049 item 8).
+                Created::MaybePack(io_err("link: a pack already exists at the path")(e))
+            } else {
+                Created::NoPack(io_err("link")(e))
+            }
+        })
+    });
+    // One directory sync covers the link and the removal, and runs even if the removal failed.
+    let removed = vfs
+        .remove_file(&temp)
+        .map_err(io_err("remove temporary file"));
+    let synced = vfs
+        .sync_dir(parent_of(path))
+        .map_err(io_err("sync directory"));
+    linked?;
+    removed.map_err(Created::MaybePack)?;
+    synced.map_err(Created::MaybePack)?;
     Ok((file, pack_id))
 }
 
@@ -433,18 +493,6 @@ impl<F: ContainerFile> Pack<F> {
             .map_err(from_format)
     }
 
-    /// Appends one frame at `end`. A failed write poisons the caller's handle.
-    fn append(&mut self, frame: &[u8]) -> io::Result<u64> {
-        let offset = self.end;
-        let end = offset
-            .checked_add(u64_from_usize(frame.len()))
-            .ok_or_else(|| io::Error::other("pack offset exhausted"))?;
-        self.file.write_all_at(frame, offset)?;
-        self.end = end;
-        self.next_frame_seq = self.next_frame_seq.saturating_add(1);
-        Ok(offset)
-    }
-
     /// The `frame_seq` of the next frame; never `u64::MAX` (SPEC §4.4).
     fn take_seq(&self) -> Result<u64> {
         match self.next_frame_seq {
@@ -458,73 +506,107 @@ impl<F: ContainerFile> Pack<F> {
 
 impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
     fn stage_chunk(&self, upload_id: UploadId, index: u32, bytes: &[u8]) -> Result<()> {
-        let mut guard = self.writer()?;
-        let inner = &mut *guard;
+        let mut w = self.writer(None)?;
         // Never overwritten (SPEC §9.2): a chunk already there must be these bytes.
-        if let Some(existing) = staged_bytes(inner, upload_id, index)? {
+        if let Some(existing) = staged_bytes(&self.read(), upload_id, index)? {
             return if existing.as_slice() == bytes {
                 Ok(())
             } else {
                 Err(Error::StagedChunkConflict { upload_id, index })
             };
         }
-        self.ensure_pack(inner)?;
-        let pack = inner.pack.as_mut().ok_or(Error::PackPoisoned)?;
-        let frame = encode_chunk_frame(pack.take_seq()?, upload_id, index, bytes)?;
-        let offset = match pack.append(&frame) {
-            Ok(offset) => offset,
-            Err(e) => {
-                inner.poisoned = true;
+        self.ensure_pack(&mut w)?;
+        // Written under the read side: readers go on, and only this writer (holding the mutex) moves `end`.
+        let (offset, end, head) = {
+            let inner = self.read();
+            let pack = inner.pack.as_ref().ok_or(Error::PackPoisoned)?;
+            let (frame, head) = encode_chunk(pack.take_seq()?, upload_id, index, bytes)?;
+            let offset = pack.end;
+            let end = offset
+                .checked_add(u64_from_usize(frame.len()))
+                .ok_or_else(|| corrupt("the pack's offsets are exhausted"))?;
+            if let Err(e) = pack.file.write_all_at(&frame, offset) {
+                w.poison = Some(Poison::NotBound);
                 return Err(io_err("append")(e));
             }
+            (offset, end, head)
         };
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        let pack = inner.pack.as_mut().ok_or(Error::PackPoisoned)?;
+        pack.end = end;
+        pack.next_frame_seq = pack.next_frame_seq.saturating_add(1);
         pack.chunk_frames.push(offset);
-        // `encode_chunk_frame` checked the length fits.
-        let len = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
         inner.staged.insert(
             (upload_id, index),
             Staged {
                 offset,
-                len,
-                crc: crc32c(bytes),
+                len: head.len,
+                crc: head.crc,
             },
         );
         Ok(())
     }
 
     fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome> {
-        let mut guard = self.writer()?;
-        let inner = &mut *guard;
         let blob_id = manifest.blob_id();
-        if let Some(pack) = &inner.pack
-            && let Some(entry) = pack.index.get(&blob_id)
-        {
-            return Ok(BindOutcome::AlreadyBound(pack.manifest_of(blob_id, entry)?));
-        }
         let upload_id = manifest.upload_id();
+        let mut w = self.writer(Some(blob_id))?;
         let mut chunks = Vec::new();
-        for index in 0..manifest.chunk_count() {
-            let expected = manifest
-                .chunk_range(index)
-                .and_then(|r| r.end.checked_sub(r.start))
-                .zip(manifest.chunk_crcs().get(usize_from_u32(index)));
-            match (inner.staged.get(&(upload_id, index)), expected) {
-                (Some(s), Some((len, &crc))) if u64::from(s.len) == len && s.crc == crc => {
-                    chunks.push(s.offset);
+        {
+            let inner = self.read();
+            if let Some(pack) = &inner.pack {
+                // Entries are published only after their commit synced (the writer mutex is held until then), so
+                // the manifest this answers with is durable.
+                if let Some(entry) = pack.index.get(&blob_id) {
+                    return Ok(BindOutcome::AlreadyBound(pack.manifest_of(blob_id, entry)?));
                 }
-                _ => return Err(Error::ChunkNotStaged { upload_id, index }),
+                // An upload binds one blob: a second index naming it would make the pack fail to open.
+                if pack.uploads.contains_key(&upload_id) {
+                    return Err(Error::InvalidManifest {
+                        what: "an upload already bound to another blob",
+                    });
+                }
+            }
+            for index in 0..manifest.chunk_count() {
+                let expected = manifest
+                    .chunk_range(index)
+                    .and_then(|r| r.end.checked_sub(r.start))
+                    .zip(manifest.chunk_crcs().get(usize_from_u32(index)));
+                match (inner.staged.get(&(upload_id, index)), expected) {
+                    (Some(s), Some((len, &crc))) if u64::from(s.len) == len && s.crc == crc => {
+                        chunks.push(s.offset);
+                    }
+                    _ => return Err(Error::ChunkNotStaged { upload_id, index }),
+                }
             }
         }
-        self.ensure_pack(inner)?;
-        let pack = inner.pack.as_mut().ok_or(Error::PackPoisoned)?;
-        let frame = encode_index_frame(pack.take_seq()?, manifest, &chunks)?;
-        let sb = match commit(pack, &frame) {
-            Ok(sb) => sb,
+        self.ensure_pack(&mut w)?;
+        // Appended, synced, committed and synced under the read side only: readers are not blocked by the syncs,
+        // and see the entry only once it is published below.
+        let committed = {
+            let inner = self.read();
+            let pack = inner.pack.as_ref().ok_or(Error::PackPoisoned)?;
+            commit(pack, manifest, &chunks)
+        };
+        let (sb, slot) = match committed {
+            Ok(done) => done,
             Err(e) => {
-                inner.poisoned = true;
+                w.poison = Some(if e.is_bind_outcome_unknown() {
+                    Poison::Unknown(blob_id)
+                } else {
+                    Poison::NotBound
+                });
                 return Err(e);
             }
         };
+        let mut inner = self.write();
+        let inner = &mut *inner;
+        let pack = inner.pack.as_mut().ok_or(Error::PackPoisoned)?;
+        pack.end = sb.log_end;
+        pack.next_frame_seq = sb.next_frame_seq;
+        pack.sb = sb;
+        pack.slot = slot;
         pack.uploads.insert(upload_id, blob_id);
         pack.index.insert(
             blob_id,
@@ -561,6 +643,7 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
     /// Does nothing: a duplicate's chunks stay in the pack until the pack rewrite (SPEC §9.2). This handle forgets
     /// them, so they cannot be bound any more.
     fn discard_upload(&self, upload_id: UploadId) -> Result<()> {
+        let _writer = self.lock_writer();
         self.write()
             .staged
             .retain(|(upload, _), _| *upload != upload_id);
@@ -627,14 +710,35 @@ fn staged_bytes<F: ContainerFile>(
     Ok(Some(bytes.to_vec()))
 }
 
-/// Appends the index frame `frame` and commits it (SPEC §9.3, §18.9): sync the data, write the inactive slot, sync
-/// again. Returns the new superblock. An error before the slot write means the blob is not bound; from the slot
-/// write on its outcome is unknown ([`Error::BindOutcomeUnknown`]).
-fn commit<F: ContainerFile>(pack: &mut Pack<F>, frame: &[u8]) -> Result<PackSuperblock> {
-    let index_off = pack.append(frame).map_err(io_err("append"))?;
+/// Appends the index frame of `manifest` (its chunks at `chunks`) at `pack.end` and commits it (SPEC §9.3, §18.9):
+/// sync the data, write the inactive slot, sync again. Returns the new superblock and its slot, which the caller
+/// publishes; `pack` is not changed. An error before the slot write means the blob is not bound; from the slot write
+/// on its outcome is unknown ([`Error::BindOutcomeUnknown`]).
+fn commit<F: ContainerFile>(
+    pack: &Pack<F>,
+    manifest: &BlobManifest,
+    chunks: &[u64],
+) -> Result<(PackSuperblock, Slot)> {
+    let frame = encode_index_frame(pack.take_seq()?, manifest, chunks)?;
+    let index_off = pack.end;
+    let index_len = u64_from_usize(frame.len());
+    let log_end = index_off
+        .checked_add(index_len)
+        .ok_or_else(|| corrupt("the pack's offsets are exhausted"))?;
+    pack.file
+        .write_all_at(&frame, index_off)
+        .map_err(io_err("append"))?;
     pack.file.sync_data().map_err(io_err("sync"))?;
     let blob_count = pack.sb.blob_count.saturating_add(1);
-    write_slot(pack, index_off, u64_from_usize(frame.len()), blob_count)
+    let next_frame_seq = pack.next_frame_seq.saturating_add(1);
+    write_slot(
+        pack,
+        index_off,
+        index_len,
+        blob_count,
+        log_end,
+        next_frame_seq,
+    )
 }
 
 /// Commits what a read-write open rolled forward (the frames up to `pack.end` are synced): the inactive slot names
@@ -647,16 +751,28 @@ fn commit_slot<F: ContainerFile>(pack: &mut Pack<F>) -> Result<PackSuperblock> {
         .max()
         .ok_or_else(|| corrupt("nothing to commit"))?;
     let blob_count = u64_from_usize(pack.index.len());
-    write_slot(pack, index_off, index_len, blob_count)
+    let (sb, slot) = write_slot(
+        pack,
+        index_off,
+        index_len,
+        blob_count,
+        pack.end,
+        pack.next_frame_seq,
+    )?;
+    pack.sb = sb;
+    pack.slot = slot;
+    Ok(sb)
 }
 
-/// Writes and syncs the inactive slot for the frames up to `pack.end`, the last index frame at `index_off`.
+/// Writes and syncs the inactive slot naming the frames up to `log_end`, the last index frame at `index_off`.
 fn write_slot<F: ContainerFile>(
-    pack: &mut Pack<F>,
+    pack: &Pack<F>,
     index_off: u64,
     index_len: u64,
     blob_count: u64,
-) -> Result<PackSuperblock> {
+    log_end: u64,
+    next_frame_seq: u64,
+) -> Result<(PackSuperblock, Slot)> {
     let old = pack.sb;
     let sb = PackSuperblock {
         seq: old
@@ -665,10 +781,10 @@ fn write_slot<F: ContainerFile>(
             .ok_or_else(|| corrupt("the commit seq is exhausted"))?,
         index_off,
         index_len,
-        log_end: pack.end,
+        log_end,
         generation: old.generation,
         blob_count,
-        next_frame_seq: pack.next_frame_seq,
+        next_frame_seq,
         pack_id: old.pack_id,
     };
     let slot = pack.slot.other();
@@ -677,9 +793,7 @@ fn write_slot<F: ContainerFile>(
         .write_all_at(&sb.encode(), slot.offset())
         .map_err(unknown)?;
     pack.file.sync_data().map_err(unknown)?;
-    pack.sb = sb;
-    pack.slot = slot;
-    Ok(sb)
+    Ok((sb, slot))
 }
 
 mod mapped;

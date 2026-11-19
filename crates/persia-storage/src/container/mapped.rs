@@ -49,12 +49,17 @@ impl MapPermit {
     /// The permit.
     ///
     /// # Safety
-    /// For every file mapped through this permit (a blob pack opened by `persia_blob::PackStore`), the contract of
-    /// [`Container::enable_mapped_reads`] holds for its committed frames: while a mapping, or a `ByteSource` taken
-    /// from one, is alive, nothing but Persia writes, truncates or hole-punches the file below the end of the mapped
-    /// range (not other programs, not other handles in this process), and at most one read-write handle of the file
-    /// is open where locks are per process. The permit is given only to Persia code that maps committed frames:
-    /// bytes a Persia writer never writes again (SPEC §4.7).
+    /// For every blob pack mapped through this permit (by `persia_blob::PackStore::enable_mapped_reads`), while a
+    /// mapping, or a `ByteSource` taken from one, is alive:
+    /// - nothing but Persia writes, truncates or hole-punches the pack below the end of the mapped range: not other
+    ///   programs, not other handles of the file in this process;
+    /// - at most one read-write `PackStore` of the pack is open at a time, anywhere (in this process or another):
+    ///   the pack takes no lock of its own (ADR-0049 item 8), and a second writer's open truncates or appends over
+    ///   frames this one mapped. Until the pack enforces a single writer, the embedder does, e.g. by opening the pack
+    ///   read-write only while it holds the container's writer lock.
+    ///
+    /// The permit is given only to Persia code that maps committed frames: bytes a Persia writer never writes again
+    /// (SPEC §4.7).
     pub const unsafe fn new() -> Self {
         Self(())
     }
@@ -62,17 +67,30 @@ impl MapPermit {
     /// Maps bytes `range` of `file` read-only.
     ///
     /// The caller maps only committed frames of a Persia file: bytes that no Persia writer writes, truncates or
-    /// rewrites again (SPEC §4.7; for a blob pack, `12288..log_end` of a slot it read or committed, ADR-0049).
+    /// rewrites again (SPEC §4.7; for a blob pack, `12288..log_end` of a slot it read or committed, ADR-0049). A range
+    /// that starts below 12288 would cover the header or a superblock slot, which are rewritten in place, and is
+    /// refused.
     ///
     /// # Errors
-    /// The error from `fstat` or `mmap`, or [`io::ErrorKind::InvalidInput`] for a range past the file's end.
+    /// [`io::ErrorKind::InvalidInput`] for a range that starts below 12288 or ends past the file's end, or the error
+    /// from `fstat` or `mmap`.
     // `self` is the proof the contract was accepted: holding a permit is what makes the call sound.
     #[allow(clippy::unused_self)]
     pub fn map(self, file: &File, range: Range<u64>) -> io::Result<ByteSource> {
+        if range.start < FIRST_FRAME_OFFSET {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "cannot map {}..{}: bytes below {FIRST_FRAME_OFFSET} are rewritten in place",
+                    range.start, range.end
+                ),
+            ));
+        }
         // SAFETY: the permit exists, so its maker vouched for `MapPermit::new`'s contract: nothing outside Persia
-        // changes `range` while it is mapped. The caller maps only committed frames (this function's rule), which no
-        // Persia writer changes: frames are append-only, recovery truncates only after `log_end`, and a rewrite
-        // writes a new file and renames it over the old one (SPEC §4.6, §4.7, §9.3).
+        // changes `range` while it is mapped, and at most one pack writer exists. `range` starts at or after 12288, so
+        // it covers no header or slot page, which are rewritten in place. The caller maps only committed frames (this
+        // function's rule), which no Persia writer changes: frames are append-only, recovery truncates only after
+        // `log_end`, and a rewrite writes a new file and renames it over the old one (SPEC §4.6, §4.7, §9.3).
         let map = unsafe { MmapFile::map(file, range)? };
         Ok(ByteSource::from_mmap(map))
     }
@@ -305,4 +323,21 @@ mod tests {
     }
 
     const F: u64 = FIRST_FRAME_OFFSET;
+
+    #[test]
+    #[cfg_attr(miri, ignore = "Miri has no file-backed mmap (ADR-0010)")]
+    fn a_permit_never_maps_the_header_or_the_slots() {
+        use std::io::Write;
+        let mut file = tempfile::tempfile().unwrap();
+        file.write_all(&[7; 12288 + 64]).unwrap();
+        // SAFETY: an unnamed temporary file this test alone holds, never written again while mapped.
+        let permit = unsafe { MapPermit::new() };
+        for start in [0, 4096, 12287] {
+            let err = permit.map(&file, start..12288 + 64).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{start}");
+        }
+        let map = permit.map(&file, 12288..12288 + 64).unwrap();
+        assert_eq!(map.base_offset(), 12288);
+        assert_eq!(&*map, &[7; 64][..]);
+    }
 }

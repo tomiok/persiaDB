@@ -45,8 +45,12 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         }
         let p = read_prefix(&pack.file)?;
         let (old, new) = (pack.sb, p.superblock);
-        if new.seq == old.seq && new == old {
+        if new == old {
             return Ok(false);
+        }
+        if new.seq == old.seq {
+            // Two commits never share a seq (SPEC §4.3): one of the two slots is wrong.
+            return Err(corrupt("the same seq with other contents"));
         }
         if new.seq < old.seq
             || new.log_end < old.log_end

@@ -19,6 +19,7 @@ use persia_blob::{
 use persia_format::BlobRef;
 use persia_format::checksum::crc32c;
 use persia_storage::container::ContainerFile;
+use persia_storage::container::sim::{CrashLoss, SimFault};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
 
@@ -58,7 +59,23 @@ fn put(
 /// A valid pack, and where its frames are.
 type Template = (Vec<u8>, Vec<(usize, usize)>);
 
-/// A valid pack with two blobs, and where its frames are (offset, total length).
+/// Where the frames of `bytes` are (offset, total length), from 12288 to the last whole header.
+fn frames_of(bytes: &[u8]) -> Vec<(usize, usize)> {
+    let mut frames = Vec::new();
+    let mut at = 12288;
+    while at + 24 <= bytes.len() {
+        let len = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes")) as usize;
+        let total = 24 + len.div_ceil(8) * 8 + 8;
+        if at + total > bytes.len() {
+            break;
+        }
+        frames.push((at, total));
+        at += total;
+    }
+    frames
+}
+
+/// A valid pack with two committed blobs.
 fn template() -> &'static Template {
     static T: OnceLock<Template> = OnceLock::new();
     T.get_or_init(|| {
@@ -74,15 +91,40 @@ fn template() -> &'static Template {
         );
         drop(store);
         let bytes = fs.read(Path::new(PACK)).expect("pack");
-        let mut frames = Vec::new();
-        let mut at = 12288;
-        while at + 24 <= bytes.len() {
-            let len =
-                u64::from_le_bytes(bytes[at + 8..at + 16].try_into().expect("8 bytes")) as usize;
-            let total = 24 + len.div_ceil(8) * 8 + 8;
-            frames.push((at, total));
-            at += total;
+        let frames = frames_of(&bytes);
+        (bytes, frames)
+    })
+}
+
+/// A valid pack with one committed blob and, after `log_end`, a staged chunk and the whole of a bind cut at its slot
+/// write: what a read-write open rolls forward (ADR-0049 item 9).
+fn cut_template() -> &'static Template {
+    static T: OnceLock<Template> = OnceLock::new();
+    T.get_or_init(|| {
+        let fs = SimFs::new();
+        let store = open(&fs, PackMode::ReadWrite).expect("open");
+        assert_eq!(
+            put(&store, b"0123456789abcdef", 8, 1).expect("put").1,
+            BindOutcome::Bound
+        );
+        store
+            .stage_chunk(UploadId::new(9), 0, b"staged")
+            .expect("stage");
+        let m = manifest_of(b"cut bind", 4, 2);
+        for (i, c) in b"cut bind".chunks(4).enumerate() {
+            store
+                .stage_chunk(m.upload_id(), i as u32, c)
+                .expect("stage");
         }
+        // A bind's calls: index append, sync, slot write, slot sync: fail the slot write.
+        fs.set_fault(Some(SimFault::FailAt(fs.mutations() + 2)));
+        assert!(store.bind(&m).is_err());
+        drop(store);
+        let bytes = fs
+            .crash(CrashLoss::Nothing)
+            .read(Path::new(PACK))
+            .expect("pack");
+        let frames = frames_of(&bytes);
         (bytes, frames)
     })
 }
@@ -126,16 +168,35 @@ fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
     };
+    // mode 0: the rest is the whole file. Otherwise bit 0 clear reseals the CRCs, bit 1 picks the template with a cut
+    // bind after log_end, bit 2 resizes the file by the first two bytes of the rest (append or truncate).
     let file = if mode == 0 {
         rest.to_vec()
     } else {
-        let (template, frames) = template();
+        let (template, frames) = if mode & 2 == 0 {
+            template()
+        } else {
+            cut_template()
+        };
         let mut bytes = template.clone();
-        for edit in rest.as_chunks::<3>().0 {
+        let mut edits = rest;
+        if mode & 4 != 0
+            && let Some((len, tail)) = edits.split_first_chunk::<2>()
+        {
+            let len = u16::from_le_bytes(*len);
+            let n = usize::from(len & 0x7fff);
+            if len & 0x8000 != 0 {
+                bytes.truncate(bytes.len().saturating_sub(n).max(1));
+            } else {
+                bytes.extend(tail.iter().copied().cycle().take(n));
+            }
+            edits = tail;
+        }
+        for edit in edits.as_chunks::<3>().0 {
             let at = usize::from(u16::from_le_bytes([edit[0], edit[1]])) % bytes.len();
             bytes[at] = edit[2];
         }
-        if mode % 2 == 0 {
+        if mode & 1 == 0 && bytes.len() >= template.len() {
             reseal(&mut bytes, frames);
         }
         bytes
@@ -153,8 +214,18 @@ fuzz_target!(|data: &[u8]| {
     read_every_blob(&store);
     let ids: std::collections::BTreeSet<_> = store.blob_ids().into_iter().collect();
     drop(store);
-    // Recovery is idempotent: the truncated pack opens to the same index.
+    // Recovery is idempotent: the recovered pack opens to the same index, with nothing left to roll forward or cut.
     let store = open(&fs, PackMode::ReadWrite).expect("a recovered pack reopens");
+    assert_eq!(
+        store.recovery().rolled_forward,
+        0,
+        "a second open rolls nothing forward"
+    );
+    assert_eq!(
+        store.recovery().truncated_from,
+        None,
+        "a second open truncates nothing"
+    );
     assert_eq!(
         store
             .blob_ids()
