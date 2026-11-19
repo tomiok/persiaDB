@@ -149,12 +149,14 @@ pub struct Mark {
     pub blobs: HashSet<BlobId>,
     /// Pinned upload ids, and those the marked blobs' manifests name: their staged chunks are kept.
     pub uploads: HashSet<UploadId>,
-    /// Marked blobs the store has no manifest for: dangling references, which `verify` reports (ROADMAP 9.5.3). GC
-    /// keeps nothing for them.
+    /// Referenced blobs the store has no manifest for: dangling references, which `verify` reports (ROADMAP 9.5.3). GC
+    /// keeps nothing for them. A blob only pinned is not listed: a `put_blob` pins its id before it binds it.
     pub missing: Vec<BlobId>,
     /// Marked blobs whose manifest could not be read (corrupt, or from a newer build): the upload they name is
     /// unknown, so a sweep deletes no staged chunk while any is listed (it deletes less, never more).
     pub unreadable: Vec<BlobId>,
+    /// Pinned blob ids no document references: not dangling when unbound.
+    pinned_only: HashSet<BlobId>,
 }
 
 impl Mark {
@@ -170,7 +172,8 @@ impl Mark {
         };
         for object in pinned {
             match object {
-                GcObject::Blob(id) => mark.blobs.insert(id),
+                GcObject::Blob(id) if mark.blobs.insert(id) => mark.pinned_only.insert(id),
+                GcObject::Blob(_) => false,
                 GcObject::Upload(id) => mark.uploads.insert(id),
             };
         }
@@ -179,7 +182,7 @@ impl Mark {
 
     /// Adds the upload id each marked blob's manifest in `store` names (SPEC §9.5: the mark's last step), so a sweep
     /// keeps the chunks behind every kept manifest. An inline manifest (SPEC §9.1.1) names none: its upload id is 0
-    /// and nothing is staged for it. A marked blob with no manifest is listed in [`Mark::missing`], one whose
+    /// and nothing is staged for it. A referenced blob with no manifest is listed in [`Mark::missing`], a marked one whose
     /// manifest cannot be read in [`Mark::unreadable`].
     ///
     /// ```
@@ -218,6 +221,7 @@ impl Mark {
                 Ok(Some(m)) => {
                     self.uploads.insert(m.upload_id());
                 }
+                Ok(None) if self.pinned_only.contains(&id) => {}
                 Ok(None) => self.missing.push(id),
                 Err(e) if is_unreadable(&e) => self.unreadable.push(id),
                 Err(e) => return Err(e),
@@ -315,7 +319,9 @@ mod tests {
         persia_storage::Storage::put(store.storage(), &key, Bytes::from_static(b"not a manifest"))
             .unwrap();
         let gone = blob_id_of(b"gone");
-        let mut mark = Mark::new([damaged.blob_id(), gone], []);
+        // A blob only pinned (a `put_blob` before its bind) is not dangling.
+        let in_flight = blob_id_of(b"pinned, not bound yet");
+        let mut mark = Mark::new([damaged.blob_id(), gone], [GcObject::Blob(in_flight)]);
         mark.add_manifest_uploads(&store).unwrap();
         assert_eq!(mark.missing, [gone]);
         assert_eq!(mark.unreadable, [damaged.blob_id()]);

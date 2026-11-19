@@ -26,7 +26,9 @@ use persia::internal::documents::{Blob, BlobDatabase};
 use persia::internal::gc::GcOptions;
 use persia::internal::pins::Pins;
 use persia_blob::{BlobId, BlobRef, BlobStore, ChunkSize, PackMode, PackStore};
-use persia_engine::db::{Database, DatabaseOptions, SearchRequest, SegmentIds, Snapshot};
+use persia_engine::db::{
+    CollectionSnapshot, Database, DatabaseOptions, SearchRequest, SegmentIds, Snapshot,
+};
 use persia_engine::document::{Document, Value};
 use persia_engine::merge::{MergeOptions, MergePolicy};
 use persia_engine::query::Query;
@@ -97,7 +99,11 @@ fn open(dir: &Path, create: bool) -> Db {
 
 /// Every live document of `c` in `snapshot` (segments and memtable), with its blob reference.
 fn documents(snapshot: &Snapshot) -> Vec<Document> {
-    let c = snapshot.collection("c").unwrap();
+    documents_of(snapshot.collection("c").unwrap())
+}
+
+/// Every live document of a collection snapshot.
+fn documents_of(c: &CollectionSnapshot) -> Vec<Document> {
     let memtable = c.memtable();
     let plan = SearchPlan::new(
         &Query::MatchAll,
@@ -138,6 +144,7 @@ enum Op {
     },
     DropBlob(usize),
     HoldSnapshot,
+    HoldView,
     DropSnapshot(usize),
     Reopen,
 }
@@ -154,6 +161,7 @@ fn op() -> impl Strategy<Value = Op> {
         1 => (any::<u8>(), any::<bool>()).prop_map(|(seed, large)| Op::HoldBlob { seed, large }),
         1 => any::<usize>().prop_map(Op::DropBlob),
         1 => Just(Op::HoldSnapshot),
+        1 => Just(Op::HoldView),
         1 => any::<usize>().prop_map(Op::DropSnapshot),
         1 => Just(Op::Reopen),
     ]
@@ -165,6 +173,8 @@ const DURABILITY: [Durability; 3] = [Durability::Buffered, Durability::Async, Du
 struct World {
     db: Option<Db>,
     snapshots: Vec<Arc<Snapshot>>,
+    /// Collection snapshots cloned out of a snapshot, which is dropped (ROADMAP 9.5.4 review).
+    views: Vec<CollectionSnapshot>,
     held: Vec<(BlobRef, Pins)>,
     stored: Vec<BlobRef>,
     contents: BTreeMap<BlobId, Vec<u8>>,
@@ -196,6 +206,11 @@ impl World {
             for d in documents(snapshot) {
                 let r = d.blob_ref().expect("every document has a blob");
                 self.readable(r, what);
+            }
+        }
+        for view in &self.views {
+            for d in documents_of(view) {
+                self.readable(d.blob_ref().expect("every document has a blob"), what);
             }
         }
         for (r, _) in &self.held {
@@ -274,15 +289,24 @@ impl World {
                 let snapshot = self.db().log().snapshot();
                 self.snapshots.push(snapshot);
             }
+            Op::HoldView => {
+                let view = self.db().log().snapshot().collection("c").unwrap().clone();
+                self.views.push(view);
+            }
             Op::DropSnapshot(i) => {
                 if !self.snapshots.is_empty() {
                     let len = self.snapshots.len();
                     self.snapshots.remove(i % len);
                 }
+                if !self.views.is_empty() {
+                    let len = self.views.len();
+                    self.views.remove(i % len);
+                }
             }
             Op::Reopen => {
                 // The process ends: its readers and pins with it.
                 self.snapshots.clear();
+                self.views.clear();
                 self.held.clear();
                 drop(self.db.take());
                 self.db = Some(open(dir, false));
@@ -295,6 +319,7 @@ fn run(dir: &Path, ops: &[Op]) {
     let mut w = World {
         db: Some(open(dir, true)),
         snapshots: Vec::new(),
+        views: Vec::new(),
         held: Vec::new(),
         stored: Vec::new(),
         contents: BTreeMap::new(),
@@ -305,6 +330,7 @@ fn run(dir: &Path, ops: &[Op]) {
     }
     // Finally, with no reader and no pin left, a GC keeps exactly the referenced blobs.
     w.snapshots.clear();
+    w.views.clear();
     w.held.clear();
     w.db_mut().commit().unwrap();
     let forced = GcOptions {
@@ -393,4 +419,43 @@ fn a_crash_between_the_blob_and_its_document_leaves_an_orphan_gc_collects() {
         db.get_blob_range(&kept, 0..kept.size()).unwrap(),
         blob_bytes(1, true)
     );
+}
+
+/// A collection snapshot cloned out of a snapshot, which is dropped, keeps the blob of a document replaced since
+/// (ROADMAP 9.5.4 review: such a view is a reader too).
+#[test]
+fn a_held_collection_snapshot_keeps_a_replaced_documents_blob() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut db = open(dir.path(), true);
+    let put = |db: &mut Db, d: u8, seed: u8| {
+        db.put(
+            "c",
+            &doc(d),
+            Blob::from_reader(&blob_bytes(seed, true)[..]).with_options(put_options()),
+            Durability::Fsync,
+        )
+        .unwrap()
+    };
+    put(&mut db, 0, 1);
+    let old = put(&mut db, 1, 2);
+    db.commit().unwrap();
+    let view = db.log().snapshot().collection("c").unwrap().clone();
+    let new = put(&mut db, 1, 3);
+    db.commit().unwrap();
+    let forced = GcOptions {
+        rewrite_ratio: 0.0,
+        ..GcOptions::default()
+    };
+    db.gc(&forced).unwrap();
+    // Its segment still shows the old copy (its memtable reader shows the newer one first, as any view of it).
+    let segment = &view.segments()[0];
+    assert!((0..segment.doc_count()).any(|d| segment.blob_ref(d).unwrap().as_ref() == Some(&old)));
+    assert_eq!(
+        db.get_blob_range(&old, 0..old.size()).unwrap(),
+        blob_bytes(2, true)
+    );
+    drop(view);
+    db.gc(&forced).unwrap();
+    assert!(!db.blobs().store().contains(&old).unwrap());
+    assert!(db.blobs().store().contains(&new).unwrap());
 }

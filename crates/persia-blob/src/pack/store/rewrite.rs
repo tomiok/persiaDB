@@ -6,8 +6,9 @@
 //! `RwLock`'s read side, on the old file, until the swap replaces the file and the index at once: a `get_blob`
 //! stream looks every chunk up by id, so it reads on in the new file (§18.10 (c)).
 //!
-//! The new file, `<pack>.tmp.<nonce>.<n>` (the temporary name a read-write open sweeps, ROADMAP 9.2.6), holds the
-//! header, both slots with generation + 1 and a new `pack_id`, then each kept blob's chunk frames followed by its
+//! The new file, `<pack>.tmp.<nonce>.<n>` (the pack creation's temporary name, which a read-write open is to sweep:
+//! ROADMAP 9.2.6; until then a crashed rewrite leaves it behind), holds the header, both slots with generation + 1
+//! and a new `pack_id`, then each kept blob's chunk frames followed by its
 //! `BlobIndex` frame, renumbered from `frame_seq` 1 (the last index frame ends at `log_end`, SPEC §9.3), then the
 //! chunks this handle staged for pinned uploads, after `log_end` like any staged chunk (a crash drops them, as it
 //! would have from the old pack: local uploads are not resumable, ADR-0049). It is synced, renamed over the pack
@@ -175,7 +176,9 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         let generation = plan
             .generation
             .checked_add(1)
-            .ok_or_else(|| corrupt("the pack generation is exhausted"))?;
+            .ok_or(Error::InvalidManifest {
+                what: "the pack generation is exhausted",
+            })?;
         let mut out = Out {
             file: &file,
             end: FIRST_FRAME,
@@ -363,7 +366,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     }
 
     /// Removes the temporary file of a rewrite that failed with `err`; a failed removal is reported with it (the
-    /// next read-write open sweeps the file, ROADMAP 9.2.6).
+    /// sweep of ROADMAP 9.2.6 is to take the file).
     fn discard(&self, temp: &Path, err: Error) -> Error {
         match self.vfs.remove_file(temp) {
             Ok(()) => err,
@@ -395,10 +398,9 @@ impl<F: ContainerFile> Out<'_, F> {
         self.end = offset
             .checked_add(u64_from_usize(frame.len()))
             .ok_or_else(|| corrupt("the pack's offsets are exhausted"))?;
-        self.seq = self
-            .seq
-            .checked_add(1)
-            .ok_or_else(|| corrupt("frame_seq exhausted"))?;
+        self.seq = self.seq.checked_add(1).ok_or(Error::InvalidManifest {
+            what: "frame_seq exhausted (ADR-0013)",
+        })?;
         Ok(offset)
     }
 }

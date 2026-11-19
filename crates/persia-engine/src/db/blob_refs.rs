@@ -1,14 +1,19 @@
 //! The blob references GC marks (SPEC §9.5, ROADMAP 9.5.1): every `BlobRef` the writer's view can still show a
 //! reader or a replay. That is the documents live in the current state (its segments as their tombstones leave them,
-//! and its memtables whole) and in every older snapshot a reader still holds, every document of the obsolete segments
-//! still held (SPEC §8.5: older snapshots and merges in flight), and every put of the WAL from the committed
+//! and its memtables whole), in every older collection snapshot a reader in this process still holds (a [`Snapshot`],
+//! or a [`CollectionSnapshot`](super::CollectionSnapshot) cloned out of one), every document of a memtable a reader
+//! still holds a view of, of a live segment as an older sidecar a reader still holds leaves it, and of the obsolete
+//! segments still held (SPEC §8.5: readers and merges in flight), and every put of the WAL from the committed
 //! `wal_start` on, the records after `log_end` included (what a reopen replays, and what `verify` checks).
+//!
+//! A reader that keeps a segment without the deletions it read it with (an `Arc<Segment>` taken out of a snapshot,
+//! the snapshot and its tombstones dropped) is not seen: it reads every document as live, deleted ones included.
 //!
 //! The engine never looks a reference up (it does not depend on `persia-blob`): this only lists ids, and the blob
 //! store's GC sweeps what no id names.
 
 use std::collections::HashSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use persia_format::BlobId;
 use persia_format::frame::FrameKind;
@@ -17,15 +22,36 @@ use persia_storage::container::ContainerFile;
 use super::{Database, DatabaseError, Snapshot};
 use crate::document::Document;
 use crate::manifest::SegmentId;
-use crate::memtable::MemtableReader;
+use crate::memtable::{self, Inner};
 use crate::segment::{Segment, Tombstones};
+use crate::stats::SegmentStatistics;
 use crate::wal::{MAX_CHUNK_LEN, ReplayError, WalOp, decode_chunk};
+
+/// What a collection snapshot a commit replaced still shows, while a reader holds it.
+#[derive(Debug)]
+pub(super) struct RetiredView {
+    /// Alive while any clone of the collection snapshot is: each one shares its statistics, which no other value
+    /// holds.
+    lease: Weak<OnceLock<SegmentStatistics>>,
+    collection: String,
+    /// Its segments, each with the deletions it showed (`None`: none).
+    segments: Vec<(Weak<Segment>, Option<Weak<Tombstones>>)>,
+    /// Its memtable, which a [`MemtableView`](crate::memtable::MemtableView) may hold longer than the snapshot.
+    memtable: Weak<RwLock<Inner>>,
+}
+
+impl RetiredView {
+    fn is_dead(&self) -> bool {
+        // A count of 0 is final: nothing can upgrade it again.
+        self.lease.strong_count() == 0 && self.memtable.strong_count() == 0
+    }
+}
 
 impl<F: ContainerFile + Sync> Database<F> {
     /// The ids of every blob the writer's view references (see the module docs): what GC's mark starts from (SPEC
     /// §9.5). A replaced or deleted document still counts while a memtable holds it, a segment's deleted document
-    /// counts in the snapshots taken before its deletion and in obsolete segments still held, and the WAL's puts count
-    /// whatever later records did to them.
+    /// counts while a reader holds a snapshot or sidecar from before its deletion, or an obsolete segment, and the
+    /// WAL's puts count whatever later records did to them.
     ///
     /// Reads the `BlobRefs` of every segment it visits (one record per document) and every WAL chunk from
     /// `wal_start` on; memory is one id per referenced blob. The writer's state cannot change while it runs (`&self`),
@@ -62,15 +88,44 @@ impl<F: ContainerFile + Sync> Database<F> {
             return Err(DatabaseError::Poisoned);
         }
         let mut ids = HashSet::new();
+        let mut memtables: Vec<Arc<RwLock<Inner>>> = Vec::new();
         for (name, c) in &self.collections {
             for live in &c.segments {
                 let deleted = live.deleted.as_ref().map(|(_, t)| &**t);
                 segment_refs(name, &live.segment, deleted, &mut ids)?;
             }
-            memtable_refs(&c.memtable.reader(), &mut ids)?;
+            memtables.push(Arc::clone(c.memtable.reader().shared()));
         }
-        for snapshot in self.retired.iter().filter_map(Weak::upgrade) {
-            snapshot_refs(&snapshot, &mut ids)?;
+        for view in &self.retired {
+            if let Some(_held) = view.lease.upgrade() {
+                for (segment, deleted) in &view.segments {
+                    let Some(segment) = segment.upgrade() else {
+                        continue;
+                    };
+                    // While the snapshot is held so are its deletions; were they gone, every document would count.
+                    let deleted = deleted.as_ref().and_then(Weak::upgrade);
+                    segment_refs(&view.collection, &segment, deleted.as_deref(), &mut ids)?;
+                }
+            }
+            if let Some(memtable) = view.memtable.upgrade()
+                && !memtables.iter().any(|m| Arc::ptr_eq(m, &memtable))
+            {
+                memtables.push(memtable);
+            }
+        }
+        for memtable in &memtables {
+            memtable_refs(memtable, &mut ids)?;
+        }
+        for (name, segment, deleted) in self.merges.obsolete.held_sidecars() {
+            let live = self
+                .collections
+                .get(name)
+                .into_iter()
+                .flat_map(|c| &c.segments)
+                .find(|s| SegmentId::new(s.segment.segment_id()) == segment);
+            if let Some(live) = live {
+                segment_refs(name, &live.segment, Some(&deleted), &mut ids)?;
+            }
         }
         for (name, segment) in self.merges.obsolete.held_segments() {
             segment_refs(name, &segment, None, &mut ids)?;
@@ -115,25 +170,25 @@ impl<F: ContainerFile + Sync> Database<F> {
         Ok(())
     }
 
-    /// Publishes `snapshot` as the latest (SPEC §8.4) and keeps a weak reference to the one it replaces, which readers
-    /// may still hold, for [`Database::referenced_blobs`].
+    /// Publishes `snapshot` as the latest (SPEC §8.4) and keeps weak references to what the one it replaces shows,
+    /// which readers may still hold, for [`Database::referenced_blobs`].
     pub(super) fn publish(&mut self, snapshot: Snapshot) {
         let old = self.published.swap(Arc::new(snapshot));
-        // A count of 0 is final (nothing can upgrade it again), so this only drops snapshots no reader holds.
-        self.retired.retain(|w| w.strong_count() > 0);
-        self.retired.push(Arc::downgrade(&old));
-    }
-}
-
-/// The ids of an older snapshot's documents: its segments as its tombstones leave them, and its memtables whole.
-fn snapshot_refs(snapshot: &Snapshot, ids: &mut HashSet<BlobId>) -> Result<(), DatabaseError> {
-    for (name, c) in snapshot.collections() {
-        for (segment, deleted) in c.segments.iter().zip(&c.tombstones) {
-            segment_refs(name, segment, deleted.as_deref(), ids)?;
+        self.retired.retain(|v| !v.is_dead());
+        for (name, c) in old.collections() {
+            self.retired.push(RetiredView {
+                lease: Arc::downgrade(&c.statistics),
+                collection: name.to_owned(),
+                segments: c
+                    .segments
+                    .iter()
+                    .zip(&c.tombstones)
+                    .map(|(s, t)| (Arc::downgrade(s), t.as_ref().map(Arc::downgrade)))
+                    .collect(),
+                memtable: Arc::downgrade(c.memtable.shared()),
+            });
         }
-        memtable_refs(&c.memtable, ids)?;
     }
-    Ok(())
 }
 
 /// The ids of `segment`'s documents that `deleted` does not delete, from its `BlobRefs` (SPEC §9.1).
@@ -160,11 +215,8 @@ fn segment_refs(
 }
 
 /// The ids of every document a memtable holds, replaced and deleted ones included.
-fn memtable_refs(
-    memtable: &MemtableReader,
-    ids: &mut HashSet<BlobId>,
-) -> Result<(), DatabaseError> {
-    memtable.for_each_encoded(|bytes| {
+fn memtable_refs(memtable: &RwLock<Inner>, ids: &mut HashSet<BlobId>) -> Result<(), DatabaseError> {
+    memtable::read(memtable).for_each_encoded(|bytes| {
         // The memtable encoded these bytes itself: a failure is a bug, not corruption.
         let blob = Document::encoded_blob_ref(bytes).map_err(|_| DatabaseError::Internal {
             what: "a memtable document whose encoding does not decode",

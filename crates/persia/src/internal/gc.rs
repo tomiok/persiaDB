@@ -144,7 +144,8 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// `put_blob` or a read that starts meanwhile keeps what it pins.
     ///
     /// Only the writer calls it, never in the background: it borrows the database shared, so it runs between writes,
-    /// while `put_blob` and reads may go on in other threads (a `put_blob` into the pack waits for a rewrite).
+    /// while `put_blob` and reads may go on in other threads (a `put_blob` into the pack waits for a rewrite). Two
+    /// calls at once are safe: rewrites take the pack's writer mutex in turn, and remote deletes are idempotent.
     ///
     /// ```
     /// use std::sync::Arc;

@@ -501,7 +501,7 @@ pub struct Database<F = File> {
     published: Arc<ArcSwap<Snapshot>>,
     /// The snapshots a later commit replaced, which readers may still hold: GC's mark reads the live ones (SPEC §9.5,
     /// [`Database::referenced_blobs`]). Dead ones are dropped at each publish.
-    retired: Vec<Weak<Snapshot>>,
+    retired: Vec<blob_refs::RetiredView>,
     options: DatabaseOptions,
     poisoned: bool,
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since

@@ -224,3 +224,52 @@ fn a_poisoned_database_refuses_to_list_its_references() {
         Err(persia_engine::db::DatabaseError::Poisoned)
     ));
 }
+
+/// A reader may keep a collection snapshot cloned out of its snapshot, or a memtable view, or a segment's older
+/// deletions, after dropping the snapshot: each still shows what it showed.
+#[test]
+fn held_collection_snapshots_memtable_views_and_sidecars_keep_their_blobs() {
+    let (_, mut db) = create();
+    // A collection snapshot cloned out, across the replacement of its document's blob (the segment stays live).
+    db.put("c", &doc(0, None), Durability::Fsync).unwrap();
+    db.put("c", &doc(1, Some(1)), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let held = db.snapshot().collection("c").unwrap().clone();
+    db.put("c", &doc(1, Some(2)), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    assert_eq!(db.referenced_blobs().unwrap(), ids([1, 2]));
+    drop(held);
+    assert_eq!(db.referenced_blobs().unwrap(), ids([2]));
+
+    // A memtable view, across its flush and the replacement of its document's blob.
+    db.put("c", &doc(1, Some(3)), Durability::Fsync).unwrap();
+    let view = db.snapshot().collection("c").unwrap().memtable();
+    db.commit().unwrap();
+    db.put("c", &doc(1, Some(4)), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    assert_eq!(db.referenced_blobs().unwrap(), ids([3, 4]));
+    drop(view);
+    assert_eq!(db.referenced_blobs().unwrap(), ids([4]));
+
+    // A segment's older deletions, kept with the segment while the snapshot is dropped.
+    for (d, b) in [(5, 5), (6, 6), (7, 7)] {
+        db.put("c", &doc(d, Some(b)), Durability::Fsync).unwrap();
+    }
+    db.commit().unwrap();
+    db.delete("c", "d7", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    let (segment, deleted) = {
+        let snapshot = db.snapshot();
+        let c = snapshot.collection("c").unwrap();
+        let last = c.segments().len() - 1;
+        (
+            Arc::clone(&c.segments()[last]),
+            c.tombstones()[last].clone().unwrap(),
+        )
+    };
+    db.delete("c", "d5", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    assert_eq!(db.referenced_blobs().unwrap(), ids([4, 5, 6]));
+    drop((segment, deleted));
+    assert_eq!(db.referenced_blobs().unwrap(), ids([4, 6]));
+}

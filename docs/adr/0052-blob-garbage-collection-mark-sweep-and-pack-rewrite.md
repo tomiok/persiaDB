@@ -29,8 +29,12 @@ a rewrite past a ratio of dead bytes; the writer's view as the snapshot set; no 
    `db/blob_refs.rs`, behind `persia`'s `BlobReferences` trait, as `DocumentLog` is): the ids of the documents
    - live in the current state: each segment as its tombstones leave it, each memtable whole (replaced and deleted
      documents too: a view taken before shows them);
-   - live in every older snapshot a reader in this process still holds: the writer keeps a weak reference to each
-     snapshot a commit replaced, dropped once dead;
+   - live in every older collection snapshot a reader in this process still holds, whether through its `Snapshot` or
+     a `CollectionSnapshot` cloned out of it: at each publish the writer keeps, per collection of the snapshot it
+     replaces, a weak reference to its per-snapshot statistics (shared by every clone, so a lease), its segments with
+     their deletions, and its memtable, and reads the segments with those deletions while the lease is alive;
+   - of every memtable a reader still holds (a `MemtableView` outlives its snapshot), whole;
+   - of a live segment as an older sidecar a reader still holds leaves it (SPEC §8.5 tracks superseded sidecars);
    - of the obsolete segments still held (SPEC §8.5: a reader holding a segment, a merge in flight), deleted ones
      included (a reader may hold one with older deletions);
    - of every WAL put from the committed `wal_start` on, the records after `log_end` included (what a reopen replays and
@@ -100,6 +104,14 @@ a rewrite past a ratio of dead bytes; the writer's view as the snapshot set; no 
   reads, are later work.
 - The pack rewrite copies every kept byte while holding the writer mutex: `put_blob` waits for it. The ratio keeps it
   rare; an incremental rewrite is not planned.
+- A reader that keeps only an `Arc<Segment>` of a live segment, dropping the snapshot and the deletions it read with,
+  reads deleted documents as live, and is not seen: a reader must keep the collection snapshot or the deletions.
+- Remotely an upload's chunks are deleted in one step under the pin set's lock, not one chunk per step: a pin taken
+  midway (a blob bound late that names the upload) must find the upload whole. The lock is held for one request per
+  chunk of that upload.
+- `grace` is checked against `DEFAULT_BIND_BUDGET`, not against the budget a caller passed to `put_blob`
+  (`PutBlobOptions::bind_budget` has no upper bound): a caller who raises the budget must raise the grace with it.
+  Open: cap the budget, or record the largest one used.
 - Holding the pin set's lock across the rename and the directory sync blocks new pins (a `put_blob`'s first pin, a
   read's) for that long, as a remote delete does under SPEC §9.5.
 - A segment's deleted documents stop protecting their blobs once no held snapshot predates the deletion; `verify`

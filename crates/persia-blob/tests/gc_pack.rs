@@ -424,29 +424,53 @@ fn orphan_frames_alone_are_dropped_without_a_pin_check() {
     assert_eq!(read_all(&store, &kept).unwrap(), b"kept");
 }
 
+/// Damage to a kept chunk stops the rewrite before anything is replaced: a flipped byte (the frame's CRC fails), and
+/// other bytes under a recomputed frame CRC (only the chunk's own CRC32C tells), which a rewrite must not copy forward.
 #[test]
 fn a_damaged_kept_chunk_stops_the_rewrite() {
-    let fs = sim();
-    let store = open(&fs, PackMode::ReadWrite).unwrap();
-    let kept = put(&store, b"kept but damaged", 4, 1);
-    put(&store, b"dropped", 4, 2);
-    // Flip a byte of the kept blob's second chunk, behind the handle's back.
-    let manifest = store.manifest(kept.blob_id()).unwrap().unwrap();
-    drop(manifest);
-    let bytes = fs.read(Path::new(PACK)).unwrap();
-    let at = bytes.windows(4).position(|w| w == b" but").unwrap();
-    let f = fs.open(Path::new(PACK), true).unwrap();
-    persia_storage::container::ContainerFile::write_all_at(&f, b"X", at as u64).unwrap();
-    let before = store.superblock();
-    let mark = Mark::new([kept.blob_id()], []);
-    assert!(
-        sweep(&store, &mark, &Pins::default(), 0.0)
-            .unwrap_err()
-            .is_corruption()
-    );
-    assert_eq!(store.superblock(), before);
-    assert!(!store.is_poisoned());
-    only_the_pack(&fs);
+    use persia_format::block::Compression;
+    use persia_format::frame::{FRAME_HEADER_LEN, FrameKind, encode_frame};
+    use persia_storage::container::ContainerFile;
+
+    for resealed in [false, true] {
+        let fs = sim();
+        let store = open(&fs, PackMode::ReadWrite).unwrap();
+        let kept = put(&store, b"kept but damaged", 4, 1);
+        put(&store, b"dropped", 4, 2);
+        // Chunk 1 of upload 1 (" but"): its payload starts with the upload id and the index.
+        let bytes = fs.read(Path::new(PACK)).unwrap();
+        let mut head = 1_u128.to_le_bytes().to_vec();
+        head.extend_from_slice(&1_u32.to_le_bytes());
+        head.extend_from_slice(&4_u32.to_le_bytes());
+        let payload_at = bytes.windows(head.len()).position(|w| w == head).unwrap();
+        let mut payload = bytes[payload_at..payload_at + 36].to_vec();
+        payload[32] ^= 0xff;
+        let frame_at = payload_at - FRAME_HEADER_LEN;
+        let f = fs.open(Path::new(PACK), true).unwrap();
+        if resealed {
+            let seq = u64::from_le_bytes(bytes[frame_at + 16..frame_at + 24].try_into().unwrap());
+            let mut w = persia_format::Writer::new();
+            encode_frame(
+                &mut w,
+                FrameKind::BlobChunk,
+                seq,
+                &payload,
+                Compression::None,
+            )
+            .unwrap();
+            f.write_all_at(w.as_slice(), frame_at as u64).unwrap();
+        } else {
+            f.write_all_at(&payload[32..33], (payload_at + 32) as u64)
+                .unwrap();
+        }
+        let before = store.superblock();
+        let mark = Mark::new([kept.blob_id()], []);
+        let err = sweep(&store, &mark, &Pins::default(), 0.0).unwrap_err();
+        assert!(err.is_corruption(), "resealed {resealed}: {err}");
+        assert_eq!(store.superblock(), before);
+        assert!(!store.is_poisoned());
+        only_the_pack(&fs);
+    }
 }
 
 // --- Crash tests ---

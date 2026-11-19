@@ -5,8 +5,10 @@
 //! upload it names keeps its chunks. Then the staged chunks: `blobs/uploads/` is listed once, chunks are grouped by
 //! upload and aged from the upload's newest chunk, and an upload no kept manifest names, old enough, has its chunks
 //! deleted unless it is pinned at its check. Manifests go first, so a crash mid-sweep leaves chunks without a
-//! manifest, never a manifest without chunks. Every key is parsed (`RemoteKey::parse`); one that does not parse was
-//! not written by Persia and is ignored, never deleted.
+//! manifest, never a manifest without chunks. An upload's chunks are deleted in one step under the lock, not one
+//! chunk per step: a pin taken midway (a blob bound late naming the upload, ROADMAP 9.5.8) must find the upload whole,
+//! at the cost of holding the lock for one request per chunk. Every key is parsed (`RemoteKey::parse`); one that
+//! does not parse was not written by Persia and is ignored, never deleted.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::SystemTime;
