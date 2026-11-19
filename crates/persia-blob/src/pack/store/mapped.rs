@@ -106,6 +106,7 @@ impl PackStore<File> {
     /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of};
     /// use persia_storage::container::MapPermit;
     ///
+    /// # if cfg!(miri) { return Ok(()); } // a real mapped file: Miri has neither a filesystem nor file-backed mmap
     /// # let dir = tempfile::tempdir()?;
     /// let store = PackStore::open(dir.path().join("app.persia.blobs"), PackMode::ReadWrite, [0; 16])?;
     /// // SAFETY: nothing but this store writes the pack while it is mapped (MapPermit::new's contract).
@@ -114,10 +115,8 @@ impl PackStore<File> {
     ///     vec![persia_format::checksum::crc32c(b"mapped")])?;
     /// store.stage_chunk(m.upload_id(), 0, b"mapped")?;
     /// assert_eq!(store.bind(&m)?, BindOutcome::Bound);
-    /// # if !cfg!(miri) {
     /// assert!(store.mapped_range().is_some());
     /// assert_eq!(&*store.read_chunk_source(&m, 0)?, b"mapped");
-    /// # }
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn enable_mapped_reads(&self, permit: MapPermit) {
