@@ -564,8 +564,7 @@ impl<F: ContainerFile + Sync + 'static> Database<F> {
             None => None,
         };
         self.manifest = Arc::new(next);
-        self.published
-            .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
+        self.publish(snapshot_of(&self.manifest, &self.collections));
         Ok((output, seq))
     }
 

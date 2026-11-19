@@ -131,6 +131,24 @@ impl MemtableReader {
             .held = None;
     }
 
+    /// Calls `f` with the encoding of every document the memtable holds, replaced and deleted ones included, in docid
+    /// order: what GC's mark reads (SPEC §9.5), since a view taken before the replacement still shows them. Holds the
+    /// read lock.
+    pub(crate) fn for_each_encoded<E>(
+        &self,
+        mut f: impl FnMut(&[u8]) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let inner = read(&self.shared);
+        let mut start = 0;
+        for &end in &inner.doc_ends {
+            if let Some(bytes) = inner.docs.get(start..end) {
+                f(bytes)?;
+            }
+            start = end;
+        }
+        Ok(())
+    }
+
     /// Whether this reads `memtable`.
     pub(crate) fn reads(&self, memtable: &Memtable) -> bool {
         Arc::ptr_eq(&self.shared, &memtable.shared)

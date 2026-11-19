@@ -499,6 +499,9 @@ pub struct Database<F = File> {
     manifest: Arc<Manifest>,
     collections: BTreeMap<String, Collection>,
     published: Arc<ArcSwap<Snapshot>>,
+    /// The snapshots a later commit replaced, which readers may still hold: GC's mark reads the live ones (SPEC §9.5,
+    /// [`Database::referenced_blobs`]). Dead ones are dropped at each publish.
+    retired: Vec<Weak<Snapshot>>,
     options: DatabaseOptions,
     poisoned: bool,
     /// While an open replays the WAL, the position of the chunk it is in: a commit then keeps `wal_start` there, since
@@ -617,6 +620,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             manifest,
             collections,
             published: Arc::new(ArcSwap::from_pointee(snapshot)),
+            retired: Vec::new(),
             merges: merging::Merges::new(options.merge.threads),
             options,
             poisoned: false,
@@ -1217,8 +1221,7 @@ impl<F: ContainerFile + Sync> Database<F> {
             c.memtable = memtable;
         }
         self.manifest = Arc::new(next);
-        self.published
-            .store(Arc::new(snapshot_of(&self.manifest, &self.collections)));
+        self.publish(snapshot_of(&self.manifest, &self.collections));
         Ok(self.manifest.seq())
     }
 
