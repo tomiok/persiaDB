@@ -124,7 +124,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 3]) -> Query {
             field: fields[clauses[0].field],
             term: clauses[0].term.clone(),
         }),
-        RefQuery::Word(clauses) => Query::Combined(CombinedQuery {
+        RefQuery::Word(clauses) | RefQuery::Combined(clauses) => Query::Combined(CombinedQuery {
             fields: clauses
                 .iter()
                 .map(|c| WeightedTerm {

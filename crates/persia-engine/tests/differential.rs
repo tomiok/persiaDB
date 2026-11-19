@@ -45,6 +45,15 @@
 //!    matches every document L0 matches at every count of alternatives per run (a self-check; the engine's step, which
 //!    no search can see, is checked for it in-crate, `relax::synonyms`). Each text with a run is also searched at a
 //!    `max_terms` inside its cut window, a different one at each operation.
+//!    The default fields analyze apart (ROADMAP 8.1.24): `title` by `whitespace`, `body` by `standard` ([`analyze`],
+//!    checked against both analyzers on the generated alphabet). User text and synonym terms have capitals and `-`
+//!    at times, and the pool other writings of its terms, so a term matches in one field only, two writings are one
+//!    term in `body` alone, and a word is one token in `title` and several in `body` (compiled as SPEC §7.1.1 says
+//!    for fields that split it apart, also through L2's importance, L3's last term and L4's corrections). The runs
+//!    are each field's own, merged as SPEC §6.3.2 says: the union in group then term order (a later field's term
+//!    before an earlier one's), the later field's overlapping match dropped, an alternative compiled away as a
+//!    duplicate over the fields; each is covered. Neither analyzer removes a token, so stopword gaps, and a run whose
+//!    alternatives all compile away (unreachable over two fields with positions), stay with `tests/relax_synonyms.rs`.
 //! 6. A sort led by the score with a later key on the `n` column (each order and `missing` pair, with the proximity
 //!    bonus and without, in turn) ranks as the score order re-sorted, among exact score ties, by the reference's `n`
 //!    values, then location: every strategy, pages walked by cursor across ties, and on the pool a page of `k` and
@@ -132,11 +141,12 @@ const STRATEGIES: [Pruning; 3] = [
 type Params = [(f64, f64, f64); 2];
 
 fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
-    // The whitespace analyzer gives the words as they are, at positions 0, 1, 2...: the reference's tokens.
-    let ws = AnalyzerRef::new("whitespace", 1).unwrap();
-    let text = |(boost, k1, b)| {
+    // `title` by `whitespace` and `body` by `standard` (ROADMAP 8.1.24): on the documents' lowercase words both give
+    // the words as they are, at positions 0, 1, 2... (the reference's tokens); user text and synonym terms analyze
+    // apart in them ([`analyze`]).
+    let text = |analyzer: &str, (boost, k1, b)| {
         FieldKind::Text(TextOptions {
-            analyzer: ws.clone(),
+            analyzer: AnalyzerRef::new(analyzer, 1).unwrap(),
             boost,
             k1,
             b,
@@ -145,8 +155,8 @@ fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
         })
     };
     SchemaBuilder::new("c")
-        .field("title", text(p[0]))
-        .field("body", text(p[1]))
+        .field("title", text("whitespace", p[0]))
+        .field("body", text("standard", p[1]))
         .field("tag", FieldKind::Keyword(KeywordOptions::default()))
         .field("n", FieldKind::I64 { stored: false })
         .synonyms(synonyms.to_vec())
@@ -157,6 +167,179 @@ fn schema(p: &Params, synonyms: &[Vec<String>]) -> CollectionSchema {
 /// `title`, `body`, `tag` (the reference's field indices), then `n`.
 fn ids(schema: &CollectionSchema) -> [FieldId; 4] {
     ["title", "body", "tag", "n"].map(|n| schema.field(n).unwrap().id())
+}
+
+/// The default fields of user text, `title` and `body`, in ascending field id (SPEC §7.1.1).
+fn default_fields(fields: &[FieldId; 4]) -> [usize; 2] {
+    let mut order = [TITLE, BODY];
+    order.sort_by_key(|&f| fields[f]);
+    order
+}
+
+/// A token of a field's analysis: its text, its byte span in the analyzed text, and its position.
+type Analyzed = (String, Range<usize>, u32);
+
+/// How a default field analyzes `text` at query time (SPEC §6.3.3, §6.3.4), on the alphabet the generators write
+/// (letters, a `-` inside a word, spaces): `title` by `whitespace`, each run of other characters as written; `body` by
+/// `standard`, whose UAX #29 words are there the runs of letters (`-` is a word break), NFKC (the letters are already
+/// composed) and lowercased, so `Cat` and `cat` are one term in `body` alone, and `cat-bee` is two tokens there and
+/// one in `title`. Positions 0, 1, 2... in order: neither analyzer removes a token, so neither leaves a gap.
+fn analyze(field: usize, text: &str) -> Vec<Analyzed> {
+    let breaks = |c: char| c.is_whitespace() || (field == BODY && c == '-');
+    let mut out = Vec::new();
+    let mut start = None;
+    for (i, c) in text
+        .char_indices()
+        .chain(std::iter::once((text.len(), ' ')))
+    {
+        match (start, breaks(c)) {
+            (None, false) => start = Some(i),
+            (Some(s), true) => {
+                let word = text.get(s..i).unwrap();
+                let term = if field == BODY {
+                    word.to_lowercase()
+                } else {
+                    word.to_owned()
+                };
+                out.push((term, s..i, u32::try_from(out.len()).unwrap()));
+                start = None;
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// [`analyze`] as `tests/reference/synonyms.rs` reads an analysis: the tokens and the positions they took.
+fn tokens(field: usize, text: &str) -> (Vec<reference::synonyms::Token>, u32) {
+    let tokens: Vec<_> = analyze(field, text)
+        .into_iter()
+        .map(|(t, _, p)| (t, p))
+        .collect();
+    let took = u32::try_from(tokens.len()).unwrap();
+    (tokens, took)
+}
+
+/// A query matching any of `alternatives`: itself when there is one (SPEC §7.1.1: "one of the fields must match").
+fn one_of(mut alternatives: Vec<RefQuery>) -> Option<RefQuery> {
+    match alternatives.len() {
+        0 => None,
+        1 => alternatives.pop(),
+        _ => Some(RefQuery::Bool {
+            must: Vec::new(),
+            should: alternatives,
+            must_not: Vec::new(),
+            filter: Vec::new(),
+            minimum_should_match: 0,
+        }),
+    }
+}
+
+/// SPEC §7.1.1's parts of a word over the default fields `order`, each field at its schema boost: fields where it
+/// analyzes to no token are left out. When the fields agree on how to split it (no two token spans overlap unless
+/// equal), each span is one required `combined` over the fields that have it; otherwise each field requires its own
+/// tokens (each a one-field `combined`, several in a `bool`), and one of the fields must match: one part.
+fn compile_word(word: &str, order: &[usize; 2], params: &Params) -> Vec<RefQuery> {
+    let per_field: Vec<(usize, Vec<Analyzed>)> = order
+        .iter()
+        .map(|&f| (f, analyze(f, word)))
+        .filter(|(_, t)| !t.is_empty())
+        .collect();
+    let clause = |field: usize, term: &str| Clause {
+        field,
+        term: term.to_owned(),
+        weight: params[field].0,
+    };
+    let mut spans: Vec<Range<usize>> = per_field
+        .iter()
+        .flat_map(|(_, t)| t.iter().map(|t| t.1.clone()))
+        .collect();
+    spans.sort_by_key(|s| (s.start, s.end));
+    spans.dedup();
+    if spans.windows(2).all(|w| w[0].end <= w[1].start) {
+        return spans
+            .iter()
+            .map(|span| {
+                RefQuery::Combined(
+                    per_field
+                        .iter()
+                        .filter_map(|(f, t)| {
+                            t.iter().find(|t| t.1 == *span).map(|t| clause(*f, &t.0))
+                        })
+                        .collect(),
+                )
+            })
+            .collect();
+    }
+    let should = per_field
+        .iter()
+        .map(|(f, t)| {
+            let mut must: Vec<RefQuery> = t
+                .iter()
+                .map(|t| RefQuery::Combined(vec![clause(*f, &t.0)]))
+                .collect();
+            if must.len() == 1 {
+                return must.remove(0);
+            }
+            RefQuery::Bool {
+                must,
+                should: Vec::new(),
+                must_not: Vec::new(),
+                filter: Vec::new(),
+                minimum_should_match: 0,
+            }
+        })
+        .collect();
+    one_of(should).into_iter().collect()
+}
+
+/// A synonym term compiled as the quoted phrase `"<term>"` would be (SPEC §6.3.2, §7.1.1): a word when it has at most
+/// one token in every default field ([`compile_word`], its parts required together); else per field with a token a
+/// `phrase` of its tokens at their relative positions (both fields have positions), a `term` where it has one, and
+/// one of the fields must match. `None` when it has no token.
+fn quoted(term: &str, order: &[usize; 2], params: &Params) -> Option<RefQuery> {
+    let per_field: Vec<(usize, Vec<Analyzed>)> =
+        order.iter().map(|&f| (f, analyze(f, term))).collect();
+    if per_field.iter().all(|(_, t)| t.len() <= 1) {
+        let mut parts = compile_word(term, order, params);
+        // Several parts (fields that agree on a split) need an analyzer that splits like `standard` in both fields;
+        // not reached with `whitespace` beside it.
+        return match parts.len() {
+            0 => None,
+            1 => parts.pop(),
+            _ => Some(RefQuery::Bool {
+                must: parts,
+                should: Vec::new(),
+                must_not: Vec::new(),
+                filter: Vec::new(),
+                minimum_should_match: 0,
+            }),
+        };
+    }
+    let should = per_field
+        .into_iter()
+        .filter(|(_, t)| !t.is_empty())
+        .map(|(field, t)| {
+            let weight = params[field].0;
+            if let [(term, _, _)] = t.as_slice() {
+                return RefQuery::Word(vec![Clause {
+                    field,
+                    term: term.clone(),
+                    weight,
+                }]);
+            }
+            let first = t[0].2;
+            RefQuery::Phrase {
+                field,
+                terms: t
+                    .into_iter()
+                    .map(|(term, _, p)| (term, p - first))
+                    .collect(),
+                weight,
+            }
+        })
+        .collect();
+    one_of(should)
 }
 
 /// A document's values: the reference's fields and `n`.
@@ -193,7 +376,7 @@ fn engine_query(q: &RefQuery, fields: &[FieldId; 4]) -> Query {
             field: fields[clauses[0].field],
             term: clauses[0].term.clone(),
         }),
-        RefQuery::Word(clauses) => Query::Combined(CombinedQuery {
+        RefQuery::Word(clauses) | RefQuery::Combined(clauses) => Query::Combined(CombinedQuery {
             fields: clauses
                 .iter()
                 .map(|c| WeightedTerm {
@@ -280,13 +463,50 @@ fn query_word() -> impl Strategy<Value = String> {
     ]
 }
 
-/// A word of user text: typos as often as the documents' words, so L4 has words to correct (ROADMAP 8.1.21).
+/// A word of user text: typos as often as the documents' words, so L4 has words to correct (ROADMAP 8.1.21); at times
+/// with capitals ([`cased`]), which `body` lowercases and `title` keeps, or two words joined by `-`, which `body`
+/// splits and `title` keeps whole (ROADMAP 8.1.24).
 fn text_word() -> impl Strategy<Value = String> {
+    let plain = || {
+        prop_oneof![
+            2 => word(),
+            2 => prop::sample::select(&TYPOS[..]).prop_map(str::to_owned),
+            1 => query_word(),
+        ]
+    };
+    let maybe_cased = move || {
+        prop_oneof![
+            3 => plain(),
+            1 => (plain(), any::<bool>()).prop_map(|(w, all)| cased(&w, all)),
+        ]
+    };
     prop_oneof![
-        2 => word(),
-        2 => prop::sample::select(&TYPOS[..]).prop_map(str::to_owned),
-        1 => query_word(),
+        8 => plain(),
+        1 => (plain(), any::<bool>()).prop_map(|(w, all)| cased(&w, all)),
+        1 => (maybe_cased(), maybe_cased()).prop_map(|(a, b)| format!("{a}-{b}")),
     ]
+}
+
+/// Another writing of a synonym term that `body` analyzes alike: `how` 0 its first letter a capital, 1 every letter,
+/// 2 its words joined by `-`.
+fn writing(term: &str, how: u8) -> String {
+    match how {
+        0 => cased(term, false),
+        1 => cased(term, true),
+        _ => term.split_whitespace().collect::<Vec<_>>().join("-"),
+    }
+}
+
+/// `text` with its first letter a capital (`Cat bee`), or every letter (`CAT BEE`, `CAFÉ`).
+fn cased(text: &str, all: bool) -> String {
+    if all {
+        return text.to_uppercase();
+    }
+    let mut chars = text.chars();
+    chars
+        .next()
+        .map(|first| first.to_uppercase().chain(chars).collect())
+        .unwrap_or_default()
 }
 
 /// A prefix of a query word, of 1 character or more.
@@ -551,36 +771,37 @@ impl Text {
         self.sources().join(" ")
     }
 
-    /// SPEC §7.1.1 for this text: each word a `combined` over the default fields (in the schema's order, by `fields`),
-    /// each at its schema boost; the excluded ones the root's `must_not`; one required word alone is the query, unless
-    /// a filter joins it.
+    /// Each clause's parts (SPEC §7.1.1, [`compile_word`]): the entries of the root's `must`, or `must_not` when it
+    /// is excluded.
+    fn parts(&self, params: &Params, fields: &[FieldId; 4]) -> Vec<Vec<RefQuery>> {
+        let order = default_fields(fields);
+        self.clauses
+            .iter()
+            .map(|c| compile_word(&c.0, &order, params))
+            .collect()
+    }
+
+    /// Whether the query is one required part and nothing beside it, so that part is the query (SPEC §7.1.1).
+    fn single(&self, params: &Params, fields: &[FieldId; 4]) -> bool {
+        let parts = self.parts(params, fields);
+        self.filter.is_none()
+            && self.clauses.iter().all(|c| !c.1)
+            && parts.iter().map(Vec::len).sum::<usize>() == 1
+    }
+
+    /// SPEC §7.1.1 for this text: each word's parts ([`compile_word`]) required; the excluded ones the root's
+    /// `must_not`; one required part alone is the query, unless a filter joins it.
     fn root(&self, params: &Params, fields: &[FieldId; 4]) -> RefQuery {
-        let mut order = [TITLE, BODY];
-        order.sort_by_key(|&f| fields[f]);
-        let word = |w: &str| {
-            RefQuery::Word(
-                order
-                    .iter()
-                    .map(|&field| Clause {
-                        field,
-                        term: w.to_owned(),
-                        weight: params[field].0,
-                    })
-                    .collect(),
-            )
-        };
-        let mut must: Vec<RefQuery> = self
-            .clauses
-            .iter()
-            .filter(|c| !c.1)
-            .map(|c| word(&c.0))
-            .collect();
-        let must_not: Vec<RefQuery> = self
-            .clauses
-            .iter()
-            .filter(|c| c.1)
-            .map(|c| word(&c.0))
-            .collect();
+        let parts = self.parts(params, fields);
+        let mut must: Vec<RefQuery> = Vec::new();
+        let mut must_not: Vec<RefQuery> = Vec::new();
+        for (c, parts) in self.clauses.iter().zip(parts) {
+            if c.1 {
+                must_not.extend(parts);
+            } else {
+                must.extend(parts);
+            }
+        }
         let filter: Vec<Filter> = self.filter.iter().cloned().collect();
         if must.len() == 1 && must_not.is_empty() && filter.is_empty() {
             return must.remove(0);
@@ -595,13 +816,45 @@ impl Text {
     }
 }
 
-/// User text drawn from the synonym terms (`pool`, each split into its words) and from [`text_word`], so runs of one
-/// and several words are common: at most 6 words (a term past the sixth is cut short, on purpose: a partial run), each
-/// excluded at times (which ends a run, SPEC §6.3.2).
+/// User text drawn from the synonym terms (`pool`, each split into its words, or at times at its `-` too, so the words
+/// of a term `body` splits are clauses of their own) and from [`text_word`], so runs of one and several words are
+/// common: at most 6 words (a term past the sixth is cut short, on purpose: a partial run), each excluded at times
+/// (which ends a run, SPEC §6.3.2).
 fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> {
+    let split = |t: String, at: fn(char) -> bool| {
+        t.split(at)
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect::<Vec<_>>()
+    };
+    // Another writing of a term, which `body` analyzes as the term and `title` may not: lowercase, capitals, its
+    // words split at `-` too, or joined by `-`; or the term with `w` joined to its last word or before its first, so
+    // in `body` the term ends or starts inside a word, and must not hide a shorter term that ends or starts with one.
+    let other = move |t: String, how: u8, w: String| {
+        let mut words = split(t.clone(), char::is_whitespace);
+        match how {
+            0 => split(t.to_lowercase(), char::is_whitespace),
+            1 => split(cased(&t, true), char::is_whitespace),
+            2 => split(t, |c| c.is_whitespace() || c == '-'),
+            3 => vec![words.join("-")],
+            4 => {
+                if let Some(last) = words.last_mut() {
+                    *last = format!("{last}-{w}");
+                }
+                words
+            }
+            _ => {
+                if let Some(first) = words.first_mut() {
+                    *first = format!("{w}-{first}");
+                }
+                words
+            }
+        }
+    };
     let chunk = prop_oneof![
-        2 => prop::sample::select(pool).prop_map(|t| t.split_whitespace().map(str::to_owned).collect::<Vec<_>>()),
-        1 => text_word().prop_map(|w| vec![w]),
+        4 => prop::sample::select(pool.clone()).prop_map(move |t| split(t, char::is_whitespace)),
+        2 => (prop::sample::select(pool), 0..6_u8, word()).prop_map(move |(t, how, w)| other(t, how, w)),
+        3 => text_word().prop_map(|w| vec![w]),
     ];
     (
         prop::collection::vec(chunk, 1..4),
@@ -617,7 +870,10 @@ fn text(fields: [FieldId; 4], pool: Vec<String>) -> impl Strategy<Value = Text> 
 /// A collection's synonym groups (SPEC §6.2.1) and the terms they hold, which user text draws from: groups of 2 to
 /// 4 terms picked from a few terms of 1 to 3 words, so a term is often in several groups and a longer term often
 /// starts with a shorter one; at times two spaces between words (equal after analysis to one, so a group may shrink
-/// to one term); and at times a word with more alternatives than the 50 a match reports (ROADMAP 8.1.18).
+/// to one term); and at times a word with more alternatives than the 50 a match reports (ROADMAP 8.1.18). The terms'
+/// words come from [`text_word`], so they have capitals and `-` at times, and the pool also holds other writings of
+/// some of its terms, with capitals or with `-` for spaces, which `body` analyzes alike and `title` does not, so a
+/// group may shrink to one term in `body` alone, and a field may match where the other does not (ROADMAP 8.1.24).
 fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
     let term = (
         prop_oneof![3 => 1..2_usize, 2 => 2..4_usize],
@@ -636,10 +892,68 @@ fn synonyms() -> impl Strategy<Value = (Vec<String>, Vec<Vec<String>>)> {
             prop::collection::vec(any::<prop::sample::Index>(), 2..5),
             0..5,
         ),
-        prop::option::weighted(0.15, many),
+        prop::option::weighted(0.25, many),
+        prop::collection::vec(
+            (
+                prop::array::uniform3(any::<prop::sample::Index>()),
+                0..3_u8,
+                0..6_u8,
+            ),
+            0..4,
+        ),
     )
-        .prop_map(|(mut pool, picks, many)| {
+        .prop_map(|(mut pool, picks, many, writings)| {
+            // Other writings of some terms (ROADMAP 8.1.24), each alone or in two groups with other terms `x` and
+            // `y`: the writing with `x`, then the term (or its first word) with `y` (`x` again at times). For text
+            // written as the term, `body` (the first default field) reads both groups and `title` the second only,
+            // so `body` reports `x` beside the shared `y`, compiles `x` again when `y` is `x` (a duplicate over the
+            // fields), or matches the longer term over clauses `title` matches part of (an overlap). Kind 4 also puts
+            // the writing and the term in one group before those, a term of its own in `title` and one term in `body`
+            // (which never matches it), so `title` reports a place before `body`'s: a union of both fields with the
+            // later field's term first. Kind 5 puts them in that one group alone: a run `title` alone matches.
             let mut groups: Vec<Vec<String>> = Vec::new();
+            for ([t, x, y], how, kind) in writings {
+                let (mut t, x, y) = (
+                    t.get(&pool).clone(),
+                    x.get(&pool).clone(),
+                    y.get(&pool).clone(),
+                );
+                // For an overlap, a term of two words or more, whose first word is the second group's term.
+                if kind == 3 && !t.contains(char::is_whitespace) {
+                    t = format!("{t} {y}");
+                }
+                let Some(other) = (0..3).map(|k| writing(&t, (how + k) % 3)).find(|o| *o != t)
+                else {
+                    continue;
+                };
+                for term in [&t, &other] {
+                    if !pool.contains(term) {
+                        pool.push(term.clone());
+                    }
+                }
+                let first = t.split_whitespace().next().unwrap_or_default().to_owned();
+                let pair = match kind {
+                    1 => Some((t, y)),
+                    2 => Some((t, x.clone())),
+                    3 => Some((first, y)),
+                    4 => {
+                        groups.push(vec![t.clone(), other.clone()]);
+                        Some((t, y))
+                    }
+                    5 => {
+                        groups.push(vec![t.clone(), other.clone()]);
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some((term, with)) = pair {
+                    for group in [[other.clone(), x.clone()], [term, with]] {
+                        if group[0] != group[1] {
+                            groups.push(group.to_vec());
+                        }
+                    }
+                }
+            }
             for pick in picks {
                 let mut group: Vec<String> = Vec::new();
                 for i in pick {
@@ -674,14 +988,15 @@ fn case() -> impl Strategy<Value = Case> {
                 ),
                 1..4,
             ),
-            prop::collection::vec(text(fields, pool), 1..3),
+            prop::collection::vec(text(fields, pool), 1..4),
             // The default, which the steps' 50-term expansions reach late in a cascade, or a limit that cuts them
             // and skips steps sooner (ROADMAP 8.1.19).
             prop_oneof![2 => Just(QueryLimits::default().max_expansions), 1 => 1..12_usize, 1 => 40..240_usize],
             // The default, or a limit that cuts L1's alternatives, or skips L1 and the steps that exclude it
             // (ROADMAP 8.1.18).
             prop_oneof![3 => Just(QueryLimits::default().max_terms), 1 => 8..60_usize, 1 => 60..300_usize],
-            any::<bool>(),
+            // Compiled at the case's `max_terms` most of the time, so the compilation's bound cuts runs (ROADMAP 8.1.24).
+            prop::bool::weighted(0.7),
             1..6_usize,
         )
             .prop_map(
@@ -1142,26 +1457,52 @@ fn check(
             text.render()
         );
         // The runs and their alternatives, as SPEC §6.3.2 finds them (checked).
-        let runs = reference_runs(
-            text,
-            &case.synonyms,
-            &case.params,
-            &fields,
-            (compile_limits.max_terms, terms(&unfiltered)),
-        );
-        let found: Vec<(Range<usize>, Vec<Query>, bool)> = compiled
-            .synonyms
-            .iter()
-            .map(|s| (s.clauses.clone(), s.alternatives.clone(), s.cut))
-            .collect();
-        let want: Vec<(Range<usize>, Vec<Query>, bool)> = runs
-            .iter()
-            .map(|r| {
-                let alternatives = r.alternatives.iter().map(|a| engine_query(a, &fields));
-                (r.clauses.clone(), alternatives.collect(), r.cut)
-            })
-            .collect();
-        prop_assert_eq!(found, want, "{} over {:?}", text.render(), case.synonyms);
+        let n = terms(&unfiltered);
+        let same_runs = |compiled: &Compiled, runs: &[RefRun]| {
+            let found: Vec<(Range<usize>, Vec<Query>, bool)> = compiled
+                .synonyms
+                .iter()
+                .map(|s| (s.clauses.clone(), s.alternatives.clone(), s.cut))
+                .collect();
+            let want: Vec<(Range<usize>, Vec<Query>, bool)> = runs
+                .iter()
+                .map(|r| {
+                    let alternatives = r.alternatives.iter().map(|a| engine_query(a, &fields));
+                    (r.clauses.clone(), alternatives.collect(), r.cut)
+                })
+                .collect();
+            prop_assert_eq!(found, want, "{} over {:?}", text.render(), case.synonyms);
+            Ok(())
+        };
+        let runs_at =
+            |max_terms| reference_runs(text, &case.synonyms, &case.params, &fields, (max_terms, n));
+        let runs = runs_at(compile_limits.max_terms);
+        same_runs(&compiled, &runs)?;
+        // The compilation's bound where it binds (ROADMAP 8.1.24): one alternative fewer in all than the runs keep at
+        // the defaults, when some run keeps more than one. The shares count the terms reported, so one that compiles
+        // away may leave every run uncut even then.
+        let at_defaults = runs_at(QueryLimits::default().max_terms);
+        let kept: usize = at_defaults.iter().map(|r| r.alternatives.len()).sum();
+        let mut bound_compiled: Option<(Compiled, Vec<RefRun>)> = None;
+        if kept > at_defaults.len() {
+            let max_terms = 2 * n + kept - 1;
+            let limits = QueryLimits {
+                max_terms,
+                ..QueryLimits::default()
+            };
+            let bound = runs_at(max_terms);
+            let mut at_bound = text_compiler.compile(&text.render(), &defaults, &limits);
+            // The same query: the bound limits the alternatives, not the text (at least `n` terms fit).
+            prop_assert_eq!(at_bound.query(), &engine_query(&unfiltered, &fields));
+            same_runs(&at_bound, &bound)?;
+            if bound.iter().any(|r| r.cut) {
+                cover("synonyms compiled cut".to_owned());
+                if let Some(f) = &text.filter {
+                    at_bound = at_bound.with_filter([f.clone()]);
+                }
+                bound_compiled = Some((at_bound, bound));
+            }
+        }
         for run in &runs {
             if run.cut {
                 cover("synonyms compiled cut".to_owned());
@@ -1194,7 +1535,20 @@ fn check(
         // L1's cut at a `max_terms` within its window (SPEC §7.1.3): from one term below L1's step with one
         // alternative per run beside L0 (skipped) to that step with every alternative the compilation kept (as it is,
         // listed cut when the compilation cut it), a different one at each operation (`t` and the live count), so the
-        // cases meet every cut of their runs.
+        // cases meet every cut of their runs. A text whose compilation did not cut its runs takes, every other
+        // operation, the compilation at its bound instead, and a compilation that cut its runs is searched at the
+        // window's top every other time it comes, so the step it keeps whole is met listed cut (ROADMAP 8.1.24: those
+        // compilations are rarer than the window is wide). The rest of `turn` walks the window's offsets.
+        let mut turn = live.len() + t;
+        let (compiled, runs) = match &bound_compiled {
+            Some((c, r)) if !runs.iter().any(|r| r.cut) && !turn.is_multiple_of(2) => {
+                (c, r.as_slice())
+            }
+            _ => (&compiled, runs.as_slice()),
+        };
+        if bound_compiled.is_some() {
+            turn /= 2;
+        }
         if !runs.is_empty() {
             let excluded = [(RelaxLevel::Exact, root.clone())];
             let at = |counts: &[usize]| {
@@ -1205,7 +1559,13 @@ fn check(
             };
             let lens: Vec<usize> = runs.iter().map(|r| r.alternatives.len()).collect();
             let (lo, hi) = (at(&vec![1; runs.len()]), at(&lens));
-            let max_terms = lo - 1 + (live.len() + t) % (hi - lo + 2);
+            let max_terms = if !runs.iter().any(|r| r.cut) {
+                lo - 1 + turn % (hi - lo + 2)
+            } else if turn.is_multiple_of(2) {
+                hi
+            } else {
+                lo - 1 + (turn / 2) % (hi - lo + 2)
+            };
             cover("synonyms window".to_owned());
             let tight = Case {
                 max_terms,
@@ -1213,11 +1573,12 @@ fn check(
             };
             let reference = Reference {
                 max_terms,
+                runs,
                 ..reference
             };
             check_relaxed(
                 &views,
-                Engine::Compiled(&compiled),
+                Engine::Compiled(compiled),
                 &reference,
                 (&root, Some(text)),
                 None,
@@ -1444,6 +1805,18 @@ fn collection_searches_match_the_reference() {
             "synonyms run of words",
             "synonyms window",
             "synonyms cut one more",
+            // Default fields that analyze apart (ROADMAP 8.1.24).
+            "synonyms match in the first field only",
+            "synonyms match in the later field only",
+            "synonyms union of both fields",
+            "synonyms later field's term first",
+            "synonyms overlap dropped",
+            "synonyms duplicate across fields",
+            "synonyms alike in one field only",
+            "synonyms run over a word of several tokens",
+            "drop_terms hit step over a word the fields split apart",
+            "prefix hit over a last word the fields split apart",
+            "fuzzy hit step beside a split word not corrected",
             "drop_terms:75% hit",
             "prefix:last hit",
             "prefix hit",
@@ -1461,6 +1834,56 @@ fn collection_searches_match_the_reference() {
             assert!(coverage.get(key).is_some_and(|&n| n > 0), "no {key} step");
         }
     }
+}
+
+/// The reference's analysis ([`analyze`]) is `whitespace` and `standard`, written from SPEC §6.3.3 for the alphabet
+/// the generators write (ROADMAP 8.1.24): a self-check of that premise on the words and synonym terms they write, and
+/// on some by hand, against the built-in analyzers. It checks the suite's model, not the analyzers, which their own
+/// tests pin.
+#[test]
+fn the_reference_analysis_is_the_analyzers_on_the_generated_alphabet() {
+    let analyzers = [(TITLE, "whitespace"), (BODY, "standard")]
+        .map(|(f, name)| (f, persia_analysis::builtin_analyzer(name, 1).unwrap()));
+    let check = |text: &str| -> Result<(), TestCaseError> {
+        for (field, analyzer) in &analyzers {
+            let mut out = persia_analysis::TokenStream::new();
+            analyzer.analyze_query(text, &mut out);
+            let engine: Vec<Analyzed> = out
+                .into_vec()
+                .into_iter()
+                .map(|t| (t.text, t.start..t.end, t.position))
+                .collect();
+            prop_assert_eq!(
+                &analyze(*field, text),
+                &engine,
+                "{:?} in field {}",
+                text,
+                field
+            );
+        }
+        Ok(())
+    };
+    for text in [
+        "Cat-bee",
+        "CAFÉ café",
+        "cat  bee",
+        "elephant-Cats-ca",
+        "Café-bee cats",
+    ] {
+        check(text).unwrap();
+    }
+    let terms = synonyms().prop_map(|(pool, groups)| (pool, groups.concat()));
+    run(
+        "the_reference_analysis_is_the_analyzers_on_the_generated_alphabet",
+        64,
+        (prop::collection::vec(text_word(), 1..6), terms),
+        |(words, (pool, terms))| {
+            for text in words.iter().chain(&pool).chain(&terms) {
+                check(text)?;
+            }
+            check(&words.join(" "))
+        },
+    );
 }
 
 /// The model's own assumptions, by hand: a commit deletes older copies, flushes only puts, and drops a segment
@@ -2033,6 +2456,9 @@ fn check_relaxed(
             hit_step,
             what()
         );
+        if let Some(t) = text {
+            reference.cover_split(t, &steps, hit_step);
+        }
         // Step order first, each step's hits its reference matches, within the tolerance, in the reference order.
         prop_assert!(relaxed.hits.windows(2).all(|w| w[0].step <= w[1].step));
         let none = BTreeMap::new();
@@ -2157,12 +2583,14 @@ struct RefRun {
     cut: bool,
 }
 
-/// SPEC §6.3.2's runs of `text` over the default fields `title` and `body` (whitespace: one token per word, at
-/// positions 0, 1, 2... in each maximal stretch of required words, which an excluded word ends). Each field scans its
-/// analysis ([`reference::synonyms::field_matches`]), the fields' matches merge, each alternative compiles as the
-/// quoted phrase `"<term>"` would (one word: a `combined` over the fields; more: a `phrase` per field, one of which
-/// must match), each once and none the run's own query, and the compilation keeps at most `max_terms − 2 · n` of them
-/// (`(max_terms, n)` its limit and its query's terms, [`reference::synonyms::bound`]).
+/// SPEC §6.3.2's runs of `text` over the default fields `title` and `body`, in each maximal stretch of required words
+/// (which an excluded word ends). Each field scans its own analysis ([`analyze`]: `whitespace`, `standard`) of the
+/// groups and of the words ([`reference::synonyms::field_matches`]), the fields' matches merge
+/// ([`reference::synonyms::merge`]: the union of the same clauses' alternatives in group then term order, a later
+/// field's match that overlaps them otherwise dropped), each alternative compiles as the quoted phrase `"<term>"` would
+/// ([`quoted`]), each once and none the run's own query (its clauses' parts), and the compilation keeps at most
+/// `max_terms − 2 · n` of them (`(max_terms, n)` its limit and its query's terms, [`reference::synonyms::bound`]).
+/// Covers each way the two analyses tell the runs apart ([`cover_fields`]).
 fn reference_runs(
     text: &Text,
     groups: &[Vec<String>],
@@ -2170,54 +2598,9 @@ fn reference_runs(
     fields: &[FieldId; 4],
     (max_terms, n): (usize, usize),
 ) -> Vec<RefRun> {
-    let analyze = |s: &str| {
-        let tokens: Vec<_> = s
-            .split_whitespace()
-            .zip(0..)
-            .map(|(w, p)| (w.to_owned(), p))
-            .collect();
-        let took = u32::try_from(tokens.len()).unwrap();
-        (tokens, took)
-    };
-    let synonyms = reference::synonyms::Synonyms::new(groups, &analyze);
-    let mut order = [TITLE, BODY];
-    order.sort_by_key(|&f| fields[f]);
-    let word = |w: &str| {
-        RefQuery::Word(
-            order
-                .iter()
-                .map(|&field| Clause {
-                    field,
-                    term: w.to_owned(),
-                    weight: params[field].0,
-                })
-                .collect(),
-        )
-    };
-    let quoted = |term: &str| {
-        let (tokens, _) = analyze(term);
-        if tokens.len() == 1 {
-            return word(&tokens[0].0);
-        }
-        let mut phrases: Vec<RefQuery> = order
-            .iter()
-            .map(|&field| RefQuery::Phrase {
-                field,
-                terms: tokens.clone(),
-                weight: params[field].0,
-            })
-            .collect();
-        if phrases.len() == 1 {
-            return phrases.remove(0);
-        }
-        RefQuery::Bool {
-            must: Vec::new(),
-            should: phrases,
-            must_not: Vec::new(),
-            filter: Vec::new(),
-            minimum_should_match: 0,
-        }
-    };
+    let order = default_fields(fields);
+    let synonyms = order.map(|f| reference::synonyms::Synonyms::new(groups, &|s| tokens(f, s)));
+    let parts = text.parts(params, fields);
     let mut runs: Vec<(Range<usize>, usize, Vec<RefQuery>)> = Vec::new();
     let mut start = 0;
     while start < text.clauses.len() {
@@ -2232,35 +2615,61 @@ fn reference_runs(
             .iter()
             .map(|c| c.0.as_str())
             .collect();
-        let per_field = order
+        let per_field: Vec<_> = order
             .iter()
-            .map(|_| reference::synonyms::field_matches(&synonyms, &words, &analyze))
+            .zip(&synonyms)
+            .map(|(&f, s)| reference::synonyms::field_matches(s, &words, &|w| tokens(f, w)))
             .collect();
+        cover_fields(&per_field);
         for (covered, terms) in reference::synonyms::merge(per_field) {
             let clauses = start + covered.start..start + covered.end;
-            let parts: Vec<RefQuery> = words[covered].iter().map(|w| word(w)).collect();
-            let own = if parts.len() == 1 {
-                parts[0].clone()
+            let mut own: Vec<RefQuery> = parts[clauses.clone()].concat();
+            let own = if own.len() == 1 {
+                own.remove(0)
             } else {
                 RefQuery::Bool {
-                    must: parts,
+                    must: own,
                     should: Vec::new(),
                     must_not: Vec::new(),
                     filter: Vec::new(),
                     minimum_should_match: 0,
                 }
             };
+            if words[covered.clone()]
+                .iter()
+                .any(|w| analyze(BODY, w).len() > 1)
+            {
+                cover("synonyms run over a word of several tokens".to_owned());
+            }
+            let run_text = words[covered].join(" ");
             // Every term the fields report compiled, each once, none the run's own query; the run's share is of the
             // terms reported (at most 50), so one that compiles away still counts.
             let reported = terms.len().min(reference::synonyms::CAP);
             let mut alternatives: Vec<RefQuery> = Vec::new();
             for (_, t) in terms {
-                let q = quoted(&t);
-                if q != own && !alternatives.contains(&q) {
-                    alternatives.push(q);
+                // A term one field analyzes as it does the run's words and the other does not: the other field
+                // reported it, as the field that reads it as the run cannot.
+                let alike = order.map(|f| tokens(f, &t).0 == tokens(f, &run_text).0);
+                if alike[0] != alike[1] {
+                    cover("synonyms alike in one field only".to_owned());
                 }
+                let Some(q) = quoted(&t, &order, params) else {
+                    continue;
+                };
+                if q == own {
+                    continue;
+                }
+                // Each field reports a term once, and terms a field tells apart compile apart: a duplicate is a term
+                // of one field's report compiled as another of the other field's.
+                if alternatives.contains(&q) {
+                    cover("synonyms duplicate across fields".to_owned());
+                    continue;
+                }
+                alternatives.push(q);
             }
-            // A run whose terms all compile away still takes its share, and is then no run (SPEC §6.3.2).
+            // A run whose terms all compile away still takes its share, and is then no run (SPEC §6.3.2). Not reached
+            // here: a term that compiles to the run's own query analyzes as the run in every field, so no field
+            // reports it, and dropping duplicates keeps the first (`relax_synonyms` and the compiler's unit tests).
             runs.push((clauses, reported, alternatives));
         }
         start = end;
@@ -2281,6 +2690,50 @@ fn reference_runs(
             }
         })
         .collect()
+}
+
+/// Coverage of how the default fields' matches (`per_field`, in field order) meet (SPEC §6.3.2): a match in one field
+/// only, and kept; the same clauses matched in both, each reporting a place the other does not, and a later field's place
+/// before an earlier field's; and a later field's match dropped for overlapping an earlier one's otherwise.
+fn cover_fields(per_field: &[Vec<(Range<usize>, Vec<reference::synonyms::Alternative>)>]) {
+    let [first, later] = per_field else {
+        panic!("two default fields");
+    };
+    // A match the other field lacks and that is kept: a later field's overlapping an earlier one's is dropped.
+    for (i, (mine, theirs)) in [(first, later), (later, first)].into_iter().enumerate() {
+        for (range, _) in mine {
+            let overlaps = |t: &&(Range<usize>, _)| t.0.start < range.end && range.start < t.0.end;
+            if !theirs.iter().any(|t| t.0 == *range)
+                && (i == 0 || !theirs.iter().any(|t| overlaps(&t)))
+            {
+                cover(format!(
+                    "synonyms match in the {} field only",
+                    ["first", "later"][i]
+                ));
+            }
+        }
+    }
+    for (range, places) in later {
+        let place = |a: &reference::synonyms::Alternative| a.0;
+        if let Some((_, earlier)) = first.iter().find(|f| f.0 == *range) {
+            let own: Vec<_> = places
+                .iter()
+                .map(place)
+                .filter(|p| !earlier.iter().any(|e| e.0 == *p))
+                .collect();
+            if !own.is_empty() && earlier.iter().any(|e| !places.iter().any(|p| p.0 == e.0)) {
+                cover("synonyms union of both fields".to_owned());
+            }
+            if own.iter().any(|p| earlier.iter().any(|e| *p < e.0)) {
+                cover("synonyms later field's term first".to_owned());
+            }
+        } else if first
+            .iter()
+            .any(|f| f.0.start < range.end && range.start < f.0.end)
+        {
+            cover("synonyms overlap dropped".to_owned());
+        }
+    }
 }
 
 /// A step of the reference cascade: its query as searched (cut when the limits cut it), what it applied, its level,
@@ -2445,7 +2898,7 @@ impl Reference<'_> {
                 let every = |f: usize, t: &str, last: bool| {
                     (last || t.chars().count() >= PREFIX_LEN).then(|| prefix(f, t))
                 };
-                let Some(full) = self.rewrite_root(root, &every) else {
+                let Some(full) = self.rewrite_root(root, text, &every) else {
                     return Vec::new();
                 };
                 // The tier step `prefix:last` (ROADMAP 8.2.7): unless L2's last rung was built and not skipped.
@@ -2456,7 +2909,7 @@ impl Reference<'_> {
                 let last = |f: usize, t: &str, last: bool| last.then(|| prefix(f, t));
                 let mut out = Vec::new();
                 if !dropped
-                    && let Some(tier) = self.rewrite_root(root, &last)
+                    && let Some(tier) = self.rewrite_root(root, text, &last)
                     && tier != full
                 {
                     out.push(built(tier, "prefix:last", l0_text()));
@@ -2465,12 +2918,13 @@ impl Reference<'_> {
                 out
             }
             RelaxLevel::Fuzzy => {
-                let Some(full) = self.rewrite_root(root, &|f, t, _| self.fuzzy(f, t, 2)) else {
+                let Some(full) = self.rewrite_root(root, text, &|f, t, _| self.fuzzy(f, t, 2))
+                else {
                     return Vec::new();
                 };
                 // The tier step `fuzzy:1` (ROADMAP 8.2.7) when a term may take two edits.
                 let mut out = Vec::new();
-                if let Some(near) = self.rewrite_root(root, &|f, t, _| self.fuzzy(f, t, 1))
+                if let Some(near) = self.rewrite_root(root, text, &|f, t, _| self.fuzzy(f, t, 1))
                     && near != full
                 {
                     out.push(self.fuzzy_step(near, "fuzzy:1", text, 1));
@@ -2548,24 +3002,28 @@ impl Reference<'_> {
     }
 
     /// The corrections of `text`'s words at distances capped at `max` (SPEC §7.6), each with its clause's index, in
-    /// text order: a required word no default field holds (collection `df` 0) whose rewritten fields hold a term within
-    /// its distance; its correction the term that field's `fuzzy` keeps first (the highest `df`, ties by bytes), the
+    /// text order: a required word of one part, one token over the default fields (not one they split apart), no field
+    /// of which holds its analyzed term (collection `df` 0), whose rewritten fields hold a term within its distance;
+    /// its correction the term that field's `fuzzy` keeps first (the highest `df`, ties by bytes), the
     /// highest `df` over the fields, ties to the field first in the `combined` (the schema's order).
     fn corrections(&self, text: &Text, max: u8) -> Vec<(usize, String, String)> {
-        let ids = ids(self.schema);
-        let mut order = [TITLE, BODY];
-        order.sort_by_key(|&f| ids[f]);
+        let parts = text.parts(self.params, &ids(self.schema));
         let mut out = Vec::new();
         for (i, (word, excluded)) in text.clauses.iter().enumerate() {
-            if *excluded || order.iter().any(|&f| self.corpus.df(f, word) > 0) {
+            // A required word of one part, one token over the default fields: its `combined` lists each field's term.
+            let [RefQuery::Combined(clauses)] = parts[i].as_slice() else {
+                continue;
+            };
+            if *excluded || clauses.iter().any(|c| self.corpus.df(c.field, &c.term) > 0) {
                 continue;
             }
             let mut best: Option<(u64, String)> = None;
-            for &field in &order {
-                let Some(RefQuery::Fuzzy { distance, .. }) = self.fuzzy(field, word, max) else {
+            for Clause { field, term, .. } in clauses {
+                let Some(RefQuery::Fuzzy { distance, .. }) = self.fuzzy(*field, term, max) else {
                     continue;
                 };
-                if let Some((term, df, _)) = self.corpus.fuzzy_terms(field, word, distance, 1).pop()
+                if let Some((term, df, _)) =
+                    self.corpus.fuzzy_terms(*field, term, distance, 1).pop()
                     && best.as_ref().is_none_or(|(top, _)| df > *top)
                 {
                     best = Some((df, term));
@@ -2579,21 +3037,34 @@ impl Reference<'_> {
     }
 
     /// L2's `effective` for user text at count `k` (SPEC §7.6, ROADMAP 8.2.2.2): its `k` most important required
-    /// words and every excluded one, in text order. A word no document holds is the least important, then (no
-    /// stopwords here) a lower IDF, a higher `df` over its fields, then a later position.
+    /// clauses and every excluded one, in text order. A clause's term is its parts (several required together), and a
+    /// term no document holds is the least important ([`Self::weigh`]), then (no stopwords here: neither analyzer
+    /// removes a token) a lower IDF, then a later position.
     fn drop_terms_effective(&self, text: &Text, k: usize) -> String {
-        let df = |w: &str| self.corpus.df(TITLE, w).max(self.corpus.df(BODY, w));
-        let mut required: Vec<(bool, u64, usize)> = text
+        let parts = text.parts(self.params, &ids(self.schema));
+        let mut required: Vec<(bool, f64, usize)> = text
             .clauses
             .iter()
             .enumerate()
             .filter(|(_, c)| !c.1)
-            .map(|(i, c)| {
-                let df = df(&c.0);
-                (df == 0, df, i)
+            .map(|(i, _)| {
+                // A clause of several parts is not reached here (see [`quoted`]): `drop_terms_steps` reads the root's
+                // `must` entries as the terms, which are the clauses only while each has one part.
+                let (none, idf) = match parts[i].as_slice() {
+                    [one] => self.weigh(one),
+                    many => self.weigh(&RefQuery::Bool {
+                        must: many.to_vec(),
+                        should: Vec::new(),
+                        must_not: Vec::new(),
+                        filter: Vec::new(),
+                        minimum_should_match: 0,
+                    }),
+                };
+                (none, idf, i)
             })
             .collect();
-        required.sort_unstable();
+        // Most important first.
+        required.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.total_cmp(&a.1)).then(a.2.cmp(&b.2)));
         let kept: BTreeSet<usize> = required.iter().take(k).map(|r| r.2).collect();
         text.sources()
             .into_iter()
@@ -2602,6 +3073,112 @@ impl Reference<'_> {
             .map(|(_, s)| s)
             .collect::<Vec<_>>()
             .join(" ")
+    }
+
+    /// Coverage of a word the default fields split apart (SPEC §7.1.1) where the cascade's compared output reads it
+    /// (ROADMAP 8.1.24): L2's hit step, whose `effective` the words' importance decides; an L3 step with hits whose
+    /// last required clause is one (each field's last token its last term); and L4's hit step beside one whose tokens
+    /// no document holds though one of them has a correction, which a word of one token would get (SPEC §7.6: a word
+    /// of several tokens is neither corrected nor rewritten in `effective`).
+    fn cover_split(&self, text: &Text, steps: &[RefStep], hit_step: usize) {
+        let parts = text.parts(self.params, &ids(self.schema));
+        let required: Vec<usize> = (0..text.clauses.len())
+            .filter(|&i| !text.clauses[i].1)
+            .collect();
+        let split = |i: usize| matches!(parts[i].as_slice(), [RefQuery::Bool { .. }]);
+        let hit = &steps[hit_step];
+        if hit.level == RelaxLevel::DropTerms && required.iter().any(|&i| split(i)) {
+            cover("drop_terms hit step over a word the fields split apart".to_owned());
+        }
+        let found = |s: &RefStep| s.matches.as_ref().is_some_and(|m| !m.is_empty());
+        if required.last().is_some_and(|&i| split(i))
+            && steps
+                .iter()
+                .any(|s| s.level == RelaxLevel::Prefix && found(s))
+        {
+            cover("prefix hit over a last word the fields split apart".to_owned());
+        }
+        if hit.level == RelaxLevel::Fuzzy
+            && required
+                .iter()
+                .any(|&i| split(i) && self.uncorrected(&parts[i][0]))
+        {
+            cover("fuzzy hit step beside a split word not corrected".to_owned());
+        }
+    }
+
+    /// Whether no document holds any of `q`'s one-field terms and one of them has a term within its distance that
+    /// some document holds: what a word of one token would be corrected to.
+    fn uncorrected(&self, q: &RefQuery) -> bool {
+        fn leaves<'q>(q: &'q RefQuery, out: &mut Vec<&'q Clause>) {
+            match q {
+                RefQuery::Combined(clauses) | RefQuery::Word(clauses) => out.extend(clauses),
+                RefQuery::Bool { must, should, .. } => {
+                    for c in must.iter().chain(should) {
+                        leaves(c, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut terms = Vec::new();
+        leaves(q, &mut terms);
+        terms.iter().all(|c| self.corpus.df(c.field, &c.term) == 0)
+            && terms.iter().any(|c| {
+                let Some(RefQuery::Fuzzy { distance, .. }) = self.fuzzy(c.field, &c.term, 2) else {
+                    return false;
+                };
+                !self
+                    .corpus
+                    .fuzzy_terms(c.field, &c.term, distance, 1)
+                    .is_empty()
+            })
+    }
+
+    /// SPEC §7.6 L2's reading of a term `q`: whether it holds no document by the `df`s its IDF reads, and that IDF,
+    /// over the search's statistics. A `term` or a `combined` holds none when every field's `df` is 0, and its IDF is of
+    /// its largest `df`; a `phrase` holds none with a term of `df` 0, and its IDF is its terms' summed; a `bool` holds
+    /// none with such a `must` clause or fewer other `should` clauses than it requires (its `minimum_should_match`, and
+    /// at least one with no `must` or `filter` clause), and its IDF is its `must` clauses' summed plus the largest of
+    /// its `should` clauses'; a `boost` or `constant_score` is its query's; an expansion and `match_all` have IDF 0.
+    fn weigh(&self, q: &RefQuery) -> (bool, f64) {
+        let n = self.corpus.n();
+        match q {
+            RefQuery::Word(clauses) | RefQuery::Combined(clauses) => {
+                let df = clauses
+                    .iter()
+                    .map(|c| self.corpus.df(c.field, &c.term))
+                    .max()
+                    .unwrap_or(0);
+                (df == 0, reference::search::idf(n, df))
+            }
+            RefQuery::Phrase { field, terms, .. } => {
+                let dfs: Vec<u64> = terms.iter().map(|t| self.corpus.df(*field, &t.0)).collect();
+                let idf = dfs.iter().map(|&df| reference::search::idf(n, df)).sum();
+                (dfs.contains(&0), idf)
+            }
+            RefQuery::Bool {
+                must,
+                should,
+                filter,
+                minimum_should_match,
+                ..
+            } => {
+                let must: Vec<(bool, f64)> = must.iter().map(|c| self.weigh(c)).collect();
+                let should: Vec<(bool, f64)> = should.iter().map(|c| self.weigh(c)).collect();
+                let requires = match *minimum_should_match {
+                    0 if must.is_empty() && filter.is_empty() && !should.is_empty() => 1,
+                    m => m,
+                };
+                let holding = should.iter().filter(|s| !s.0).count();
+                let none = must.iter().any(|m| m.0) || holding < requires;
+                let idf = must.iter().map(|m| m.1).sum::<f64>()
+                    + should.iter().map(|s| s.1).fold(0.0, f64::max);
+                (none, idf)
+            }
+            RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => self.weigh(inner),
+            RefQuery::Prefix { .. } | RefQuery::Fuzzy { .. } | RefQuery::All => (false, 0.0),
+        }
     }
 
     /// Whether `whole` (a step beside the steps it excludes) is within the limits other than `max_expansions` (SPEC
@@ -2735,20 +3312,14 @@ impl Reference<'_> {
     /// of its words in the root's `must`; L0's other required words, its excluded words and its filter as they are.
     /// A root of one word is that `bool` alone.
     fn synonyms_step(&self, root: &RefQuery, text: &Text, counts: &[usize]) -> RefQuery {
-        let (must, must_not, filter) = match root {
+        let (must_not, filter) = match root {
             RefQuery::Bool {
-                must,
-                must_not,
-                filter,
-                ..
-            } => (must.clone(), must_not.clone(), filter.clone()),
-            word => (vec![word.clone()], Vec::new(), Vec::new()),
+                must_not, filter, ..
+            } if !text.single(self.params, &ids(self.schema)) => (must_not.clone(), filter.clone()),
+            _ => (Vec::new(), Vec::new()),
         };
-        // The position in the root's `must` of each required clause.
-        let mut slot = BTreeMap::new();
-        for (i, _) in text.clauses.iter().enumerate().filter(|(_, c)| !c.1) {
-            slot.insert(i, slot.len());
-        }
+        // Each clause's parts in the root.
+        let parts = text.parts(self.params, &ids(self.schema));
         let mut out = Vec::new();
         let mut i = 0;
         while i < text.clauses.len() {
@@ -2762,20 +3333,16 @@ impl Reference<'_> {
                 .zip(counts)
                 .find(|(r, _)| r.clauses.start == i)
             else {
-                out.push(must[slot[&i]].clone());
+                out.extend(parts[i].iter().cloned());
                 i += 1;
                 continue;
             };
-            let mut parts: Vec<RefQuery> = run
-                .clauses
-                .clone()
-                .map(|c| must[slot[&c]].clone())
-                .collect();
-            let own = if parts.len() == 1 {
-                parts.remove(0)
+            let mut own: Vec<RefQuery> = parts[run.clauses.clone()].concat();
+            let own = if own.len() == 1 {
+                own.remove(0)
             } else {
                 RefQuery::Bool {
-                    must: parts,
+                    must: own,
                     should: Vec::new(),
                     must_not: Vec::new(),
                     filter: Vec::new(),
@@ -2807,8 +3374,17 @@ impl Reference<'_> {
 
     /// L3's and L4's step for `root` (SPEC §7.6): the terms of a root `bool`'s `must` clauses rewritten by `leaf`, the
     /// last clause's last term the last term, or of a word alone (under `boost`s); `None` when no term is rewritten
-    /// or the root `bool` has `should` clauses or a `minimum_should_match`.
-    fn rewrite_root(&self, root: &RefQuery, leaf: &Leaf<'_>) -> Option<RefQuery> {
+    /// or a programmatic root `bool` has `should` clauses or a `minimum_should_match`. User `text` of one part is that
+    /// part, whatever it is (a word the fields split apart is a `bool` of `should` clauses, one per field).
+    fn rewrite_root(
+        &self,
+        root: &RefQuery,
+        text: Option<&Text>,
+        leaf: &Leaf<'_>,
+    ) -> Option<RefQuery> {
+        if text.is_some_and(|t| t.single(self.params, &ids(self.schema))) {
+            return self.rewrite(root, true, leaf);
+        }
         match root {
             RefQuery::Bool {
                 should,
@@ -2859,15 +3435,18 @@ impl Reference<'_> {
     /// last `must` clause and every `should` clause holding the last term of a last `q`), and under a `boost`.
     /// Phrases, `must_not`, filters, expansions, `match_all` and `constant_score` stay as they are.
     ///
-    /// Two details follow the engine (`relax/words.rs`), not a SPEC rule, and these generators never reach them: a
-    /// `combined` left with one `should` clause is that clause, and an empty term is kept exact.
+    /// A `combined` left with one `should` clause is that clause (SPEC §7.6 L3: a one-field `combined`, as of a word the
+    /// fields split apart, becomes its expansion). One detail follows the engine (`relax/words.rs`), not a SPEC rule,
+    /// and these generators never reach it: an empty term is kept exact.
     fn rewrite(&self, q: &RefQuery, last: bool, leaf: &Leaf<'_>) -> Option<RefQuery> {
         let open = |c: &Clause| {
             (c.field != TAG && !c.term.is_empty()).then(|| leaf(c.field, &c.term, last))?
         };
         match q {
-            RefQuery::Word(clauses) if clauses.len() == 1 => open(&clauses[0]),
-            RefQuery::Word(clauses) => {
+            RefQuery::Word(clauses) | RefQuery::Combined(clauses) if clauses.len() == 1 => {
+                open(&clauses[0])
+            }
+            RefQuery::Word(clauses) | RefQuery::Combined(clauses) => {
                 let mut exact = Vec::new();
                 let mut should = Vec::new();
                 for c in clauses {
@@ -2954,7 +3533,7 @@ fn expansions(q: &RefQuery) -> usize {
             .map(expansions)
             .sum(),
         RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => expansions(inner),
-        RefQuery::Word(_) | RefQuery::Phrase { .. } | RefQuery::All => 0,
+        RefQuery::Word(_) | RefQuery::Combined(_) | RefQuery::Phrase { .. } | RefQuery::All => 0,
     }
 }
 
@@ -2962,7 +3541,7 @@ fn expansions(q: &RefQuery) -> usize {
 /// `phrase` term, and per filter value ([`filter_terms`]).
 fn terms(q: &RefQuery) -> usize {
     match q {
-        RefQuery::Word(clauses) => clauses.len(),
+        RefQuery::Word(clauses) | RefQuery::Combined(clauses) => clauses.len(),
         RefQuery::Phrase { terms, .. } => terms.len(),
         RefQuery::Prefix { .. } | RefQuery::Fuzzy { .. } => 1,
         RefQuery::Bool {
@@ -3013,7 +3592,7 @@ fn cuttable<'q>(q: &'q mut RefQuery, caps: &mut Vec<&'q mut usize>) {
             }
         }
         RefQuery::Boost(inner, _) | RefQuery::Constant(inner, _) => cuttable(inner, caps),
-        RefQuery::Word(_) | RefQuery::Phrase { .. } | RefQuery::All => {}
+        RefQuery::Word(_) | RefQuery::Combined(_) | RefQuery::Phrase { .. } | RefQuery::All => {}
     }
 }
 
@@ -3127,6 +3706,7 @@ fn reference_unfiltered(q: &RefQuery) -> Option<RefQuery> {
 fn searches_word(q: &RefQuery) -> bool {
     match q {
         RefQuery::Word(_)
+        | RefQuery::Combined(_)
         | RefQuery::Phrase { .. }
         | RefQuery::Prefix { .. }
         | RefQuery::Fuzzy { .. } => true,

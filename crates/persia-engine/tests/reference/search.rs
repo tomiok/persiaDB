@@ -11,8 +11,11 @@ use super::expand::edit_weight;
 /// A query of the reference, by field index.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Query {
-    /// One word over one or more fields (a `term` or a `combined`).
+    /// One word over one or more fields, as a programmatic query writes it: a `term` (one field) or a `combined`.
     Word(Vec<Clause>),
+    /// A `combined` over one or more fields, also of one: how user text compiles a word (SPEC §7.1.1, each field of a
+    /// word the fields split apart a one-field `combined`). Scored as a [`Query::Word`] of the same clauses.
+    Combined(Vec<Clause>),
     /// Terms at relative positions of one `text` field, scored with weight `weight` (the schema `boost`).
     Phrase {
         field: usize,
@@ -116,7 +119,9 @@ impl Corpus {
     pub fn bonus(&self, must: &[Query], doc: &Doc) -> (f64, f64) {
         let (mut bonus, mut bound) = (0.0, 0.0);
         for w in must.windows(2) {
-            let (Query::Word(a), Query::Word(b)) = (&w[0], &w[1]) else {
+            let (Query::Word(a) | Query::Combined(a), Query::Word(b) | Query::Combined(b)) =
+                (&w[0], &w[1])
+            else {
                 continue;
             };
             let fields: Vec<(usize, &str, &str)> = a
@@ -170,7 +175,7 @@ impl Corpus {
     ) -> Option<(f64, f64)> {
         let eval = |q| self.eval_filtered(q, doc, proximity, selects);
         match q {
-            Query::Word(clauses) => {
+            Query::Word(clauses) | Query::Combined(clauses) => {
                 let held = clauses.iter().any(|c| doc[c.field].contains(&c.term));
                 held.then(|| (self.score(clauses, doc), self.word_top(clauses)))
             }

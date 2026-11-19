@@ -2,8 +2,9 @@
 //! group term analyzed into tokens, the longest term matching at each start of an analyzed query, what a match reports,
 //! the compiler's reading of whole clauses over several fields, its bound on the alternatives, and the cascade's cut.
 //!
-//! The analysis is a parameter: the differential suite analyzes by whitespace, where no term analyzes to nothing and
-//! no stopword leaves a gap, so those rules are checked here, by hand.
+//! The analysis is a parameter, one per default field: the differential suite gives `title` `whitespace` and `body`
+//! `standard`, which analyze case and `-` apart (ROADMAP 8.1.24), but no term analyzes to nothing there and no stopword
+//! leaves a gap, so those rules are checked here, by hand.
 
 #![allow(dead_code)]
 
