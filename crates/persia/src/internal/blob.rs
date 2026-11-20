@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, Chunk, ChunkSize, Error, Result,
-    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range, read_range,
+    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range_into, read_range,
 };
 use persia_engine::db::SegmentIds;
 
@@ -239,7 +239,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
 
     /// A reader of the whole blob `blob_ref` refers to (SPEC §9.6 `get_blob`), which reads it a window of chunks at
     /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once. The manifest is looked up and checked
-    /// once, here; every window reads by it ([`read_manifest_range`]). The reader pins the blob and its upload until
+    /// once, here; every window reads by it ([`read_manifest_range_into`], with one window buffer
+    /// and one store scratch buffer for the whole stream). The reader pins the blob and its upload until
     /// it is dropped, so a GC sweep never takes a blob mid-stream (SPEC §9.5).
     ///
     /// # Errors
@@ -266,6 +267,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             offset: 0,
             buf: Vec::new(),
             pos: 0,
+            scratch: Vec::new(),
             _pins: pins,
         })
     }
@@ -353,7 +355,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                     if e.is_store_poisoned()
                         && (unknown.is_some() || e.is_bind_outcome_unknown()) =>
                 {
-                    return (Err(still_unknown(e)), true);
+                    return (Err(still_unknown(e, unknown.as_ref())), true);
                 }
                 Err(e) if e.is_bind_outcome_unknown() => unknown = Some(e),
                 Err(e) if unknown.is_none() => return (Err(e), false),
@@ -421,8 +423,16 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
 
 /// `poisoned` (an error with [`Error::is_store_poisoned`]) as an unknown outcome: itself when it already is one, or
 /// wrapped in [`Error::BindOutcomeUnknown`], so the caller learns both that nothing is known and that the store must
-/// be reopened.
-fn still_unknown(poisoned: Error) -> Error {
+/// be reopened. The earlier unknown outcome, if any, holds the root cause (the failed sync): it is logged, since the
+/// returned error must carry the poisoned refusal for [`Error::is_store_poisoned`] to hold.
+fn still_unknown(poisoned: Error, first: Option<&Error>) -> Error {
+    if let Some(first) = first {
+        tracing::warn!(
+            error = %first,
+            source = ?std::error::Error::source(first),
+            "a blob bind's outcome is unknown and its store refuses every write until reopened"
+        );
+    }
     if poisoned.is_bind_outcome_unknown() {
         poisoned
     } else {
@@ -486,6 +496,8 @@ pub struct BlobReader<'a, S: ?Sized> {
     offset: u64,
     buf: Vec<u8>,
     pos: usize,
+    /// The store's read buffer (`BlobStore::read_chunks_checked`), kept for the stream: at most one chunk frame.
+    scratch: Vec<u8>,
     /// The blob and its upload, pinned while the stream lives (SPEC §9.5).
     _pins: Pins,
 }
@@ -505,8 +517,21 @@ impl<S: BlobStore + ?Sized> Read for BlobReader<'_, S> {
                 return Ok(0);
             }
             let end = self.offset.saturating_add(self.window).min(size);
-            self.buf = read_manifest_range(self.store, &self.manifest, self.offset..end)
-                .map_err(io::Error::other)?;
+            // The window buffer and the store's scratch are kept across windows: neither is allocated (nor, for a
+            // pack read with `pread`, zero-filled) again (ROADMAP 9.2.9).
+            self.buf.clear();
+            self.pos = 0;
+            read_manifest_range_into(
+                self.store,
+                &self.manifest,
+                self.offset..end,
+                &mut self.scratch,
+                &mut self.buf,
+            )
+            .map_err(|e| {
+                self.buf.clear();
+                io::Error::other(e)
+            })?;
             self.offset = end;
             self.pos = 0;
         }

@@ -5,13 +5,19 @@
 //! (ROADMAP 9.5.2, which writes its new file under the same pattern) does. None of them is needed: a creation's is an
 //! empty pack or a second name of the pack (removing a name never touches the file's data), and a rewrite's file is
 //! renamed over the pack only once complete. The container's `sweep_stale_files` (SPEC §4.5.1) matches only the
-//! container's own names, so the pack sweeps its own, with the same rules: only regular files named exactly as
-//! [`temp_path`](super::temp_path) names them, and one directory sync after the removals.
+//! container's own names, so the pack sweeps its own, with rules like the container's but stricter: only regular
+//! files named exactly as [`temp_path`](super::temp_path) names them (lowercase hex only, where the container
+//! accepts either case), and one directory sync after the removals.
 //!
 //! Only the container's writer opens the pack read-write (ADR-0049 item 8), and it creates or rewrites the pack only
 //! through that handle, after the open: when the sweep runs, no creation or rewrite of this pack is in flight, so no
 //! temporary file can be in use. That is why the pack needs no lock on its temporary files, unlike the container's
 //! (whose creates take their own lock, SPEC §4.5.1).
+//!
+//! It also fails safe if that contract is broken and two read-write handles exist (ROADMAP 9.2.7 does not enforce
+//! one writer yet): a temporary name the sweep removes under another handle makes that handle's link (a creation)
+//! or rename (a rewrite) fail, so it reports an error and publishes nothing; it never leaves a half-made pack at
+//! the pack's name.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};

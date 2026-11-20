@@ -205,8 +205,8 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// the next read-write open tries again (ROADMAP 9.2.6).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] for a damaged header, slot or committed frame, [`Error::PackUnsupported`] for a newer
-    /// format, or [`Error::PackIo`].
+    /// [`Error::CorruptAt`] naming the damaged header (0), slot or committed frame (ROADMAP 9.2.8),
+    /// [`Error::PackUnsupported`] for a newer format, or [`Error::PackIo`].
     pub fn open_in(
         vfs: Arc<dyn Vfs<File = F>>,
         path: impl AsRef<Path>,
@@ -706,24 +706,21 @@ impl<F: ContainerFile + 'static> BlobStore for PackStore<F> {
 
     /// Each chunk in one read of its frame, sized by the manifest, and one CRC pass over its bytes that checks both
     /// the frame's CRC and the manifest's ([`layout::check_chunk_frame`], ROADMAP 9.2.9); `sink` gets a slice of the
-    /// mapping, or of one buffer reused for every chunk read with `pread`, never a copy.
+    /// mapping, or of the caller's `scratch`, reused for every chunk read with `pread`, never a copy.
     fn read_chunks_checked(
         &self,
         manifest: &BlobManifest,
         indices: Range<u32>,
+        scratch: &mut Vec<u8>,
         sink: &mut dyn FnMut(u32, &[u8]) -> Result<()>,
     ) -> Result<()> {
-        let mut scratch = Vec::new();
         for index in indices {
             let expected = expected_chunk(manifest, index)?;
             // Read under the read side only: a bind's publish waits for one chunk's read, not for the whole range.
             let (offset, frame) = {
                 let inner = self.read();
-                let (pack, offset) = locate(&inner, manifest, index)?;
-                (
-                    offset,
-                    pack.chunk_frame(offset, expected.len, &mut scratch)?,
-                )
+                let (pack, offset) = locate_chunk(&inner, manifest, index)?;
+                (offset, pack.chunk_frame(offset, expected.len, scratch)?)
             };
             sink(
                 index,
@@ -752,14 +749,15 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     /// length and stored CRC32C, and the bytes' CRC32C, all against the manifest ([`layout::check_chunk_frame`]).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when the chunk is not in the pack, is past the blob's last one, or its frame is damaged or
-    /// does not match `manifest`; [`Error::PackUnsupported`] for unknown frame flags; [`Error::PackIo`].
+    /// [`Error::CorruptAt`] naming the chunk's frame when it is damaged or does not match `manifest`;
+    /// [`Error::Corrupt`] when the chunk is not in the pack or is past the blob's last one;
+    /// [`Error::PackUnsupported`] for unknown frame flags; [`Error::PackIo`].
     pub fn read_chunk_source(&self, manifest: &BlobManifest, index: u32) -> Result<ByteSource> {
         let expected = expected_chunk(manifest, index)?;
         let mut scratch = Vec::new();
         let (offset, frame) = {
             let inner = self.read();
-            let (pack, offset) = locate(&inner, manifest, index)?;
+            let (pack, offset) = locate_chunk(&inner, manifest, index)?;
             let frame = match pack.chunk_frame(offset, expected.len, &mut scratch)? {
                 FrameBytes::Mapped(source) => Some(source),
                 FrameBytes::Read(_) => None,
@@ -800,7 +798,7 @@ fn expected_chunk(manifest: &BlobManifest, index: u32) -> Result<ChunkHead> {
 
 /// The pack and the offset of the `BlobChunk` frame of chunk `index` of the blob `manifest` describes: from the
 /// bound blob's index entry when it is bound under the manifest's upload, else from this handle's staged chunks.
-fn locate<'a, F>(
+fn locate_chunk<'a, F>(
     inner: &'a Inner<F>,
     manifest: &BlobManifest,
     index: u32,

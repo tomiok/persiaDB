@@ -13,8 +13,8 @@ use std::sync::{Arc, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
 use persia_blob::{
-    BindOutcome, BlobManifest, BlobStore, ChunkSize, PackMode, PackStore, UploadId, blob_id_of,
-    read_range,
+    BindOutcome, BlobManifest, BlobStore, ChunkSize, Error, PackMode, PackStore, UploadId,
+    blob_id_of, read_range,
 };
 use persia_format::BlobRef;
 use persia_format::checksum::crc32c;
@@ -158,7 +158,14 @@ fn read_every_blob(store: &PackStore<SimFsFile>) {
         if let Ok(Some(m)) = store.manifest(id) {
             assert_eq!(m.blob_id(), id, "a manifest is checked against its id");
             if let Some(r) = reference(&m) {
-                let _ = read_range(store, &r, 0..m.size().min(1 << 20));
+                // A read fails only on damaged bytes, a newer format or an I/O error, never on a caller-side rule.
+                if let Err(e) = read_range(store, &r, 0..m.size().min(1 << 20)) {
+                    assert!(
+                        e.is_corruption()
+                            || matches!(e, Error::PackUnsupported(_) | Error::PackIo { .. }),
+                        "unexpected read error: {e:?}"
+                    );
+                }
             }
         }
     }

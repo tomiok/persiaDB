@@ -115,15 +115,16 @@ pub(crate) fn at(offset: u64) -> impl Fn(Error) -> Error {
 }
 
 /// [`from_format`] for the header and slots: at the page the format error found its field in, the header (0) or a
-/// slot (4096, 8192). A format error carries the offset of its field; ours, the start of the slot.
+/// slot (4096, 8192): the prefix is three pages of `SLOT_LEN` bytes. A format error carries the offset of its field;
+/// ours, the start of the slot.
 fn from_format_in_prefix(e: persia_format::Error) -> Error {
     match e.corruption() {
         Some((offset, _)) => {
             let page = offset
                 .min(FIRST_FRAME.saturating_sub(1))
-                .checked_div(4096)
+                .checked_div(u64_from_usize(SLOT_LEN))
                 .unwrap_or(0)
-                .saturating_mul(4096);
+                .saturating_mul(u64_from_usize(SLOT_LEN));
             from_format_at(e, page)
         }
         None => from_format(e),
@@ -1159,5 +1160,33 @@ mod tests {
                 .unwrap_err()
                 .is_corruption()
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(feature = "slow") { 256 } else { 16 },
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// The combine against the CRC of the concatenation, for any split of up to 1 MiB of bytes.
+        #[test]
+        fn crc32c_combine_matches_any_split(
+            len in 0..=(1_usize << 20),
+            split in proptest::prelude::any::<proptest::sample::Index>(),
+            seed in proptest::prelude::any::<u64>(),
+        ) {
+            let mut x = seed;
+            let data: Vec<u8> = (0..len)
+                .map(|_| {
+                    x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    (x >> 56).to_le_bytes()[0]
+                })
+                .collect();
+            let (a, b) = data.split_at(split.index(len + 1));
+            proptest::prop_assert_eq!(
+                crc32c_combine(crc32c(a), crc32c(b), b.len() as u64),
+                crc32c(&data)
+            );
+        }
     }
 }

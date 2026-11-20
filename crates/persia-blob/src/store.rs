@@ -146,18 +146,25 @@ pub trait BlobStore: Send + Sync {
     /// [`read_chunk_checked`] checks one (its length and its CRC32C), and handed to `sink` with its index; `sink`'s
     /// error ends the read. [`read_range`] and [`read_manifest_range`] read through it, once per range.
     ///
-    /// The default reads them with one [`BlobStore::read_chunks`] and checks each. A store that checks its stored
-    /// chunks as it reads them may override it to read and check each byte once (the pack, ROADMAP 9.2.9), and lend
-    /// `sink` bytes it does not own (a mapping). An override must hand `sink` only bytes whose length and CRC32C it
-    /// checked against `manifest`: the reads above it serve what `sink` gets as checked.
+    /// `scratch` (the third argument) is the caller's buffer, which a store may read into and leave grown: a caller
+    /// that reads many ranges (a `get_blob` stream) passes the same one each time, so a store reading with `pread`
+    /// zero-fills it at most once per stream, not per range (ROADMAP 9.2.9). Its contents mean nothing to the caller.
+    ///
+    /// The default reads them with one [`BlobStore::read_chunks`] and checks each; it does not use `scratch`. A store
+    /// that checks its stored chunks as it reads them may override it to read and check each byte once (the pack,
+    /// ROADMAP 9.2.9), and lend `sink` bytes it does not own (a mapping, `scratch`). An override must hand `sink`
+    /// every index of `indices`, once and in order, each with only bytes whose length and CRC32C it checked against
+    /// `manifest`: the reads above it serve what `sink` gets as checked ([`read_manifest_range`] also refuses an
+    /// override that skips, repeats or reorders a chunk, or hands one of another length, as `Corrupt`).
     ///
     /// # Errors
-    /// [`Error::Corrupt`] when an index is past the last chunk or a chunk does not match `manifest`, the store's
-    /// errors, or `sink`'s.
+    /// [`Error::Corrupt`] (or, from the pack, [`Error::CorruptAt`] naming the chunk's frame) when an index is past
+    /// the last chunk or a chunk does not match `manifest`, the store's errors, or `sink`'s.
     fn read_chunks_checked(
         &self,
         manifest: &BlobManifest,
         indices: Range<u32>,
+        _scratch: &mut Vec<u8>,
         sink: &mut dyn FnMut(u32, &[u8]) -> Result<()>,
     ) -> Result<()> {
         for index in indices.clone() {
@@ -247,17 +254,40 @@ pub fn read_range<S: BlobStore + ?Sized>(
 /// further lookup, so a blob of many small chunks costs one manifest read, not one per window (a manifest is
 /// `76 + 4·n` bytes, SPEC §9.1.1). Reads every chunk the range touches whole, in one
 /// [`BlobStore::read_chunks_checked`], which checks each as [`read_chunk_checked`] does. An empty range in bounds
-/// reads nothing.
+/// reads nothing. [`read_manifest_range_into`] reuses the caller's buffers.
 ///
 /// # Errors
 /// - [`Error::RangeOutOfBounds`] when `range` is inverted or ends past the blob;
-/// - [`Error::Corrupt`] when a chunk does not match the manifest;
+/// - [`Error::Corrupt`] (or the pack's [`Error::CorruptAt`]) when a chunk does not match the manifest, or the store
+///   hands back another chunk than asked for;
 /// - the store's errors.
 pub fn read_manifest_range<S: BlobStore + ?Sized>(
     store: &S,
     manifest: &BlobManifest,
     range: Range<u64>,
 ) -> Result<Vec<u8>> {
+    let mut out = Vec::new();
+    read_manifest_range_into(store, manifest, range, &mut Vec::new(), &mut out)?;
+    Ok(out)
+}
+
+/// [`read_manifest_range`], appending the bytes to `out` and passing `scratch` to
+/// [`BlobStore::read_chunks_checked`]: a stream that reads window after window keeps both, so neither is allocated
+/// again, and a store reading with `pread` zero-fills `scratch` at most once per stream (ROADMAP 9.2.9). On an error
+/// `out` may hold part of the range.
+///
+/// The store's answers are checked against the contract of `read_chunks_checked`: every chunk the range touches,
+/// once and in order, each of its length in the manifest; anything else is `Corrupt`.
+///
+/// # Errors
+/// As [`read_manifest_range`].
+pub fn read_manifest_range_into<S: BlobStore + ?Sized>(
+    store: &S,
+    manifest: &BlobManifest,
+    range: Range<u64>,
+    scratch: &mut Vec<u8>,
+    out: &mut Vec<u8>,
+) -> Result<()> {
     if range.start > range.end || range.end > manifest.size() {
         return Err(Error::RangeOutOfBounds {
             start: range.start,
@@ -265,10 +295,10 @@ pub fn read_manifest_range<S: BlobStore + ?Sized>(
             size: manifest.size(),
         });
     }
-    let mut out = Vec::with_capacity(usize::try_from(range.end.abs_diff(range.start)).unwrap_or(0));
     if range.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
+    out.reserve(usize::try_from(range.end.abs_diff(range.start)).unwrap_or(0));
     let chunk_size = u64::from(manifest.chunk_size().get());
     let index_of = |offset: u64| {
         u32::try_from(offset.checked_div(chunk_size).unwrap_or(0))
@@ -280,9 +310,19 @@ pub fn read_manifest_range<S: BlobStore + ?Sized>(
         .checked_add(1)
         .ok_or_else(|| corrupt("a chunk index does not fit in a u32"))?;
     // Every chunk the range touches, read whole and checked by the store's `read_chunks_checked` (ROADMAP 9.2.9):
-    // only the part in the range is copied out.
-    store.read_chunks_checked(manifest, first..end, &mut |index, bytes| {
+    // only the part in the range is copied out. The next index the store must hand back, so an override that skips,
+    // repeats or reorders a chunk is caught here, whatever it checked itself.
+    let mut next = first;
+    store.read_chunks_checked(manifest, first..end, scratch, &mut |index, bytes| {
+        if index != next {
+            return Err(corrupt(
+                "a store returned another chunk than the next one asked for",
+            ));
+        }
         let (chunk, _) = expected_chunk(manifest, index)?;
+        if chunk.end.checked_sub(chunk.start) != Some(u64_from_usize(bytes.len())) {
+            return Err(corrupt("a chunk's length differs from its manifest's"));
+        }
         let from = range.start.max(chunk.start).saturating_sub(chunk.start);
         let to = range.end.min(chunk.end).saturating_sub(chunk.start);
         let part = usize::try_from(from)
@@ -291,14 +331,15 @@ pub fn read_manifest_range<S: BlobStore + ?Sized>(
             .and_then(|(from, to)| bytes.get(from..to))
             .ok_or_else(|| corrupt("a chunk is shorter than its range"))?;
         out.extend_from_slice(part);
+        next = next.saturating_add(1);
         Ok(())
     })?;
-    if u64_from_usize(out.len()) != range.end.abs_diff(range.start) {
+    if next != end {
         return Err(corrupt(
             "a store returned another number of chunks than asked for",
         ));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The byte range and CRC32C chunk `index` must have; `Corrupt` past the last chunk.
@@ -586,5 +627,75 @@ mod tests {
                 .unwrap_err()
                 .is_corruption()
         );
+    }
+
+    /// A store whose `read_chunks_checked` breaks its contract one way (`how`), over honest, checked chunks.
+    #[derive(Debug)]
+    struct Misbehaving {
+        inner: MemoryBlobStore,
+        how: u8,
+    }
+
+    impl BlobStore for Misbehaving {
+        fn stage_chunk(&self, upload_id: UploadId, index: u32, bytes: &[u8]) -> Result<()> {
+            self.inner.stage_chunk(upload_id, index, bytes)
+        }
+        fn bind(&self, manifest: &BlobManifest) -> Result<BindOutcome> {
+            self.inner.bind(manifest)
+        }
+        fn manifest(&self, blob_id: BlobId) -> Result<Option<BlobManifest>> {
+            self.inner.manifest(blob_id)
+        }
+        fn read_chunk(&self, manifest: &BlobManifest, index: u32) -> Result<Vec<u8>> {
+            self.inner.read_chunk(manifest, index)
+        }
+        fn discard_upload(&self, upload_id: UploadId) -> Result<()> {
+            self.inner.discard_upload(upload_id)
+        }
+        fn read_chunks_checked(
+            &self,
+            manifest: &BlobManifest,
+            indices: Range<u32>,
+            _scratch: &mut Vec<u8>,
+            sink: &mut dyn FnMut(u32, &[u8]) -> Result<()>,
+        ) -> Result<()> {
+            let mut chunks: Vec<(u32, Vec<u8>)> = indices
+                .map(|i| read_chunk_checked(&self.inner, manifest, i).map(|b| (i, b)))
+                .collect::<Result<_>>()?;
+            match self.how {
+                1 => drop(chunks.remove(1)),              // skips a chunk
+                2 => chunks.insert(1, chunks[0].clone()), // repeats one
+                3 => chunks.swap(0, 1),                   // reorders
+                4 => drop(chunks[0].1.pop()),             // hands one shorter
+                5 => chunks[0].1.push(0),                 // hands one longer
+                6 => drop(chunks.pop()),                  // stops early
+                7 => chunks[1].0 = 7,                     // hands another index
+                _ => {}
+            }
+            for (index, bytes) in chunks {
+                sink(index, &bytes)?;
+            }
+            Ok(())
+        }
+    }
+
+    /// ROADMAP 9.2.9: `read_manifest_range` enforces `read_chunks_checked`'s contract on any override: every chunk of
+    /// the range, once, in order, of its manifest length; anything else is `Corrupt`, never wrong bytes.
+    #[test]
+    fn a_store_that_breaks_the_sink_contract_is_corrupt() {
+        let data = b"0123456789ab";
+        for how in 0..=7 {
+            let store = Misbehaving {
+                inner: MemoryBlobStore::new(),
+                how,
+            };
+            let m = stored(&store.inner, data, 4, 1);
+            let got = read_range(&store, &reference(&m), 0..12);
+            if how == 0 {
+                assert_eq!(got.unwrap(), data);
+            } else {
+                assert!(got.unwrap_err().is_corruption(), "how {how}");
+            }
+        }
     }
 }

@@ -12,7 +12,8 @@ impl<F: ContainerFile + 'static> PackStore<F> {
     ///
     /// # Errors
     /// [`Error::PackReplaced`] when the path now holds another pack generation (a pack rewrite, SPEC §18.10): reopen;
-    /// [`Error::Corrupt`] for a slot that moved back or a damaged new frame (the handle then keeps what it had);
+    /// [`Error::CorruptAt`] naming the slot that moved back or disagrees with the new frames, or a damaged new frame
+    /// (the handle then keeps what it had);
     /// [`Error::PackIo`].
     pub fn refresh(&self) -> Result<bool> {
         if self.mode == PackMode::ReadWrite {
