@@ -1294,6 +1294,21 @@ fn is_corruption_is_true_for_corrupt_only() {
             },
             true,
         ),
+        // -- wiring --
+        // One case per wiring variant, here and only here.
+        // -- resume --
+        // One case per resume variant, here and only here.
+        (
+            Error::UploadInterrupted {
+                token: persia_blob::ResumeToken {
+                    upload_id: UploadId::new(1),
+                    chunk_size: ChunkSize::DEFAULT,
+                },
+                source: Box::new(Error::ChunkerFailed),
+            },
+            false,
+        ),
+        (Error::ResumeUnsupported, false),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1332,6 +1347,12 @@ fn is_corruption_is_true_for_corrupt_only() {
             // -- followups --
             // One arm for the follow-ups' variants, `=> "followups"`, here and only here.
             Error::CorruptAt { .. } => "followups",
+            // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
+            // One arm for the wiring variants, `=> "wiring"`, here and only here.
+            //
+            // -- resume (9.3.4, 9.3.6, 9.5.9) --
+            // One arm for the resume variants, `=> "resume"`, here and only here.
+            Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }

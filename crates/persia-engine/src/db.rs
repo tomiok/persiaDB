@@ -639,6 +639,12 @@ impl<F: ContainerFile + Sync> Database<F> {
         self.manifest.seq()
     }
 
+    /// The proof that this database holds its container's writer lock, with which its blob pack opens read-write
+    /// (SPEC §9.3, ROADMAP 9.2.7, ADR-0053): always `Some`, a `Database` being the writer. It borrows the database.
+    pub fn writer_proof(&self) -> Option<container::WriterProof<'_>> {
+        self.wal.log().writer_proof()
+    }
+
     /// The mark of the last operation logged to the WAL since this database was opened. Taken right after a
     /// [`Database::put`] or [`Database::delete`] returns `Ok`, it is that operation's: the operation is durable once
     /// [`Database::durable_mark`] reaches it.

@@ -211,6 +211,30 @@ pub enum Error {
     // Variants of the mark, the sweep and the pack rewrite (SPEC §9.5; ROADMAP 9.5.1, 9.5.2) go here, and only here.
     //
     //
+
+    // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
+    // Variants of wave 3's pack wiring and verify (blob/wiring) go here, and only here.
+    //
+    //
+
+    // -- resume (9.3.4, 9.3.6, 9.5.9) --
+    // Variants of wave 3's resumed uploads (blob/resume) go here, and only here.
+    /// A `put_blob` failed after its upload staged chunks that a later `put_blob` can resume with `token`
+    /// (`PutBlobOptions::resume`; SPEC §9.4, ROADMAP 9.3.4, ADR-0053). Its pins were dropped with the error: the
+    /// grace period keeps the upload resumable (SPEC §9.5). `source` is the failure.
+    #[error("the upload was interrupted and can be resumed")]
+    UploadInterrupted {
+        /// What a later `put_blob` resumes with.
+        token: crate::remote::ResumeToken,
+        /// Why the upload stopped.
+        #[source]
+        source: Box<Error>,
+    },
+    /// This store cannot resume an upload: only the remote layout can (SPEC §9.3: local uploads are not resumable;
+    /// ADR-0053). A caller's error.
+    #[error("this blob store cannot resume an upload")]
+    ResumeUnsupported,
+    //
 }
 
 impl Error {

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, Chunk, ChunkSize, Error, Result,
-    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range_into, read_range,
+    ResumeToken, SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range_into, read_range,
 };
 use persia_engine::db::SegmentIds;
 
@@ -55,6 +55,10 @@ pub struct PutBlobOptions {
     /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default, at
     /// most [`MAX_BIND_BUDGET`].
     pub bind_budget: Duration,
+    /// The upload to resume (SPEC §9.4, ROADMAP 9.3.4, ADR-0053): the token of an [`Error::UploadInterrupted`], with
+    /// a reader that yields the blob from its start. `None` (the default) starts a new upload. A store that cannot
+    /// resume (the pack) fails with [`Error::ResumeUnsupported`] before any byte is read.
+    pub resume: Option<ResumeToken>,
 }
 
 impl Default for PutBlobOptions {
@@ -65,6 +69,7 @@ impl Default for PutBlobOptions {
             expected_id: None,
             chunk_size: ChunkSize::DEFAULT,
             bind_budget: DEFAULT_BIND_BUDGET,
+            resume: None,
         }
     }
 }
@@ -126,6 +131,11 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         &self.pins
     }
 
+    // -- wiring (9.4.5) --
+    // blob/wiring: what opening the database with its pack adds to this handle, if anything, goes here.
+    //
+    // -- end wiring --
+
     /// Stores the blob `reader` yields (SPEC §9.2, §9.6) and returns its reference, with the bound blob's chunk size
     /// for a duplicate, and the pins of its upload id and blob id, which keep GC off them until dropped (SPEC §9.5).
     ///
@@ -167,6 +177,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         }
         // The rules of `mime` and `user_meta` checked on an empty blob, so a bad option reads and stages nothing.
         reference(blob_id_of(&[]), 0, chunk_size, options)?;
+        // -- resume (9.3.4, 9.3.6) --
+        // blob/resume: the resumed upload, from pinning the old upload id before listing to restaging under a new one.
+        if options.resume.is_some() {
+            return Err(Error::ResumeUnsupported);
+        }
+        // -- end resume --
         let upload_id = UploadId::new(self.next_upload_id());
         // SPEC §9.5: pinned before the first chunk write.
         let mut pins = self.pins.pin([Pinned::Upload(upload_id)]);

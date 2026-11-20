@@ -46,6 +46,9 @@ pub fn verify(out: &mut dyn Write, path: &Path) -> Result<()> {
         ),
         ("tail", tail),
     ];
+    // -- wiring (9.5.3, 9.5.6) --
+    // blob/wiring: the blob rows and the dangling-reference errors (SPEC §9.5) go here.
+    // -- end wiring --
     for (key, value) in rows {
         writeln!(out, "{key:<18}{value}")?;
     }

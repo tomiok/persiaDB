@@ -190,6 +190,23 @@ pub struct Container<F = File> {
     unlock_file: fn(&F),
 }
 
+/// Proof that a [`Container`] handle holds the container's writer lock ([`Container::writer_proof`]; SPEC §9.3,
+/// ROADMAP 9.2.7, ADR-0053). Only a read-write container mints one, and it borrows that handle: the blob pack opens
+/// read-write only with it, so two read-write packs of one database cannot exist. It is checked when the pack opens
+/// and is not stored; the caller keeps the container alive at least as long as the pack.
+#[derive(Debug, Clone, Copy)]
+pub struct WriterProof<'a> {
+    db_uuid: [u8; 16],
+    _container: core::marker::PhantomData<&'a ()>,
+}
+
+impl WriterProof<'_> {
+    /// The `db_uuid` of the container whose lock this proves: the one the pack's header must carry (SPEC §9.3).
+    pub const fn db_uuid(&self) -> [u8; 16] {
+        self.db_uuid
+    }
+}
+
 /// Unlocks `file` on drop while `armed`. Close alone does not: `flock` / `LockFileEx` stay held until every
 /// duplicated or inherited descriptor is closed (SPEC §4.5.1).
 struct UnlockGuard<'a, F: ContainerFile> {
@@ -616,6 +633,16 @@ impl<F: ContainerFile> Container<F> {
     /// How the container was opened.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// The proof that this handle holds the container's writer lock, which opening its blob pack read-write takes
+    /// (SPEC §9.3, ROADMAP 9.2.7, ADR-0053): `Some` only for a [`Mode::ReadWrite`] handle, the only kind that took
+    /// the lock. It borrows the handle, so it cannot outlive it.
+    pub fn writer_proof(&self) -> Option<WriterProof<'_>> {
+        (self.mode == Mode::ReadWrite).then_some(WriterProof {
+            db_uuid: self.header.db_uuid,
+            _container: core::marker::PhantomData,
+        })
     }
 
     /// The committed superblock: the state a crash now would recover.

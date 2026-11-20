@@ -10,6 +10,9 @@ pub mod layout;
 mod store;
 
 pub use store::{PackMode, PackRecovery, PackStore};
+// The writer-lock proof a read-write open takes (ROADMAP 9.2.7, ADR-0053), for callers that reach `persia-storage`
+// only through this crate.
+pub use persia_storage::container::WriterProof;
 
 /// What the pack's file name adds to its container's: `app.persia` keeps its blobs in `app.persia.blobs` (SPEC §4).
 pub const PACK_SUFFIX: &str = ".blobs";

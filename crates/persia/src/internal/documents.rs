@@ -298,3 +298,9 @@ impl From<DatabaseError> for Error {
         Self::Database(Box::new(e))
     }
 }
+
+// -- wiring (9.4.5) --
+// blob/wiring: `BlobDatabase` opened over a `Database` and its pack (`<name>.persia.blobs`, the container's
+// `db_uuid`, the writer proof) goes here, and only here.
+//
+// -- end wiring --

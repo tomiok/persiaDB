@@ -2617,10 +2617,13 @@ error but happened, poisons the handle (§18.10 (b)).
 
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
-references one is dangling, which `verify` reports, §9.5). Creating it is durable before the first blob is bound: the
+references one is dangling, which `verify` reports, §9.5). A read-only database opens its pack read-only and never creates it: with
+no pack, a `get_blob` fails as not bound, and its refresh opens a pack the writer has created since (ROADMAP 9.4.5). Creating it is durable before the first blob is bound: the
 file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
-syncs the directory; only the container's writer opens the pack read-write, so none is in use. That sweep relies on
+syncs the directory; only the container's writer opens the pack read-write, so none is in use. It proves it: a
+read-write open takes the container's `WriterProof`, which only a read-write container handle mints, and the pack
+carries that proof's `db_uuid` (ROADMAP 9.2.7, ADR-0053). That sweep relies on
 §18.10 (b): nothing is bound into the new pack until its directory sync succeeds, and writing stops if it fails, so a
 swept rewrite file holds no blob a reader can still name. A removal or directory sync that fails is logged and does
 not fail the open (ROADMAP 9.2.6). The next open does not retry that directory sync: a name the removal left, or that
@@ -2661,7 +2664,15 @@ bound) is never replaced: the resume restarts under a new `upload_id`. The id is
 resuming client should pass `expected_id` (§9.6). A chunk listed full but read back at another length, or gone, ends
 the kept run. After an `AlreadyExists` on a chunk, the writer copies the chunks it has (the kept run and those staged
 since, each checked against its CRC32C) under the new `upload_id` and continues there, so the client never rewinds
-(ADR-0050). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
+(ADR-0050). A caller gets the token from the error of a `put_blob` that failed after staging
+(`UploadInterrupted { token, source }`); its pins drop with the error, and the grace period keeps the upload
+resumable (§9.5). It passes the token as `PutBlobOptions::resume` with a reader of the whole blob, from its start:
+`put_blob` pins the old `upload_id` before listing, skips the bytes of the kept run without uploading them, pins the
+new `upload_id` before restaging, and rejects a token whose chunk size is below the floor (§9.2; ROADMAP 9.3.4). A
+resume that stages no new chunk restages the kept run under a new `upload_id` before binding, so its chunks are
+young again: the sweep counts an upload's age from its newest chunk, and a binding after its manifest listing is not
+in its view (ROADMAP 9.3.6). Only the remote layout resumes; any other store fails with `ResumeUnsupported` before
+reading (ADR-0053). Chunk transfers, uploads and downloads, run with at most `parallelism` requests in flight (default 8).
 **Small blobs** (ROADMAP 9.3.3). A blob of at most 64 KiB (the chunk size floor, §9.2) is buffered and hashed before
 any write and stored in its blob manifest (`INLINE`, §9.1.1) at `blobs/<xx>/<id>`: one `put_if_absent`, nothing
 staged, and a read is the one `get` of the manifest; the empty blob writes its plain manifest the same way. Its
@@ -2717,12 +2728,14 @@ The grace period covers a crashed or replaced writer's uploads; the pins are wha
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,
 in a segment or in a WAL record from `wal_start` on, whose `BlobRef` names a blob the store has not bound (no
 manifest, or no pack at all), or whose manifest does not match it (`check_ref`), is an error that names the
-collection, the document id and the `blob_id`, never a warning. The engine itself does not look a `BlobRef` up when
+collection, the document id and the `blob_id`, never a warning. By default `verify` also scans the pack: every frame's
+checksum and every chunk's CRC32C, orphans included; `--quick` skips that scan, and `--deep` also re-hashes every
+referenced blob against its `blob_id` (ADR-0053). It checks the local layout; the remote one is ROADMAP 13.2.6. The engine itself does not look a `BlobRef` up when
 it logs or commits a document (it does not depend on `persia-blob`); the public API is what keeps references bound
 (§9.6).
 
 ### 9.6 API
-`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, chunk_size, bind_budget }) -> BlobRef`,
+`put_blob(reader, &PutBlobOptions { mime, user_meta, expected_id, chunk_size, bind_budget, resume }) -> BlobRef`,
 `get_blob(blob_ref) -> Stream`, `get_blob_range(blob_ref, range)` (by reference: a read checks the manifest against it,
 `check_ref`, and a stream reads by that manifest, looked up once), `delete` via document delete + GC.
 `expected_id` (optional) is checked against the computed id when the reader ends; a mismatch is

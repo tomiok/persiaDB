@@ -19,7 +19,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Slot};
 use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_format::{BlobId, Reader};
-use persia_storage::container::{ContainerFile, MapPermit};
+use persia_storage::container::{ContainerFile, MapPermit, WriterProof};
 use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
@@ -187,6 +187,32 @@ impl PackStore<File> {
     /// See [`PackStore::open_in`].
     pub fn open(path: impl AsRef<Path>, mode: PackMode, db_uuid: [u8; 16]) -> Result<Self> {
         Self::open_in(Arc::new(RealFs), path, mode, db_uuid)
+    }
+
+    /// [`PackStore::open_writer_in`] on the operating system's file system.
+    ///
+    /// # Errors
+    /// See [`PackStore::open_in`].
+    pub fn open_writer(path: impl AsRef<Path>, proof: &WriterProof<'_>) -> Result<Self> {
+        Self::open_writer_in(Arc::new(RealFs), path, proof)
+    }
+}
+
+impl<F: ContainerFile + 'static> PackStore<F> {
+    /// Opens the pack read-write as the database's writer: `proof` shows the caller holds the container's writer
+    /// lock, and its `db_uuid` is the one the pack carries (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). Otherwise as
+    /// [`PackStore::open_in`] with [`PackMode::ReadWrite`].
+    ///
+    /// # Errors
+    /// See [`PackStore::open_in`].
+    pub fn open_writer_in(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: impl AsRef<Path>,
+        proof: &WriterProof<'_>,
+    ) -> Result<Self> {
+        // -- wiring (9.2.7) --
+        // ROADMAP 9.2.7 makes this the only read-write open; until then it forwards.
+        Self::open_in(vfs, path, PackMode::ReadWrite, proof.db_uuid())
     }
 }
 

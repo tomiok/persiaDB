@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+<!-- -- wiring (blob/wiring: 9.2.7, 9.4.5, 9.4.6, 9.5.3, 9.5.6) -- -->
+<!-- -- end wiring -- -->
+<!-- -- resume (blob/resume: 9.3.4, 9.3.6, 9.5.9) -- -->
+<!-- -- end resume -- -->
 - `persia` (internal API): blob GC, `BlobDatabase::gc(&GcOptions) -> GcReport` (ROADMAP 9.5.1, 9.5.2, 9.5.8; SPEC
   §9.3, §9.5; ADR-0052). It marks the blobs the database's documents (the writer's view: live state, snapshots and
   memtable views readers still hold, obsolete segments still held, the WAL from `wal_start`) and the writer's pins

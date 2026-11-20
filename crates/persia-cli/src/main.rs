@@ -71,6 +71,9 @@ enum Command {
     Verify {
         /// The container file.
         path: PathBuf,
+        // -- wiring (9.5.3) --
+        // blob/wiring: `--quick` and `--deep` (ADR-0053) go here.
+        // -- end wiring --
     },
 }
 
