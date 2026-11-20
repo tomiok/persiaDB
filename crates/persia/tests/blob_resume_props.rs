@@ -302,6 +302,11 @@ fn run_case(
                 prop_assert_eq!(t.chunk_size.get(), chunk);
                 prop_assert!(len > SMALL, "a small blob stages nothing: {:?}", source);
                 if fail_at.is_some() {
+                    // Every blob here is under one window: a new upload's reader fails before any chunk write.
+                    prop_assert!(
+                        resuming,
+                        "a reader failure before any chunk write was wrapped"
+                    );
                     prop_assert!(matches!(*source, Error::Read(_)), "{:?}", source);
                 } else {
                     prop_assert!(matches!(*source, Error::Storage(_)), "{:?}", source);
