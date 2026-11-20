@@ -104,8 +104,10 @@ impl<S: Storage> RemoteBlobStore<S> {
         &self.storage
     }
 
-    /// The chunks staged under `upload_id`, by index, with their lengths and times. Keys under the upload's prefix that Persia
-    /// did not write are skipped.
+    /// The chunks staged under `upload_id`, with their lengths and times, in the backend's listing order. Keys under
+    /// the upload's prefix that Persia did not write are skipped. A listing is not an index order a caller can rely
+    /// on, and a key may appear more than once (SPEC §9.4, §10.1): [`RemoteBlobStore::resume`] sorts by index and
+    /// collapses duplicates. Zero-padded indices are in index order only when the backend lists by key bytes.
     ///
     /// # Errors
     /// The backend's errors.
@@ -114,7 +116,6 @@ impl<S: Storage> RemoteBlobStore<S> {
             .storage
             .list(&keys::upload_prefix(upload_id)?)
             .map_err(storage)?;
-        // Sorted by key bytes, and the index is zero-padded, so the chunks come in index order.
         Ok(listed
             .into_iter()
             .filter_map(|meta| match RemoteKey::parse(&meta.key)? {
@@ -318,6 +319,21 @@ impl<S: Storage> BlobStore for RemoteBlobStore<S> {
         }
         first.map_or(Ok(()), Err)
     }
+
+    // -- resume (9.3.4) --
+    // The remote layout is the one that resumes (SPEC §9.4, ADR-0053): the trait forwards to the inherent methods.
+    fn resumable(&self) -> bool {
+        true
+    }
+
+    fn resume(&self, token: ResumeToken) -> Result<ResumedUpload> {
+        Self::resume(self, token)
+    }
+
+    fn restage(&self, from: ResumeToken, chunk_crcs: &[u32], to: UploadId) -> Result<()> {
+        Self::restage(self, from, chunk_crcs, to)
+    }
+    // -- end resume --
 }
 
 /// A backend error as this crate reports it: corruption the backend detected stays corruption.

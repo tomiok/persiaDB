@@ -35,10 +35,8 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     let report = docs
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
-    // -- wiring (9.5.3, 9.5.6) --
     let db = ReadOnlyBlobDatabase::with_pack_beside(docs, path)
         .with_context(|| format!("opening the blob pack of {}", path.display()))?;
-    // -- end wiring --
     let tail = match report.tail {
         Tail::Clean => "clean".to_owned(),
         Tail::Torn { offset } => {
@@ -64,7 +62,6 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
         ),
         ("tail", tail),
     ];
-    // -- wiring (9.5.3, 9.5.6) --
     // The blob rows; a dangling reference (SPEC §9.5) or a damaged pack frame is the command's error.
     let blobs = match db.verify_blobs(scan) {
         Ok(blobs) => blobs,
@@ -106,7 +103,6 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
             None => "skipped (--deep re-hashes every referenced blob)".to_owned(),
         },
     ));
-    // -- end wiring --
     for (key, value) in rows {
         writeln!(out, "{key:<18}{value}")?;
     }

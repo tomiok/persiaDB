@@ -17,13 +17,5 @@ pub mod retry;
 // Garbage collection (SPEC §9.5; ROADMAP 9.5.1, 9.5.2): `BlobDatabase::gc` and its options live in `gc`.
 pub mod gc;
 
-// -- wiring (9.4.5, 9.5.3, 9.5.6) --
-// blob/wiring: the blob checks `persia verify` runs (ADR-0053: the CLI reaches them through `persia`) go here.
 // `verify`: dangling references and the pack's checksum scan (SPEC §9.5; ROADMAP 9.5.3, 9.5.6).
 pub mod verify;
-// -- end wiring --
-
-// -- resume (9.3.4, 9.3.6, 9.5.9) --
-// blob/resume: its `mod` lines, if any, go here.
-//
-// -- end resume --

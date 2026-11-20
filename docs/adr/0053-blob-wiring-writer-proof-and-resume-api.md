@@ -69,10 +69,14 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    and a bind's backend error whose outcome is known. Never wrapped: an unknown bind outcome (the blob may still be
    bound), `BlobIdMismatch`, a caller's error, or a small (inline) blob. The pins drop with the error, and GC's grace
    period keeps the upload resumable (SPEC §9.5). A resume that fails again returns the token of the upload it was
-   staging (after a conflict restage, the new one).
+   staging (after a conflict restage, the new one). `UploadInterrupted` is not corruption: `is_corruption` is false
+   and `corrupt_offset` is `None`, even when `source` is corruption. The source carries the cause.
 8. **The caller passes the whole blob.** `PutBlobOptions::resume` takes a reader of the whole blob from its start.
    `put_blob` pins the old upload before listing it, reads past the kept run without uploading it, and checks each
    kept chunk against the staged chunk's CRC32C (a reader that differs there is `InvalidResume`, a caller's error).
+   A staged chunk whose read reports corruption is not part of that run: the run ends there instead of failing the
+   resume. The object stays, so staging the index conflicts when the stored bytes differ and the upload restarts under
+   a new id. The listing is sorted by index first; a repeated index whose lengths differ ends the run before it.
    It pins a new upload before any chunk is copied to it. The token's chunk size wins over `chunk_size`, because chunk
    objects do not record their size, and it is checked against the floor before anything is read. A network client
    that wants to send only the rest needs an offset query, which M11 adds if it needs one.

@@ -17,6 +17,7 @@ use persia_format::{BlobId, BlobRef};
 
 use crate::error::{Error, Result};
 use crate::manifest::{BlobManifest, UploadId};
+use crate::remote::{ResumeToken, ResumedUpload};
 
 #[cfg(any(test, feature = "testing"))]
 mod memory;
@@ -203,6 +204,39 @@ pub trait BlobStore: Send + Sync {
             Some(manifest) => manifest.check_ref(blob_ref).map(|()| true),
         }
     }
+
+    // -- resume (9.3.4, 9.3.6) --
+    // Resumed uploads (SPEC §9.4, ADR-0053): only the remote layout resumes, every other store keeps these defaults.
+
+    /// Whether this store can resume an upload ([`BlobStore::resume`]): `false` by default, `true` for the remote
+    /// layout (SPEC §9.4; local uploads are not resumable, SPEC §9.3). `put_blob` wraps a failure after staging in
+    /// [`Error::UploadInterrupted`] only on a store that can (ADR-0053).
+    ///
+    /// A store that wraps another (a recording or caching layer) must forward `resumable`, `resume` and `restage`: with
+    /// the defaults, a remote store behind it could not resume, and its failures would not be wrapped.
+    fn resumable(&self) -> bool {
+        false
+    }
+
+    /// What `token`'s upload has stored: the run of full chunks from chunk 0, re-read and hashed
+    /// ([`RemoteBlobStore::resume`](crate::RemoteBlobStore::resume)). The caller pins `token.upload_id` first
+    /// (SPEC §9.5).
+    ///
+    /// # Errors
+    /// [`Error::ResumeUnsupported`] by default, before anything is read; the store's errors.
+    fn resume(&self, _token: ResumeToken) -> Result<ResumedUpload> {
+        Err(Error::ResumeUnsupported)
+    }
+
+    /// Copies chunks `0..chunk_crcs.len()` of the upload `from` under the new upload `to`, each checked against its
+    /// CRC32C ([`RemoteBlobStore::restage`](crate::RemoteBlobStore::restage)). The caller pins `to` first (SPEC §9.5).
+    ///
+    /// # Errors
+    /// [`Error::ResumeUnsupported`] by default, before anything is read or written; the store's errors.
+    fn restage(&self, _from: ResumeToken, _chunk_crcs: &[u32], _to: UploadId) -> Result<()> {
+        Err(Error::ResumeUnsupported)
+    }
+    // -- end resume --
 }
 
 /// The most bytes [`BlobStore::bind_small`] takes: 64 KiB, the chunk size floor (SPEC §9.2), so a small blob is at

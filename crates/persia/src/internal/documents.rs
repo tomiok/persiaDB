@@ -411,7 +411,6 @@ impl From<DatabaseError> for Error {
     }
 }
 
-// -- wiring (9.4.5) --
 // `BlobDatabase` opened over a `Database` and its pack (`<name>.persia.blobs`, the container's `db_uuid`, the writer
 // proof), and its read-only counterpart (SPEC §9.3; ROADMAP 9.2.7, 9.4.5; ADR-0053).
 
@@ -762,4 +761,3 @@ mod tests {
         BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
     }
 }
-// -- end wiring --

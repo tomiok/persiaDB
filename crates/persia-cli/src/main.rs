@@ -85,7 +85,6 @@ enum Command {
     Verify {
         /// The container file.
         path: PathBuf,
-        // -- wiring (9.5.3) --
         /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound. The scan is
         /// what bounds each frame's length, and that bound applies after the pack is opened (ROADMAP 9.2.14).
         #[arg(long, conflicts_with = "deep")]
@@ -93,7 +92,6 @@ enum Command {
         /// Also read every referenced blob whole and check its SHA-256 against its id.
         #[arg(long)]
         deep: bool,
-        // -- end wiring --
     },
 }
 
