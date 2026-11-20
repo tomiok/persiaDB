@@ -2727,7 +2727,10 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   is expired once `now − last_modified > grace`, and one written after `now` is young. Locally there is none (§9.3). A
   manifest kept for any reason is read, so its upload's chunks stay; an unreadable one leaves every staged chunk.
   Before deleting an upload's chunks, under the lock, the sweep checks every pinned blob's manifest (reading those it
-  has not seen, including a marked blob whose manifest the mark did not resolve) and keeps the chunks one names.
+  has not seen, including a marked blob whose manifest the mark did not resolve) and keeps the chunks one names. It ages an
+  upload from its listing: a resume that stages a new chunk under an old upload, binds and drops its pins between that
+  listing and the locked check, then is referenced by `BlobRef`, can lose the old chunks until the sweep re-lists the
+  upload under the lock (ROADMAP 9.5.10).
   Readers in other processes are not in the writer's view. Locally a read-only process keeps the pack file it opened,
   and the bytes it mapped, only until `refresh` returns `PackReplaced`; nothing reopens or remaps on that error
   (ROADMAP 9.2.13). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
