@@ -1,6 +1,7 @@
 //! Fuzz the blob pack reader (ROADMAP 9.2.5; SPEC §9.3, §17, ADR-0049): opening a pack file of arbitrary bytes and
 //! reading every blob it indexes never panics, a read-write open's recovery is idempotent, and a recovered pack takes
-//! a new blob and reads it back. The checksum scan `persia verify` runs over it (ROADMAP 9.5.3) never panics either.
+//! a new blob and reads it back. The checksum scan `persia verify` runs over it (ROADMAP 9.5.3) never panics, its counts
+//! agree with the index, and a recovered pack scans the same after another open.
 //!
 //! The first input byte picks the mode: 0, the rest is the whole file; otherwise the rest is a list of 3-byte edits
 //! (`offset u16`, `value u8`) applied to a valid two-blob pack, whose slot and frame CRCs are then recomputed when the
@@ -12,6 +13,7 @@ use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
 use libfuzzer_sys::fuzz_target;
+use persia_blob::pack::PackScan;
 use persia_blob::{
     BindOutcome, BlobManifest, BlobStore, ChunkSize, Error, PackMode, PackStore, UploadId,
     blob_id_of, read_range,
@@ -185,6 +187,34 @@ fn read_every_blob(store: &PackStore<SimFsFile>) {
     }
 }
 
+/// The checksum scan `persia verify` runs (ROADMAP 9.5.3, SPEC §9.5): it never panics, fails only on damaged bytes, a
+/// newer format or an I/O error, and a clean scan counts what the open indexed: every committed frame is a chunk or an
+/// index, each committed index binds one blob, orphans are chunks, and the frames span `12288..log_end`. Its outcome:
+/// the counts, or the offset of the damage it reported.
+fn scan(store: &PackStore<SimFsFile>) -> Result<Option<PackScan>, Option<u64>> {
+    match store.scan_checksums() {
+        Ok(Some(s)) => {
+            assert_eq!(s.frames, s.chunks + s.indexes, "{s:?}");
+            assert!(s.orphan_chunks <= s.chunks, "{s:?}");
+            assert_eq!(
+                s.indexes,
+                store.blob_ids().len() as u64,
+                "each committed index binds one blob: {s:?}"
+            );
+            let log_end = store.superblock().expect("a scanned pack").log_end;
+            assert_eq!(s.bytes, log_end - 12288, "{s:?}");
+            Ok(Some(s))
+        }
+        Ok(None) => Ok(None),
+        Err(e) => {
+            assert!(
+                e.is_corruption() || matches!(e, Error::PackUnsupported(_) | Error::PackIo { .. }),
+                "unexpected scan error: {e:?}"
+            );
+            Err(e.corrupt_offset())
+        }
+    }
+}
 fuzz_target!(|data: &[u8]| {
     let Some((&mode, rest)) = data.split_first() else {
         return;
@@ -228,14 +258,15 @@ fuzz_target!(|data: &[u8]| {
     f.write_all_at(&file, 0).expect("write");
     if let Ok(store) = open(&fs, PackMode::ReadOnly) {
         read_every_blob(&store);
-        // The checksum scan `persia verify` runs (ROADMAP 9.5.3) reads every committed frame: it never panics.
-        let _ = store.scan_checksums();
+        // The checksum scan `persia verify` runs (ROADMAP 9.5.3) reads every committed frame.
+        let _ = scan(&store);
         let _ = store.refresh();
     }
     let Ok(store) = open(&fs, PackMode::ReadWrite) else {
         return;
     };
     read_every_blob(&store);
+    let scanned = scan(&store);
     let ids: std::collections::BTreeSet<_> = store.blob_ids().into_iter().collect();
     drop(store);
     // Recovery is idempotent: the recovered pack opens to the same index, with nothing left to roll forward or cut.
@@ -256,6 +287,12 @@ fuzz_target!(|data: &[u8]| {
             .into_iter()
             .collect::<std::collections::BTreeSet<_>>(),
         ids
+    );
+    // A second open recovers nothing more, so it scans the same frames to the same outcome.
+    assert_eq!(
+        scan(&store),
+        scanned,
+        "the scan of a recovered pack is stable"
     );
     // And takes a new blob, which reads back (a damaged pack may already hold its id, or claim its upload).
     if let Ok((m, BindOutcome::Bound)) = put(&store, b"fuzzed in", 4, u128::MAX - 1)
