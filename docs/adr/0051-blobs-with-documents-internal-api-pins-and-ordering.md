@@ -42,9 +42,9 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
    attempt is no answer (the earlier write may still land): the retry goes on; a plain error ends the loop only when
    no attempt was unknown. When the budget runs out `put_blob` fails with the unknown error, binds nothing it knows
    of, discards nothing and logs nothing; an upload whose outcome was once unknown is never discarded. A store that
-   refuses every write once poisoned (the pack's `PackPoisoned` after an unknown sync) should end the retry at once
-   as still unknown; that needs an error predicate in the contract (`Error::is_store_poisoned`), until which such
-   a store is retried, harmlessly, to the end of the budget. `AlreadyBound` returns a `BlobRef` with the bound manifest's chunk size, after checking it names the
+   refuses every write once poisoned (the pack's `PackPoisoned` after an unknown sync) ends the retry at once
+   as still unknown (`Error::is_store_poisoned`, ROADMAP 9.4.7; amended 2026-11-19); the error returned has both
+   predicates. `AlreadyBound` returns a `BlobRef` with the bound manifest's chunk size, after checking it names the
    id and the size; its chunks are discarded only when the bound manifest names another upload and no outcome was
    unknown (a retry may find its own earlier write). A staging or reader error discards nothing: a resume
    (ROADMAP 9.3.2) or GC takes the chunks. Discard failures are logged (`tracing::warn!`) and ignored (GC is the

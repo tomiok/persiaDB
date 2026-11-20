@@ -2593,12 +2593,18 @@ lookups) only after its slot sync returns. Chunk frames no committed `BlobIndex`
 open rebuilds the index by scanning the frames of `12288..log_end`; a read-write open then commits the longest fully
 valid frame run after `log_end` that ends in a complete `BlobIndex` whose chunk frames match its manifest (a cut
 bind, or one whose newer slot was damaged) and truncates the rest. A read checks the manifest it found against the `BlobRef` it reads by (`check_ref`: id, size, chunk
-size), then each chunk's length and CRC32C. GC rewrites live blobs into a new pack (like container compaction).
+size), then each chunk's length and CRC32C. A pack reader reads each chunk's `BlobChunk` frame in one read sized by the
+manifest (`24 + pad8(32 + len) + 8`, bounded by the frames it knows; a frame that would run past them is corruption)
+and checks the frame (§4.4) and the chunk's CRC32C in one pass over its bytes (ROADMAP 9.2.9). A corruption error of
+the pack names the offset of the slot or frame it found damaged (the header: 0; ROADMAP 9.2.8). GC rewrites live blobs into a new pack (like container compaction).
 
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
 references one is dangling, which `verify` reports, §9.5). Creating it is durable before the first blob is bound: the
-file with its header and superblock synced, then its directory synced (§4.5.2). A blob is durable per bind, before any
+file with its header and superblock synced, then its directory synced (§4.5.2). A read-write open first removes the stale
+temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
+syncs the directory; only the container's writer opens the pack read-write, so none is in use. A removal or sync that
+fails is logged, retried at the next read-write open, and does not fail the open (ROADMAP 9.2.6). A blob is durable per bind, before any
 document that references it is logged (§18.9). A reader learns that the pack was replaced from its
 `(pack_id, generation)` (§18.10). A copy of the database takes both files (§4.8).
 
@@ -2615,7 +2621,9 @@ bound it first, so this one is a duplicate (§9.2); an error leaves the outcome 
 `put_if_absent` (same bytes) until it gets an answer, with jittered exponential backoff (50 ms doubling to 5 s), for
 at most a time budget (`bind_budget`, default 60 s; ADR-0051); a plain error after an unknown outcome answers nothing
 and is retried too. When the budget runs out, `put_blob` fails with the unknown outcome, returns no `BlobRef`, and
-the document is not logged. The writer never deletes the chunks of an upload whose binding outcome was once unknown
+the document is not logged. A store that refuses every write until it is reopened (the pack after a failed sync, §4.5) ends
+the retries at once, still unknown: when it refuses after an unknown outcome, or its refusal is itself outcome-unknown;
+only a reopen tells what was bound (ROADMAP 9.4.7). The writer never deletes the chunks of an upload whose binding outcome was once unknown
 (an S3 conditional write still in flight may land later), leaving them to GC, whose grace period (§9.5) must stay far
 above the budget. A backend without
 `conditional_put` cannot store blobs (`Unsupported`). A read gets the blob manifest, checks it against the `BlobRef`
