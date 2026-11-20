@@ -2605,12 +2605,15 @@ rewritten only when the frames nothing keeps hold at least `rewrite_ratio` of it
 it), and never in place. Holding its writer mutex throughout, the writer writes `<name>.persia.blobs.tmp.<nonce>.<n>`
 (the name a creation uses, which a read-write open sweeps): the header; both slots at `generation + 1` with a new
 random `pack_id` (`seq 1` with the last `BlobIndex` frame ending at `log_end`, or exactly the new-pack values when no
-blob is kept); each kept blob's chunk frames and then its `BlobIndex` frame, renumbered from `frame_seq` 1, each
-chunk checked against its manifest; then the chunks staged for pinned uploads, after `log_end`. It syncs the file,
-then, as one step under the pin set's lock, renames it over the pack (only while the path still names the handle's
-file), syncs the directory, and swaps the handle's file and index at once. A pin taken since the plan on anything
-dropped defers the rewrite, and the file is removed. A failed directory sync, or a rename that reported an error but
-happened, poisons the handle (§18.10 (b)).
+blob is kept); each kept blob's chunk frames and then its `BlobIndex` frame, renumbered from `frame_seq` 1. The
+manifest is written again from the one the old frame held, so its `upload_id` and each chunk's CRC32C are unchanged,
+and the chunk bytes are copied only after that CRC check: a reader of a kept blob does not see `Corrupt`. Then the
+chunks staged for pinned uploads, after `log_end`. The writer mutex is held from the start of that copy through the
+directory sync. It syncs the file, then, as one step under the pin set's lock, re-checks the pins
+(`unless_pinned`) and renames it over the pack only while nothing dropped is pinned and the path still names the
+handle's file, syncs the directory, and swaps the handle's file and index at once. A pin taken since the plan on
+anything dropped defers the rewrite, and the file is removed. A failed directory sync, or a rename that reported an
+error but happened, poisons the handle (§18.10 (b)).
 
 The pack is created **lazily**, by the first `put_blob` (ROADMAP 9.2.1): opening or creating a database creates no
 pack, a database that never stored a blob has none, and an open that finds none has no blobs (a document that
@@ -2685,12 +2688,15 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   names right after, until the stream is dropped, and `get_blob_range` pins the `blob_id` for the call, so a sweep
   never takes a blob mid-read (§18.10 (c)).
 - Mark (ADR-0052): the `blob_id`s of the documents the writer's view can still show: those live in the current state
-  (segments as their tombstones leave them, memtables whole, replaced and deleted documents included); those in every
-  older collection snapshot, memtable view or sidecar a reader of this process holds; every document of the obsolete
-  segments still held (§8.5); and every put of the WAL records from the committed `wal_start` on (§8.2), those after
-  `log_end` included. Then the pinned ids, then the upload ids their blob manifests name (none for an inline
-  manifest), and the pinned upload ids. GC runs only when the writer calls `gc`, never in the background, and
-  between writes.
+  (segments only as their committed tombstones leave them, memtables whole, replaced and deleted documents included);
+  those in every older collection snapshot, memtable view or sidecar a reader of this process holds; every document of
+  the obsolete segments still held (§8.5); and every put of the WAL records from the committed `wal_start` on (§8.2),
+  those after `log_end` included. A `Buffered` or `Async` delete or replace is not durable: the segment still shows
+  the earlier document, and the memtable still holds the new one, so the mark keeps a blob a crash would revive.
+  A caller that holds a bare `Arc<Segment>` and has dropped the snapshot and the tombstones it was read with is not
+  tracked. Then the pinned ids, then the upload ids their blob manifests name (none for an inline manifest; a marked
+  blob whose manifest was missing is not resolved, so a later pin still makes the sweep read it), and the pinned
+  upload ids. GC runs only when the writer calls `gc`, never in the background, and between writes.
 - Sweep: unmarked blob manifests, then staged chunks of uploads no marked manifest names, each only once older than a
   grace period (default 24 h, and at least `2 * MAX_BIND_BUDGET`, §9.4; for staged chunks counted from the upload's
   newest chunk, so an idle upload stays
@@ -2702,9 +2708,11 @@ the same process that runs `put_blob`, and keeps a **pin set** with it:
   is expired once `now − last_modified > grace`, and one written after `now` is young. Locally there is none (§9.3). A
   manifest kept for any reason is read, so its upload's chunks stay; an unreadable one leaves every staged chunk.
   Before deleting an upload's chunks, under the lock, the sweep checks every pinned blob's manifest (reading those it
-  has not seen) and keeps the chunks one names. Readers in other processes are not in the writer's view: locally they
-  keep the pack file they opened; remotely one that lags may find the blob of a document the writer deleted gone after
-  the grace period (ROADMAP 13.2.5).
+  has not seen, including a marked blob whose manifest the mark did not resolve) and keeps the chunks one names.
+  Readers in other processes are not in the writer's view. Locally a read-only process keeps the pack file it opened,
+  and the bytes it mapped, only until `refresh` returns `PackReplaced`; nothing reopens or remaps on that error
+  (ROADMAP 9.2.13). Remotely one that lags may find the blob of a document the writer deleted gone after the grace
+  period (ROADMAP 13.2.5, which extends 13.2.4).
 The grace period covers a crashed or replaced writer's uploads; the pins are what keeps a blob that a not-yet-committed
 document references. A referenced blob must never be missing. `verify` (ROADMAP 9.5.3) **fails** on one: a live document,
 in a segment or in a WAL record from `wal_start` on, whose `BlobRef` names a blob the store has not bound (no
@@ -3145,12 +3153,17 @@ Comparison against other engines is reported with methodology, never cherry-pick
     rewrite in place, so the path names a complete old or new pack at every instant. On Windows the rename over a
     file that readers hold open or mapped succeeds on NTFS (ADR-0016 item 2) and those readers keep the old bytes;
     where it fails the rewrite fails without harm. The container's writer lock covers the pack. (a) answered by
-    ADR-0049: readers compare `(pack_id, generation)` and reopen on a change. (b) answered: the writer holds its
-    mutex from the plan through the directory sync, so nothing is bound into the new pack before that sync succeeds;
-    a failed sync poisons the handle, which has moved to the new file (a crash may bring back either; both are
-    complete); confirmed by crash tests (ROADMAP 9.5.4). (c) answered: a `get_blob` stream in the writer reads on,
-    because the handle swaps file and index at once and looks every chunk up by id, and it pins its blob (§9.5); a
-    reader in another process reads the old file until its `refresh` reports `PackReplaced`.
-    The mark keeps every blob a reader in the writer process can still name (§9.5). A reader in another process, or a
-    remote reader lagging the writer, is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects
-    reader leases and the grace period.
+    ADR-0049: readers compare `(pack_id, generation)`. Reopening or remapping when `refresh` returns `PackReplaced`
+    is not implemented (ROADMAP 9.2.13). (b) answered: the writer holds its mutex from the start of the copy through
+    the directory sync, and re-checks the pin set under that lock (`unless_pinned`) before the rename, so nothing is
+    bound into the new pack before that sync succeeds; a failed sync poisons the handle, which has moved to the new
+    file (a crash may bring back either; both are complete); confirmed by crash tests (ROADMAP 9.5.4). The kept
+    manifests are written again from the bytes the old frames held, so `upload_id` and each chunk's CRC32C are
+    unchanged and a live reader does not see `Corrupt` for a blob the rewrite kept. (c) answered for the writer
+    process: a `get_blob` stream in the writer reads on, because the handle swaps file and index at once and looks
+    every chunk up by id, and it pins its blob (§9.5). A read-only handle in another process keeps the file it opened
+    only until `refresh` returns `PackReplaced`; it does not reopen.
+    The mark keeps every blob a reader in the writer process can still name (§9.5), including one a non-durable
+    `Buffered` or `Async` delete or replace would revive after a crash. A reader in another process, or a remote
+    reader lagging the writer, is ROADMAP 13.2.4: readers pin old manifests while queries run, and GC respects reader
+    leases and the grace period. Remote blob GC under those nodes is ROADMAP 13.2.5.

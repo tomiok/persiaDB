@@ -10,8 +10,9 @@ use crate::pack::PackStore;
 impl<F: ContainerFile + 'static> Sweep for PackStore<F> {
     /// Rewrites the pack without what the mark and the pins do not keep, when enough is dropped
     /// ([`SweepOptions::rewrite_ratio`]). There is no grace period locally: only this writer writes the pack, local
-    /// uploads are not resumable (ADR-0049), and the pins cover every `put_blob` in flight. Readers in other
-    /// processes keep the old file until their `refresh` reports [`Error::PackReplaced`](crate::Error::PackReplaced).
+    /// uploads are not resumable (ADR-0049), and the pins cover every `put_blob` in flight. A read-only handle in
+    /// another process keeps the file it opened only until `refresh` returns
+    /// [`Error::PackReplaced`](crate::Error::PackReplaced); nothing reopens or remaps on that error (ROADMAP 9.2.13).
     fn sweep<P: PinGate>(
         &self,
         mark: &Mark,

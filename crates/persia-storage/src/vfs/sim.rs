@@ -13,7 +13,8 @@
 //!
 //! Files keep a modification time only on a file system given a clock ([`SimFs::with_clock`], ROADMAP 9.5.7): each
 //! file is stamped with the clock's time when it is created and at every write or length change through one of its
-//! handles, and keeps it across renames, links and crashes. That is what [`Vfs::entry_kind`] reports, so a GC sweep
+//! handles, and keeps it across renames, links and crashes. The stamp is dropped once no current or durable name
+//! still reaches the file, so a final unlink does not leave one behind. That is what [`Vfs::entry_kind`] reports, so a GC sweep
 //! over the local backend on a `SimFs` can age objects (SPEC §9.5, §10.1). Without a clock no file has one (`None`).
 
 use std::collections::{BTreeMap, HashMap};
@@ -181,6 +182,26 @@ impl State {
             .ok_or_else(|| io::Error::other("dangling inode"))
     }
 
+    /// Whether any current or durable directory entry still names `ino`.
+    fn inode_linked(&self, ino: u64) -> bool {
+        let file = Node::File(ino);
+        self.dirs.values().any(|d| {
+            d.current.values().any(|n| *n == file) || d.durable.values().any(|n| *n == file)
+        })
+    }
+
+    /// Drops modification times of inodes no name still reaches, current or durable.
+    fn drop_unlinked_mtimes(&mut self) {
+        let inos: Vec<u64> = self.mtimes.keys().copied().collect();
+        let stale: Vec<u64> = inos
+            .into_iter()
+            .filter(|ino| !self.inode_linked(*ino))
+            .collect();
+        for ino in stale {
+            self.mtimes.remove(&ino);
+        }
+    }
+
     /// Stamps the file `ino` with the clock's time, if there is a clock.
     fn touch(&mut self, ino: u64) {
         if let Some(SimClock(clock)) = &self.clock {
@@ -280,6 +301,12 @@ impl SimFs {
     /// lock, and [`ContainerFile::locks_per_handle`] is `false` (ADR-0019).
     pub fn set_per_process_locks(&self, on: bool) {
         lock(&self.state).per_process_locks = on;
+    }
+
+    /// How many file modification times are stored. A final unlink drops the file's.
+    #[cfg(test)]
+    fn mtime_count(&self) -> usize {
+        lock(&self.state).mtimes.len()
     }
 
     /// How many mutating calls have been made: the `n` of the next one.
@@ -499,11 +526,16 @@ impl Vfs for SimFs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         self.mutate(|state| {
-            if state.lookup(path)? == Node::Dir {
+            let Node::File(ino) = state.lookup(path)? else {
                 return Err(io::ErrorKind::IsADirectory.into());
-            }
+            };
             let (dir, name) = State::split(path)?;
             state.dir_mut(&dir)?.apply(vec![(name, None)]);
+            // A name the durable image still has keeps the stamp: a crash that loses this unlink restores the file
+            // with its time. The last name, once gone from both, does not.
+            if !state.inode_linked(ino) {
+                state.mtimes.remove(&ino);
+            }
             Ok(())
         })
     }
@@ -511,9 +543,13 @@ impl Vfs for SimFs {
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
         self.mutate(|state| {
             let dir = normalize(dir).ok_or_else(|| not_found(dir))?;
-            let d = state.dir_mut(&dir)?;
-            d.durable = d.current.clone();
-            d.pending.clear();
+            {
+                let d = state.dir_mut(&dir)?;
+                d.durable = d.current.clone();
+                d.pending.clear();
+            }
+            // The unlink is durable now: a file no name reaches drops its stamp.
+            state.drop_unlinked_mtimes();
             Ok(())
         })
     }
@@ -736,6 +772,44 @@ mod tests {
             fs.rename(p("/old"), p("/d/old")).unwrap_err().kind(),
             io::ErrorKind::Unsupported
         );
+    }
+
+    #[test]
+    fn a_final_unlink_drops_the_modification_time() {
+        let clock = Arc::new(crate::retry::ManualClock::new(std::time::UNIX_EPOCH));
+        let fs = SimFs::with_clock(clock);
+        let f = fs.create_new(p("/a")).unwrap();
+        f.write_all_at(b"x", 0).unwrap();
+        f.sync_data().unwrap();
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        // A second name keeps the stamp.
+        fs.hard_link(p("/a"), p("/b")).unwrap();
+        fs.remove_file(p("/a")).unwrap();
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        assert!(matches!(
+            fs.entry_kind(p("/b")),
+            Ok(EntryKind::File {
+                modified: Some(_),
+                ..
+            })
+        ));
+        // An unsynced unlink keeps the stamp, so a crash that restores the name restores the time.
+        fs.remove_file(p("/b")).unwrap();
+        assert_eq!(fs.mtime_count(), 1);
+        let back = fs.crash(CrashLoss::All);
+        assert_eq!(back.mtime_count(), 1);
+        assert!(matches!(
+            back.entry_kind(p("/b")),
+            Ok(EntryKind::File {
+                modified: Some(_),
+                ..
+            })
+        ));
+        // Once the unlink is durable, the stamp is gone.
+        fs.sync_dir(p("/")).unwrap();
+        assert_eq!(fs.mtime_count(), 0);
     }
 
     #[test]

@@ -17,17 +17,18 @@
     clippy::cast_possible_truncation
 )] // Tests: inputs are generated or fixed.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
-use persia::internal::documents::{Blob, BlobDatabase};
-use persia::internal::gc::GcOptions;
+use persia::internal::documents::{Blob, BlobDatabase, DocumentLog};
+use persia::internal::gc::{BlobReferences, GcOptions};
 use persia::internal::pins::Pins;
 use persia_blob::{BlobId, BlobRef, BlobStore, ChunkSize, PackMode, PackStore};
 use persia_engine::db::{
-    CollectionSnapshot, Database, DatabaseOptions, SearchRequest, SegmentIds, Snapshot,
+    CollectionSnapshot, Database, DatabaseError, DatabaseOptions, SearchRequest, SegmentIds,
+    Snapshot,
 };
 use persia_engine::document::{Document, Value};
 use persia_engine::merge::{MergeOptions, MergePolicy};
@@ -35,6 +36,10 @@ use persia_engine::query::Query;
 use persia_engine::schema::{CollectionSchema, FieldKind, SchemaBuilder, TextOptions};
 use persia_engine::search::{Pruning, SearchPlan};
 use persia_engine::wal::Durability;
+use persia_engine::wal::WalMark;
+use persia_storage::container::sim::CrashLoss;
+use persia_storage::vfs::Vfs;
+use persia_storage::vfs::sim::{SimFs, SimFsFile};
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngSeed};
 
@@ -84,6 +89,94 @@ fn db_options() -> DatabaseOptions {
 
 type Db = BlobDatabase<PackStore>;
 
+/// The engine log on a simulated file, so a [`CrashLoss`] can drop what was not synced.
+struct Log(Database<SimFsFile>);
+
+impl DocumentLog for Log {
+    fn put(
+        &mut self,
+        collection: &str,
+        doc: &Document,
+        durability: Durability,
+    ) -> Result<(), DatabaseError> {
+        self.0.put(collection, doc, durability)
+    }
+
+    fn wal_mark(&self) -> WalMark {
+        self.0.wal_mark()
+    }
+
+    fn durable_mark(&self) -> WalMark {
+        self.0.durable_mark()
+    }
+
+    fn commit(&mut self) -> Result<u64, DatabaseError> {
+        self.0.commit()
+    }
+}
+
+impl BlobReferences for Log {
+    fn referenced_blobs(&self) -> Result<HashSet<BlobId>, DatabaseError> {
+        self.0.referenced_blobs()
+    }
+}
+
+impl Log {
+    fn snapshot(&self) -> Arc<Snapshot> {
+        self.0.snapshot()
+    }
+
+    fn delete(&mut self, collection: &str, id: &str, durability: Durability) {
+        self.0.delete(collection, id, durability).unwrap();
+    }
+
+    fn finish_merges(&mut self) {
+        self.0.finish_merges().unwrap();
+    }
+}
+
+type SimDb = BlobDatabase<PackStore<SimFsFile>, Log>;
+
+const SIM_UUID: [u8; 16] = [9; 16];
+
+struct SimOpen {
+    fs: SimFs,
+    db: SimDb,
+}
+
+fn create_sim() -> SimOpen {
+    let fs = SimFs::new();
+    let file = fs.create_new(Path::new("/app.persia")).unwrap();
+    let mut log = Database::create_on(file, SIM_UUID, db_options()).unwrap();
+    log.create_collection(schema()).unwrap();
+    // The container file's name is durable only after this. Later unsynced bytes are still lost by a crash.
+    fs.sync_dir(Path::new("/")).unwrap();
+    let pack = PackStore::open_in(
+        Arc::new(fs.clone()),
+        Path::new("/app.persia.blobs"),
+        PackMode::ReadWrite,
+        SIM_UUID,
+    )
+    .unwrap();
+    SimOpen {
+        fs,
+        db: BlobDatabase::new(Log(log), Blobs::new(Arc::new(pack))),
+    }
+}
+
+fn reopen_sim(fs: &SimFs) -> SimDb {
+    let file = fs.open(Path::new("/app.persia"), true).unwrap();
+    let log = Database::open_on(file, db_options()).unwrap();
+    let pack = PackStore::open_in(
+        Arc::new(fs.clone()),
+        Path::new("/app.persia.blobs"),
+        PackMode::ReadWrite,
+        SIM_UUID,
+    )
+    .unwrap();
+    BlobDatabase::new(Log(log), Blobs::new(Arc::new(pack)))
+}
+
 fn open(dir: &Path, create: bool) -> Db {
     let path = dir.join("app.persia");
     let log = if create {
@@ -132,7 +225,12 @@ enum Op {
         doc: u8,
         which: usize,
     },
-    Delete(u8),
+    Delete {
+        doc: u8,
+        durability: u8,
+    },
+    /// Lose every unsynced write (`CrashLoss::All`) and reopen.
+    Crash,
     Commit,
     Merge,
     Gc {
@@ -154,7 +252,8 @@ fn op() -> impl Strategy<Value = Op> {
         6 => (0..6_u8, any::<u8>(), any::<bool>(), 0..3_u8)
             .prop_map(|(doc, seed, large, durability)| Op::Put { doc, seed, large, durability }),
         2 => (0..6_u8, any::<usize>()).prop_map(|(doc, which)| Op::PutStored { doc, which }),
-        3 => (0..6_u8).prop_map(Op::Delete),
+        3 => (0..6_u8, 0..3_u8).prop_map(|(doc, durability)| Op::Delete { doc, durability }),
+        1 => Just(Op::Crash),
         3 => Just(Op::Commit),
         1 => Just(Op::Merge),
         4 => any::<bool>().prop_map(|force| Op::Gc { force }),
@@ -171,7 +270,8 @@ const DURABILITY: [Durability; 3] = [Durability::Buffered, Durability::Async, Du
 
 /// What the test holds of a running database, and every blob it stored.
 struct World {
-    db: Option<Db>,
+    fs: SimFs,
+    db: Option<SimDb>,
     snapshots: Vec<Arc<Snapshot>>,
     /// Collection snapshots cloned out of a snapshot, which is dropped (ROADMAP 9.5.4 review).
     views: Vec<CollectionSnapshot>,
@@ -181,11 +281,11 @@ struct World {
 }
 
 impl World {
-    fn db(&self) -> &Db {
+    fn db(&self) -> &SimDb {
         self.db.as_ref().expect("open")
     }
 
-    fn db_mut(&mut self) -> &mut Db {
+    fn db_mut(&mut self) -> &mut SimDb {
         self.db.as_mut().expect("open")
     }
 
@@ -220,7 +320,7 @@ impl World {
 }
 
 impl World {
-    fn apply(&mut self, dir: &Path, step: usize, op: &Op) {
+    fn apply(&mut self, step: usize, op: &Op) {
         match op {
             Op::Put {
                 doc: d,
@@ -253,17 +353,18 @@ impl World {
                     .put("c", &doc(*d), Blob::Stored(r), Durability::Fsync);
                 assert_eq!(put.is_ok(), present, "step {step}: {put:?}");
             }
-            Op::Delete(d) => {
-                self.db_mut()
-                    .log_mut()
-                    .delete("c", &format!("d{d}"), Durability::Fsync)
-                    .unwrap();
+            Op::Delete { doc: d, durability } => {
+                self.db_mut().log_mut().delete(
+                    "c",
+                    &format!("d{d}"),
+                    DURABILITY[usize::from(*durability)],
+                );
             }
             Op::Commit => {
                 self.db_mut().commit().unwrap();
             }
             Op::Merge => {
-                self.db_mut().log_mut().finish_merges().unwrap();
+                self.db_mut().log_mut().finish_merges();
             }
             Op::Gc { force } => {
                 let options = GcOptions {
@@ -304,20 +405,32 @@ impl World {
                 }
             }
             Op::Reopen => {
-                // The process ends: its readers and pins with it.
+                // The process ends cleanly: its readers and pins with it. Unsynced bytes stay, as a real file's do
+                // when the handle is dropped without a crash.
                 self.snapshots.clear();
                 self.views.clear();
                 self.held.clear();
                 drop(self.db.take());
-                self.db = Some(open(dir, false));
+                self.db = Some(reopen_sim(&self.fs));
+            }
+            Op::Crash => {
+                // The process dies: unsynced `Buffered` and `Async` records are gone, synced blobs are not.
+                self.snapshots.clear();
+                self.views.clear();
+                self.held.clear();
+                drop(self.db.take());
+                self.fs = self.fs.crash(CrashLoss::All);
+                self.db = Some(reopen_sim(&self.fs));
             }
         }
     }
 }
 
-fn run(dir: &Path, ops: &[Op]) {
+fn run(ops: &[Op]) {
+    let opened = create_sim();
     let mut w = World {
-        db: Some(open(dir, true)),
+        fs: opened.fs,
+        db: Some(opened.db),
         snapshots: Vec::new(),
         views: Vec::new(),
         held: Vec::new(),
@@ -325,7 +438,7 @@ fn run(dir: &Path, ops: &[Op]) {
         contents: BTreeMap::new(),
     };
     for (step, op) in ops.iter().enumerate() {
-        w.apply(dir, step, op);
+        w.apply(step, op);
         w.check(&format!("after step {step} ({op:?}) of {ops:?}"));
     }
     // Finally, with no reader and no pin left, a GC keeps exactly the referenced blobs.
@@ -361,8 +474,76 @@ proptest! {
 
     #[test]
     fn gc_never_deletes_a_live_blob(ops in prop::collection::vec(op(), 1..30)) {
-        let dir = tempfile::tempdir().unwrap();
-        run(dir.path(), &ops);
+        run(&ops);
+    }
+}
+
+/// A `Buffered` or `Async` delete or replace is not durable. GC must not drop the blob, and a crash that loses every
+/// unsynced write revives the document with that blob intact (SPEC §9.5).
+#[test]
+fn a_non_durable_delete_or_replace_revives_with_its_blob_after_gc_and_a_crash() {
+    for (n, durability) in [Durability::Buffered, Durability::Async]
+        .into_iter()
+        .enumerate()
+    {
+        for replace in [false, true] {
+            let seed = u8::try_from(n).unwrap().saturating_mul(2) + u8::from(replace);
+            let ctx = format!("{durability:?}, replace {replace}, seed {seed}");
+            let mut opened = create_sim();
+            let original = opened
+                .db
+                .put(
+                    "c",
+                    &doc(0),
+                    Blob::from_reader(&blob_bytes(seed, true)[..]).with_options(put_options()),
+                    Durability::Fsync,
+                )
+                .unwrap();
+            opened.db.commit().unwrap();
+            // The pack's name is durable after `put_blob` synced its directory. Sync again so a crash cannot lose it.
+            opened.fs.sync_dir(Path::new("/")).unwrap();
+            if replace {
+                opened
+                    .db
+                    .put(
+                        "c",
+                        &doc(0),
+                        Blob::from_reader(&blob_bytes(seed.wrapping_add(1), false)[..])
+                            .with_options(put_options()),
+                        durability,
+                    )
+                    .unwrap();
+            } else {
+                opened.db.log_mut().delete("c", "d0", durability);
+            }
+            let forced = GcOptions {
+                rewrite_ratio: 0.0,
+                ..GcOptions::default()
+            };
+            opened.db.gc(&forced).unwrap();
+            assert_eq!(
+                opened
+                    .db
+                    .get_blob_range(&original, 0..original.size())
+                    .unwrap(),
+                blob_bytes(seed, true),
+                "{ctx}: gc dropped the blob a crash revives"
+            );
+            drop(opened.db);
+            let fs = opened.fs.crash(CrashLoss::All);
+            let db = reopen_sim(&fs);
+            let revived = documents(&db.log().snapshot())
+                .into_iter()
+                .find(|d| d.id() == "d0")
+                .unwrap_or_else(|| panic!("{ctx}: the document did not revive"));
+            let blob = revived.blob_ref().expect("revived document has its blob");
+            assert_eq!(blob, &original, "{ctx}");
+            assert_eq!(
+                db.get_blob_range(blob, 0..blob.size()).unwrap(),
+                blob_bytes(seed, true),
+                "{ctx}"
+            );
+        }
     }
 }
 

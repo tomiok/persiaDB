@@ -1,17 +1,21 @@
 //! The pack rewrite (SPEC §9.3, §9.5, §18.10; ROADMAP 9.5.2, ADR-0052): GC copies what it keeps into a new pack file
 //! and renames it over the pack, never compacting in place.
 //!
-//! The writer mutex is held from the plan to the swap, so nothing is staged or bound meanwhile (a `put_blob` waits),
+//! The writer mutex is held from the start of the copy through the directory sync, so nothing is staged or bound meanwhile (a `put_blob` waits),
 //! and nothing is bound into the new pack before its directory sync succeeded (§18.10 (b)). Readers go on under the
 //! `RwLock`'s read side, on the old file, until the swap replaces the file and the index at once: a `get_blob`
 //! stream looks every chunk up by id, so it reads on in the new file (§18.10 (c)).
 //!
-//! The new file, `<pack>.tmp.<nonce>.<n>` (the pack creation's temporary name, which a read-write open is to sweep:
-//! ROADMAP 9.2.6; until then a crashed rewrite leaves it behind), holds the header, both slots with generation + 1
+//! The new file, `<pack>.tmp.<nonce>.<n>` (the pack creation's temporary name), holds the header, both slots with generation + 1
 //! and a new `pack_id`, then each kept blob's chunk frames followed by its
 //! `BlobIndex` frame, renumbered from `frame_seq` 1 (the last index frame ends at `log_end`, SPEC §9.3), then the
 //! chunks this handle staged for pinned uploads, after `log_end` like any staged chunk (a crash drops them, as it
-//! would have from the old pack: local uploads are not resumable, ADR-0049). It is synced, renamed over the pack
+//! would have from the old pack: local uploads are not resumable, ADR-0049). A read-write open sweeps that temporary
+//! name (`sweep.rs` matches [`temp_path`](super::temp_path): `<name>.persia.blobs.tmp.<16 lowercase hex>.<n>`,
+//! ROADMAP 9.2.6), so a crashed rewrite does not stay behind. Each kept blob's manifest is written again from the
+//! one the old frame held, so its `upload_id` and chunk CRC32Cs are unchanged, and the chunk bytes are copied only
+//! after that CRC check: a reader does not see [`Error::Corrupt`](crate::Error::Corrupt) for a blob the rewrite kept.
+//! It is synced, renamed over the pack
 //! (only if the path still names this handle's file), and the directory synced. The pin check of everything dropped
 //! and the rename, directory sync and swap are one step under the pin set's lock (SPEC §9.5), so a pin taken after
 //! the plan defers the rewrite instead of losing what it names.
@@ -29,7 +33,7 @@ use persia_format::checksum::crc32c;
 use super::{
     BlobId, ContainerFile, Entry, Error, FRAME_HEADER_LEN, FrameHeader, FrameKind, Header, Inner,
     Pack, PackStore, Poison, Result, Slot, Staged, WriterState, corrupt, decode_chunk_payload,
-    decode_frame, from_format, io, io_err, layout, parent_of, random_u128, temp_path,
+    decode_frame, from_format_at, io, io_err, layout, parent_of, random_u128, temp_path,
     u64_from_usize, usize_from_u32,
 };
 use crate::gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, SweepReport};
@@ -478,8 +482,10 @@ impl Bytes {
 /// The total length of the frame at `offset`, from its header.
 fn frame_len<F: ContainerFile>(pack: &Pack<F>, offset: u64) -> Result<u64> {
     let head = pack.bytes_at(offset, u64_from_usize(FRAME_HEADER_LEN))?;
-    let header = FrameHeader::decode(&mut head.reader()).map_err(from_format)?;
-    header.check_fits(pack.end).map_err(from_format)?;
+    let header = FrameHeader::decode(&mut head.reader()).map_err(|e| from_format_at(e, offset))?;
+    header
+        .check_fits(pack.end)
+        .map_err(|e| from_format_at(e, offset))?;
     Ok(header.total_len())
 }
 

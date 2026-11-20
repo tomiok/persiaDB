@@ -150,7 +150,10 @@ pub(crate) fn violations(metadata: &Metadata, external: &BTreeSet<String>) -> Ve
                 continue;
             }
             let ok = allowed.contains(&target)
-                || (kind == "dev" && target == TESTUTIL && pkg.name != TESTUTIL);
+                || (kind == "dev" && target == TESTUTIL && pkg.name != TESTUTIL)
+                // Crash tests of blob GC (`persia` tests) drive `SimFs`. A normal dependency stays forbidden:
+                // `persia` reaches storage through the engine and the blob crate (ROADMAP 9.4.6, 9.5.9).
+                || (kind == "dev" && pkg.name == "persia" && target == "persia-storage");
             if !ok {
                 errors.push(format!("{} -> {target} ({kind}): not allowed", pkg.name));
             }
@@ -352,6 +355,24 @@ mod tests {
         );
         let md = metadata(&[("persia-format", "persia-engine", Some("dev"))], &[]);
         assert_ne!(violations(&md, &ext(&[])), Vec::<String>::new());
+    }
+
+    #[test]
+    fn persia_may_depend_on_storage_only_in_tests() {
+        assert_eq!(
+            violations(
+                &metadata(&[("persia", "persia-storage", Some("dev"))], &[]),
+                &ext(&[])
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            violations(
+                &metadata(&[("persia", "persia-storage", None)], &[]),
+                &ext(&[])
+            ),
+            ["persia -> persia-storage (normal): not allowed"]
+        );
     }
 
     #[test]

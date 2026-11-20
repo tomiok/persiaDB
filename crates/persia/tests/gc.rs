@@ -182,25 +182,27 @@ fn gc_drops_the_blobs_of_deleted_documents_and_released_pins_and_keeps_the_rest(
 }
 
 #[test]
-fn gc_rejects_a_grace_below_the_bind_budget_and_a_bad_ratio() {
+fn gc_rejects_a_grace_below_twice_the_bind_budget_and_a_bad_ratio() {
     let dir = tempfile::tempdir().unwrap();
     let db = pack_database(dir.path());
-    let short = GcOptions {
-        grace: MAX_BIND_BUDGET
-            .checked_sub(Duration::from_nanos(1))
-            .unwrap(),
-        ..GcOptions::default()
-    };
-    assert!(matches!(
-        db.gc(&short),
-        Err(GcError::GraceBelowBindBudget { .. })
-    ));
+    // One hour is the longest bind budget, and still too short: a `put_if_absent` started just before the deadline
+    // can land after it (SPEC §9.4). Two hours is the floor.
     let at_budget = GcOptions {
         grace: MAX_BIND_BUDGET,
         ..GcOptions::default()
     };
-    db.gc(&at_budget).unwrap();
+    assert!(matches!(
+        db.gc(&at_budget),
+        Err(GcError::GraceBelowBindBudget { grace, floor })
+            if grace == MAX_BIND_BUDGET && floor == 2 * MAX_BIND_BUDGET
+    ));
+    let at_floor = GcOptions {
+        grace: 2 * MAX_BIND_BUDGET,
+        ..GcOptions::default()
+    };
+    db.gc(&at_floor).unwrap();
     assert_eq!(MAX_BIND_BUDGET, Duration::from_hours(1));
+    assert_eq!(2 * MAX_BIND_BUDGET, Duration::from_hours(2));
     for ratio in [f64::NAN, -0.1] {
         let bad = GcOptions {
             rewrite_ratio: ratio,

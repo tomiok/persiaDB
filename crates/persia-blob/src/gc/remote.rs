@@ -63,7 +63,9 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
         let mut keep = mark.uploads.clone();
         // The upload each kept, unmarked manifest names (`None`: inline), for the check of pinned blobs below.
         let mut named: HashMap<BlobId, Option<UploadId>> = HashMap::new();
-        let mut unreadable = !mark.unreadable.is_empty();
+        // The listing skips marked blobs, so a manifest the mark already failed to read is not counted again below.
+        report.unreadable = u64::try_from(mark.unreadable.len()).unwrap_or(u64::MAX);
+        let mut unreadable = report.unreadable > 0;
         for first in 0..=u8::MAX {
             let listed = self
                 .storage()
@@ -137,9 +139,9 @@ impl<S: Storage> Sweep for RemoteBlobStore<S> {
 
 impl<S: Storage> RemoteBlobStore<S> {
     /// Whether a blob pinned now has a manifest that names `upload_id` (SPEC §9.5, ADR-0051 item 5), read through the
-    /// locked pins `view`. A marked blob's upload is kept already; a kept manifest's upload was learned by the
-    /// listing (`named`); any other pinned blob's manifest is read now (it may have been bound after the listing),
-    /// and one that cannot be read counts as naming the upload: GC deletes less, never more.
+    /// locked pins `view`. A marked blob whose manifest the mark resolved is skipped: its upload is kept already. One
+    /// the mark did not resolve (the manifest was missing then) is read now, as is any other pinned blob the listing
+    /// did not name (`named`). A manifest that cannot be read counts as naming the upload: GC deletes less, never more.
     fn named_by_pinned_blob(
         &self,
         upload_id: UploadId,
@@ -148,7 +150,7 @@ impl<S: Storage> RemoteBlobStore<S> {
         named: &mut HashMap<BlobId, Option<UploadId>>,
     ) -> Result<bool> {
         for blob in view.pinned_blobs() {
-            if mark.blobs.contains(&blob) {
+            if mark.manifest_resolved(blob) {
                 continue;
             }
             let upload = if let Some(upload) = named.get(&blob) {

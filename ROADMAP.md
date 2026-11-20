@@ -621,7 +621,8 @@ Deps: M1, M2.
 - [x] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review). Done as one read and one CRC pass per chunk and no copy (a 16 MiB read 27.7 → 5.1 ms, `pack` bench). The read buffer is still zero-filled, at most once per `get_blob` stream and once per `read_range` or `read_chunk_source` call; removing that zero-fill is 9.2.11
 - [ ] 9.2.10 (v1.0) `Container::side_files` and `persia container sweep` also list and remove the pack's stale `<name>.persia.blobs.tmp.*` files (SPEC §9.3; found in 9.2.6)
 - [ ] 9.2.11 (v1.0) `read_chunk_checked` over the pack in one CRC pass without costing other stores a copy; the `pack` bench gains a mapped-read case once a bench can make a `MapPermit` (found in 9.2.9)
-- [ ] 9.2.12 [T] A pack rewrite with mapped reads on: the window remap after the swap (the copying stand-in is private to `pack::store::mapped`; found in 9.5.2)
+- [ ] 9.2.12 (v1.0) [T] A pack rewrite with mapped reads on: the window remap after the swap (the copying stand-in is private to `pack::store::mapped`; found in 9.5.2)
+- [ ] 9.2.13 (v1.0) A read-only local pack reopens when `refresh` returns `Error::PackReplaced`: today that handle keeps the file it opened, and the bytes it mapped, only until the error, and nothing reopens or remaps (SPEC §9.5, §18.10; found in the 9.5 review). The same gap is a local reader lease, when a reader must keep a blob the writer has stopped referencing
 
 ## 9.3 Remote layout
 - [x] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)
@@ -629,6 +630,7 @@ Deps: M1, M2.
 - [x] 9.3.3 Small-blob single-object optimization (threshold)
 - [ ] 9.3.4 `put_blob` resumes a remote upload: `PutBlobOptions::resume: Option<ResumeToken>` drives `RemoteBlobStore::resume`, `Chunker::resume` and `restage`, pinning the old upload id before listing and the new one before `restage`, and rejecting a token chunk size below the floor (SPEC §9.4, §9.5; found in 9.3.2)
 - [x] 9.3.5 Seed the `blob_manifest` fuzz corpus with the `inline-*.blm` golden files (found in 9.3.3)
+- [ ] 9.3.6 (v1.0) A resumed upload refreshes its chunks' age, or `pin_contained` checks that chunk 0 exists: an upload resumed, older than the grace period and bound after the sweep's manifest listing could lose its chunks if its pins drop before the chunk phase (found in the 9.5 review)
 
 ## 9.4 Integration with documents
 - [x] 9.4.1 `put(doc, blob)` ordering: blob durable → document commit (SPEC §9.5)
@@ -648,7 +650,7 @@ Deps: M1, M2.
 - [ ] 9.5.6 (v1.0) [T] No dangling blob reference (SPEC §9.5, §9.6): a document committed with a `BlobRef` that has no blob behind it (set below the public API with `Document::set_blob_ref`, or after copying only the container, §4.8) is reported by `verify` as an error naming the collection, document id and `blob_id`, in a segment and in the WAL; the public `put(doc, blob)` given a `BlobRef` its database never bound is rejected and logs nothing
 - [x] 9.5.7 `SimFs` file modification times from an injectable clock, so sweep crash tests on `LocalStorage<SimFs>` can age objects (SPEC §10.1; found in 9.5.5)
 - [x] 9.5.8 Sweep (9.5.2): an upload's staged chunks are not deleted while a pinned blob's manifest names it, checked under the pin set's lock (`PinSet::unless_pinned`, ADR-0051; found in the 9.4.1 review)
-- [ ] 9.5.9 [T] GC concurrent with `put_blob` and `get_blob` on other threads over a real `PinSet` (the 9.5 tests simulate pin races through a pin-gate hook, and the remote path at the `persia` level needs a clocked `MemoryStorage`: a `persia` dev-dependency on `persia-storage` in xtask `ALLOWED`, as 9.4.6 does, or a `persia-blob` `testing` re-export; found in 9.5.2)
+- [ ] 9.5.9 (v1.0) [T] GC concurrent with `put_blob` and `get_blob` on other threads over a real `PinSet` (the 9.5 tests simulate pin races through a pin-gate hook, and the remote path at the `persia` level needs a clocked `MemoryStorage`: a `persia` dev-dependency on `persia-storage` in xtask `ALLOWED`, as 9.4.6 does, or a `persia-blob` `testing` re-export; found in 9.5.2)
 
 ---
 
@@ -788,7 +790,7 @@ Deps: M11, M12.
 - [ ] 13.2.2 Cache warm-up on new segments (optional prefetch)
 - [ ] 13.2.3 `persia_replica_lag_seconds` and readiness gating on lag threshold
 - [ ] 13.2.4 Safe segment lifetime: readers pin old manifests while queries run; GC respects reader leases/grace
-- [ ] 13.2.5 Remote blob GC under reader nodes (SPEC §9.5, ADR-0052): a stateless query node that lags behind the writer may find the blob of a deleted document gone after the grace period; reader leases or a low-water snapshot `seq` the sweep honors (found in 9.5.2)
+- [ ] 13.2.5 (v1.0) Remote blob GC under reader nodes (extends 13.2.4; SPEC §9.5, ADR-0052): a stateless query node that lags behind the writer may find the blob of a deleted document gone after the grace period; reader leases or a low-water snapshot `seq` the sweep honors (found in 9.5.2)
 
 ## 13.3 Sharding (SPEC §11.1)
 - [ ] 13.3.1 Shard map definition + routing function (xxh3 mod N), stored in cluster manifest
@@ -886,7 +888,7 @@ Deps: M1–M14 (can start benchmarking early after M7).
 - [ ] 15.2.3 FST/term-dict memory & mmap layout tuning
 - [ ] 15.2.4 Cache sizing guidance and defaults from measurements
 - [ ] 15.2.5 Disjunction default: on `search_top10_pruning` `MaxScore` beats block-max WAND (`or` 902 µs vs 1.17 ms, `or_rare` 270 vs 432 µs); try block bounds in `MaxScore` (Lucene 9.6's block-max MaxScore) and fewer pivot sums in WAND, then pick the default by benchmark and update SPEC §7.3 (found in 7.4.4); `MaxScore` still scans every essential clause per candidate and sums every bound per lookup, O(clauses²): 41.6 ms vs 24.5 ms for block-max WAND on `search_top10_pruning/or50` (7.4.7). (was 7.4.9)
-- [ ] 15.2.6 Remote blob sweep at scale: page the `blobs/uploads/` listing and read the mark's manifests in parallel (SPEC §9.5; found in 9.5.2)
+- [ ] 15.2.6 (v1.0) Remote blob sweep at scale: page the `blobs/uploads/` listing and read the mark's manifests in parallel (SPEC §9.5; found in 9.5.2)
 
 ## 15.3 Reliability & chaos
 - [ ] 15.3.1 Long-running soak test (24–72 h) with random ops + invariants checks

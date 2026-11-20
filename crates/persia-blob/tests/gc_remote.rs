@@ -393,6 +393,9 @@ fn an_unreadable_manifest_leaves_every_staged_chunk() {
             )
             .unwrap();
         assert!(report.uploads_skipped, "marked {marked}: {report:?}");
+        // The mark's unreadable blob and a kept manifest the sweep reads are the same object only when it is marked,
+        // and the listing skips marked blobs, so the count is one either way.
+        assert_eq!(report.unreadable, 1, "marked {marked}: {report:?}");
         assert_eq!(store.staged_chunks(UploadId::new(2)).unwrap().len(), 4);
         assert_eq!(store.staged_chunks(UploadId::new(1)).unwrap().len(), 3);
     }
@@ -426,6 +429,41 @@ fn a_kept_manifest_keeps_its_uploads_chunks_whatever_their_age() {
     assert_eq!(report.uploads_deleted, 0, "{report:?}");
     assert_eq!(read_all(&store, &young).unwrap(), b"bound late");
     assert_eq!(read_all(&store, &pinned).unwrap(), b"pinned at the check");
+}
+
+/// A marked blob whose manifest was missing when the mark ran is not resolved. If it is bound and pinned before the
+/// chunk phase, the sweep reads that manifest under the lock and keeps the upload (SPEC §9.5).
+#[test]
+fn a_marked_blob_missing_at_the_mark_is_read_when_a_pin_binds_it() {
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let store = Arc::new(RemoteBlobStore::new(MemoryStorage::with_clock(
+        Arc::clone(&clock) as Arc<dyn Clock>,
+    )));
+    let manifest = stage(&*store, b"bound after the mark", 4, 1);
+    clock.set(at(100));
+    let mut mark = Mark::new([manifest.blob_id()], []);
+    mark.add_manifest_uploads(&*store).unwrap();
+    assert_eq!(mark.missing, [manifest.blob_id()]);
+    let pins = Pins::default();
+    let hooked = Arc::clone(&store);
+    let m = manifest.clone();
+    let mut done = false;
+    pins.on_check(move |pinned| {
+        if std::mem::replace(&mut done, true) {
+            return;
+        }
+        assert_eq!(hooked.bind(&m).unwrap(), BindOutcome::Bound);
+        pinned.insert(GcObject::Blob(m.blob_id()));
+    });
+    let report = store.sweep(&mark, &pins, &options(at(100))).unwrap();
+    assert_eq!(report.uploads_deleted, 0, "{report:?}");
+    assert!(
+        !store
+            .staged_chunks(manifest.upload_id())
+            .unwrap()
+            .is_empty(),
+        "{report:?}"
+    );
 }
 
 /// ROADMAP 9.5.8 (ADR-0051 item 5): a blob is pinned before the manifest naming an upload is read, and that upload

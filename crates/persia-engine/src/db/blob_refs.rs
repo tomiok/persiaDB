@@ -6,8 +6,8 @@
 //! segments still held (SPEC §8.5: readers and merges in flight), and every put of the WAL from the committed
 //! `wal_start` on, the records after `log_end` included (what a reopen replays, and what `verify` checks).
 //!
-//! A reader that keeps a segment without the deletions it read it with (an `Arc<Segment>` taken out of a snapshot,
-//! the snapshot and its tombstones dropped) is not seen: it reads every document as live, deleted ones included.
+//! A caller that holds a bare [`Arc<Segment>`](crate::segment::Segment) without the snapshot or the committed
+//! tombstones it was read with is not tracked: it reads every document as live, deleted ones included.
 //!
 //! The engine never looks a reference up (it does not depend on `persia-blob`): this only lists ids, and the blob
 //! store's GC sweeps what no id names.
@@ -41,9 +41,19 @@ pub(super) struct RetiredView {
 }
 
 impl RetiredView {
-    fn is_dead(&self) -> bool {
+    /// Nothing still shows this view. A dead lease with a memtable the new snapshot already reads is dead too: that
+    /// memtable's strong count stays above 0 for as long as it is the live one, so counting it would keep one entry
+    /// per publish on an idle collection. An older memtable a [`MemtableView`](crate::memtable::MemtableView) still
+    /// holds, or a snapshot whose lease is alive, stays.
+    fn is_dead(&self, live_memtables: &[Arc<RwLock<Inner>>]) -> bool {
+        if self.lease.strong_count() != 0 {
+            return false;
+        }
         // A count of 0 is final: nothing can upgrade it again.
-        self.lease.strong_count() == 0 && self.memtable.strong_count() == 0
+        match self.memtable.upgrade() {
+            None => true,
+            Some(memtable) => live_memtables.iter().any(|m| Arc::ptr_eq(m, &memtable)),
+        }
     }
 }
 
@@ -173,8 +183,14 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// Publishes `snapshot` as the latest (SPEC §8.4) and keeps weak references to what the one it replaces shows,
     /// which readers may still hold, for [`Database::referenced_blobs`].
     pub(super) fn publish(&mut self, snapshot: Snapshot) {
-        let old = self.published.swap(Arc::new(snapshot));
-        self.retired.retain(|v| !v.is_dead());
+        let new = Arc::new(snapshot);
+        // The memtables the snapshot just published reads. An entry whose lease is dead and whose memtable is one of
+        // these is redundant: the live state already reads that memtable whole.
+        let live_memtables: Vec<Arc<RwLock<Inner>>> = new
+            .collections()
+            .map(|(_, c)| Arc::clone(c.memtable.shared()))
+            .collect();
+        let old = self.published.swap(new);
         for (name, c) in old.collections() {
             self.retired.push(RetiredView {
                 lease: Arc::downgrade(&c.statistics),
@@ -188,6 +204,9 @@ impl<F: ContainerFile + Sync> Database<F> {
                 memtable: Arc::downgrade(c.memtable.shared()),
             });
         }
+        // Drop the previous snapshot before the prune, so a lease nobody else holds counts as dead.
+        drop(old);
+        self.retired.retain(|v| !v.is_dead(&live_memtables));
     }
 }
 
@@ -291,5 +310,38 @@ mod tests {
         db.put("c", &doc, Durability::Buffered).unwrap();
         assert!(wal_refs(&db).is_empty());
         assert_eq!(db.referenced_blobs().unwrap(), [blob(3).blob_id()].into());
+    }
+
+    /// Compaction and merge republish the snapshot without replacing the live memtable when nothing was written.
+    /// With no reader holding the previous snapshot, `retired` must not grow by one entry per publish.
+    #[test]
+    fn publishes_of_the_same_memtable_keep_retired_bounded() {
+        let mut db =
+            Database::create_on(SimFile::new(), [1; 16], DatabaseOptions::default()).unwrap();
+        db.create_collection(SchemaBuilder::new("c").build().unwrap())
+            .unwrap();
+        put(&mut db, "a", Some(1));
+        for _ in 0..8 {
+            let snapshot = super::super::snapshot_of(&db.manifest, &db.collections);
+            db.publish(snapshot);
+        }
+        assert!(
+            db.retired.is_empty(),
+            "retired grew to {} with no held snapshot",
+            db.retired.len()
+        );
+
+        // A snapshot still held, even one that reads the live memtable, stays until it is dropped: its segments
+        // may be the ones a merge has since replaced.
+        let held = db.snapshot();
+        db.publish(super::super::snapshot_of(&db.manifest, &db.collections));
+        assert_eq!(db.retired.len(), 1, "a held snapshot stays tracked");
+        assert!(db.referenced_blobs().unwrap().contains(&blob(1).blob_id()));
+        drop(held);
+        db.publish(super::super::snapshot_of(&db.manifest, &db.collections));
+        assert!(
+            db.retired.is_empty(),
+            "dropping the snapshot lets the next publish prune it"
+        );
     }
 }

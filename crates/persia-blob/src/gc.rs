@@ -23,9 +23,9 @@ mod remote;
 /// How a sweep runs (SPEC §9.5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SweepOptions {
-    /// How long an unmarked remote object is kept after it was written (SPEC §9.5: 24 h by default; staged chunks
-    /// counted from their upload's newest chunk). It must stay far above the bind budget (SPEC §9.4): a conditional
-    /// write still in flight may bind an upload that long after it was last touched. The pack has none.
+    /// How long an unmarked remote object is kept after it was written (SPEC §9.5: 24 h by default, at least twice the
+    /// longest bind budget; staged chunks counted from their upload's newest chunk). A conditional write started
+    /// inside the budget can land after it (SPEC §9.4). The pack has none.
     pub grace: Duration,
     /// The time ages are measured at, by the backend's clock: objects' `last_modified` come from it (SPEC §10.1).
     pub now: SystemTime,
@@ -53,7 +53,8 @@ pub struct SweepReport {
     /// Unmarked remote objects kept because the backend cannot tell their age (`last_modified` is `None`, SPEC
     /// §10.1): never taken for expired (an upload counts once).
     pub unknown_age: u64,
-    /// Remote manifests kept that could not be read: the upload each names is unknown.
+    /// Remote manifests that could not be read, the mark's and those a kept manifest's read failed on (never both for
+    /// the same blob: the listing skips blobs the mark already resolved): the upload each names is unknown.
     pub unreadable: u64,
     /// Whether the staged chunks were left alone because a marked or kept manifest could not be read (the upload it
     /// names is unknown): GC deletes less, never more.
@@ -155,6 +156,9 @@ pub struct Mark {
     /// Marked blobs whose manifest could not be read (corrupt, or from a newer build): the upload they name is
     /// unknown, so a sweep deletes no staged chunk while any is listed (it deletes less, never more).
     pub unreadable: Vec<BlobId>,
+    /// Marked blobs whose manifest was read: an upload was added, or the manifest is inline and names none. A marked
+    /// blob that was missing or unreadable is not here, so a pin can still make the sweep read it.
+    resolved: HashSet<BlobId>,
     /// Pinned blob ids no document references: not dangling when unbound.
     pinned_only: HashSet<BlobId>,
 }
@@ -178,6 +182,12 @@ impl Mark {
             };
         }
         mark
+    }
+
+    /// Whether [`Mark::add_manifest_uploads`] read `id`'s manifest. A marked blob it did not resolve (missing, or
+    /// unreadable) stays out, so the sweep reads it again when a pin holds it.
+    pub(crate) fn manifest_resolved(&self, id: BlobId) -> bool {
+        self.resolved.contains(&id)
     }
 
     /// Adds the upload id each marked blob's manifest in `store` names (SPEC §9.5: the mark's last step), so a sweep
@@ -217,9 +227,12 @@ impl Mark {
         blobs.sort_unstable();
         for id in blobs {
             match store.manifest(id) {
-                Ok(Some(m)) if m.is_inline() => {}
+                Ok(Some(m)) if m.is_inline() => {
+                    self.resolved.insert(id);
+                }
                 Ok(Some(m)) => {
                     self.uploads.insert(m.upload_id());
+                    self.resolved.insert(id);
                 }
                 Ok(None) if self.pinned_only.contains(&id) => {}
                 Ok(None) => self.missing.push(id),

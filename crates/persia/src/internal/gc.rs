@@ -9,9 +9,10 @@
 //! reference can become referenced before the sweep, except through a pin, which the sweep checks again under the
 //! pin set's lock. `put_blob` and reads may run meanwhile, from other threads.
 //!
-//! The view is this process's: readers in other processes are not seen. Locally they keep reading the pack file they
-//! opened, which a rewrite does not change. Remotely a reader that lags behind the writer may find the blob of a
-//! document the writer has deleted gone (ADR-0052).
+//! The view is this process's: readers in other processes are not seen. Locally a read-only process keeps the pack
+//! file it opened only until `refresh` returns [`persia_blob::Error::PackReplaced`]; nothing reopens on that error
+//! (ROADMAP 9.2.13). Remotely a reader that lags behind the writer may find the blob of a document the writer has
+//! deleted gone (ADR-0052, ROADMAP 13.2.5).
 
 use std::collections::HashSet;
 use std::time::{Duration, SystemTime};
@@ -34,9 +35,8 @@ pub const DEFAULT_REWRITE_RATIO: f64 = 0.5;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct GcOptions {
     /// How long an unmarked remote object is kept after it was written (staged chunks: after their upload's newest
-    /// chunk). [`DEFAULT_GRACE`] by default; at least [`MAX_BIND_BUDGET`] (1 h), the longest bind budget `put_blob`
-    /// accepts: a conditional write still in flight may bind an upload that long after `put_blob` gave up (SPEC §9.4).
-    /// The pack has none.
+    /// chunk). [`DEFAULT_GRACE`] by default, and at least twice [`MAX_BIND_BUDGET`] (2 h): an attempt started just
+    /// before the deadline can land its `put_if_absent` after the budget ends (SPEC §9.4). The pack has none.
     pub grace: Duration,
     /// The pack is rewritten only when it would drop at least this share of its frames' bytes: 0 forces the rewrite,
     /// above 1 it never runs. [`DEFAULT_REWRITE_RATIO`] by default. The remote layout ignores it.
@@ -80,14 +80,15 @@ pub enum GcError {
     /// was deleted.
     #[error(transparent)]
     Database(Box<DatabaseError>),
-    /// [`GcOptions::grace`] is below [`MAX_BIND_BUDGET`], the longest bind budget `put_blob` accepts
-    /// (SPEC §9.4: the grace period must stay far above the bind budget). Nothing was done.
-    #[error("the grace period {grace:?} is below the bind budget {budget:?}")]
+    /// [`GcOptions::grace`] is below twice [`MAX_BIND_BUDGET`] (2 h). An attempt started just before the deadline can
+    /// land its `put_if_absent` after the budget ends, so a grace of only the budget could sweep those chunks while
+    /// that write is still in flight (SPEC §9.4). Nothing was done.
+    #[error("the grace period {grace:?} is below {floor:?}, twice the longest bind budget")]
     GraceBelowBindBudget {
         /// The grace period asked for.
         grace: Duration,
-        /// [`MAX_BIND_BUDGET`].
-        budget: Duration,
+        /// `2 * `[`MAX_BIND_BUDGET`].
+        floor: Duration,
     },
     /// [`GcOptions::rewrite_ratio`] is negative or not a number. Nothing was done.
     #[error("invalid rewrite ratio {0}")]
@@ -181,10 +182,11 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// [`BlobDatabase::mark`] and the store's sweep ([`GcError::Blob`]): the sweep stops at the first error, and what
     /// it deleted before was unmarked.
     pub fn gc(&self, options: &GcOptions) -> Result<GcReport, GcError> {
-        if options.grace < MAX_BIND_BUDGET {
+        // Twice the cap, not the cap: a `put_if_absent` started inside the budget can land after it (SPEC §9.4).
+        if options.grace < 2 * MAX_BIND_BUDGET {
             return Err(GcError::GraceBelowBindBudget {
                 grace: options.grace,
-                budget: MAX_BIND_BUDGET,
+                floor: 2 * MAX_BIND_BUDGET,
             });
         }
         if options.rewrite_ratio.is_nan() || options.rewrite_ratio < 0.0 {
