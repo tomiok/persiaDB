@@ -72,6 +72,11 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
     keep its old age, and a sweep whose manifest listing came before the bind could delete it. This replaces the
     alternative of `pin_contained` checking chunk 0, which cannot help once the pins have dropped before the chunk
     phase.
+    The cost is a re-read and re-upload of every chunk before the last window when the upload was fully staged; it is
+    accepted rather than skipping the copy for uploads that look young, because the client's clock and the backend's
+    need not agree.
+11. **No discard of the token's upload.** A resume never discards the token's upload: a replayed token may name an
+    upload bound to another blob. It discards only an upload it restaged to; GC decides about the token's.
 
 ## Consequences
 

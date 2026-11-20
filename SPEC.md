@@ -2657,7 +2657,8 @@ A backend without
 (`check_ref`; a manifest under the wrong key would otherwise serve another blob's bytes with every CRC valid), then
 gets whole chunks and checks each chunk's length and CRC32C against it (a mismatch is `Corrupt`).
 **Resume** (ROADMAP 9.3.2). The resume token is the `upload_id` and the `chunk_size` the upload started with (chunk
-objects do not record it). The writer lists the staged chunks, keeps the run of full-length chunks from chunk 0,
+objects do not record it). The writer lists the staged chunks (their indices taken sorted and without duplicates, whatever order the backend
+returns), keeps the run of full-length chunks from chunk 0,
 re-hashes their bytes and continues after them; hasher state is never persisted. Chunk writes are `put_if_absent`, so
 a chunk already there with other bytes (`AlreadyExists`, e.g. the short last chunk of an upload that was already
 bound) is never replaced: the resume restarts under a new `upload_id`. The id is computed from the stored bytes, so a
@@ -2685,7 +2686,8 @@ staged, and a read is the one `get` of the manifest; the empty blob writes its p
 `upload_id` is 0, so two writers of the same small blob at the same `chunk_size` (the inline manifest records it)
 write equal bytes and both get `Created` (§10.1); at different chunk sizes the second gets `AlreadyExists` and is a
 duplicate (§9.2). The
-mark takes no upload id from it (§9.5). An unknown outcome of a small blob's write is retried as the same single
+mark takes no upload id from it (§9.5). A resume stores its blob chunked even when it is at most 64 KiB and the kept run is empty: only a new
+upload takes the inline path. An unknown outcome of a small blob's write is retried as the same single
 object, never as a staged blob (a plain manifest with no chunk behind it).
 
 ### 9.5 Write ordering and GC

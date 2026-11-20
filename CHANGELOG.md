@@ -171,6 +171,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 - `persia-blob` / `persia`: on the remote layout, `put_blob` failures after staging come wrapped in
   `Error::UploadInterrupted`, with the original error as `source` (ROADMAP 9.3.4).
+- `persia`: a resume of an upload that is already fully staged (for example after a bind that failed with a known
+  outcome) re-reads every chunk before its last window and uploads it again under a new upload id, so that GC's grace
+  period counts from the new chunks (ROADMAP 9.3.6).
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
   `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
   an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc`
