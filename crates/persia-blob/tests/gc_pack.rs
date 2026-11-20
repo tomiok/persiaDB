@@ -11,6 +11,8 @@
 //!    `refresh` reports `PackReplaced`.
 //! 5. A crash at any call of the rewrite reopens to the old pack or the new one, never a mix, with every kept blob
 //!    readable. A failed directory sync poisons the handle, which still reads.
+//! 6. So does one of a pack of generation 2 that keeps blobs only a pin on their id or their upload keeps: the
+//!    generation and the `pack_id` tell the old pack from the new, and the next sweep converges on the new one.
 //!
 //! Seeds: fixed (`RngSeed::Fixed`), printed by proptest on failure.
 #![allow(
@@ -643,4 +645,241 @@ fn a_failed_directory_sync_stops_the_handle_and_the_new_pack_binds_nothing() {
             "failed sync",
         );
     }
+}
+
+// --- Crash tests with pins, on a pack already rewritten once (ROADMAP 9.5.4) ---
+
+/// The blobs of [`pinned_crash_fixture`]: bytes, chunk size, upload id, and what keeps it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Marked,
+    /// Unmarked, its blob id pinned after the mark (a `get_blob` or a `put_blob` still in flight).
+    PinnedBlob,
+    /// Unmarked, its upload id pinned after the mark.
+    PinnedUpload,
+    Dropped,
+}
+
+const PINNED_BLOBS: [(&[u8], u32, u128, Keep); 6] = [
+    (b"a marked blob, kept", 4, 11, Keep::Marked),
+    (b"garbage", 3, 12, Keep::Dropped),
+    (
+        b"only a pin on its blob id keeps this one",
+        5,
+        13,
+        Keep::PinnedBlob,
+    ),
+    (
+        b"only a pin on its upload keeps this one",
+        6,
+        14,
+        Keep::PinnedUpload,
+    ),
+    (b"", 4, 15, Keep::Dropped),
+    (
+        b"bound after the first rewrite, dropped",
+        4,
+        16,
+        Keep::Dropped,
+    ),
+];
+
+struct PinnedFixture {
+    fs: SimFs,
+    store: PackStore<SimFsFile>,
+    mark: Mark,
+    pins: Pins,
+    blobs: BTreeMap<BlobId, (Vec<u8>, BlobManifest, Keep)>,
+}
+
+/// A pack of generation 2 (rewritten once, dropping one blob), then more garbage bound after it, a pinned staged
+/// upload and an unpinned one; durable. The mark names the marked blob only; the pins (taken after it) the rest.
+fn pinned_crash_fixture() -> PinnedFixture {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    let mut blobs = BTreeMap::new();
+    for &(data, chunk, upload, keep) in &PINNED_BLOBS[..5] {
+        let m = put(&store, data, chunk, upload);
+        blobs.insert(m.blob_id(), (data.to_vec(), m, keep));
+    }
+    let first_garbage = put(&store, b"dropped by the first rewrite", 4, 10);
+    let all_but_first: Vec<BlobId> = blobs.keys().copied().collect();
+    let first = sweep(&store, &Mark::new(all_but_first, []), &Pins::default(), 0.0).unwrap();
+    assert!(
+        matches!(first.rewrite, Some(Rewrite::Done { generation: 2, .. })),
+        "{first:?}"
+    );
+    assert!(store.manifest(first_garbage.blob_id()).unwrap().is_none());
+    let (data, chunk, upload, keep) = PINNED_BLOBS[5];
+    let m = put(&store, data, chunk, upload);
+    blobs.insert(m.blob_id(), (data.to_vec(), m, keep));
+    // A `put_blob` in flight (its upload pinned) and an abandoned one: chunks after `log_end`.
+    let in_flight = stage(&store, b"staged, its upload pinned", 4, 17);
+    stage(&store, b"staged, abandoned", 4, 18);
+    let mut mark = Mark::new(
+        blobs
+            .iter()
+            .filter(|(_, (_, _, k))| *k == Keep::Marked)
+            .map(|(id, _)| *id),
+        [],
+    );
+    mark.add_manifest_uploads(&store).unwrap();
+    let pins = Pins::new([GcObject::Upload(in_flight.upload_id())]);
+    for (data, m, keep) in blobs.values() {
+        match keep {
+            Keep::PinnedBlob => pins.pin(GcObject::Blob(m.blob_id())),
+            Keep::PinnedUpload => pins.pin(GcObject::Upload(m.upload_id())),
+            Keep::Marked | Keep::Dropped => {}
+        }
+        assert_eq!(&read_all(&store, m).unwrap(), data);
+    }
+    PinnedFixture {
+        fs,
+        store,
+        mark,
+        pins,
+        blobs,
+    }
+}
+
+/// After a crash: the old pack (every blob, the old generation and `pack_id`) or the new one (exactly the marked and
+/// pinned blobs, generation + 1, another `pack_id`), each blob byte for byte. Returns the `pack_id` when it is new.
+fn check_pinned_crash(
+    fs: &SimFs,
+    old: persia_blob::pack::layout::PackSuperblock,
+    blobs: &BTreeMap<BlobId, (Vec<u8>, BlobManifest, Keep)>,
+    what: &str,
+) -> Option<u128> {
+    let store = open(fs, PackMode::ReadWrite).unwrap_or_else(|e| panic!("{what}: reopen: {e}"));
+    let sb = store.superblock().unwrap();
+    let replaced = match sb.generation {
+        g if g == old.generation => false,
+        g if g == old.generation + 1 => true,
+        g => panic!("{what}: generation {g} after {}", old.generation),
+    };
+    assert_eq!(
+        sb.pack_id == old.pack_id,
+        !replaced,
+        "{what}: the pack_id tells the old pack from the new one"
+    );
+    let mut ids = store.blob_ids();
+    ids.sort_unstable();
+    let expected: Vec<BlobId> = blobs
+        .iter()
+        .filter(|(_, (_, _, keep))| !replaced || *keep != Keep::Dropped)
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(ids, expected, "{what}: replaced {replaced}");
+    assert_eq!(sb.blob_count, expected.len() as u64, "{what}");
+    for (data, m, keep) in blobs.values() {
+        if !replaced || *keep != Keep::Dropped {
+            assert_eq!(&read_all(&store, m).unwrap(), data, "{what}: {keep:?}");
+        }
+    }
+    replaced.then_some(sb.pack_id)
+}
+
+/// After [`check_pinned_crash`]: a sweep of the reopened pack with the same mark and pins converges on the new pack.
+fn sweep_after_crash(
+    fs: &SimFs,
+    mark: &Mark,
+    pins: &Pins,
+    blobs: &BTreeMap<BlobId, (Vec<u8>, BlobManifest, Keep)>,
+    what: &str,
+) {
+    let store = open(fs, PackMode::ReadWrite).unwrap();
+    let report = sweep(&store, mark, pins, 0.0)
+        .unwrap_or_else(|e| panic!("{what}: the sweep after the crash: {e}"));
+    assert!(
+        matches!(report.rewrite, Some(Rewrite::Done { .. })),
+        "{what}: {report:?}"
+    );
+    let reopened = open(&fs.crash(CrashLoss::All), PackMode::ReadOnly).unwrap();
+    for store in [&store, &reopened] {
+        for (data, m, keep) in blobs.values() {
+            let found = store.manifest(m.blob_id()).unwrap().is_some();
+            assert_eq!(found, *keep != Keep::Dropped, "{what}: {keep:?}");
+            if found {
+                assert_eq!(&read_all(store, m).unwrap(), data, "{what}: {keep:?}");
+            }
+        }
+    }
+}
+
+fn crash_during_pinned_rewrite(seeds: u64) {
+    let total = {
+        let f = pinned_crash_fixture();
+        let start = f.fs.mutations();
+        let report = sweep(&f.store, &f.mark, &f.pins, 0.0).unwrap();
+        // The three dropped blobs, and the abandoned upload.
+        assert_eq!(
+            (report.blobs_deleted, report.uploads_deleted),
+            (3, 1),
+            "{report:?}"
+        );
+        f.fs.mutations() - start
+    };
+    let mut sides = BTreeSet::new();
+    for k in 0..total {
+        for fault in [SimFault::FailAt, SimFault::ApplyThenFail] {
+            let f = pinned_crash_fixture();
+            let old = f.store.superblock().unwrap();
+            f.fs.set_fault(Some(fault(f.fs.mutations() + k)));
+            assert!(
+                sweep(&f.store, &f.mark, &f.pins, 0.0).is_err(),
+                "the fault at call {k} fires"
+            );
+            // The handle reads every marked and pinned blob, whatever failed.
+            for (data, m, keep) in f.blobs.values() {
+                if *keep != Keep::Dropped {
+                    assert_eq!(&read_all(&f.store, m).unwrap(), data, "call {k}: {keep:?}");
+                }
+            }
+            drop(f.store);
+            let mut new_ids = BTreeSet::new();
+            let losses = [CrashLoss::All, CrashLoss::Nothing]
+                .into_iter()
+                .chain((0..seeds).map(CrashLoss::Seeded));
+            for loss in losses {
+                let what = format!("{:?} at call {k} of {total}, {loss:?}", fault(k));
+                let crashed = f.fs.crash(loss);
+                let new = check_pinned_crash(&crashed, old, &f.blobs, &what);
+                sides.insert(new.is_some());
+                new_ids.extend(new);
+                sweep_after_crash(&crashed, &f.mark, &f.pins, &f.blobs, &what);
+            }
+            // Every crash that lands on the new pack finds the one file this rewrite wrote.
+            assert!(new_ids.len() <= 1, "call {k}: {new_ids:?}");
+        }
+    }
+    assert_eq!(sides.len(), 2, "crashes land on both sides of the rename");
+    // No fault: the new pack, after any crash that follows.
+    let f = pinned_crash_fixture();
+    let old = f.store.superblock().unwrap();
+    sweep(&f.store, &f.mark, &f.pins, 0.0).unwrap();
+    let new = f.store.superblock().unwrap().pack_id;
+    for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(1)] {
+        let crashed = f.fs.crash(loss);
+        let found = check_pinned_crash(
+            &crashed,
+            old,
+            &f.blobs,
+            &format!("after the sync, {loss:?}"),
+        );
+        assert_eq!(found, Some(new), "{loss:?}");
+    }
+}
+
+/// ROADMAP 9.5.4: a crash at any write or sync of a rewrite of a pack of generation 2, keeping blobs that only a pin
+/// on their id or their upload keeps, reopens to the complete old pack or the complete new one, told apart by the
+/// generation and the `pack_id`; every marked or pinned blob reads back byte for byte, and the next sweep converges.
+#[test]
+fn a_crash_at_any_call_of_a_rewrite_keeping_pinned_blobs_reopens_a_whole_pack() {
+    crash_during_pinned_rewrite(4);
+}
+
+#[cfg(feature = "slow")]
+#[test]
+fn a_crash_at_any_call_of_a_rewrite_keeping_pinned_blobs_reopens_a_whole_pack_many_seeds() {
+    crash_during_pinned_rewrite(64);
 }

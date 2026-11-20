@@ -10,6 +10,9 @@
 //! 5. A crash at any step of a sweep (`LocalStorage` on `SimFs`) leaves no manifest without its chunks, and every
 //!    marked blob readable.
 //! 6. An unreadable manifest, marked or kept, stops the staged-chunk phase.
+//! 7. A sweep of a generated store stopped at any delete (failed, or applied with the process gone) leaves no manifest
+//!    without its chunks, and the next sweep ends where an uninterrupted one does.
+//! 8. One object of unknown age keeps its upload (a chunk) or its manifest and the chunks it names.
 //!
 //! Seeds: fixed (`RngSeed::Fixed`), printed by proptest on failure.
 #![allow(
@@ -668,4 +671,199 @@ fn a_crash_anywhere_in_a_sweep_leaves_no_manifest_without_its_chunks() {
 #[test]
 fn a_crash_anywhere_in_a_sweep_leaves_no_manifest_without_its_chunks_many_seeds() {
     crash_during_sweep(64);
+}
+
+// --- A sweep stopped at any delete, on generated stores (ROADMAP 9.5.4) ---
+
+/// Every key under `blobs/` (ignoring times).
+fn all_keys<S: Storage>(store: &RemoteBlobStore<S>) -> BTreeSet<String> {
+    store
+        .storage()
+        .list(&KeyPrefix::new("blobs/").unwrap())
+        .unwrap()
+        .into_iter()
+        .map(|m| m.key.as_str().to_owned())
+        .collect()
+}
+
+/// A generated store on a `FaultyStorage`, with its mark.
+fn faulty_store(
+    specs: &[Spec],
+) -> (
+    RemoteBlobStore<persia_storage::faulty::FaultyStorage<MemoryStorage>>,
+    Built,
+    Mark,
+) {
+    let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+    let memory = MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+    let store = RemoteBlobStore::new(persia_storage::faulty::FaultyStorage::new(memory, 7));
+    let built = build(&store, &clock, specs);
+    let mark = mark_of(&store, &built);
+    (store, built, mark)
+}
+
+/// SPEC §9.5: manifests go before their chunks. Whichever delete the sweep stops at (failed, or applied with the
+/// process gone), every manifest left has all its chunks, every marked or pinned blob reads back, and a sweep after a
+/// restart ends where an uninterrupted one does.
+fn stopped_sweeps(specs: &[Spec], now: SystemTime) {
+    use persia_storage::Op;
+    use persia_storage::faulty::{Fault, Trigger};
+
+    let (store, built, mark) = faulty_store(specs);
+    let report = store.sweep(&mark, &built.pins, &options(now)).unwrap();
+    let deletes = report.blobs_deleted + report.chunks_deleted;
+    let expected = all_keys(&store);
+    for n in 1..=deletes {
+        for fault in [Fault::Io, Fault::CrashAfter] {
+            let (store, built, mark) = faulty_store(specs);
+            store.storage().inject(Trigger::Nth(Op::Delete, n), fault);
+            let stopped = store.sweep(&mark, &built.pins, &options(now));
+            assert!(
+                stopped.is_err(),
+                "delete {n} of {deletes} ({fault:?}) stops it"
+            );
+            store.storage().restart();
+            let what = format!("stopped at delete {n} of {deletes} ({fault:?})");
+            for (s, m, data) in &built.blobs {
+                if !s.bound {
+                    continue;
+                }
+                let keep = built.marked.contains(&m.blob_id())
+                    || built.pins_now().contains(&GcObject::Blob(m.blob_id()));
+                match store.manifest(m.blob_id()).unwrap() {
+                    Some(_) => assert_eq!(
+                        &read_all(&store, m).unwrap_or_else(|e| panic!(
+                            "{what}: a manifest without its chunks: {e}"
+                        )),
+                        data,
+                        "{what}"
+                    ),
+                    None => assert!(!keep, "{what}: a kept blob was deleted: {s:?}"),
+                }
+            }
+            store.sweep(&mark, &built.pins, &options(now)).unwrap();
+            assert_eq!(all_keys(&store), expected, "{what}: the sweep after it");
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: if cfg!(feature = "slow") { 256 } else { 24 },
+        rng_seed: RngSeed::Fixed(0x9_5_4_3),
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn a_sweep_stopped_at_any_delete_leaves_no_manifest_without_its_chunks(
+        specs in prop::collection::vec(spec(), 1..8),
+        now in 30..100_u64,
+    ) {
+        stopped_sweeps(&specs, at(now));
+    }
+}
+
+// --- Unknown ages, object by object (SPEC §9.5, §10.1) ---
+
+/// Lists the keys of `unknown` without a time (`last_modified: None`), the others as the storage does.
+struct NoTimesFor<S> {
+    inner: S,
+    unknown: BTreeSet<String>,
+}
+
+impl<S: Storage> Storage for NoTimesFor<S> {
+    fn get_range(
+        &self,
+        key: &Key,
+        range: core::ops::Range<u64>,
+    ) -> persia_storage::Result<ByteSource> {
+        self.inner.get_range(key, range)
+    }
+    fn get(&self, key: &Key) -> persia_storage::Result<Bytes> {
+        self.inner.get(key)
+    }
+    fn put(&self, key: &Key, data: Bytes) -> persia_storage::Result<()> {
+        self.inner.put(key, data)
+    }
+    fn put_if_absent(&self, key: &Key, data: Bytes) -> persia_storage::Result<PutOutcome> {
+        self.inner.put_if_absent(key, data)
+    }
+    fn list(&self, prefix: &KeyPrefix) -> persia_storage::Result<Vec<ObjectMeta>> {
+        let mut listed = self.inner.list(prefix)?;
+        for meta in &mut listed {
+            if self.unknown.contains(meta.key.as_str()) {
+                meta.last_modified = None;
+            }
+        }
+        Ok(listed)
+    }
+    fn delete(&self, key: &Key) -> persia_storage::Result<()> {
+        self.inner.delete(key)
+    }
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+}
+
+/// One chunk of unknown age keeps its whole upload, however old its other chunks are; a manifest of unknown age is
+/// kept, and so are its upload's old chunks. Objects of known age beside them still go.
+#[test]
+fn one_object_of_unknown_age_keeps_its_upload_or_its_manifest_and_chunks() {
+    let clock = Arc::new(ManualClock::new(at(0)));
+    let memory = MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>);
+    let chunk_key = |upload: u128, index: u32| {
+        RemoteKey::Chunk {
+            upload_id: UploadId::new(upload),
+            index,
+        }
+        .key()
+        .unwrap()
+        .as_str()
+        .to_owned()
+    };
+    let unknown_manifest = manifest_of(b"a manifest of unknown age", 4, 2);
+    let unknown: BTreeSet<String> = [
+        // Chunk 2 of upload 1 (an unbound upload of three chunks).
+        chunk_key(1, 2),
+        RemoteKey::Manifest(unknown_manifest.blob_id())
+            .key()
+            .unwrap()
+            .as_str()
+            .to_owned(),
+    ]
+    .into();
+    let store = RemoteBlobStore::new(NoTimesFor {
+        inner: memory,
+        unknown,
+    });
+    let partly_unknown = stage(&store, b"three chunks", 4, 1);
+    let kept = put(&store, b"a manifest of unknown age", 4, 2);
+    assert_eq!(kept, unknown_manifest);
+    let gone = put(&store, b"known and old", 4, 3);
+    stage(&store, b"staged, known and old", 4, 4);
+    let mark = Mark::default();
+    let report = store
+        .sweep(&mark, &Pins::default(), &options(at(1000)))
+        .unwrap();
+    assert_eq!(report.unknown_age, 2, "{report:?}");
+    assert_eq!(
+        (report.blobs_deleted, report.uploads_deleted),
+        (1, 2),
+        "{report:?}"
+    );
+    assert_eq!(
+        store
+            .staged_chunks(partly_unknown.upload_id())
+            .unwrap()
+            .len(),
+        3
+    );
+    assert_eq!(
+        read_all(&store, &kept).unwrap(),
+        b"a manifest of unknown age"
+    );
+    assert!(store.manifest(gone.blob_id()).unwrap().is_none());
+    assert!(store.staged_chunks(gone.upload_id()).unwrap().is_empty());
+    assert!(store.staged_chunks(UploadId::new(4)).unwrap().is_empty());
 }
