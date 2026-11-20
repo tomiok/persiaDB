@@ -638,15 +638,15 @@ Deps: M1, M2.
 - [ ] 9.4.7 A store that refuses every write until reopened (the pack after a failed sync, `PackPoisoned`) ends `put_blob`'s bind retries at once instead of at the end of `bind_budget`: an `Error::is_store_poisoned` predicate in the contract (found in 9.4.1 review)
 
 ## 9.5 Garbage collection
-- [~] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name
-- [~] 9.5.2 Sweep (SPEC §9.5): unmarked blob manifests before their upload's staged chunks, older than the grace period, each pin check and delete under the pin set's lock; remote listing per `blobs/<xx>/` prefix and `blobs/uploads/`; pack-file rewrite for local
+- [x] 9.5.1 Mark (SPEC §9.5): referenced ids from all live manifests/snapshots and WAL records from `wal_start`, plus the writer's pin set (pinned blob ids and upload ids from `put_blob`), then the upload ids their blob manifests name
+- [x] 9.5.2 Sweep (SPEC §9.5): unmarked blob manifests before their upload's staged chunks, older than the grace period, each pin check and delete under the pin set's lock; remote listing per `blobs/<xx>/` prefix and `blobs/uploads/`; pack-file rewrite for local
 - [ ] 9.5.3 `persia verify`: referenced blob missing → error; checksum scan
-- [~] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
+- [x] 9.5.4 [T] crash tests between blob write and doc commit; GC safety test (no live blob ever deleted)
 - [x] 9.5.5 `ObjectMeta.last_modified` (SPEC §10.1 update) so the sweep (9.5.2) can apply the grace period to remote objects
 - [ ] 9.5.6 (v1.0) [T] No dangling blob reference (SPEC §9.5, §9.6): a document committed with a `BlobRef` that has no blob behind it (set below the public API with `Document::set_blob_ref`, or after copying only the container, §4.8) is reported by `verify` as an error naming the collection, document id and `blob_id`, in a segment and in the WAL; the public `put(doc, blob)` given a `BlobRef` its database never bound is rejected and logs nothing
-- [~] 9.5.7 `SimFs` file modification times from an injectable clock, so sweep crash tests on `LocalStorage<SimFs>` can age objects (SPEC §10.1; found in 9.5.5)
-- [~] 9.5.8 Sweep (9.5.2): an upload's staged chunks are not deleted while a pinned blob's manifest names it, checked under the pin set's lock (`PinSet::unless_pinned`, ADR-0051; found in the 9.4.1 review)
-- [ ] 9.5.9 [T] GC concurrent with `put_blob` and `get_blob` on other threads over a real `PinSet` (the 9.5 tests simulate pin races through a pin-gate hook; found in 9.5.2)
+- [x] 9.5.7 `SimFs` file modification times from an injectable clock, so sweep crash tests on `LocalStorage<SimFs>` can age objects (SPEC §10.1; found in 9.5.5)
+- [x] 9.5.8 Sweep (9.5.2): an upload's staged chunks are not deleted while a pinned blob's manifest names it, checked under the pin set's lock (`PinSet::unless_pinned`, ADR-0051; found in the 9.4.1 review)
+- [ ] 9.5.9 [T] GC concurrent with `put_blob` and `get_blob` on other threads over a real `PinSet` (the 9.5 tests simulate pin races through a pin-gate hook, and the remote path at the `persia` level needs a clocked `MemoryStorage`: a `persia` dev-dependency on `persia-storage` in xtask `ALLOWED`, as 9.4.6 does, or a `persia-blob` `testing` re-export; found in 9.5.2)
 
 ---
 
