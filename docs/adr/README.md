@@ -74,4 +74,4 @@ SPEC.md says *what* the system does; ADRs say *why* it is that way and what was 
 | [0049](./0049-blob-pack-layout-and-durability.md) | Blob pack: layout, per-blob durable bind, recovery with roll-forward, pack generation | proposed |
 | [0050](./0050-remote-blob-layout-transfers-resume-and-inline-blobs.md) | Remote blob layout: keys, parallel transfers, resume, inline small blobs, object times | accepted |
 | [0051](./0051-blobs-with-documents-internal-api-pins-and-ordering.md) | Blobs with documents: the internal put_blob/put API, the pin set, and the blob-before-document order | accepted |
-| 0052 | Blob garbage collection: the mark, the sweep and the pack rewrite (ROADMAP 9.5; reserved for wave 2 of M9) | reserved |
+| [0052](./0052-blob-garbage-collection-mark-sweep-and-pack-rewrite.md) | Blob garbage collection: the mark, the sweep and the pack rewrite | proposed |
