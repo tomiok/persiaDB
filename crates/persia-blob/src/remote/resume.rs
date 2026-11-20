@@ -34,6 +34,8 @@ pub struct ResumedUpload {
     token: ResumeToken,
     hasher: ContentHasher,
     crcs: Vec<u32>,
+    /// Every chunk index the listing showed, kept run or not, in order.
+    listed: Vec<u32>,
 }
 
 impl ResumedUpload {
@@ -56,6 +58,14 @@ impl ResumedUpload {
     /// The CRC32Cs of the kept chunks, in order: the start of the blob manifest's list.
     pub fn chunk_crcs(&self) -> &[u32] {
         &self.crcs
+    }
+
+    /// Every chunk index the listing [`RemoteBlobStore::resume`] read showed, in the kept run or not, in order.
+    /// Staging such a chunk again with the same bytes writes nothing (SPEC §9.4: `put_if_absent`), so it leaves the
+    /// upload as old as it was; one the listing did not show is written then (ROADMAP 9.3.6). Without `strong_list`
+    /// a listing may miss a chunk written just before it, which is young anyway.
+    pub fn listed(&self) -> &[u32] {
+        &self.listed
     }
 
     /// Reads the kept run's bytes from `reader`, a reader of the whole blob from its start, and checks each chunk of
@@ -124,6 +134,7 @@ impl<S: Storage> RemoteBlobStore<S> {
             token,
             hasher: ContentHasher::new(),
             crcs: Vec::new(),
+            listed: listed.iter().map(|chunk| chunk.index).collect(),
         };
         let window = self.parallelism.get();
         let mut start = 0_usize;
@@ -263,6 +274,7 @@ mod tests {
         // Through the trait, which forwards to the inherent method (ADR-0053).
         let resumed = BlobStore::resume(&store, t).unwrap();
         assert_eq!(resumed.next_index(), 2);
+        assert_eq!(resumed.listed(), [0, 1, 3, 4]);
         let mut reader = &b"abcdefghijklmnopq"[..];
         resumed.skip_kept(&mut reader).unwrap();
         assert_eq!(reader, b"ijklmnopq");
@@ -301,6 +313,7 @@ mod tests {
         let store = store();
         let resumed = BlobStore::resume(&store, token(2)).unwrap();
         assert_eq!(resumed.next_index(), 0);
+        assert_eq!(resumed.listed(), [0_u32; 0]);
         resumed.skip_kept(&mut Failing).unwrap();
     }
 

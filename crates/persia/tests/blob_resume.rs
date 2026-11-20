@@ -1,4 +1,4 @@
-//! Resumed uploads through `put_blob` (SPEC §9.4, §9.5; ROADMAP 9.3.4; ADR-0050, ADR-0053), over the remote layout
+//! Resumed uploads through `put_blob` (SPEC §9.4, §9.5; ROADMAP 9.3.4, 9.3.6; ADR-0050, ADR-0053), over the remote layout
 //! on a `MemoryStorage`, with faults injected at the store.
 //!
 //! Invariants:
@@ -13,10 +13,15 @@
 //!    error or the returned guard.
 //! 5. A token chunk size below the floor fails before reading, and the token's chunk size wins over the options'.
 //! 6. A store that cannot resume fails a resume with `ResumeUnsupported` before reading.
+//! 7. A resume that writes no chunk its listing did not show, of an upload older than the grace period, moves the
+//!    upload to a new upload id before binding: a sweep that listed the manifests and uploads before the bind, and
+//!    checks the old upload once the resume's pins dropped, deletes the old upload and keeps the blob (ROADMAP 9.3.6).
+//! 8. A resume that writes a new chunk before the sweep lists the uploads keeps its upload: it is young.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::expect_used,
     clippy::cast_possible_truncation,
     clippy::assert_is_empty
 )] // Tests: inputs are fixed.
@@ -25,14 +30,17 @@
 mod remote;
 
 use std::io::{self, Read};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
-use persia::internal::pins::Pinned;
+use persia::internal::documents::BlobDatabase;
+use persia::internal::gc::DEFAULT_GRACE;
+use persia::internal::pins::{PinSet, Pinned};
 use persia::internal::retry::ManualRetryClock;
+use persia_blob::gc::{GcObject, PinCheck, PinGate, Sweep, SweepOptions};
 use persia_blob::{BlobRef, BlobStore, ChunkSize, Error, MemoryBlobStore, ResumeToken, UploadId};
-use persia_engine::db::SegmentIds;
+use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use remote::{Event, Fault, Watched};
 
 const CHUNK: u32 = ChunkSize::MIN;
@@ -431,4 +439,165 @@ fn a_store_that_cannot_resume_fails_a_resume_before_reading() {
     assert!(matches!(err, Error::ResumeUnsupported), "{err:?}");
     assert!(blobs.pin_set().pinned().is_empty());
     assert!(store.bound_ids().is_empty());
+}
+
+// -- 9.3.6: a resume that writes nothing new, and a sweep that runs across its bind --
+
+/// The writer's `PinSet`, with `hook` run before the sweep's first pin check, outside the set's lock: as a
+/// `put_blob` on another thread would run between the sweep's listings and its checks.
+struct Hooked<'a> {
+    set: &'a PinSet,
+    hook: Mutex<Option<Box<dyn FnOnce() + 'a>>>,
+}
+
+impl PinGate for Hooked<'_> {
+    fn pinned(&self) -> Vec<GcObject> {
+        PinGate::pinned(self.set)
+    }
+
+    fn unless_pinned<T>(
+        &self,
+        object: GcObject,
+        delete: impl FnOnce(&dyn PinCheck) -> T,
+    ) -> Option<T> {
+        let hook = self.hook.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
+        PinGate::unless_pinned(self.set, object, delete)
+    }
+}
+
+fn database(dir: &std::path::Path) -> (Arc<Watched>, BlobDatabase<Watched>) {
+    let (store, blobs) = remote();
+    let log = Database::create(dir.join("app.persia"), DatabaseOptions::default()).unwrap();
+    (store, BlobDatabase::new(log, blobs))
+}
+
+/// Runs a sweep of `db`'s store whose first pin check first resumes `token` with `data` and drops its pins; returns
+/// the resumed reference and the sweep's report.
+fn sweep_across_resume(
+    store: &Watched,
+    db: &BlobDatabase<Watched>,
+    token: ResumeToken,
+    data: &[u8],
+) -> (BlobRef, persia_blob::SweepReport) {
+    let mark = db.mark().unwrap();
+    let resumed = Mutex::new(None);
+    let hooked = Hooked {
+        set: db.blobs().pin_set(),
+        hook: Mutex::new(Some(Box::new(|| {
+            let (r, pins) = db.put_blob(data, &resume(token)).unwrap();
+            // Nothing references it but its pins (no document is logged during a GC): once they drop, only the
+            // store's own state keeps it.
+            drop(pins);
+            *resumed.lock().unwrap() = Some(r);
+        }))),
+    };
+    let options = SweepOptions {
+        grace: DEFAULT_GRACE,
+        now: store.now(),
+        rewrite_ratio: 0.5,
+    };
+    let report = store.inner().sweep(&mark, &hooked, &options).unwrap();
+    let r = resumed
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the sweep checked a pin");
+    (r, report)
+}
+
+#[test]
+fn a_resume_that_writes_nothing_new_moves_to_a_young_upload_a_late_sweep_keeps() {
+    // With a short last chunk, and without one (then the last window is empty and every chunk is copied).
+    for len in [5 * CHUNK_LEN + 100, 5 * CHUNK_LEN] {
+        let dir = tempfile::tempdir().unwrap();
+        let (store, db) = database(dir.path());
+        let data = bytes(len, 9);
+        // Every chunk staged, the last write's response lost: the resume has nothing left to write.
+        let last = (len.div_ceil(CHUNK_LEN) - 1) as u32;
+        store.fail_when(once(Fault::Lost, stage_of(last)));
+        let (token, _) = interruption(db.blobs().put_blob(&data[..], &options()).unwrap_err());
+        assert_eq!(
+            store.chunks(token.upload_id),
+            (0..=last).collect::<Vec<_>>()
+        );
+        // The upload is older than the grace period when it is resumed.
+        store
+            .clock()
+            .advance(DEFAULT_GRACE + Duration::from_hours(1));
+        store.clear();
+
+        // The sweep lists the manifests (none) and the uploads (the token's, expired), then the resume binds and
+        // drops its pins, then the sweep checks the token's upload: unpinned, named by no listed manifest.
+        let (r, report) = sweep_across_resume(&store, &db, token, &data);
+        let moved = upload_of(db.blobs(), &r);
+        assert_ne!(moved, token.upload_id, "len {len}");
+        assert_eq!(report.uploads_deleted, 1, "{report:?}");
+        assert!(store.chunks(token.upload_id).is_empty());
+        assert_eq!(store.chunks(moved), (0..=last).collect::<Vec<_>>());
+        assert_eq!(db.get_blob_range(&r, 0..r.size()).unwrap(), data);
+        assert_eq!(r, uninterrupted(&data));
+        // The copy went to the new upload, pinned first, before the last window and the bind.
+        let events = store.events();
+        let restaged = events
+            .iter()
+            .position(|e| {
+                matches!(e, Event::Restage { from, to, pinned: true, .. }
+                    if *from == token.upload_id && *to == moved)
+            })
+            .unwrap();
+        let bound = events
+            .iter()
+            .position(|e| matches!(e, Event::Bind { upload, .. } if *upload == moved))
+            .unwrap();
+        assert!(restaged < bound);
+    }
+}
+
+#[test]
+fn a_resume_that_writes_a_new_chunk_before_the_upload_listing_stays_young() {
+    let dir = tempfile::tempdir().unwrap();
+    let (store, db) = database(dir.path());
+    let data = bytes(5 * CHUNK_LEN + 100, 10);
+    store.fail_when(once(Fault::Fail, stage_of(2)));
+    let (token, _) = interruption(db.blobs().put_blob(&data[..], &options()).unwrap_err());
+    // An orphan small blob whose expired manifest the sweep checks first, before it lists the uploads.
+    let (decoy, pins) = db.put_blob(&b"decoy"[..], &options()).unwrap();
+    drop(pins);
+    store
+        .clock()
+        .advance(DEFAULT_GRACE + Duration::from_hours(1));
+
+    let (r, report) = sweep_across_resume(&store, &db, token, &data);
+    assert_eq!(upload_of(db.blobs(), &r), token.upload_id);
+    assert_eq!(report.blobs_deleted, 1, "{report:?}");
+    assert_eq!(report.uploads_deleted, 0, "{report:?}");
+    assert!(!db.blobs().store().contains(&decoy).unwrap());
+    assert_eq!(db.get_blob_range(&r, 0..r.size()).unwrap(), data);
+}
+
+#[test]
+fn a_resume_that_wrote_a_new_chunk_in_an_earlier_window_keeps_its_upload() {
+    // Chunks 0 and 1 are staged, and so is the short chunk 66 (an earlier attempt's). The resume's two windows are
+    // chunks 2..66, all new, which make the upload young, then chunk 66, which the listing showed.
+    let (store, blobs) = remote();
+    let data = bytes(66 * CHUNK_LEN + 100, 11);
+    store.fail_when(once(Fault::Fail, stage_of(2)));
+    let (token, _) = interruption(blobs.put_blob(&data[..], &options()).unwrap_err());
+    store
+        .inner()
+        .stage_chunk(token.upload_id, 66, &data[66 * CHUNK_LEN..])
+        .unwrap();
+    store.clear();
+    let (r, _pins) = blobs.put_blob(&data[..], &resume(token)).unwrap();
+    assert_eq!(r, uninterrupted(&data));
+    assert_eq!(upload_of(&blobs, &r), token.upload_id, "no restage");
+    assert!(
+        !store
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Restage { .. }))
+    );
 }

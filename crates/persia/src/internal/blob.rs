@@ -157,7 +157,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// of chunks it kept without uploading them (each checked against the staged chunk's CRC32C), and stages the
     /// rest under the same upload. The token's chunk size is the blob's, whatever `chunk_size` says. A chunk staged
     /// there with other bytes restarts it under a new upload id, pinned before its chunks are copied
-    /// ([`BlobStore::restage`]).
+    /// ([`BlobStore::restage`]), and so does a resume that writes no chunk the listing did not show (ROADMAP 9.3.6).
     /// A resume that fails again returns [`Error::UploadInterrupted`] with the upload it was staging then.
     ///
     /// # Errors
