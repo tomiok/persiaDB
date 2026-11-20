@@ -36,7 +36,8 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
    the manifest bound. Default `mime` is `application/octet-stream`, default chunk size 4 MiB.
 3. **Binding outcomes.** An unknown outcome is retried with the same manifest, and a small blob's with
    `bind_small` and the same bytes (never `bind`: a single-object store stages nothing), within a **time budget**,
-   `PutBlobOptions::bind_budget` (default 60 s; at least one attempt). Attempts are spaced by jittered exponential
+   `PutBlobOptions::bind_budget` (default 60 s; at least one attempt; at most `MAX_BIND_BUDGET`, 1 h, which GC's grace
+   period is at least: amended 2026-11-19, ROADMAP 9.5.2). Attempts are spaced by jittered exponential
    backoff (50 ms doubling to a 5 s cap, a random half of it kept, seeded by the upload id), read and waited through
    an injected `RetryClock` (a `ManualRetryClock` in tests). After an unknown outcome a plain error from a later
    attempt is no answer (the earlier write may still land): the retry goes on; a plain error ends the loop only when

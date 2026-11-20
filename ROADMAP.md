@@ -615,7 +615,7 @@ Deps: M1, M2.
 - [x] 9.2.3 Read full / range via chunk index (mmap-backed)
 - [x] 9.2.4 Recovery: torn tail truncation, index rebuild by scan
 - [x] 9.2.5 Fuzz pack reader
-- [~] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` with the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2)
+- [~] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` at a read-write open of the pack, by the rules of the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2)
 - [ ] 9.2.7 Enforce one pack writer: open the pack read-write only with a proof of the container's writer lock, so two read-write `PackStore`s of one file cannot exist (ADR-0049; found in the 9.2.1 review)
 - [~] 9.2.8 Pack corruption errors carry the offset of the bad slot or frame (found in the 9.2.1 review)
 - [~] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review)

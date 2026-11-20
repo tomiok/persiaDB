@@ -2619,7 +2619,8 @@ A key under `blobs/` that is not exactly of these forms (lowercase hex, `<xx>` t
 Binding: `Created` binds the id; `AlreadyExists` (resolved against the writer's own bytes, §10.1) means another upload
 bound it first, so this one is a duplicate (§9.2); an error leaves the outcome unknown: the writer retries the same
 `put_if_absent` (same bytes) until it gets an answer, with jittered exponential backoff (50 ms doubling to 5 s), for
-at most a time budget (`bind_budget`, default 60 s; ADR-0051); a plain error after an unknown outcome answers nothing
+at most a time budget (`bind_budget`, default 60 s, at most
+`MAX_BIND_BUDGET`, 1 h, so the GC grace period, §9.5, stays above every budget; ADR-0051); a plain error after an unknown outcome answers nothing
 and is retried too. When the budget runs out, `put_blob` fails with the unknown outcome, returns no `BlobRef`, and
 the document is not logged. A store that refuses every write until it is reopened (the pack after a failed sync, §4.5) ends
 the retries at once, still unknown: when it refuses after an unknown outcome, or its refusal is itself outcome-unknown;
