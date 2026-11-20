@@ -1099,3 +1099,33 @@ fn a_store_poisoned_before_the_first_attempt_is_not_retried() {
     assert_eq!(clock.sleeps().len(), sleeps);
     assert!(!store.calls().iter().any(|c| matches!(c, Call::Discard(_))));
 }
+
+/// A `bind_budget` above the cap is a caller's error found before any byte is read; the cap itself is accepted
+/// (SPEC §9.4: GC's grace period stays above every budget a writer uses).
+#[test]
+fn a_bind_budget_above_the_cap_reads_nothing() {
+    use persia::internal::blob::MAX_BIND_BUDGET;
+    struct Untouchable;
+    impl Read for Untouchable {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            panic!("put_blob read a blob it should have rejected");
+        }
+    }
+    let (store, blobs) = faulty(Faults::default());
+    let over = MAX_BIND_BUDGET + Duration::from_nanos(1);
+    let opts = PutBlobOptions {
+        bind_budget: over,
+        ..PutBlobOptions::default()
+    };
+    assert!(matches!(
+        blobs.put_blob(Untouchable, &opts),
+        Err(Error::BindBudgetAboveMax { budget, max }) if budget == over && max == MAX_BIND_BUDGET
+    ));
+    assert!(store.calls().is_empty());
+    assert!(blobs.pin_set().pinned().is_empty());
+    let opts = PutBlobOptions {
+        bind_budget: MAX_BIND_BUDGET,
+        ..PutBlobOptions::default()
+    };
+    assert!(blobs.put_blob(&b"ok"[..], &opts).is_ok());
+}

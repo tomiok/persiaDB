@@ -1277,6 +1277,13 @@ fn is_corruption_is_true_for_corrupt_only() {
             }),
             false,
         ),
+        (
+            Error::BindBudgetAboveMax {
+                budget: std::time::Duration::from_secs(7200),
+                max: std::time::Duration::from_secs(3600),
+            },
+            false,
+        ),
     ];
     for (e, corrupt) in &cases {
         assert_eq!(e.is_corruption(), *corrupt, "{e:?}");
@@ -1309,7 +1316,9 @@ fn is_corruption_is_true_for_corrupt_only() {
             //
             // -- documents (9.4) --
             // One arm for the documents variants, `=> "documents"`, here and only here.
-            Error::BlobIdMismatch { .. } | Error::InvalidBlobRef(_) => "documents",
+            Error::BlobIdMismatch { .. }
+            | Error::InvalidBlobRef(_)
+            | Error::BindBudgetAboveMax { .. } => "documents",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }
             | Error::StagedChunkConflict { .. }
