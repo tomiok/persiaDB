@@ -23,7 +23,7 @@ use persia::internal::documents::{Blob, BlobDatabase};
 use persia::internal::gc::{BlobReferences, GcError, GcOptions};
 use persia::internal::pins::Pinned;
 use persia_blob::gc::Rewrite;
-use persia_blob::{BlobId, BlobStore, ChunkSize, MemoryBlobStore, PackMode, PackStore, UploadId};
+use persia_blob::{BlobId, BlobStore, ChunkSize, MemoryBlobStore, PackStore, UploadId};
 use persia_engine::db::{Database, DatabaseError, DatabaseOptions, SegmentIds};
 use persia_engine::document::Document;
 use persia_engine::schema::SchemaBuilder;
@@ -124,9 +124,10 @@ const FORCE: GcOptions = GcOptions {
 };
 
 fn pack_database(dir: &Path) -> BlobDatabase<PackStore> {
-    let pack = PackStore::open(dir.join("app.persia.blobs"), PackMode::ReadWrite, [0; 16]).unwrap();
+    let log = database(&dir.join("app.persia"));
+    let pack = PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof()).unwrap();
     let blobs = Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(5));
-    BlobDatabase::new(database(&dir.join("app.persia")), blobs)
+    BlobDatabase::new(log, blobs)
 }
 
 fn put_doc(db: &mut BlobDatabase<PackStore>, id: &str, seed: u8) -> persia_blob::BlobRef {
@@ -253,12 +254,8 @@ fn gc_stops_when_the_log_or_the_store_refuses() {
     ));
     assert!(store.contains(&blob).unwrap());
     // A read-only pack cannot be swept.
-    let ro = PackStore::open(
-        dir.path().join("app.persia.blobs"),
-        PackMode::ReadOnly,
-        [0; 16],
-    )
-    .unwrap();
+    let db_uuid = db.log().container().header().db_uuid;
+    let ro = PackStore::open(dir.path().join("app.persia.blobs"), db_uuid).unwrap();
     let ro_db = BlobDatabase::new(
         database(&dir.path().join("other.persia")),
         Blobs::new(Arc::new(ro)),

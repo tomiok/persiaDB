@@ -27,7 +27,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(e) => return Err(io_err("open")(e)),
             };
-            let (mut pack, _) = recover(file, PackMode::ReadOnly, self.db_uuid)?;
+            let (mut pack, _) = recover(file, PackMode::ReadOnly, self.db_uuid, false)?;
             if let Some(mapper) = &mut inner.mapper {
                 mapper.remap(&mut pack);
             }
@@ -96,5 +96,16 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             mapper.remap(pack);
         }
         Ok(true)
+    }
+
+    /// A new read-only open of the pack now at this handle's path, with this handle's `db_uuid`.
+    ///
+    /// [`PackStore::refresh`] returns [`Error::PackReplaced`] and stays on the file it opened (ROADMAP 9.2.13). A
+    /// caller that holds `&mut` to its reader, so nothing still borrows this handle, opens the replacement with this.
+    ///
+    /// # Errors
+    /// As [`PackStore::open_in`].
+    pub fn reopen(&self) -> Result<Self> {
+        Self::open_in(std::sync::Arc::clone(&self.vfs), &self.path, self.db_uuid)
     }
 }

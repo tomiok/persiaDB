@@ -55,6 +55,9 @@ pub struct ReadOnlyDatabase<F = File> {
     container: Container<F>,
     snapshot: Arc<Snapshot>,
     replayed: u64,
+    /// The positions of the WAL chunks the open replayed, in order: what `verify` reads the WAL's blob references
+    /// from (SPEC §9.5, ROADMAP 9.5.3).
+    wal_chunks: Vec<u64>,
 }
 
 impl ReadOnlyDatabase<File> {
@@ -96,7 +99,8 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
         let (manifest, mut collections) = load(&container, |s| Memtable::new(s, registry))?;
         let mut replayed = 0u64;
         // Stop at a Manifest a fresh superblock read shows committed during this scan (SPEC §8.6).
-        for chunk in wal_chunks(&container, manifest.seq(), false)? {
+        let chunks = wal_chunks(&container, manifest.seq(), false)?;
+        for &chunk in &chunks {
             let frame = container
                 .read_frame_source(chunk, MAX_CHUNK_LEN)
                 .map_err(ReplayError::from)?;
@@ -119,6 +123,7 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
             container,
             snapshot,
             replayed,
+            wal_chunks: chunks,
         })
     }
 
@@ -145,6 +150,11 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
     /// The WAL records the open replayed.
     pub fn replayed(&self) -> u64 {
         self.replayed
+    }
+
+    /// The positions of the WAL chunks the open replayed, in order.
+    pub(super) fn wal_chunks(&self) -> &[u64] {
+        &self.wal_chunks
     }
 
     /// The committed objects of the container, as [`persia_storage::Storage`] (ROADMAP 6.3.6).

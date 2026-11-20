@@ -5,16 +5,20 @@
 //! its manifest entry, and every WAL record from `wal_start` on. [`ReadOnlyDatabase::verify`] adds what no open or
 //! lookup checks: every segment's whole bytes ([`Segment::verify`](crate::segment::Segment::verify), SPEC §5.5),
 //! that no document id is live in two segments of a collection (SPEC §8.3), and that nothing after `log_end` is
-//! corrupt.
+//! corrupt. [`ReadOnlyDatabase::blob_references`] lists the documents' blob references for the blob store's checks
+//! (SPEC §9.5, ROADMAP 9.5.3).
 
 use std::collections::HashSet;
 
+use persia_format::BlobRef;
 use persia_format::frame::ScanEnd;
 use persia_storage::container::ContainerFile;
 
 use super::{DatabaseError, ReadOnlyDatabase};
+use crate::document::Document;
 use crate::manifest::SegmentId;
 use crate::view::SearchView;
+use crate::wal::ReplayError;
 
 /// How the container's bytes after its committed `log_end` ended (SPEC §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,5 +131,129 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
             }
         }
         Ok(report)
+    }
+}
+
+/// Where [`ReadOnlyDatabase::blob_references`] found a document's blob reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BlobRefSite {
+    /// A document of a committed segment that the segment's committed tombstones leave live.
+    Segment {
+        /// The segment.
+        segment: SegmentId,
+    },
+    /// A put of the WAL from `wal_start` on, as the open replayed it.
+    Wal {
+        /// The position of its chunk's frame in the container.
+        chunk: u64,
+        /// The record's offset in the chunk.
+        offset: u64,
+    },
+}
+
+/// A document's blob reference, as [`ReadOnlyDatabase::blob_references`] lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BlobReference {
+    /// The document's collection.
+    pub collection: String,
+    /// The document's id.
+    pub id: String,
+    /// The reference it holds.
+    pub blob_ref: BlobRef,
+    /// Where it was found.
+    pub site: BlobRefSite,
+}
+
+impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
+    /// Calls `f` with every blob reference a document of this database holds where `verify` checks them (SPEC §9.5,
+    /// ROADMAP 9.5.3): each document of a committed segment that its committed tombstones leave live, then every put
+    /// of the WAL chunks the open replayed (from `wal_start` on, those after `log_end` included), whatever later
+    /// records did to it, as GC's mark counts them. Documents without a reference are skipped. One segment's document,
+    /// or one chunk, at a time; stops at `f`'s first error.
+    ///
+    /// The engine never looks a reference up (it does not depend on `persia-blob`): the blob store's `verify` does.
+    ///
+    /// ```
+    /// use persia_analysis::AnalyzerRegistry;
+    /// use persia_engine::db::{BlobRefSite, Database, DatabaseError, DatabaseOptions, ReadOnlyDatabase};
+    /// use persia_engine::document::Document;
+    /// use persia_engine::schema::SchemaBuilder;
+    /// use persia_engine::wal::Durability;
+    /// use persia_format::{BlobId, BlobRef};
+    ///
+    /// # if cfg!(miri) { return Ok(()); } // a real container file: Miri's isolation has no filesystem
+    /// # let dir = tempfile::tempdir()?;
+    /// let path = dir.path().join("app.persia");
+    /// let mut db = Database::create(&path, DatabaseOptions::default())?;
+    /// db.create_collection(SchemaBuilder::new("files").build()?)?;
+    /// let mut doc = Document::new("a");
+    /// doc.set_blob_ref(Some(BlobRef::new(BlobId::from_bytes([7; 32]), 3, "text/plain", 1 << 16, Default::default())?));
+    /// db.put("files", &doc, Durability::Fsync)?;
+    ///
+    /// let reader = ReadOnlyDatabase::open(&path, &AnalyzerRegistry::builtin())?;
+    /// let mut found = Vec::new();
+    /// reader.blob_references(|r| Ok::<_, DatabaseError>(found.push((r.id, r.site))))?;
+    /// assert!(matches!(found.as_slice(), [(id, BlobRefSite::Wal { .. })] if id == "a"));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// # Errors
+    /// [`DatabaseError::ReadSegment`] for a segment whose ids or `BlobRefs` cannot be read; [`DatabaseError::Replay`]
+    /// for a WAL chunk that cannot be read or decoded; `f`'s.
+    pub fn blob_references<E: From<DatabaseError>>(
+        &self,
+        mut f: impl FnMut(BlobReference) -> Result<(), E>,
+    ) -> Result<(), E> {
+        let snapshot = self.snapshot();
+        for (name, collection) in snapshot.collections() {
+            for view in collection.segment_views() {
+                let segment = view.segment();
+                let id = SegmentId::new(segment.segment_id());
+                let failed = |source| DatabaseError::ReadSegment {
+                    collection: name.to_owned(),
+                    id,
+                    source,
+                };
+                for docid in 0..segment.doc_count() {
+                    if !view.is_live(docid) {
+                        continue;
+                    }
+                    let Some(blob_ref) = segment.blob_ref(docid).map_err(failed)? else {
+                        continue;
+                    };
+                    f(BlobReference {
+                        collection: name.to_owned(),
+                        id: segment.id_of(docid).map_err(failed)?,
+                        blob_ref,
+                        site: BlobRefSite::Segment { segment: id },
+                    })?;
+                }
+            }
+        }
+        let chunks = self.wal_chunks().iter().copied();
+        super::blob_refs::for_each_wal_put(self.container(), chunks, |put| {
+            let undecodable = |error| {
+                DatabaseError::from(ReplayError::Document {
+                    chunk: put.chunk,
+                    offset: put.offset,
+                    error,
+                })
+            };
+            let Some(blob_ref) = Document::encoded_blob_ref(put.payload).map_err(undecodable)?
+            else {
+                return Ok(());
+            };
+            f(BlobReference {
+                collection: put.collection.to_owned(),
+                id: Document::encoded_id(put.payload).map_err(undecodable)?,
+                blob_ref,
+                site: BlobRefSite::Wal {
+                    chunk: put.chunk,
+                    offset: put.offset,
+                },
+            })
+        })
     }
 }

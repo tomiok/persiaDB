@@ -21,6 +21,8 @@
     missing_docs
 )] // Tests: inputs are generated or fixed.
 
+mod pack_support;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -71,7 +73,7 @@ fn sim() -> SimFs {
 }
 
 fn open(fs: &SimFs, mode: PackMode) -> persia_blob::Result<PackStore<SimFsFile>> {
-    PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [9; 16])
+    pack_support::open_pack(Arc::new(fs.clone()), PACK, mode, [9; 16])
 }
 
 fn stage(store: &PackStore<SimFsFile>, m: &BlobManifest, data: &[u8]) -> persia_blob::Result<()> {
@@ -123,14 +125,15 @@ fn the_golden_packs_open_and_read() {
     let fs = with_pack(&std::fs::read(fixture("one-blob.pack")).unwrap());
     let m = manifest_of(b"persia blobs!", 5, u128::MAX);
     for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
-        let store = PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [0x11; 16]).unwrap();
+        let store = pack_support::open_pack(Arc::new(fs.clone()), PACK, mode, [0x11; 16]).unwrap();
         assert_eq!(store.header().unwrap().db_uuid, [0x11; 16]);
         assert_eq!(store.blob_ids(), [m.blob_id()]);
         assert_eq!(read_all(&store, &m).unwrap(), b"persia blobs!");
     }
     let fs = with_pack(&std::fs::read(fixture("new.pack")).unwrap());
     let store =
-        PackStore::open_in(Arc::new(fs.clone()), PACK, PackMode::ReadWrite, [0x11; 16]).unwrap();
+        pack_support::open_pack(Arc::new(fs.clone()), PACK, PackMode::ReadWrite, [0x11; 16])
+            .unwrap();
     assert_eq!(store.blob_ids(), Vec::<BlobId>::new());
     // A new pack takes its first blob.
     let m = put(&store, b"first", 4, 1);
@@ -231,7 +234,7 @@ fn a_pack_of_another_database_is_refused() {
     let (bytes, _, _) = two_blobs();
     let fs = with_pack(&bytes);
     for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
-        let err = PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [8; 16])
+        let err = pack_support::open_pack(Arc::new(fs.clone()), PACK, mode, [8; 16])
             .map(|_| ())
             .unwrap_err();
         assert!(
@@ -434,9 +437,7 @@ fn a_container_is_not_a_pack() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("app.persia");
     drop(persia_storage::container::Container::create(&path).unwrap());
-    let err = PackStore::open(&path, PackMode::ReadOnly, [0; 16])
-        .map(|_| ())
-        .unwrap_err();
+    let err = PackStore::open(&path, [0; 16]).map(|_| ()).unwrap_err();
     assert!(err.is_corruption(), "{err:?}");
 }
 

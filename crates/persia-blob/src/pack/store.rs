@@ -19,7 +19,7 @@ use persia_format::source::ByteSource;
 use persia_format::superblock::{FIRST_FRAME_OFFSET, Slot};
 use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_format::{BlobId, Reader};
-use persia_storage::container::{ContainerFile, MapPermit};
+use persia_storage::container::{ContainerFile, MapPermit, WriterProof};
 use persia_storage::vfs::{RealFs, Vfs};
 
 use super::layout::{
@@ -35,7 +35,8 @@ use crate::store::{BindOutcome, BlobStore};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackMode {
     /// The container's writer: stages and binds, creates the pack on its first write, and truncates what no commit
-    /// covers. Only the process holding the container's writer lock opens the pack this way (ADR-0049 item 8).
+    /// covers. Only [`PackStore::open_writer_in`] opens the pack this way, with the proof that the caller holds the
+    /// container's writer lock (ADR-0049 item 8, ROADMAP 9.2.7, ADR-0053).
     ReadWrite,
     /// Never writes, truncates or creates: the blobs committed as of the open (or the last
     /// [`refresh`](PackStore::refresh)).
@@ -92,7 +93,7 @@ struct Staged {
 
 /// The open pack file.
 #[derive(Debug)]
-struct Pack<F> {
+struct Pack<F: ContainerFile> {
     file: F,
     header: Header,
     slot: Slot,
@@ -107,12 +108,22 @@ struct Pack<F> {
     chunk_frames: Vec<u64>,
     /// The mapping of `12288..` a committed `log_end`, with mapped reads on (ROADMAP 9.2.3).
     window: Option<ByteSource>,
+    /// Whether this handle holds the writer lock on `file`, released when the pack is dropped (ROADMAP 9.2.7).
+    locked: bool,
+}
+
+impl<F: ContainerFile> Drop for Pack<F> {
+    fn drop(&mut self) {
+        if self.locked {
+            lock::release(&self.file);
+        }
+    }
 }
 
 /// What readers share with the writer, behind the `RwLock`. Only a writer holding [`PackStore`]'s writer mutex
 /// changes it, and only to publish what is already written (and, for a bind, synced).
 #[derive(Debug)]
-struct Inner<F> {
+struct Inner<F: ContainerFile> {
     /// `None` while there is no pack file (SPEC §9.3: created by the first write).
     pack: Option<Pack<F>>,
     staged: HashMap<(UploadId, u32), Staged>,
@@ -146,14 +157,18 @@ struct WriterState {
 /// it, and its recovery decides what survived.
 ///
 /// ```
-/// use persia_blob::pack::{PackMode, PackStore};
+/// use persia_blob::pack::{PackMode, PackStore, pack_path};
 /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of, read_chunk_checked};
 /// use persia_format::checksum::crc32c;
+/// use persia_storage::container::Container;
 ///
 /// # if cfg!(miri) { return Ok(()); } // a real pack file: Miri's isolation has no filesystem or real-time clock
 /// # let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("app.persia.blobs");
-/// let store = PackStore::open(&path, PackMode::ReadWrite, [7; 16])?;
+/// // Only the holder of the container's writer lock opens the pack read-write: its proof is the key.
+/// let container = Container::create(dir.path().join("app.persia"))?;
+/// let path = pack_path(&dir.path().join("app.persia"));
+/// let store = PackStore::open_writer(&path, &container.writer_proof().ok_or("read-only")?)?;
+/// assert_eq!(store.mode(), PackMode::ReadWrite);
 /// assert!(!store.exists()); // no blob yet, no file
 ///
 /// let data = b"hello, pack";
@@ -164,7 +179,7 @@ struct WriterState {
 /// assert_eq!(store.bind(&m)?, BindOutcome::Bound);
 /// drop(store);
 ///
-/// let store = PackStore::open(&path, PackMode::ReadOnly, [7; 16])?;
+/// let store = PackStore::open(&path, container.header().db_uuid)?; // read-only
 /// let found = store.manifest(m.blob_id())?.expect("bound");
 /// assert_eq!(read_chunk_checked(&store, &found, 1)?, b"ack");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -178,55 +193,121 @@ pub struct PackStore<F: ContainerFile = File> {
     recovery: PackRecovery,
     writer: Mutex<WriterState>,
     inner: RwLock<Inner<F>>,
+    /// Whether a read-write handle locks its pack file (and each new file it creates or rewrites) itself: `false`
+    /// where the lock is the file beside the pack (Windows), and for a read-only handle (ROADMAP 9.2.7).
+    lock_file: bool,
+    /// The writer lock beside the pack (Windows), held for the handle's life.
+    _beside: Option<lock::Held<F>>,
+    /// New pack files a rewrite may have renamed over the path although its rename reported an error: kept locked
+    /// for the handle's life, so the path never names an unlocked pack while this writer lives (ROADMAP 9.2.7).
+    held: Mutex<Vec<lock::Held<F>>>,
 }
 
 impl PackStore<File> {
-    /// [`PackStore::open_in`] on the operating system's file system.
+    /// [`PackStore::open_in`] on the operating system's file system: the pack opened read-only.
     ///
     /// # Errors
     /// See [`PackStore::open_in`].
-    pub fn open(path: impl AsRef<Path>, mode: PackMode, db_uuid: [u8; 16]) -> Result<Self> {
-        Self::open_in(Arc::new(RealFs), path, mode, db_uuid)
+    pub fn open(path: impl AsRef<Path>, db_uuid: [u8; 16]) -> Result<Self> {
+        Self::open_in(Arc::new(RealFs), path, db_uuid)
+    }
+
+    /// [`PackStore::open_writer_in`] on the operating system's file system.
+    ///
+    /// # Errors
+    /// See [`PackStore::open_writer_in`].
+    pub fn open_writer(path: impl AsRef<Path>, proof: &WriterProof<'_>) -> Result<Self> {
+        Self::open_writer_in(Arc::new(RealFs), path, proof)
     }
 }
 
 impl<F: ContainerFile + 'static> PackStore<F> {
-    /// Opens the pack at `path` on `vfs` and recovers it (SPEC §9.3, ADR-0049 item 9); a missing file is a pack
-    /// with no blobs, which a read-write handle creates at its first write with `db_uuid` (the database's) in its
-    /// header.
+    /// Opens the pack at `path` on `vfs` **read-only** ([`PackMode::ReadOnly`]) and recovers it (SPEC §9.3, ADR-0049
+    /// item 9): it never writes, truncates or creates the file, and a missing file is a pack with no blobs, which
+    /// [`refresh`](PackStore::refresh) opens once the writer has created it. `db_uuid` is the database's (a read-only
+    /// container's header names it): a pack of another database fails to open. Only [`PackStore::open_writer_in`]
+    /// opens the pack read-write (ROADMAP 9.2.7, ADR-0053).
     ///
     /// Recovery validates the header, picks the active slot and checks it against the file, then rebuilds the
-    /// index by scanning the committed frames `12288..log_end`. A read-write open then truncates the file to
-    /// `log_end` and syncs it: nothing after `log_end` was ever acknowledged.
-    ///
-    /// Before it opens the file, a read-write open removes the stale temporary files of crashed pack creations and
-    /// rewrites beside it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory
-    /// sync that fails logs a `tracing::warn!` and the open continues: such a file holds nothing the pack needs, and
-    /// the next read-write open tries again (ROADMAP 9.2.6).
+    /// index by scanning the committed frames `12288..log_end`.
     ///
     /// # Errors
-    /// [`Error::CorruptAt`] naming the damaged header (0), slot or committed frame (ROADMAP 9.2.8),
-    /// [`Error::PackUnsupported`] for a newer format, or [`Error::PackIo`].
+    /// [`Error::PackOfAnotherDatabase`], [`Error::CorruptAt`] naming the damaged header (0), slot or committed frame
+    /// (ROADMAP 9.2.8), [`Error::PackUnsupported`] for a newer format, or [`Error::PackIo`].
     pub fn open_in(
         vfs: Arc<dyn Vfs<File = F>>,
         path: impl AsRef<Path>,
+        db_uuid: [u8; 16],
+    ) -> Result<Self> {
+        Self::open_as(vfs, path.as_ref(), PackMode::ReadOnly, db_uuid)
+    }
+
+    /// Opens the pack read-write as the database's writer (SPEC §9.3, ROADMAP 9.2.7, ADR-0053): `proof` shows the
+    /// caller holds the container's writer lock (only a read-write [`Container`](persia_storage::container::Container)
+    /// mints one), so no other read-write handle of this pack can exist while that container is open, and the pack
+    /// carries the proof's `db_uuid`. The proof is the API gate, checked here and not kept; the pack's own writer lock
+    /// is the enforcement: taken before anything else, on the pack file (`flock` on Unix) or on
+    /// `<name>.persia.blobs.lock` beside it (Windows), as the container's (SPEC §4.5.1), and held until the handle is
+    /// dropped, however long other owners keep it (an `Arc` clone outlives the database: the lock goes with it). A
+    /// second read-write handle, in this process or another, fails with [`Error::PackLocked`]. A missing file is a pack
+    /// with no blobs, created at the first write with that `db_uuid` in its header, its new file locked before it is
+    /// written; a pack rewrite locks its new file before the rename too.
+    ///
+    /// Before it opens the file, it removes the stale temporary files of crashed pack creations and rewrites beside
+    /// it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory sync that fails
+    /// logs a `tracing::warn!` and the open continues: such a file holds nothing the pack needs, and the next
+    /// read-write open tries again (ROADMAP 9.2.6). Recovery is [`PackStore::open_in`]'s, then it commits the
+    /// longest complete bind after `log_end`, truncates the file to the end of what it keeps and syncs it: nothing
+    /// after that was ever acknowledged.
+    ///
+    /// # Errors
+    /// As [`PackStore::open_in`], [`Error::PackLocked`] while another handle holds the pack's writer lock, and
+    /// [`Error::PackReadOnly`] for a pack whose unknown flags allow only reading.
+    pub fn open_writer_in(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: impl AsRef<Path>,
+        proof: &WriterProof<'_>,
+    ) -> Result<Self> {
+        Self::open_as(vfs, path.as_ref(), PackMode::ReadWrite, proof.db_uuid())
+    }
+
+    /// The open of both modes: the callers above decide the mode, the read-write one only with a writer proof.
+    fn open_as(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: &Path,
         mode: PackMode,
         db_uuid: [u8; 16],
     ) -> Result<Self> {
-        let path = path.as_ref().to_owned();
-        // Before the open, while no creation or rewrite of this pack can be in flight (ADR-0049 item 8).
-        let swept = if mode == PackMode::ReadWrite {
+        let path = path.to_owned();
+        let write = mode == PackMode::ReadWrite;
+        // The writer lock first (ROADMAP 9.2.7): a second writer stops here, before it sweeps or recovers anything.
+        let beside = if write {
+            lock::lock_beside(&*vfs, &path)?
+        } else {
+            None
+        };
+        let lock_file = write && beside.is_none();
+        let file = if lock_file {
+            lock::open_locked(&*vfs, &path)?
+        } else {
+            match vfs.open(&path, write) {
+                Ok(file) => Some(file),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(io_err("open")(e)),
+            }
+        };
+        // Before the recovery, while no creation or rewrite of this pack can be in flight (ADR-0049 item 8).
+        let swept = if write {
             u64_from_usize(sweep_stale_files(&*vfs, &path).len())
         } else {
             0
         };
-        let (pack, mut recovery) = match vfs.open(&path, mode == PackMode::ReadWrite) {
-            Ok(file) => {
-                let (pack, recovery) = recover(file, mode, db_uuid)?;
+        let (pack, mut recovery) = match file {
+            Some(file) => {
+                let (pack, recovery) = recover(file, mode, db_uuid, lock_file)?;
                 (Some(pack), recovery)
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => (None, PackRecovery::default()),
-            Err(e) => return Err(io_err("open")(e)),
+            None => (None, PackRecovery::default()),
         };
         recovery.swept = swept;
         Ok(Self {
@@ -241,6 +322,9 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 staged: HashMap::new(),
                 mapper: None,
             }),
+            lock_file,
+            _beside: beside,
+            held: Mutex::new(Vec::new()),
         })
     }
 
@@ -330,9 +414,15 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         if self.read().pack.is_some() {
             return Ok(());
         }
-        match create_pack(&*self.vfs, &self.path, self.db_uuid) {
+        match create_pack(
+            &*self.vfs,
+            &self.path,
+            self.db_uuid,
+            self.lock_file,
+            &self.held,
+        ) {
             Ok((file, pack_id)) => {
-                self.write().pack = Some(Pack::new(file, self.db_uuid, pack_id));
+                self.write().pack = Some(Pack::new(file, self.db_uuid, pack_id, self.lock_file));
                 Ok(())
             }
             Err(Created::NoPack(e)) => Err(e),
@@ -384,6 +474,8 @@ fn create_pack<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
     db_uuid: [u8; 16],
+    lock_file: bool,
+    held: &Mutex<Vec<lock::Held<F>>>,
 ) -> core::result::Result<(F, u128), Created> {
     let pack_id = random_u128();
     let prefix = layout::new_pack_prefix(db_uuid, pack_id).map_err(Created::NoPack)?;
@@ -391,36 +483,67 @@ fn create_pack<F: ContainerFile>(
     let file = vfs
         .create_new(&temp)
         .map_err(|e| Created::NoPack(io_err("create")(e)))?;
-    let written = file
-        .write_all_at(&prefix, 0)
-        .map_err(io_err("write header"))
-        .and_then(|()| file.sync_data().map_err(io_err("sync")))
-        .map_err(Created::NoPack);
-    // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
-    let linked = written.and_then(|()| {
-        vfs.hard_link(&temp, path).map_err(|e| {
-            if e.kind() == io::ErrorKind::AlreadyExists {
-                // Another writer created a pack there: a second writer, outside the contract (ADR-0049 item 8).
-                Created::MaybePack(io_err("link: a pack already exists at the path")(e))
-            } else {
-                Created::NoPack(io_err("link")(e))
-            }
-        })
-    });
-    // One directory sync covers the link and the removal, and runs even if the removal failed.
-    // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
-    // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
-    let removed = match vfs.remove_file(&temp) {
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-        other => other.map_err(io_err("remove temporary file")),
+    // Locked before it is written or linked, so the pack's name never names an unlocked pack (ROADMAP 9.2.7).
+    let locked = if lock_file { lock::lock(&file) } else { Ok(()) };
+    let locked_ok = lock_file && locked.is_ok();
+    // The guard unlocks on drop unless disarmed. A failure must unlock, not only close: a forked copy of the
+    // descriptor keeps the lock after the close (SPEC §4.5.1).
+    let (created, was_linked) = {
+        let mut unlock = lock::UnlockOnDrop {
+            file: &file,
+            locked: locked_ok,
+        };
+        let written = locked
+            .and_then(|()| {
+                file.write_all_at(&prefix, 0)
+                    .map_err(io_err("write header"))
+            })
+            .and_then(|()| file.sync_data().map_err(io_err("sync")))
+            .map_err(Created::NoPack);
+        // A crash before the link leaves only the temporary file (no pack); after it, a complete empty pack.
+        let linked = written.and_then(|()| {
+            vfs.hard_link(&temp, path).map_err(|e| {
+                if e.kind() == io::ErrorKind::AlreadyExists {
+                    // Another writer created a pack there: a second read-write handle opened while there was no pack
+                    // file to lock (ROADMAP 9.2.7), whose creation lost the race.
+                    Created::MaybePack(io_err("link: a pack already exists at the path")(e))
+                } else {
+                    Created::NoPack(io_err("link")(e))
+                }
+            })
+        });
+        // One directory sync covers the link and the removal, and runs even if the removal failed.
+        // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
+        // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
+        let removed = match vfs.remove_file(&temp) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            other => other.map_err(io_err("remove temporary file")),
+        };
+        let synced = vfs
+            .sync_dir(parent_of(path))
+            .map_err(io_err("sync directory"));
+        let was_linked = linked.is_ok();
+        let created = linked
+            .and_then(|()| removed.map_err(Created::MaybePack))
+            .and_then(|()| synced.map_err(Created::MaybePack));
+        // The caller keeps the lock: the returned file, or a file the path now names (held for the handle's life).
+        if created.is_ok() || (was_linked && unlock.locked) {
+            unlock.locked = false;
+        }
+        (created, was_linked)
     };
-    let synced = vfs
-        .sync_dir(parent_of(path))
-        .map_err(io_err("sync directory"));
-    linked?;
-    removed.map_err(Created::MaybePack)?;
-    synced.map_err(Created::MaybePack)?;
-    Ok((file, pack_id))
+    match created {
+        Ok(()) => Ok((file, pack_id)),
+        // The path names this file now: it stays locked while the (poisoned) handle lives.
+        Err(e) if was_linked && locked_ok => {
+            held.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(lock::Held(file));
+            Err(e)
+        }
+        // The guard already unlocked. Closing the descriptor is what happens as `file` drops.
+        Err(e) => Err(e),
+    }
 }
 
 /// 128 bits from the standard library's per-process hash keys, the time and the pid: a pack id (ADR-0049 item 3).
@@ -444,7 +567,7 @@ fn io_err(op: &'static str) -> impl FnOnce(io::Error) -> Error {
 
 impl<F: ContainerFile> Pack<F> {
     /// A pack just created: the new-pack state.
-    fn new(file: F, db_uuid: [u8; 16], pack_id: u128) -> Self {
+    fn new(file: F, db_uuid: [u8; 16], pack_id: u128, locked: bool) -> Self {
         let sb = PackSuperblock::new_pack(pack_id);
         Self {
             file,
@@ -457,6 +580,7 @@ impl<F: ContainerFile> Pack<F> {
             uploads: HashMap::new(),
             chunk_frames: Vec::new(),
             window: None,
+            locked,
         }
     }
 
@@ -803,7 +927,7 @@ fn expected_chunk(manifest: &BlobManifest, index: u32) -> Result<ChunkHead> {
 
 /// The pack and the offset of the `BlobChunk` frame of chunk `index` of the blob `manifest` describes: from the
 /// bound blob's index entry when it is bound under the manifest's upload, else from this handle's staged chunks.
-fn locate_chunk<'a, F>(
+fn locate_chunk<'a, F: ContainerFile>(
     inner: &'a Inner<F>,
     manifest: &BlobManifest,
     index: u32,
@@ -964,6 +1088,14 @@ mod rewrite;
 mod sweep;
 use sweep::sweep_stale_files;
 //
+
+// -- wiring (9.2.7, 9.5.3) --
+// The checksum scan `persia verify` runs over the pack (ROADMAP 9.5.3, ADR-0053).
+mod scan;
+pub use scan::PackScan;
+// The pack's writer lock (ROADMAP 9.2.7, ADR-0053).
+mod lock;
+// -- end wiring --
 
 use mapped::Mapper;
 use recover::{check_scan, read_prefix, recover, scan_committed};

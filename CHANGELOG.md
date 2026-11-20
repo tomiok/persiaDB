@@ -9,6 +9,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ## [Unreleased]
 
 ### Added
+<!-- -- wiring (blob/wiring: 9.2.7, 9.4.5, 9.4.6, 9.5.3, 9.5.6) -- -->
+- `persia` (internal API): `BlobDatabase::create` / `open` open a database with its blob pack `<name>.persia.blobs`,
+  read-write with the container's writer proof; the pack is still created by the first `put_blob` (ROADMAP 9.4.5;
+  ADR-0053). `ReadOnlyBlobDatabase` opens the pack read-only and never creates it; its `refresh` finds a pack the
+  writer created since, and reopens the pack when a GC rewrite replaced it. Any other pack error leaves the documents
+  as they were. A same-seq open with fewer replayed WAL records, or an earlier end of those frames, is refused.
+  `BlobDatabase::log_mut` checks in debug builds that the log still has the `db_uuid` the pack was opened with. If the pack fails
+  to open after `create`, the new container is removed so a retry works.
+- `persia verify` checks blobs (ROADMAP 9.5.3, 9.5.6): a live document or WAL put whose blob is missing is an error
+  (exit 3) naming the collection, document id and `blob_id`. Document checks run before the pack is opened. By default
+  it scans every pack frame's checksum and every chunk's CRC32C; `--quick` skips that scan, and `--deep` also
+  re-hashes every referenced blob. The scan bounds each frame's length before reading it, and that bound applies
+  after the pack is opened (the open itself is ROADMAP 9.2.14).
+- `persia-blob`: `PackStore::scan_checksums`; `persia-engine`: `ReadOnlyDatabase::blob_references`;
+  `persia-storage`: `WriterProof` and `Container::writer_proof` (ROADMAP 9.2.7, 9.5.3).
+- `persia-blob`: the blob pack takes its own writer lock; a second writer fails with `PackLocked` (ROADMAP 9.2.7).
+  `persia verify` exits 1 with "changed during verify, rerun" when a live writer commits during the run. The pack
+  checksum scan bounds frame lengths before reading and checks every chunk an index names against its manifest.
+  `BlobDatabase::create` refuses a leftover pack; `ReadOnlyBlobDatabase::refresh` refuses a copy at another path or an
+  older open.
+<!-- -- end wiring -- -->
+<!-- -- resume (blob/resume: 9.3.4, 9.3.6, 9.5.9) -- -->
+<!-- -- end resume -- -->
 - `persia` (internal API): blob GC, `BlobDatabase::gc(&GcOptions) -> GcReport` (ROADMAP 9.5.1, 9.5.2, 9.5.8; SPEC
   §9.3, §9.5; ADR-0052). It marks the blobs the database's documents (the writer's view: live state, snapshots and
   memtable views readers still hold, obsolete segments still held, the WAL from `wal_start`) and the writer's pins
@@ -157,6 +180,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   a filter.
 
 ### Changed
+- `persia-blob`: `PackStore::open` / `open_in` open the pack read-only and take a `db_uuid`; only `open_writer` /
+  `open_writer_in` open it read-write, with the container's `WriterProof` (ROADMAP 9.2.7, ADR-0053).
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
   `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
   an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc`

@@ -12,14 +12,22 @@
 //!
 //! `persia inspect container` prints a container's superblock, the frames recovery reads and, by document id, the WAL
 //! records replay applies (ROADMAP 6.6.10, module `container`). `persia verify` checks a whole database read-only
-//! (ROADMAP 6.6.3, module `database`).
+//! (ROADMAP 6.6.3, module `database`) before it opens the blob pack, then its blobs (ROADMAP 9.5.3, ADR-0053): every
+//! blob a live document or a WAL record from `wal_start` on references must be bound in the blob pack, and by default
+//! every frame of the pack is checksummed (`--quick` skips that scan, `--deep` also re-hashes every referenced blob).
+//! The scan bounds each frame's length before reading it; that bound applies after the pack is opened. The open
+//! itself still reads index frames bounded only by the file length (ROADMAP 9.2.14). Only the local layout is
+//! checked (the remote one is ROADMAP 13.2.6).
 //!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
-//! container or segment that breaks its format), 4 when the file is not a Persia container (its header magic differs,
-//! or it is too short to hold the magic; SPEC §4.2), 2 for a usage error, and 1 for any other failure (a missing file,
-//! an I/O error, a lock held by a writer, data written by a newer build, a `--schema` that is not the segment's, a
-//! logged record that replay cannot apply). A script separates a wrong file (4), damage (3), and any other failed
-//! run (1).
+//! container, segment or blob pack that breaks its format) or on a broken blob reference (`verify`: a document that
+//! references a blob the pack lacks, or whose bytes do not match it, SPEC §9.5), 4 when the file is not a Persia
+//! container (its header magic differs, or it is too short to hold the magic; SPEC §4.2), 2 for a usage error, and 1
+//! for any other failure (a missing file, an I/O error, a lock held by a writer, data written by a newer build, a
+//! `--schema` that is not the segment's, a logged record that replay cannot apply; for `verify`, a blob pack of
+//! another database (`PackOfAnotherDatabase`) or of a newer format (`PackUnsupported`), and a database a live writer
+//! committed to while `verify` ran, which reports "changed during verify, rerun" instead of a dangling reference). A
+//! script separates a wrong file (4), damage (3), and any other failed run (1).
 #![forbid(unsafe_code)]
 
 mod container;
@@ -32,6 +40,8 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
+use persia::internal::documents::Error as BlobDatabaseError;
+use persia::internal::verify::{Scan, VerifyError};
 use persia_engine::db::DatabaseError;
 use persia_engine::segment::ReadError;
 use persia_format::{Corruption, Error as FormatError};
@@ -43,7 +53,7 @@ use persia_storage::{InUse, LocalStorage, SideFile, SideFileKind};
     name = "persia",
     version,
     about = "Persia DB command-line tool",
-    after_help = "Exit status: 0 success; 1 another failure; 2 usage error; 3 corrupt Persia data; 4 the file is not a Persia container"
+    after_help = "Exit status: 0 success; 1 another failure; 2 usage error; 3 corrupt Persia data or a missing referenced blob; 4 the file is not a Persia container"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -66,11 +76,24 @@ enum Command {
     Dump(DumpCommand),
     /// Checks a whole database read-only (no lock, no writes, so a live writer may have it open): every check an
     /// open makes, every segment's bytes, one live copy per document id, and the bytes after the last commit.
-    /// Exits with status 3 on corruption, 4 when the file is not a Persia container, and 1 on any other failure
-    /// (see the crate docs).
+    /// Those document checks run before the blob pack is opened. Then its blobs: every blob a live document or a
+    /// WAL record references must be bound in the blob pack (`<name>.persia.blobs`), and every frame's checksum
+    /// and chunk's CRC32C of the pack is checked. That scan bounds each frame's length before reading it, and the
+    /// bound applies after the pack is opened; the open itself is not bounded that way (ROADMAP 9.2.14). Exits with
+    /// status 3 on corruption or a missing referenced blob, 4 when the file is not a Persia container, and 1 on any
+    /// other failure (see the crate docs).
     Verify {
         /// The container file.
         path: PathBuf,
+        // -- wiring (9.5.3) --
+        /// Skip the checksum scan of the blob pack: only check that every referenced blob is bound. The scan is
+        /// what bounds each frame's length, and that bound applies after the pack is opened (ROADMAP 9.2.14).
+        #[arg(long, conflicts_with = "deep")]
+        quick: bool,
+        /// Also read every referenced blob whole and check its SHA-256 against its id.
+        #[arg(long)]
+        deep: bool,
+        // -- end wiring --
     },
 }
 
@@ -193,6 +216,10 @@ fn is_corruption(err: &anyhow::Error) -> bool {
         .find_map(|c| {
             if let Some(e) = c.downcast_ref::<DatabaseError>() {
                 Some(e.is_corruption())
+            } else if let Some(e) = c.downcast_ref::<VerifyError>() {
+                Some(e.is_corruption())
+            } else if let Some(e) = c.downcast_ref::<BlobDatabaseError>() {
+                Some(e.is_corruption())
             } else if let Some(e) = c.downcast_ref::<ReadError>() {
                 Some(e.is_corruption())
             } else {
@@ -266,7 +293,14 @@ fn run(cli: Cli) -> Result<()> {
             field,
             term,
         }) => to_stdout(|out| segment::dump(out, &path, &schema, &field, term.as_deref()))?,
-        Command::Verify { path } => to_stdout(|out| database::verify(out, &path))?,
+        Command::Verify { path, quick, deep } => {
+            let scan = match (quick, deep) {
+                (true, _) => Scan::Quick,
+                (_, true) => Scan::Deep,
+                _ => Scan::Checksums,
+            };
+            to_stdout(|out| database::verify(out, &path, scan))?;
+        }
         Command::Container(ContainerCommand::Files { path }) => {
             if !path.is_file() {
                 bail!("{} is not a container file", path.display());
