@@ -18,6 +18,8 @@
     missing_docs
 )] // Tests: inputs are generated or fixed.
 
+mod pack_support;
+
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
@@ -66,7 +68,7 @@ fn sim() -> SimFs {
 }
 
 fn open(fs: &SimFs, mode: PackMode) -> persia_blob::Result<PackStore<SimFsFile>> {
-    PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [9; 16])
+    pack_support::open_pack(Arc::new(fs.clone()), PACK, mode, [9; 16])
 }
 
 fn stage_all<F>(store: &PackStore<F>, m: &BlobManifest, data: &[u8]) -> persia_blob::Result<()>
@@ -246,11 +248,11 @@ fn a_failed_write_poisons_the_handle() {
 fn a_real_file_round_trips() {
     let dir = tempfile::tempdir().unwrap();
     let path = persia_blob::pack_path(&dir.path().join("app.persia"));
-    let store = PackStore::open(&path, PackMode::ReadWrite, [1; 16]).unwrap();
+    let store = PackStore::open_writer(&path, &pack_support::writer_proof([1; 16])).unwrap();
     let data: Vec<u8> = (0..200_000_u32).map(|i| (i % 251) as u8).collect();
     let m = store_blob(&store, &data, 65_536, 77);
     drop(store);
-    let store = PackStore::open(&path, PackMode::ReadWrite, [1; 16]).unwrap();
+    let store = PackStore::open_writer(&path, &pack_support::writer_proof([1; 16])).unwrap();
     assert_eq!(store.header().unwrap().db_uuid, [1; 16]);
     assert_eq!(read_all(&store, &m).unwrap(), data);
     assert_eq!(
@@ -781,7 +783,7 @@ impl Wrapped {
         self.faults.lock().unwrap()
     }
     fn open(&self, mode: PackMode) -> persia_blob::Result<PackStore<CountedFile>> {
-        PackStore::open_in(Arc::new(self.clone()), PACK, mode, [9; 16])
+        pack_support::open_pack(Arc::new(self.clone()), PACK, mode, [9; 16])
     }
 }
 
@@ -956,7 +958,7 @@ fn a_symlink_named_like_a_temporary_file_is_not_swept() {
     let mut link = pack.as_os_str().to_owned();
     link.push(".tmp.0123456789abcdef.1");
     std::os::unix::fs::symlink(&target, &link).unwrap();
-    let store = PackStore::open(&pack, PackMode::ReadWrite, [1; 16]).unwrap();
+    let store = PackStore::open_writer(&pack, &pack_support::writer_proof([1; 16])).unwrap();
     assert_eq!(store.recovery().swept, 0);
     assert!(
         std::fs::symlink_metadata(&link)

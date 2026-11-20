@@ -18,8 +18,8 @@ use persia_blob::{
 };
 use persia_format::BlobRef;
 use persia_format::checksum::crc32c;
-use persia_storage::container::ContainerFile;
-use persia_storage::container::sim::{CrashLoss, SimFault};
+use persia_storage::container::sim::{CrashLoss, SimFault, SimFile};
+use persia_storage::container::{Container, ContainerFile};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
 
@@ -37,8 +37,22 @@ fn manifest_of(data: &[u8], chunk: u32, upload: u128) -> BlobManifest {
     .expect("manifest")
 }
 
+/// The read-write container whose writer proof opens the pack read-write (ROADMAP 9.2.7): one for the whole run, so
+/// it outlives every pack opened with its proof.
+fn writer() -> &'static Container<SimFile> {
+    static WRITER: OnceLock<Container<SimFile>> = OnceLock::new();
+    WRITER.get_or_init(|| Container::create_on(SimFile::new(), [1; 16]).expect("container"))
+}
+
 fn open(fs: &SimFs, mode: PackMode) -> persia_blob::Result<PackStore<SimFsFile>> {
-    PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [1; 16])
+    let vfs = Arc::new(fs.clone());
+    match mode {
+        PackMode::ReadWrite => {
+            let proof = writer().writer_proof().expect("a read-write container");
+            PackStore::open_writer_in(vfs, PACK, &proof)
+        }
+        PackMode::ReadOnly => PackStore::open_in(vfs, PACK, [1; 16]),
+    }
 }
 
 /// Stages and binds `data`; the manifest and what `bind` answered.

@@ -28,6 +28,7 @@
 )] // Tests: inputs are generated or fixed.
 
 mod gc_support;
+mod pack_support;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -55,7 +56,7 @@ fn sim() -> SimFs {
 }
 
 fn open(fs: &SimFs, mode: PackMode) -> persia_blob::Result<PackStore<SimFsFile>> {
-    PackStore::open_in(Arc::new(fs.clone()), PACK, mode, [9; 16])
+    pack_support::open_pack(Arc::new(fs.clone()), PACK, mode, [9; 16])
 }
 
 fn options(ratio: f64) -> SweepOptions {

@@ -146,11 +146,13 @@ impl DocumentLog for Database {
 /// A database and its blob store: documents with blobs (see the module docs). M10's `Db` wraps it.
 #[derive(Debug)]
 pub struct BlobDatabase<S: ?Sized, L = Database> {
-    log: L,
     /// Pins of blobs referenced by logged documents, with the mark of each document's record, oldest first: released
     /// once the record is durable.
     held: VecDeque<(WalMark, Pins)>,
+    /// Declared before the log, so it drops first: a pack opened read-write with the log's writer proof must not
+    /// outlive the container whose lock the proof stood for (ROADMAP 9.2.7, ADR-0053).
     blobs: Blobs<S>,
+    log: L,
 }
 
 impl<S: BlobStore + ?Sized, L: DocumentLog> BlobDatabase<S, L> {

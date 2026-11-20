@@ -35,7 +35,8 @@ use crate::store::{BindOutcome, BlobStore};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PackMode {
     /// The container's writer: stages and binds, creates the pack on its first write, and truncates what no commit
-    /// covers. Only the process holding the container's writer lock opens the pack this way (ADR-0049 item 8).
+    /// covers. Only [`PackStore::open_writer_in`] opens the pack this way, with the proof that the caller holds the
+    /// container's writer lock (ADR-0049 item 8, ROADMAP 9.2.7, ADR-0053).
     ReadWrite,
     /// Never writes, truncates or creates: the blobs committed as of the open (or the last
     /// [`refresh`](PackStore::refresh)).
@@ -146,14 +147,18 @@ struct WriterState {
 /// it, and its recovery decides what survived.
 ///
 /// ```
-/// use persia_blob::pack::{PackMode, PackStore};
+/// use persia_blob::pack::{PackMode, PackStore, pack_path};
 /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of, read_chunk_checked};
 /// use persia_format::checksum::crc32c;
+/// use persia_storage::container::Container;
 ///
 /// # if cfg!(miri) { return Ok(()); } // a real pack file: Miri's isolation has no filesystem or real-time clock
 /// # let dir = tempfile::tempdir()?;
-/// let path = dir.path().join("app.persia.blobs");
-/// let store = PackStore::open(&path, PackMode::ReadWrite, [7; 16])?;
+/// // Only the holder of the container's writer lock opens the pack read-write: its proof is the key.
+/// let container = Container::create(dir.path().join("app.persia"))?;
+/// let path = pack_path(&dir.path().join("app.persia"));
+/// let store = PackStore::open_writer(&path, &container.writer_proof().ok_or("read-only")?)?;
+/// assert_eq!(store.mode(), PackMode::ReadWrite);
 /// assert!(!store.exists()); // no blob yet, no file
 ///
 /// let data = b"hello, pack";
@@ -164,7 +169,7 @@ struct WriterState {
 /// assert_eq!(store.bind(&m)?, BindOutcome::Bound);
 /// drop(store);
 ///
-/// let store = PackStore::open(&path, PackMode::ReadOnly, [7; 16])?;
+/// let store = PackStore::open(&path, container.header().db_uuid)?; // read-only
 /// let found = store.manifest(m.blob_id())?.expect("bound");
 /// assert_eq!(read_chunk_checked(&store, &found, 1)?, b"ack");
 /// # Ok::<(), Box<dyn std::error::Error>>(())
@@ -181,65 +186,76 @@ pub struct PackStore<F: ContainerFile = File> {
 }
 
 impl PackStore<File> {
-    /// [`PackStore::open_in`] on the operating system's file system.
+    /// [`PackStore::open_in`] on the operating system's file system: the pack opened read-only.
     ///
     /// # Errors
     /// See [`PackStore::open_in`].
-    pub fn open(path: impl AsRef<Path>, mode: PackMode, db_uuid: [u8; 16]) -> Result<Self> {
-        Self::open_in(Arc::new(RealFs), path, mode, db_uuid)
+    pub fn open(path: impl AsRef<Path>, db_uuid: [u8; 16]) -> Result<Self> {
+        Self::open_in(Arc::new(RealFs), path, db_uuid)
     }
 
     /// [`PackStore::open_writer_in`] on the operating system's file system.
     ///
     /// # Errors
-    /// See [`PackStore::open_in`].
+    /// See [`PackStore::open_writer_in`].
     pub fn open_writer(path: impl AsRef<Path>, proof: &WriterProof<'_>) -> Result<Self> {
         Self::open_writer_in(Arc::new(RealFs), path, proof)
     }
 }
 
 impl<F: ContainerFile + 'static> PackStore<F> {
-    /// Opens the pack read-write as the database's writer: `proof` shows the caller holds the container's writer
-    /// lock, and its `db_uuid` is the one the pack carries (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). Otherwise as
-    /// [`PackStore::open_in`] with [`PackMode::ReadWrite`].
+    /// Opens the pack at `path` on `vfs` **read-only** ([`PackMode::ReadOnly`]) and recovers it (SPEC §9.3, ADR-0049
+    /// item 9): it never writes, truncates or creates the file, and a missing file is a pack with no blobs, which
+    /// [`refresh`](PackStore::refresh) opens once the writer has created it. `db_uuid` is the database's (a read-only
+    /// container's header names it): a pack of another database fails to open. Only [`PackStore::open_writer_in`]
+    /// opens the pack read-write (ROADMAP 9.2.7, ADR-0053).
+    ///
+    /// Recovery validates the header, picks the active slot and checks it against the file, then rebuilds the
+    /// index by scanning the committed frames `12288..log_end`.
     ///
     /// # Errors
-    /// See [`PackStore::open_in`].
+    /// [`Error::PackOfAnotherDatabase`], [`Error::CorruptAt`] naming the damaged header (0), slot or committed frame
+    /// (ROADMAP 9.2.8), [`Error::PackUnsupported`] for a newer format, or [`Error::PackIo`].
+    pub fn open_in(
+        vfs: Arc<dyn Vfs<File = F>>,
+        path: impl AsRef<Path>,
+        db_uuid: [u8; 16],
+    ) -> Result<Self> {
+        Self::open_as(vfs, path.as_ref(), PackMode::ReadOnly, db_uuid)
+    }
+
+    /// Opens the pack read-write as the database's writer (SPEC §9.3, ROADMAP 9.2.7, ADR-0053): `proof` shows the
+    /// caller holds the container's writer lock (only a read-write [`Container`](persia_storage::container::Container)
+    /// mints one), so no other read-write handle of this pack can exist while that container is open, and the pack
+    /// carries the proof's `db_uuid`. The proof is checked here, not kept: the caller keeps the container open at
+    /// least as long as the returned pack (an owner of both declares the pack first, so it drops first). A missing
+    /// file is a pack with no blobs, created at the first write with that `db_uuid` in its header.
+    ///
+    /// Before it opens the file, it removes the stale temporary files of crashed pack creations and rewrites beside
+    /// it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory sync that fails
+    /// logs a `tracing::warn!` and the open continues: such a file holds nothing the pack needs, and the next
+    /// read-write open tries again (ROADMAP 9.2.6). Recovery is [`PackStore::open_in`]'s, then it commits the
+    /// longest complete bind after `log_end`, truncates the file to the end of what it keeps and syncs it: nothing
+    /// after that was ever acknowledged.
+    ///
+    /// # Errors
+    /// As [`PackStore::open_in`], and [`Error::PackReadOnly`] for a pack whose unknown flags allow only reading.
     pub fn open_writer_in(
         vfs: Arc<dyn Vfs<File = F>>,
         path: impl AsRef<Path>,
         proof: &WriterProof<'_>,
     ) -> Result<Self> {
-        // -- wiring (9.2.7) --
-        // ROADMAP 9.2.7 makes this the only read-write open; until then it forwards.
-        Self::open_in(vfs, path, PackMode::ReadWrite, proof.db_uuid())
+        Self::open_as(vfs, path.as_ref(), PackMode::ReadWrite, proof.db_uuid())
     }
-}
 
-impl<F: ContainerFile + 'static> PackStore<F> {
-    /// Opens the pack at `path` on `vfs` and recovers it (SPEC §9.3, ADR-0049 item 9); a missing file is a pack
-    /// with no blobs, which a read-write handle creates at its first write with `db_uuid` (the database's) in its
-    /// header.
-    ///
-    /// Recovery validates the header, picks the active slot and checks it against the file, then rebuilds the
-    /// index by scanning the committed frames `12288..log_end`. A read-write open then truncates the file to
-    /// `log_end` and syncs it: nothing after `log_end` was ever acknowledged.
-    ///
-    /// Before it opens the file, a read-write open removes the stale temporary files of crashed pack creations and
-    /// rewrites beside it (`<pack>.tmp.<nonce>.<n>`, counted in [`PackRecovery::swept`]). A removal or directory
-    /// sync that fails logs a `tracing::warn!` and the open continues: such a file holds nothing the pack needs, and
-    /// the next read-write open tries again (ROADMAP 9.2.6).
-    ///
-    /// # Errors
-    /// [`Error::CorruptAt`] naming the damaged header (0), slot or committed frame (ROADMAP 9.2.8),
-    /// [`Error::PackUnsupported`] for a newer format, or [`Error::PackIo`].
-    pub fn open_in(
+    /// The open of both modes: the callers above decide the mode, the read-write one only with a writer proof.
+    fn open_as(
         vfs: Arc<dyn Vfs<File = F>>,
-        path: impl AsRef<Path>,
+        path: &Path,
         mode: PackMode,
         db_uuid: [u8; 16],
     ) -> Result<Self> {
-        let path = path.as_ref().to_owned();
+        let path = path.to_owned();
         // Before the open, while no creation or rewrite of this pack can be in flight (ADR-0049 item 8).
         let swept = if mode == PackMode::ReadWrite {
             u64_from_usize(sweep_stale_files(&*vfs, &path).len())

@@ -154,7 +154,7 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// use persia::internal::blob::{Blobs, PutBlobOptions};
     /// use persia::internal::documents::{Blob, BlobDatabase};
     /// use persia::internal::gc::GcOptions;
-    /// use persia_blob::{BlobStore, PackMode, PackStore};
+    /// use persia_blob::{BlobStore, PackStore};
     /// use persia_engine::db::{Database, DatabaseOptions};
     /// use persia_engine::document::Document;
     /// use persia_engine::schema::SchemaBuilder;
@@ -164,7 +164,8 @@ impl<S: BlobStore + Sweep + ?Sized, L: DocumentLog + BlobReferences> BlobDatabas
     /// # let dir = tempfile::tempdir()?;
     /// let mut log = Database::create(dir.path().join("app.persia"), DatabaseOptions::default())?;
     /// log.create_collection(SchemaBuilder::new("files").build()?)?;
-    /// let pack = PackStore::open(dir.path().join("app.persia.blobs"), PackMode::ReadWrite, [0; 16])?;
+    /// let proof = log.writer_proof().ok_or("read-only")?; // the pack opens read-write only with it
+    /// let pack = PackStore::open_writer(dir.path().join("app.persia.blobs"), &proof)?;
     /// let mut db = BlobDatabase::new(log, Blobs::new(Arc::new(pack)));
     /// let kept = db.put("files", &Document::new("a"), Blob::from_reader(&b"kept"[..]), Durability::Fsync)?;
     /// let (orphan, pins) = db.put_blob(&[7; 1000][..], &PutBlobOptions::default())?;

@@ -13,14 +13,16 @@
 
 use std::collections::BTreeMap;
 use std::hint::black_box;
+use std::path::Path;
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use persia_blob::{
-    BindOutcome, BlobManifest, BlobStore, ChunkSize, PackMode, PackStore, UploadId, blob_id_of,
+    BindOutcome, BlobManifest, BlobStore, ChunkSize, PackStore, UploadId, blob_id_of, pack_path,
     read_range,
 };
 use persia_format::BlobRef;
 use persia_format::checksum::crc32c;
+use persia_storage::container::Container;
 
 /// Incompressible-looking bytes from a fixed LCG.
 fn data(len: usize, seed: u64) -> Vec<u8> {
@@ -52,6 +54,15 @@ fn put(store: &PackStore, data: &[u8], chunk: u32, upload: u128) -> BlobManifest
     m
 }
 
+/// A container at `path` and its pack opened read-write with its writer proof (ROADMAP 9.2.7). The container is
+/// returned first, so a caller holding both drops the pack first.
+fn writer(path: &Path) -> (Container, PackStore) {
+    let container = Container::create(path).unwrap();
+    let store =
+        PackStore::open_writer(pack_path(path), &container.writer_proof().unwrap()).unwrap();
+    (container, store)
+}
+
 fn reference(m: &BlobManifest) -> BlobRef {
     BlobRef::new(
         m.blob_id(),
@@ -71,12 +82,7 @@ fn append(c: &mut Criterion) {
         group.throughput(Throughput::Bytes(len as u64));
         group.bench_with_input(BenchmarkId::new("stage_and_bind", len), &src, |b, src| {
             let dir = tempfile::tempdir().unwrap();
-            let store = PackStore::open(
-                dir.path().join("b.persia.blobs"),
-                PackMode::ReadWrite,
-                [0; 16],
-            )
-            .unwrap();
+            let (_container, store) = writer(&dir.path().join("b.persia"));
             let mut n = 0_u64;
             b.iter(|| {
                 // Distinct bytes per blob, or bind would dedup.
@@ -92,12 +98,7 @@ fn append(c: &mut Criterion) {
 
 fn read(c: &mut Criterion) {
     let dir = tempfile::tempdir().unwrap();
-    let store = PackStore::open(
-        dir.path().join("r.persia.blobs"),
-        PackMode::ReadWrite,
-        [0; 16],
-    )
-    .unwrap();
+    let (_container, store) = writer(&dir.path().join("r.persia"));
     let len = 16 << 20;
     let m = put(&store, &data(len, 9), 4 << 20, 1);
     let r = reference(&m);

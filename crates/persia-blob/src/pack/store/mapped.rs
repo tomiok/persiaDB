@@ -102,13 +102,15 @@ impl PackStore<File> {
     /// time, anywhere ([`MapPermit::new`]).
     ///
     /// ```
-    /// use persia_blob::pack::{PackMode, PackStore};
+    /// use persia_blob::pack::{PackStore, pack_path};
     /// use persia_blob::{BindOutcome, BlobManifest, BlobStore, ChunkSize, UploadId, blob_id_of};
-    /// use persia_storage::container::MapPermit;
+    /// use persia_storage::container::{Container, MapPermit};
     ///
     /// # if cfg!(miri) { return Ok(()); } // a real mapped file: Miri has neither a filesystem nor file-backed mmap
     /// # let dir = tempfile::tempdir()?;
-    /// let store = PackStore::open(dir.path().join("app.persia.blobs"), PackMode::ReadWrite, [0; 16])?;
+    /// let container = Container::create(dir.path().join("app.persia"))?;
+    /// let proof = container.writer_proof().ok_or("read-only")?;
+    /// let store = PackStore::open_writer(pack_path(&dir.path().join("app.persia")), &proof)?;
     /// // SAFETY: nothing but this store writes the pack while it is mapped (MapPermit::new's contract).
     /// store.enable_mapped_reads(unsafe { MapPermit::new() });
     /// let m = BlobManifest::new(blob_id_of(b"mapped"), 6, ChunkSize::from_encoding(6)?, UploadId::new(1),
@@ -131,10 +133,11 @@ impl PackStore<File> {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
+    use persia_storage::container::Container;
+    use persia_storage::container::sim::SimFile;
     use persia_storage::vfs::sim::{SimFs, SimFsFile};
 
     use super::*;
-    use crate::pack::PackMode;
     use crate::store::BlobStore;
     use crate::{BindOutcome, BlobManifest, ChunkSize, UploadId, blob_id_of, read_chunk_checked};
     use persia_format::checksum::crc32c;
@@ -152,14 +155,12 @@ mod tests {
     }
 
     fn store() -> (SimFs, PackStore<SimFsFile>) {
+        // A real proof, from a read-write container that outlives every test (ROADMAP 9.2.7).
+        static WRITER: std::sync::OnceLock<Container<SimFile>> = std::sync::OnceLock::new();
         let fs = SimFs::new();
-        let store = PackStore::open_in(
-            Arc::new(fs.clone()),
-            "/p.blobs",
-            PackMode::ReadWrite,
-            [0; 16],
-        )
-        .unwrap();
+        let writer = WRITER.get_or_init(|| Container::create_on(SimFile::new(), [0; 16]).unwrap());
+        let proof = writer.writer_proof().unwrap();
+        let store = PackStore::open_writer_in(Arc::new(fs.clone()), "/p.blobs", &proof).unwrap();
         (fs, store)
     }
 
@@ -295,7 +296,7 @@ mod tests {
                 .unwrap();
             file.write_all_at(&damaged, 0).unwrap();
             file.sync_data().unwrap();
-            let opened = PackStore::open_in(Arc::new(fs), "/p.blobs", PackMode::ReadOnly, [0; 16]);
+            let opened = PackStore::open_in(Arc::new(fs), "/p.blobs", [0; 16]);
             let store = match opened {
                 Ok(store) => store,
                 Err(e) => {

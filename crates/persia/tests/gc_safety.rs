@@ -25,7 +25,7 @@ use persia::internal::blob::{Blobs, PutBlobOptions};
 use persia::internal::documents::{Blob, BlobDatabase, DocumentLog};
 use persia::internal::gc::{BlobReferences, GcOptions};
 use persia::internal::pins::Pins;
-use persia_blob::{BlobId, BlobRef, BlobStore, ChunkSize, PackMode, PackStore};
+use persia_blob::{BlobId, BlobRef, BlobStore, ChunkSize, PackStore};
 use persia_engine::db::{
     CollectionSnapshot, Database, DatabaseError, DatabaseOptions, SearchRequest, SegmentIds,
     Snapshot,
@@ -151,11 +151,10 @@ fn create_sim() -> SimOpen {
     log.create_collection(schema()).unwrap();
     // The container file's name is durable only after this. Later unsynced bytes are still lost by a crash.
     fs.sync_dir(Path::new("/")).unwrap();
-    let pack = PackStore::open_in(
+    let pack = PackStore::open_writer_in(
         Arc::new(fs.clone()),
         Path::new("/app.persia.blobs"),
-        PackMode::ReadWrite,
-        SIM_UUID,
+        &log.writer_proof().unwrap(),
     )
     .unwrap();
     SimOpen {
@@ -167,11 +166,10 @@ fn create_sim() -> SimOpen {
 fn reopen_sim(fs: &SimFs) -> SimDb {
     let file = fs.open(Path::new("/app.persia"), true).unwrap();
     let log = Database::open_on(file, db_options()).unwrap();
-    let pack = PackStore::open_in(
+    let pack = PackStore::open_writer_in(
         Arc::new(fs.clone()),
         Path::new("/app.persia.blobs"),
-        PackMode::ReadWrite,
-        SIM_UUID,
+        &log.writer_proof().unwrap(),
     )
     .unwrap();
     BlobDatabase::new(Log(log), Blobs::new(Arc::new(pack)))
@@ -186,7 +184,8 @@ fn open(dir: &Path, create: bool) -> Db {
     } else {
         Database::open(&path, db_options()).unwrap()
     };
-    let pack = PackStore::open(dir.join("app.persia.blobs"), PackMode::ReadWrite, [0; 16]).unwrap();
+    let pack =
+        PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof().unwrap()).unwrap();
     BlobDatabase::new(log, Blobs::new(Arc::new(pack)))
 }
 
