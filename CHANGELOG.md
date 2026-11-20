@@ -13,8 +13,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   rewrites, `<name>.persia.blobs.tmp.*` (`PackRecovery::swept`; ROADMAP 9.2.6).
 - `persia-blob`: `Error::CorruptAt { encoding, what, offset }` and `Error::corrupt_offset`: a pack corruption error
   names the slot or frame it found damaged (ROADMAP 9.2.8).
-- `persia-blob`: `BlobStore::read_chunks_checked`, a provided method that hands each checked chunk to a sink, so a
-  store can serve bytes without a copy (ROADMAP 9.2.9).
+- `persia-blob`: `BlobStore::read_chunks_checked`, a provided method that hands each checked chunk to a sink (with a
+  caller's scratch buffer), so a store can serve bytes without a copy; `read_manifest_range_into`, which reuses one
+  buffer across a stream (ROADMAP 9.2.9).
 - `persia-blob`: `RemoteBlobStore`, the remote blob layout over any `Storage` with conditional put (SPEC §9.4,
   ADR-0050): blob manifests at `blobs/<xx>/<id>`, staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>`, parallel
   chunk transfers (`with_parallelism`, default 8) and resumable uploads (`resume`, `restage`, `Chunker::resume`)
