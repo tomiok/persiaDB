@@ -8,6 +8,8 @@
 //! 3. A read-only database opens its pack read-only and never creates it: with no pack, `get_blob` fails as not
 //!    bound, and its refresh (a newer read-only open of the documents, then the pack) finds a pack created since.
 //! 4. The pack is found beside the container's canonical path, whatever name opened it.
+//! 5. A create with a file at the pack's path fails before creating anything.
+//! 6. A refresh takes only the same database at the same canonical path and no older `seq`.
 #![allow(clippy::unwrap_used, clippy::panic, clippy::indexing_slicing)] // Tests: inputs are fixed.
 
 use std::io::Read;
@@ -89,7 +91,10 @@ fn a_reopened_database_reads_its_documents_blobs_and_has_one_writer() {
         ),
         "{second:?}"
     );
-    assert!(db.log().writer_proof().is_some());
+    assert_eq!(
+        db.log().writer_proof().db_uuid(),
+        db.log().container().header().db_uuid
+    );
     drop(db);
 
     let db = BlobDatabase::open(&path, DatabaseOptions::default()).unwrap();
@@ -233,4 +238,79 @@ fn the_pack_is_found_beside_the_containers_canonical_path() {
     assert!(!pack_path(&link).exists());
     let reader = ReadOnlyBlobDatabase::open(&path, &DatabaseOptions::default()).unwrap();
     assert_eq!(read_all(&reader, &blob), b"through a link");
+}
+
+/// Invariant 5: a create with a file already at the pack's path fails before it creates anything (the database it
+/// would leave could never open), and succeeds once that file is gone.
+#[test]
+fn a_create_over_a_leftover_pack_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let other = dir.path().join("other.persia");
+    let db = create(&other);
+    let (_, pins) = db
+        .put_blob(&b"leftover"[..], &PutBlobOptions::default())
+        .unwrap();
+    drop((pins, db));
+    std::fs::copy(pack_path(&other), pack_path(&path)).unwrap();
+    let created = BlobDatabase::create(&path, DatabaseOptions::default());
+    assert!(
+        matches!(&created, Err(Error::PackExists { path: p }) if *p == pack_path(&path)),
+        "{created:?}"
+    );
+    assert!(!path.exists(), "no container is left behind");
+    std::fs::remove_file(pack_path(&path)).unwrap();
+    drop(create(&path));
+    BlobDatabase::open(&path, DatabaseOptions::default()).unwrap();
+}
+
+/// Invariant 6: a refresh takes only this database opened again: a copy at another path (same `db_uuid`) or an open
+/// older than the current one fails, and the reader keeps what it had.
+#[test]
+fn a_refresh_with_a_copy_or_an_older_open_changes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let copy = dir.path().join("copy.persia");
+    let options = DatabaseOptions::default();
+    let mut writer = create(&path);
+    let older = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
+    writer
+        .put(
+            "c",
+            &Document::new("a"),
+            Blob::from_reader(&b"newer"[..]),
+            Durability::Fsync,
+        )
+        .unwrap();
+    writer.commit().unwrap();
+    std::fs::copy(&path, &copy).unwrap();
+    let mut reader = ReadOnlyBlobDatabase::open(&path, &options).unwrap();
+    let seq = reader.database().seq();
+    assert!(older.seq() < seq);
+
+    let refreshed = reader.refresh(ReadOnlyDatabase::open(&copy, &options.registry).unwrap());
+    assert!(
+        matches!(&refreshed, Err(Error::RefreshedElsewhere { reopened: Some(p), .. }) if p.ends_with("copy.persia")),
+        "{refreshed:?}"
+    );
+    let refreshed = reader.refresh(older);
+    assert!(
+        matches!(refreshed, Err(Error::RefreshedOlder { current, reopened }) if current == seq && reopened < seq),
+        "{refreshed:?}"
+    );
+    assert_eq!(reader.database().seq(), seq);
+    assert!(
+        reader
+            .database()
+            .container()
+            .path()
+            .unwrap()
+            .ends_with("app.persia")
+    );
+    // The same database at the same seq is fine.
+    assert!(
+        !reader
+            .refresh(ReadOnlyDatabase::open(&path, &options.registry).unwrap())
+            .unwrap()
+    );
 }

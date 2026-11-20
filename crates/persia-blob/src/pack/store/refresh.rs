@@ -27,7 +27,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(e) => return Err(io_err("open")(e)),
             };
-            let (mut pack, _) = recover(file, PackMode::ReadOnly, self.db_uuid)?;
+            let (mut pack, _) = recover(file, PackMode::ReadOnly, self.db_uuid, false)?;
             if let Some(mapper) = &mut inner.mapper {
                 mapper.remap(&mut pack);
             }

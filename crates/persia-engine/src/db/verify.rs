@@ -18,7 +18,7 @@ use super::{DatabaseError, ReadOnlyDatabase};
 use crate::document::Document;
 use crate::manifest::SegmentId;
 use crate::view::SearchView;
-use crate::wal::{MAX_CHUNK_LEN, ReplayError, WalOp, decode_chunk};
+use crate::wal::ReplayError;
 
 /// How the container's bytes after its committed `log_end` ended (SPEC §4.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,42 +232,28 @@ impl<F: ContainerFile + Sync> ReadOnlyDatabase<F> {
                 }
             }
         }
-        for &chunk in self.wal_chunks() {
-            let source = self
-                .container()
-                .read_frame_source(chunk, MAX_CHUNK_LEN)
-                .map_err(|e| DatabaseError::from(ReplayError::Container(e)))?;
-            let at_chunk = |error| DatabaseError::from(ReplayError::Chunk { chunk, error });
-            let mut records = decode_chunk(&source.payload).map_err(at_chunk)?;
-            loop {
-                let offset = records.offset();
-                let Some(record) = records.next() else {
-                    break;
-                };
-                let record = record.map_err(at_chunk)?;
-                if record.op() != WalOp::Put {
-                    continue;
-                }
-                let undecodable = |error| {
-                    DatabaseError::from(ReplayError::Document {
-                        chunk,
-                        offset,
-                        error,
-                    })
-                };
-                let payload = record.payload();
-                let Some(blob_ref) = Document::encoded_blob_ref(payload).map_err(undecodable)?
-                else {
-                    continue;
-                };
-                f(BlobReference {
-                    collection: record.collection().to_owned(),
-                    id: Document::encoded_id(payload).map_err(undecodable)?,
-                    blob_ref,
-                    site: BlobRefSite::Wal { chunk, offset },
-                })?;
-            }
-        }
-        Ok(())
+        let chunks = self.wal_chunks().iter().copied();
+        super::blob_refs::for_each_wal_put(self.container(), chunks, |put| {
+            let undecodable = |error| {
+                DatabaseError::from(ReplayError::Document {
+                    chunk: put.chunk,
+                    offset: put.offset,
+                    error,
+                })
+            };
+            let Some(blob_ref) = Document::encoded_blob_ref(put.payload).map_err(undecodable)?
+            else {
+                return Ok(());
+            };
+            f(BlobReference {
+                collection: put.collection.to_owned(),
+                id: Document::encoded_id(put.payload).map_err(undecodable)?,
+                blob_ref,
+                site: BlobRefSite::Wal {
+                    chunk: put.chunk,
+                    offset: put.offset,
+                },
+            })
+        })
     }
 }

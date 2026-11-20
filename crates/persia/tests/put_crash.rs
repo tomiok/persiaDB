@@ -12,8 +12,12 @@
 //! 2. Every blob a document of the reopened database may name (live in a segment or a memtable, or put by a WAL
 //!    record from `wal_start` on: `Database::referenced_blobs`) is bound in the pack and reads back whole, hashing to
 //!    its id: no WAL record survives without its blob.
-//! 3. Every live document is one the workload put, with the reference its `put` returned; every `Fsync` put
-//!    acknowledged before the fault is there (puts of distinct ids, so nothing replaces them).
+//! 3. Every live document is one the workload put, with the reference its `put` returned, or the document of the
+//!    `put` that failed; every `Fsync` put acknowledged before the fault is there (puts of distinct ids, so nothing
+//!    replaces them).
+//! 4. The same after a second fault during the reopen, then a clean reopen.
+//!
+//! `CrashLoss::Seeded` runs only with the `slow` feature.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -122,10 +126,13 @@ fn workload() -> Vec<Op> {
     ]
 }
 
-/// What the workload put: each document's reference, and whether its put was acknowledged at `Fsync`.
+/// What the workload put: each document's reference, and whether its put was acknowledged at `Fsync`; and the id of
+/// the document whose `put` failed, if one did (it may survive the crash, with a reference the workload would have
+/// given it).
 #[derive(Debug, Default)]
 struct Model {
     refs: BTreeMap<String, (BlobRef, bool)>,
+    failed: Option<String>,
 }
 
 /// A fresh database on `fs`: the container and its collection created before any fault is armed.
@@ -156,7 +163,10 @@ fn run(db: &mut SimDb) -> Model {
                     Blob::from_reader(&bytes[..]).with_options(put_options()),
                     durability,
                 );
-                let Ok(r) = put else { return model };
+                let Ok(r) = put else {
+                    model.failed = Some(format!("d{id}"));
+                    return model;
+                };
                 model.refs.insert(
                     format!("d{id}"),
                     (r, matches!(durability, Durability::Fsync)),
@@ -172,7 +182,10 @@ fn run(db: &mut SimDb) -> Model {
                     Blob::Stored(r),
                     durability,
                 );
-                let Ok(r) = put else { return model };
+                let Ok(r) = put else {
+                    model.failed = Some(format!("d{id}"));
+                    return model;
+                };
                 model.refs.insert(
                     format!("d{id}"),
                     (r, matches!(durability, Durability::Fsync)),
@@ -190,6 +203,11 @@ fn run(db: &mut SimDb) -> Model {
 
 /// Reopens the database and its pack on `crashed`; a corrupt tail is quarantined (ADR-0014).
 fn reopen(crashed: &SimFs, ctx: &str) -> SimDb {
+    try_reopen(crashed).unwrap_or_else(|e| panic!("{ctx}: {e}"))
+}
+
+/// [`reopen`], returning what failed: a reopen that itself meets a fault fails like a process dying there.
+fn try_reopen(crashed: &SimFs) -> Result<SimDb, String> {
     let vfs: Arc<dyn Vfs<File = SimFsFile>> = Arc::new(crashed.clone());
     let opened = Container::open_in(Arc::clone(&vfs), DB, Mode::ReadWrite)
         .map_err(DatabaseError::from)
@@ -199,14 +217,13 @@ fn reopen(crashed: &SimFs, ctx: &str) -> SimDb {
         Err(DatabaseError::Container(ContainerError::CorruptTail { .. })) => {
             let c =
                 Container::open_in_with(Arc::clone(&vfs), DB, Mode::ReadWrite, Repair::Quarantine)
-                    .unwrap_or_else(|e| panic!("{ctx}: quarantining open: {e}"));
+                    .map_err(|e| format!("quarantining open: {e}"))?;
             Database::open_container(c, options())
-                .unwrap_or_else(|e| panic!("{ctx}: open after quarantine: {e}"))
+                .map_err(|e| format!("open after quarantine: {e}"))?
         }
-        Err(e) => panic!("{ctx}: reopen failed: {e}"),
+        Err(e) => return Err(format!("reopen failed: {e}")),
     };
-    BlobDatabase::with_pack_in(db, vfs, PACK)
-        .unwrap_or_else(|e| panic!("{ctx}: the pack does not reopen: {e}"))
+    BlobDatabase::with_pack_in(db, vfs, PACK).map_err(|e| format!("the pack does not reopen: {e}"))
 }
 
 /// Every live document of a collection snapshot (segments and memtable).
@@ -247,8 +264,16 @@ fn check(db: &SimDb, model: &Model, ctx: &str) {
             .unwrap_or_else(|| panic!("{ctx}: {} lost its reference", doc.id()));
         // The failed operation's document may survive without being in the model: its reference is then one the
         // workload would have given it, which the check above already found bound.
+        // Any other document is not one the workload put.
         if let Some((expected, _)) = model.refs.get(doc.id()) {
             assert_eq!(r, expected, "{ctx}: {} names another blob", doc.id());
+        } else {
+            assert_eq!(
+                model.failed.as_deref(),
+                Some(doc.id()),
+                "{ctx}: {} is live, but neither acknowledged nor the failed put",
+                doc.id()
+            );
         }
         assert!(
             store.contains(r).unwrap(),
@@ -289,7 +314,12 @@ fn a_crash_at_every_write_never_leaves_a_document_without_its_blob() {
     let mut runs = 0;
     for n in 0..calls {
         for kind in [SimFault::FailAt, SimFault::ApplyThenFail] {
-            for loss in [CrashLoss::All, CrashLoss::Nothing, CrashLoss::Seeded(n)] {
+            // A seeded subset of the unsynced writes only in the extended run: twice the work for each fault point.
+            let mut losses = vec![CrashLoss::All, CrashLoss::Nothing];
+            if cfg!(feature = "slow") {
+                losses.push(CrashLoss::Seeded(n));
+            }
+            for &loss in &losses {
                 let ctx = format!("call {n} {kind:?} {loss:?}");
                 let fs = SimFs::new();
                 let mut db = create(&fs);
@@ -298,11 +328,20 @@ fn a_crash_at_every_write_never_leaves_a_document_without_its_blob() {
                 assert!(fs.crashed(), "{ctx}: the fault fired");
                 drop(db);
                 let crashed = fs.crash(loss);
+                // A second fault, during the reopen itself (its recovery writes and syncs too), on a copy of the
+                // crashed state; then a clean reopen of what that left (invariants 1 to 3 again).
+                let faulted = crashed.crash(CrashLoss::Nothing);
                 let db = reopen(&crashed, &ctx);
                 check(&db, &model, &ctx);
+                let again = format!("{ctx}, then a fault at reopen call {}", n % 8);
+                faulted.set_fault(Some(kind(faulted.mutations() + n % 8)));
+                // It may fail anywhere, or finish if it makes fewer calls: either way, a process ending there.
+                drop(try_reopen(&faulted));
+                let db = reopen(&faulted.crash(loss), &again);
+                check(&db, &model, &again);
                 runs += 1;
             }
         }
     }
-    assert_eq!(runs, calls * 6);
+    assert_eq!(runs, calls * if cfg!(feature = "slow") { 6 } else { 4 });
 }

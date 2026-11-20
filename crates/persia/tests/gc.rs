@@ -125,8 +125,7 @@ const FORCE: GcOptions = GcOptions {
 
 fn pack_database(dir: &Path) -> BlobDatabase<PackStore> {
     let log = database(&dir.join("app.persia"));
-    let pack =
-        PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof().unwrap()).unwrap();
+    let pack = PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof()).unwrap();
     let blobs = Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(5));
     BlobDatabase::new(log, blobs)
 }

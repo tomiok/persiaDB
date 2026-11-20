@@ -5,6 +5,7 @@
 //!    as `None`.
 //! 2. A damaged byte in any committed chunk frame, bound or orphan, which an open does not read, fails the scan with
 //!    a corruption naming that frame's offset; the blobs the open indexed are unchanged.
+//! 5. An index frame naming a sound chunk frame that is not its manifest's chunk fails the scan at the index frame.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -224,6 +225,65 @@ fn the_scan_names_the_first_damaged_frame() {
     for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
         let err = open(&fs, mode).scan_checksums().unwrap_err();
         assert_eq!(err.corrupt_offset(), Some(chunks[1]), "{mode:?}: {err}");
+    }
+}
+
+/// Rewrites the frame at `frame` in `bytes` (any kind) with its payload changed by `edit`, then reseals it, as
+/// [`reseal_chunk_frame`] does. Returns its whole length.
+fn reseal_frame(
+    bytes: &mut [u8],
+    frame: u64,
+    kind: persia_format::frame::FrameKind,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> usize {
+    use persia_format::Writer;
+    use persia_format::block::Compression;
+    use persia_format::frame::encode_frame;
+
+    let at = frame as usize;
+    let len = u64::from_le_bytes(bytes[at + 8..at + 16].try_into().unwrap()) as usize;
+    let seq = u64::from_le_bytes(bytes[at + 16..at + 24].try_into().unwrap());
+    let mut payload = bytes[at + 24..at + 24 + len].to_vec();
+    edit(&mut payload);
+    let mut w = Writer::new();
+    encode_frame(&mut w, kind, seq, &payload, Compression::None).unwrap();
+    let total = w.len();
+    bytes[at..at + total].copy_from_slice(w.as_slice());
+    total
+}
+
+/// Invariant 5: an index frame resealed to name another blob's valid chunk frame (its frame and chunk CRCs sound, so
+/// an open indexes it) fails the default scan at the index frame: each named chunk's upload, index, length and CRC32C
+/// are checked against the index's manifest (ROADMAP 9.5.3, ADR-0053).
+#[test]
+fn an_index_resealed_to_name_another_blobs_chunk_fails_the_scan_at_the_index() {
+    use persia_blob::pack::layout::MIN_INDEX_FRAME_LEN;
+    use persia_format::frame::FrameKind;
+
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite);
+    // Same length, so only the manifest tells the chunks apart: [a's chunk][a's index][b's chunk][b's index].
+    for (data, upload) in [(&b"first"[..], 1), (&b"other"[..], 2)] {
+        let m = manifest(data, upload);
+        stage(&store, &m, data);
+        assert_eq!(store.bind(&m).unwrap(), BindOutcome::Bound);
+    }
+    drop(store);
+    let a_chunk = FIRST_FRAME;
+    let b_index = a_chunk + 2 * chunk_frame_len(5) + MIN_INDEX_FRAME_LEN + 8;
+    let mut bytes = fs.read(Path::new(PACK)).unwrap();
+    assert_eq!(&bytes[b_index as usize + 4], &FrameKind::BlobIndex.to_u8());
+    reseal_frame(&mut bytes, b_index, FrameKind::BlobIndex, |p| {
+        let last = p.len() - 8;
+        p[last..].copy_from_slice(&a_chunk.to_le_bytes());
+    });
+    let fs = sim_with(&bytes);
+    for mode in [PackMode::ReadOnly, PackMode::ReadWrite] {
+        let store = open(&fs, mode);
+        assert_eq!(store.blob_ids().len(), 2, "{mode:?}: the open indexes both");
+        let err = store.scan_checksums().unwrap_err();
+        assert!(err.is_corruption(), "{mode:?}: {err}");
+        assert_eq!(err.corrupt_offset(), Some(b_index), "{mode:?}: {err}");
     }
 }
 

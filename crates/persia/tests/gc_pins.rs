@@ -40,8 +40,7 @@ fn pack_database(dir: &Path) -> BlobDatabase<PackStore> {
     let mut log = Database::create(dir.join("app.persia"), DatabaseOptions::default()).unwrap();
     log.create_collection(SchemaBuilder::new("c").build().unwrap())
         .unwrap();
-    let pack =
-        PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof().unwrap()).unwrap();
+    let pack = PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof()).unwrap();
     BlobDatabase::new(
         log,
         Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(11)),

@@ -19,11 +19,13 @@
 //!
 //! Exit status (ROADMAP 6.6.7, SPEC §8.6): 0 on success, 3 when the command failed on corrupt stored bytes (a database,
 //! container, segment or blob pack that breaks its format) or on a broken blob reference (`verify`: a document that
-//! references a blob the pack lacks, or whose bytes do not match it, SPEC §9.5), 4 when the file is not a Persia container (its header magic differs,
-//! or it is too short to hold the magic; SPEC §4.2), 2 for a usage error, and 1 for any other failure (a missing file,
-//! an I/O error, a lock held by a writer, data written by a newer build, a `--schema` that is not the segment's, a
-//! logged record that replay cannot apply). A script separates a wrong file (4), damage (3), and any other failed
-//! run (1).
+//! references a blob the pack lacks, or whose bytes do not match it, SPEC §9.5), 4 when the file is not a Persia
+//! container (its header magic differs, or it is too short to hold the magic; SPEC §4.2), 2 for a usage error, and 1
+//! for any other failure (a missing file, an I/O error, a lock held by a writer, data written by a newer build, a
+//! `--schema` that is not the segment's, a logged record that replay cannot apply; for `verify`, a blob pack of
+//! another database (`PackOfAnotherDatabase`) or of a newer format (`PackUnsupported`), and a database a live writer
+//! committed to while `verify` ran, which reports "changed during verify, rerun" instead of a dangling reference). A
+//! script separates a wrong file (4), damage (3), and any other failed run (1).
 #![forbid(unsafe_code)]
 
 mod container;

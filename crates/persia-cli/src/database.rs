@@ -2,14 +2,20 @@
 //! its blobs with [`ReadOnlyBlobDatabase::verify_blobs`] (SPEC §9.5, ADR-0053).
 //!
 //! The output is for people: `key  value` lines, then `verify  ok`. A failed check is the command's error.
+//!
+//! A live writer may commit and collect blobs while this runs: the pack is opened right after the documents, and a
+//! dangling reference is reported as such only if the container's committed `seq` has not moved since the documents
+//! were opened. Otherwise the documents may be older than the pack (a document deleted, then its blob collected), and
+//! the run fails with "changed during verify, rerun" (exit status 1, not 3).
 
 use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 use persia::internal::documents::ReadOnlyBlobDatabase;
-use persia::internal::verify::Scan;
+use persia::internal::verify::{Scan, VerifyError};
 use persia_engine::db::{DatabaseOptions, ReadOnlyDatabase, Tail};
+use persia_storage::container::{Container, Mode};
 
 /// Opens the database at `path` read-only, verifies it and its blobs as deep as `scan` asks, and writes what it found
 /// to `out`.
@@ -22,7 +28,14 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     let options = DatabaseOptions::default();
     let db = ReadOnlyDatabase::open(path, &options.registry)
         .with_context(|| format!("opening {}", path.display()))?;
+    // -- wiring (9.5.3, 9.5.6) --
+    // The pack right after the documents, before the (long) document checks: the narrowest window for a writer's
+    // pack rewrite between the two opens.
+    let db = ReadOnlyBlobDatabase::with_pack_beside(db, path)
+        .with_context(|| format!("opening the blob pack of {}", path.display()))?;
+    // -- end wiring --
     let report = db
+        .database()
         .verify()
         .with_context(|| format!("verifying {}", path.display()))?;
     let tail = match report.tail {
@@ -52,11 +65,16 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     ];
     // -- wiring (9.5.3, 9.5.6) --
     // The blob rows; a dangling reference (SPEC §9.5) or a damaged pack frame is the command's error.
-    let db = ReadOnlyBlobDatabase::with_pack_beside(db, path)
-        .with_context(|| format!("opening the blob pack of {}", path.display()))?;
-    let blobs = db
-        .verify_blobs(scan)
-        .with_context(|| format!("verifying the blobs of {}", path.display()))?;
+    let blobs = match db.verify_blobs(scan) {
+        Ok(blobs) => blobs,
+        Err(e @ VerifyError::Dangling { .. }) => {
+            changed_during_verify(&db, path)?;
+            return Err(e).with_context(|| format!("verifying the blobs of {}", path.display()));
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("verifying the blobs of {}", path.display()));
+        }
+    };
     rows.push((
         "references",
         format!("{} to {} blobs", blobs.references, blobs.blobs),
@@ -93,4 +111,93 @@ pub fn verify(out: &mut dyn Write, path: &Path, scan: Scan) -> Result<()> {
     }
     writeln!(out, "verify            ok")?;
     Ok(())
+}
+
+/// After a dangling reference: fails (status 1) if the container's committed `seq` moved since the documents were
+/// opened. A blob is collected only after the commit that dropped its last reference (SPEC §9.5), and that commit
+/// precedes this read, so an unmoved `seq` means the pack this run opened lacks a blob documents it read reference.
+/// The container at `path` is opened again rather than this handle's superblock re-read: a compaction renames a new
+/// file over the path, and this handle keeps reading the old one.
+fn changed_during_verify(db: &ReadOnlyBlobDatabase, path: &Path) -> Result<()> {
+    let opened = db.database().container().superblock().seq;
+    let now = Container::open(path, Mode::ReadOnly)
+        .with_context(|| format!("opening {} again", path.display()))?
+        .superblock()
+        .seq;
+    if now != opened {
+        bail!(
+            "{} changed during verify (seq {opened} at the start, {now} now): a writer committed while it ran, so a \
+             blob its documents referenced may have been collected since; rerun",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::panic)] // Tests: inputs are fixed.
+
+    use persia::internal::documents::{Blob, BlobDatabase};
+    use persia::internal::gc::GcOptions;
+    use persia_engine::document::Document;
+    use persia_engine::schema::SchemaBuilder;
+    use persia_engine::wal::Durability;
+
+    use super::*;
+
+    /// A reference found dangling because the documents were opened before a writer deleted their document,
+    /// committed and collected its blob, and the pack after: "changed during verify" (status 1), never a dangling
+    /// reference (status 3). With no commit since the documents' open, it is a dangling reference.
+    #[test]
+    fn a_dangling_reference_after_a_commit_since_the_documents_open_asks_for_a_rerun() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("app.persia");
+        let options = DatabaseOptions::default();
+        let mut writer = BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
+        writer
+            .log_mut()
+            .create_collection(SchemaBuilder::new("c").build().unwrap())
+            .unwrap();
+        writer
+            .put(
+                "c",
+                &Document::new("a"),
+                Blob::from_reader(&b"collected"[..]),
+                Durability::Fsync,
+            )
+            .unwrap();
+        writer.commit().unwrap();
+        let docs = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
+        writer
+            .log_mut()
+            .delete("c", "a", Durability::Fsync)
+            .unwrap();
+        writer.commit().unwrap();
+        assert_eq!(
+            writer
+                .gc(&GcOptions::default())
+                .unwrap()
+                .sweep
+                .blobs_deleted,
+            1
+        );
+        let db = ReadOnlyBlobDatabase::with_pack_beside(docs, &path).unwrap();
+        assert!(matches!(
+            db.verify_blobs(Scan::Quick),
+            Err(VerifyError::Dangling { .. })
+        ));
+        let err = changed_during_verify(&db, &path).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("changed during verify"),
+            "{err:#}"
+        );
+        assert_eq!(crate::status_of(&err), 1);
+
+        // The same reader with nothing committed since: the dangling reference stands.
+        drop(writer);
+        let docs = ReadOnlyDatabase::open(&path, &options.registry).unwrap();
+        let db = ReadOnlyBlobDatabase::with_pack_beside(docs, &path).unwrap();
+        changed_during_verify(&db, &path).unwrap();
+    }
 }

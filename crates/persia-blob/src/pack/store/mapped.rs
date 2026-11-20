@@ -24,7 +24,7 @@ impl<F> std::fmt::Debug for Mapper<F> {
     }
 }
 
-impl<F> Mapper<F> {
+impl<F: ContainerFile> Mapper<F> {
     /// Maps `12288..log_end` of the committed superblock again, unless the mapping already ends there. If that fails
     /// the previous mapping stays: it is still valid for the frames it covers, and newer ones are read.
     pub(super) fn remap(&mut self, pack: &mut Pack<F>) {

@@ -214,7 +214,10 @@ pub enum Error {
 
     // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
     // Variants of wave 3's pack wiring and verify (blob/wiring) go here, and only here.
-    //
+    /// Another read-write handle, in this process or another, holds the pack's writer lock: one pack writer at a
+    /// time (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). Nothing was opened or swept.
+    #[error("the blob pack is locked by another writer")]
+    PackLocked,
     //
 
     // -- resume (9.3.4, 9.3.6, 9.5.9) --

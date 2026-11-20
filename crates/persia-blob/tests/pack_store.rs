@@ -574,6 +574,12 @@ fn a_failed_link_removes_its_temporary_file_and_poisons() {
     assert!(late.is_poisoned());
     let names: Vec<_> = fs.files().into_iter().map(|(p, _)| p).collect();
     assert_eq!(names, [Path::new(PACK)], "no temporary file left");
+    // The pack exists now, and `early` holds its writer lock (ROADMAP 9.2.7).
+    assert!(matches!(
+        open(&fs, PackMode::ReadWrite),
+        Err(Error::PackLocked)
+    ));
+    drop((late, early));
     assert!(open(&fs, PackMode::ReadWrite).unwrap().exists());
 }
 

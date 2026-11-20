@@ -154,7 +154,7 @@ fn create_sim() -> SimOpen {
     let pack = PackStore::open_writer_in(
         Arc::new(fs.clone()),
         Path::new("/app.persia.blobs"),
-        &log.writer_proof().unwrap(),
+        &log.writer_proof(),
     )
     .unwrap();
     SimOpen {
@@ -169,7 +169,7 @@ fn reopen_sim(fs: &SimFs) -> SimDb {
     let pack = PackStore::open_writer_in(
         Arc::new(fs.clone()),
         Path::new("/app.persia.blobs"),
-        &log.writer_proof().unwrap(),
+        &log.writer_proof(),
     )
     .unwrap();
     BlobDatabase::new(Log(log), Blobs::new(Arc::new(pack)))
@@ -184,8 +184,7 @@ fn open(dir: &Path, create: bool) -> Db {
     } else {
         Database::open(&path, db_options()).unwrap()
     };
-    let pack =
-        PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof().unwrap()).unwrap();
+    let pack = PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof()).unwrap();
     BlobDatabase::new(log, Blobs::new(Arc::new(pack)))
 }
 

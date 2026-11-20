@@ -33,7 +33,7 @@ use persia_format::checksum::crc32c;
 use super::{
     BlobId, ContainerFile, Entry, Error, FRAME_HEADER_LEN, FrameHeader, FrameKind, Header, Inner,
     Pack, PackStore, Poison, Result, Slot, Staged, WriterState, corrupt, decode_chunk_payload,
-    decode_frame, from_format_at, io, io_err, layout, parent_of, random_u128, temp_path,
+    decode_frame, from_format_at, io, io_err, layout, lock, parent_of, random_u128, temp_path,
     u64_from_usize, usize_from_u32,
 };
 use crate::gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, SweepReport};
@@ -168,7 +168,14 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             .vfs
             .create_new(&temp)
             .map_err(io_err("create the rewrite's temporary file"))?;
-        match self.fill(file, temp.clone(), plan) {
+        // Locked before it is written, and so before its rename over the pack: the path never names an unlocked
+        // pack while this writer lives (ROADMAP 9.2.7, ADR-0053). The old file stays locked until the swap drops it.
+        let locked = if self.lock_file {
+            lock::lock(&file)
+        } else {
+            Ok(())
+        };
+        match locked.and_then(|()| self.fill(file, temp.clone(), plan)) {
             Ok(written) => Ok(written),
             Err(e) => Err(self.discard(&temp, e)),
         }
@@ -334,6 +341,13 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             };
             if !still_ours {
                 w.poison = Some(Poison::NotBound);
+                // The path may name the new file: it stays locked while this handle lives (ROADMAP 9.2.7).
+                if self.lock_file {
+                    self.held
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(lock::Held(written.file));
+                }
                 return Err(e);
             }
             let temp = written.temp.clone();
@@ -355,6 +369,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             uploads: written.uploads,
             chunk_frames: written.chunk_frames,
             window: None,
+            locked: self.lock_file,
         });
         inner.staged = written.staged;
         if let (Some(mapper), Some(pack)) = (&mut inner.mapper, &mut inner.pack) {

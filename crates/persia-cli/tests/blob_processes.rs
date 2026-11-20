@@ -7,7 +7,9 @@
 //!    `BlobDatabase::open` fails on the container's writer lock (`flock`, which belongs to the open file description,
 //!    so another process is the real case), and never opens the pack read-write: a stale pack temporary file, which a
 //!    read-write pack open sweeps, is still there, and the pack's bytes are unchanged. A read-only open beside the
-//!    writer reads its blob. Once the writer exits, the next read-write open succeeds and sweeps it.
+//!    writer reads its blob. Once the writer exits, the next read-write open succeeds and sweeps it. A holder that
+//!    drops its database but keeps a clone of the pack's `Arc` keeps the pack's own writer lock: a second process
+//!    opens the container, then fails on the pack (`PackLocked`) before it sweeps or writes.
 //! 2. **A concurrent reader** (9.4.5): a `ReadOnlyBlobDatabase` opened before the writer's first `put_blob` (no pack
 //!    file) creates none; each `refresh` with a newer read-only open, while another process writes, shows at least
 //!    every document acknowledged before it, and every document it shows has its blob, byte-identical. The last
@@ -64,6 +66,7 @@ fn child_role() {
     };
     match env.role.as_str() {
         "holder" => holder(&env.path),
+        "clone-holder" => clone_holder(&env.path),
         "second" => second(&env.path),
         "reader" => reader(&env.path),
         "writer" => writer(&env.path, &env.prefix, env.count),
@@ -100,6 +103,18 @@ fn holder(path: &Path) {
     wait_for_eof();
 }
 
+/// Opens the database read-write, puts `held`, then drops the database and keeps only a clone of its pack's `Arc`
+/// until stdin closes: the container's lock is released, the pack's is not.
+fn clone_holder(path: &Path) {
+    let mut db = BlobDatabase::open(path, DatabaseOptions::default()).unwrap();
+    let blob = put!(db, "held");
+    let kept = std::sync::Arc::clone(db.blobs().store());
+    drop(db);
+    report(&format!("ready {}", blob.blob_id()));
+    wait_for_eof();
+    drop(kept);
+}
+
 /// Tries a second read-write open, reports `locked`, `opened` or `error <e>`; when locked, reads `held`'s blob
 /// through a read-only open beside the writer and reports `read <len>`.
 fn second(path: &Path) {
@@ -108,6 +123,12 @@ fn second(path: &Path) {
             if matches!(*e, DatabaseError::Container(ContainerError::Locked)) =>
         {
             report("locked");
+        }
+        // The pack's writer lock (persia-blob's `PackLocked`, named by its message: this crate does not depend on
+        // persia-blob).
+        Err(e @ Error::Blob(_)) if e.to_string().contains("locked by another writer") => {
+            report("pack-locked");
+            return;
         }
         Ok(db) => {
             drop(db);
@@ -297,6 +318,52 @@ fn a_second_process_fails_on_the_lock_and_never_opens_the_pack_read_write() {
     assert!(
         !stale.exists(),
         "a read-write open after the writer left kept the stale temporary"
+    );
+    assert_eq!(
+        check_blobs(&path, "after"),
+        BTreeSet::from(["held".to_owned()])
+    );
+}
+/// The pack's own writer lock (9.2.7): a holder that drops its database but keeps a clone of the pack's `Arc` has
+/// released the container's lock, not the pack's. A second process opens the container read-write, then fails on the
+/// pack's lock before it sweeps or writes anything; once the clone is dropped, the next open succeeds.
+#[test]
+fn a_second_process_fails_on_the_pack_lock_a_cloned_store_keeps() {
+    if child_env().is_some() {
+        return;
+    }
+    let _serial = serial();
+    let dir = KeptOnFailure::new();
+    let path = create(dir.path());
+    let pack = pack_of(&path);
+
+    let holder = ChildIo::spawn("clone-holder", &path, 0, "", 0);
+    let ready = holder.expect("clone holder");
+    assert!(ready.starts_with("ready "), "{ready}");
+    let stale = dir.path().join("app.persia.blobs.tmp.0123456789abcdef.7");
+    std::fs::write(&stale, b"stale").unwrap();
+    let pack_before = std::fs::read(&pack).unwrap();
+    for attempt in 0..2 {
+        let ctx = format!("second writer {attempt}");
+        let second = ChildIo::spawn("second", &path, 0, "", 0);
+        assert_eq!(second.expect(&ctx), "pack-locked", "{ctx}");
+        second.finish();
+        assert!(
+            stale.exists(),
+            "{ctx}: the locked-out open swept the pack's temporaries"
+        );
+        assert!(
+            std::fs::read(&pack).unwrap() == pack_before,
+            "{ctx}: the locked-out open changed the pack"
+        );
+    }
+    holder.finish();
+    let third = ChildIo::spawn("second", &path, 0, "", 0);
+    assert_eq!(third.expect("third"), "opened");
+    third.finish();
+    assert!(
+        !stale.exists(),
+        "the read-write open kept the stale temporary"
     );
     assert_eq!(
         check_blobs(&path, "after"),

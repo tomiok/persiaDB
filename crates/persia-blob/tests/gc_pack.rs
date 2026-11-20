@@ -40,6 +40,7 @@ use persia_blob::gc::{GcObject, Mark, Rewrite, Sweep, SweepOptions, SweepReport}
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobStore, Error, PackMode, PackStore, read_chunk_checked,
 };
+use persia_storage::container::ContainerFile;
 use persia_storage::container::sim::{CrashLoss, SimFault};
 use persia_storage::vfs::Vfs;
 use persia_storage::vfs::sim::{SimFs, SimFsFile};
@@ -883,4 +884,49 @@ fn a_crash_at_any_call_of_a_rewrite_keeping_pinned_blobs_reopens_a_whole_pack() 
 #[test]
 fn a_crash_at_any_call_of_a_rewrite_keeping_pinned_blobs_reopens_a_whole_pack_many_seeds() {
     crash_during_pinned_rewrite(64);
+}
+
+/// A rewrite holds the writer lock throughout (ROADMAP 9.2.7, ADR-0052, ADR-0053): just before its rename the old pack
+/// and the new file are both locked, and after it the file the path names is.
+#[test]
+fn a_rewrite_keeps_the_writer_lock_through_the_swap() {
+    let fs = sim();
+    let store = open(&fs, PackMode::ReadWrite).unwrap();
+    let kept = put(&store, b"kept by the mark", 4, 1);
+    put(&store, b"dropped by the sweep", 4, 2);
+    let pins = Pins::new([]);
+    let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+    {
+        let (fs, seen) = (fs.clone(), Arc::clone(&seen));
+        // Under the pin set's lock, right before the rename.
+        pins.on_check(move |_| {
+            let second = matches!(open(&fs, PackMode::ReadWrite), Err(Error::PackLocked));
+            let temps: Vec<PathBuf> = fs
+                .files()
+                .into_iter()
+                .map(|(p, _)| p)
+                .filter(|p| p.to_string_lossy().contains(".tmp."))
+                .collect();
+            let temp_locked = temps
+                .iter()
+                .all(|t| !fs.open(t, true).unwrap().try_lock().unwrap());
+            seen.lock()
+                .unwrap()
+                .push((second, temps.len(), temp_locked));
+        });
+    }
+    let mark = Mark::new([kept.blob_id()], persia_blob::PinGate::pinned(&pins));
+    let report = sweep(&store, &mark, &pins, 0.0).unwrap();
+    assert!(
+        matches!(report.rewrite, Some(Rewrite::Done { .. })),
+        "{report:?}"
+    );
+    assert_eq!(*seen.lock().unwrap(), [(true, 1, true)]);
+    assert!(matches!(
+        open(&fs, PackMode::ReadWrite),
+        Err(Error::PackLocked)
+    ));
+    drop(store);
+    let reopened = open(&fs, PackMode::ReadWrite).unwrap();
+    assert_eq!(read_all(&reopened, &kept).unwrap(), b"kept by the mark");
 }

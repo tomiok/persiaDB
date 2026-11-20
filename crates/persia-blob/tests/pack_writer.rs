@@ -153,3 +153,69 @@ fn a_second_writer_fails_on_a_real_containers_lock() {
     let read_only = PackStore::open(pack_path(&db), reader.header().db_uuid).unwrap();
     assert_eq!(read_only.mode(), PackMode::ReadOnly);
 }
+
+/// The proof is the gate, the pack's writer lock the enforcement (ROADMAP 9.2.7): the same proof cannot open a second
+/// read-write handle, and a handle an `Arc` clone keeps alive after its container closed keeps the lock with it.
+#[test]
+fn the_pack_lock_allows_one_writer_whatever_the_proof() {
+    let fs = fs();
+    let path = pack_path(Path::new(DB));
+    let container = Container::create_in(vfs(&fs), DB).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let first = PackStore::open_writer_in(vfs(&fs), &path, &proof).unwrap();
+    store_blob(&first, b"locked", 1);
+    for _ in 0..2 {
+        assert!(matches!(
+            PackStore::open_writer_in(vfs(&fs), &path, &proof),
+            Err(Error::PackLocked)
+        ));
+    }
+    // A reader is never locked out.
+    assert_eq!(
+        PackStore::open_in(vfs(&fs), &path, proof.db_uuid())
+            .unwrap()
+            .blob_ids()
+            .len(),
+        1
+    );
+
+    let first = Arc::new(first);
+    let kept = Arc::clone(&first);
+    drop((first, container));
+    // The container's lock is free, the pack's is not.
+    let next = Container::open_in(vfs(&fs), DB, Mode::ReadWrite).unwrap();
+    assert!(matches!(
+        PackStore::open_writer_in(vfs(&fs), &path, &next.writer_proof().unwrap()),
+        Err(Error::PackLocked)
+    ));
+    drop(kept);
+    let store = PackStore::open_writer_in(vfs(&fs), &path, &next.writer_proof().unwrap()).unwrap();
+    assert_eq!(store.blob_ids(), [blob_id_of(b"locked")]);
+}
+
+/// The same on the operating system's file system: `flock` on Unix, `<name>.persia.blobs.lock` on Windows.
+#[test]
+fn the_pack_lock_allows_one_writer_on_a_real_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("app.persia");
+    let container = Container::create(&db).unwrap();
+    let proof = container.writer_proof().unwrap();
+    let first = PackStore::open_writer(pack_path(&db), &proof).unwrap();
+    let m = BlobManifest::new(
+        blob_id_of(b"real"),
+        4,
+        ChunkSize::new(ChunkSize::MIN).unwrap(),
+        UploadId::new(1),
+        vec![crc32c(b"real")],
+    )
+    .unwrap();
+    first.stage_chunk(m.upload_id(), 0, b"real").unwrap();
+    assert_eq!(first.bind(&m).unwrap(), BindOutcome::Bound);
+    assert!(matches!(
+        PackStore::open_writer(pack_path(&db), &proof),
+        Err(Error::PackLocked)
+    ));
+    drop(first);
+    let again = PackStore::open_writer(pack_path(&db), &proof).unwrap();
+    assert_eq!(again.blob_ids(), [m.blob_id()]);
+}

@@ -1296,6 +1296,7 @@ fn is_corruption_is_true_for_corrupt_only() {
         ),
         // -- wiring --
         // One case per wiring variant, here and only here.
+        (Error::PackLocked, false),
         // -- resume --
         // One case per resume variant, here and only here.
         (
@@ -1349,7 +1350,7 @@ fn is_corruption_is_true_for_corrupt_only() {
             Error::CorruptAt { .. } => "followups",
             // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
             // One arm for the wiring variants, `=> "wiring"`, here and only here.
-            //
+            Error::PackLocked => "wiring",
             // -- resume (9.3.4, 9.3.6, 9.5.9) --
             // One arm for the resume variants, `=> "resume"`, here and only here.
             Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
