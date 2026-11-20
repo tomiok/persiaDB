@@ -25,6 +25,14 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    carries the container's `db_uuid`, which the pack's header must match, and borrows the handle. It is checked at
    open and not stored. `PackStore::open_writer` / `open_writer_in` are the only read-write opens; `open` / `open_in`
    are read-only and take a `db_uuid`. A second writer is impossible because its container open fails on the lock.
+   The proof is the API gate; the pack's own OS lock, reusing the container's primitive (`ContainerFile::try_lock`,
+   `Vfs::lock_beside`), is the enforcement. The proof is `Copy`, any read-write container mints one (a simulated one
+   too), and an `Arc` clone of the store outlives the container, so the proof alone cannot enforce one writer. A
+   read-write handle holds the lock from open to drop (Unix: the pack file itself; Windows: `<name>.persia.blobs.lock`),
+   taken before the open sweeps or recovers anything; a created or rewritten pack file is locked before it is written,
+   so the path never names an unlocked pack while its writer lives. A second read-write open fails with `PackLocked`.
+   Remaining gap: before the pack file exists on Unix there is nothing to lock, so two read-write handles opened then
+   can both exist; the one that loses the race to create the pack fails at its first write and is poisoned.
 2. **Drop order.** The proof does not keep the container alive, so owners declare the pack before the container
    (`BlobDatabase`: pins, then blobs, then the log) and the pack drops first. Tests mint real proofs from a real
    `Container` over a `SimFile`; there is no test-only constructor.
@@ -34,8 +42,13 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
 4. **Read-only.** `ReadOnlyBlobDatabase` opens the pack read-only and never creates it. With no pack, a blob read
    fails as not bound. `refresh(reopened)` takes a newer read-only open of the documents first, then refreshes the
    pack, in that order because a blob is bound before any document that references it is logged. A reopened
-   database of another `db_uuid` is refused. The engine's `ReadOnlyDatabase` has no refresh of its own, so the caller
-   reopens it.
+   database of another `db_uuid`, at another canonical path, or older than the current open is refused and nothing
+   changes. Older is a lower manifest `seq`, or the same `seq` with fewer replayed WAL records or an earlier end of
+   the frames that open saw. `PackReplaced` (a GC rewrite) reopens the pack read-only at the same path with the same
+   `db_uuid`; the refresh holds `&mut self`, so no stream still borrows the old pack. Any other pack error, and a
+   reopen that fails, restores the previous documents so the documents and the pack stay paired. `PackStore::refresh`
+   itself does not reopen or remap (ROADMAP 9.2.13). The engine's `ReadOnlyDatabase` has no refresh of its own, so
+   the caller reopens it.
 
 ### `verify` (ROADMAP 9.5.3, 9.5.6)
 
@@ -56,10 +69,14 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    and a bind's backend error whose outcome is known. Never wrapped: an unknown bind outcome (the blob may still be
    bound), `BlobIdMismatch`, a caller's error, or a small (inline) blob. The pins drop with the error, and GC's grace
    period keeps the upload resumable (SPEC §9.5). A resume that fails again returns the token of the upload it was
-   staging (after a conflict restage, the new one).
+   staging (after a conflict restage, the new one). `UploadInterrupted` is not corruption: `is_corruption` is false
+   and `corrupt_offset` is `None`, even when `source` is corruption. The source carries the cause.
 8. **The caller passes the whole blob.** `PutBlobOptions::resume` takes a reader of the whole blob from its start.
    `put_blob` pins the old upload before listing it, reads past the kept run without uploading it, and checks each
    kept chunk against the staged chunk's CRC32C (a reader that differs there is `InvalidResume`, a caller's error).
+   A staged chunk whose read reports corruption is not part of that run: the run ends there instead of failing the
+   resume. The object stays, so staging the index conflicts when the stored bytes differ and the upload restarts under
+   a new id. The listing is sorted by index first; a repeated index whose lengths differ ends the run before it.
    It pins a new upload before any chunk is copied to it. The token's chunk size wins over `chunk_size`, because chunk
    objects do not record their size, and it is checked against the floor before anything is read. A network client
    that wants to send only the rest needs an offset query, which M11 adds if it needs one.
@@ -83,10 +100,11 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
 - Every pack test needs a real container to mint a proof. `PackStore::open(.., ReadWrite, ..)` no longer exists.
 - `persia verify` reads the whole pack by default; `--quick` restores the old cost.
 - A resume re-reads the kept run from the caller (not re-uploaded). A resumed blob's upload id may differ from the token's.
-- Remaining race (ROADMAP 9.5.10): the sweep ages an upload from its listing. A resume that pins, lists, stages a new
-  chunk under the old upload, binds and drops its pins between that listing and the upload's locked check, then is
-  referenced later by `BlobRef`, can lose the old chunks. The fix belongs to the sweep: re-list the upload under the
-  lock before deleting it.
+- Remaining race (ROADMAP 9.5.10, added on `blob/resume` and merged after this PR): the remote sweep re-lists an
+  upload's chunks under the pin set's lock before deleting them, and keeps the upload when a chunk is younger than
+  the grace period or was not in its first listing. A resume that pins, lists, stages a new chunk under the old
+  upload, binds and drops its pins between the sweep's upload listing and its locked check, and is referenced later
+  by `BlobRef`, can lose the old chunks. Without `strong_list` the first listing can also miss a fresh chunk.
 
 ## Alternatives considered
 

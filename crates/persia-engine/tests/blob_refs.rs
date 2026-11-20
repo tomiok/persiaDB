@@ -13,6 +13,7 @@
     clippy::unwrap_used,
     clippy::panic,
     clippy::indexing_slicing,
+    clippy::result_large_err,
     missing_docs
 )] // Tests: inputs are generated or fixed.
 
@@ -272,4 +273,205 @@ fn held_collection_snapshots_memtable_views_and_sidecars_keep_their_blobs() {
     assert_eq!(db.referenced_blobs().unwrap(), ids([4, 5, 6]));
     drop((segment, deleted));
     assert_eq!(db.referenced_blobs().unwrap(), ids([4, 6]));
+}
+
+/// What `ReadOnlyDatabase::blob_references` lists for `verify` (SPEC §9.5, ROADMAP 9.5.3): `(collection, id, blob
+/// seed, in a segment)` of each reference, in order.
+fn listed(file: &SimFile) -> Vec<(String, String, u8, bool)> {
+    let reader = persia_engine::db::ReadOnlyDatabase::open_on(
+        file.crash(CrashLoss::Nothing),
+        &persia_analysis::AnalyzerRegistry::builtin(),
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    reader
+        .blob_references(|r| {
+            let in_segment = matches!(r.site, persia_engine::db::BlobRefSite::Segment { .. });
+            let seed = r.blob_ref.blob_id().as_bytes()[0];
+            out.push((r.collection, r.id, seed, in_segment));
+            Ok::<_, persia_engine::db::DatabaseError>(())
+        })
+        .unwrap();
+    out
+}
+
+/// Live segment documents as their committed tombstones leave them, then every WAL put from `wal_start` on, replaced
+/// or deleted since included; documents without a reference are skipped.
+#[test]
+fn blob_references_lists_live_segment_documents_and_every_wal_put() {
+    let (file, mut db) = create();
+    db.put("c", &doc(1, Some(1)), Durability::Fsync).unwrap();
+    db.put("c", &doc(2, Some(2)), Durability::Fsync).unwrap();
+    db.put("c", &doc(3, None), Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    db.delete("c", "d2", Durability::Fsync).unwrap();
+    db.commit().unwrap();
+    // After the last commit: only in the WAL, the replaced put too.
+    db.put("c", &doc(4, Some(4)), Durability::Fsync).unwrap();
+    db.put("c", &doc(4, Some(5)), Durability::Fsync).unwrap();
+    db.delete("c", "d4", Durability::Fsync).unwrap();
+    let found = listed(&file);
+    let row = |id: &str, seed, seg| ("c".to_owned(), id.to_owned(), seed, seg);
+    assert_eq!(
+        found,
+        [row("d1", 1, true), row("d4", 4, false), row("d4", 5, false)]
+    );
+}
+
+// -- `ReadOnlyDatabase::blob_references` against a naive model (SPEC §9.5, ROADMAP 9.5.3) --
+//
+// Invariants:
+// 4. A read-only open lists, first, exactly one reference per document live as of the last commit (a segment
+//    document its committed tombstones leave live, in any collection), whatever the merges did; then every put
+//    logged since that commit, in log order, replaced or deleted since or not, across reopens of the writer. Nothing
+//    a committed delete or replacement hides; documents without a reference are not listed.
+// 5. A WAL reference names the chunk and record it was found at, and two puts never share one.
+
+#[derive(Debug, Clone)]
+enum RefOp {
+    Put(u8, u8, Option<u8>),
+    Delete(u8, u8),
+    Commit,
+    Merge,
+    Reopen,
+}
+
+fn ref_op() -> impl Strategy<Value = RefOp> {
+    prop_oneof![
+        6 => (0..2_u8, 0..5_u8, proptest::option::of(0..8_u8)).prop_map(|(c, d, b)| RefOp::Put(c, d, b)),
+        2 => (0..2_u8, 0..5_u8).prop_map(|(c, d)| RefOp::Delete(c, d)),
+        2 => Just(RefOp::Commit),
+        1 => Just(RefOp::Merge),
+        1 => Just(RefOp::Reopen),
+    ]
+}
+
+const COLLECTIONS: [&str; 2] = ["c", "e"];
+
+fn create_two() -> (SimFile, Database<SimFile>) {
+    let (file, mut db) = create();
+    db.create_collection(SchemaBuilder::new("e").build().unwrap())
+        .unwrap();
+    (file, db)
+}
+
+/// Every reference a read-only open of `file` lists: the segment ones sorted, the WAL ones in order, with their
+/// sites.
+#[allow(clippy::type_complexity)]
+fn listed_split(
+    file: &SimFile,
+) -> (
+    Vec<(String, String, u8)>,
+    Vec<(String, String, u8, (u64, u64))>,
+) {
+    let reader = persia_engine::db::ReadOnlyDatabase::open_on(
+        file.crash(CrashLoss::Nothing),
+        &persia_analysis::AnalyzerRegistry::builtin(),
+    )
+    .unwrap();
+    let (mut segment, mut wal) = (Vec::new(), Vec::new());
+    reader
+        .blob_references(|r| {
+            let seed = r.blob_ref.blob_id().as_bytes()[0];
+            // The whole reference round-trips, not only its id.
+            assert_eq!(r.blob_ref, blob(seed), "{} {}", r.collection, r.id);
+            match r.site {
+                persia_engine::db::BlobRefSite::Segment { .. } => {
+                    assert!(wal.is_empty(), "segment references come first");
+                    segment.push((r.collection, r.id, seed));
+                }
+                persia_engine::db::BlobRefSite::Wal { chunk, offset } => {
+                    wal.push((r.collection, r.id, seed, (chunk, offset)));
+                }
+                other => panic!("{other:?}"),
+            }
+            Ok::<_, persia_engine::db::DatabaseError>(())
+        })
+        .unwrap();
+    segment.sort();
+    (segment, wal)
+}
+
+fn run_refs(ops: &[RefOp]) {
+    let (mut file, mut db) = create_two();
+    // Live now (memtables included), live as of the last commit, and the puts logged since it.
+    let mut live: BTreeMap<(u8, u8), Option<u8>> = BTreeMap::new();
+    let mut committed: BTreeMap<(u8, u8), Option<u8>> = BTreeMap::new();
+    let mut wal: Vec<(u8, u8, Option<u8>)> = Vec::new();
+    for (step, op) in ops.iter().enumerate() {
+        match *op {
+            RefOp::Put(c, d, b) => {
+                db.put(COLLECTIONS[c as usize], &doc(d, b), Durability::Fsync)
+                    .unwrap();
+                live.insert((c, d), b);
+                wal.push((c, d, b));
+            }
+            RefOp::Delete(c, d) => {
+                db.delete(COLLECTIONS[c as usize], &format!("d{d}"), Durability::Fsync)
+                    .unwrap();
+                live.remove(&(c, d));
+            }
+            RefOp::Commit => {
+                db.commit().unwrap();
+                committed.clone_from(&live);
+                wal.clear();
+            }
+            RefOp::Merge => {
+                db.finish_merges().unwrap();
+            }
+            RefOp::Reopen => {
+                drop(db);
+                file = file.crash(CrashLoss::Nothing);
+                db = Database::open_on(file.clone(), options()).unwrap();
+            }
+        }
+        let name = |c: u8, d: u8| (COLLECTIONS[c as usize].to_owned(), format!("d{d}"));
+        let mut expected_segment: Vec<_> = committed
+            .iter()
+            .filter_map(|(&(c, d), b)| {
+                b.map(|b| {
+                    let (c, d) = name(c, d);
+                    (c, d, b)
+                })
+            })
+            .collect();
+        expected_segment.sort();
+        let expected_wal: Vec<_> = wal
+            .iter()
+            .filter_map(|&(c, d, b)| {
+                b.map(|b| {
+                    let (c, d) = name(c, d);
+                    (c, d, b)
+                })
+            })
+            .collect();
+        let (segment, found_wal) = listed_split(&file);
+        let what = || format!("after step {step} ({op:?}) of {ops:?}");
+        assert_eq!(segment, expected_segment, "segment references {}", what());
+        let wal_refs: Vec<_> = found_wal
+            .iter()
+            .map(|(c, d, b, _)| (c.clone(), d.clone(), *b))
+            .collect();
+        assert_eq!(wal_refs, expected_wal, "WAL references {}", what());
+        let sites: Vec<_> = found_wal.iter().map(|w| w.3).collect();
+        assert!(
+            sites.windows(2).all(|w| w[0] < w[1]),
+            "WAL sites strictly increase {}: {sites:?}",
+            what()
+        );
+    }
+}
+
+proptest! {
+    #![proptest_config(Config {
+        cases: if cfg!(feature = "slow") { 512 } else { 48 },
+        rng_seed: RngSeed::Fixed(0x9_5_3),
+        failure_persistence: None,
+        ..Config::default()
+    })]
+
+    #[test]
+    fn blob_references_match_the_model(ops in proptest::collection::vec(ref_op(), 1..32)) {
+        run_refs(&ops);
+    }
 }

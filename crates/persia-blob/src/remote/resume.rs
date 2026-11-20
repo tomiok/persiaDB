@@ -115,10 +115,14 @@ impl ResumedUpload {
 }
 
 impl<S: Storage> RemoteBlobStore<S> {
-    /// Finds what `token`'s upload has stored: the run of chunks `0, 1, …` whose listed length is the chunk size,
-    /// each re-read (up to `parallelism` at a time), checked to be full again, hashed in order and its CRC32C kept. A
-    /// chunk missing or of another length ends the run; it and later ones are written again (same bytes succeed,
-    /// other bytes conflict). Without `strong_list` a just-written chunk may be missed, which only shortens the run.
+    /// Finds what `token`'s upload has stored. The listing is sorted by index and duplicate keys are collapsed first
+    /// (a backend's order is its own, and a key may be listed twice; SPEC §9.4, §10.1): repeats of one index with the
+    /// same length collapse to one, and repeats whose lengths differ end the run before that index. Then the run of
+    /// chunks `0, 1, …` whose listed length is the chunk size is re-read (up to `parallelism` at a time), checked to
+    /// be full again, hashed in order and its CRC32C kept. A chunk missing, of another length, or whose read reports
+    /// corruption ends the run; it and later ones are written again (same bytes succeed, other bytes conflict, and a
+    /// corrupt object that is still there conflicts, so the upload restarts under a new id). Without `strong_list` a
+    /// just-written chunk may be missed, which only shortens the run.
     ///
     /// The caller pins `token.upload_id` before calling (SPEC §9.5).
     ///
@@ -127,7 +131,9 @@ impl<S: Storage> RemoteBlobStore<S> {
     pub fn resume(&self, token: ResumeToken) -> Result<ResumedUpload> {
         let full = u64::from(token.chunk_size.get());
         let listed = self.staged_chunks(token.upload_id)?;
-        let run = listed
+        let indices = sorted_indices(&listed);
+        let ordered = chunks_for_run(listed);
+        let run = ordered
             .iter()
             .zip(0..u32::MAX)
             .take_while(|(chunk, index)| chunk.index == *index && chunk.size == full)
@@ -136,7 +142,7 @@ impl<S: Storage> RemoteBlobStore<S> {
             token,
             hasher: ContentHasher::new(),
             crcs: Vec::new(),
-            listed: sorted_indices(&listed),
+            listed: indices,
         };
         let window = self.parallelism.get();
         let mut start = 0_usize;
@@ -144,13 +150,19 @@ impl<S: Storage> RemoteBlobStore<S> {
             let len = window.min(run.saturating_sub(start));
             let chunks = parallel::run(len, self.parallelism, |i| {
                 let index = chunk_index(start, i)?;
-                self.get(
+                match self.get(
                     &RemoteKey::Chunk {
                         upload_id: token.upload_id,
                         index,
                     }
                     .key()?,
-                )
+                ) {
+                    Ok(bytes) => Ok(bytes),
+                    // A corrupt object is not part of the run (SPEC §9.4): staging the index later conflicts
+                    // if the object is still there, and the upload restarts under a new id.
+                    Err(e) if e.is_corruption() => Ok(None),
+                    Err(e) => Err(e),
+                }
             })?;
             for bytes in chunks {
                 match bytes {
@@ -158,7 +170,7 @@ impl<S: Storage> RemoteBlobStore<S> {
                         resumed.hasher.update(&bytes);
                         resumed.crcs.push(crc32c(&bytes));
                     }
-                    // Gone or not full since the listing: the run ends here.
+                    // Gone, not full, or corrupt since the listing: the run ends here.
                     _ => return Ok(resumed),
                 }
             }
@@ -213,6 +225,26 @@ impl<S: Storage> RemoteBlobStore<S> {
     }
 }
 
+/// The listing sorted by index, with duplicate keys collapsed, up to the first index whose repeats disagree on
+/// length: that index is not part of the run (neither length can be trusted), and neither is anything after it,
+/// because the run is a prefix from chunk 0 (SPEC §9.4). Repeats of the same length collapse to one.
+fn chunks_for_run(mut listed: Vec<StagedChunk>) -> Vec<StagedChunk> {
+    listed.sort_by_key(|chunk| chunk.index);
+    let mut out: Vec<StagedChunk> = Vec::with_capacity(listed.len());
+    for chunk in listed {
+        // `copied`: the match does not borrow `out`, so the disagreeing index can be popped.
+        match out.last().copied() {
+            Some(prev) if prev.index == chunk.index && prev.size != chunk.size => {
+                out.pop();
+                break;
+            }
+            Some(prev) if prev.index == chunk.index => {}
+            _ => out.push(chunk),
+        }
+    }
+    out
+}
+
 /// The listed chunks' indices, sorted and without duplicates: a backend may list them in another order, or twice.
 fn sorted_indices(listed: &[StagedChunk]) -> Vec<u32> {
     let mut indices: Vec<u32> = listed.iter().map(|chunk| chunk.index).collect();
@@ -237,9 +269,10 @@ mod tests {
     use std::sync::Arc;
     use std::time::UNIX_EPOCH;
 
-    use persia_storage::MemoryStorage;
     use persia_storage::retry::ManualClock;
+    use persia_storage::{MemoryStorage, Storage};
 
+    use super::RemoteKey;
     use super::*;
     use crate::store::MemoryBlobStore;
 
@@ -337,7 +370,188 @@ mod tests {
             }
             let resumed = BlobStore::resume(&store, t).unwrap();
             assert_eq!(resumed.listed(), [0, 1, 3, 4], "{order:?}");
+            // The kept run is the full chunks from 0, not whatever the listing returned first.
+            assert_eq!(resumed.next_index(), 2, "{order:?}");
         }
+    }
+
+    #[test]
+    fn a_misordered_listing_of_a_fully_staged_upload_keeps_the_whole_run() {
+        use crate::testing::{ListOrder, MisorderedList};
+        for order in [ListOrder::Reversed, ListOrder::Duplicated] {
+            let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+            let inner = MemoryStorage::with_clock(clock);
+            let store = RemoteBlobStore::new(MisorderedList { inner, order })
+                .with_parallelism(NonZeroUsize::MIN);
+            let t = token(1);
+            for (index, bytes) in [(0, b"abcd".as_slice()), (1, b"efgh"), (2, b"ijkl")] {
+                store.stage_chunk(t.upload_id, index, bytes).unwrap();
+            }
+            let resumed = BlobStore::resume(&store, t).unwrap();
+            assert_eq!(resumed.next_index(), 3, "{order:?}: the full run");
+            assert_eq!(resumed.listed(), [0, 1, 2], "{order:?}");
+        }
+    }
+
+    /// Lists `inner`, then repeats the chunk at `index` with a different length.
+    struct DifferingSize<S> {
+        inner: S,
+        upload: UploadId,
+        index: u32,
+    }
+
+    impl<S: Storage> Storage for DifferingSize<S> {
+        fn get_range(
+            &self,
+            key: &persia_storage::Key,
+            range: std::ops::Range<u64>,
+        ) -> persia_storage::Result<persia_format::ByteSource> {
+            self.inner.get_range(key, range)
+        }
+
+        fn get(&self, key: &persia_storage::Key) -> persia_storage::Result<bytes::Bytes> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &persia_storage::Key, data: bytes::Bytes) -> persia_storage::Result<()> {
+            self.inner.put(key, data)
+        }
+
+        fn put_if_absent(
+            &self,
+            key: &persia_storage::Key,
+            data: bytes::Bytes,
+        ) -> persia_storage::Result<persia_storage::PutOutcome> {
+            self.inner.put_if_absent(key, data)
+        }
+
+        fn list(
+            &self,
+            prefix: &persia_storage::KeyPrefix,
+        ) -> persia_storage::Result<Vec<persia_storage::ObjectMeta>> {
+            let mut listed = self.inner.list(prefix)?;
+            if let Some(meta) = listed.iter().find(|meta| {
+                matches!(
+                    RemoteKey::parse(&meta.key),
+                    Some(RemoteKey::Chunk {
+                        upload_id,
+                        index,
+                    }) if upload_id == self.upload && index == self.index
+                )
+            }) {
+                let mut again = meta.clone();
+                again.size = again.size.saturating_add(1);
+                listed.push(again);
+            }
+            Ok(listed)
+        }
+
+        fn delete(&self, key: &persia_storage::Key) -> persia_storage::Result<()> {
+            self.inner.delete(key)
+        }
+
+        fn capabilities(&self) -> persia_storage::Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[test]
+    fn a_duplicate_index_with_two_lengths_ends_the_run_there() {
+        let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+        let inner = MemoryStorage::with_clock(clock);
+        let t = token(1);
+        let store = RemoteBlobStore::new(DifferingSize {
+            inner,
+            upload: t.upload_id,
+            index: 1,
+        })
+        .with_parallelism(NonZeroUsize::MIN);
+        for (index, bytes) in [(0, b"abcd".as_slice()), (1, b"efgh"), (2, b"ijkl")] {
+            store.stage_chunk(t.upload_id, index, bytes).unwrap();
+        }
+        let resumed = BlobStore::resume(&store, t).unwrap();
+        assert_eq!(resumed.next_index(), 1, "chunk 1's two lengths end the run");
+        assert_eq!(resumed.listed(), [0, 1, 2]);
+    }
+
+    /// `get` of one chunk reports corruption; everything else is `inner`.
+    struct CorruptGet<S> {
+        inner: S,
+        upload: UploadId,
+        index: u32,
+    }
+
+    impl<S: Storage> Storage for CorruptGet<S> {
+        fn get_range(
+            &self,
+            key: &persia_storage::Key,
+            range: std::ops::Range<u64>,
+        ) -> persia_storage::Result<persia_format::ByteSource> {
+            self.inner.get_range(key, range)
+        }
+
+        fn get(&self, key: &persia_storage::Key) -> persia_storage::Result<bytes::Bytes> {
+            if matches!(
+                RemoteKey::parse(key),
+                Some(RemoteKey::Chunk {
+                    upload_id,
+                    index,
+                }) if upload_id == self.upload && index == self.index
+            ) {
+                return Err(persia_storage::Error::ShortRead {
+                    key: key.clone(),
+                    requested: 0..1,
+                    returned: 0,
+                });
+            }
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: &persia_storage::Key, data: bytes::Bytes) -> persia_storage::Result<()> {
+            self.inner.put(key, data)
+        }
+
+        fn put_if_absent(
+            &self,
+            key: &persia_storage::Key,
+            data: bytes::Bytes,
+        ) -> persia_storage::Result<persia_storage::PutOutcome> {
+            self.inner.put_if_absent(key, data)
+        }
+
+        fn list(
+            &self,
+            prefix: &persia_storage::KeyPrefix,
+        ) -> persia_storage::Result<Vec<persia_storage::ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        fn delete(&self, key: &persia_storage::Key) -> persia_storage::Result<()> {
+            self.inner.delete(key)
+        }
+
+        fn capabilities(&self) -> persia_storage::Capabilities {
+            self.inner.capabilities()
+        }
+    }
+
+    #[test]
+    fn a_corrupt_chunk_ends_the_run_instead_of_failing_the_resume() {
+        let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+        let inner = MemoryStorage::with_clock(clock);
+        let t = token(1);
+        let store = RemoteBlobStore::new(CorruptGet {
+            inner,
+            upload: t.upload_id,
+            index: 1,
+        })
+        .with_parallelism(NonZeroUsize::MIN);
+        for (index, bytes) in [(0, b"abcd".as_slice()), (1, b"efgh"), (2, b"ijkl")] {
+            store.stage_chunk(t.upload_id, index, bytes).unwrap();
+        }
+        let resumed = BlobStore::resume(&store, t).unwrap();
+        assert_eq!(resumed.next_index(), 1);
+        assert_eq!(resumed.chunk_crcs().len(), 1);
     }
 
     #[test]

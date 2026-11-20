@@ -17,7 +17,7 @@ use std::sync::{Arc, OnceLock, RwLock, Weak};
 
 use persia_format::BlobId;
 use persia_format::frame::FrameKind;
-use persia_storage::container::ContainerFile;
+use persia_storage::container::{Container, ContainerFile};
 
 use super::{Database, DatabaseError, Snapshot};
 use crate::document::Document;
@@ -148,36 +148,22 @@ impl<F: ContainerFile + Sync> Database<F> {
     /// a reopen would replay (SPEC §8.6). Records still buffered in memory are in the memtables.
     fn wal_refs(&self, ids: &mut HashSet<BlobId>) -> Result<(), DatabaseError> {
         let container = self.wal.log();
-        for frame in container.frames() {
-            if frame.kind != FrameKind::WalChunk {
-                continue;
-            }
-            let chunk = frame.offset;
-            let source = container
-                .read_frame_source(chunk, MAX_CHUNK_LEN)
-                .map_err(ReplayError::Container)?;
-            let at_chunk = |error| ReplayError::Chunk { chunk, error };
-            let mut records = decode_chunk(&source.payload).map_err(at_chunk)?;
-            loop {
-                let offset = records.offset();
-                let Some(record) = records.next() else {
-                    break;
-                };
-                let record = record.map_err(at_chunk)?;
-                if record.op() != WalOp::Put {
-                    continue;
-                }
-                let blob = Document::encoded_blob_ref(record.payload()).map_err(|error| {
-                    ReplayError::Document {
-                        chunk,
-                        offset,
-                        error,
-                    }
-                })?;
-                ids.extend(blob.map(|b| b.blob_id()));
-            }
-        }
-        Ok(())
+        let chunks = container
+            .frames()
+            .iter()
+            .filter(|frame| frame.kind == FrameKind::WalChunk)
+            .map(|frame| frame.offset);
+        for_each_wal_put(container, chunks, |put| {
+            let blob = Document::encoded_blob_ref(put.payload).map_err(|error| {
+                DatabaseError::from(ReplayError::Document {
+                    chunk: put.chunk,
+                    offset: put.offset,
+                    error,
+                })
+            })?;
+            ids.extend(blob.map(|b| b.blob_id()));
+            Ok(())
+        })
     }
 
     /// Publishes `snapshot` as the latest (SPEC §8.4) and keeps weak references to what the one it replaces shows,
@@ -208,6 +194,56 @@ impl<F: ContainerFile + Sync> Database<F> {
         drop(old);
         self.retired.retain(|v| !v.is_dead(&live_memtables));
     }
+}
+
+/// A `Put` record of the WAL, as [`for_each_wal_put`] finds it.
+pub(super) struct WalPut<'a> {
+    /// The offset of its WAL chunk frame.
+    pub chunk: u64,
+    /// Its offset in the chunk's payload.
+    pub offset: u64,
+    /// Its collection.
+    pub collection: &'a str,
+    /// The encoded document.
+    pub payload: &'a [u8],
+}
+
+/// Calls `f` with every `Put` record of the WAL chunk frames at `chunks`, in log order (SPEC §8.2, §8.6). The one walk
+/// of the WAL's puts. GC's mark ([`Database::referenced_blobs`]) passes every WAL chunk frame the container holds;
+/// `ReadOnlyDatabase::blob_references` (`persia verify`) passes only the chunks the read-only open replayed, a subset
+/// of those. Verify therefore checks no reference GC would drop: they differ only by GC keeping more (SPEC §9.5).
+///
+/// # Errors
+/// [`DatabaseError::Replay`] for a chunk that cannot be read or decoded; `f`'s.
+pub(super) fn for_each_wal_put<F: ContainerFile, E: From<DatabaseError>>(
+    container: &Container<F>,
+    chunks: impl IntoIterator<Item = u64>,
+    mut f: impl FnMut(WalPut<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    let replay = |e: ReplayError| E::from(DatabaseError::from(e));
+    for chunk in chunks {
+        let source = container
+            .read_frame_source(chunk, MAX_CHUNK_LEN)
+            .map_err(|e| replay(ReplayError::Container(e)))?;
+        let at_chunk = |error| replay(ReplayError::Chunk { chunk, error });
+        let mut records = decode_chunk(&source.payload).map_err(at_chunk)?;
+        loop {
+            let offset = records.offset();
+            let Some(record) = records.next() else {
+                break;
+            };
+            let record = record.map_err(at_chunk)?;
+            if record.op() == WalOp::Put {
+                f(WalPut {
+                    chunk,
+                    offset,
+                    collection: record.collection(),
+                    payload: record.payload(),
+                })?;
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The ids of `segment`'s documents that `deleted` does not delete, from its `BlobRefs` (SPEC §9.1).

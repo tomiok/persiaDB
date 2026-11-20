@@ -118,6 +118,12 @@ const EXPLAIN_LEAVES = ['7.7.1', '7.7.2', '7.7.3'];
 
 /** Pack file. Hashing and chunking can exist before this leaf. */
 const PACK_LEAVES = ['9.2.1'];
+/** Remote key layout (SPEC §9.4). */
+const REMOTE_BLOB_LEAVES = ['9.3.1'];
+/** Blob durable before the document is logged, and the streaming calls. */
+const BLOB_DOC_LEAVES = ['9.4.1', '9.4.2'];
+/** Mark, then sweep. */
+const GC_LEAVES = ['9.5.1', '9.5.2'];
 
 const CALLS = ['open', 'create_collection', 'put', 'put_batch', 'delete', 'commit'];
 
@@ -524,8 +530,24 @@ function blobFacts(ctx, m9) {
 			),
 		};
 	}
-	const now = `The blob store is in progress (${m9.id}, ${count}). persia-blob exports an API. Not every blob leaf is done.`;
-	return { cell: seal(`In progress (${m9.id}, ${count}).`), now: seal(now) };
+	const remote = groupState(ctx.leaves, REMOTE_BLOB_LEAVES);
+	const docs = groupState(ctx.leaves, BLOB_DOC_LEAVES);
+	const gc = groupState(ctx.leaves, GC_LEAVES);
+	/** @type {string[]} */
+	const pieces = ['the local pack file'];
+	if (remote === 'done') pieces.push('the remote key layout');
+	else if (remote === 'partial') pieces.push('part of the remote key layout');
+	if (docs === 'done') pieces.push('document ordering');
+	else if (docs === 'partial') pieces.push('part of document ordering');
+	if (gc === 'done') pieces.push('garbage collection');
+	else if (gc === 'partial') pieces.push('part of garbage collection');
+	const calls =
+		ctx.hasPutBlob && ctx.hasGetBlob
+			? 'put_blob and get_blob live in persia::internal.'
+			: 'persia-blob exports an API.';
+	const now = `The blob store is in progress (${m9.id}, ${count}). persia-blob implements ${englishList(pieces)}. ${calls} The public Db facade is milestone M10. Not every blob leaf is done.`;
+	const cell = `In progress (${m9.id}, ${count}): ${englishList(pieces)}.`;
+	return { cell: seal(cell), now: seal(now) };
 }
 
 /**
@@ -725,8 +747,15 @@ export function buildStatus(ctx) {
 	if (!ctx.hasOpenOptions) absent.push('OpenOptions');
 	const absentSentence =
 		absent.length > 0 ? ` There is ${englishList(absent.map((name) => `no ${name}`))}.` : '';
+	const internalBlob = ['put_blob', 'get_blob'].filter((name) =>
+		name === 'put_blob' ? ctx.hasPutBlob : ctx.hasGetBlob,
+	);
+	const internalBlobSentence =
+		internalBlob.length > 0
+			? ` ${englishList(internalBlob)} ${internalBlob.length === 1 ? 'lives' : 'live'} in persia::internal.`
+			: '';
 	const engineCalls = seal(
-		`${hasSentence}${getSentence}${absentSentence} Those SPEC names are not the public embedded API.`,
+		`${hasSentence}${getSentence}${absentSentence} Those SPEC names are not the public embedded API.${internalBlobSentence}`,
 	);
 
 	const noPublicApi = seal(
@@ -917,6 +946,31 @@ export function buildStatus(ctx) {
 	};
 }
 
+/**
+ * A public item in `source` that rustdoc would list. `#[doc(hidden)]` on the previous line hides the item
+ * (`persia::internal` is the blob layer under M10, not `Db`).
+ * @param {string} source
+ */
+function visibleExports(source) {
+	const lines = source.split('\n');
+	let docHidden = false;
+	for (const line of lines) {
+		const trimmed = line.trim();
+		if (trimmed === '#[doc(hidden)]') {
+			docHidden = true;
+			continue;
+		}
+		if (trimmed === '' || trimmed.startsWith('//')) continue;
+		if (/^pub (?:struct|enum|type|use|fn|mod|trait|const|static)\b/.test(line)) {
+			if (!docHidden) return true;
+			docHidden = false;
+			continue;
+		}
+		docHidden = false;
+	}
+	return false;
+}
+
 /** @returns {StatusInput} */
 function readInput() {
 	const root = repoRoot();
@@ -930,6 +984,7 @@ function readInput() {
 	const searchRs = read('crates/persia-engine/src/db/search.rs');
 	const explainRs = read('crates/persia-engine/src/search/explain.rs');
 	const persiaLib = read('crates/persia/src/lib.rs');
+	const persiaBlob = read('crates/persia/src/internal/blob.rs');
 	const blobLib = read('crates/persia-blob/src/lib.rs');
 	const modules = publicModules(engineLib).filter((name) => name.length > 0);
 	if (modules.length === 0) throw new Error('persia-engine: no public modules');
@@ -942,12 +997,13 @@ function readInput() {
 		modules,
 		dbFns,
 		snapshotFns: exportedFns(snapshotRs),
-		persiaExports: exports(persiaLib),
+		// `pub mod internal` is doc(hidden). It is not the embedded API (M10).
+		persiaExports: visibleExports(persiaLib),
 		blobExports: exports(blobLib),
 		hasOpenOptions: /pub struct OpenOptions\b/.test(persiaLib) || /pub struct OpenOptions\b/.test(dbRs),
 		hasPutStruct: dbFns.has('put_struct') || /pub fn put_struct\b/.test(persiaLib),
-		hasPutBlob: dbFns.has('put_blob') || /pub fn put_blob\b/.test(persiaLib),
-		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib),
+		hasPutBlob: dbFns.has('put_blob') || /pub fn put_blob\b/.test(persiaLib) || /pub fn put_blob\b/.test(persiaBlob),
+		hasGetBlob: dbFns.has('get_blob') || /pub fn get_blob\b/.test(persiaLib) || /pub fn get_blob\b/.test(persiaBlob),
 		hasQuery: modules.includes('query'),
 		hasSearch: dbFns.has('search') || /pub fn search\b/.test(persiaLib),
 		hasCollectionSearch: ['crates/persia-engine/src/db/search.rs', 'crates/persia-engine/src/db/views.rs'].some((rel) =>

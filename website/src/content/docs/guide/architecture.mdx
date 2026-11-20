@@ -43,14 +43,14 @@ Three rules shape the rest of the design:
 | `persia-analysis` | Tokenizers, normalizers, stemmers, analyzers. | Done (M4). The query compiler runs them. This crate does not search. |
 | `persia-engine` | Schema, segments, WAL, commit, merge, query, BM25F, relaxation. | %%ENGINE_SHORT%% |
 | `persia-blob` | Content-addressed chunks, dedup, garbage collection. | %%BLOB_CELL%% |
-| `persia` | The embedded API: `Db` and `Collection`. | Not implemented (M10). The crate exports no types. |
+| `persia` | The embedded API: `Db` and `Collection`. | No `Db` (M10). Blobs with documents are `persia::internal`. |
 | `persia-proto` | `persia.proto` and committed generated code. | Module docs only (M11) |
 | `persia-server` | gRPC and HTTP. Roles: writer, reader, router. | Placeholder: exits with "not implemented" (M11, M13) |
 | `persia-cli` | Sweep temporary and quarantine files. `inspect segment` and `dump segment` read one segment (`--verify` checks it). `compact`, `bench`, import, and search are later. | Sweep, inspect, dump, and `verify` exist. The rest is M10. |
 
 Dependencies point downward only (`persia-format` at the bottom). `cargo xtask check-deps` enforces
-the graph. The public facade orders blob writes before the document commit so the engine never has
-to know about blob bytes (SPEC §9.5).
+the graph. `BlobDatabase::put` stores the blob, then logs the document, so the engine stores a
+`BlobRef` and never the file bytes (SPEC §9.5). [Blob storage](/guide/blobs/) is that path.
 
 On a query, the design is: analyze the text, search each segment and the memtable, merge
 the per-segment top-k, and if there are too few hits run the relaxation cascade. The response

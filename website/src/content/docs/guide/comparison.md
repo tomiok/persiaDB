@@ -20,7 +20,7 @@ When this page and the SPEC disagree, the SPEC wins.
 |---|---|---|---|---|
 | What it is | Embedded search database, written in Rust. An optional server is planned. | Full-text virtual-table module inside SQLite, a C library. | Full-text search library, written in Rust. Its docs describe it as Lucene, in Rust. | Standalone search server, written in Rust. |
 | How you run it | Planned: in-process. `Db::open` on a file. No daemon for the library. | In-process. Link SQLite and query with SQL. | In-process. Link the crate. Indexing and serving are your code. | A separate process. Clients use an HTTP API. |
-| What you store | Planned: one `<name>.persia` file, plus an optional `<name>.persia.blobs` pack. | The FTS5 index lives in the SQLite database file. | A directory of segment files. | The server's own data directory. |
+| What you store | A `<name>.persia` container and an optional `<name>.persia.blobs` pack, as library code. `Db::open` is planned. | The FTS5 index lives in the SQLite database file. | A directory of segment files. | The server's own data directory. |
 | How you query | Planned: a collection API, BM25F, filters, and facets. | SQL `MATCH`, with a `bm25()` ranking function. | Queries against a schema declared in code. | JSON over HTTP. Typo tolerance is on by default. |
 | Object storage | Planned: the same segment bytes locally or in S3, GCS, or Azure Blob. | A local database file. | A directory the library writes. | You run the server. |
 | Today | %%PRE_ALPHA%% | Part of SQLite. | A released library. | A released server. |

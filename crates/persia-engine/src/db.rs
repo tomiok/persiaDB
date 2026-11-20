@@ -92,7 +92,7 @@ pub use search::{
     Cursor, CursorOrigin, DEFAULT_LIMIT, SearchHit, SearchRequest, SearchResults, StepCursor,
 };
 pub use snapshot::{CollectionSnapshot, DatabaseReader, Located, Snapshot};
-pub use verify::{Tail, VerifyReport};
+pub use verify::{BlobRefSite, BlobReference, Tail, VerifyReport};
 pub use views::{CollectionHit, CollectionViews};
 
 use crate::document::Document;
@@ -640,9 +640,19 @@ impl<F: ContainerFile + Sync> Database<F> {
     }
 
     /// The proof that this database holds its container's writer lock, with which its blob pack opens read-write
-    /// (SPEC §9.3, ROADMAP 9.2.7, ADR-0053): always `Some`, a `Database` being the writer. It borrows the database.
-    pub fn writer_proof(&self) -> Option<container::WriterProof<'_>> {
-        self.wal.log().writer_proof()
+    /// (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). It borrows the database.
+    ///
+    /// # Panics
+    /// Never: a `Database` holds its container read-write from its open to its drop (see the comment inside).
+    #[allow(clippy::expect_used)] // An invariant, not external data: see the comment.
+    pub fn writer_proof(&self) -> container::WriterProof<'_> {
+        // Every constructor checks the container is read-write (`open_container`, `create_container`, and the
+        // `Mode::ReadWrite` opens), the container is never handed out mutably (a compaction moves the same handle to
+        // the file it wrote), and a handle's mode never changes: a `Database` is always its container's writer.
+        self.wal
+            .log()
+            .writer_proof()
+            .expect("a Database holds its container read-write")
     }
 
     /// The mark of the last operation logged to the WAL since this database was opened. Taken right after a

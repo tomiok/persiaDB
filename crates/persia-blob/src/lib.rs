@@ -30,12 +30,10 @@ pub use store::{
 };
 
 // -- pack (9.2) --
-// The local pack file (SPEC §9.3): its `mod` and `pub use` lines go here, and only here.
 pub mod pack;
 pub use pack::{PackMode, PackStore, WriterProof, pack_path};
 
 // -- remote (9.3) --
-// The remote layout (SPEC §9.4): its `mod` and `pub use` lines go here, and only here.
 pub mod remote;
 pub use remote::RemoteBlobStore;
 //
@@ -48,7 +46,6 @@ pub use remote::RemoteBlobStore;
 pub use persia_format::BlobRef;
 
 // -- gc (9.5) --
-// Garbage collection (SPEC §9.5; ROADMAP 9.5.1, 9.5.2, 9.5.8): its `mod` and `pub use` lines go here, and only here.
 pub mod gc;
 pub use gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, Sweep, SweepOptions, SweepReport};
 
@@ -56,16 +53,7 @@ pub use gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, Sweep, SweepOptions, Sw
 // Wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7): their `mod` and `pub use` lines, if any.
 // `read_manifest_range` with the caller's buffers, for streams (ROADMAP 9.2.9).
 pub use store::read_manifest_range_into;
-//
 
-// -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
-// Wave 3's pack wiring and verify (blob/wiring): its `mod` and `pub use` lines, if any, go here, and only here.
-//
-//
-
-// -- resume (9.3.4, 9.3.6, 9.5.9) --
-// Wave 3's resumed uploads (blob/resume): its `mod` and `pub use` lines, if any, go here, and only here.
 pub use remote::ResumeToken;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
-//

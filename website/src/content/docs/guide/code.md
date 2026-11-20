@@ -16,8 +16,9 @@ head:
 
 This page quotes code that is on `main`. %%PRE_ALPHA%%
 `persia-format` is the on-disk codec crate. `persia-storage`, `persia-engine`, and `persia-analysis` also export library code, summarized below.
-`persia` does not. The `Db::open` sketch on the [embedded API](/guide/embedded-api/) page is
-illustrative: `persia::Db` is not in the tree. %%ENGINE_CALLS%%
+`persia` exports no `Db`. Its `internal` module is `doc(hidden)` library code for blobs with documents.
+The `Db::open` sketch on the [embedded API](/guide/embedded-api/) page is
+illustrative. %%ENGINE_CALLS%% [Blob storage](/guide/blobs/) is `put_blob` and the pack file.
 
 ## Crate layout
 
@@ -28,7 +29,7 @@ What each file says about itself:
 | Crate | Source | What the file says | In the tree |
 |---|---|---|---|
 | `persia-format` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-format/src/lib.rs) | On-disk primitives: encodings, frames, superblock, checksums. No I/O policy. | Encodings, checksums, block codecs and framing, the container header, the superblock, frames (including the streaming encoder), mmap, `BlobId`, and `BlobRef`. |
-| `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | The module docs only. No `Db` type. |
+| `persia` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia/src/lib.rs) | The public embedded API (`Db`, `Collection`). | No `Db` type. `internal` (`doc(hidden)`) has `put_blob`, `get_blob`, and `BlobDatabase`. |
 | `persia-engine` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-engine/src/lib.rs) | Segments, indexing, WAL, query, scoring, relaxation. Synchronous. | %%ENGINE_NOW%% |
 | `persia-storage` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-storage/src/lib.rs) | `Storage` trait and backends (SPEC §10). | The trait, memory, local file, and the single-file container. No S3, GCS, or Azure. |
 | `persia-analysis` | [lib.rs](https://github.com/tomiok/persiaDB/blob/main/crates/persia-analysis/src/lib.rs) | Tokenizers, normalizers, stemmers (SPEC §6.3). | Tokenizers, filters, `en` / `es` / `pt` / `fr` / `de` / `it` stemmers, and built-in analyzers. |

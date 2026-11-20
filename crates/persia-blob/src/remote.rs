@@ -104,8 +104,10 @@ impl<S: Storage> RemoteBlobStore<S> {
         &self.storage
     }
 
-    /// The chunks staged under `upload_id`, by index, with their lengths and times. Keys under the upload's prefix that Persia
-    /// did not write are skipped.
+    /// The chunks staged under `upload_id`, with their lengths and times, in the backend's listing order. Keys under
+    /// the upload's prefix that Persia did not write are skipped. A listing is not an index order a caller can rely
+    /// on, and a key may appear more than once (SPEC §9.4, §10.1): [`RemoteBlobStore::resume`] sorts by index and
+    /// collapses duplicates. Zero-padded indices are in index order only when the backend lists by key bytes.
     ///
     /// # Errors
     /// The backend's errors.
@@ -114,7 +116,6 @@ impl<S: Storage> RemoteBlobStore<S> {
             .storage
             .list(&keys::upload_prefix(upload_id)?)
             .map_err(storage)?;
-        // Sorted by key bytes, and the index is zero-padded, so the chunks come in index order.
         Ok(listed
             .into_iter()
             .filter_map(|meta| match RemoteKey::parse(&meta.key)? {

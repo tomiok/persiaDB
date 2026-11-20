@@ -17,7 +17,7 @@ use persia::internal::documents::{Blob, BlobDatabase};
 use persia::internal::gc::GcOptions;
 use persia::internal::pins::{PinSet, Pinned, Pins};
 use persia_blob::gc::{GcObject, PinCheck, PinGate, Rewrite, Sweep, SweepOptions, SweepReport};
-use persia_blob::{BlobRef, BlobStore, ChunkSize, PackMode, PackStore};
+use persia_blob::{BlobRef, BlobStore, ChunkSize, PackStore};
 use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use persia_engine::document::Document;
 use persia_engine::schema::SchemaBuilder;
@@ -40,7 +40,7 @@ fn pack_database(dir: &Path) -> BlobDatabase<PackStore> {
     let mut log = Database::create(dir.join("app.persia"), DatabaseOptions::default()).unwrap();
     log.create_collection(SchemaBuilder::new("c").build().unwrap())
         .unwrap();
-    let pack = PackStore::open(dir.join("app.persia.blobs"), PackMode::ReadWrite, [0; 16]).unwrap();
+    let pack = PackStore::open_writer(dir.join("app.persia.blobs"), &log.writer_proof()).unwrap();
     BlobDatabase::new(
         log,
         Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(11)),

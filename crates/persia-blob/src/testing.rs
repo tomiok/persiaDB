@@ -6,6 +6,53 @@ use bytes::Bytes;
 use persia_format::ByteSource;
 use persia_storage::{Capabilities, Key, KeyPrefix, ObjectMeta, PutOutcome, Result, Storage};
 
+/// A [`Storage`] whose [`Storage::get`] of `bad` reports corruption (`ShortRead`, which is corruption).
+/// Everything else is `inner`. A resume treats that chunk as missing (SPEC §9.4).
+#[derive(Debug)]
+pub struct CorruptGet<S> {
+    /// The backend.
+    pub inner: S,
+    /// The object whose `get` fails.
+    pub bad: Key,
+}
+
+impl<S: Storage> Storage for CorruptGet<S> {
+    fn get_range(&self, key: &Key, range: Range<u64>) -> Result<ByteSource> {
+        self.inner.get_range(key, range)
+    }
+
+    fn get(&self, key: &Key) -> Result<Bytes> {
+        if key == &self.bad {
+            return Err(persia_storage::Error::ShortRead {
+                key: key.clone(),
+                requested: 0..1,
+                returned: 0,
+            });
+        }
+        self.inner.get(key)
+    }
+
+    fn put(&self, key: &Key, data: Bytes) -> Result<()> {
+        self.inner.put(key, data)
+    }
+
+    fn put_if_absent(&self, key: &Key, data: Bytes) -> Result<PutOutcome> {
+        self.inner.put_if_absent(key, data)
+    }
+
+    fn list(&self, prefix: &KeyPrefix) -> Result<Vec<ObjectMeta>> {
+        self.inner.list(prefix)
+    }
+
+    fn delete(&self, key: &Key) -> Result<()> {
+        self.inner.delete(key)
+    }
+
+    fn capabilities(&self) -> Capabilities {
+        self.inner.capabilities()
+    }
+}
+
 /// How [`MisorderedList`] lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ListOrder {

@@ -43,9 +43,9 @@ use persia::internal::retry::ManualRetryClock;
 use persia_blob::remote::{RemoteBlobStore, ResumedUpload};
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, ChunkSize, Error, MemoryBlobStore,
-    PackMode, PackStore, Result, ResumeToken, SMALL_BLOB_MAX, UploadId, blob_id_of,
+    PackStore, Result, ResumeToken, SMALL_BLOB_MAX, UploadId, blob_id_of,
 };
-use persia_engine::db::SegmentIds;
+use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use persia_storage::retry::{Clock, ManualClock};
 use persia_storage::{MemoryStorage, Op};
 use proptest::prelude::*;
@@ -368,6 +368,31 @@ proptest! {
         seed in any::<u8>(),
     ) {
         run_case(len, chunk, &cuts, step, seed)?;
+    }
+}
+
+// One window at the floor is 64 chunks (`WINDOW_MAX_CHUNKS`). A blob of more than that, cut in the next window,
+// is the same property across a window boundary (ROADMAP 9.3.6 copies every chunk before the last window).
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: if cfg!(feature = "slow") { 6 } else { 2 },
+        rng_seed: proptest::test_runner::RngSeed::Fixed(0x7265_7375_6d65_7769),
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn an_upload_cut_across_a_window_boundary_and_resumed_binds_the_blob(
+        extra in 1_usize..=4,
+        into_next in 0_usize..=3,
+        seed in any::<u8>(),
+    ) {
+        let chunks = 64 + extra.max(into_next + 1);
+        let len = chunks * MIN as usize;
+        let cut = Cut::Stage {
+            nth: 64 + into_next,
+            lost: false,
+        };
+        run_case(len, MIN, &[cut], usize::MAX, seed)?;
     }
 }
 
@@ -894,11 +919,9 @@ fn nothing_is_wrapped_on_the_memory_store() {
 #[test]
 fn nothing_is_wrapped_on_the_pack_store() {
     let dir = tempfile::tempdir().unwrap();
-    let pack = PackStore::open(
-        dir.path().join("app.persia.blobs"),
-        PackMode::ReadWrite,
-        [0; 16],
-    )
-    .unwrap();
+    // The pack opens read-write only with the container's writer proof, which borrows `log` (ROADMAP 9.2.7).
+    let log = Database::create(dir.path().join("app.persia"), DatabaseOptions::default()).unwrap();
+    let pack =
+        PackStore::open_writer(dir.path().join("app.persia.blobs"), &log.writer_proof()).unwrap();
     never_wrapped_on(pack);
 }

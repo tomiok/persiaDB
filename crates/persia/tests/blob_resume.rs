@@ -40,8 +40,8 @@ use persia::internal::gc::DEFAULT_GRACE;
 use persia::internal::pins::{PinSet, Pinned};
 use persia::internal::retry::ManualRetryClock;
 use persia_blob::gc::{GcObject, PinCheck, PinGate, Sweep, SweepOptions};
-use persia_blob::remote::RemoteBlobStore;
-use persia_blob::testing::{ListOrder, MisorderedList};
+use persia_blob::remote::{RemoteBlobStore, RemoteKey};
+use persia_blob::testing::{CorruptGet, ListOrder, MisorderedList};
 use persia_blob::{BlobRef, BlobStore, ChunkSize, Error, MemoryBlobStore, ResumeToken, UploadId};
 use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
 use persia_storage::MemoryStorage;
@@ -646,6 +646,13 @@ fn a_misordered_listing_of_a_fully_staged_expired_upload_still_restages() {
         }
         clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
 
+        let kept = BlobStore::resume(&*store, token).unwrap();
+        let full = data
+            .chunks(CHUNK_LEN)
+            .filter(|c| c.len() == CHUNK_LEN)
+            .count() as u32;
+        assert_eq!(kept.next_index(), full, "{order:?}: the kept run");
+
         let (r, report) = sweep_across_resume_on(&*store, clock.now(), &db, token, &data);
         let moved = store.manifest(r.blob_id()).unwrap().unwrap().upload_id();
         assert_ne!(moved, token.upload_id, "{order:?}: no restage");
@@ -716,4 +723,59 @@ fn a_resume_never_discards_the_tokens_upload_which_may_be_bound() {
     assert!(!store.events().contains(&Event::Discard(token.upload_id)));
     assert_eq!(blobs.get_blob_range(&rx, 0..rx.size()).unwrap(), x);
     assert_eq!(blobs.get_blob_range(&rz, 0..rz.size()).unwrap(), z);
+}
+
+/// Chunk 1's read reports corruption. Resume must not return the same token forever: the run ends at that
+/// chunk, and the upload that binds is not the one whose chunk cannot be read (SPEC §9.4).
+#[test]
+fn a_corrupt_kept_chunk_resumes_without_the_same_token_forever() {
+    let data = bytes(3 * CHUNK_LEN, 15);
+    let token = ResumeToken {
+        upload_id: UploadId::new(9),
+        chunk_size: ChunkSize::new(CHUNK).unwrap(),
+    };
+    let bad = RemoteKey::Chunk {
+        upload_id: token.upload_id,
+        index: 1,
+    }
+    .key()
+    .unwrap();
+    let clock = Arc::new(ManualClock::new(UNIX_EPOCH + remote::START));
+    let storage = CorruptGet {
+        inner: MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>),
+        bad,
+    };
+    let store = Arc::new(RemoteBlobStore::new(storage).with_parallelism(NonZeroUsize::MIN));
+    for (index, chunk) in (0_u32..).zip(data.chunks(CHUNK_LEN)) {
+        store.stage_chunk(token.upload_id, index, chunk).unwrap();
+    }
+
+    let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(9))
+        .with_retry_clock(Arc::new(ManualRetryClock::new()));
+    let mut options = resume(token);
+    let mut previous = token;
+    let mut attempts = 0_u32;
+    let bound = loop {
+        match blobs.put_blob(&data[..], &options) {
+            Ok(bound) => break bound,
+            Err(Error::UploadInterrupted { token: next, .. }) => {
+                attempts += 1;
+                assert!(attempts < 3, "still failing after {attempts} resumes");
+                assert_ne!(next, previous, "the same token came back");
+                previous = next;
+                options = resume(next);
+            }
+            Err(e) => panic!("not a resume: {e:?}"),
+        }
+    };
+    let (r, _pins) = bound;
+    assert_eq!(r, uninterrupted(&data));
+    assert_eq!(blobs.get_blob_range(&r, 0..r.size()).unwrap(), data);
+    let upload = blobs
+        .store()
+        .manifest(r.blob_id())
+        .unwrap()
+        .unwrap()
+        .upload_id();
+    assert_ne!(upload, token.upload_id, "the corrupt upload was not reused");
 }

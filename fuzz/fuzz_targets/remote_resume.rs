@@ -5,9 +5,11 @@
 //! object at its index, of the token's chunk size, with its CRC32C. `skip_kept` accepts those bytes and rejects them
 //! one byte short, and `restage` copies the run to a new upload byte for byte.
 //!
-//! Input: byte 0 the chunk size (1..=16), byte 1 the parallelism (1..=4), then records: a selector byte (bit 7: a
-//! foreign name from the next byte's length of text; else bit 6: a 4-byte little-endian index, or the low bits as the
-//! index), a length byte (modulo twice the chunk size plus one), and the object's bytes are derived from its index.
+//! Input: byte 0 the listing order (even: reversed, odd: duplicated), byte 1 the chunk size (1..=16), byte 2 the
+//! parallelism (1..=4), then records: a selector byte (bit 7: a foreign name from the next byte's length of text;
+//! else bit 6: a 4-byte little-endian index, or the low bits as the index), a length byte (modulo twice the chunk
+//! size plus one), and the object's bytes are derived from its index. The storage lists out of key order or twice,
+//! which a resume must not rely on (SPEC §9.4).
 #![no_main]
 
 use core::num::NonZeroUsize;
@@ -15,6 +17,7 @@ use std::collections::BTreeMap;
 
 use libfuzzer_sys::fuzz_target;
 use persia_blob::remote::{RemoteKey, ResumeToken};
+use persia_blob::testing::{ListOrder, MisorderedList};
 use persia_blob::{BlobStore, ChunkSize, Error, RemoteBlobStore, UploadId};
 use persia_format::checksum::crc32c;
 use persia_storage::{Key, MemoryStorage, Storage};
@@ -28,7 +31,7 @@ fn object_bytes(index: u32, len: usize) -> Vec<u8> {
 }
 
 fuzz_target!(|data: &[u8]| {
-    let [cs, par, rest @ ..] = data else {
+    let [order_b, cs, par, rest @ ..] = data else {
         return;
     };
     let chunk = u32::from(cs % 16) + 1;
@@ -36,7 +39,16 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
     let parallelism = NonZeroUsize::new(usize::from(par % 4) + 1).unwrap_or(NonZeroUsize::MIN);
-    let store = RemoteBlobStore::new(MemoryStorage::new()).with_parallelism(parallelism);
+    let order = if order_b % 2 == 0 {
+        ListOrder::Reversed
+    } else {
+        ListOrder::Duplicated
+    };
+    let store = RemoteBlobStore::new(MisorderedList {
+        inner: MemoryStorage::new(),
+        order,
+    })
+    .with_parallelism(parallelism);
     let upload_id = UploadId::new(UPLOAD);
     let prefix = format!("blobs/uploads/{upload_id}/");
 

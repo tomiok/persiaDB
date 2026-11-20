@@ -30,6 +30,7 @@
 )] // Tests: inputs are generated.
 
 mod gc_support;
+mod pack_support;
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -84,7 +85,7 @@ impl Pack {
     }
 
     fn open(fs: &SimFs) -> PackStore<SimFsFile> {
-        PackStore::open_in(Arc::new(fs.clone()), PACK, PackMode::ReadWrite, [9; 16]).unwrap()
+        pack_support::open_pack(Arc::new(fs.clone()), PACK, PackMode::ReadWrite, [9; 16]).unwrap()
     }
 }
 

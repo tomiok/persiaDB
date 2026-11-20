@@ -9,10 +9,14 @@ use std::path::{Path, PathBuf};
 pub mod layout;
 mod store;
 
-pub use store::{PackMode, PackRecovery, PackStore};
+pub use store::{PackMode, PackRecovery, PackScan, PackStore};
 // The writer-lock proof a read-write open takes (ROADMAP 9.2.7, ADR-0053), for callers that reach `persia-storage`
 // only through this crate.
 pub use persia_storage::container::WriterProof;
+// The file and file-system traits the generic opens name (`open_in`, `open_writer_in`), for the same callers: `persia`
+// opens a database's pack through them (ROADMAP 9.4.5).
+pub use persia_storage::container::ContainerFile;
+pub use persia_storage::vfs::Vfs;
 
 /// What the pack's file name adds to its container's: `app.persia` keeps its blobs in `app.persia.blobs` (SPEC §4).
 pub const PACK_SUFFIX: &str = ".blobs";

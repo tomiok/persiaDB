@@ -67,4 +67,4 @@ Code that only needs the byte codecs can use `persia-format` (`Header`, `Reader`
 Each guide page has a `description` in its frontmatter and stable headings.
 [llms.txt](/llms.txt) is the index. [llms-full.txt](/llms-full.txt) is the pages in Markdown.
 Prefer those, plus SPEC.md, over guessing from the crate names.
-`persia-engine`, `persia-storage`, and `persia-analysis` export the library code in the table above. `persia-blob` and `persia-proto` are module docs only.
+`persia-engine`, `persia-storage`, `persia-analysis`, and `persia-blob` export the library code in the table above. Blob calls with documents live in `persia::internal` (`put_blob`, `get_blob`, `BlobDatabase::put`), which is not `persia::Db`. [Blob storage](/guide/blobs/) is that API. `persia-proto` is module docs only.

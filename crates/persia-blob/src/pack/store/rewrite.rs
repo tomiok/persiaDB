@@ -33,7 +33,7 @@ use persia_format::checksum::crc32c;
 use super::{
     BlobId, ContainerFile, Entry, Error, FRAME_HEADER_LEN, FrameHeader, FrameKind, Header, Inner,
     Pack, PackStore, Poison, Result, Slot, Staged, WriterState, corrupt, decode_chunk_payload,
-    decode_frame, from_format_at, io, io_err, layout, parent_of, random_u128, temp_path,
+    decode_frame, from_format_at, io, io_err, layout, lock, parent_of, random_u128, temp_path,
     u64_from_usize, usize_from_u32,
 };
 use crate::gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, SweepReport};
@@ -62,8 +62,11 @@ struct Plan {
 }
 
 /// The new pack, written and synced under its temporary name.
-struct Written<F> {
-    file: F,
+struct Written<F: ContainerFile> {
+    file: Option<F>,
+    /// Unlocked on drop while set. A failed rewrite must unlock the temporary file, not only close it
+    /// (SPEC §4.5.1). Cleared when the file is kept locked (installed as the pack, or held for the handle's life).
+    unlock_on_drop: bool,
     temp: PathBuf,
     sb: PackSuperblock,
     end: u64,
@@ -72,6 +75,37 @@ struct Written<F> {
     uploads: HashMap<UploadId, BlobId>,
     chunk_frames: Vec<u64>,
     staged: HashMap<(UploadId, u32), Staged>,
+}
+
+/// What [`PackStore::fill`] wrote, before the file is attached.
+struct Filled {
+    sb: PackSuperblock,
+    end: u64,
+    next_frame_seq: u64,
+    index: HashMap<BlobId, Entry>,
+    uploads: HashMap<UploadId, BlobId>,
+    chunk_frames: Vec<u64>,
+    staged: HashMap<(UploadId, u32), Staged>,
+}
+
+impl<F: ContainerFile> Drop for Written<F> {
+    fn drop(&mut self) {
+        if self.unlock_on_drop
+            && let Some(file) = self.file.take()
+        {
+            lock::release(&file);
+        }
+    }
+}
+
+impl<F: ContainerFile> Written<F> {
+    /// The new file, still locked: dropping this value will not unlock it.
+    fn take_locked_file(&mut self) -> Result<F> {
+        self.unlock_on_drop = false;
+        self.file
+            .take()
+            .ok_or_else(|| corrupt("the rewrite's new file is missing"))
+    }
 }
 
 impl<F: ContainerFile + 'static> PackStore<F> {
@@ -161,21 +195,48 @@ impl<F: ContainerFile + 'static> PackStore<F> {
         })
     }
 
-    /// Writes the new pack under a temporary name and syncs it. On an error the temporary file is removed.
+    /// Writes the new pack under a temporary name and syncs it. On an error the temporary file is unlocked, if this
+    /// handle locked it, and removed (SPEC §4.5.1: unlock, don't just close).
     fn write_new(&self, plan: &Plan) -> Result<Written<F>> {
         let temp = temp_path(&self.path);
         let file = self
             .vfs
             .create_new(&temp)
             .map_err(io_err("create the rewrite's temporary file"))?;
-        match self.fill(file, temp.clone(), plan) {
-            Ok(written) => Ok(written),
-            Err(e) => Err(self.discard(&temp, e)),
+        // Locked before it is written, and so before its rename over the pack: the path never names an unlocked
+        // pack while this writer lives (ROADMAP 9.2.7, ADR-0053). The old file stays locked until the swap drops it.
+        let locked = if self.lock_file {
+            lock::lock(&file)
+        } else {
+            Ok(())
+        };
+        let locked_ok = self.lock_file && locked.is_ok();
+        match locked.and_then(|()| self.fill(&file, plan)) {
+            Ok(filled) => Ok(Written {
+                file: Some(file),
+                unlock_on_drop: locked_ok,
+                temp,
+                sb: filled.sb,
+                end: filled.end,
+                next_frame_seq: filled.next_frame_seq,
+                index: filled.index,
+                uploads: filled.uploads,
+                chunk_frames: filled.chunk_frames,
+                staged: filled.staged,
+            }),
+            Err(e) => {
+                // The lock is held on this descriptor. Close alone would leave a forked copy holding it.
+                if locked_ok {
+                    lock::release(&file);
+                }
+                drop(file);
+                Err(self.discard(&temp, e))
+            }
         }
     }
 
     /// Copies the kept frames into `file`, renumbered, then writes the header and both slots, and syncs.
-    fn fill(&self, file: F, temp: PathBuf, plan: &Plan) -> Result<Written<F>> {
+    fn fill(&self, file: &F, plan: &Plan) -> Result<Filled> {
         let pack_id = random_u128();
         let generation = plan
             .generation
@@ -184,7 +245,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
                 what: "the pack generation is exhausted",
             })?;
         let mut out = Out {
-            file: &file,
+            file,
             end: FIRST_FRAME,
             seq: 1,
         };
@@ -262,9 +323,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             .map_err(io_err("write the rewrite's header"))?;
         file.sync_data().map_err(io_err("sync the rewrite"))?;
         let (end, next_frame_seq) = (out.end, out.seq);
-        Ok(Written {
-            file,
-            temp,
+        Ok(Filled {
             sb,
             end,
             next_frame_seq,
@@ -304,7 +363,7 @@ impl<F: ContainerFile + 'static> PackStore<F> {
 
     /// Renames the written pack over the pack, syncs the directory and swaps the handle's file, index and staged
     /// chunks at once (under the `RwLock`'s write side). Run under the pin set's lock, with the writer mutex held.
-    fn replace(&self, w: &mut WriterState, written: Written<F>) -> Result<()> {
+    fn replace(&self, w: &mut WriterState, mut written: Written<F>) -> Result<()> {
         // Never rename over a path that no longer names this handle's file (replaced from outside: not ours).
         let same = {
             let inner = self.read();
@@ -334,29 +393,40 @@ impl<F: ContainerFile + 'static> PackStore<F> {
             };
             if !still_ours {
                 w.poison = Some(Poison::NotBound);
+                // The path may name the new file: it stays locked while this handle lives (ROADMAP 9.2.7).
+                if self.lock_file {
+                    let file = written.take_locked_file()?;
+                    self.held
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push(lock::Held(file));
+                }
                 return Err(e);
             }
             let temp = written.temp.clone();
+            // Drop unlocks the temporary file when this handle locked it (SPEC §4.5.1), then the name is removed.
             drop(written);
             return Err(self.discard(&temp, e));
         }
         // The path names the complete new pack now, or after a crash maybe the old one: both hold every kept blob.
         let synced = self.vfs.sync_dir(parent_of(&self.path));
+        let file = written.take_locked_file()?;
         let mut guard = self.write();
         let inner: &mut Inner<F> = &mut guard;
         inner.pack = Some(Pack {
-            file: written.file,
+            file,
             header: Header::new(self.db_uuid),
             slot: Slot::A,
             sb: written.sb,
             end: written.end,
             next_frame_seq: written.next_frame_seq,
-            index: written.index,
-            uploads: written.uploads,
-            chunk_frames: written.chunk_frames,
+            index: std::mem::take(&mut written.index),
+            uploads: std::mem::take(&mut written.uploads),
+            chunk_frames: std::mem::take(&mut written.chunk_frames),
             window: None,
+            locked: self.lock_file,
         });
-        inner.staged = written.staged;
+        inner.staged = std::mem::take(&mut written.staged);
         if let (Some(mapper), Some(pack)) = (&mut inner.mapper, &mut inner.pack) {
             mapper.remap(pack);
         }

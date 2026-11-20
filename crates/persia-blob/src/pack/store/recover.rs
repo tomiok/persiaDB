@@ -5,7 +5,7 @@ use super::{
     Access, BLOB_PACK, BlobId, BlobManifest, ContainerFile, Entry, Error, FIRST_FRAME_OFFSET,
     FRAME_HEADER_LEN, FrameHeader, FrameKind, HashMap, MIN_FRAME_LEN, Pack, PackMode, PackRecovery,
     Reader, Result, StreamScanner, at, commit_slot, corrupt_at, decode_frame, decode_index_payload,
-    decode_prefix, from_format_at, io, io_err, layout, u64_from_usize, usize_from_u32,
+    decode_prefix, from_format_at, io, io_err, layout, lock, u64_from_usize, usize_from_u32,
 };
 
 /// The prefix of the pack in `file`: header and active slot.
@@ -15,13 +15,13 @@ pub(super) fn read_prefix<F: ContainerFile>(file: &F) -> Result<layout::Prefix> 
     decode_prefix(&prefix)
 }
 
-/// Opens the pack in `file` (SPEC §9.3, ADR-0049 item 9): header, active slot against the file length, the index
-/// rebuilt by scanning `12288..log_end`; a read-write open then truncates to `log_end` and syncs.
-pub(super) fn recover<F: ContainerFile>(
-    file: F,
+/// The prefix of the pack in `file`, checked before anything is built on it: long enough, this database's, writable
+/// if `mode` writes, and its active slot within the file. Returns it with the file length.
+fn checked_prefix<F: ContainerFile>(
+    file: &F,
     mode: PackMode,
     db_uuid: [u8; 16],
-) -> Result<(Pack<F>, PackRecovery)> {
+) -> Result<(layout::Prefix, u64)> {
     let len = file.file_len().map_err(io_err("stat"))?;
     if len < FIRST_FRAME_OFFSET {
         return Err(corrupt_at(
@@ -29,7 +29,7 @@ pub(super) fn recover<F: ContainerFile>(
             0,
         ));
     }
-    let p = read_prefix(&file)?;
+    let p = read_prefix(file)?;
     if p.header.db_uuid != db_uuid {
         // Serving, or collecting, another database's blobs would hand out bytes its documents never referenced.
         return Err(Error::PackOfAnotherDatabase {
@@ -44,6 +44,22 @@ pub(super) fn recover<F: ContainerFile>(
     p.superblock
         .check_bounds(file_len)
         .map_err(at(p.slot.offset()))?;
+    Ok((p, file_len))
+}
+
+/// Opens the pack in `file` (SPEC §9.3, ADR-0049 item 9): header, active slot against the file length, the index
+/// rebuilt by scanning `12288..log_end`; a read-write open then truncates to `log_end` and syncs. `locked`: the caller
+/// took the writer lock on `file`, which the returned pack releases when dropped, and a failure releases now.
+pub(super) fn recover<F: ContainerFile>(
+    file: F,
+    mode: PackMode,
+    db_uuid: [u8; 16],
+    locked: bool,
+) -> Result<(Pack<F>, PackRecovery)> {
+    let (p, file_len) = match checked_prefix(&file, mode, db_uuid) {
+        Ok(found) => found,
+        Err(e) => return Err(lock::unlock_after(&file, locked, e)),
+    };
     let mut pack = Pack {
         file,
         header: p.header,
@@ -55,6 +71,8 @@ pub(super) fn recover<F: ContainerFile>(
         uploads: HashMap::new(),
         chunk_frames: Vec::new(),
         window: None,
+        // From here the pack's `Drop` releases the lock, on any error too (ROADMAP 9.2.7).
+        locked,
     };
     let mut last_index = None;
     scan_committed(
@@ -172,7 +190,10 @@ fn roll_forward<F: ContainerFile>(
 }
 
 /// Checks what the scan found against the slot: `blob_count` index frames, the last one at `index_off`.
-pub(super) fn check_scan<F>(pack: &Pack<F>, last_index: Option<(u64, u64)>) -> Result<()> {
+pub(super) fn check_scan<F: ContainerFile>(
+    pack: &Pack<F>,
+    last_index: Option<(u64, u64)>,
+) -> Result<()> {
     let sb = &pack.sb;
     // Found by comparing the frames with the slot: located at the slot.
     let corrupt = |what| corrupt_at(what, pack.slot.offset());

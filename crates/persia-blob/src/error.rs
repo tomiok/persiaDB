@@ -97,7 +97,6 @@ pub enum Error {
     #[error("whether the blob was bound is unknown")]
     BindOutcomeUnknown(#[source] Box<dyn std::error::Error + Send + Sync + 'static>),
     // -- pack (9.2) --
-    // Variants of the local pack file (crate::pack, SPEC §9.3) go here, and only here.
     /// A read, write, sync or file-system call on the blob pack failed. After a failed write or sync the pack is
     /// poisoned ([`Error::PackPoisoned`]): what reached the disk is unknown until it is reopened (SPEC §4.5).
     #[error("blob pack {op} failed")]
@@ -145,7 +144,6 @@ pub enum Error {
         index: u32,
     },
     // -- remote (9.3) --
-    // Variants of the remote layout (crate::remote, SPEC §9.4) go here, and only here.
     /// A storage operation of the remote layout failed (SPEC §9.4, §10.1). Corruption a backend reports is
     /// [`Error::Corrupt`] instead.
     #[error("blob storage failed")]
@@ -164,7 +162,6 @@ pub enum Error {
     //
 
     // -- documents (9.4) --
-    // Variants of put_blob and get_blob_range (SPEC §9.6) go here, and only here.
     /// The id computed from a blob's bytes is not the `expected_id` the caller passed (SPEC §9.6, ADR-0034 item 5):
     /// a caller's error, not corruption. Nothing was bound.
     #[error("the blob's bytes hash to {actual}, not the expected {expected}")]
@@ -192,7 +189,6 @@ pub enum Error {
     //
 
     // -- followups (9.2, 9.4) --
-    // Variants of wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7) go here, and only here.
     /// Stored bytes of the blob pack break a rule of their encoding, found in the slot or frame that starts at `offset`
     /// (ROADMAP 9.2.8): the header page at 0, a superblock slot at 4096 or 8192, or a frame from 12288 on. Corruption
     /// like [`Error::Corrupt`] ([`Error::is_corruption`]); [`Error::corrupt_offset`] reads the offset.
@@ -205,20 +201,12 @@ pub enum Error {
         /// The absolute offset in the pack file of the slot or frame holding the bytes.
         offset: u64,
     },
-    //
 
-    // -- gc (9.5) --
-    // Variants of the mark, the sweep and the pack rewrite (SPEC §9.5; ROADMAP 9.5.1, 9.5.2) go here, and only here.
+    /// Another read-write handle, in this process or another, holds the pack's writer lock: one pack writer at a
+    /// time (SPEC §9.3, ROADMAP 9.2.7, ADR-0053). Nothing was opened or swept.
+    #[error("the blob pack is locked by another writer")]
+    PackLocked,
     //
-    //
-
-    // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
-    // Variants of wave 3's pack wiring and verify (blob/wiring) go here, and only here.
-    //
-    //
-
-    // -- resume (9.3.4, 9.3.6, 9.5.9) --
-    // Variants of wave 3's resumed uploads (blob/resume) go here, and only here.
     /// A `put_blob` failed after its upload staged chunks that a later `put_blob` can resume with `token`
     /// (`PutBlobOptions::resume`; SPEC §9.4, ROADMAP 9.3.4, ADR-0053). Its pins were dropped with the error: the
     /// grace period keeps the upload resumable (SPEC §9.5). `source` is the failure.
@@ -253,22 +241,20 @@ impl Error {
         }
     }
 
-    /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error; also when the corruption
-    /// is the source of an [`Error::UploadInterrupted`].
-    pub fn is_corruption(&self) -> bool {
-        match self {
-            Self::Corrupt { .. } | Self::CorruptAt { .. } => true,
-            Self::UploadInterrupted { source, .. } => source.is_corruption(),
-            _ => false,
-        }
+    /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error.
+    ///
+    /// [`Error::UploadInterrupted`] is not corruption, even when its source is (SPEC §9.4): the upload can be resumed,
+    /// and the source carries the cause. [`Error::corrupt_offset`] is `None` for the same reason.
+    pub const fn is_corruption(&self) -> bool {
+        matches!(self, Self::Corrupt { .. } | Self::CorruptAt { .. })
     }
 
-    /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`], also as the
-    /// source of an [`Error::UploadInterrupted`]).
-    pub fn corrupt_offset(&self) -> Option<u64> {
+    /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`]).
+    ///
+    /// `None` for [`Error::UploadInterrupted`]: that error is a resumable upload, not a located corruption.
+    pub const fn corrupt_offset(&self) -> Option<u64> {
         match self {
             Self::CorruptAt { offset, .. } => Some(*offset),
-            Self::UploadInterrupted { source, .. } => source.corrupt_offset(),
             _ => None,
         }
     }
@@ -298,7 +284,7 @@ mod tests {
     }
 
     #[test]
-    fn the_helpers_look_through_an_interrupted_upload() {
+    fn an_interrupted_upload_is_resumable_not_corruption() {
         let wrap = |source: Error| Error::UploadInterrupted {
             token: crate::remote::ResumeToken {
                 upload_id: UploadId::new(1),
@@ -310,14 +296,18 @@ mod tests {
             encoding: "blob chunk",
             what: "test",
         };
-        assert!(wrap(corrupt()).is_corruption());
-        assert!(wrap(wrap(corrupt())).is_corruption());
+        // The source is corruption; the interrupt itself is not (SPEC §9.4: the upload can be resumed).
+        assert!(corrupt().is_corruption());
+        assert!(!wrap(corrupt()).is_corruption());
+        assert!(!wrap(wrap(corrupt())).is_corruption());
         let at = Error::CorruptAt {
             encoding: "blob pack frame",
             offset: 42,
             what: "test",
         };
-        assert_eq!(wrap(at).corrupt_offset(), Some(42));
+        assert_eq!(at.corrupt_offset(), Some(42));
+        assert_eq!(wrap(at).corrupt_offset(), None);
+        // A poisoned store behind the interrupt still has to be reopened: that helper does look through.
         assert!(wrap(Error::PackPoisoned).is_store_poisoned());
         let read = || Error::Read(std::io::Error::other("reader"));
         assert!(!wrap(read()).is_corruption());

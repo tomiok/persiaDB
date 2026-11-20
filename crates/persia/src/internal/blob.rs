@@ -20,10 +20,8 @@ use persia_engine::db::SegmentIds;
 use super::pins::{PinSet, Pinned, Pins};
 use super::retry::{RetryClock, SystemRetryClock, backoff};
 
-// -- resume (9.3.4, 9.3.6) --
 // The resumed upload of `put_blob` (SPEC §9.4, ROADMAP 9.3.4, 9.3.6, ADR-0053).
 mod resume;
-// -- end resume --
 
 /// The MIME type of a blob whose caller names none.
 pub const DEFAULT_MIME: &str = "application/octet-stream";
@@ -136,11 +134,6 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         &self.pins
     }
 
-    // -- wiring (9.4.5) --
-    // blob/wiring: what opening the database with its pack adds to this handle, if anything, goes here.
-    //
-    // -- end wiring --
-
     /// Stores the blob `reader` yields (SPEC §9.2, §9.6) and returns its reference, with the bound blob's chunk size
     /// for a duplicate, and the pins of its upload id and blob id, which keep GC off them until dropped (SPEC §9.5).
     ///
@@ -193,12 +186,10 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         mut reader: impl Read,
         options: &PutBlobOptions,
     ) -> Result<(BlobRef, Pins)> {
-        // -- resume (9.3.4) --
         // A resumed blob keeps the chunk size it was staged with: the chunk objects do not record it (SPEC §9.4).
         let chunk_size = options
             .resume
             .map_or(options.chunk_size, |token| token.chunk_size);
-        // -- end resume --
         if chunk_size.get() < ChunkSize::MIN {
             return Err(Error::ChunkSizeBelowMin {
                 chunk_size: chunk_size.get(),
@@ -213,12 +204,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         }
         // The rules of `mime` and `user_meta` checked on an empty blob, so a bad option reads and stages nothing.
         reference(blob_id_of(&[]), 0, chunk_size, options)?;
-        // -- resume (9.3.4, 9.3.6) --
-        // blob/resume: the resumed upload, from pinning the old upload id before listing to restaging under a new one.
         if let Some(token) = options.resume {
             return self.put_resumed(reader, token, options);
         }
-        // -- end resume --
         let upload_id = UploadId::new(self.next_upload_id());
         // SPEC §9.5: pinned before the first chunk write.
         let mut pins = self.pins.pin([Pinned::Upload(upload_id)]);
@@ -509,7 +497,6 @@ fn still_unknown(poisoned: Error, first: Option<&Error>) -> Error {
     }
 }
 
-// -- resume (9.3.4) --
 /// `e` as [`Error::UploadInterrupted`] with `token` when a later `put_blob` can resume after it (ADR-0053): the
 /// caller's reader failed, or the store failed to stage, restage or list (a backend error, a chunk staged with other
 /// bytes, a staged chunk gone or changed). Not when `token` is `None` (a store that cannot resume, or nothing staged
@@ -553,7 +540,6 @@ fn bind_interrupted(
         (_, outcome) => (outcome, unknown),
     }
 }
-// -- end resume --
 
 /// The CRC32C of each chunk of the blob `reader` yields, and its summary; `sink` gets each chunk in order.
 fn chunk_crcs(

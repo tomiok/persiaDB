@@ -1220,7 +1220,6 @@ fn is_corruption_is_true_for_corrupt_only() {
         ),
         (Error::BindOutcomeUnknown("x".into()), false),
         // -- pack (9.2) --
-        // One case per pack variant, here and only here.
         (
             Error::PackIo {
                 op: "x",
@@ -1250,7 +1249,6 @@ fn is_corruption_is_true_for_corrupt_only() {
             false,
         ),
         // -- remote (9.3) --
-        // One case per remote variant, here and only here.
         (
             Error::Storage(persia_storage::Error::Unsupported {
                 op: persia_storage::Op::Get,
@@ -1263,7 +1261,6 @@ fn is_corruption_is_true_for_corrupt_only() {
         //
 
         // -- documents (9.4) --
-        // One case per documents variant, here and only here.
         (
             Error::BlobIdMismatch {
                 expected: blob_id_of(b"a"),
@@ -1285,7 +1282,6 @@ fn is_corruption_is_true_for_corrupt_only() {
             false,
         ),
         // -- followups --
-        // One case per follow-up variant, here and only here.
         (
             Error::CorruptAt {
                 encoding: "x",
@@ -1294,10 +1290,7 @@ fn is_corruption_is_true_for_corrupt_only() {
             },
             true,
         ),
-        // -- wiring --
-        // One case per wiring variant, here and only here.
-        // -- resume --
-        // One case per resume variant, here and only here.
+        (Error::PackLocked, false),
         (
             Error::UploadInterrupted {
                 token: persia_blob::ResumeToken {
@@ -1324,7 +1317,6 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::ChunkerFailed
             | Error::ChunkSizeBelowMin { .. } => "manifest and chunking",
             // -- pack (9.2) --
-            // One arm for the pack's variants, `=> "pack"`, here and only here.
             Error::PackIo { .. }
             | Error::PackPoisoned
             | Error::PackReadOnly
@@ -1333,25 +1325,18 @@ fn is_corruption_is_true_for_corrupt_only() {
             | Error::PackOfAnotherDatabase { .. }
             | Error::ChunkNotStaged { .. } => "pack",
             // -- remote (9.3) --
-            // One arm for the remote layout's variants, `=> "remote"`, here and only here.
             Error::Storage(_) | Error::ConditionalPutUnsupported | Error::InvalidResume { .. } => {
                 "remote"
             }
             //
             //
             // -- documents (9.4) --
-            // One arm for the documents variants, `=> "documents"`, here and only here.
             Error::BlobIdMismatch { .. }
             | Error::InvalidBlobRef(_)
             | Error::BindBudgetAboveMax { .. } => "documents",
             // -- followups --
-            // One arm for the follow-ups' variants, `=> "followups"`, here and only here.
             Error::CorruptAt { .. } => "followups",
-            // -- wiring (9.2.7, 9.4.5, 9.5.3, 9.5.6) --
-            // One arm for the wiring variants, `=> "wiring"`, here and only here.
-            //
-            // -- resume (9.3.4, 9.3.6, 9.5.9) --
-            // One arm for the resume variants, `=> "resume"`, here and only here.
+            Error::PackLocked => "wiring",
             Error::UploadInterrupted { .. } | Error::ResumeUnsupported => "resume",
             Error::BlobNotFound { .. }
             | Error::RangeOutOfBounds { .. }

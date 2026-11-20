@@ -372,7 +372,7 @@ fn pack(load: Load) {
     let dir = tempfile::tempdir().unwrap();
     let log = log(dir.path());
     // ROADMAP 9.2.7: the pack opens read-write only as the container's writer.
-    let proof = log.writer_proof().unwrap();
+    let proof = log.writer_proof();
     let pack = PackStore::open_writer(dir.path().join("app.persia.blobs"), &proof).unwrap();
     let blobs = Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(22));
     let mut db = BlobDatabase::new(log, blobs);
