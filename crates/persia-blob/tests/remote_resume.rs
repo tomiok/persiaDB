@@ -599,14 +599,15 @@ fn a_listing_in_index_order_keeps_the_whole_run() {
     let resumed = store.resume(token(77, 4)).unwrap();
     assert_eq!(resumed.next_index(), 6, "the short last chunk is not kept");
     assert_eq!(resumed.listed(), [0, 1, 2, 3, 4, 5, 6]);
-    // Reversed, chunk 0 is not listed first: nothing is kept, and the indices are still all listed.
+    // Reversed, chunk 0 is not listed first: nothing is kept, and the indices are still all listed, sorted (ROADMAP
+    // 9.3.6: the caller binary-searches them).
     let mut storage = Listing::new(MemoryStorage::new());
     storage.reshape = Box::new(|listed| listed.reverse());
     let store = RemoteBlobStore::new(storage);
     stage_some(&store, &data, 4, 77, &[0, 1, 2, 3, 4, 5, 6]);
     let resumed = store.resume(token(77, 4)).unwrap();
     assert_eq!(resumed.next_index(), 0);
-    assert_eq!(resumed.listed(), [6, 5, 4, 3, 2, 1, 0]);
+    assert_eq!(resumed.listed(), [0, 1, 2, 3, 4, 5, 6]);
 }
 
 #[test]

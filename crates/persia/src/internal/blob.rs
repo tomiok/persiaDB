@@ -158,7 +158,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// rest under the same upload. The token's chunk size is the blob's, whatever `chunk_size` says. A chunk staged
     /// there with other bytes restarts it under a new upload id, pinned before its chunks are copied
     /// ([`BlobStore::restage`]), and so does a resume that writes no chunk the listing did not show (ROADMAP 9.3.6).
-    /// A resume that fails again returns [`Error::UploadInterrupted`] with the upload it was staging then.
+    /// A resume that fails again returns [`Error::UploadInterrupted`] with the upload it was staging then: after a
+    /// conflict, the new upload, even when the copy was empty, since the token's upload holds other bytes there.
+    ///
+    /// The 9.3.6 restage has a cost: a resume of an upload whose chunks are all staged already (after a bind that
+    /// failed with a known outcome, say) re-reads every chunk before its last window and uploads it again under the
+    /// new id, besides the re-read every resume makes of its kept run. A resume with an empty kept run of a blob of at
+    /// most [`SMALL_BLOB_MAX`] bytes is stored chunked (staged, then bound), not inline: only a new upload takes the
+    /// small path. A resume never discards the token's upload (a replayed token's may be bound to another blob), only
+    /// one it restaged to, on a duplicate or an `expected_id` mismatch; GC takes the token's.
     ///
     /// # Errors
     /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built (the token's
@@ -168,7 +176,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::UploadInterrupted`], on a store that can resume, for a reader failure ([`Error::Read`]) or a store
     ///   error ([`Error::Storage`], [`Error::StagedChunkConflict`], [`Error::Corrupt`] while staging or restaging)
     ///   after the upload staged chunks or while resuming, and for a bind that failed with a store error and a known
-    ///   outcome (nothing bound): the other errors below are never wrapped;
+    ///   outcome (nothing bound); never for a small blob, which stages nothing. The other errors below are never
+    ///   wrapped;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::InvalidResume`] when the reader of a resume ends inside the kept run or is not the blob the upload
     ///   staged there (nothing staged);
@@ -249,14 +258,16 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 Ok(())
             })
             .map_err(|e| interrupted(token.filter(|_| attempted), e))?;
+            // The last window: a chunk write is attempted only when it holds a chunk.
+            let attempted = attempted || !staged.is_empty();
             self.stage(upload_id, &mut staged)
-                .map_err(|e| interrupted(token, e))?;
+                .map_err(|e| interrupted(token.filter(|_| attempted), e))?;
             let manifest = self.checked_manifest(blob, upload_id, crcs, options, true)?;
             pins.add(Pinned::Blob(manifest.blob_id()));
             let outcome = self.bind(upload_id, options, || self.store.bind(&manifest));
             (manifest, bind_interrupted(token, outcome))
         };
-        let blob_ref = self.bound(&manifest, outcome, options, &mut pins)?;
+        let blob_ref = self.bound(&manifest, outcome, options, &mut pins, true)?;
         Ok((blob_ref, pins))
     }
 
@@ -347,7 +358,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 
     /// The blob's manifest once its id is checked against `expected_id`; a mismatch discards the upload when it
-    /// `staged` chunks (the small path stages nothing before `bind_small`).
+    /// `staged` chunks this call owns (the small path stages nothing before `bind_small`; a resume passes `false`
+    /// for the token's upload, which may be bound to another blob, ADR-0053).
     fn checked_manifest(
         &self,
         blob: persia_blob::ChunkedBlob,
@@ -431,12 +443,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 
     /// The `BlobRef` of a bound blob, from `bind`'s outcome (SPEC §9.2: a duplicate carries the bound chunk size).
+    /// A duplicate discards `manifest`'s upload only when `owned`: this call created it. A resume does not own the
+    /// token's upload, which a replayed token may have bound to another blob: GC takes it (ADR-0053).
     fn bound(
         &self,
         manifest: &BlobManifest,
         (outcome, unknown): (Result<BindOutcome>, bool),
         options: &PutBlobOptions,
         pins: &mut Pins,
+        owned: bool,
     ) -> Result<BlobRef> {
         match outcome? {
             BindOutcome::Bound => reference(
@@ -459,7 +474,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
                 if bound.upload_id() != manifest.upload_id() {
                     pins.add(Pinned::Upload(bound.upload_id()));
                 }
-                if !unknown && bound.upload_id() != manifest.upload_id() {
+                if owned && !unknown && bound.upload_id() != manifest.upload_id() {
                     self.discard(manifest.upload_id());
                 }
                 reference(bound.blob_id(), bound.size(), bound.chunk_size(), options)

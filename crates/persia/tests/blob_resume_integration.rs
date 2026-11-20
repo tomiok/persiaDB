@@ -260,7 +260,9 @@ impl<S: Storage> BlobStore for Probe<S> {
         if let Some(child) = &self.child
             && !child.token_printed.swap(true, Ordering::AcqRel)
         {
-            // The token is known once the first chunk write is about to be attempted.
+            // The token is known once the first chunk write is about to be attempted. This hook stands in for a token
+            // the caller recorded: a killed process never returns its `UploadInterrupted`, so its parent learns the
+            // upload id and chunk size from this line, as an application would from its own record.
             report(&format!("token {} {CHUNK}", upload_id.get()));
         }
         if self.child.is_some() {

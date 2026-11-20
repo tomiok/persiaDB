@@ -247,19 +247,28 @@ impl Error {
             Self::BindOutcomeUnknown(source) => source
                 .downcast_ref::<Self>()
                 .is_some_and(Self::is_store_poisoned),
+            // ADR-0053: the wrapper only says the upload can be resumed; what failed is its source.
+            Self::UploadInterrupted { source, .. } => source.is_store_poisoned(),
             _ => false,
         }
     }
 
-    /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error.
-    pub const fn is_corruption(&self) -> bool {
-        matches!(self, Self::Corrupt { .. } | Self::CorruptAt { .. })
+    /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error; also when the corruption
+    /// is the source of an [`Error::UploadInterrupted`].
+    pub fn is_corruption(&self) -> bool {
+        match self {
+            Self::Corrupt { .. } | Self::CorruptAt { .. } => true,
+            Self::UploadInterrupted { source, .. } => source.is_corruption(),
+            _ => false,
+        }
     }
 
-    /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`]).
-    pub const fn corrupt_offset(&self) -> Option<u64> {
+    /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`], also as the
+    /// source of an [`Error::UploadInterrupted`]).
+    pub fn corrupt_offset(&self) -> Option<u64> {
         match self {
             Self::CorruptAt { offset, .. } => Some(*offset),
+            Self::UploadInterrupted { source, .. } => source.corrupt_offset(),
             _ => None,
         }
     }
@@ -286,5 +295,34 @@ mod tests {
         assert!(!Error::PackReadOnly.is_store_poisoned());
         let io = std::io::Error::other("timeout");
         assert!(!Error::BindOutcomeUnknown(Box::new(io)).is_store_poisoned());
+    }
+
+    #[test]
+    fn the_helpers_look_through_an_interrupted_upload() {
+        let wrap = |source: Error| Error::UploadInterrupted {
+            token: crate::remote::ResumeToken {
+                upload_id: UploadId::new(1),
+                chunk_size: crate::ChunkSize::DEFAULT,
+            },
+            source: Box::new(source),
+        };
+        let corrupt = || Error::Corrupt {
+            encoding: "blob chunk",
+            what: "test",
+        };
+        assert!(wrap(corrupt()).is_corruption());
+        assert!(wrap(wrap(corrupt())).is_corruption());
+        let at = Error::CorruptAt {
+            encoding: "blob pack frame",
+            offset: 42,
+            what: "test",
+        };
+        assert_eq!(wrap(at).corrupt_offset(), Some(42));
+        assert!(wrap(Error::PackPoisoned).is_store_poisoned());
+        let read = || Error::Read(std::io::Error::other("reader"));
+        assert!(!wrap(read()).is_corruption());
+        assert_eq!(wrap(read()).corrupt_offset(), None);
+        assert!(!wrap(read()).is_store_poisoned());
+        assert!(!wrap(corrupt()).is_bind_outcome_unknown());
     }
 }

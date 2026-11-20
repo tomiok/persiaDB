@@ -29,9 +29,10 @@
 #[path = "support/remote.rs"]
 mod remote;
 
+use core::num::NonZeroUsize;
 use std::io::{self, Read};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
 use persia::internal::documents::BlobDatabase;
@@ -39,8 +40,12 @@ use persia::internal::gc::DEFAULT_GRACE;
 use persia::internal::pins::{PinSet, Pinned};
 use persia::internal::retry::ManualRetryClock;
 use persia_blob::gc::{GcObject, PinCheck, PinGate, Sweep, SweepOptions};
+use persia_blob::remote::RemoteBlobStore;
+use persia_blob::testing::{ListOrder, MisorderedList};
 use persia_blob::{BlobRef, BlobStore, ChunkSize, Error, MemoryBlobStore, ResumeToken, UploadId};
 use persia_engine::db::{Database, DatabaseOptions, SegmentIds};
+use persia_storage::MemoryStorage;
+use persia_storage::retry::{Clock, ManualClock};
 use remote::{Event, Fault, Watched};
 
 const CHUNK: u32 = ChunkSize::MIN;
@@ -482,6 +487,17 @@ fn sweep_across_resume(
     token: ResumeToken,
     data: &[u8],
 ) -> (BlobRef, persia_blob::SweepReport) {
+    sweep_across_resume_on(store.inner(), store.now(), db, token, data)
+}
+
+/// [`sweep_across_resume`] with `sweeper` (the store under `db`) and the time `now`.
+fn sweep_across_resume_on<S: BlobStore + ?Sized, W: Sweep>(
+    sweeper: &W,
+    now: std::time::SystemTime,
+    db: &BlobDatabase<S>,
+    token: ResumeToken,
+    data: &[u8],
+) -> (BlobRef, persia_blob::SweepReport) {
     let mark = db.mark().unwrap();
     let resumed = Mutex::new(None);
     let hooked = Hooked {
@@ -496,10 +512,10 @@ fn sweep_across_resume(
     };
     let options = SweepOptions {
         grace: DEFAULT_GRACE,
-        now: store.now(),
+        now,
         rewrite_ratio: 0.5,
     };
-    let report = store.inner().sweep(&mark, &hooked, &options).unwrap();
+    let report = sweeper.sweep(&mark, &hooked, &options).unwrap();
     let r = resumed
         .lock()
         .unwrap()
@@ -600,4 +616,104 @@ fn a_resume_that_wrote_a_new_chunk_in_an_earlier_window_keeps_its_upload() {
             .iter()
             .any(|e| matches!(e, Event::Restage { .. }))
     );
+}
+
+#[test]
+fn a_misordered_listing_of_a_fully_staged_expired_upload_still_restages() {
+    // A backend may list out of key order, or twice (SPEC §10.1 promises neither): the resume must still see that
+    // every chunk it stages is there already, and move the blob to a young upload (ROADMAP 9.3.6).
+    for order in [ListOrder::Reversed, ListOrder::Duplicated] {
+        let dir = tempfile::tempdir().unwrap();
+        let clock = Arc::new(ManualClock::new(UNIX_EPOCH + remote::START));
+        let storage = MisorderedList {
+            inner: MemoryStorage::with_clock(Arc::clone(&clock) as Arc<dyn Clock>),
+            order,
+        };
+        let store = Arc::new(RemoteBlobStore::new(storage).with_parallelism(NonZeroUsize::MIN));
+        let blobs = Blobs::with_upload_ids(Arc::clone(&store), SegmentIds::seeded(5))
+            .with_retry_clock(Arc::new(ManualRetryClock::new()));
+        let log =
+            Database::create(dir.path().join("app.persia"), DatabaseOptions::default()).unwrap();
+        let db = BlobDatabase::new(log, blobs);
+        let data = bytes(5 * CHUNK_LEN + 100, 12);
+        // A writer staged every chunk and died before its bind; this is the token it recorded.
+        let token = ResumeToken {
+            upload_id: UploadId::new(77),
+            chunk_size: ChunkSize::new(CHUNK).unwrap(),
+        };
+        for (i, chunk) in (0_u32..).zip(data.chunks(CHUNK_LEN)) {
+            store.stage_chunk(token.upload_id, i, chunk).unwrap();
+        }
+        clock.advance(DEFAULT_GRACE + Duration::from_hours(1));
+
+        let (r, report) = sweep_across_resume_on(&*store, clock.now(), &db, token, &data);
+        let moved = store.manifest(r.blob_id()).unwrap().unwrap().upload_id();
+        assert_ne!(moved, token.upload_id, "{order:?}: no restage");
+        assert_eq!(report.uploads_deleted, 1, "{order:?}: {report:?}");
+        assert_eq!(
+            db.get_blob_range(&r, 0..r.size()).unwrap(),
+            data,
+            "{order:?}"
+        );
+        assert_eq!(r, uninterrupted(&data));
+    }
+}
+
+/// A store holding `z` (three chunks and a bit, bound under its own upload) and `x`, its first two chunks, bound under
+/// the upload the returned token names: a token replayed after its upload was bound (ADR-0053).
+fn replayed() -> (
+    Arc<Watched>,
+    Blobs<Watched>,
+    ResumeToken,
+    BlobRef,
+    Vec<u8>,
+    Vec<u8>,
+) {
+    let (store, blobs) = remote();
+    let x = bytes(2 * CHUNK_LEN, 13);
+    let mut z = x.clone();
+    z.extend(bytes(CHUNK_LEN + 50, 14));
+    drop(blobs.put_blob(&z[..], &options()).unwrap());
+    let (rx, pins) = blobs.put_blob(&x[..], &options()).unwrap();
+    drop(pins);
+    let token = ResumeToken {
+        upload_id: upload_of(&blobs, &rx),
+        chunk_size: ChunkSize::new(CHUNK).unwrap(),
+    };
+    store.clear();
+    (store, blobs, token, rx, x, z)
+}
+
+#[test]
+fn a_resume_never_discards_the_tokens_upload_which_may_be_bound() {
+    // The resume of z keeps x's two chunks and stages the rest under x's upload (new chunks: no restage). Then it
+    // fails its expected id, or finds z bound already: neither may discard x's upload.
+    let (store, blobs, token, rx, x, z) = replayed();
+    let mismatch = PutBlobOptions {
+        expected_id: Some(persia_blob::blob_id_of(b"another blob")),
+        ..resume(token)
+    };
+    let err = blobs.put_blob(&z[..], &mismatch).unwrap_err();
+    assert!(matches!(err, Error::BlobIdMismatch { .. }), "{err:?}");
+    assert!(!store.events().contains(&Event::Discard(token.upload_id)));
+    assert_eq!(blobs.get_blob_range(&rx, 0..rx.size()).unwrap(), x);
+
+    let (store, blobs, token, rx, x, z) = replayed();
+    let (rz, _pins) = blobs.put_blob(&z[..], &resume(token)).unwrap();
+    assert_eq!(rz, uninterrupted(&z));
+    assert_ne!(
+        upload_of(&blobs, &rz),
+        token.upload_id,
+        "z was bound before"
+    );
+    assert!(
+        !store
+            .events()
+            .iter()
+            .any(|e| matches!(e, Event::Restage { .. })),
+        "the resume staged new chunks under the token's upload"
+    );
+    assert!(!store.events().contains(&Event::Discard(token.upload_id)));
+    assert_eq!(blobs.get_blob_range(&rx, 0..rx.size()).unwrap(), x);
+    assert_eq!(blobs.get_blob_range(&rz, 0..rz.size()).unwrap(), z);
 }

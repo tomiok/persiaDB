@@ -66,4 +66,6 @@ pub use store::read_manifest_range_into;
 // -- resume (9.3.4, 9.3.6, 9.5.9) --
 // Wave 3's resumed uploads (blob/resume): its `mod` and `pub use` lines, if any, go here, and only here.
 pub use remote::ResumeToken;
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 //

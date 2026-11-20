@@ -33,6 +33,14 @@ struct Upload {
     fresh: bool,
 }
 
+impl Upload {
+    /// Whether this call created the upload being staged (a restage's), so it may discard it. Never the token's:
+    /// a replayed token's upload may be bound to another blob, so only GC decides it is garbage (ADR-0053).
+    fn owned(self) -> bool {
+        self.current != self.from
+    }
+}
+
 impl<S: BlobStore + ?Sized> Blobs<S> {
     /// `put_blob` with `options.resume` (see the module docs); the options are checked already.
     pub(super) fn put_resumed(
@@ -84,14 +92,19 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             self.restage_resumed(&mut upload, copied, false, &mut pins)?;
         }
         self.stage_resumed(&mut upload, &crcs, &mut staged, &was_listed, &mut pins)?;
-        let manifest =
-            self.checked_manifest(blob, upload.current.upload_id, crcs, options, true)?;
+        let manifest = self.checked_manifest(
+            blob,
+            upload.current.upload_id,
+            crcs,
+            options,
+            upload.owned(),
+        )?;
         pins.add(Pinned::Blob(manifest.blob_id()));
         let outcome = self.bind(upload.current.upload_id, options, || {
             self.store.bind(&manifest)
         });
         let outcome = bind_interrupted(Some(upload.current), outcome);
-        let blob_ref = self.bound(&manifest, outcome, options, &mut pins)?;
+        let blob_ref = self.bound(&manifest, outcome, options, &mut pins, upload.owned())?;
         Ok((blob_ref, pins))
     }
 

@@ -11,7 +11,7 @@ use persia_format::checksum::crc32c;
 use persia_format::widen::{u64_from_usize, usize_from_u32};
 use persia_storage::Storage;
 
-use super::{RemoteBlobStore, RemoteKey, parallel};
+use super::{RemoteBlobStore, RemoteKey, StagedChunk, parallel};
 use crate::chunker::Chunker;
 use crate::chunking::ChunkSize;
 use crate::error::{Error, Result};
@@ -34,7 +34,7 @@ pub struct ResumedUpload {
     token: ResumeToken,
     hasher: ContentHasher,
     crcs: Vec<u32>,
-    /// Every chunk index the listing showed, kept run or not, in order.
+    /// Every chunk index the listing showed, kept run or not: sorted, without duplicates.
     listed: Vec<u32>,
 }
 
@@ -60,10 +60,12 @@ impl ResumedUpload {
         &self.crcs
     }
 
-    /// Every chunk index the listing [`RemoteBlobStore::resume`] read showed, in the kept run or not, in order.
-    /// Staging such a chunk again with the same bytes writes nothing (SPEC §9.4: `put_if_absent`), so it leaves the
-    /// upload as old as it was; one the listing did not show is written then (ROADMAP 9.3.6). Without `strong_list`
-    /// a listing may miss a chunk written just before it, which is young anyway.
+    /// The chunk indices the listing [`RemoteBlobStore::resume`] read showed, in the kept run or not: sorted
+    /// ascending and without duplicates, whatever order the backend listed them in (so a caller may binary-search
+    /// it). A chunk listed here that the resume stages again with the same bytes is not rewritten (SPEC §9.4:
+    /// `put_if_absent`), so it does not make the upload younger; a chunk not listed here is a new write
+    /// (ROADMAP 9.3.6). Without `strong_list` a listing may miss a chunk written just before it, which is young
+    /// anyway.
     pub fn listed(&self) -> &[u32] {
         &self.listed
     }
@@ -134,7 +136,7 @@ impl<S: Storage> RemoteBlobStore<S> {
             token,
             hasher: ContentHasher::new(),
             crcs: Vec::new(),
-            listed: listed.iter().map(|chunk| chunk.index).collect(),
+            listed: sorted_indices(&listed),
         };
         let window = self.parallelism.get();
         let mut start = 0_usize;
@@ -209,6 +211,14 @@ impl<S: Storage> RemoteBlobStore<S> {
         }
         Ok(())
     }
+}
+
+/// The listed chunks' indices, sorted and without duplicates: a backend may list them in another order, or twice.
+fn sorted_indices(listed: &[StagedChunk]) -> Vec<u32> {
+    let mut indices: Vec<u32> = listed.iter().map(|chunk| chunk.index).collect();
+    indices.sort_unstable();
+    indices.dedup();
+    indices
 }
 
 fn chunk_index(start: usize, i: usize) -> Result<u32> {
@@ -306,6 +316,28 @@ mod tests {
             resumed.skip_kept(&mut Failing),
             Err(Error::Read(_))
         ));
+    }
+
+    #[test]
+    fn listed_is_sorted_and_without_duplicates_however_the_backend_lists() {
+        use crate::testing::{ListOrder, MisorderedList};
+        for order in [ListOrder::Reversed, ListOrder::Duplicated] {
+            let clock = Arc::new(ManualClock::new(UNIX_EPOCH));
+            let inner = MemoryStorage::with_clock(clock);
+            let store = RemoteBlobStore::new(MisorderedList { inner, order })
+                .with_parallelism(NonZeroUsize::MIN);
+            let t = token(1);
+            for (index, bytes) in [
+                (0, b"abcd".as_slice()),
+                (1, b"efgh"),
+                (3, b"mnop"),
+                (4, b"q"),
+            ] {
+                store.stage_chunk(t.upload_id, index, bytes).unwrap();
+            }
+            let resumed = BlobStore::resume(&store, t).unwrap();
+            assert_eq!(resumed.listed(), [0, 1, 3, 4], "{order:?}");
+        }
     }
 
     #[test]

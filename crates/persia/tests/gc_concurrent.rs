@@ -12,8 +12,9 @@
 //!    leave no chunk outside the uploads the kept blobs' manifests name.
 //!
 //! Deterministic inputs: the blobs' bytes come from fixed seeds and every thread runs a fixed number of iterations;
-//! only the interleaving varies, and the invariants hold for every one. No sleeps: barriers start the threads
-//! together and run a GC round between each `put_blob` and the drop of its pins, while its writer reads the blob.
+//! only the interleaving varies, and the invariants hold for every one. No sleeps: a barrier starts the threads
+//! together, GC runs its rounds freely beside the writers' `put_blob`s and reads, and each writer waits on GC's
+//! round count, holding its pins, until one full round has run since its `put_blob`.
 #![allow(
     clippy::unwrap_used,
     clippy::panic,
@@ -28,7 +29,7 @@ use std::collections::HashSet;
 use std::io::Read;
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Barrier, Mutex};
+use std::sync::{Arc, Barrier, Condvar, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use persia::internal::blob::{Blobs, PutBlobOptions};
@@ -57,6 +58,18 @@ struct Load {
     rounds: usize,
     /// Blobs a document references, put before the threads start.
     documents: usize,
+}
+
+/// The most GC rounds a run makes: a bound, far above what the writers need.
+const MAX_ROUNDS: usize = 100_000;
+
+/// GC's progress, as the writers wait on it.
+#[derive(Debug, Default)]
+struct Rounds {
+    /// Rounds finished.
+    finished: usize,
+    /// Whether GC has stopped: no round will finish any more.
+    stopped: bool,
 }
 
 const FAST: Load = Load {
@@ -182,45 +195,55 @@ fn run<S: BlobStore + Sweep + ?Sized>(
     db.release_durable();
 
     let db = &*db;
-    // Lock step: after each `put_blob`, every writer and GC meet at `step`; GC runs a round while the writers read
-    // their new blobs (pins held), and they meet again before the writers read once more, so every blob is read both
-    // across and after a round its pins alone keep it through. Failures are collected, not panicked on, so a failing
-    // thread never leaves the others waiting at the barrier.
+    // GC runs freely on its own thread, round after round, while the writers `put_blob` and read: rounds overlap
+    // staging, binding and reads at whatever point the scheduler picks. The one rendezvous is `done`, the count of
+    // finished rounds: after a `put_blob`, its writer waits (holding the pins) until a round that started after the
+    // put has finished, then reads again, so every blob is read after at least one full round its pins alone kept it
+    // through. Failures are collected, not panicked on, so a failing thread never leaves another one waiting.
     let start = Barrier::new(load.writers + load.readers + 1);
-    let step = Barrier::new(load.writers + 1);
     let finished = AtomicUsize::new(0);
+    let done = Mutex::new(Rounds::default());
+    let round_done = Condvar::new();
     let failures: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let fail = |what: String| failures.lock().unwrap().push(what);
     let (held, mut orphans) = std::thread::scope(|scope| {
         let writers: Vec<_> = (0..load.writers)
             .map(|t| {
-                let (start, step, finished, fail) = (&start, &step, &finished, &fail);
+                let (start, finished, fail) = (&start, &finished, &fail);
+                let (done, round_done) = (&done, &round_done);
                 scope.spawn(move || {
                     start.wait();
                     let mut held: Vec<(BlobRef, Vec<u8>, Pins)> = Vec::new();
                     let mut orphans = Vec::new();
                     for i in 0..load.iterations {
                         let bytes = data(t, i);
-                        let put = db.put_blob(&bytes[..], &options());
-                        step.wait();
-                        let (r, pins) = match put {
+                        let (r, pins) = match db.put_blob(&bytes[..], &options()) {
                             Ok(put) => put,
                             Err(e) => {
                                 fail(format!("put_blob {t}/{i}: {e:?}"));
-                                step.wait();
                                 continue;
                             }
                         };
-                        // Invariant 1: its pins keep it while GC runs, and after.
+                        // Invariant 1: its pins keep it while GC runs, and after a full round.
+                        check(db, &r, &bytes, &format!("blob {t}/{i} beside GC"), fail);
+                        let mut rounds = done.lock().unwrap();
+                        // The round running now may have marked before the put: the next one starts after it.
+                        let target = rounds.finished + 2;
+                        while rounds.finished < target && !rounds.stopped {
+                            rounds = round_done.wait(rounds).unwrap();
+                        }
+                        let stopped = rounds.finished < target;
+                        drop(rounds);
+                        if stopped {
+                            fail(format!("blob {t}/{i}: GC stopped before a full round"));
+                        }
                         check(
                             db,
                             &r,
                             &bytes,
-                            &format!("blob {t}/{i} during a round"),
+                            &format!("blob {t}/{i} after a full round"),
                             fail,
                         );
-                        step.wait();
-                        check(db, &r, &bytes, &format!("blob {t}/{i} after a round"), fail);
                         orphans.push(r.clone());
                         if i % 3 == 2 {
                             held.push((r, bytes, pins));
@@ -244,24 +267,27 @@ fn run<S: BlobStore + Sweep + ?Sized>(
             });
         }
         start.wait();
-        let round = |rounds: &mut usize| {
+        // At least `load.rounds`, then until the writers are done, never more than `MAX_ROUNDS`.
+        let mut rounds = 0;
+        while rounds < load.rounds || finished.load(Ordering::Acquire) < load.writers {
+            if rounds >= MAX_ROUNDS {
+                fail(format!(
+                    "GC ran {MAX_ROUNDS} rounds before the writers finished"
+                ));
+                break;
+            }
             before_round();
             match db.gc(&gc()) {
                 // Invariant 2: no referenced blob is missing.
                 Ok(report) if report.missing.is_empty() => {}
                 other => fail(format!("GC round {rounds}: {other:?}")),
             }
-            *rounds += 1;
-        };
-        let mut rounds = 0;
-        for _ in 0..load.iterations {
-            step.wait();
-            round(&mut rounds);
-            step.wait();
+            rounds += 1;
+            done.lock().unwrap().finished = rounds;
+            round_done.notify_all();
         }
-        while rounds < load.rounds {
-            round(&mut rounds);
-        }
+        done.lock().unwrap().stopped = true;
+        round_done.notify_all();
         let mut held = Vec::new();
         let mut orphans = Vec::new();
         for writer in writers {
@@ -350,9 +376,15 @@ fn pack(load: Load) {
     let pack = PackStore::open_writer(dir.path().join("app.persia.blobs"), &proof).unwrap();
     let blobs = Blobs::with_upload_ids(Arc::new(pack), SegmentIds::seeded(22));
     let mut db = BlobDatabase::new(log, blobs);
-    // Every round rewrites the pack, so streams and range reads cross rewrites (SPEC §18.10 (c)).
+    // Every fourth round forces a rewrite of the pack, so reads cross rewrites (SPEC §18.10 (c)); the others rewrite
+    // only past the default ratio (a forced rewrite syncs the new file: forcing every round makes the test slow).
+    let round = AtomicUsize::new(0);
     let gc = || GcOptions {
-        rewrite_ratio: 0.0,
+        rewrite_ratio: if round.fetch_add(1, Ordering::Relaxed).is_multiple_of(4) {
+            0.0
+        } else {
+            persia::internal::gc::DEFAULT_REWRITE_RATIO
+        },
         ..GcOptions::default()
     };
     let outcome = run(&mut db, load, &gc, &|| {});

@@ -211,6 +211,9 @@ pub trait BlobStore: Send + Sync {
     /// Whether this store can resume an upload ([`BlobStore::resume`]): `false` by default, `true` for the remote
     /// layout (SPEC §9.4; local uploads are not resumable, SPEC §9.3). `put_blob` wraps a failure after staging in
     /// [`Error::UploadInterrupted`] only on a store that can (ADR-0053).
+    ///
+    /// A store that wraps another (a recording or caching layer) must forward `resumable`, `resume` and `restage`: with
+    /// the defaults, a remote store behind it could not resume, and its failures would not be wrapped.
     fn resumable(&self) -> bool {
         false
     }
