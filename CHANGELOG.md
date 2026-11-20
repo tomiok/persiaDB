@@ -19,6 +19,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   chunk's CRC32C; `--quick` skips that scan, and `--deep` also re-hashes every referenced blob.
 - `persia-blob`: `PackStore::scan_checksums`; `persia-engine`: `ReadOnlyDatabase::blob_references`;
   `persia-storage`: `WriterProof` and `Container::writer_proof` (ROADMAP 9.2.7, 9.5.3).
+- `persia-blob`: the blob pack takes its own writer lock; a second writer fails with `PackLocked` (ROADMAP 9.2.7).
+  `persia verify` exits 1 with "changed during verify, rerun" when a live writer commits during the run. The pack
+  checksum scan bounds frame lengths before reading and checks every chunk an index names against its manifest.
+  `BlobDatabase::create` refuses a leftover pack; `ReadOnlyBlobDatabase::refresh` refuses a copy at another path or an
+  older open.
 <!-- -- end wiring -- -->
 <!-- -- resume (blob/resume: 9.3.4, 9.3.6, 9.5.9) -- -->
 <!-- -- end resume -- -->

@@ -25,6 +25,14 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
    carries the container's `db_uuid`, which the pack's header must match, and borrows the handle. It is checked at
    open and not stored. `PackStore::open_writer` / `open_writer_in` are the only read-write opens; `open` / `open_in`
    are read-only and take a `db_uuid`. A second writer is impossible because its container open fails on the lock.
+   The proof is the API gate; the pack's own OS lock, reusing the container's primitive (`ContainerFile::try_lock`,
+   `Vfs::lock_beside`), is the enforcement. The proof is `Copy`, any read-write container mints one (a simulated one
+   too), and an `Arc` clone of the store outlives the container, so the proof alone cannot enforce one writer. A
+   read-write handle holds the lock from open to drop (Unix: the pack file itself; Windows: `<name>.persia.blobs.lock`),
+   taken before the open sweeps or recovers anything; a created or rewritten pack file is locked before it is written,
+   so the path never names an unlocked pack while its writer lives. A second read-write open fails with `PackLocked`.
+   Remaining gap: before the pack file exists on Unix there is nothing to lock, so two read-write handles opened then
+   can both exist; the one that loses the race to create the pack fails at its first write and is poisoned.
 2. **Drop order.** The proof does not keep the container alive, so owners declare the pack before the container
    (`BlobDatabase`: pins, then blobs, then the log) and the pack drops first. Tests mint real proofs from a real
    `Container` over a `SimFile`; there is no test-only constructor.
@@ -72,6 +80,11 @@ error; `Unsupported` trait defaults; a restage that makes the chunks young.
     keep its old age, and a sweep whose manifest listing came before the bind could delete it. This replaces the
     alternative of `pin_contained` checking chunk 0, which cannot help once the pins have dropped before the chunk
     phase.
+    The cost is a re-read and re-upload of every chunk before the last window when the upload was fully staged; it is
+    accepted rather than skipping the copy for uploads that look young, because the client's clock and the backend's
+    need not agree.
+11. **No discard of the token's upload.** A resume never discards the token's upload: a replayed token may name an
+    upload bound to another blob. It discards only an upload it restaged to; GC decides about the token's.
 
 ## Consequences
 

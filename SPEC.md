@@ -2626,7 +2626,11 @@ file with its header and superblock synced, then its directory synced (§4.5.2).
 temporary files a crashed creation or pack rewrite left beside the pack (`<name>.persia.blobs.tmp.<nonce>.<n>`), then
 syncs the directory; only the container's writer opens the pack read-write, so none is in use. It proves it: a
 read-write open takes the container's `WriterProof`, which only a read-write container handle mints, and the pack
-carries that proof's `db_uuid` (ROADMAP 9.2.7, ADR-0053). That sweep relies on
+carries that proof's `db_uuid` (ROADMAP 9.2.7, ADR-0053). A read-write pack handle holds the pack's writer lock from
+open to drop: on Unix an advisory lock on the pack file itself, on Windows the locked `<name>.persia.blobs.lock` beside
+it, taken before the open sweeps or recovers anything. A created or rewritten pack file is locked before it is
+written, so the path never names an unlocked pack while its writer lives. A second read-write open fails with
+`PackLocked`, however the first handle is kept alive. That sweep relies on
 §18.10 (b): nothing is bound into the new pack until its directory sync succeeds, and writing stops if it fails, so a
 swept rewrite file holds no blob a reader can still name. A removal or directory sync that fails is logged and does
 not fail the open (ROADMAP 9.2.6). The next open does not retry that directory sync: a name the removal left, or that
@@ -2737,7 +2741,9 @@ referenced blob against its `blob_id` (ADR-0053). It checks the local layout; th
 `ReadOnlyDatabase::blob_references` lists: each document of a committed segment that its committed tombstones leave
 live, and every put of the WAL chunks the read-only open replayed, replaced since or not (what GC's mark keeps). The
 scan reads only the committed frames `12288..log_end`; an orphan chunk is one no bound blob names, counted and never
-an error. The engine itself does not look a `BlobRef` up when
+an error. `persia verify` opens the pack right after the documents; a dangling reference found once the container's
+committed seq has moved since then is reported as "changed during verify, rerun" (exit status 1), not as damage (exit
+status 3). The engine itself does not look a `BlobRef` up when
 it logs or commits a document (it does not depend on `persia-blob`); the public API is what keeps references bound
 (§9.6).
 
