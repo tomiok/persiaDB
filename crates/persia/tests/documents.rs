@@ -460,7 +460,12 @@ fn a_crash_while_checking_a_stored_reference_logs_nothing() {
             ..Faults::default()
         });
         assert!(db.put("c", &doc("again"), Blob::Stored(r), level).is_err());
-        assert!(store.calls().iter().any(|c| matches!(c, Call::Manifest(_))));
+        assert!(
+            store
+                .calls()
+                .iter()
+                .any(|c| matches!(c, Call::Manifest { .. }))
+        );
         drop(db);
         let docs = documents(&Database::open(&path, DatabaseOptions::default()).unwrap());
         assert_eq!(

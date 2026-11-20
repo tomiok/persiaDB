@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use persia_blob::{
     BindOutcome, BlobId, BlobManifest, BlobRef, BlobStore, Chunk, ChunkSize, Error, Result,
-    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range, read_range,
+    SMALL_BLOB_MAX, UploadId, blob_id_of, read_manifest_range_into, read_range,
 };
 use persia_engine::db::SegmentIds;
 
@@ -33,9 +33,10 @@ pub const WINDOW_MAX_CHUNKS: u32 = 64;
 /// How long `put_blob` keeps retrying a bind whose outcome is unknown, by default (SPEC §9.4, ADR-0051).
 pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 
-/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4): GC's grace period must stay far above any budget a
-/// writer used, and a cap holds across restarts where a recorded maximum would not. `gc` requires a grace of at
-/// least this.
+/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4). A cap holds across restarts, where a recorded maximum
+/// would not. GC's grace period must be at least twice this, strictly above every budget: an attempt started just
+/// before the deadline can land its `put_if_absent` after the budget ends, and a grace of only this long could sweep
+/// those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace.
 pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
 
 /// What `put_blob` stores beside the bytes (SPEC §9.6).
@@ -141,7 +142,9 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
-    ///   bound later, and nothing references it (its upload is left to GC);
+    ///   bound later, and nothing references it (its upload is left to GC). Also before the budget runs out when the
+    ///   store refuses every write until it is reopened: that error has [`Error::is_store_poisoned`] too, and only
+    ///   reopening the store tells whether the blob was bound (ROADMAP 9.4.7);
     /// - [`Error::Corrupt`] when the manifest bound under the id does not name it or another size;
     /// - the store's errors, after which nothing this call returned references the blob.
     pub fn put_blob(
@@ -237,7 +240,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
 
     /// A reader of the whole blob `blob_ref` refers to (SPEC §9.6 `get_blob`), which reads it a window of chunks at
     /// a time ([`WINDOW_BYTES`]), each checked, never the whole blob at once. The manifest is looked up and checked
-    /// once, here; every window reads by it ([`read_manifest_range`]). The reader pins the blob and its upload until
+    /// once, here; every window reads by it ([`read_manifest_range_into`], with one window buffer
+    /// and one store scratch buffer for the whole stream). The reader pins the blob and its upload until
     /// it is dropped, so a GC sweep never takes a blob mid-stream (SPEC §9.5).
     ///
     /// # Errors
@@ -264,6 +268,7 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             offset: 0,
             buf: Vec::new(),
             pos: 0,
+            scratch: Vec::new(),
             _pins: pins,
         })
     }
@@ -317,6 +322,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     /// unknown; after one, an error is no answer (the earlier write may still land), so the loop goes on. Attempts
     /// are spaced by [`backoff`]; no attempt starts at or after `options.bind_budget` past the first (a wait that
     /// would reach that deadline is not waited), and the unknown error is returned then. At least one attempt is made.
+    /// An unknown outcome from a store that refuses every write until reopened ([`Error::is_store_poisoned`]), or such
+    /// a store's error after an unknown outcome, ends the loop at once, still unknown ([`still_unknown`]).
     fn bind(
         &self,
         upload_id: UploadId,
@@ -342,6 +349,15 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
         loop {
             match bind() {
                 Ok(outcome) => return (Ok(outcome), unknown.is_some()),
+                // A store that refuses every write until it is reopened (the pack after a failed sync, SPEC §4.5)
+                // answers nothing more on this handle: the outcome stays unknown, so the retry ends now instead of at
+                // the end of the budget (ROADMAP 9.4.7, ADR-0051 item 3). Only a reopen tells what was bound.
+                Err(e)
+                    if e.is_store_poisoned()
+                        && (unknown.is_some() || e.is_bind_outcome_unknown()) =>
+                {
+                    return (Err(still_unknown(e, unknown.as_ref())), true);
+                }
                 Err(e) if e.is_bind_outcome_unknown() => unknown = Some(e),
                 Err(e) if unknown.is_none() => return (Err(e), false),
                 // Still unknown: this answer says nothing of the earlier attempt's write.
@@ -406,6 +422,25 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     }
 }
 
+/// `poisoned` (an error with [`Error::is_store_poisoned`]) as an unknown outcome: itself when it already is one, or
+/// wrapped in [`Error::BindOutcomeUnknown`], so the caller learns both that nothing is known and that the store must
+/// be reopened. The earlier unknown outcome, if any, holds the root cause (the failed sync): it is logged, since the
+/// returned error must carry the poisoned refusal for [`Error::is_store_poisoned`] to hold.
+fn still_unknown(poisoned: Error, first: Option<&Error>) -> Error {
+    if let Some(first) = first {
+        tracing::warn!(
+            error = %first,
+            source = ?std::error::Error::source(first),
+            "a blob bind's outcome is unknown and its store refuses every write until reopened"
+        );
+    }
+    if poisoned.is_bind_outcome_unknown() {
+        poisoned
+    } else {
+        Error::BindOutcomeUnknown(Box::new(poisoned))
+    }
+}
+
 /// The CRC32C of each chunk of the blob `reader` yields, and its summary; `sink` gets each chunk in order.
 fn chunk_crcs(
     reader: impl Read,
@@ -462,6 +497,8 @@ pub struct BlobReader<'a, S: ?Sized> {
     offset: u64,
     buf: Vec<u8>,
     pos: usize,
+    /// The store's read buffer (`BlobStore::read_chunks_checked`), kept for the stream: at most one chunk frame.
+    scratch: Vec<u8>,
     /// The blob and its upload, pinned while the stream lives (SPEC §9.5).
     _pins: Pins,
 }
@@ -481,8 +518,21 @@ impl<S: BlobStore + ?Sized> Read for BlobReader<'_, S> {
                 return Ok(0);
             }
             let end = self.offset.saturating_add(self.window).min(size);
-            self.buf = read_manifest_range(self.store, &self.manifest, self.offset..end)
-                .map_err(io::Error::other)?;
+            // The window buffer and the store's scratch are kept across windows: neither is allocated (nor, for a
+            // pack read with `pread`, zero-filled) again (ROADMAP 9.2.9).
+            self.buf.clear();
+            self.pos = 0;
+            read_manifest_range_into(
+                self.store,
+                &self.manifest,
+                self.offset..end,
+                &mut self.scratch,
+                &mut self.buf,
+            )
+            .map_err(|e| {
+                self.buf.clear();
+                io::Error::other(e)
+            })?;
             self.offset = end;
             self.pos = 0;
         }

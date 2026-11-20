@@ -54,5 +54,6 @@ pub use gc::{GcObject, Mark, PinCheck, PinGate, Rewrite, Sweep, SweepOptions, Sw
 
 // -- followups (9.2, 9.3, 9.4) --
 // Wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7): their `mod` and `pub use` lines, if any.
-//
+// `read_manifest_range` with the caller's buffers, for streams (ROADMAP 9.2.9).
+pub use store::read_manifest_range_into;
 //

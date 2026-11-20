@@ -13,7 +13,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   §9.3, §9.5; ADR-0052). It marks the blobs the database's documents (the writer's view: live state, snapshots and
   memtable views readers still hold, obsolete segments still held, the WAL from `wal_start`) and the writer's pins
   reference. Remotely it deletes unmarked blob manifests, then the staged chunks of unreferenced uploads, once older
-  than the grace period (`GcOptions::grace`, default 24 h, at least `MAX_BIND_BUDGET`); objects of unknown age are
+  than the grace period (`GcOptions::grace`, default 24 h, at least `2 * MAX_BIND_BUDGET`); objects of unknown age are
   kept and counted. Locally it rewrites the pack without them, by copy and rename, once at least `rewrite_ratio`
   (default 0.5) of its frame bytes is garbage.
 - `persia-blob`: the `gc` module (`Mark`, `Sweep`, `SweepOptions`, `SweepReport`, `Rewrite`, `PinGate`/`PinCheck`)
@@ -23,6 +23,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   objects (ROADMAP 9.5.7).
 - `persia`: `get_blob` streams pin their blob and upload until dropped, and `get_blob_range` its blob for the call,
   so GC never takes a blob mid-read (SPEC §9.5).
+- `persia-blob`: a read-write open of the pack removes the stale temporary files of crashed pack creations and
+  rewrites, `<name>.persia.blobs.tmp.*` (`PackRecovery::swept`; ROADMAP 9.2.6).
+- `persia-blob`: `Error::CorruptAt { encoding, what, offset }` and `Error::corrupt_offset`: a pack corruption error
+  names the slot or frame it found damaged (ROADMAP 9.2.8).
+- `persia-blob`: `BlobStore::read_chunks_checked`, a provided method that hands each checked chunk to a sink (with a
+  caller's scratch buffer), so a store can serve bytes without a copy; `read_manifest_range_into`, which reuses one
+  buffer across a stream (ROADMAP 9.2.9).
 - `persia-blob`: `RemoteBlobStore`, the remote blob layout over any `Storage` with conditional put (SPEC §9.4,
   ADR-0050): blob manifests at `blobs/<xx>/<id>`, staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>`, parallel
   chunk transfers (`with_parallelism`, default 8) and resumable uploads (`resume`, `restage`, `Chunker::resume`)
@@ -151,9 +158,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
-  `Error::BindBudgetAboveMax`, before reading any byte: GC's grace period must stay above every budget (SPEC §9.4).
+  `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
+  an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc`
+  rejects a shorter grace (SPEC §9.4).
 - `persia-engine`: the writer keeps weak references to the collection snapshots it replaced, so GC's mark sees what
   a reader of this process still holds (ROADMAP 9.5.1).
+- `persia-blob`: pack chunk reads take one read and one CRC pass per chunk, with no copy: a 16 MiB read is 27.7 →
+  5.1 ms, a 1 MiB range across two chunks 3.9 → 1.9 ms (`pack` bench, pread; ROADMAP 9.2.9). The read buffer is
+  still zero-filled at most once per `get_blob` stream (once per `read_range` or `read_chunk_source` call).
+- `persia-blob` (breaking): pack corruption errors from reads, the open and `refresh` are `Error::CorruptAt`
+  (`is_corruption` still holds); code matching `Error::Corrupt { .. }` on them must match both (ROADMAP 9.2.8).
+- `persia` (internal API): `put_blob` stops retrying a bind at once on a poisoned store (`Error::is_store_poisoned`),
+  still as an unknown outcome (ROADMAP 9.4.7).
 - `persia-storage` (breaking): `ObjectMeta` gained `last_modified` and `vfs::EntryKind::File` gained `modified`, so
   struct literals of either must name the new field (ROADMAP 9.5.5).
 - `persia-engine` (breaking): `Compiled::query` is private, and a compiled query keeps the request filter beside it

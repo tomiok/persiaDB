@@ -11,7 +11,10 @@
 
 use persia_format::checksum::crc32c;
 use persia_format::checksummed::{Checksummed, ChecksummedLayout};
-use persia_format::frame::{Frame, FrameEncoder, FrameKind};
+use persia_format::frame::{
+    FLAG_ZSTD, FRAME_HEADER_LEN, FRAME_MAGIC, FRAME_TRAILER_LEN, Frame, FrameEncoder, FrameHeader,
+    FrameKind, KNOWN_FRAME_FLAGS, frame_len,
+};
 use persia_format::header::{BLOB_PACK, HEADER_LEN, Header};
 use persia_format::superblock::{FIRST_FRAME_OFFSET, SLOT_LEN, SLOTS_LEN, Slot, pick_active};
 use persia_format::widen::{u64_from_usize, usize_from_u32};
@@ -31,6 +34,8 @@ pub const FIRST_GENERATION: u64 = 1;
 pub const CHUNK_HEAD_LEN: usize = 32;
 /// The bytes before the blob manifest in a `BlobIndex` payload: `manifest_len`, reserved.
 pub const INDEX_HEAD_LEN: usize = 8;
+/// Where a chunk's bytes start in its `BlobChunk` frame: after the frame header and the chunk's head.
+pub const CHUNK_BYTES_OFFSET: usize = FRAME_HEADER_LEN + CHUNK_HEAD_LEN;
 /// The largest chunk a `BlobChunk` frame holds: the largest chunk size (SPEC §9.1).
 pub const MAX_CHUNK_LEN: u32 = ChunkSize::MAX;
 
@@ -70,6 +75,60 @@ pub(crate) fn from_format(e: persia_format::Error) -> Error {
         _ => "an invalid header, slot or frame",
     };
     corrupt(what)
+}
+
+// -- followups (9.2.8) --
+// Pack corruption located at the slot or frame it was found in. `corrupt` and `from_format` keep their meaning
+// (unlocated `Error::Corrupt`), so code that builds those keeps compiling.
+
+/// [`corrupt`] in the slot or frame that starts at `offset` ([`Error::CorruptAt`], ROADMAP 9.2.8).
+pub(crate) const fn corrupt_at(what: &'static str, offset: u64) -> Error {
+    Error::CorruptAt {
+        encoding: ENCODING,
+        what,
+        offset,
+    }
+}
+
+/// [`from_format`] in the slot or frame that starts at `offset`.
+pub(crate) fn from_format_at(e: persia_format::Error, offset: u64) -> Error {
+    locate(from_format(e), offset)
+}
+
+/// Locates an error at the slot or frame that starts at `offset`: an unlocated [`Error::Corrupt`] (of any encoding,
+/// e.g. a blob manifest in a `BlobIndex` frame) becomes [`Error::CorruptAt`]; an error already located (in an inner,
+/// more precise slot or frame) or that is not corruption is kept.
+pub(crate) fn locate(e: Error, offset: u64) -> Error {
+    match e {
+        Error::Corrupt { encoding, what } => Error::CorruptAt {
+            encoding,
+            what,
+            offset,
+        },
+        other => other,
+    }
+}
+
+/// [`locate`] as a `map_err` argument.
+pub(crate) fn at(offset: u64) -> impl Fn(Error) -> Error {
+    move |e| locate(e, offset)
+}
+
+/// [`from_format`] for the header and slots: at the page the format error found its field in, the header (0) or a
+/// slot (4096, 8192): the prefix is three pages of `SLOT_LEN` bytes. A format error carries the offset of its field;
+/// ours, the start of the slot.
+fn from_format_in_prefix(e: persia_format::Error) -> Error {
+    match e.corruption() {
+        Some((offset, _)) => {
+            let page = offset
+                .min(FIRST_FRAME.saturating_sub(1))
+                .checked_div(u64_from_usize(SLOT_LEN))
+                .unwrap_or(0)
+                .saturating_mul(u64_from_usize(SLOT_LEN));
+            from_format_at(e, page)
+        }
+        None => from_format(e),
+    }
 }
 
 /// One superblock slot of a pack (SPEC §9.3), the double-buffered commit record of SPEC §4.3 with the pack's fields:
@@ -257,13 +316,14 @@ pub fn new_pack_prefix(db_uuid: [u8; 16], pack_id: u128) -> Result<Vec<u8>> {
 /// the file ([`PackSuperblock::check_bounds`]).
 ///
 /// # Errors
-/// [`Error::Corrupt`] (a short prefix, a bad magic, a CRC mismatch, no valid slot, conflicting slots), or
+/// [`Error::CorruptAt`] at the header (0) or the slot (4096, 8192) found damaged: a short prefix, a bad magic, a CRC
+/// mismatch, no valid slot (at slot A) or conflicting slots (at slot B); or
 /// [`Error::PackUnsupported`] for a newer major or unknown `incompat_flags`.
 pub fn decode_prefix(bytes: &[u8]) -> Result<Prefix> {
     let mut r = Reader::new(bytes);
-    let header = Header::decode_with(&mut r, &BLOB_PACK).map_err(from_format)?;
+    let header = Header::decode_with(&mut r, &BLOB_PACK).map_err(from_format_in_prefix)?;
     debug_assert_eq!(r.position(), HEADER_LEN);
-    let mut slots = r.sub_reader(SLOTS_LEN).map_err(from_format)?;
+    let mut slots = r.sub_reader(SLOTS_LEN).map_err(from_format_in_prefix)?;
     let a_offset = Slot::A.offset();
     let b_offset = Slot::B.offset();
     let a = slots
@@ -279,7 +339,7 @@ pub fn decode_prefix(bytes: &[u8]) -> Result<Prefix> {
         a_offset,
         b_offset,
     )
-    .map_err(from_format)?;
+    .map_err(from_format_in_prefix)?;
     Ok(Prefix {
         header,
         slot,
@@ -405,6 +465,143 @@ pub fn decode_chunk_payload(payload: &[u8]) -> Result<(ChunkHead, &[u8])> {
     Ok((head, bytes))
 }
 
+/// The total length of the `BlobChunk` frame holding a chunk of `len` bytes (SPEC §4.4): `24 + pad8(32 + len) + 8`.
+/// What a reader sizes its one read of the frame by, from the blob manifest (ROADMAP 9.2.9).
+pub fn chunk_frame_len(len: u32) -> u64 {
+    // At most 24 + 64 MiB + 40 for a chunk the encoding allows, and below u64::MAX for any u32.
+    frame_len(u64_from_usize(CHUNK_HEAD_LEN).saturating_add(u64::from(len))).unwrap_or(u64::MAX)
+}
+
+/// Checks that `frame`, read whole at absolute offset `offset`, is the `BlobChunk` frame of the chunk `expected`
+/// describes (from its blob manifest: the upload, the index, the length and the CRC32C), and returns the chunk's
+/// bytes, a slice of `frame` (ROADMAP 9.2.9).
+///
+/// The checks are SPEC §4.4's (magic, length, CRC32C over `kind..padding`, zero padding and reserved bytes, then
+/// unknown flags) and SPEC §9.3's (an uncompressed `BlobChunk` frame whose head names `expected` and whose bytes have
+/// its CRC32C), in that order. One CRC pass reads the bytes: their CRC32C is compared with the manifest's, and
+/// combined with the head's and the padding's into the frame's.
+///
+/// # Errors
+/// [`Error::CorruptAt`] at `offset` for any rule that does not hold, [`Error::PackUnsupported`] for unknown frame
+/// flags in an otherwise valid frame.
+pub fn check_chunk_frame(frame: &[u8], offset: u64, expected: ChunkHead) -> Result<&[u8]> {
+    check_chunk_frame_unlocated(frame, offset, expected).map_err(at(offset))
+}
+
+/// [`check_chunk_frame`] before its errors are located.
+fn check_chunk_frame_unlocated(frame: &[u8], offset: u64, expected: ChunkHead) -> Result<&[u8]> {
+    let header =
+        FrameHeader::decode(&mut Reader::with_base_offset(frame, offset)).map_err(from_format)?;
+    if header.payload_len()
+        != u64_from_usize(CHUNK_HEAD_LEN).saturating_add(u64::from(expected.len))
+        || header.total_len() != u64_from_usize(frame.len())
+    {
+        return Err(corrupt(
+            "a chunk frame's length differs from its manifest's",
+        ));
+    }
+    let bytes_start = CHUNK_BYTES_OFFSET;
+    let bytes_end = bytes_start.saturating_add(usize_from_u32(expected.len));
+    let body_end = frame.len().saturating_sub(FRAME_TRAILER_LEN);
+    let short = || corrupt("a chunk frame is cut short");
+    // The header's 20 bytes after the magic, then the chunk's head: what the frame CRC covers before the bytes.
+    let covered_head = frame
+        .get(FRAME_MAGIC.len()..bytes_start)
+        .ok_or_else(short)?;
+    let bytes = frame.get(bytes_start..bytes_end).ok_or_else(short)?;
+    let padding = frame.get(bytes_end..body_end).ok_or_else(short)?;
+    let trailer: &[u8; FRAME_TRAILER_LEN] = frame
+        .get(body_end..)
+        .and_then(|t| t.try_into().ok())
+        .ok_or_else(short)?;
+    let [c0, c1, c2, c3, r0, r1, r2, r3] = *trailer;
+    let bytes_crc = crc32c(bytes);
+    let frame_crc = crc32c_combine(
+        crc32c_combine(crc32c(covered_head), bytes_crc, u64_from_usize(bytes.len())),
+        crc32c(padding),
+        u64_from_usize(padding.len()),
+    );
+    if frame_crc != u32::from_le_bytes([c0, c1, c2, c3]) {
+        return Err(corrupt("checksum mismatch"));
+    }
+    if padding.iter().chain(&[r0, r1, r2, r3]).any(|&b| b != 0) {
+        return Err(corrupt("non-zero reserved or padding bytes"));
+    }
+    let unknown = header.flags() & !KNOWN_FRAME_FLAGS;
+    if unknown != 0 {
+        return Err(Error::PackUnsupported(persia_format::Error::Unsupported {
+            offset: offset.saturating_add(5),
+            reason: persia_format::Unsupported::FrameFlags { flags: unknown },
+        }));
+    }
+    if header.flags() & FLAG_ZSTD != 0 {
+        return Err(corrupt(
+            "a compressed frame (a pack stores blobs as they are)",
+        ));
+    }
+    if header.kind() != FrameKind::BlobChunk {
+        return Err(corrupt("a frame of another kind than expected"));
+    }
+    let head = decode_chunk_head(frame.get(FRAME_HEADER_LEN..bytes_start).ok_or_else(short)?)?;
+    if head.upload_id != expected.upload_id || head.index != expected.index {
+        return Err(corrupt(
+            "a chunk frame of another upload or index than its index names",
+        ));
+    }
+    if head.len != expected.len || head.crc != expected.crc {
+        return Err(corrupt(
+            "a chunk frame's CRC32C differs from its manifest's",
+        ));
+    }
+    if bytes_crc != expected.crc {
+        return Err(corrupt("a chunk's CRC32C differs from its manifest's"));
+    }
+    Ok(bytes)
+}
+
+/// CRC32C's polynomial, bit-reflected (`x^32` implied): bit 31 is `x^0`.
+const CRC32C_POLY: u32 = 0x82F6_3B78;
+
+/// The CRC32C of `A ‖ B` from `crc_a` (of `A`), `crc_b` (of `B`) and `B`'s length, as zlib's `crc32_combine` does for
+/// its CRC: the pre- and post-inversion of both cancel, so `crc(A ‖ B) = crc_a · x^(8·len_b) + crc_b` modulo the
+/// polynomial. `O(log len_b)` steps, none over the bytes.
+fn crc32c_combine(crc_a: u32, crc_b: u32, len_b: u64) -> u32 {
+    mult_mod_p(x8n_mod_p(len_b), crc_a) ^ crc_b
+}
+
+/// `a · b` modulo [`CRC32C_POLY`], in its reflected representation.
+const fn mult_mod_p(a: u32, mut b: u32) -> u32 {
+    let mut product = 0;
+    let mut m: u32 = 1 << 31;
+    // From x^0 (bit 31) up: each set bit of `a` adds `b · x^i`, and `b` is multiplied by x at each step.
+    while m != 0 {
+        if a & m != 0 {
+            product ^= b;
+        }
+        m >>= 1;
+        b = if b & 1 != 0 {
+            (b >> 1) ^ CRC32C_POLY
+        } else {
+            b >> 1
+        };
+    }
+    product
+}
+
+/// `x^(8·n)` modulo [`CRC32C_POLY`]: `n` zero bytes' worth of shifting, by squaring.
+const fn x8n_mod_p(mut n: u64) -> u32 {
+    let mut result: u32 = 1 << 31; // x^0
+    let mut power: u32 = 1 << 23; // x^8: bit 31 - 8
+    while n != 0 {
+        if n & 1 != 0 {
+            result = mult_mod_p(power, result);
+        }
+        n >>= 1;
+        power = mult_mod_p(power, power);
+    }
+    result
+}
+
 /// One whole `BlobIndex` frame numbered `frame_seq`: the blob manifest (SPEC §9.1.1) and, per chunk, the offset of
 /// the `BlobChunk` frame holding it (SPEC §9.3):
 ///
@@ -453,12 +650,20 @@ pub fn encode_index_frame(
 /// offsets. Allocates at most the payload's length.
 ///
 /// # Errors
-/// - the blob manifest's errors ([`BlobManifest::decode`]): [`Error::Corrupt`], [`Error::UnsupportedVersion`],
-///   [`Error::UnsupportedFlags`];
-/// - [`Error::Corrupt`] for a short payload, non-zero reserved or padding bytes, a `manifest_len` past the payload,
-///   not exactly one offset per chunk after it, or an offset that is not 8-aligned in `12288..frame_offset` (a chunk
-///   is staged before the index that names it).
+/// - the blob manifest's errors ([`BlobManifest::decode`]): [`Error::CorruptAt`] at `frame_offset`,
+///   [`Error::UnsupportedVersion`], [`Error::UnsupportedFlags`];
+/// - [`Error::CorruptAt`] at `frame_offset` for a short payload, non-zero reserved or padding bytes, a `manifest_len`
+///   past the payload, not exactly one offset per chunk after it, or an offset that is not 8-aligned in
+///   `12288..frame_offset` (a chunk is staged before the index that names it).
 pub fn decode_index_payload(payload: &[u8], frame_offset: u64) -> Result<(BlobManifest, Vec<u64>)> {
+    decode_index_payload_unlocated(payload, frame_offset).map_err(at(frame_offset))
+}
+
+/// [`decode_index_payload`] before its errors are located.
+fn decode_index_payload_unlocated(
+    payload: &[u8],
+    frame_offset: u64,
+) -> Result<(BlobManifest, Vec<u64>)> {
     let short = || corrupt("an index frame shorter than its head");
     let mut r = Reader::new(payload);
     let manifest_len = usize_from_u32(r.read_u32().map_err(|_| short())?);
@@ -505,9 +710,14 @@ pub fn decode_index_payload(payload: &[u8], frame_offset: u64) -> Result<(BlobMa
 /// `frame_seq` and payload. `bytes` start at absolute offset `offset`.
 ///
 /// # Errors
-/// [`Error::Corrupt`] for an invalid frame (SPEC §4.4), one that is not exactly `bytes` long, of another kind, or
-/// compressed (a pack never compresses, SPEC §9.2); [`Error::PackUnsupported`] for unknown frame flags.
+/// [`Error::CorruptAt`] at `offset` for an invalid frame (SPEC §4.4), one that is not exactly `bytes` long, of another
+/// kind, or compressed (a pack never compresses, SPEC §9.2); [`Error::PackUnsupported`] for unknown frame flags.
 pub fn decode_frame(bytes: &[u8], offset: u64, kind: FrameKind) -> Result<(u64, &[u8])> {
+    decode_frame_unlocated(bytes, offset, kind).map_err(at(offset))
+}
+
+/// [`decode_frame`] before its errors are located.
+fn decode_frame_unlocated(bytes: &[u8], offset: u64, kind: FrameKind) -> Result<(u64, &[u8])> {
     let mut r = Reader::with_base_offset(bytes, offset);
     let frame = Frame::decode(&mut r).map_err(from_format)?;
     if !r.is_empty() {
@@ -708,10 +918,7 @@ mod tests {
     #[test]
     fn chunk_frames_round_trip() {
         let frame = encode_chunk_frame(9, UploadId::new(7), 3, b"chunk bytes").unwrap();
-        assert_eq!(
-            frame.len() as u64,
-            persia_format::frame::frame_len(32 + 11).unwrap()
-        );
+        assert_eq!(frame.len() as u64, frame_len(32 + 11).unwrap());
         let (seq, payload) = decode_frame(&frame, FIRST_FRAME, FrameKind::BlobChunk).unwrap();
         assert_eq!(seq, 9);
         let (head, bytes) = decode_chunk_payload(payload).unwrap();
@@ -813,5 +1020,173 @@ mod tests {
         let mut longer = payload.clone();
         longer.extend([0; 8]);
         assert!(decode_index_payload(&longer, at).is_err());
+    }
+
+    #[test]
+    fn crc32c_combine_matches_the_crc_of_the_concatenation() {
+        let data: Vec<u8> = (0..1000_u32)
+            .map(|i| (i * 7 + 3).to_le_bytes()[0])
+            .collect();
+        for split in [0, 1, 7, 8, 9, 63, 64, 500, 999, 1000] {
+            let (a, b) = data.split_at(split);
+            assert_eq!(
+                crc32c_combine(crc32c(a), crc32c(b), b.len() as u64),
+                crc32c(&data),
+                "{split}"
+            );
+        }
+        assert_eq!(x8n_mod_p(0), 1 << 31, "x^0");
+    }
+
+    /// The frame's trailer CRC recomputed over `kind..padding`, as a writer of these bytes would have written it.
+    fn reseal(frame: &mut [u8]) {
+        let end = frame.len() - 8;
+        let crc = crc32c(&frame[4..end]);
+        frame[end..end + 4].copy_from_slice(&crc.to_le_bytes());
+    }
+
+    fn head_of(bytes: &[u8]) -> ChunkHead {
+        ChunkHead {
+            upload_id: UploadId::new(7),
+            index: 3,
+            len: u32::try_from(bytes.len()).unwrap(),
+            crc: crc32c(bytes),
+        }
+    }
+
+    #[test]
+    fn a_chunk_frame_is_checked_in_one_read_and_every_flipped_bit_is_corrupt() {
+        // 12 bytes: 4 bytes of padding after the 44-byte payload, so the padding is checked too.
+        let bytes = b"chunk bytes!";
+        let frame = encode_chunk_frame(9, UploadId::new(7), 3, bytes).unwrap();
+        assert_eq!(frame.len() as u64, chunk_frame_len(12));
+        let expected = head_of(bytes);
+        assert_eq!(
+            check_chunk_frame(&frame, FIRST_FRAME, expected).unwrap(),
+            bytes
+        );
+        for i in 0..frame.len() {
+            for bit in 0..8 {
+                let mut f = frame.clone();
+                f[i] ^= 1 << bit;
+                let e = check_chunk_frame(&f, FIRST_FRAME, expected).unwrap_err();
+                assert!(e.is_corruption(), "byte {i} bit {bit}: {e:?}");
+                assert_eq!(e.corrupt_offset(), Some(FIRST_FRAME), "byte {i} bit {bit}");
+            }
+        }
+        for cut in [0, 23, 24, frame.len() - 1] {
+            assert!(
+                check_chunk_frame(&frame[..cut], FIRST_FRAME, expected).is_err(),
+                "{cut}"
+            );
+        }
+        let mut longer = frame.clone();
+        longer.extend([0; 8]);
+        assert!(check_chunk_frame(&longer, FIRST_FRAME, expected).is_err());
+        // What the manifest says of the chunk must be what the frame holds.
+        let wrong: [fn(&mut ChunkHead); 4] = [
+            |h| h.upload_id = UploadId::new(8),
+            |h| h.index = 4,
+            |h| h.len = 11,
+            |h| h.crc ^= 1,
+        ];
+        for edit in wrong {
+            let mut h = expected;
+            edit(&mut h);
+            assert!(
+                check_chunk_frame(&frame, FIRST_FRAME, h)
+                    .unwrap_err()
+                    .is_corruption(),
+                "{h:?}"
+            );
+        }
+    }
+
+    /// Frames whose CRC a writer of the damaged bytes would have resealed: the rules after the CRC still hold.
+    #[test]
+    fn a_resealed_chunk_frame_is_still_checked_against_its_manifest() {
+        let bytes = b"chunk bytes!";
+        let expected = head_of(bytes);
+        // Other bytes of the same length under a head that claims the manifest's CRC: only the bytes' CRC32C tells.
+        let other = b"chunk bytes?";
+        let mut forged = encode_chunk_frame(9, UploadId::new(7), 3, other).unwrap();
+        forged[24 + 24..24 + 28].copy_from_slice(&expected.crc.to_le_bytes());
+        reseal(&mut forged);
+        assert!(matches!(
+            check_chunk_frame(&forged, FIRST_FRAME, expected),
+            Err(Error::CorruptAt {
+                what: "a chunk's CRC32C differs from its manifest's",
+                offset: FIRST_FRAME,
+                ..
+            })
+        ));
+        let frame = encode_chunk_frame(9, UploadId::new(7), 3, bytes).unwrap();
+        // Unknown flags are a newer writer's; the compressed flag and another kind are corruption in a pack.
+        let mut flagged = frame.clone();
+        flagged[5] |= 2;
+        reseal(&mut flagged);
+        assert!(matches!(
+            check_chunk_frame(&flagged, FIRST_FRAME, expected),
+            Err(Error::PackUnsupported(_))
+        ));
+        for (at, value) in [(5, 1), (4, FrameKind::BlobIndex.to_u8())] {
+            let mut f = frame.clone();
+            f[at] = value;
+            reseal(&mut f);
+            assert!(
+                check_chunk_frame(&f, FIRST_FRAME, expected)
+                    .unwrap_err()
+                    .is_corruption(),
+                "{at}"
+            );
+        }
+        // The right bytes under a head whose stored CRC32C, chunk index or upload is not the manifest's.
+        for at in [24 + 24, 24 + 16, 24] {
+            let mut f = frame.clone();
+            f[at] ^= 1;
+            reseal(&mut f);
+            assert!(
+                check_chunk_frame(&f, FIRST_FRAME, expected)
+                    .unwrap_err()
+                    .is_corruption(),
+                "head byte {at}"
+            );
+        }
+        let mut padded = frame.clone();
+        padded[24 + 44] = 1;
+        reseal(&mut padded);
+        assert!(
+            check_chunk_frame(&padded, FIRST_FRAME, expected)
+                .unwrap_err()
+                .is_corruption()
+        );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: if cfg!(feature = "slow") { 256 } else { 16 },
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// The combine against the CRC of the concatenation, for any split of up to 1 MiB of bytes.
+        #[test]
+        fn crc32c_combine_matches_any_split(
+            len in 0..=(1_usize << 20),
+            split in proptest::prelude::any::<proptest::sample::Index>(),
+            seed in proptest::prelude::any::<u64>(),
+        ) {
+            let mut x = seed;
+            let data: Vec<u8> = (0..len)
+                .map(|_| {
+                    x = x.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                    (x >> 56).to_le_bytes()[0]
+                })
+                .collect();
+            let (a, b) = data.split_at(split.index(len + 1));
+            proptest::prop_assert_eq!(
+                crc32c_combine(crc32c(a), crc32c(b), b.len() as u64),
+                crc32c(&data)
+            );
+        }
     }
 }

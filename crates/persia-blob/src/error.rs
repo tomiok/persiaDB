@@ -179,7 +179,8 @@ pub enum Error {
     #[error("the blob reference put_blob's mime and user_meta describe is invalid")]
     InvalidBlobRef(#[source] persia_format::EncodeError),
     /// A `put_blob`'s `bind_budget` is above the cap (a caller's error), found before any byte is read: GC's grace
-    /// period must stay far above every budget a writer uses (SPEC §9.4, §9.5).
+    /// period must be at least twice this cap, since a `put_if_absent` started inside the budget can land after it
+    /// (SPEC §9.4, §9.5).
     #[error("bind budget {budget:?} above the maximum {max:?}")]
     BindBudgetAboveMax {
         /// The budget asked for.
@@ -192,7 +193,18 @@ pub enum Error {
 
     // -- followups (9.2, 9.4) --
     // Variants of wave 2's pack and put_blob follow-ups (ROADMAP 9.2.6, 9.2.8, 9.2.9, 9.4.7) go here, and only here.
-    //
+    /// Stored bytes of the blob pack break a rule of their encoding, found in the slot or frame that starts at `offset`
+    /// (ROADMAP 9.2.8): the header page at 0, a superblock slot at 4096 or 8192, or a frame from 12288 on. Corruption
+    /// like [`Error::Corrupt`] ([`Error::is_corruption`]); [`Error::corrupt_offset`] reads the offset.
+    #[error("corrupt {encoding} in the slot or frame at offset {offset}: {what}")]
+    CorruptAt {
+        /// The encoding the bytes were read as, e.g. `"blob pack"` or `"blob manifest"` (in a `BlobIndex` frame).
+        encoding: &'static str,
+        /// What was wrong.
+        what: &'static str,
+        /// The absolute offset in the pack file of the slot or frame holding the bytes.
+        offset: u64,
+    },
     //
 
     // -- gc (9.5) --
@@ -217,7 +229,15 @@ impl Error {
 
     /// Whether stored bytes are corrupt, as opposed to a newer format or a caller's error.
     pub const fn is_corruption(&self) -> bool {
-        matches!(self, Self::Corrupt { .. })
+        matches!(self, Self::Corrupt { .. } | Self::CorruptAt { .. })
+    }
+
+    /// The offset of the slot or frame a corruption was found in, when it is known ([`Error::CorruptAt`]).
+    pub const fn corrupt_offset(&self) -> Option<u64> {
+        match self {
+            Self::CorruptAt { offset, .. } => Some(*offset),
+            _ => None,
+        }
     }
 
     /// Whether this is an error after which a [`BlobStore::bind`](crate::BlobStore::bind) may have bound the
