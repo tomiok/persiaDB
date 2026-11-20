@@ -33,6 +33,11 @@ pub const WINDOW_MAX_CHUNKS: u32 = 64;
 /// How long `put_blob` keeps retrying a bind whose outcome is unknown, by default (SPEC §9.4, ADR-0051).
 pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 
+/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4): GC's grace period must stay far above any budget a
+/// writer used, and a cap holds across restarts where a recorded maximum would not. `gc` requires a grace of at
+/// least this.
+pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
+
 /// What `put_blob` stores beside the bytes (SPEC §9.6).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PutBlobOptions {
@@ -46,7 +51,8 @@ pub struct PutBlobOptions {
     /// duplicate keeps the bound blob's.
     pub chunk_size: ChunkSize,
     /// How long a bind whose outcome is unknown is retried, with backoff ([`super::retry::backoff`]), before
-    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default.
+    /// `put_blob` fails with the unknown outcome; at least one attempt is made. [`DEFAULT_BIND_BUDGET`] by default, at
+    /// most [`MAX_BIND_BUDGET`].
     pub bind_budget: Duration,
 }
 
@@ -130,7 +136,8 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
     ///
     /// # Errors
     /// - [`Error::ChunkSizeBelowMin`] for a chunk size below [`ChunkSize::MIN`], however it was built, and
-    ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, before any byte is read;
+    ///   [`Error::InvalidBlobRef`] for an invalid `mime` or `user_meta`, and [`Error::BindBudgetAboveMax`] for a
+    ///   `bind_budget` above [`MAX_BIND_BUDGET`], before any byte is read;
     /// - [`Error::Read`] when the reader fails, [`Error::InvalidChunking`] for a blob of more than `u32::MAX` chunks;
     /// - [`Error::BlobIdMismatch`] when the bytes do not hash to `expected_id` (nothing bound);
     /// - an error with [`Error::is_bind_outcome_unknown`] when the outcome stayed unknown for the whole `bind_budget`: the blob may be
@@ -147,6 +154,12 @@ impl<S: BlobStore + ?Sized> Blobs<S> {
             return Err(Error::ChunkSizeBelowMin {
                 chunk_size: chunk_size.get(),
                 min: ChunkSize::MIN,
+            });
+        }
+        if options.bind_budget > MAX_BIND_BUDGET {
+            return Err(Error::BindBudgetAboveMax {
+                budget: options.bind_budget,
+                max: MAX_BIND_BUDGET,
             });
         }
         // The rules of `mime` and `user_meta` checked on an empty blob, so a bad option reads and stages nothing.
