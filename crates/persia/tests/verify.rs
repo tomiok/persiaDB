@@ -201,3 +201,80 @@ fn deep_finds_bytes_that_hash_to_another_id() {
         "{err}"
     );
 }
+
+// -- Corruption: one damaged byte anywhere in the pack's committed frames (SPEC §9.3, §9.5; ROADMAP 9.5.3) --
+//
+// Invariant 6: a single damaged byte at any offset of `12288..log_end` (chunk frames, orphan included, and index
+// frames: headers, payloads, padding, CRCs, reserved bytes) never lets the default `verify` pass and never panics: the
+// pack's open fails as corruption, or `verify_blobs` does, at `Checksums` and at `Deep`.
+
+/// A database whose pack holds, in order: blob `a`'s chunk and index (its document committed), an orphan chunk (staged,
+/// never bound), and blob `b`'s chunk and index (its document only in the WAL). Small blobs: a few hundred frame
+/// bytes. Returns the pack's path, its bytes, and its `log_end`.
+fn small_pack(path: &Path) -> (std::path::PathBuf, Vec<u8>, u64) {
+    let mut db = create(path);
+    put(&mut db, "a", b"first blob");
+    db.commit().unwrap();
+    db.blobs()
+        .store()
+        .stage_chunk(UploadId::new(0x0e), 0, b"an orphan")
+        .unwrap();
+    put(&mut db, "b", b"second, in the WAL");
+    drop(db);
+    let reader = ReadOnlyBlobDatabase::open(path, &DatabaseOptions::default()).unwrap();
+    let log_end = reader.blobs().store().superblock().unwrap().log_end;
+    let report = reader.verify_blobs(Scan::Deep).unwrap();
+    let scan = report.scan.unwrap();
+    assert_eq!(
+        (scan.frames, scan.chunks, scan.orphan_chunks, scan.indexes),
+        (5, 3, 1, 2)
+    );
+    drop(reader);
+    let pack = persia_blob::pack_path(path);
+    let bytes = std::fs::read(&pack).unwrap();
+    (pack, bytes, log_end)
+}
+
+/// Every damaged byte fails the open or the check, as corruption, at each scanning depth.
+fn assert_detected(path: &Path, what: &str) {
+    match ReadOnlyBlobDatabase::open(path, &DatabaseOptions::default()) {
+        Err(e) => assert!(
+            e.is_corruption(),
+            "{what}: the open failed but not as corruption: {e}"
+        ),
+        Ok(reader) => {
+            for scan in [Scan::Checksums, Scan::Deep] {
+                match reader.verify_blobs(scan) {
+                    Ok(report) => panic!("{what}: {scan:?} passed: {report:?}"),
+                    Err(e) => assert!(e.is_corruption(), "{what}: {scan:?}: not corruption: {e}"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn a_damaged_byte_anywhere_in_the_committed_frames_fails_verify() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let (pack, bytes, log_end) = small_pack(&path);
+    // Every bit position across the offsets by default; all eight at every offset with `slow`.
+    let masks = |at: usize| -> Vec<u8> {
+        if cfg!(feature = "slow") {
+            (0..8).map(|b| 1 << b).collect()
+        } else {
+            vec![1 << (at % 8)]
+        }
+    };
+    for at in 12288..usize::try_from(log_end).unwrap() {
+        for mask in masks(at) {
+            let mut damaged = bytes.clone();
+            damaged[at] ^= mask;
+            std::fs::write(&pack, &damaged).unwrap();
+            assert_detected(&path, &format!("byte {at} ^ {mask:#04x}"));
+        }
+    }
+    // Restored, it passes again: the damage, not the loop, failed it.
+    std::fs::write(&pack, &bytes).unwrap();
+    verify(&path, Scan::Deep).unwrap();
+}

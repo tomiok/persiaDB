@@ -1128,3 +1128,64 @@ fn verify_scans_every_pack_frame_unless_quick() {
     // The references are all bound: only the scan reads chunk bytes.
     report(&persia(&["verify", "--quick", path_arg(&path)]));
 }
+
+/// One damaged byte in the committed frames of a small pack (SPEC §9.5, ROADMAP 9.5.3): `persia verify` exits with the
+/// corruption status (3), prints no report, and never panics, wherever the byte is (frame headers, chunk heads and
+/// bytes, the index frame, padding, CRCs). A stride of offsets by default, every offset with `slow`; the in-process
+/// test in `crates/persia/tests/verify.rs` checks every offset.
+#[test]
+fn verify_fails_with_the_corruption_status_on_any_damaged_pack_byte() {
+    use persia::internal::documents::{Blob, BlobDatabase};
+    use persia_engine::db::DatabaseOptions;
+    use persia_engine::document::Document;
+    use persia_engine::schema::SchemaBuilder;
+    use persia_engine::wal::Durability;
+
+    let _serial = serial();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.persia");
+    let mut db = BlobDatabase::create(&path, DatabaseOptions::default()).unwrap();
+    db.log_mut()
+        .create_collection(SchemaBuilder::new("files").build().unwrap())
+        .unwrap();
+    db.put(
+        "files",
+        &Document::new("a"),
+        Blob::from_reader(&b"small"[..]),
+        Durability::Fsync,
+    )
+    .unwrap();
+    db.commit().unwrap();
+    db.put(
+        "files",
+        &Document::new("b"),
+        Blob::from_reader(&b"in the WAL"[..]),
+        Durability::Fsync,
+    )
+    .unwrap();
+    drop(db);
+    let found = report(&persia(&["verify", path_arg(&path)]));
+    assert!(
+        found.contains(&pair("scan", "4 frames: 2 chunks (0 orphans), 2 indexes")),
+        "{found:?}"
+    );
+    let pack = dir.path().join("app.persia.blobs");
+    let bytes = std::fs::read(&pack).unwrap();
+    // The committed frames end at `log_end`; nothing is staged after it here.
+    let stride = if cfg!(feature = "slow") { 1 } else { 7 };
+    let mut checked = 0;
+    for at in (12288..bytes.len()).step_by(stride) {
+        let mut damaged = bytes.clone();
+        damaged[at] ^= 1 << (at % 8);
+        std::fs::write(&pack, &damaged).unwrap();
+        let out = persia(&["verify", path_arg(&path)]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(3), "byte {at}: {err}");
+        assert_eq!(out.stdout, b"", "byte {at}");
+        assert!(!err.contains("panicked"), "byte {at}: {err}");
+        checked += 1;
+    }
+    assert!(checked > 20, "{checked}");
+    std::fs::write(&pack, &bytes).unwrap();
+    report(&persia(&["verify", path_arg(&path)]));
+}
