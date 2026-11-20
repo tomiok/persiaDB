@@ -36,8 +36,9 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
    the manifest bound. Default `mime` is `application/octet-stream`, default chunk size 4 MiB.
 3. **Binding outcomes.** An unknown outcome is retried with the same manifest, and a small blob's with
    `bind_small` and the same bytes (never `bind`: a single-object store stages nothing), within a **time budget**,
-   `PutBlobOptions::bind_budget` (default 60 s; at least one attempt; at most `MAX_BIND_BUDGET`, 1 h, which GC's grace
-   period is at least: amended 2026-11-19, ROADMAP 9.5.2). Attempts are spaced by jittered exponential
+   `PutBlobOptions::bind_budget` (default 60 s; at least one attempt; at most `MAX_BIND_BUDGET`, 1 h). GC's grace
+   period is at least `2 * MAX_BIND_BUDGET`: an attempt started just before the deadline can land `put_if_absent`
+   after it, so `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace (amended 2026-11-20, SPEC §9.4). Attempts are spaced by jittered exponential
    backoff (50 ms doubling to a 5 s cap, a random half of it kept, seeded by the upload id), read and waited through
    an injected `RetryClock` (a `ManualRetryClock` in tests). After an unknown outcome a plain error from a later
    attempt is no answer (the earlier write may still land): the retry goes on; a plain error ends the loop only when
@@ -85,9 +86,9 @@ and the sweep checks under one lock. SPEC §18.9 was decided for ROADMAP 9.2.2 a
 - Pins of documents logged `Buffered`/`Async` live until the next commit or `Fsync` operation; a writer that never
   commits holds them. GC therefore never sweeps a blob such a document references.
 - `bind_budget` bounds in time the retry SPEC §9.4 states as "until it answers": a caller sees an error instead of a hang;
-  the upload stays for GC, and nothing references the blob. Its pins are dropped then, so only the grace period (24 h) keeps
-  the upload's chunks from a sweep while a late conditional write may still bind them: the grace period must stay far
-  above any such delay.
+  the upload stays for GC, and nothing references the blob. Its pins are dropped then, so only the grace period (24 h,
+  and at least `2 * MAX_BIND_BUDGET`) keeps the upload's chunks from a sweep while a late conditional write may still
+  bind them.
 - `BlobDatabase::log_mut` exposes the engine's `Database::put`, which takes any `set_blob_ref`; M10's `Db` must not
   re-expose it (SPEC §9.6). Replacing the log through it restarts its marks at 0: pins held from the old log
   wait for the new one's marks, so they are held longer, never released early (safe).

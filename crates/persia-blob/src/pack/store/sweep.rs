@@ -4,7 +4,9 @@
 //! name; a crash before its removal, or a removal that failed, leaves that name behind, as a crashed pack rewrite
 //! (ROADMAP 9.5.2, which writes its new file under the same pattern) does. None of them is needed: a creation's is an
 //! empty pack or a second name of the pack (removing a name never touches the file's data), and a rewrite's file is
-//! renamed over the pack only once complete. The container's `sweep_stale_files` (SPEC §4.5.1) matches only the
+//! renamed over the pack only once complete. Removing a rewrite's file relies on SPEC §18.10 (b): nothing is bound
+//! into the new pack until its directory sync succeeds, and writing stops if that sync fails, so the file holds no
+//! blob a reader can still name. The container's `sweep_stale_files` (SPEC §4.5.1) matches only the
 //! container's own names, so the pack sweeps its own, with rules like the container's but stricter: only regular
 //! files named exactly as [`temp_path`](super::temp_path) names them (lowercase hex only, where the container
 //! accepts either case), and one directory sync after the removals.
@@ -15,9 +17,10 @@
 //! (whose creates take their own lock, SPEC §4.5.1).
 //!
 //! It also fails safe if that contract is broken and two read-write handles exist (ROADMAP 9.2.7 does not enforce
-//! one writer yet): a temporary name the sweep removes under another handle makes that handle's link (a creation)
-//! or rename (a rewrite) fail, so it reports an error and publishes nothing; it never leaves a half-made pack at
-//! the pack's name.
+//! one writer yet): a temporary name the sweep removes before the other handle links (a creation) or renames (a
+//! rewrite) makes that step fail, so it reports an error and publishes nothing. A creation whose link already
+//! succeeded treats the missing temporary name as removed (`NotFound` is success) and goes on to its directory sync.
+//! Either way it never leaves a half-made pack at the pack's name.
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -28,9 +31,9 @@ use persia_storage::vfs::{FileType, Vfs};
 /// Removes the stale temporary files of the pack at `path` (see the module docs) and returns them, in name order.
 ///
 /// Errors do not fail the open: a failed listing, removal or directory sync logs a `tracing::warn!` and the open
-/// continues (a failed removal does not stop the others). What is left holds no acknowledged data, the next
-/// read-write open sweeps it again, and refusing the writer for it would stop the database over a file it never
-/// needs.
+/// continues (a failed removal does not stop the others). What is left holds no acknowledged data. The next
+/// read-write open does not retry that directory sync: a name a crash brings back is swept again. Refusing the
+/// writer for a leftover name would stop the database over a file it never needs.
 pub(super) fn sweep_stale_files<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,

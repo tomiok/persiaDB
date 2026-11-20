@@ -33,9 +33,10 @@ pub const WINDOW_MAX_CHUNKS: u32 = 64;
 /// How long `put_blob` keeps retrying a bind whose outcome is unknown, by default (SPEC §9.4, ADR-0051).
 pub const DEFAULT_BIND_BUDGET: Duration = Duration::from_secs(60);
 
-/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4): GC's grace period must stay far above any budget a
-/// writer used, and a cap holds across restarts where a recorded maximum would not. `gc` requires a grace of at
-/// least this.
+/// The longest `bind_budget` `put_blob` accepts (SPEC §9.4). A cap holds across restarts, where a recorded maximum
+/// would not. GC's grace period must be at least twice this, strictly above every budget: an attempt started just
+/// before the deadline can land its `put_if_absent` after the budget ends, and a grace of only this long could sweep
+/// those chunks while that write is still in flight. `gc` (ROADMAP 9.5.2, #108) rejects a shorter grace.
 pub const MAX_BIND_BUDGET: Duration = Duration::from_hours(1);
 
 /// What `put_blob` stores beside the bytes (SPEC §9.6).

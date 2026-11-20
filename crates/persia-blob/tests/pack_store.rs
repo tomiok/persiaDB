@@ -707,6 +707,8 @@ struct VfsFaults {
     remove: Option<std::path::PathBuf>,
     sync_dir: bool,
     read_dir: bool,
+    /// `remove_file` of a pack temporary name deletes it, then reports `NotFound`.
+    remove_not_found: bool,
 }
 
 /// `SimFs` with failures injected into chosen calls, and a count of `read_exact_at` calls on its files.
@@ -811,6 +813,18 @@ impl Vfs for Wrapped {
         if self.faults().remove.as_deref() == Some(path) {
             return Err(injected("remove"));
         }
+        if self.faults().remove_not_found && path.to_string_lossy().contains(".persia.blobs.tmp.") {
+            // Already gone, as when another handle's sweep won the race after the link.
+            match self.fs.remove_file(path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "the temporary name was already gone",
+            ));
+        }
         self.fs.remove_file(path)
     }
     fn sync_dir(&self, dir: &Path) -> io::Result<()> {
@@ -840,6 +854,22 @@ impl Vfs for Wrapped {
     fn lock_beside(&self, path: &Path) -> io::Result<Option<CountedFile>> {
         self.fs.lock_beside(path).map(|f| f.map(|f| self.wrap(f)))
     }
+}
+
+/// A creation whose temporary name is already gone after the link (`NotFound`, as when another handle's sweep
+/// removed it) still publishes the pack: the name being gone is what the removal wanted (ROADMAP 9.2.6, 9.2.7).
+#[test]
+fn a_temporary_name_already_gone_after_the_link_still_creates_the_pack() {
+    let fs = sim();
+    let vfs = Wrapped::new(&fs);
+    vfs.faults().remove_not_found = true;
+    let store = vfs.open(PackMode::ReadWrite).unwrap();
+    let m = store_blob(&store, b"kept", 4, 1);
+    assert_eq!(read_all(&store, &m).unwrap(), b"kept");
+    assert!(temporaries(&fs).is_empty(), "the temporary name is gone");
+    drop(store);
+    let store = open(&fs.crash(CrashLoss::All), PackMode::ReadOnly).unwrap();
+    assert_eq!(read_all(&store, &m).unwrap(), b"kept");
 }
 
 /// ROADMAP 9.2.6, the sweep's failure policy: a failed removal, directory sync or listing is logged and the read-write

@@ -179,7 +179,8 @@ pub enum Error {
     #[error("the blob reference put_blob's mime and user_meta describe is invalid")]
     InvalidBlobRef(#[source] persia_format::EncodeError),
     /// A `put_blob`'s `bind_budget` is above the cap (a caller's error), found before any byte is read: GC's grace
-    /// period must stay far above every budget a writer uses (SPEC §9.4, §9.5).
+    /// period must be at least twice this cap, since a `put_if_absent` started inside the budget can land after it
+    /// (SPEC §9.4, §9.5).
     #[error("bind budget {budget:?} above the maximum {max:?}")]
     BindBudgetAboveMax {
         /// The budget asked for.

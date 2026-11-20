@@ -970,7 +970,7 @@ fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
     let calls = store.calls();
     let lookups = calls
         .iter()
-        .filter(|c| matches!(c, Call::Manifest(_)))
+        .filter(|c| matches!(c, Call::Manifest { .. }))
         .count();
     let windows = calls
         .iter()
@@ -981,28 +981,51 @@ fn get_blob_over_one_byte_chunks_counts_its_manifest_lookups() {
     assert_eq!(lookups, 1, "manifest lookups");
 }
 
+/// The `manifest` calls in `calls`, each with whether `Pinned::Blob` of that id was already pinned.
+fn manifest_pins(calls: &[Call]) -> Vec<(BlobId, bool)> {
+    calls
+        .iter()
+        .filter_map(|c| match c {
+            Call::Manifest { blob, pinned } => Some((*blob, *pinned)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Invariant 8: a stream pins its blob and the upload its manifest names while it lives (SPEC §9.5); a range read
-/// holds no pin once it returns.
+/// holds no pin once it returns. The blob pin is taken before `manifest`, for both `get_blob` and `get_blob_range`.
 #[test]
 fn a_blob_stream_pins_its_blob_and_upload_until_dropped() {
     let data = bytes(2 * MIN as usize + 5, 4);
-    let blobs = Blobs::new(Arc::new(MemoryBlobStore::new()));
+    let (store, blobs) = faulty(Faults::default());
     let (r, pins) = blobs.put_blob(&data[..], &options(MIN)).unwrap();
     let upload = upload_of(&pins);
     drop(pins);
     let set = blobs.pin_set();
     assert!(set.pinned().is_empty());
+    let after_put = store.calls().len();
 
     let mut reader = blobs.get_blob(&r).unwrap();
     assert!(set.is_pinned(Pinned::Blob(r.blob_id())));
     assert!(set.is_pinned(Pinned::Upload(upload)));
+    assert_eq!(
+        manifest_pins(&store.calls()[after_put..]),
+        vec![(r.blob_id(), true)],
+        "get_blob"
+    );
     let mut first = [0; 10];
     reader.read_exact(&mut first).unwrap();
     assert!(set.is_pinned(Pinned::Blob(r.blob_id())));
     drop(reader);
     assert!(set.pinned().is_empty());
 
+    let after_stream = store.calls().len();
     assert_eq!(blobs.get_blob_range(&r, 3..9).unwrap(), &data[3..9]);
+    assert_eq!(
+        manifest_pins(&store.calls()[after_stream..]),
+        vec![(r.blob_id(), true)],
+        "get_blob_range"
+    );
     assert!(set.pinned().is_empty());
     let missing = persia_blob::BlobRef::new(
         blob_id_of(b"absent"),
@@ -1012,10 +1035,16 @@ fn a_blob_stream_pins_its_blob_and_upload_until_dropped() {
         std::collections::BTreeMap::default(),
     )
     .unwrap();
+    let after_range = store.calls().len();
     assert!(matches!(
         blobs.get_blob(&missing),
         Err(Error::BlobNotFound { .. })
     ));
+    assert_eq!(
+        manifest_pins(&store.calls()[after_range..]),
+        vec![(missing.blob_id(), true)],
+        "a failed open"
+    );
     assert!(set.pinned().is_empty(), "a failed open releases its pin");
 }
 
@@ -1101,7 +1130,7 @@ fn a_store_poisoned_before_the_first_attempt_is_not_retried() {
 }
 
 /// A `bind_budget` above the cap is a caller's error found before any byte is read; the cap itself is accepted
-/// (SPEC §9.4: GC's grace period stays above every budget a writer uses).
+/// (SPEC §9.4: GC's grace period is at least twice this cap).
 #[test]
 fn a_bind_budget_above_the_cap_reads_nothing() {
     use persia::internal::blob::MAX_BIND_BUDGET;

@@ -378,6 +378,8 @@ fn parent_of(path: &Path) -> &Path {
 /// written to a temporary file and synced, the file hard-linked to `path` (which fails if the name exists), then the
 /// temporary name removed and the directory synced whatever happened, as `Container::create_in` does. A failure the
 /// process survives leaves a stale temporary file only if that removal fails too (the sweep, ROADMAP 9.2.6, takes it).
+/// `NotFound` from the removal is success: the name is already gone (another handle's sweep may have taken it after
+/// the link).
 fn create_pack<F: ContainerFile>(
     vfs: &dyn Vfs<File = F>,
     path: &Path,
@@ -406,9 +408,12 @@ fn create_pack<F: ContainerFile>(
         })
     });
     // One directory sync covers the link and the removal, and runs even if the removal failed.
-    let removed = vfs
-        .remove_file(&temp)
-        .map_err(io_err("remove temporary file"));
+    // NotFound is the name already gone (another read-write handle's sweep may have removed it after the link,
+    // ROADMAP 9.2.7). That is what the removal wanted, so the creation continues.
+    let removed = match vfs.remove_file(&temp) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other.map_err(io_err("remove temporary file")),
+    };
     let synced = vfs
         .sync_dir(parent_of(path))
         .map_err(io_err("sync directory"));

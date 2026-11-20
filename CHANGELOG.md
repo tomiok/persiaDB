@@ -144,11 +144,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 - `persia` (internal API): `put_blob` rejects a `bind_budget` above `MAX_BIND_BUDGET` (1 h) with
-  `Error::BindBudgetAboveMax`, before reading any byte: GC's grace period must stay above every budget (SPEC §9.4).
+  `Error::BindBudgetAboveMax`, before reading any byte. GC's grace period must be at least `2 * MAX_BIND_BUDGET`:
+  an attempt started just before the deadline can land its `put_if_absent` after the budget ends, and `gc` (#108)
+  rejects a shorter grace (SPEC §9.4).
 - `persia-blob`: pack chunk reads take one read and one CRC pass per chunk, with no copy: a 16 MiB read is 27.7 →
-  5.1 ms, a 1 MiB range across two chunks 3.9 → 1.9 ms (`pack` bench, pread; ROADMAP 9.2.9).
-- `persia-blob`: pack corruption errors from reads, the open and `refresh` are `Error::CorruptAt` (`is_corruption`
-  still holds); code matching `Error::Corrupt { .. }` on them must match both (ROADMAP 9.2.8).
+  5.1 ms, a 1 MiB range across two chunks 3.9 → 1.9 ms (`pack` bench, pread; ROADMAP 9.2.9). The read buffer is
+  still zero-filled at most once per `get_blob` stream (once per `read_range` or `read_chunk_source` call).
+- `persia-blob` (breaking): pack corruption errors from reads, the open and `refresh` are `Error::CorruptAt`
+  (`is_corruption` still holds); code matching `Error::Corrupt { .. }` on them must match both (ROADMAP 9.2.8).
 - `persia` (internal API): `put_blob` stops retrying a bind at once on a poisoned store (`Error::is_store_poisoned`),
   still as an unknown outcome (ROADMAP 9.4.7).
 - `persia-storage` (breaking): `ObjectMeta` gained `last_modified` and `vfs::EntryKind::File` gained `modified`, so

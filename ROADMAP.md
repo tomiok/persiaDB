@@ -615,12 +615,12 @@ Deps: M1, M2.
 - [x] 9.2.3 Read full / range via chunk index (mmap-backed)
 - [x] 9.2.4 Recovery: torn tail truncation, index rebuild by scan
 - [x] 9.2.5 Fuzz pack reader
-- [x] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` at a read-write open of the pack, by the rules of the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2)
+- [x] 9.2.6 Sweep stale pack temporary files `<name>.persia.blobs.tmp.*` with the container's `sweep_stale_files` (SPEC §9.3; found in 9.2.2). Done as a sweep at each read-write open of the pack, by those rules but stricter (regular files, lowercase hex only, one directory sync); the container's own sweep listing these names is 9.2.10
 - [ ] 9.2.7 Enforce one pack writer: open the pack read-write only with a proof of the container's writer lock, so two read-write `PackStore`s of one file cannot exist (ADR-0049; found in the 9.2.1 review)
 - [x] 9.2.8 Pack corruption errors carry the offset of the bad slot or frame (found in the 9.2.1 review)
-- [x] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no copy, the read buffer zero-filled at most once per `get_blob` stream (once per `read_range` or `read_chunk_source` call); bench `pack` before and after (found in 9.2.3 and its review)
-- [ ] 9.2.10 `Container::side_files` and `persia container sweep` also list and remove the pack's stale `<name>.persia.blobs.tmp.*` files (SPEC §9.3; found in 9.2.6)
-- [ ] 9.2.11 `read_chunk_checked` over the pack in one CRC pass without costing other stores a copy; the `pack` bench gains a mapped-read case once a bench can make a `MapPermit` (found in 9.2.9)
+- [x] 9.2.9 Pack read path: one read per chunk (the frame length from the manifest), one CRC pass instead of the frame's and the chunk's, and no zero-fill or copy; bench `pack` before and after (found in 9.2.3 and its review). Done as one read and one CRC pass per chunk and no copy (a 16 MiB read 27.7 → 5.1 ms, `pack` bench). The read buffer is still zero-filled, at most once per `get_blob` stream and once per `read_range` or `read_chunk_source` call; removing that zero-fill is 9.2.11
+- [ ] 9.2.10 (v1.0) `Container::side_files` and `persia container sweep` also list and remove the pack's stale `<name>.persia.blobs.tmp.*` files (SPEC §9.3; found in 9.2.6)
+- [ ] 9.2.11 (v1.0) `read_chunk_checked` over the pack in one CRC pass without costing other stores a copy; the `pack` bench gains a mapped-read case once a bench can make a `MapPermit` (found in 9.2.9)
 
 ## 9.3 Remote layout
 - [x] 9.3.1 Key layout via `Storage` (SPEC §9.4): blob manifests at `blobs/<xx>/<id>` (`put_if_absent`), staged chunks at `blobs/uploads/<upload_id>/<chunk_idx>` (`put_if_absent`, never overwritten); reads check the manifest against the `BlobRef` (`check_ref`)

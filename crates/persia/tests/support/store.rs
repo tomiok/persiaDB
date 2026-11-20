@@ -32,7 +32,11 @@ pub enum Call {
         pinned: (bool, bool),
     },
     Discard(UploadId),
-    Manifest(BlobId),
+    /// `manifest`, and whether `Pinned::Blob` of this id was already in the pin set.
+    Manifest {
+        blob: BlobId,
+        pinned: bool,
+    },
     ReadChunks(BlobId, Range<u32>),
 }
 
@@ -217,7 +221,12 @@ impl BlobStore for FaultyStore {
     }
 
     fn manifest(&self, blob_id: BlobId) -> Result<Option<BlobManifest>> {
-        self.lock().calls.push(Call::Manifest(blob_id));
+        // Recorded before the lookup returns, so a test can see the pin that guarded it (SPEC §9.5).
+        let pinned = self.pinned(Pinned::Blob(blob_id));
+        self.lock().calls.push(Call::Manifest {
+            blob: blob_id,
+            pinned,
+        });
         self.step()?;
         self.inner.manifest(blob_id)
     }
